@@ -1126,7 +1126,7 @@ describe('ManagedHookRuntime', () => {
       readFile(path.join(directory, 'counter'), 'utf8'),
     ).rejects.toThrow();
   });
-  it('settles a stuck module evaluation as cancelled without wedging close', async () => {
+  it('fences a stuck module evaluation cancelled mid-evaluation without wedging close', async () => {
     const modulePath = path.join(directory, 'stuck-cancel-handler.mjs');
     await writeFile(
       modulePath,
@@ -1163,12 +1163,17 @@ describe('ManagedHookRuntime', () => {
       targetOperationId: call.operationId,
     });
     const receipt = await settled(instance);
+    // The cancel abandoned a module evaluation that is still running, so the
+    // abort is not completion evidence: the receipt carries no result and the
+    // host fences the execution as outcome_unknown instead of committing a
+    // definite cancellation.
     expect(receipt).toMatchObject({
       state: 'settled',
-      result: { outcome: 'cancelled' },
+      error: { code: 'managed_hook_module_evaluation_abandoned' },
     });
-    // The user-requested cancel settles the turn, but the abandoned evaluation
-    // never finishes, so the hold stays reported rather than released.
+    expect(receipt.result).toBeUndefined();
+    // The abandoned evaluation never finishes, so the hold stays reported
+    // rather than released.
     expect(instance.hasHolds('runtime-session')).toBe(true);
     expect(await instance.control('runtime-session', call)).toEqual(receipt);
     await instance.close();

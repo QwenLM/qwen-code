@@ -192,9 +192,12 @@ Runtime — releasing its one slot of the 16-operation admission budget and
 unblocking Runtime `close()` — while keeping its hold until the module's
 top-level code actually finishes; a never-settling evaluation keeps the hold for
 the worker's lifetime. The Runtime reports an evaluation timeout with the
-dedicated code `managed_hook_module_evaluation_timeout`, and the Harness fences
-the execution as outcome_unknown rather than claiming not_started_proven for code
-that may have run. A module whose evaluation fails settles as
+dedicated code `managed_hook_module_evaluation_timeout` and an evaluation
+abandoned by a cancel or shutdown with
+`managed_hook_module_evaluation_abandoned`, and the Harness fences both as
+outcome_unknown rather than claiming not_started_proven — or committing a
+definite cancellation — for code that may still be running. A module whose
+evaluation fails settles as
 `managed_hook_handler_unavailable`, which the Harness records as
 not_started_proven — whether it was rejected before any top-level statement ran,
 partway through top-level execution, or only after it evaluated in full (the
@@ -202,7 +205,10 @@ shape or handler-revision guard, for instance); the proof therefore does not
 cover any top-level effects that already ran.
 When the Harness releases an earlier owner, the Broker may refuse. A refusal
 because the owner is already absent (404 `runtime_session_not_found`) is booked
-as released and never retried. A refusal from a hold-fenced owner (409
+as released and never retried. An execution the Harness fenced as
+outcome_unknown is never drained or released past, so a hold-fenced refusal
+arrives only from a Runtime that certified an abandoned evaluation as
+cancelled before the fence existed. A refusal from a hold-fenced owner (409
 `managed_runtime_identity_conflict` or
 `managed_runtime_provider_operation_failed`) is skipped for that pass, reported
 on the daemon's stderr, and left unreleased, so each later turn of that Hook

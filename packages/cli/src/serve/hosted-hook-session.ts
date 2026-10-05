@@ -178,9 +178,12 @@ function executionUnavailable(response: ManagedHookOperationView): boolean {
 
 /**
  * A release the Broker refuses because the owner still holds unfinished work —
- * the shape an operation whose module evaluation was abandoned answers with.
- * Both codes are needed: the provider worker answers a pending-work refusal
- * with either, depending on which of its checks fires first.
+ * the shape an operation whose module evaluation was abandoned answers with
+ * when its Runtime certified the cancellation as settled; a current Runtime
+ * fences such an evaluation as outcome_unknown before any release is
+ * attempted. Both codes are needed: the provider worker answers a
+ * pending-work refusal with either, depending on which of its checks fires
+ * first.
  */
 function holdFencedRelease(cause: unknown): boolean {
   return (
@@ -1610,9 +1613,10 @@ export class HostedHookSession {
       try {
         await this.broker.release();
       } catch (cause) {
-        // An abandoned module evaluation can outlive the cancelled receipt that
-        // let drain() pass, so this release can be hold-fenced. Name that
-        // condition instead of letting a bare Broker refusal reach the route.
+        // A Runtime that settled an abandoned module evaluation as cancelled
+        // lets drain() pass while the evaluation still runs, so this release
+        // can be hold-fenced. Name that condition instead of letting a bare
+        // Broker refusal reach the route.
         if (!holdFencedRelease(cause)) throw cause;
         writeStderrLineSafe(
           `qwen serve: Hook owner release held by unfinished work: ${

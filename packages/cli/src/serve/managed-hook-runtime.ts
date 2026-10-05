@@ -82,9 +82,11 @@ class ManagedHookImportAbortedError extends Error {}
 // pin an admission slot or hold close() open forever. ESM evaluation itself
 // cannot be cancelled, so a timeout or abort only abandons the wait — the
 // evaluation keeps running, which is why a timeout reports
-// 'managed_hook_module_evaluation_timeout' (the host fences the execution as
-// outcome_unknown) instead of 'managed_hook_handler_unavailable', which would
-// certify not_started_proven for code that may already have run.
+// 'managed_hook_module_evaluation_timeout' and an abort that lands
+// mid-evaluation reports 'managed_hook_module_evaluation_abandoned' (the host
+// fences both as outcome_unknown) instead of 'managed_hook_handler_unavailable'
+// or a definite cancellation, which would certify an outcome for code that may
+// still be running.
 function importHookModule(
   modulePath: string,
   timeoutMs: number,
@@ -783,6 +785,14 @@ export class ManagedHookRuntime {
             throw new Error('handler revision unavailable');
         } catch (error) {
           if (error instanceof ManagedHookImportAbortedError) {
+            // An abort that lands while the module's top-level code is still
+            // evaluating is not completion evidence: fence it the way the
+            // evaluation timeout does. The outer catch publishes an error-only
+            // receipt and done still resolves, so close() does not wedge.
+            if (entry.moduleEvaluationPending)
+              throw new ManagedHookError(
+                'managed_hook_module_evaluation_abandoned',
+              );
             entry.view = {
               operationId: control.operationId,
               state: 'settled',

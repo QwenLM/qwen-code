@@ -142,14 +142,19 @@ trusted function Hook 取消或超时时，Runtime 最多等待一秒，确认�
 Runtime 侧结算——释放其在 16 个准入名额中占用的那一个，并解除 Runtime `close()`
 挂起——但在模块顶层代码实际结束前持续保留 hold；永不 settle 的求值在 worker
 生命周期内保留 hold。Runtime 以专用编码
-`managed_hook_module_evaluation_timeout` 报告求值超时，
-Harness 据此以 outcome_unknown 围闭该执行，而不是对可能已经运行过的代码出具
-not_started_proven。求值失败的模块以 `managed_hook_handler_unavailable` 结算，
+`managed_hook_module_evaluation_timeout` 报告求值超时、以
+`managed_hook_module_evaluation_abandoned` 报告因取消或关停而弃用的求值；Harness
+将两者都以 outcome_unknown 围闭，而不是对可能仍在运行的代码出具
+not_started_proven——或提交确定的取消。求值失败的模块以
+`managed_hook_handler_unavailable` 结算，
 Harness 记为 not_started_proven——无论是在任何顶层语句执行前被拒绝、在顶层执行
 中途被拒绝，还是在完整求值之后才被拒绝（例如形状或 handlerRevision 校验）；
 因此该证明并不覆盖任何已经发生的顶层副作用。
 Harness 释放此前 owner 时 Broker 可能拒绝：因 owner 已不存在而拒绝
-（404 `runtime_session_not_found`）时记为已释放且不再重试；被 hold 围闭的
+（404 `runtime_session_not_found`）时记为已释放且不再重试。被 Harness 以
+outcome_unknown 围闭的执行永远不会被 drain 越过、也不会进入释放集合，因此 hold
+围闭的拒绝只会来自在围闭存在之前就把被弃用求值认证为已取消的 Runtime。被 hold
+围闭的
 owner 拒绝（409 `managed_runtime_identity_conflict` 或
 `managed_runtime_provider_operation_failed`）时本次跳过、写入 daemon 的 stderr
 且不记为已释放，该 Hook Session 之后每个回合都会再次尝试释放。获取路径上的其余

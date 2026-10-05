@@ -1041,6 +1041,87 @@ it('fences a module-evaluation timeout as outcome_unknown, never not_started_pro
   ).toHaveLength(1);
 });
 
+it('fences a hook-cancel that lands during module evaluation as outcome_unknown', async () => {
+  const key = session.authority.sessionHeader.sessionKey;
+  const modulePath = path.join(root, 'stuck-cancel-handler.mjs');
+  await writeFile(
+    modulePath,
+    `await new Promise(() => {});
+     export const handler = {handlerRevision: 1, callback: async () => ({continue: true})};`,
+  );
+  const runtime = new ManagedHookRuntime(
+    { ...key, workspaceGeneration: '1' },
+    async () => root,
+    {
+      version: 1,
+      catalogs: [
+        {
+          ...pin,
+          tenantId: key.tenantId,
+          workspaceId: key.workspaceId,
+          hooks: [
+            {
+              ...catalog.hooks[0],
+              config: { type: HookType.Function, timeout: 60_000 },
+              handler: {
+                handlerId: 'stuck',
+                handlerRevision: 1,
+                modulePath,
+                exportName: 'handler',
+              },
+            },
+          ],
+        },
+      ],
+    },
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+    function (this: HostedWorkspaceBroker, operation) {
+      requests.push(operation);
+      return runtime.control(this.runtimeSessionId, operation);
+    },
+  );
+  try {
+    const abort = new AbortController();
+    const fired = hooks.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      {},
+      abort.signal,
+    );
+    await vi.waitFor(() =>
+      expect(
+        requests.filter((request) => request.kind === 'hook-execute'),
+      ).toHaveLength(1),
+    );
+    abort.abort();
+    await expect(fired).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+    const child = session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .find(
+        (entry) =>
+          entry.recordId.startsWith('hook-') &&
+          !entry.recordId.startsWith('hook-plan-'),
+      )!;
+    expect(child.run).toMatchObject({
+      state: 'recovery_blocked',
+      execution: 'outcome_unknown',
+      reason: 'outcome_unknown',
+    });
+    expect(hooks.hasPendingOperations).toBe(true);
+    // The never-settling evaluation keeps its Runtime hold.
+    expect(runtime.hasHolds(hooks.broker.runtimeSessionId)).toBe(true);
+    await expect(
+      hooks.fire(HookEventName.PreToolUse, 'call-2', {}, signal()),
+    ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(1);
+  } finally {
+    await runtime.close();
+  }
+});
+
 it('drains async execution before lifecycle hooks and retains the Runtime owner until close', async () => {
   catalog = {
     ...catalog,
