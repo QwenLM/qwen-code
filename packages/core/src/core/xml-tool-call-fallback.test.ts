@@ -520,3 +520,227 @@ describe('tryRecoverXmlToolCalls', () => {
     expect(result.remainingText).toBe('');
   });
 });
+
+describe('complete taught-dialect recovery (#10692)', () => {
+  const functionBlock =
+    '<function=read_file><parameter=file_path>a.ts</parameter></function>';
+
+  it.each([functionBlock, `<tool_call>${functionBlock}</tool_call>`])(
+    'recovers a complete function block: %s',
+    (text) => {
+      expect(containsXmlToolCalls(text)).toBe(true);
+      const result = tryRecoverXmlToolCalls(text);
+      expect(result.recovered).toBe(true);
+      expect(result.functionCallParts).toEqual([
+        {
+          functionCall: {
+            id: expect.any(String),
+            name: 'read_file',
+            args: { file_path: 'a.ts' },
+          },
+        },
+      ]);
+      expect(result.remainingText).toBe('');
+    },
+  );
+
+  it('preserves explicit examples while recovering a following real call', () => {
+    const documentation = `<example>model:\n${functionBlock}</example>`;
+    expect(tryRecoverXmlToolCalls(documentation)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: documentation,
+    });
+    const result = tryRecoverXmlToolCalls(`${documentation}\n${functionBlock}`);
+    expect(result.functionCallParts).toHaveLength(1);
+    expect(result.functionCallParts[0]?.functionCall?.name).toBe('read_file');
+    expect(result.remainingText).toBe(documentation);
+  });
+
+  it.each([
+    functionBlock,
+    '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>',
+  ])('ignores an inline-code example mention before %s', (call) => {
+    const prose = 'See the `<example>` format.';
+    const result = tryRecoverXmlToolCalls(`${prose}\n${call}`);
+    expect(result.functionCallParts).toHaveLength(1);
+    expect(result.functionCallParts[0]?.functionCall?.name).toBe('read_file');
+    expect(result.remainingText).toBe(prose);
+  });
+
+  it('keeps a genuinely unclosed example inert', () => {
+    const documentation = `<example>model:\n${functionBlock}`;
+    expect(tryRecoverXmlToolCalls(documentation)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: documentation,
+    });
+  });
+
+  it('keeps parameter backticks from masking a later example opener', () => {
+    const write =
+      '<function=write_file><parameter=file_path>a.ts</parameter>' +
+      '<parameter=content>`</parameter></function>';
+    const documentation = `<example>model:\n${functionBlock}\nclosing \`</example>`;
+    const result = tryRecoverXmlToolCalls(`${write}\n${documentation}`);
+    expect(result.functionCallParts).toHaveLength(1);
+    expect(result.functionCallParts[0]?.functionCall?.name).toBe('write_file');
+    expect(result.functionCallParts[0]?.functionCall?.args).toEqual({
+      file_path: 'a.ts',
+      content: '`',
+    });
+    expect(result.remainingText).toBe(documentation);
+  });
+
+  it.each([
+    ['<example id="one > two">', '</example>'],
+    ['<example >', '</example >'],
+  ])('preserves example attributes and whitespace: %s', (open, close) => {
+    const documentation = `${open}${functionBlock}${close}`;
+    const result = tryRecoverXmlToolCalls(`${documentation}\n${functionBlock}`);
+    expect(result.functionCallParts).toHaveLength(1);
+    expect(result.remainingText).toBe(documentation);
+  });
+
+  it('ignores a literal example opener in fenced documentation', () => {
+    const documentation = '```xml\n<example>\n```';
+    const result = tryRecoverXmlToolCalls(`${documentation}\n${functionBlock}`);
+    expect(result.functionCallParts).toHaveLength(1);
+    expect(result.remainingText).toBe(documentation);
+  });
+
+  it('keeps example tags in parameter data from hiding a following real call', () => {
+    const write =
+      '<function=write_file><parameter=file_path>a.ts</parameter>' +
+      '<parameter=content><example>literal data</parameter></function>';
+    expect(
+      extractXmlToolCalls(`${write}\n${functionBlock}`).map(
+        (call) => call.name,
+      ),
+    ).toEqual(['write_file', 'read_file']);
+  });
+
+  it('preserves parameter values, JSON structure and null-prototype args', () => {
+    const calls = extractXmlToolCalls(
+      '<function=write_file>' +
+        '<parameter=file_path>null</parameter>' +
+        '<parameter=content>\n    a &lt; b &amp;&amp; c\n</parameter>' +
+        '<parameter=options>{"x":[1,2]}</parameter>' +
+        '<parameter=__proto__>value</parameter>' +
+        '</function>',
+    );
+    expect(calls).toEqual([
+      {
+        name: 'write_file',
+        args: {
+          file_path: 'null',
+          content: '    a < b && c',
+          options: { x: [1, 2] },
+          ['__proto__']: 'value',
+        },
+      },
+    ]);
+    expect(Object.getPrototypeOf(calls[0]!.args)).toBeNull();
+  });
+
+  it('recovers mixed dialects while retaining fenced and parameterless blocks', () => {
+    const documented = `\`\`\`xml\n${functionBlock}\n\`\`\``;
+    const parameterless = '<function=no_params></function>';
+    const text =
+      `<tool_call>${functionBlock}</tool_call>\n` +
+      invoke('run_shell_command', param('command', 'pwd')) +
+      `\n${documented}\n${parameterless}`;
+    const result = tryRecoverXmlToolCalls(text);
+    expect(
+      result.functionCallParts.map((part) => part.functionCall?.name),
+    ).toEqual(['read_file', 'run_shell_command']);
+    expect(result.remainingText).toBe(`${documented}\n${parameterless}`);
+  });
+
+  it.each([
+    [
+      invoke('read_file', param('file_path', 'a.ts')),
+      '<tool_call></tool_call>',
+    ],
+    [`<tool_call>${functionBlock}</tool_call>`, '<tool_call></tool_call>'],
+    [
+      invoke('read_file', param('file_path', 'a.ts')),
+      '```xml\n<tool_call></tool_call>\n```',
+    ],
+    [functionBlock, '```xml\n<tool_call> \n</tool_call>\n```'],
+  ])(
+    'preserves an originally empty envelope after %s',
+    (call, documentation) => {
+      const result = tryRecoverXmlToolCalls(`${call}\n${documentation}`);
+      expect(result.recovered).toBe(true);
+      expect(result.functionCallParts).toHaveLength(1);
+      expect(result.remainingText).toBe(documentation);
+    },
+  );
+
+  it('keeps parameter fences from hiding a later function block', () => {
+    const text =
+      '<function=edit><parameter=old_string>\n```\n</parameter></function>\n' +
+      functionBlock;
+    expect(extractXmlToolCalls(text).map((call) => call.name)).toEqual([
+      'edit',
+      'read_file',
+    ]);
+  });
+
+  it.each([
+    'The shell format is <function=run_shell_command> with a command:\n' +
+      '```xml\n<parameter=command>echo example</parameter></function>\n```',
+    '<function=run_shell_command>\n```xml\n' +
+      '<parameter=command>echo example</parameter>\n```\n</function>',
+  ])('does not join a prose opener to fenced parameters: %s', (text) => {
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it.each([
+    '<function=run_shell_command>\n```xml\n' + functionBlock + '\n```',
+    '<tool_call><function=write_file>' +
+      '<parameter=file_path>a.ts</parameter>' +
+      '<parameter=content>before</function>after</parameter></function></tool_call>',
+    '<tool_call><function=read_file><parameter=file_path>a.ts</parameter></tool_call>' +
+      '<tool_call><function=run_shell_command>' +
+      '<parameter=command>pwd</parameter></function></tool_call>',
+  ])(
+    'preserves malformed blocks instead of dispatching partial calls: %s',
+    (text) => {
+      expect(tryRecoverXmlToolCalls(text)).toEqual({
+        recovered: false,
+        functionCallParts: [],
+        remainingText: text,
+      });
+    },
+  );
+
+  it('preserves a parameterless block whose name contains parameter syntax', () => {
+    const parameterless = "<invoke name='<parameter=x>y</parameter>'></invoke>";
+    const result = tryRecoverXmlToolCalls(`${functionBlock}\n${parameterless}`);
+    expect(result.functionCallParts).toHaveLength(1);
+    expect(result.remainingText).toBe(parameterless);
+  });
+
+  it.each([
+    `\`\`\`xml\n${functionBlock}\n\`\`\``,
+    `${'Explanation. '.repeat(80)}${functionBlock}`,
+    '<function=read_file><parameter=file_path>a.ts</parameter>',
+    '<function=read_file><parameter=file_path>a.ts</function>',
+    '<invoke name="read_file"><parameter=file_path>a.ts</parameter></function>',
+  ])(
+    'does not recover documentation or incomplete/mismatched blocks: %s',
+    (text) => {
+      expect(tryRecoverXmlToolCalls(text)).toEqual({
+        recovered: false,
+        functionCallParts: [],
+        remainingText: text,
+      });
+    },
+  );
+});
