@@ -629,8 +629,10 @@ class ManagedSessionLifecycleTest {
                                 """))
                 .andExpect(status().isAccepted());
         await().atMost(Duration.ofSeconds(5)).until(() ->
-                store.findActiveTurn(tenant, kept).isEmpty()
-                        && store.findLatestTurn(tenant, kept).orElseThrow()
+                !store.findActiveTurns(tenant, List.of(kept))
+                        .containsKey(kept)
+                        && store.findLatestTurns(tenant, List.of(kept))
+                                .get(kept)
                                 .status().equals("COMPLETED"));
         assertThat(sessionStatus(tenant, kept)).isEqualTo("active");
     }
@@ -733,7 +735,8 @@ class ManagedSessionLifecycleTest {
                 .andReturn().getResponse().getContentAsString())
                 .get("id").asText();
         await().atMost(Duration.ofSeconds(5)).until(() ->
-                store.findActiveTurn(tenant, sessionId).isEmpty()
+                !store.findActiveTurns(tenant, List.of(sessionId))
+                        .containsKey(sessionId)
                         && store.requireSession(tenant, sessionId)
                                 .harnessBootId() != null);
         return sessionId;
