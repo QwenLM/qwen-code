@@ -357,7 +357,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the creator with current read access (404 unreadable, 403 readable non-creator). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made. */
+        /** @description Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the creator with current read access (404 unreadable, 403 readable non-creator). Bound keys are tenant/Session/actor scoped. Replay returns the recorded outcome without repeating the mutation; a replay after delete answers with the Session as last visible — its pre-delete status — rather than 404. The permanent close fence is preserved and no Harness or Runtime call is made. */
         post: operations["unarchiveWebShellSession"];
         delete?: never;
         options?: never;
@@ -1019,7 +1019,7 @@ export interface components {
     parameters: never;
     requestBodies: never;
     headers: {
-        /** @description True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the current visible Session; operation responses represent the original operation at its current state. */
+        /** @description True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the recorded outcome on the Session as last visible — a replay after delete answers with the Session's pre-delete status rather than 404; operation responses represent the original operation at its current state. */
         IdempotentReplay: boolean;
         /** @description Trace-only correlation identifier; never an idempotency key. */
         RequestId: string;

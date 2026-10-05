@@ -29,6 +29,8 @@ import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.HarnessDisabledException;
+import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
@@ -71,7 +73,7 @@ class HarnessCoordinatorTest {
             RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
             TurnRecord claimed = turn(tenantId, sessionId, turnId,
                     "11111111-1111-4111-8111-111111111111", null, 0,
-                    status, false, 0);
+                    status, true, 0);
             when(store.claimTurn(eq(tenantId), eq(sessionId), eq(turnId),
                     anyString(), any(Duration.class)))
                     .thenReturn(Optional.of(claimed));
@@ -88,10 +90,84 @@ class HarnessCoordinatorTest {
             }
             verify(store).failTurn(eq(tenantId), eq(sessionId), eq(turnId),
                     anyString(), eq("workspace_unavailable"), anyString());
+            verify(store, never()).deferTurnRetry(anyString(), anyString(),
+                    anyString(), anyString(), anyLong());
             verify(harness).isWorkspaceFilesAvailable();
             verifyNoMoreInteractions(harness);
             verifyNoInteractions(runtimeWarmer);
         }
+    }
+
+    // Before any submission a Workspace-files outage holds the Turn like a
+    // Harness outage: a replay may already have answered 202 for it, and the
+    // availability-gated sweep re-offers it once the files are back.
+    @Test
+    void defersABoundTurnWhileWorkspaceFilesAreUnavailable() {
+        ContextBinding binding = new ContextBinding("tenant", "ws-a", 1,
+                "storage-a", ".", "config-a", 1);
+        SessionRecord session = new SessionRecord("tenant", "session",
+                "qwen-code", null, null, "ACTIVE", null, null, 0, 0, 0, 1, 1,
+                null, 1, binding, "yolo", "hosted-workspace-files/1");
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        TurnRecord claimed = turn("tenant", "session", "turn",
+                "11111111-1111-4111-8111-111111111111", null, 0, "ACCEPTED",
+                false, 0);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(session);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).deferTurnRetry(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        verify(harness).isWorkspaceFilesAvailable();
+        verifyNoMoreInteractions(harness);
+        verifyNoInteractions(runtimeWarmer);
+    }
+
+    // The hold is bounded by the pre-admission budget: a Workspace-files
+    // outage that outlasts it terminates with an actionable code instead of
+    // an eternal ACCEPTED.
+    @Test
+    void failsABoundTurnAfterTheWorkspaceOutageBudgetIsExhausted() {
+        ContextBinding binding = new ContextBinding("tenant", "ws-a", 1,
+                "storage-a", ".", "config-a", 1);
+        SessionRecord session = new SessionRecord("tenant", "session",
+                "qwen-code", null, null, "ACTIVE", null, null, 0, 0, 0, 1, 1,
+                null, 1, binding, "yolo", "hosted-workspace-files/1");
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        TurnRecord claimed = turn("tenant", "session", "turn",
+                "11111111-1111-4111-8111-111111111111", null, 0, "ACCEPTED",
+                false, 5);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(session);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("workspace_unavailable"), anyString());
+        verify(store, never()).deferTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
     }
 
     // Before submission, the only RuntimeBrokerException that reaches the
@@ -113,20 +189,48 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyLong());
     }
 
-    // An outage defers without spending the pre-admission budget: a replay
-    // answered 202 relies on this hold, and the recovery sweep picks the
-    // turn back up once the Harness returns (it is gated on availability).
+    // An outage defers instead of terminally failing: a replay answered 202
+    // relies on this hold, and the recovery sweep picks the turn back up
+    // once the Harness returns (it is gated on availability). The deferral
+    // still spends the pre-admission budget — a permanent disable
+    // terminates rather than holding the Turn forever.
     @Test
-    void defersWithoutBurningBudgetWhileTheHarnessIsDisabled() {
+    void defersWhileTheHarnessIsDisabled() {
         AgentStateStore store = dispatchWithCreateOrLoadFailure(
-                new IllegalStateException("Hosted Harness is disabled"),
-                false, 0);
+                disabledHarnessFailure(), false, 0);
         verify(store).deferTurnRetry(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), anyLong());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
                 anyString(), anyString(), anyLong());
         verify(store, never()).failTurn(anyString(), anyString(), anyString(),
                 anyString(), anyString(), anyString());
+    }
+
+    // Past the pre-admission budget the same outage ends the Turn with an
+    // actionable code instead of holding it ACCEPTED forever.
+    @Test
+    void failsAfterTheHarnessOutageBudgetIsExhausted() {
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(
+                disabledHarnessFailure(), false, 5);
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_unavailable"), anyString());
+        verify(store, never()).deferTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+    }
+
+    // The outage signal comes from the real connector: if the disabled
+    // connector ever throws something else, this test — and the deferral
+    // path it drives — turns red instead of silently shifting the load.
+    private static HarnessDisabledException disabledHarnessFailure() {
+        try {
+            new UnavailableHarnessConnector().createOrLoad("tenant",
+                    "session", false);
+            throw new AssertionError("the disabled connector must throw");
+        } catch (HarnessDisabledException error) {
+            return error;
+        }
     }
 
     // A claim that already recorded a submission attempt may have been

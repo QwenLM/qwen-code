@@ -35,7 +35,7 @@ public final class StoreModels {
                     agentRevision, title, value, harnessBootId,
                     harnessEventEpoch, harnessLastEventId, lastSequence,
                     replayFloorSequence, createdAt, updatedAt, deletedAt,
-                    version, workspace, toolProfile);
+                    version, workspace, approvalMode, toolProfile);
         }
     }
 

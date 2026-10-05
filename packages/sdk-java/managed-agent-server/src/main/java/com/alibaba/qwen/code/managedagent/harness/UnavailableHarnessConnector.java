@@ -50,7 +50,7 @@ public class UnavailableHarnessConnector implements HarnessConnector {
         throw unavailable();
     }
 
-    private static IllegalStateException unavailable() {
-        return new IllegalStateException("Hosted Harness is disabled");
+    private static HarnessDisabledException unavailable() {
+        return new HarnessDisabledException("Hosted Harness is disabled");
     }
 }
