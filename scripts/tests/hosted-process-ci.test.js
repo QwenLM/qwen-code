@@ -155,6 +155,13 @@ describe('Hosted real-process gates', () => {
     );
     expect(run.run).toContain('clean verify checkstyle:check');
     expect(run.run).not.toContain('skip');
+    // The step runs the unit tests, SpotBugs, Checkstyle and the Hosted*IT
+    // suite in one Maven invocation. Green main runs measured 8.4-11.7 min on
+    // the GitHub-hosted pool (Oct 2026), so a 12-minute ceiling left as
+    // little as 18 s of headroom and run 37346072729 died at it before
+    // failsafe wrote a report (issue #13471). 20 minutes restores ~1.7x
+    // headroom over the slowest observed green run.
+    expect(run['timeout-minutes']).toBe(20);
     expect(run['continue-on-error']).toBeUndefined();
     const pom = read('packages/sdk-java/managed-agent-server/pom.xml').replace(
       /<!--[\s\S]*?-->/g,

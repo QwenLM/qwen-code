@@ -312,8 +312,13 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (12+10+20) leave room for the uncapped setup steps;
-    # a healthy run measured ~20 min end to end.
+    # The step ceilings leave room for the uncapped setup steps; a healthy
+    # run measures ~28 min end to end. The Verify step runs the unit tests,
+    # SpotBugs, Checkstyle and the Hosted*IT suite in one Maven invocation,
+    # and its green duration measured 8.4-11.7 min across ten consecutive
+    # main runs in Oct 2026 -- the old 12-minute ceiling left as little as
+    # 18 s of headroom, and run 37346072729 died at it before failsafe wrote
+    # a report. 20 minutes restores ~1.7x headroom over the slowest green run.
     timeout-minutes: 60
     services:
       mysql:
@@ -359,7 +364,7 @@ jobs:
           # `clean verify` invocations (pinned by scripts/tests/spotbugs-gate.test.js).
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        timeout-minutes: 12
+        timeout-minutes: 20
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
