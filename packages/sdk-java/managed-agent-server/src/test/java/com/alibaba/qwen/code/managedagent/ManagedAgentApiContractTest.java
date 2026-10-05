@@ -1566,14 +1566,20 @@ class ManagedAgentApiContractTest {
         assertThat(publishedKib * 1024)
                 .as("published durable-record limit is the enforced one")
                 .isEqualTo(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES);
+        assertThat(CONTRACT.node("/components/schemas/InputBlock"
+                + "/properties/text/maxLength").asLong())
+                .as("published per-block maxLength is the enforced"
+                        + " per-block cap")
+                .isEqualTo(publishedBlock);
 
         // The enforced numbers are read out of the 400s the server
         // returns, so no copy of either constant lives in this test.
         String block = "{\"type\":\"input_text\",\"text\":\""
                 + "x".repeat((int) publishedBlock) + "\"}";
+        String oversizedInput = (block + ",").repeat(4) + block;
         String oversized = "{\"idempotencyKey\":\"budget-submit\","
                 + "\"sessionId\":\"" + sessionId + "\",\"input\":["
-                + (block + ",").repeat(4) + block + "]}";
+                + oversizedInput + "]}";
         String message = json(webShell(tenant, "/turns/submit", oversized))
                 .path("error").path("message").asText();
         var enforcedMatcher = java.util.regex.Pattern
@@ -1584,6 +1590,30 @@ class ManagedAgentApiContractTest {
         assertThat(Long.parseLong(enforcedMatcher.group(1)))
                 .as("enforced aggregate matches the published one")
                 .isEqualTo(publishedAggregate);
+
+        // The public events route enforces the same budget, not just the
+        // WebShell one; there the idempotency key travels in the
+        // Idempotency-Key header instead of the body.
+        MockHttpServletResponse publicRefusal = mvc.perform(
+                        post("/v1/agents/sessions/{id}/events", sessionId)
+                                .header(TENANT, tenant)
+                                .header(IDEMPOTENCY_KEY,
+                                        "budget-public-submit")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"type\":\"agent.session.input."
+                                        + "message\",\"input\":["
+                                        + oversizedInput + "]}"))
+                .andReturn().getResponse();
+        assertThat(publicRefusal.getStatus())
+                .as("public events route refuses the oversized body")
+                .isEqualTo(400);
+        JsonNode publicError = json(publicRefusal.getContentAsString(
+                StandardCharsets.UTF_8)).path("error");
+        assertThat(publicError.path("code").asText())
+                .isEqualTo("invalid_input");
+        assertThat(publicError.path("message").asText())
+                .as("public route 400 names the same aggregate budget")
+                .isEqualTo(message);
 
         // One block at published+1 characters stays under the aggregate,
         // so this 400 can only come from the per-block cap.

@@ -56,6 +56,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -1844,6 +1845,9 @@ class ManagedAgentServerIntegrationTest {
                                 .value("failed"))
                         .andExpect(jsonPath("$.activeTurn.errorCode")
                                 .value("hosted_harness_rejected")));
+        assertThat(harness.lastRejectionArm.get())
+                .as("the %s arm is the one that fired", arm)
+                .isEqualTo(arm);
     }
 
     private ResultActions lifecycle(MockHttpServletRequestBuilder request,
@@ -1910,6 +1914,8 @@ class ManagedAgentServerIntegrationTest {
                 new ConcurrentHashMap<>();
         private final Set<String> uncertainRetries =
                 ConcurrentHashMap.newKeySet();
+        private final AtomicReference<String> lastRejectionArm =
+                new AtomicReference<>();
         private volatile boolean available = true;
         private volatile String closeAnswer = BOOT_ID;
         private volatile HarnessRuntimeRecovery runtimeRecovery;
@@ -1961,10 +1967,20 @@ class ManagedAgentServerIntegrationTest {
                     "message", Map.of("role", "user",
                             "parts", List.of(Map.of("text", text))));
             try {
-                if (mapper.writeValueAsBytes(input).length
-                        > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES
-                        || mapper.writeValueAsBytes(record).length
-                        > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES) {
+                // Keep the real harness's check order — serialized prompt
+                // first, durable record second — and record which arm
+                // fired: the record arm only discriminates while the
+                // prompt stays under the limit, and nothing else would
+                // notice the prompt arm shadowing it.
+                boolean promptOversized = mapper.writeValueAsBytes(input)
+                        .length
+                        > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES;
+                boolean recordOversized = !promptOversized
+                        && mapper.writeValueAsBytes(record).length
+                        > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES;
+                if (promptOversized || recordOversized) {
+                    lastRejectionArm.set(
+                            promptOversized ? "prompt" : "record");
                     DaemonHttpException tooLarge =
                             mock(DaemonHttpException.class);
                     when(tooLarge.getStatusCode()).thenReturn(413);

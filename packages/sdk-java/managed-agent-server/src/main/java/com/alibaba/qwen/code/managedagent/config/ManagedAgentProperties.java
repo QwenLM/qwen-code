@@ -1,18 +1,27 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import jakarta.annotation.PostConstruct;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.boot.convert.DurationUnit;
 import java.util.Locale;
 import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.convert.DurationUnit;
 
 @ConfigurationProperties("qwen.managed-agent")
 public class ManagedAgentProperties {
+    private static final Logger LOG = LoggerFactory.getLogger(
+            ManagedAgentProperties.class);
+
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
     private final ToolPublication toolPublication = new ToolPublication();
@@ -98,6 +107,68 @@ public class ManagedAgentProperties {
                     "Hosted Workspace files require"
                             + " a supported Harness, Session Store and Session-isolated"
                             + " local-process Broker with Workspace mounts");
+        }
+        warnOnSecondScaleOverrides();
+    }
+
+    // A suffix-less override bound milliseconds before the @DurationUnit
+    // sweep and now binds seconds; a bound value at 1000x its field
+    // default or more is that flip's signature (every shipped value is
+    // suffixed, so a default never trips this). Warn, never refuse: a
+    // deliberate large value must still boot.
+    private void warnOnSecondScaleOverrides() {
+        warnOnSecondScaleOverrides("qwen.managed-agent.", this,
+                new ManagedAgentProperties());
+    }
+
+    private static void warnOnSecondScaleOverrides(String prefix,
+            Object bound, Object initial) {
+        for (Field field : bound.getClass().getDeclaredFields()) {
+            if (Modifier.isStatic(field.getModifiers())) {
+                continue;
+            }
+            // Only Duration fields can carry the flipped unit, and only
+            // the nested groups can hold one; both expose getXxx getters
+            // (the boolean isXxx getters belong to fields skipped here).
+            boolean duration = field.getType() == Duration.class;
+            boolean group = field.getType().getEnclosingClass()
+                    == ManagedAgentProperties.class;
+            if (!duration && !group) {
+                continue;
+            }
+            Object value;
+            Object basis;
+            try {
+                Method getter = bound.getClass().getMethod("get"
+                        + Character.toUpperCase(field.getName().charAt(0))
+                        + field.getName().substring(1));
+                value = getter.invoke(bound);
+                basis = getter.invoke(initial);
+            } catch (NoSuchMethodException | IllegalAccessException
+                    | InvocationTargetException error) {
+                throw new IllegalStateException(error);
+            }
+            String property = prefix + field.getName()
+                    .replaceAll("([A-Z])", "-$1")
+                    .toLowerCase(Locale.ROOT);
+            if (duration) {
+                DurationUnit unit = field.getAnnotation(DurationUnit.class);
+                if (unit != null && unit.value() == ChronoUnit.SECONDS
+                        && value instanceof Duration boundValue
+                        && basis instanceof Duration basisDefault
+                        && boundValue.compareTo(
+                                basisDefault.multipliedBy(1000)) >= 0) {
+                    LOG.warn("{} resolved to {}, at least 1000x its default"
+                            + " ({}) — the signature of a stale"
+                            + " milliseconds-style override: a suffix-less"
+                            + " number now binds as seconds. Write an"
+                            + " explicit suffix (for example 1800000ms)"
+                            + " to confirm the intent.",
+                            property, boundValue, basisDefault);
+                }
+            } else if (value != null) {
+                warnOnSecondScaleOverrides(property + ".", value, basis);
+            }
         }
     }
 
@@ -278,6 +349,12 @@ public class ManagedAgentProperties {
     public static class Auth {
         private String mode = "auto";
         private String signingKey = "";
+        // MILLIS, deliberately against the sweep's SECONDS: a stale
+        // milliseconds-style override (300000) must keep binding the
+        // documented 5m — under SECONDS it would silently widen the
+        // signature-replay window to ~83h and still pass BrokerSecurity's
+        // 1s floor.
+        @DurationUnit(ChronoUnit.MILLIS)
         private Duration allowedDrift = Duration.ofMinutes(5);
         private boolean allowInsecureBind;
         private long maxSignedBodyBytes = 10 * 1024 * 1024;

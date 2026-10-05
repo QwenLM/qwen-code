@@ -8,10 +8,14 @@ import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.Scheduled;
 
@@ -123,10 +127,15 @@ class ManagedAgentPropertiesTest {
         // every 20 s invites double execution. The v3 result window is the
         // documented case: a stale milliseconds-style 1800000 meant as 30
         // minutes binds as PT500H, so the suffix is mandatory.
+        // Auth.allowedDrift declares MILLIS on purpose: the same stale
+        // 300000 must keep binding the documented PT5M — as seconds it
+        // would widen the signature-replay window to ~83h and still pass
+        // the 1s floor. This arm goes red if the field flips to SECONDS.
         new ApplicationContextRunner()
                 .withPropertyValues(
                         "qwen.managed-agent.dispatch.lease-duration=120",
-                        "qwen.managed-agent.runtime-broker.v3-result-window=1800000")
+                        "qwen.managed-agent.runtime-broker.v3-result-window=1800000",
+                        "qwen.managed-agent.auth.allowed-drift=300000")
                 .withUserConfiguration(PropertiesConfiguration.class)
                 .run(started -> {
                     assertThat(started).hasNotFailed();
@@ -136,6 +145,33 @@ class ManagedAgentPropertiesTest {
                     assertThat(started.getBean(ManagedAgentProperties.class)
                             .getRuntimeBroker().getV3ResultWindow())
                             .isEqualTo(java.time.Duration.ofSeconds(1_800_000));
+                    assertThat(started.getBean(ManagedAgentProperties.class)
+                            .getAuth().getAllowedDrift())
+                            .isEqualTo(java.time.Duration.ofMinutes(5));
+                });
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void aMillisecondScaleOverrideWarnsAtStartup(CapturedOutput output) {
+        // A bare 1800000 meant as 30 minutes in milliseconds binds PT500H
+        // under the seconds convention — exactly 1000x the 30m default,
+        // the stale-override signature the startup warning names.
+        new ApplicationContextRunner()
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    assertThat(output).doesNotContain(
+                            "qwen.managed-agent.harness.turn-deadline");
+                });
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        "qwen.managed-agent.harness.turn-deadline=1800000")
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    assertThat(output).contains(
+                            "qwen.managed-agent.harness.turn-deadline");
                 });
     }
 
@@ -156,22 +192,32 @@ class ManagedAgentPropertiesTest {
     void theThreeScanDelaySchedulesShareOneFallback() {
         // The Dispatch comment claims the three sites read the identical
         // "${...scan-delay:1s}" placeholder; only this pin keeps the claim
-        // true when one fallback is retuned without the others.
+        // true when one fallback is retuned without the others. The unit
+        // is half of the claim: @Scheduled reads a bare number as
+        // timeUnit() — milliseconds by default — so these placeholders
+        // deliberately did not move to seconds with the typed Duration
+        // fields, and a one-sided timeUnit change turns this red too.
         String expected = "${qwen.managed-agent.dispatch.scan-delay:1s}";
-        assertThat(scanDelayFallback(ActionResponseCoordinator.class))
-                .isEqualTo(expected);
-        assertThat(scanDelayFallback(HarnessCoordinator.class))
-                .isEqualTo(expected);
-        assertThat(scanDelayFallback(SessionLifecycleCoordinator.class))
-                .isEqualTo(expected);
+        assertThat(scanDelaySchedule(ActionResponseCoordinator.class)
+                .fixedDelayString()).isEqualTo(expected);
+        assertThat(scanDelaySchedule(HarnessCoordinator.class)
+                .fixedDelayString()).isEqualTo(expected);
+        assertThat(scanDelaySchedule(SessionLifecycleCoordinator.class)
+                .fixedDelayString()).isEqualTo(expected);
+        assertThat(scanDelaySchedule(ActionResponseCoordinator.class)
+                .timeUnit()).isEqualTo(TimeUnit.MILLISECONDS);
+        assertThat(scanDelaySchedule(HarnessCoordinator.class)
+                .timeUnit()).isEqualTo(TimeUnit.MILLISECONDS);
+        assertThat(scanDelaySchedule(SessionLifecycleCoordinator.class)
+                .timeUnit()).isEqualTo(TimeUnit.MILLISECONDS);
     }
 
-    private static String scanDelayFallback(Class<?> coordinator) {
+    private static Scheduled scanDelaySchedule(Class<?> coordinator) {
         return java.util.Arrays.stream(coordinator.getDeclaredMethods())
                 .map(method -> method.getAnnotation(Scheduled.class))
                 .filter(java.util.Objects::nonNull)
-                .map(Scheduled::fixedDelayString)
-                .filter(value -> value.contains("dispatch.scan-delay"))
+                .filter(scheduled -> scheduled.fixedDelayString()
+                        .contains("dispatch.scan-delay"))
                 .findFirst().orElseThrow();
     }
 

@@ -86,6 +86,7 @@ All settings below use the `qwen.managed-agent.artifacts` prefix:
 | `max-concurrent-reads`       | `4`     | Maximum simultaneous content responses per server process.                                                                                                                                                                                                                                                                                                                                                                            |
 | `read-timeout`               | `2m`    | Elapsed-time budget checked between stream chunks, capped by the fixed two-minute output read lease; storage requests also use the storage client's timeouts.                                                                                                                                                                                                                                                                         |
 | `read-revalidation-interval` | `5s`    | How often an in-flight download re-runs the access check (workspace grant, read policy, session lifecycle); `PT0S` re-verifies every chunk. A revocation lands at the first chunk boundary after the window's end; chunks written inside the window still reach the client — up to 1 MiB for a Range request, and up to a full `read-timeout`'s worth of a streaming download. Once the re-check denies, no further chunk is written. |
+| `projection-interval`        | `1s`    | Cadence of the tool-result projection pass (backfill plus claim processing). Bound through a `@Scheduled` placeholder, so a suffix-less number binds as milliseconds — unlike the typed settings above.                                                                                                                                                                                                                               |
 
 A product can replace `ManagedArtifactPolicy` for narrower publication or
 actor rules. Published previews persist in shared events. Policy changes do
@@ -529,6 +530,17 @@ export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK='false'
 # its own fixed 30-minute deadline.
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW='30m'
 ```
+
+The same unit rule applies to every `qwen.managed-agent.*` duration setting: a
+suffix-less number binds as seconds, except five settings that keep
+milliseconds — `auth.allowed-drift` (so a stale `300000` keeps meaning five
+minutes instead of widening the signature-replay window to ~83 hours), the
+sub-second `events.batch-interval` and `events.materialize-interval`, and the
+two scheduler cadences `dispatch.scan-delay` and
+`artifacts.projection-interval`, which bind through `@Scheduled` placeholders.
+Always write the suffix (`90s`, `500ms`). At startup the server logs a warning
+for any seconds-convention duration bound to at least 1000x its default — the
+signature of a stale milliseconds-style override.
 
 When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 16-character SHA-256 workspace ID that Qwen Code uses from the canonical
