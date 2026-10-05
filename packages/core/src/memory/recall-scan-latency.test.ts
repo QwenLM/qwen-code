@@ -75,14 +75,21 @@ function isHostedLane(env: NodeJS.ProcessEnv): boolean {
 
 // The autofix verification gate launches vitest through an env -i allowlist
 // that keeps CI=true but strips RUNNER_NAME and RUNNER_ENVIRONMENT
-// (qwen-autofix.yml), on a host shared with up to 20 sibling autofix jobs.
-// Both discriminators unset would otherwise read as a developer machine and
-// hand that shared host the strict bound — measured at 140-149ms for the
-// 1000-topic cold best-of-5 against the 125ms ceiling, which is contention,
-// not a scan regression. CI staying set is what separates that host from a
-// developer machine, so it takes the hosted lane's shared multiplier.
+// (qwen-autofix.yml), so the child looks identical whether it landed on the
+// self-hosted pool host — shared with up to 20 sibling autofix jobs — or on
+// the workflow's ubuntu-latest fallback. Read as a developer machine, that
+// shared host would face the strict bound it cannot meet: the 1000-topic
+// cold best-of-5 measured 140-149ms there against the 125ms ceiling, which
+// is contention, not a scan regression. CI set with both markers absent is
+// exactly that child, so it takes the hosted lane's shared multiplier; a
+// lane whose markers survived (ecs-win, an autofix job's ambient steps)
+// keeps the strict bound.
 function isMarkerlessCiLane(env: NodeJS.ProcessEnv): boolean {
-  return env['CI'] === 'true';
+  return (
+    env['CI'] === 'true' &&
+    env['RUNNER_NAME'] === undefined &&
+    env['RUNNER_ENVIRONMENT'] === undefined
+  );
 }
 
 const POOL_CI = isPoolLane(process.env);
@@ -114,8 +121,9 @@ const FAST_RESULT_CEILING_MS = POOL_CI
 // What a wall-clock ceiling cannot do is promise that regression reddens
 // fleet-wide: 275ms only catches the +48% reparse where the 1000-topic
 // baseline exceeds 275/1.48 ≈ 186ms, so the faster hosted runners pass it. It
-// stays reliably asserted on the strict developer-machine lane, which is where
-// this file's header says the number means something. The warm-cache gate is
+// stays reliably asserted on the strict lanes — developer machines and
+// marked self-hosted runners — which is where this file's header says the
+// number means something. The warm-cache gate is
 // untouched — hosted jobs measured green under it (run 36640349705:
 // `recall-scan-latency.test.ts (2 tests | 1 failed)`).
 const HOSTED_COLD_SCAN_MULTIPLIER = 2.2;
@@ -254,9 +262,10 @@ function sessionCacheFor(projectRoot: string): AutoMemoryDocumentCache {
 describe('coldScanCeilingMs lane arms', () => {
   // One arm runs per CI job, and this PR's own `Test (ubuntu-latest)` job lands
   // on the pool, so without these cases the hosted arm never executes anywhere:
-  // dropping a disjunct, or putting `topicCount >= 1000` back, would redden
-  // fork PRs again with nothing failing at the edit. `env` is passed rather
-  // than stubbed, so no case here can leak a lane into the timing tests below.
+  // dropping or reordering a disjunct, or putting `topicCount >= 1000` back,
+  // would redden fork PRs again with nothing failing at the edit. `env` is
+  // passed rather than stubbed, so no case here can leak a lane into the
+  // timing tests below.
   const arms: Array<{
     lane: string;
     env: NodeJS.ProcessEnv;
@@ -294,6 +303,26 @@ describe('coldScanCeilingMs lane arms', () => {
       env: { CI: 'true' },
       small: 220,
       large: 275,
+    },
+    {
+      // Both runner markers present: not the gate child, so the strict bound.
+      lane: 'marked self-hosted CI',
+      env: {
+        CI: 'true',
+        RUNNER_ENVIRONMENT: 'self-hosted',
+        RUNNER_NAME: 'corp-runner-1',
+      },
+      small: 100,
+      large: 125,
+    },
+    {
+      // CI set beside the pool marker: the pool arm must still answer, so
+      // deleting it — or a markerless check broad enough to swallow a
+      // marked lane — reddens this row.
+      lane: 'ecs pool with CI set',
+      env: { RUNNER_NAME: 'ecs-qwen-parity', CI: 'true' },
+      small: 1000,
+      large: 1250,
     },
     {
       lane: 'strict (both unset)',

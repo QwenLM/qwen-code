@@ -258,6 +258,8 @@ describe('managed session metadata', () => {
           { class: 'trusted_entry' },
         ),
       ).rejects.toThrow(/different content/);
+      // Refused before publishing: no third body beside the two committed.
+      expect((await fs.readdir(bodies)).length).toBe(published + 1);
     });
   });
 
@@ -384,6 +386,21 @@ describe('managed session metadata', () => {
           { class: 'trusted_entry' },
         ),
       ).rejects.toThrow(/does not match this session/);
+      // A committed command retried under a foreign session key must not
+      // resolve as a replay of this session's record either.
+      await expect(
+        authority.commitDomainRecord(
+          {
+            ...renameCommand('cmd-rename-1'),
+            sessionKey: { ...sessionKey, sessionId: 'another-session' },
+          },
+          {
+            domain: 'session_metadata',
+            content: { title: 'Foreign title', titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/does not match this session/);
       expect((await fs.readdir(bodies)).length).toBe(published);
     });
   });
@@ -437,6 +454,30 @@ describe('managed session metadata', () => {
       ).rejects.toThrow(/committed without a domain record/);
       expect(authority.committedSequence).toBe(sequence);
       expect((await fs.readdir(bodies)).length).toBe(published);
+    });
+  });
+
+  it('refuses a retry of a committed command under a different domain', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'First title', titleSource: 'auto' },
+        },
+        { class: 'trusted_entry' },
+      );
+      // The command identity is spent on session_metadata: retrying it for
+      // another domain refuses rather than resolving with that record.
+      await expect(
+        authority.commitDomainRecord(
+          renameCommand('cmd-rename-1'),
+          { domain: 'goal_state', content: { goal: 'another domain' } },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/committed without a domain record/);
+      expect(authority.domainRecord('goal_state')).toBeUndefined();
     });
   });
 

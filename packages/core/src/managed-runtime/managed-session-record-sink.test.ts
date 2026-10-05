@@ -515,8 +515,10 @@ describe('managed session record sink', () => {
       systemPayload: { customTitle: 'Recorded title', titleSource: 'manual' },
     } as Partial<ChatRecord>;
     await harness.sink.write(record(title));
-    // A re-import after a reopen re-delivers the record as a fresh object;
-    // its command identity is the record's, so the second write is a replay.
+    // The sink derives a record's command identity from its uuid, so the same
+    // record delivered again — a fresh object with the same uuid — presents
+    // the same command, and the authority answers the second write from its
+    // journal instead of publishing another body.
     await harness.sink.write(record(title));
     await harness.close();
 

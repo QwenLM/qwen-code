@@ -391,10 +391,14 @@ export class LocalManagedSessionAuthority {
     string,
     { revision: number; recordRef: ManagedSessionDurableRef }
   >();
-  /** The revision and reference each committed domain record event carried, by sequence. */
+  /**
+   * The domain, revision and reference each committed domain record event
+   * carried, by sequence: a command identity is unique per session, not per
+   * domain, so the replay check compares the domain before answering.
+   */
   private readonly domainEvents = new Map<
     number,
-    { revision: number; recordRef: ManagedSessionDurableRef }
+    { domain: string; revision: number; recordRef: ManagedSessionDurableRef }
   >();
   private readonly actions = new Map<string, ManagedSessionAction>();
   /** The latest revision of each Stage H record, by its chain key. */
@@ -1327,7 +1331,7 @@ export class LocalManagedSessionAuthority {
     return this.runSerial(async () => {
       // A retry returns what it committed even if the domain was disabled
       // since.
-      const replayed = this.replayedDomain(command);
+      const replayed = this.replayedDomain(command, request.domain);
       if (replayed !== undefined) return replayed;
       assertExtensionActor(actor.class);
       assertCommandIdentity(command);
@@ -1603,6 +1607,7 @@ export class LocalManagedSessionAuthority {
    */
   private replayedDomain(
     command: ManagedSessionCommand,
+    domain: ManagedSessionDomain,
   ): ManagedSessionDomainReceipt | undefined {
     const previous = this.transactions.get(
       managedSessionCommandKey(command.operation, command.commandId),
@@ -1624,14 +1629,17 @@ export class LocalManagedSessionAuthority {
       sequence++
     ) {
       const committed = this.domainEvents.get(sequence);
-      if (committed !== undefined) {
+      // A retry naming another domain falls through to the conflict below
+      // rather than resolving with the record its own domain committed.
+      if (committed !== undefined && committed.domain === domain) {
         return {
           receipt: {
             ...previous.receipt,
             committedSequence: this.committed,
             replayed: true,
           },
-          ...committed,
+          revision: committed.revision,
+          recordRef: committed.recordRef,
         };
       }
     }
@@ -2612,7 +2620,7 @@ export class LocalManagedSessionAuthority {
       ] as unknown as ManagedSessionDurableRef,
     };
     this.domainRecords.set(domain, committed);
-    this.domainEvents.set(event.sequence, committed);
+    this.domainEvents.set(event.sequence, { domain, ...committed });
   }
 
   /** The latest committed record for a registered domain, if any. */
