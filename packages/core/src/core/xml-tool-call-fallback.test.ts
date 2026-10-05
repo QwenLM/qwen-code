@@ -916,4 +916,36 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     ).toEqual(['read_file']);
     expect(result.remainingText).toContain('<example>note');
   });
+
+  it('does not dispatch a complete call embedded in a rejected block name', () => {
+    // The invoke name pattern admits `>`, so this block's open tag ends after
+    // the quoted name, not at the first `>` in it. Deriving the rescan offset
+    // from that first `>` restarted the scan inside the name attribute, where
+    // it matched the complete call below and dispatched it out of a block the
+    // guard had already rejected — leaving corrupted `a>btail` markup behind.
+    const fnOpen = '<' + 'function=';
+    const embedded = [
+      fnOpen,
+      'run>',
+      PARAM_OPEN,
+      '=cmd>ls',
+      PARAM_CLOSE,
+      FN_CLOSE,
+    ].join('');
+    const text = [
+      OPEN,
+      ' name="a>b',
+      embedded,
+      '">',
+      'tail',
+      PARAM_OPEN,
+      '=x>',
+      CLOSE,
+    ].join('');
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
 });

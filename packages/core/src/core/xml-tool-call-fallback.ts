@@ -202,6 +202,31 @@ function computeExampleRanges(
 }
 
 /**
+ * Returns the offset just past the end of the open tag at the start of a
+ * matched block, or -1 when the block holds no unquoted `>`.
+ *
+ * The invoke branch of TOOL_CALL_PATTERN admits `>` inside the quoted name, so
+ * deriving the tag end with `indexOf('>')` can land in the middle of the open
+ * tag. A rescan from there matches a complete call embedded in that name
+ * attribute and dispatches it out of a block the guard has just rejected.
+ * Tracking quote runs makes the tag end the first `>` outside a quoted run.
+ */
+function openTagEnd(block: string): number {
+  let quote: string | null = null;
+  for (let index = 0; index < block.length; index++) {
+    const char = block[index];
+    if (quote !== null) {
+      if (char === quote) quote = null;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === '>') {
+      return index + 1;
+    }
+  }
+  return -1;
+}
+
+/**
  * Extracts XML-style tool calls from plain text content.
  * Tool-call blocks inside fences or explicit example wrappers are skipped:
  * they document the format rather than emitting a tool call. See #8003.
@@ -231,7 +256,11 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     const paramsBlock = match[2] ?? match[4];
     // A rejected block may have swallowed a complete later block, so rescan
     // from just after this block's open tag instead of its borrowed close.
-    const resumeAt = match.index + match[0].indexOf('>') + 1;
+    // When the tag end is not derivable, skip the whole block: rescanning
+    // inside a rejected block is what dispatches markup it never accepted.
+    const tagEnd = openTagEnd(match[0]);
+    const resumeAt =
+      tagEnd === -1 ? match.index + match[0].length : match.index + tagEnd;
     PARAMETER_PATTERN.lastIndex = 0;
     const outsideParameters = paramsBlock.replace(PARAMETER_PATTERN, '');
     PARAM_OPEN_PATTERN.lastIndex = 0;
