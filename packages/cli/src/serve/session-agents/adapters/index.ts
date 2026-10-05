@@ -28,6 +28,8 @@ import {
   type QwenSessionSendBinding,
 } from './qwen-acp.js';
 
+export type { QwenSessionSendBinding } from './qwen-acp.js';
+
 export interface AgentAdapterContext {
   workspaceCwd: string;
   bridge: QwenAcpAdapterBridge;

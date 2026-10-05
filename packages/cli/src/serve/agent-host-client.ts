@@ -48,7 +48,10 @@ import {
   AGENT_HOST_CREDENTIAL_REJECTED,
   AGENT_HOST_REPLACEMENT_REQUIRED,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
-import { getAdapter } from './session-agents/adapters/index.js';
+import {
+  getAdapter,
+  type QwenSessionSendBinding,
+} from './session-agents/adapters/index.js';
 import { updateSessionAgents } from '@qwen-code/qwen-code-core/agents/session-agents/binding-store.js';
 import {
   availablePrograms,
@@ -624,6 +627,41 @@ async function connectAgentHost(
   };
   assertOpen();
   const turns = new Map<string, HostTurn>();
+  /**
+   * `session_send` for remote `qwen` turns. The hidden session outlives a run
+   * and its MCP servers are fixed when it is (re)created, so the relay token
+   * belongs to the (chat session, agent) binding, like the coordinator's own
+   * qwen agents (see qwen-acp.ts); posts go to that binding's current turn.
+   */
+  const qwenRelayBindings = new Map<
+    string,
+    { relay: AgentHostRelayRun; runId?: string }
+  >();
+  const qwenRelayKey = (assignment: HostTurnAssignment) =>
+    `${assignment.sessionId}\0${assignment.agent.agentId}`;
+  const qwenSessionSendFor = (
+    assignment: HostTurnAssignment,
+  ): QwenSessionSendBinding => {
+    const key = qwenRelayKey(assignment);
+    const relayId = `qs-${createHash('sha256').update(key).digest('hex').slice(0, 32)}`;
+    return {
+      isCurrent: () => qwenRelayBindings.has(key),
+      rotate: () => {
+        qwenRelayBindings.get(key)?.relay.close();
+        qwenRelayBindings.delete(key);
+        const relay = openAgentHostRelayRun(relayId, (text) => {
+          const runId = qwenRelayBindings.get(key)?.runId;
+          const current = runId ? turns.get(runId) : undefined;
+          // A post outside a turn has nowhere to go: the coordinator only
+          // accepts events for a leased run.
+          if (current) pushEvent(current, { type: 'session_send', text });
+        });
+        if (!relay) return undefined;
+        qwenRelayBindings.set(key, { relay, runId: assignment.runId });
+        return sessionSendServerFor(relay);
+      },
+    };
+  };
   interface HeartbeatResponse {
     leases?: HostLeaseStatus[];
     decisions?: HostDecision[];
@@ -1113,9 +1151,20 @@ async function connectAgentHost(
         await markRemoteQwenTurn(options.workspaceCwd, assignment, nativeSessionId);
         remoteQwenBound = true;
       }
-      relay = openAgentHostRelayRun(assignment.runId, (text) =>
-        pushEvent(turn, { type: 'session_send', text }),
-      );
+      // qwen: the per-binding relay above, handed to the adapter. Other
+      // programs start a process per turn, so a per-run relay fits them.
+      const qwenSessionSend =
+        assignment.program === 'qwen'
+          ? qwenSessionSendFor(assignment)
+          : undefined;
+      if (qwenSessionSend) {
+        const binding = qwenRelayBindings.get(qwenRelayKey(assignment));
+        if (binding) binding.runId = assignment.runId;
+      } else {
+        relay = openAgentHostRelayRun(assignment.runId, (text) =>
+          pushEvent(turn, { type: 'session_send', text }),
+        );
+      }
       turn.relay = relay;
       // Cancelled while the binding was being written: never start.
       if (turn.lost) relay?.close();
@@ -1125,6 +1174,7 @@ async function connectAgentHost(
         workspaceCwd: options.workspaceCwd,
         bridge: options.bridge,
         agentId: assignment.agent.agentId,
+        ...(qwenSessionSend ? { sessionSend: qwenSessionSend } : {}),
       });
       result = await adapter.runTurn({
         prompt: assignment.prompt,
