@@ -1818,6 +1818,7 @@ export class HostedWorkspaceToolTurn {
       for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
         if (!saved) continue;
+        let proven = false;
         try {
           const owner = this.publication!.owner;
           const closed = await owner.request(
@@ -1837,12 +1838,46 @@ export class HostedWorkspaceToolTurn {
             (closed as Record<string, unknown>)['state'] !== 'NOT_STARTED'
           )
             throw new Error('Original execution was not proven unstarted.');
+          proven = true;
         } catch (closeCause) {
           writeStderrLineSafe(
             'qwen serve: Tool publication close was not confirmed: ' +
               String(closeCause),
           );
         }
+        if (!proven) continue;
+        // The grant owner proved this start never happened, yet the run
+        // record admitted for the same execution was already committed
+        // dispatch_started — and nothing beyond this catch can ever settle
+        // it again. Settle it under the same proof so the projection stops
+        // reporting a run that never started.
+        const request = requests.find(
+          (_, index) => reserved.get(index) === executionCallId,
+        );
+        if (request?.background)
+          await this.childRuns
+            ?.settleFailed(executionCallId, {
+              stopReason: 'start_failed',
+              started: false,
+            })
+            .catch((settleCause: unknown) =>
+              writeStderrLineSafe(
+                'qwen serve: Unstarted child run record was not settled: ' +
+                  String(settleCause),
+              ),
+            );
+        if (request?.monitoring)
+          await this.monitors
+            ?.settleFailed(executionCallId, {
+              stopReason: 'start_failed',
+              started: false,
+            })
+            .catch((settleCause: unknown) =>
+              writeStderrLineSafe(
+                'qwen serve: Unstarted monitor run record was not settled: ' +
+                  String(settleCause),
+              ),
+            );
       }
       throw new HostedToolRecoveryRequiredError(cause);
     } finally {

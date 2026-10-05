@@ -4110,6 +4110,7 @@ function backgroundTurnRig(
     attached?: boolean;
     lane?: HostedShellTurnOptions;
     notStartedProven?: boolean;
+    reserveRefused?: boolean;
   } = {},
 ) {
   enablement.childRun = true;
@@ -4150,6 +4151,12 @@ function backgroundTurnRig(
       const operation = (body as { operation?: string }).operation;
       if (route === '/grants' && operation === 'reserve') {
         order.push('reserve');
+        if (options.reserveRefused === true)
+          throw new ManagedSessionStoreHttpError(
+            500,
+            'store_unavailable',
+            'reserve refused',
+          );
         return { state: 'OPEN' };
       }
       if (route === '/grants' && operation === 'renew') {
@@ -4222,6 +4229,7 @@ function monitorTurnRig(
   opts: {
     notStartedProven?: boolean;
     lane?: HostedShellTurnOptions;
+    reserveRefused?: boolean;
   } = {},
 ) {
   enablement.childRun = true;
@@ -4299,6 +4307,12 @@ function monitorTurnRig(
       const operation = (body as { operation?: string }).operation;
       if (route === '/grants' && operation === 'reserve') {
         order.push('reserve');
+        if (opts.reserveRefused === true)
+          throw new ManagedSessionStoreHttpError(
+            500,
+            'store_unavailable',
+            'reserve refused',
+          );
         return { state: 'OPEN' };
       }
       if (route === '/grants' && operation === 'renew') {
@@ -5137,6 +5151,130 @@ it('records a proven-unstarted background refuse as start_failed and lands the u
     resources: [],
   });
   expect(broker.acknowledgeV3).not.toHaveBeenCalled();
+});
+
+it('settles the admitted child run when grant reservation exhausts its retries', async () => {
+  // R3-23: the checkpoint committed, dispatch_started is durable, and the
+  // /grants reserve then refuses three times — the recovery catch closes
+  // the grant as NOT_STARTED, which is also the proof under which the
+  // admitted run record must settle instead of staying dispatch_started
+  // forever.
+  const { call, parts } = backgroundCall();
+  const unreached: ToolResultEnvelope = {
+    executionStatus: 'success',
+    responseParts: [{ text: 'unreached' }],
+    capture: {
+      captureStatus: 'detached',
+      captureReason: null,
+      manifest: null,
+      previewTruncated: false,
+      deliveryStatus: 'pending',
+    },
+  };
+  const rig = backgroundTurnRig(unreached, { reserveRefused: true });
+  turn = rig.turn;
+  await expect(
+    turn.execute([call], parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+
+  expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
+    'admit',
+    'dispatchStarted',
+    'settleFailed',
+  ]);
+  expect(rig.orchestrator.calls.at(-1)?.[1]).toEqual({
+    id: 'shell-execution',
+    params: { stopReason: 'start_failed', started: false },
+  });
+  expect(rig.order).toEqual([
+    'assistant',
+    'reserve',
+    'reserve',
+    'reserve',
+    'close_not_started',
+  ]);
+});
+
+it('settles the admitted child run when executeV3 fails without the proven 409', async () => {
+  // R3-24: dispatch_started is durable and the v3 start then fails with
+  // anything but the execution-unknown 409 — the turn refuses recovery,
+  // and the admitted record settles under the same close_not_started
+  // proof instead of reporting running forever.
+  const { call, parts } = backgroundCall();
+  const unreached: ToolResultEnvelope = {
+    executionStatus: 'success',
+    responseParts: [{ text: 'unreached' }],
+    capture: {
+      captureStatus: 'detached',
+      captureReason: null,
+      manifest: null,
+      previewTruncated: false,
+      deliveryStatus: 'pending',
+    },
+  };
+  const rig = backgroundTurnRig(unreached);
+  turn = rig.turn;
+  broker.executeV3.mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(500, 'runtime_internal_error'),
+  );
+  await expect(
+    turn.execute([call], parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+
+  expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
+    'admit',
+    'dispatchStarted',
+    'settleFailed',
+  ]);
+  expect(rig.orchestrator.calls.at(-1)?.[1]).toEqual({
+    id: 'shell-execution',
+    params: { stopReason: 'start_failed', started: false },
+  });
+  expect(rig.order).toEqual([
+    'assistant',
+    'reserve',
+    'renew',
+    'close_not_started',
+  ]);
+});
+
+it('settles the admitted monitor run on the same unstarted recovery proof', async () => {
+  // R3-23 monitor half: the monitor_run record admitted at dispatch time
+  // faces the same refusal windows and must settle under the same proof.
+  const { call, parts } = monitorCall();
+  const unreached: ToolResultEnvelope = {
+    executionStatus: 'success',
+    responseParts: [{ text: 'unreached' }],
+    capture: {
+      captureStatus: 'detached',
+      captureReason: null,
+      manifest: null,
+      previewTruncated: false,
+      deliveryStatus: 'pending',
+    },
+  };
+  const rig = monitorTurnRig(unreached, { reserveRefused: true });
+  turn = rig.turn;
+  await expect(
+    turn.execute([call], parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+
+  expect(rig.monitors.calls.map(([name]) => name)).toEqual([
+    'admit',
+    'dispatchStarted',
+    'settleFailed',
+  ]);
+  expect(rig.monitors.calls.at(-1)?.[1]).toEqual({
+    id: 'monitor-execution',
+    params: { stopReason: 'start_failed', started: false },
+  });
+  expect(rig.order).toEqual([
+    'assistant',
+    'reserve',
+    'reserve',
+    'reserve',
+    'close_not_started',
+  ]);
 });
 
 it('keeps the deliberate refusal while child_run stays disabled', async () => {
