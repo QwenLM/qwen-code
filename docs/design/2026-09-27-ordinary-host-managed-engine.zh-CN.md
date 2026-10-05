@@ -596,6 +596,11 @@ M6 逐项决定：Managed 会话拒绝该功能，还是为其记录增加映射
   尾部就不会掩盖已经发生的副作用。
 - `loadCliConfig` 会拒绝 owner 为 `managed` 的恢复。M6 宿主恢复 Managed 会话时必须绕过
   这项 Legacy 检查，并且必须提供恢复投影。
+- 普通 Managed 子进程无法重开已崩溃 Managed 子进程的日志：`acpAgent.ts` 给它的回收
+  策略是 `never`，崩溃子进程遗留的 writer 锁永远不会被回收，重开会以
+  `session_writer_conflict` 失败。M6 宿主必须决定由谁回收这把锁。在此之前，崩溃后
+  重开时执行的修复只能在 `Config` 层（默认策略为 `local`）走到：`Config` 层的崩溃
+  测试会通过，而 ACP 宿主会拒绝同样的打开。
 - 记录 Managed 会话的开销高于 Legacy transcript。在同一台机器上测 300 个回合：写一个
   回合的耗时约为 3.4 倍，日志约大 2.8 倍，磁盘占用约为 9 倍；goal 校验每次都要读取的
   活动链，读取耗时为 30 到 80 倍，并随日志增长。M6 在 Managed 会话上运行 goal 之前必须

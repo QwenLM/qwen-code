@@ -107,8 +107,11 @@ export class LocalManagedRuntimeOutcomes {
     // evidence starts here, covering the committed log. A session whose
     // checkpoint blocks it stops here, before anything is dispatched.
     await this.harness.ensureCheckpoint();
-    // The digest is the first thing that can refuse an inadmissible call:
-    // nothing durable may be written before it passes.
+    // The digest is the first per-call refusal: ensureCheckpoint above may
+    // already have committed the session's initial before_model checkpoint
+    // (so a blocked session reports its block ahead of this size error), but
+    // nothing about the refused call — no intent, item or ordinal — is
+    // written before the digest passes.
     const inputDigest = managedToolDigest(input.params);
     // Results committed but the closing steps never ran — a close or crash
     // between the batch's commits and its consumption — join them now:

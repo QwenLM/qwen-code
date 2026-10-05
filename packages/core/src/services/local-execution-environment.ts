@@ -121,16 +121,18 @@ export class LocalExecutionEnvironment implements ExecutionEnvironment {
   }
 
   /**
-   * The declaration of one admitted tool, as the model sees it: its name and
-   * parameter schema. An environment that dispatched the tool elsewhere
-   * publishes this so the durable record names what the host approved.
+   * The declaration of one admitted tool, as the model sees it: its name,
+   * description and parameter schema. An environment that dispatched the
+   * tool elsewhere publishes this so the durable record names what the host
+   * approved.
    */
   toolDefinition(name: string): Record<string, unknown> {
-    const tool = this.tool(name);
-    return {
-      name: tool.name,
-      parametersJsonSchema: tool.parameterSchema,
-    };
+    const {
+      name: toolName,
+      description,
+      parametersJsonSchema,
+    } = this.tool(name).schema;
+    return { name: toolName, description, parametersJsonSchema };
   }
 
   async prepare(

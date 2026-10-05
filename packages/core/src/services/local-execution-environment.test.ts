@@ -14,21 +14,21 @@ import { LocalExecutionEnvironment } from './local-execution-environment.js';
 
 describe('LocalExecutionEnvironment', () => {
   let workspace: string;
+  let config: Config;
   let environment: LocalExecutionEnvironment;
   const signal = new AbortController().signal;
 
   beforeEach(async () => {
     workspace = await mkdtemp(path.join(os.tmpdir(), 'execution-environment-'));
-    environment = new LocalExecutionEnvironment(
-      new Config({
-        targetDir: workspace,
-        cwd: workspace,
-        debugMode: false,
-        telemetry: { enabled: false },
-        deferTelemetryInitialization: true,
-        shouldUseNodePtyShell: false,
-      }),
-    );
+    config = new Config({
+      targetDir: workspace,
+      cwd: workspace,
+      debugMode: false,
+      telemetry: { enabled: false },
+      deferTelemetryInitialization: true,
+      shouldUseNodePtyShell: false,
+    });
+    environment = new LocalExecutionEnvironment(config);
   });
 
   afterEach(async () => {
@@ -48,6 +48,7 @@ describe('LocalExecutionEnvironment', () => {
   it('names an admitted tool with its parameter schema as its declaration', async () => {
     expect(environment.toolDefinition('read_file')).toEqual({
       name: 'read_file',
+      description: expect.any(String),
       parametersJsonSchema: expect.anything(),
     });
     expect(
@@ -56,6 +57,23 @@ describe('LocalExecutionEnvironment', () => {
     expect(() => environment.toolDefinition('not_a_tool')).toThrow(
       'Unsupported execution tool',
     );
+  });
+
+  it("carries read_file's modality-derived description in its declaration", () => {
+    // ReadFile recomputes its description from the model's current input
+    // modalities on every schema access; the durable declaration publishes
+    // the text the model actually saw.
+    const textOnly = environment.toolDefinition('read_file') as {
+      description: string;
+    };
+    expect(textOnly.description).not.toContain('watch a video');
+    vi.spyOn(config, 'getEffectiveInputModalities').mockReturnValue({
+      video: true,
+    });
+    const multimodal = environment.toolDefinition('read_file') as {
+      description: string;
+    };
+    expect(multimodal.description).toContain('watch a video');
   });
 
   it('runs a prepared call elsewhere, with its final parameters', async () => {

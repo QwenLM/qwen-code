@@ -791,6 +791,13 @@ validates a request before it changes anything.
 - `loadCliConfig` refuses a restore whose owner is `managed`. The M6 host must
   restore Managed sessions without that Legacy check, and must supply the
   restore projection.
+- An ordinary Managed child cannot reopen a crashed Managed child's log:
+  `acpAgent.ts` gives it reclaim policy `never`, so the dead child's writer
+  lock is never reclaimed and the open fails with `session_writer_conflict`.
+  The M6 host must decide who reclaims that lock. Until then the repair an
+  open after a crash performs is reachable only at the `Config` layer, whose
+  default policy is `local`: a `Config`-level crash test passes while the ACP
+  host refuses the same open.
 - Recording a Managed session costs more than a Legacy transcript. Measured
   over 300 turns on one host, writing a turn took about 3.4 times as long,
   the log was about 2.8 times as large and disk use about 9 times, and

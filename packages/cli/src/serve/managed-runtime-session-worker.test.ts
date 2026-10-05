@@ -826,6 +826,7 @@ describe.skipIf(process.platform === 'win32')(
           workerIncarnation: entries.find((entry) => entry.boot)?.boot,
           toolDefinition: {
             name: 'write_file',
+            description: expect.any(String),
             parametersJsonSchema: expect.objectContaining({
               type: 'object',
             }),

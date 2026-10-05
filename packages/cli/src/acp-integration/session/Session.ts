@@ -12671,7 +12671,21 @@ export class Session implements SessionContext {
       // keep the Legacy shape.
       const outcomes = this.config.getManagedRuntimeOutcomes?.();
       if (outcomes !== undefined) {
-        await this.config.getChatRecordingService()?.flush();
+        // `ChatRecordingService` latches a write failure permanently, so a
+        // failed flush re-throws from then on (see the Goal turn flush
+        // above). Degrade like the fire-and-forget recorder does, and skip
+        // the batch close: the records never landed, and the next
+        // admission's leftover-batch repair closes it instead.
+        try {
+          await this.config.getChatRecordingService()?.flush();
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to flush Managed tool batch: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return finalized;
+        }
         await outcomes.finalizeBatch();
       }
       return finalized;

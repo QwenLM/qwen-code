@@ -440,7 +440,7 @@ describe('LocalManagedRuntimeOutcomes', () => {
     }
   });
 
-  it('refuses an inadmissible call before anything durable is written', async () => {
+  it('refuses an inadmissible call without recording anything about the call', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
     roots.add(root);
     const { session } = await openSession(root, 'session-oversized');
