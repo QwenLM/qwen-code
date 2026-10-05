@@ -78,7 +78,10 @@ import {
   hasActiveTaskActivity,
 } from '../utils/taskActivity';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
-import { parseWebShellGoalCommand } from '../utils/goalCondition';
+import {
+  GOAL_COMMAND_PATTERN,
+  parseWebShellGoalCommand,
+} from '../utils/goalCondition';
 import { buildGoalControlRequest } from '../utils/goalControlRequest';
 import {
   useContextUsageControls,
@@ -991,7 +994,7 @@ export function ChatPane({
           return true;
         }
       }
-      if (!planOperation && /^\/goal(?:\s|$)/i.test(trimmed)) {
+      if (!planOperation && GOAL_COMMAND_PATTERN.test(trimmed)) {
         // The same guard App.tsx applies before any slash handling: a control
         // that cannot reach the daemon must leave the text in the composer
         // instead of consuming it, appending a transcript entry, and failing

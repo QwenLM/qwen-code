@@ -17,6 +17,8 @@ import {
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import { goalCommand, parseGoalCommand } from './goalCommand.js';
+import { parseSlashCommand } from './commands.js';
+import { commandRestrictionNames } from '../../services/commandUtils.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 function goalSnapshot(
@@ -102,6 +104,14 @@ describe('parseGoalCommand', () => {
     ['/goal resume', { kind: 'resume' }],
     ['/goal clear', { kind: 'clear' }],
     ['/goal stop', { kind: 'clear' }],
+    ['/目标', { kind: 'status' }],
+    ['/目标 ship it', { kind: 'set', objective: 'ship it' }],
+    ['/目标 set ship it', { kind: 'set', objective: 'ship it' }],
+    ['/目标 edit revised', { kind: 'edit', objective: 'revised' }],
+    ['/目标 pause', { kind: 'pause' }],
+    ['/目标 resume', { kind: 'resume' }],
+    ['/目标 clear', { kind: 'clear' }],
+    ['/目标x clear', { kind: 'set', objective: '/目标x clear' }],
   ] as const)('parses %j', (args, expected) => {
     expect(parseGoalCommand(args)).toEqual(expected);
   });
@@ -126,6 +136,20 @@ describe('parseGoalCommand', () => {
 });
 
 describe('goalCommand', () => {
+  it('dispatches the Chinese alias with the canonical restriction names', () => {
+    const parsed = parseSlashCommand('/目标 clear', [goalCommand]);
+    expect(parsed.commandToExecute).toBe(goalCommand);
+    expect(parsed.canonicalPath).toEqual(['goal']);
+    expect(parsed.args).toBe('clear');
+    expect(commandRestrictionNames(parsed.commandToExecute!)).toEqual([
+      'goal',
+      '目标',
+    ]);
+    expect(
+      parseSlashCommand('/目标x clear', [goalCommand]).commandToExecute,
+    ).toBeUndefined();
+  });
+
   it('is available in interactive, non-interactive, and ACP modes', () => {
     expect(goalCommand.supportedModes).toEqual([
       'interactive',

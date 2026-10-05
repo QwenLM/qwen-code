@@ -16672,7 +16672,7 @@ export function App({
             openWorkflows();
             return true;
           }
-          if (cmd === 'goal') {
+          if (cmd === 'goal' || cmd === '目标') {
             return handleGoalSlashCommand(
               text,
               (images?.length ?? 0) > 0 ||

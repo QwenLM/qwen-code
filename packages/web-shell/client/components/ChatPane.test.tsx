@@ -1052,6 +1052,45 @@ describe('ChatPane', () => {
     expect(controlGoal).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['/goal', '/目标'])(
+    'admits %s clear while a Goal blocks ordinary slash commands',
+    async (command) => {
+      const current = {
+        v: 2 as const,
+        activity: 'running' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 5,
+          objective: 'ship it',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 1,
+          activeTimeMs: 10,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      };
+      connectionState.goalState = current;
+      getGoal.mockResolvedValue({ snapshot: current });
+      controlGoal.mockResolvedValue({ snapshot: { ...current, goal: null } });
+      render();
+
+      let accepted: unknown;
+      act(() => {
+        expect(latestOnSubmit!('/model')).toBe(false);
+        accepted = latestOnSubmit!(`${command} clear`);
+      });
+      expect(accepted).toBe(true);
+      await vi.waitFor(() => expect(controlGoal).toHaveBeenCalledTimes(1));
+      expect(controlGoal).toHaveBeenCalledWith({
+        action: 'clear',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 5,
+      });
+      expect(appendLocalUserMessage).toHaveBeenCalledWith(`${command} clear`);
+    },
+  );
+
   it('builds the control request from the freshly fetched Goal', async () => {
     // `expectedGoalId`/`expectedRevision` must come from the getGoal round trip,
     // not from the possibly-stale snapshot in connection state, or every

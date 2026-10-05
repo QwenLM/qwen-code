@@ -859,54 +859,60 @@ describe('useMessageQueue', () => {
     });
   });
 
-  it('holds reserved user input behind a stopped Goal until /goal resumes it', () => {
-    const { result } = renderHook(() => useMessageQueue());
-    act(() => {
-      result.current.addMessage('queued user');
-      result.current.addMessage('/goal resume');
-    });
-    const reservedKey = result.current.peekNextUserBatchKey();
+  it.each(['goal', '目标'])(
+    'holds reserved user input behind a stopped Goal until /%s resumes it',
+    (name) => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('queued user');
+        result.current.addMessage(`/${name} resume`);
+      });
+      const reservedKey = result.current.peekNextUserBatchKey();
 
-    let goalControl: ReturnType<typeof result.current.popNextSubmission>;
-    act(() => {
-      goalControl = result.current.popNextSubmission('only');
-    });
-    expect(goalControl!).toMatchObject({
-      kind: 'user',
-      modelText: '/goal resume',
-    });
-    expect(result.current.messageQueue).toEqual(['queued user']);
-    expect(result.current.popNextSubmission('only')).toBeNull();
-    let userSubmission: ReturnType<typeof result.current.popNextSubmission>;
-    act(() => {
-      userSubmission = result.current.popNextSubmission();
-    });
-    expect(userSubmission!).toEqual({
-      kind: 'user',
-      modelText: 'queued user',
-      turnKey: reservedKey,
-      submittedPrompt: 'queued user',
-    });
-  });
+      let goalControl: ReturnType<typeof result.current.popNextSubmission>;
+      act(() => {
+        goalControl = result.current.popNextSubmission('only');
+      });
+      expect(goalControl!).toMatchObject({
+        kind: 'user',
+        modelText: `/${name} resume`,
+      });
+      expect(result.current.messageQueue).toEqual(['queued user']);
+      expect(result.current.popNextSubmission('only')).toBeNull();
+      let userSubmission: ReturnType<typeof result.current.popNextSubmission>;
+      act(() => {
+        userSubmission = result.current.popNextSubmission();
+      });
+      expect(userSubmission!).toEqual({
+        kind: 'user',
+        modelText: 'queued user',
+        turnKey: reservedKey,
+        submittedPrompt: 'queued user',
+      });
+    },
+  );
 
-  it('prioritizes a Goal control over ordinary input while the Goal is active', () => {
-    const { result } = renderHook(() => useMessageQueue());
-    act(() => {
-      result.current.addMessage('queued user');
-      result.current.addMessage('/goal pause');
-    });
+  it.each(['goal', '目标'])(
+    'prioritizes a Goal control over ordinary input while the Goal is active',
+    (name) => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('queued user');
+        result.current.addMessage(`/${name} pause`);
+      });
 
-    let goalControl: ReturnType<typeof result.current.popNextSubmission>;
-    act(() => {
-      goalControl = result.current.popNextSubmission('priority');
-    });
+      let goalControl: ReturnType<typeof result.current.popNextSubmission>;
+      act(() => {
+        goalControl = result.current.popNextSubmission('priority');
+      });
 
-    expect(goalControl!).toMatchObject({
-      kind: 'user',
-      modelText: '/goal pause',
-    });
-    expect(result.current.messageQueue).toEqual(['queued user']);
-  });
+      expect(goalControl!).toMatchObject({
+        kind: 'user',
+        modelText: `/${name} pause`,
+      });
+      expect(result.current.messageQueue).toEqual(['queued user']);
+    },
+  );
 
   it('keeps ordinary input queued while an active Goal has no continuation ready', () => {
     const { result } = renderHook(() => useMessageQueue());
@@ -996,32 +1002,35 @@ describe('useMessageQueue', () => {
       ]);
     });
 
-    it('drains only Goal controls while a Goal turn is running', () => {
-      const { result } = renderHook(() => useMessageQueue());
+    it.each(['goal', '目标'])(
+      'drains only /%s controls while a Goal turn is running',
+      (name) => {
+        const { result } = renderHook(() => useMessageQueue());
 
-      act(() => {
-        result.current.addMessage('plain user text');
-        result.current.addMessage('/goal pause');
-        result.current.addMessage('/model');
-        result.current.addMessage('/goal edit revised objective');
-        result.current.addMessage('/goal clear');
-      });
+        act(() => {
+          result.current.addMessage('plain user text');
+          result.current.addMessage(`/${name} pause`);
+          result.current.addMessage('/model');
+          result.current.addMessage(`/${name} edit revised objective`);
+          result.current.addMessage(`/${name} clear`);
+        });
 
-      let drained: string[] = [];
-      act(() => {
-        drained = result.current.drainQueue(false, true);
-      });
+        let drained: string[] = [];
+        act(() => {
+          drained = result.current.drainQueue(false, true);
+        });
 
-      expect(drained).toEqual([
-        '/goal pause',
-        '/goal edit revised objective',
-        '/goal clear',
-      ]);
-      expect(result.current.messageQueue).toEqual([
-        'plain user text',
-        '/model',
-      ]);
-    });
+        expect(drained).toEqual([
+          `/${name} pause`,
+          `/${name} edit revised objective`,
+          `/${name} clear`,
+        ]);
+        expect(result.current.messageQueue).toEqual([
+          'plain user text',
+          '/model',
+        ]);
+      },
+    );
 
     it('leaves goal commands queued at the idle boundary', () => {
       const { result } = renderHook(() => useMessageQueue());

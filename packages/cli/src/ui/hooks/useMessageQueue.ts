@@ -127,7 +127,7 @@ interface QueuedMessage {
   delivery?: PeerQueuedDelivery;
 }
 
-export const GOAL_COMMAND_RE = /^\/goal(?:\s|$)/;
+export const GOAL_COMMAND_RE = /^\/(?:goal|目标)(?:\s|$)/;
 
 function aggregateUserMessages(
   messages: readonly QueuedMessage[],

@@ -2,6 +2,8 @@
 
 A Goal keeps Qwen Code working across turns until a stated condition is met. Set one with `/goal <objective>`, and the session keeps going on its own. When the model proposes that the objective is complete or blocked, an independent verifier judges that proposal from the most recent part of the Goal's transcript. The session stops when the verifier accepts, or when the Goal is paused, cleared, or stopped by a limit.
 
+`/目标` is an alias for `/goal`. It accepts the same arguments, for example `/目标 pause`, `/目标 resume`, and `/目标 clear`.
+
 ## Commands
 
 | Command                  | Behavior                                                      |

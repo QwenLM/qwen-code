@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   GOAL_CLEAR_KEYWORDS,
+  GOAL_COMMAND_PATTERN,
   goalArgOf,
   isGoalClearCommand,
   isGoalClearKeyword,
@@ -26,6 +27,14 @@ describe('parseWebShellGoalCommand', () => {
     ['/goal resume', { kind: 'resume' }],
     ['/goal clear', { kind: 'clear' }],
     ['/goal stop', { kind: 'clear' }],
+    ['/目标', { kind: 'status' }],
+    ['/目标 ship it', { kind: 'set', objective: 'ship it' }],
+    ['/目标 set ship it', { kind: 'set', objective: 'ship it' }],
+    ['/目标 edit safer', { kind: 'edit', objective: 'safer' }],
+    ['/目标 pause', { kind: 'pause' }],
+    ['/目标 resume', { kind: 'resume' }],
+    ['/目标 clear', { kind: 'clear' }],
+    ['/目标 stop', { kind: 'clear' }],
   ])('parses %s', (input, expected) => {
     expect(parseWebShellGoalCommand(input)).toEqual(expected);
   });
@@ -82,6 +91,7 @@ describe('isGoalClearKeyword', () => {
 describe('isGoalClearCommand', () => {
   it('matches /goal <clear-keyword> in any case', () => {
     expect(isGoalClearCommand('/goal clear')).toBe(true);
+    expect(isGoalClearCommand('/目标 clear')).toBe(true);
     expect(isGoalClearCommand('/goal  STOP ')).toBe(true);
   });
 
@@ -103,6 +113,7 @@ describe('isGoalClearCommand', () => {
     expect(isGoalClearCommand('stop')).toBe(false);
     expect(isGoalClearCommand('  CANCEL  ')).toBe(false);
     expect(isGoalClearCommand('/goalie clear')).toBe(false);
+    expect(isGoalClearCommand('/目标x clear')).toBe(false);
     expect(isGoalClearCommand('please /goal clear')).toBe(false);
   });
 });
@@ -135,4 +146,19 @@ describe('the CLI is the authority on the clear keywords', () => {
     expect(cliKeywords.length).toBeGreaterThan(0);
     expect([...cliKeywords].sort()).toEqual([...GOAL_CLEAR_KEYWORDS].sort());
   });
+});
+
+describe('Goal command prefix', () => {
+  it.each(['/goal', '/goal clear', '/目标', '/目标 clear'])(
+    'matches %s',
+    (text) => {
+      expect(GOAL_COMMAND_PATTERN.test(text)).toBe(true);
+    },
+  );
+  it.each(['/goalkeeper clear', '/目标x clear', '目标 clear'])(
+    'does not match %s',
+    (text) => {
+      expect(GOAL_COMMAND_PATTERN.test(text)).toBe(false);
+    },
+  );
 });
