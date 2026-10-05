@@ -1878,13 +1878,15 @@ describe('managed session checkpoints', () => {
     /* Accepted input is not execution continuation. */
     expect(harness.authority.restoreBasis()).toBe('initial');
     await expect(harness.authority.restoreBundle()).resolves.toMatchObject({
-      formatVersion: MANAGED_SESSION_FORMAT_VERSION,
-      sessionKey: sessionKeyFor(harness.fixture),
-      engine: 'managed',
-      restoreBasis: 'initial',
-      checkpointRef: null,
-      restoreProofRef: null,
-      recoveryStatus: 'ok',
+      bundle: {
+        formatVersion: MANAGED_SESSION_FORMAT_VERSION,
+        sessionKey: sessionKeyFor(harness.fixture),
+        engine: 'managed',
+        restoreBasis: 'initial',
+        checkpointRef: null,
+        restoreProofRef: null,
+        recoveryStatus: 'ok',
+      },
     });
     await harness.close();
   });
@@ -1905,12 +1907,17 @@ describe('managed session checkpoints', () => {
       HOLDS,
     );
     expect(harness.authority.restoreBasis()).toBe('blocked');
-    await expect(harness.authority.restoreBundle()).resolves.toMatchObject({
-      restoreBasis: null,
-      checkpointRef: null,
-      restoreProofRef: null,
-      recoveryStatus: 'blocked',
+    const restore = await harness.authority.restoreBundle();
+    expect(restore).toMatchObject({
+      bundle: {
+        restoreBasis: null,
+        checkpointRef: null,
+        restoreProofRef: null,
+        recoveryStatus: 'blocked',
+      },
     });
+    // The continuation-without-checkpoint branch consults no authorization.
+    expect(restore.authorization).toBeUndefined();
     await harness.close();
   });
 
@@ -2038,10 +2045,14 @@ describe('managed session checkpoints', () => {
       message: expect.stringMatching(/is not present for session/),
     });
     await expect(harness.authority.restoreBundle()).resolves.toMatchObject({
-      restoreBasis: 'checkpoint',
-      checkpointRef: committed.checkpoint.stateRef,
-      restoreProofRef: null,
-      recoveryStatus: 'blocked',
+      bundle: {
+        restoreBasis: 'checkpoint',
+        checkpointRef: committed.checkpoint.stateRef,
+        restoreProofRef: null,
+        recoveryStatus: 'blocked',
+      },
+      // The deciding authorization rides beside the bundle.
+      authorization: { status: 'blocked', reason: 'missing_state' },
     });
     await harness.close();
   });
@@ -2091,12 +2102,14 @@ describe('managed session checkpoints', () => {
       message: expect.stringMatching(/JSON/),
     });
     await expect(harness.authority.restoreBundle()).resolves.toMatchObject({
-      restoreBasis: 'checkpoint',
-      restoreProofRef: null,
-      recoveryStatus: 'blocked',
+      bundle: {
+        restoreBasis: 'checkpoint',
+        restoreProofRef: null,
+        recoveryStatus: 'blocked',
+      },
     });
     expect(
-      (await harness.authority.restoreBundle()).checkpointRef,
+      (await harness.authority.restoreBundle()).bundle.checkpointRef,
     ).not.toBeNull();
     await harness.close();
   });
@@ -2136,10 +2149,13 @@ describe('managed session checkpoints', () => {
       checkpoint,
     });
     await expect(harness.authority.restoreBundle()).resolves.toMatchObject({
-      restoreBasis: 'checkpoint',
-      checkpointRef: committed.checkpoint.stateRef,
-      restoreProofRef: null,
-      recoveryStatus: 'ok',
+      bundle: {
+        restoreBasis: 'checkpoint',
+        checkpointRef: committed.checkpoint.stateRef,
+        restoreProofRef: null,
+        recoveryStatus: 'ok',
+      },
+      authorization: { status: 'runnable' },
     });
     await harness.close();
   });

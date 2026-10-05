@@ -260,7 +260,9 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
   private async ensureRunnableUnlocked(): Promise<HarnessCheckpointV1> {
     this.assertNotDetached();
     this.assertCurrentActivation();
-    assertManagedSessionRestoreBundle(await this.authority.restoreBundle());
+    assertManagedSessionRestoreBundle(
+      (await this.authority.restoreBundle()).bundle,
+    );
     let authorization = await this.authority.harnessRunAuthorization();
     if (authorization.status === 'initial') {
       await this.commitInitialBeforeModel();

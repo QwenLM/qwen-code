@@ -262,6 +262,16 @@ function record(
   };
 }
 
+// Refusal tags interpolate Store-influenced text: stripAnsiAndControl deletes
+// newlines and escape sequences, and this class deletes the invisible format
+// characters (zero-width, bidi, line/paragraph separators) that survive it and
+// could still reorder or forge an operator's log line (CVE-2021-42574).
+const TAG_FORMAT_CHARS_RE = /[\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g;
+
+function stripTagText(value: string): string {
+  return stripAnsiAndControl(value).replace(TAG_FORMAT_CHARS_RE, '');
+}
+
 function hasAcceptedInput(session: HostedSession, promptId: string): boolean {
   const authority = session.managed.authority;
   return authority
@@ -1682,7 +1692,7 @@ export function registerHostedHarnessSessionRoutes(
           !(await canSettleHostedFileHistory(managed, fileHistory)))
       ) {
         writeStderrLineSafe(
-          `qwen serve: Hosted Session ${sessionId} load refused (file_history_pending): ${JSON.stringify({ pendingTurn: fileHistory.pendingTurn, pendingUndo: fileHistory.pendingUndo, unsettled: unsettled ?? null, takeover })}`,
+          `qwen serve: Hosted Session ${sessionId} load refused (file_history_pending): ${stripTagText(JSON.stringify({ pendingTurn: fileHistory.pendingTurn, pendingUndo: fileHistory.pendingUndo, unsettled: unsettled ?? null, takeover })).slice(0, 4096)}`,
         );
         await managed.close();
         error(
@@ -1694,22 +1704,18 @@ export function registerHostedHarnessSessionRoutes(
         );
         return;
       }
-      const restore = await managed.authority.restoreBundle();
+      const { bundle: restore, authorization } =
+        await managed.authority.restoreBundle();
       if (restore.recoveryStatus !== 'ok') {
-        // The restore bundle is a spec'd closed set with no reason field, so
-        // the blocked reason is re-read at the tag site. That read hits the
-        // Store again, so a faulting Store must not take the tag down too.
+        // The tag names the authorization that DECIDED the bundle: a re-read
+        // could disagree with it and would double the Store reads on exactly
+        // the faulting path. The continuation-without-checkpoint branch
+        // consulted none, so it prints no reason.
         let blocked = '';
-        try {
-          const authorization =
-            await managed.authority.harnessRunAuthorization();
-          if (authorization.status === 'blocked') {
-            blocked = ` reason=${authorization.reason}`;
-            if (authorization.message !== undefined)
-              blocked += ` message=${stripAnsiAndControl(authorization.message).slice(0, 4096)}`;
-          }
-        } catch {
-          // The refusal still names the basis and boundary without it.
+        if (authorization?.status === 'blocked') {
+          blocked = ` reason=${authorization.reason}`;
+          if (authorization.message !== undefined)
+            blocked += ` message=${stripTagText(authorization.message).slice(0, 4096)}`;
         }
         writeStderrLineSafe(
           `qwen serve: Hosted Session ${sessionId} load refused (restore_${restore.recoveryStatus}): basis=${String(restore.restoreBasis)} through=${restore.throughSequence}${blocked}`,
@@ -1729,7 +1735,7 @@ export function registerHostedHarnessSessionRoutes(
           );
         } catch (cause) {
           writeStderrLineSafe(
-            `qwen serve: Hosted Session ${sessionId} load refused (workspace_verify): ${stripAnsiAndControl(String(cause)).slice(0, 4096)}`,
+            `qwen serve: Hosted Session ${sessionId} load refused (workspace_verify): ${stripTagText(String(cause)).slice(0, 4096)}`,
           );
           await managed.close();
           error(res, 409, 'hosted_turn_recovery_required');
@@ -1739,7 +1745,7 @@ export function registerHostedHarnessSessionRoutes(
           await stores.assertWritable();
         } catch (cause) {
           writeStderrLineSafe(
-            `qwen serve: Hosted Session ${sessionId} load refused (workspace_writable): ${stripAnsiAndControl(String(cause)).slice(0, 4096)}`,
+            `qwen serve: Hosted Session ${sessionId} load refused (workspace_writable): ${stripTagText(String(cause)).slice(0, 4096)}`,
           );
           await managed.close();
           error(res, 409, 'hosted_turn_recovery_required');
@@ -1776,7 +1782,7 @@ export function registerHostedHarnessSessionRoutes(
           });
           if (recovered === undefined) {
             writeStderrLineSafe(
-              `qwen serve: Hosted Session ${sessionId} load refused (takeover_unrecovered): prompt=${unsettled}`,
+              `qwen serve: Hosted Session ${sessionId} load refused (takeover_unrecovered): prompt=${stripTagText(unsettled)}`,
             );
             await managed.close();
             error(res, 409, 'hosted_turn_recovery_required');
@@ -1790,7 +1796,7 @@ export function registerHostedHarnessSessionRoutes(
         } catch (cause) {
           await managed.close();
           writeStderrLineSafe(
-            `qwen serve: Hosted Harness recovery of session ${sessionId} failed: ${String(cause)}`,
+            `qwen serve: Hosted Harness recovery of session ${sessionId} failed: ${stripTagText(String(cause)).slice(0, 4096)}`,
           );
           // A failed takeover keeps the turn parked for the next attempt:
           // refuse exactly like a plain recovery refusal so the coordinator
@@ -1908,7 +1914,7 @@ export function registerHostedHarnessSessionRoutes(
         // strand is silent until retirement.
         noteOwedAdoption(session, sessionId);
         writeStderrLineSafe(
-          `qwen serve: Hosted Session ${sessionId} load refused (unsettled_input): ${JSON.stringify({ incompletePublication: !create && workspaceProfile ? incompletePublication : null, unsettled: [...unsettledInputsThrough(session, unsettledThrough)], resume: resume?.promptId ?? null, settle: settlePromptId ?? null, through: unsettledThrough })}`,
+          `qwen serve: Hosted Session ${sessionId} load refused (unsettled_input): ${stripTagText(JSON.stringify({ incompletePublication: !create && workspaceProfile ? incompletePublication : null, unsettled: [...unsettledInputsThrough(session, unsettledThrough)], resume: resume?.promptId ?? null, settle: settlePromptId ?? null, through: unsettledThrough })).slice(0, 4096)}`,
         );
         await managed.close();
         error(res, 409, 'hosted_turn_recovery_required');
@@ -1918,10 +1924,11 @@ export function registerHostedHarnessSessionRoutes(
         try {
           await stores.assertWritable();
         } catch (cause) {
-          // Same owed-lease discipline as the refusal above.
+          // Same owed-lease discipline as the refusal above; the distinct
+          // post-recovery tag tells a grep whether a lease was parked owed.
           noteOwedAdoption(session, sessionId);
           writeStderrLineSafe(
-            `qwen serve: Hosted Session ${sessionId} load refused (workspace_writable): ${stripAnsiAndControl(String(cause)).slice(0, 4096)}`,
+            `qwen serve: Hosted Session ${sessionId} load refused (workspace_writable_post_recovery): ${stripTagText(String(cause)).slice(0, 4096)}`,
           );
           await managed.close();
           error(res, 409, 'hosted_turn_recovery_required');
@@ -2033,7 +2040,7 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 404, 'managed_session_not_found');
       } else {
         writeStderrLineSafe(
-          `qwen serve: Hosted Session open failed: ${String(cause)}`,
+          `qwen serve: Hosted Session open failed: ${stripTagText(String(cause)).slice(0, 4096)}`,
         );
         error(res, 503, 'managed_session_open_failed');
       }

@@ -192,6 +192,18 @@ export function assertManagedSessionRestoreBundle(
   );
 }
 
+/**
+ * The restore bundle plus the authorization that decided a checkpoint-based
+ * bundle's recovery status. It rides BESIDE the bundle — the bundle itself is
+ * a spec'd closed set — so a refused restore can name the deciding reason
+ * without reading the checkpoint state a second time. It is absent when the
+ * blocked branch a continuation without checkpoint takes consulted none.
+ */
+export interface ManagedSessionRestore {
+  readonly bundle: ManagedSessionRestoreBundle;
+  readonly authorization?: HarnessRunAuthorization;
+}
+
 export interface ManagedSessionCheckpoint {
   readonly checkpointId: string;
   readonly coveredSequence: number;
@@ -951,7 +963,7 @@ export class LocalManagedSessionAuthority {
    * to `initial`. A stored checkpoint that fails authorization stays
    * `restoreBasis=checkpoint` with its original ref.
    */
-  async restoreBundle(): Promise<ManagedSessionRestoreBundle> {
+  async restoreBundle(): Promise<ManagedSessionRestore> {
     const checkpoint = this.checkpoint;
     const identity: Pick<
       ManagedSessionRestoreBundle,
@@ -972,7 +984,7 @@ export class LocalManagedSessionAuthority {
         recoveryStatus: authorization.status === 'runnable' ? 'ok' : 'blocked',
       };
       assertManagedSessionRestoreBundle(bundle);
-      return bundle;
+      return { bundle, authorization };
     }
     if (this.hasContinuation) {
       const bundle: ManagedSessionRestoreBundle = {
@@ -983,7 +995,7 @@ export class LocalManagedSessionAuthority {
         recoveryStatus: 'blocked',
       };
       assertManagedSessionRestoreBundle(bundle);
-      return bundle;
+      return { bundle };
     }
     const bundle: ManagedSessionRestoreBundle = {
       ...identity,
@@ -993,7 +1005,7 @@ export class LocalManagedSessionAuthority {
       recoveryStatus: 'ok',
     };
     assertManagedSessionRestoreBundle(bundle);
-    return bundle;
+    return { bundle };
   }
 
   /**

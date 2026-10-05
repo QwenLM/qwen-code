@@ -666,8 +666,10 @@ describe('HTTP Managed Session store', () => {
     });
     expect(restored.activation.epoch).toBe(2);
     expect(await restored.authority.restoreBundle()).toMatchObject({
-      sessionKey: SESSION_KEY,
-      recoveryStatus: 'ok',
+      bundle: {
+        sessionKey: SESSION_KEY,
+        recoveryStatus: 'ok',
+      },
     });
     await restored.close();
   });
@@ -1145,6 +1147,49 @@ describe('HTTP Managed Session store', () => {
           requestUrl(input).includes('/restore?'),
         ),
       ).toHaveLength(6);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('does not retry a corruption verdict the Store will not heal', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?'))
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_journal_corrupt',
+              message: 'journal digest mismatch',
+            },
+          },
+          500,
+        );
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      // A corruption verdict is a deterministic judgement, not a transient
+      // fault: it must surface once, unwrapped, without the retry loop.
+      const failure = await handle.read().catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ManagedSessionStoreHttpError);
+      expect((failure as ManagedSessionStoreHttpError).message).toBe(
+        'journal digest mismatch',
+      );
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(1);
     } finally {
       await stores.close();
     }

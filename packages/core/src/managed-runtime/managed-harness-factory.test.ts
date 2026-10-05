@@ -159,10 +159,12 @@ describe('managed harness factory', () => {
     });
     expect(session.authority.restoreBasis()).toBe('initial');
     await expect(session.authority.restoreBundle()).resolves.toMatchObject({
-      restoreBasis: 'initial',
-      checkpointRef: null,
-      restoreProofRef: null,
-      recoveryStatus: 'ok',
+      bundle: {
+        restoreBasis: 'initial',
+        checkpointRef: null,
+        restoreProofRef: null,
+        recoveryStatus: 'ok',
+      },
     });
     expect(session.authority.latestCheckpoint).toBeUndefined();
     await session.close();
@@ -192,9 +194,11 @@ describe('managed harness factory', () => {
     expect(result).toBe('read-final');
     expect(order).toEqual(['agent']);
     await expect(session.authority.restoreBundle()).resolves.toMatchObject({
-      restoreBasis: 'checkpoint',
-      restoreProofRef: null,
-      recoveryStatus: 'ok',
+      bundle: {
+        restoreBasis: 'checkpoint',
+        restoreProofRef: null,
+        recoveryStatus: 'ok',
+      },
     });
     await expect(handle.run(async () => 'again')).rejects.toThrow(
       ManagedSessionConflictError,
@@ -235,12 +239,14 @@ describe('managed harness factory', () => {
     expect(ran).toBe(false);
     expect(session.authority.restoreBasis()).toBe('checkpoint');
     await expect(session.authority.restoreBundle()).resolves.toMatchObject({
-      restoreBasis: 'checkpoint',
-      restoreProofRef: null,
-      recoveryStatus: 'blocked',
+      bundle: {
+        restoreBasis: 'checkpoint',
+        restoreProofRef: null,
+        recoveryStatus: 'blocked',
+      },
     });
     expect(
-      (await session.authority.restoreBundle()).checkpointRef,
+      (await session.authority.restoreBundle()).bundle.checkpointRef,
     ).not.toBeNull();
     await session.close();
   });
@@ -285,10 +291,12 @@ describe('managed harness factory', () => {
     expect(ran).toBe(false);
     expect(session.authority.restoreBasis()).toBe('blocked');
     await expect(session.authority.restoreBundle()).resolves.toMatchObject({
-      restoreBasis: null,
-      checkpointRef: null,
-      restoreProofRef: null,
-      recoveryStatus: 'blocked',
+      bundle: {
+        restoreBasis: null,
+        checkpointRef: null,
+        restoreProofRef: null,
+        recoveryStatus: 'blocked',
+      },
     });
     await session.close();
   });

@@ -1014,7 +1014,10 @@ class ManagedSessionStoreHttpClient {
         const transient =
           error instanceof ManagedSessionStoreTransportError ||
           (error instanceof ManagedSessionStoreHttpError &&
-            [500, 502, 503, 504].includes(error.status));
+            [500, 502, 503, 504].includes(error.status) &&
+            // A _corrupt verdict is deterministic: the Store judged the bytes
+            // it served, and a retry re-reads what cannot heal.
+            !error.remoteCode.endsWith('_corrupt'));
         if (
           !retryable ||
           !transient ||

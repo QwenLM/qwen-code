@@ -3405,7 +3405,7 @@ describe('Hosted Harness no-tool session', () => {
       return ref.kind === 'managed-tool-outcome'
         ? Promise.reject(
             new Error(
-              'missing settled tool outcome\nqwen serve: forged\x1b[2J',
+              'missing settled tool outcome\nqwen serve: forged\x1b[2J\u202e\u200b',
             ),
           )
         : original.call(this, ref);
@@ -3421,12 +3421,15 @@ describe('Hosted Harness no-tool session', () => {
     // The cause is Store-influenced text: the single-line tag must strip
     // newlines and control sequences rather than replay them to stderr.
     const verifyLine = `qwen serve: Hosted Session ${SESSION_ID} load refused (workspace_verify): Error: missing settled tool outcomeqwen serve: forged`;
-    expect(log.mock.calls.map(([line]) => line)).toContain(verifyLine);
-    expect(
-      log.mock.calls
-        .map(([line]) => line)
-        .every((line) => line === stripAnsiAndControl(line)),
-    ).toBe(true);
+    const emitted = log.mock.calls.map(([line]) => line);
+    expect(emitted).toContain(verifyLine);
+    expect(emitted.every((line) => line === stripAnsiAndControl(line))).toBe(
+      true,
+    );
+    // The deleting strip must also cover the invisible format characters.
+    expect(emitted.every((line) => !/[\p{Cf}\u2028-\u202e]/u.test(line))).toBe(
+      true,
+    );
     expect(
       damaged.mock.calls.some(([ref]) => ref.kind === 'managed-tool-outcome'),
     ).toBe(true);
@@ -3611,10 +3614,10 @@ describe('Hosted Harness no-tool session', () => {
       LocalManagedSessionAuthority.prototype,
       'restoreBundle',
     ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
-      const bundle = await restore.call(this);
+      const result = await restore.call(this);
       renew = () => this.renewActivation({ leaseDurationMs: 60_000 });
-      cut = bundle.throughSequence;
-      return bundle;
+      cut = result.bundle.throughSequence;
+      return result;
     });
     const read = LocalManagedSessionResourceStore.prototype.read;
     let renewed = false;
@@ -3908,6 +3911,66 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
+  it.each([
+    // Nineteen extra short ids: all twenty fit, so the count survives.
+    { count: 19, length: 12, sliced: false },
+    // Eight ids at the journal's per-id cap: the payload bound cuts the tail.
+    { count: 8, length: 500, sliced: true },
+  ])(
+    'bounds the unsettled_input payload (ids: $count x $length)',
+    async ({ count, length, sliced }) => {
+      const server = await app(true);
+      await parkUnsettledPlainTurn(server);
+      // The journal caps each id at 512 bytes, not how many a Store holds.
+      const extra = Array.from(
+        { length: count },
+        (_, index) => `parked-turn-${index}-${'p'.repeat(length)}`,
+      );
+      const eventsInSequenceRange =
+        LocalManagedSessionAuthority.prototype.eventsInSequenceRange;
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'eventsInSequenceRange',
+      ).mockImplementation(function (
+        this: LocalManagedSessionAuthority,
+        from,
+        to,
+      ) {
+        return [
+          ...eventsInSequenceRange.call(this, from, to),
+          ...extra.map(
+            (turnId) =>
+              ({
+                kind: 'input.accepted',
+                payload: { turnId },
+              }) as unknown as ManagedSessionEvent,
+          ),
+        ];
+      });
+      const log = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => {});
+      const refused = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store() });
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe('hosted_turn_recovery_required');
+      const prefix = `qwen serve: Hosted Session ${SESSION_ID} load refused (unsettled_input): `;
+      const line = log.mock.calls
+        .map(([entry]) => entry)
+        .find((entry) => entry.startsWith(prefix));
+      expect(line).toBeDefined();
+      expect(line!.length).toBeLessThanOrEqual(prefix.length + 4096);
+      expect(line).toContain(`"${extra[0]}`);
+      if (sliced) {
+        expect(line).not.toContain(extra.at(-1)!);
+      } else {
+        for (const turnId of [PROMPT_ID, ...extra])
+          expect(line).toContain(`"${turnId}"`);
+      }
+    },
+  );
+
   it('names the blocked authorization reason a refused restore discarded', async () => {
     const server = await app(true);
     const created = await headers(supertest(server).post('/session')).send({
@@ -3935,14 +3998,14 @@ describe('Hosted Harness no-tool session', () => {
       'X-Qwen-Client-Id',
       clientId,
     );
-    vi.spyOn(
-      LocalManagedSessionAuthority.prototype,
-      'harnessRunAuthorization',
-    ).mockResolvedValue({
-      status: 'blocked',
-      reason: 'identity_mismatch',
-      message: 'checkpoint names another session',
-    });
+    const authorization = vi
+      .spyOn(LocalManagedSessionAuthority.prototype, 'harnessRunAuthorization')
+      .mockResolvedValueOnce({
+        status: 'blocked',
+        reason: 'missing_state',
+        message:
+          'checkpoint names another session\nqwen serve: forged\x1b[2J\u202e\u200b',
+      });
     const log = vi
       .spyOn(stdio, 'writeStderrLineSafe')
       .mockImplementation(() => {});
@@ -3951,15 +4014,19 @@ describe('Hosted Harness no-tool session', () => {
     ).send({ managedSessionStore: store() });
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    // restoreBundle() consulted the authorization once; the tag reuses it.
+    expect(authorization).toHaveBeenCalledTimes(1);
+    const line = log.mock.calls
+      .map(([entry]) => entry)
+      .find((entry) =>
+        entry.includes('load refused (restore_blocked): basis=checkpoint'),
+      );
+    expect(line).toBeDefined();
+    expect(line).toContain('reason=missing_state');
     expect(
-      log.mock.calls
-        .map(([line]) => line)
-        .some(
-          (line) =>
-            line.includes('load refused (restore_blocked): basis=checkpoint') &&
-            line.includes('reason=identity_mismatch') &&
-            line.includes('message=checkpoint names another session'),
-        ),
+      line?.endsWith(
+        'message=checkpoint names another sessionqwen serve: forged',
+      ),
     ).toBe(true);
   });
 
@@ -4588,6 +4655,10 @@ describe('Hosted Harness no-tool session', () => {
       if (partial) {
         acknowledge.mockReset();
         acknowledge.mockResolvedValue();
+        const beforePartial = await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          key,
+        );
         for (let attempt = 0; attempt < 2; attempt++) {
           const loaded = await headers(
             supertest(second).post('/session/' + SESSION_ID + '/load'),
@@ -4605,6 +4676,12 @@ describe('Hosted Harness no-tool session', () => {
           expect(execute).toHaveBeenCalledOnce();
           expect(acquire).toHaveBeenCalledTimes(acquireCount);
         }
+        // The refusal names the publication gate that decided it and the
+        // boundary the guard used: the load's own activation commit is in,
+        // the receipt recovery commit is not.
+        expect(log.mock.calls.map(([line]) => line)).toContain(
+          `qwen serve: Hosted Session ${SESSION_ID} load refused (unsettled_input): {"incompletePublication":true,"unsettled":["${PROMPT_ID}"],"resume":null,"settle":null,"through":${beforePartial.events.at(-1)!.sequence + 1}}`,
+        );
         const repaired = await LocalJsonlManagedSessionJournalStore.read(
           path.join(state.root, `${SESSION_ID}.jsonl`),
           key,
@@ -6151,6 +6228,38 @@ describe('Hosted Harness tool approvals', () => {
     expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
     expect(HostedWorkspaceBroker.prototype.fileHistory).not.toHaveBeenCalled();
     expect(state.model).not.toHaveBeenCalled();
+    // The file-history parser bounds neither length nor charset of the
+    // pending ids: a Store-sized payload must not reach stderr whole.
+    const read = LocalManagedSessionResourceStore.prototype.read;
+    vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'read',
+    ).mockImplementation(async function (
+      this: LocalManagedSessionResourceStore,
+      ref,
+    ) {
+      const bytes = await read.call(this, ref);
+      if (ref.kind !== 'managed-file_history') return bytes;
+      const record = JSON.parse(bytes.toString('utf8')) as Record<
+        string,
+        unknown
+      >;
+      record['pendingTurn'] = 'x'.repeat(8 * 1024);
+      return Buffer.from(JSON.stringify(record));
+    });
+    const bounded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store(), toolProfile: files });
+    expect(bounded.status).toBe(409);
+    const prefix = `qwen serve: Hosted Session ${SESSION_ID} load refused (file_history_pending): `;
+    const line = log.mock.calls
+      .map(([entry]) => entry)
+      .find(
+        (entry) =>
+          entry.startsWith(prefix) && entry.includes('"pendingTurn":"xxx'),
+      );
+    expect(line).toBeDefined();
+    expect(line!.length).toBeLessThanOrEqual(prefix.length + 4096);
   });
 
   it.each(['pending-snapshot', 'history-settled'])(
@@ -7829,7 +7938,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
     expect(stderr.mock.calls.map(([line]) => line)).toContain(
-      `qwen serve: Hosted Session ${SESSION_ID} load refused (workspace_writable): Error: writer lost`,
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (workspace_writable_post_recovery): Error: writer lost`,
     );
     expect(acquireSpy).toHaveBeenCalled();
     // The refusal invited a retried takeover load: the adopted lease must
@@ -7863,6 +7972,60 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
+  it('strips invisible format characters from a takeover_unrecovered refusal', async () => {
+    await parkToolTurn();
+    const hostile = `${PROMPT_ID}\u202e`;
+    const eventsInSequenceRange =
+      LocalManagedSessionAuthority.prototype.eventsInSequenceRange;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'eventsInSequenceRange',
+    ).mockImplementation(function (
+      this: LocalManagedSessionAuthority,
+      from,
+      to,
+    ) {
+      return eventsInSequenceRange.call(this, from, to).map((event) =>
+        event.kind === 'input.accepted'
+          ? ({
+              ...event,
+              payload: { ...event.payload, turnId: hostile },
+            } as ManagedSessionEvent)
+          : event,
+      );
+    });
+    // The takeover exemption compares the pending file history's turn id
+    // with the parked one; the hostile id must answer that consistently.
+    const read = LocalManagedSessionResourceStore.prototype.read;
+    vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'read',
+    ).mockImplementation(async function (
+      this: LocalManagedSessionResourceStore,
+      ref,
+    ) {
+      const bytes = await read.call(this, ref);
+      if (ref.kind !== 'managed-file_history') return bytes;
+      const record = JSON.parse(bytes.toString('utf8')) as Record<
+        string,
+        unknown
+      >;
+      record['pendingTurn'] = hostile;
+      return Buffer.from(JSON.stringify(record));
+    });
+    state.assertWritable.mockReset();
+    state.assertWritable.mockResolvedValue(undefined);
+    const stderr = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => undefined);
+    const { loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(409);
+    expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    const line = `qwen serve: Hosted Session ${SESSION_ID} load refused (takeover_unrecovered): prompt=${PROMPT_ID}`;
+    expect(stderr.mock.calls.map(([entry]) => entry)).toContain(line);
+    expect(line).not.toMatch(/[\p{Cf}\u2028-\u202e]/u);
+  });
+
   it('records the owed adoption when every takeover load refuses the workspace writes', async () => {
     await parkToolTurn();
     const release = vi
@@ -7891,7 +8054,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const { server, loaded } = await loadReplacement(true);
     expect(loaded.status).toBe(409);
     expect(stderr.mock.calls.map(([line]) => line)).toContain(
-      `qwen serve: Hosted Session ${SESSION_ID} load refused (workspace_writable): Error: writer lost`,
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (workspace_writable_post_recovery): Error: writer lost`,
     );
     const second = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/load`),
