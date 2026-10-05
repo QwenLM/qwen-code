@@ -158,11 +158,13 @@ class HostedHarnessCreateOrLoadPinningTest {
             throws Exception {
         open = new CountDownLatch(1);
         CountDownLatch capabilitiesRequested = new CountDownLatch(1);
+        AtomicInteger capabilitiesHits = new AtomicInteger();
         HttpServer server = HttpServer.create(
                 new InetSocketAddress("127.0.0.1", 0), 0);
         ExecutorService serverExecutor = Executors.newCachedThreadPool();
         server.setExecutor(serverExecutor);
         server.createContext("/capabilities", exchange -> {
+            capabilitiesHits.incrementAndGet();
             capabilitiesRequested.countDown();
             try {
                 open.await();
@@ -293,6 +295,13 @@ class HostedHarnessCreateOrLoadPinningTest {
                 "callers never settled after the latch opened: "
                         + unsettled);
         assertTrue(allOk.get(), "callers failed after the latch opened");
+        // The count is sound only while the fixture keeps the heartbeat
+        // interval at zero: a live heartbeat scheduler would fire its own
+        // timer-driven /capabilities hits that read as extra builds.
+        assertTrue(capabilitiesHits.get() == 1,
+                "cold burst built " + capabilitiesHits.get()
+                        + " HostedHarnessClient instances for " + callerCount
+                        + " callers");
     }
 
     private static int carrierCount() {
