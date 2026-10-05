@@ -40,6 +40,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final ManagedActionStore actions;
     private final WriterCredentialPolicy credentials;
     private volatile HostedHarnessClient client;
+    private final ReentrantLock clientLock = new ReentrantLock();
     // Sessions whose takeover load reported parked Runtime work that no
     // continue/cancel has been admitted for yet.
     private final Set<AttachmentKey> pendingRecovery =
@@ -453,7 +454,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (current != null) {
             return current;
         }
-        synchronized (this) {
+        // A ReentrantLock, not a monitor: the first build blocks on the
+        // capabilities round trip, and callers waiting to enter a monitor
+        // pin their virtual-thread carriers on JDK 21 while AQS waiters
+        // unmount.
+        clientLock.lock();
+        try {
             current = client;
             if (current == null) {
                 current = HostedHarnessClient.builder()
@@ -467,6 +473,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 client = current;
             }
             return current;
+        } finally {
+            clientLock.unlock();
         }
     }
 
