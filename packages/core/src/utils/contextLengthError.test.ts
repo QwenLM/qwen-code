@@ -89,7 +89,11 @@ describe('contextLengthError', () => {
         cause: new Error(LLAMA_CPP_OVERFLOW),
       });
 
-      expect(isContextLengthExceededError(error)).toBe(true);
+      const info = getContextLengthExceededInfo(error);
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(279935);
+      expect(info.limitTokens).toBe(262144);
     });
   });
 
