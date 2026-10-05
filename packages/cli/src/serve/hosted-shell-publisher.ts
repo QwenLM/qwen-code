@@ -71,10 +71,14 @@ interface RegisteredCapture {
     remainder: string;
     decoder: StringDecoder;
     refusedBody?: Record<string, unknown>;
-    // A refused finalize whose record is already attached re-drives itself
-    // once: the route's stash alone cannot heal a stranded record whose
-    // worker finalized exactly once and moved on.
+    // A refused finalize whose record is already attached re-drives
+    // itself: the route's stash alone cannot heal a stranded record whose
+    // worker finalized exactly once and moved on. Attempts are bounded,
+    // and any in-flight attempt joins the drain's wait set so a Session
+    // close can never outrun it.
     redrive?: NodeJS.Timeout;
+    redriveAttempts?: number;
+    redriveInFlight?: Promise<void>;
     observer?: {
       onLine: (line: string) => void;
       onExit: (failed: boolean) => void;
@@ -85,6 +89,11 @@ interface RegisteredCapture {
 type BackgroundCaptureRequest = LocalShellCaptureRequest & {
   readonly capture: { readonly background?: boolean };
 };
+
+// Bounded self re-drive of a refused finalize: one transient 5xx cannot
+// strand an attached record, and neither can a brief store outage.
+const MAX_REDRIVE_ATTEMPTS = 3;
+const REDRIVE_BACKOFF_MS = 250;
 
 export class HostedShellPublisher {
   private readonly token = randomBytes(32).toString('base64url');
@@ -272,6 +281,12 @@ export class HostedShellPublisher {
         ));
         entry.sink = (await prepared).sink;
         entry.background.sink = entry.sink as LocalShellStreamCapture;
+        entry.background.sink.onBrokenAnnounce = async () => {
+          await this.advanceBackgroundManifest(
+            entry,
+            String(capture['executionCallId']),
+          );
+        };
         // The open manifest is what any reader sees before exit.
         await entry.background.sink.open();
         await this.advanceBackgroundManifest(
@@ -394,18 +409,12 @@ export class HostedShellPublisher {
               : this.childRuns?.record(String(id));
           // An attached record that missed the final forward otherwise
           // strands forever: the worker finalizes once and drops the hold.
-          // The same stash re-drives itself once; a retry the client or
-          // the attach path already owns guards this out.
-          if (
-            owner?.startReceiptRef &&
-            entry.background.redrive === undefined
-          ) {
-            const redrive = setTimeout(() => {
-              entry.background!.redrive = undefined;
-              void this.settleAttached(String(id)).catch(() => undefined);
-            }, 0);
-            if (typeof redrive.unref === 'function') redrive.unref();
-            entry.background.redrive = redrive;
+          // The same stash re-drives itself, bounded and drain-aware, so a
+          // brief store outage cannot strand it either; a retry the client
+          // or the attach path already owns guards this out.
+          if (owner?.startReceiptRef) {
+            entry.background.redriveAttempts = 1;
+            this.scheduleRedrive(String(id), entry);
           }
           throw cause;
         }
@@ -896,6 +905,7 @@ export class HostedShellPublisher {
       clearTimeout(background.redrive);
       background.redrive = undefined;
     }
+    background.redriveAttempts = undefined;
     background.refusedBody = undefined;
     entry.finalizing = this.finalizeBackground(entry, body, executionCallId);
     try {
@@ -905,6 +915,34 @@ export class HostedShellPublisher {
       background.refusedBody ??= body;
       throw cause;
     }
+  }
+
+  private scheduleRedrive(executionCallId: string, entry: RegisteredCapture) {
+    const background = entry.background;
+    if (!background || background.redrive !== undefined) return;
+    const attempt = background.redriveAttempts ?? 1;
+    const redrive = setTimeout(
+      () => {
+        background.redrive = undefined;
+        background.redriveInFlight = this.settleAttached(executionCallId)
+          .then(() => undefined)
+          .catch(() => {
+            if (
+              background.refusedBody !== undefined &&
+              attempt < MAX_REDRIVE_ATTEMPTS
+            ) {
+              background.redriveAttempts = attempt + 1;
+              this.scheduleRedrive(executionCallId, entry);
+            }
+          })
+          .finally(() => {
+            background.redriveInFlight = undefined;
+          });
+      },
+      (attempt - 1) * REDRIVE_BACKOFF_MS,
+    );
+    if (typeof redrive.unref === 'function') redrive.unref();
+    background.redrive = redrive;
   }
 
   close(): Promise<void> {
@@ -919,6 +957,13 @@ export class HostedShellPublisher {
       );
     }
     await Promise.allSettled([...this.operations]);
+    // The stranded-write fail stop stands, but a re-drive already on its
+    // way lands inside the drain: no close answers ahead of it either.
+    await Promise.allSettled(
+      [...this.captures.values()].map(
+        (entry) => entry.background?.redriveInFlight,
+      ),
+    );
     for (const entry of this.captures.values()) {
       if (entry.background?.redrive) clearTimeout(entry.background.redrive);
     }
