@@ -52,8 +52,8 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
     await importOriginal<typeof import('@qwen-code/channel-base')>();
   return {
     // Spread the real module so tests assert against the shipped exports
-    // (truncateUtf16Units in particular) instead of hand-written mirrors; only
-    // the base classes, the path helper and the sanitizers listed below are
+    // (truncateUtf16Units and the sanitizers in particular) instead of
+    // hand-written mirrors; only the base classes and the path helper are
     // stubbed.
     ...actual,
     ChannelBase: class {
@@ -129,12 +129,14 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
       }
     },
     getGlobalQwenDir: () => '/tmp/test-qwen',
-    sanitizeLogText: (text: string, _maxLen: number): string =>
-      String(text).slice(0, 200),
-    sanitizeSenderName: (name: string): string => name || 'QQ User',
-    sanitizePromptText: (text: string): string => text,
-    truncateCodePoints: (text: string, max: number): string =>
-      [...text].slice(0, max).join(''),
+    // The sanitizers and code-point truncation are pure: keep the shipped
+    // implementations rather than mirrors, so the double cannot diverge from
+    // what production imports. Pinned by the test double suite at the bottom
+    // of this file.
+    sanitizeLogText: actual.sanitizeLogText,
+    sanitizeSenderName: actual.sanitizeSenderName,
+    sanitizePromptText: actual.sanitizePromptText,
+    truncateCodePoints: actual.truncateCodePoints,
   };
 });
 
@@ -8246,5 +8248,18 @@ describe('round-1 robustness pins', () => {
       'dropping 10 chars',
     );
     stderrSpy.mockRestore();
+  });
+});
+
+describe('channel-base test double', () => {
+  it('sanitizer exports are the shipped implementations, not mirrors', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const mocked = await import('@qwen-code/channel-base');
+    expect(mocked.sanitizeLogText).toBe(actual.sanitizeLogText);
+    expect(mocked.sanitizeSenderName).toBe(actual.sanitizeSenderName);
+    expect(mocked.sanitizePromptText).toBe(actual.sanitizePromptText);
+    expect(mocked.truncateCodePoints).toBe(actual.truncateCodePoints);
   });
 });
