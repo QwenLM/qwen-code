@@ -15,6 +15,7 @@ import {
   Storage,
   type HostRunAssignment,
   type HostRunResult,
+  type HostUserQuestion,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
@@ -30,6 +31,7 @@ import {
 const HEARTBEAT_MS = 5_000;
 const LEASE_RENEW_MS = 20_000;
 const RETRY_MS = 2_000;
+const MAX_ACTIVE_RUNS = 100;
 const PROVIDER_LABELS = {
   qwen: 'Qwen Code ACP',
   codex: 'Codex CLI',
@@ -134,17 +136,18 @@ async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
 async function pickup(
   serverUrl: string,
   credential: AgentHostCredential,
-  waitMs = 25_000,
+  activeRunIds: string[],
 ): Promise<HostRunAssignment | undefined> {
   const response = await fetch(
     `${serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/pickup`,
     {
       method: 'POST',
+      signal: AbortSignal.timeout(35_000),
       headers: {
         authorization: `AgentHost ${credential.secret}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ waitMs }),
+      body: JSON.stringify({ waitMs: 25_000, activeRunIds }),
     },
   );
   if (response.status === 204) return undefined;
@@ -218,18 +221,55 @@ async function executeAssignment(
   const updates = new AbortController();
   let stream: Promise<void> | undefined;
   let progress = {
-    sequence: 1,
+    sequence: (assignment.progressSequence ?? 0) + 1,
     stage: 'starting',
     detail: '执行器已接单，正在启动',
     outputText: '',
     thoughtText: '',
   };
   let sending = false;
+  let questionSessionId: string | undefined;
+  let question: HostUserQuestion | undefined;
   const flush = async () => {
     if (sending) return;
     sending = true;
     try {
-      await requestJson(
+      if (questionSessionId && !finished) {
+        const interaction = options.bridge
+          .getSessionSummary(questionSessionId)
+          .pendingInteractions?.find((entry) => entry.kind === 'user_question');
+        const submit = interaction?.options.find(
+          (entry) => entry.kind === 'allow_once',
+        );
+        const previousId = question?.requestId;
+        question =
+          interaction?.kind === 'user_question' && submit
+            ? {
+                requestId: interaction.requestId,
+                submitOptionId: submit.optionId,
+                questions: interaction.questions.map((entry) => ({
+                  header: entry.header ?? '',
+                  question: entry.question ?? '',
+                  options: (entry.options ?? []).map((option) => ({
+                    label: option.label ?? '',
+                    description: option.description ?? '',
+                  })),
+                  ...(entry.multiSelect === undefined
+                    ? {}
+                    : { multiSelect: entry.multiSelect }),
+                })),
+              }
+            : undefined;
+        if (question?.requestId !== previousId) {
+          report(
+            question ? 'waiting_input' : 'waiting',
+            question ? '等待你回答问题' : '已收到回答，继续执行',
+          );
+        }
+      }
+      const response = await requestJson<{
+        question?: HostUserQuestion & { answers?: Record<string, string> };
+      }>(
         `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/progress`,
         {
           method: 'POST',
@@ -240,6 +280,7 @@ async function executeAssignment(
           },
           body: JSON.stringify({
             ...progress,
+            question: question ?? null,
             threadId: assignment.threadId,
             runId: assignment.runId,
             leaseId: assignment.lease.leaseId,
@@ -247,6 +288,28 @@ async function executeAssignment(
           }),
         },
       );
+      if (
+        questionSessionId &&
+        question &&
+        response.question?.requestId === question.requestId &&
+        response.question.answers &&
+        !execution.signal.aborted &&
+        !finished
+      ) {
+        const vote = {
+          outcome: {
+            outcome: 'selected' as const,
+            optionId: question.submitOptionId,
+          },
+          answers: response.question.answers,
+        };
+        options.bridge.respondToSessionPermission(
+          questionSessionId,
+          question.requestId,
+          vote,
+          { fromLoopback: true },
+        );
+      }
     } catch {
       // Telemetry is retried by the next heartbeat, never blocks execution.
     } finally {
@@ -351,6 +414,7 @@ async function executeAssignment(
       ).catch((error: unknown) => {
         if (!updates.signal.aborted) execution.abort(error);
       });
+      questionSessionId = sessionId;
       report('waiting', 'Qwen Code 已接单，等待模型回复');
       await options.bridge.sendPrompt(
         sessionId,
@@ -566,36 +630,53 @@ async function connectAgentHost(
     `qwen serve: connected as Agent Host ${activeCredential.hostId} for ${options.workspaceId}.`,
   );
 
+  const activeRuns = new Map<string, Promise<void>>();
+  const runAssignment = async (assignment: HostRunAssignment) => {
+    writeStderrLine(
+      `qwen serve: Agent Host ${activeCredential.hostId} running ${assignment.agent.name} on ${assignment.threadId}.`,
+    );
+    let result: HostRunResult;
+    try {
+      result = await executeAssignment(options, activeCredential, assignment);
+    } catch (error) {
+      result = {
+        threadId: assignment.threadId,
+        runId: assignment.runId,
+        hostId: activeCredential.hostId,
+        leaseId: assignment.lease.leaseId,
+        attempt: assignment.attempt,
+        status:
+          error instanceof Error && error.message === 'not_leasable'
+            ? 'cancelled'
+            : 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    await returnResult(serverUrl, activeCredential, result);
+  };
   void (async () => {
     for (;;) {
       try {
-        const assignment = await pickup(serverUrl, activeCredential);
-        if (!assignment) continue;
-        writeStderrLine(
-          `qwen serve: Agent Host ${activeCredential.hostId} running ${assignment.agent.name} on ${assignment.threadId}.`,
-        );
-        let result: HostRunResult;
-        try {
-          result = await executeAssignment(
-            options,
-            activeCredential,
-            assignment,
-          );
-        } catch (error) {
-          result = {
-            threadId: assignment.threadId,
-            runId: assignment.runId,
-            hostId: activeCredential.hostId,
-            leaseId: assignment.lease.leaseId,
-            attempt: assignment.attempt,
-            status:
-              error instanceof Error && error.message === 'not_leasable'
-                ? 'cancelled'
-                : 'failed',
-            error: error instanceof Error ? error.message : String(error),
-          };
+        if (activeRuns.size >= MAX_ACTIVE_RUNS) {
+          await Promise.race(activeRuns.values());
         }
-        await returnResult(serverUrl, activeCredential, result);
+        const assignment = await pickup(serverUrl, activeCredential, [
+          ...activeRuns.keys(),
+        ]);
+        if (!assignment) continue;
+        // Older coordinators replay the held lease instead of skipping active runs.
+        if (activeRuns.has(assignment.runId)) {
+          await delay(RETRY_MS);
+          continue;
+        }
+        const execution = runAssignment(assignment)
+          .catch((error: unknown) => {
+            writeStderrLine(
+              `qwen serve: Agent Host run failed: ${String(error)}`,
+            );
+          })
+          .finally(() => activeRuns.delete(assignment.runId));
+        activeRuns.set(assignment.runId, execution);
       } catch (error) {
         writeStderrLine(
           `qwen serve: Agent Host pickup failed: ${error instanceof Error ? error.message : String(error)}`,

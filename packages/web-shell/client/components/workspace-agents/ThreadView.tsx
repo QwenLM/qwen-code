@@ -136,6 +136,7 @@ export function RunRowView({
     thinking: '思考中',
     tool: '调用工具中',
     responding: '正在回复',
+    waiting_input: '等待你回答',
   };
   const state =
     row.run.status === 'queued'
@@ -146,9 +147,13 @@ export function RunRowView({
         ? progress
           ? stale
             ? '连接中断待确认'
-            : quiet
-              ? '等待新输出'
-              : (stages[progress.stage] ?? '执行中')
+            : progress.question
+              ? progress.question.answers
+                ? '答案已提交'
+                : '等待你回答'
+              : quiet
+                ? '等待新输出'
+                : (stages[progress.stage] ?? '执行中')
           : '等待执行端确认'
         : row.state;
   const stateClass = row.outstanding

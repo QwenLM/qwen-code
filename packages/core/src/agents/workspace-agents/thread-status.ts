@@ -176,12 +176,21 @@ export function resolveThreadStatus(
   const live = thread.runs.filter((run) => LIVE_RUN_STATUSES.has(run.status));
   if (live.length > 0) {
     const queued = live.filter((run) => run.status === 'queued').length;
+    const questions = live.filter(
+      (run) =>
+        run.status === 'running' &&
+        run.progress?.attempt === run.attempts &&
+        run.progress?.question &&
+        !run.progress.question.answers,
+    );
     return {
       status: 'in_progress',
       reason:
-        queued === live.length
-          ? `${queued} 个智能体排队中，尚未开始执行`
-          : `${live.length - queued} 个智能体执行中${queued ? `，${queued} 个排队中` : ''}`,
+        questions.length > 0
+          ? `${questions.length} 个智能体等待你回答问题`
+          : queued === live.length
+            ? `${queued} 个智能体排队中，尚未开始执行`
+            : `${live.length - queued} 个智能体执行中${queued ? `，${queued} 个排队中` : ''}`,
       outstanding,
     };
   }

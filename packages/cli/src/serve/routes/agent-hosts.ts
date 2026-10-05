@@ -5,6 +5,7 @@
  */
 
 import express from 'express';
+import { z } from 'zod';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Application, Request, Response } from 'express';
 import {
@@ -18,6 +19,32 @@ import {
   type HostRunResult,
 } from '@qwen-code/qwen-code-core';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+
+const hostQuestionSchema = z
+  .object({
+    requestId: z.string().min(1).max(256),
+    submitOptionId: z.string().min(1).max(256),
+    questions: z
+      .array(
+        z.object({
+          header: z.string().max(500),
+          question: z.string().min(1).max(10000),
+          options: z
+            .array(
+              z.object({
+                label: z.string().min(1).max(2000),
+                description: z.string().max(10000),
+              }),
+            )
+            .max(20),
+          multiSelect: z.boolean().optional(),
+        }),
+      )
+      .min(1)
+      .max(10),
+  })
+  .nullable()
+  .optional();
 
 function body(req: Request): Record<string, unknown> {
   return typeof req.body === 'object' && req.body !== null ? req.body : {};
@@ -139,7 +166,9 @@ export function registerAgentHostTransportRoutes(
         outputText,
         thoughtText,
       } = body(req);
+      const question = hostQuestionSchema.safeParse(body(req)['question']);
       if (
+        !question.success ||
         typeof threadId !== 'string' ||
         typeof runId !== 'string' ||
         typeof leaseId !== 'string' ||
@@ -150,9 +179,14 @@ export function registerAgentHostTransportRoutes(
         !Number.isSafeInteger(sequence) ||
         sequence < 1 ||
         typeof stage !== 'string' ||
-        !['starting', 'waiting', 'thinking', 'tool', 'responding'].includes(
-          stage,
-        ) ||
+        ![
+          'starting',
+          'waiting',
+          'thinking',
+          'tool',
+          'responding',
+          'waiting_input',
+        ].includes(stage) ||
         typeof detail !== 'string' ||
         detail.length > 1200 ||
         (outputText !== undefined &&
@@ -174,6 +208,7 @@ export function registerAgentHostTransportRoutes(
         detail,
         outputText,
         thoughtText,
+        question: question.data,
       });
       res.status(result.ok ? 200 : 409).json(result);
     },
@@ -310,11 +345,20 @@ export function registerAgentHostTransportRoutes(
       const hostId = req.params['hostId'];
       const secret = hostSecret(req);
       const waitMs = readWaitMs(body(req)['waitMs']);
+      const activeRunIds = body(req)['activeRunIds'] ?? [];
       if (!workspaceId || !hostId || !secret) {
         res.status(401).json({ error: 'Invalid Agent Host credential.' });
         return;
       }
-      if (waitMs === undefined) {
+      if (
+        waitMs === undefined ||
+        !Array.isArray(activeRunIds) ||
+        activeRunIds.length > 100 ||
+        !activeRunIds.every(
+          (id: unknown) =>
+            typeof id === 'string' && id.length > 0 && id.length <= 128,
+        )
+      ) {
         res.status(400).json({ error: 'Invalid Agent Host pickup.' });
         return;
       }
@@ -335,6 +379,8 @@ export function registerAgentHostTransportRoutes(
           const assignment = await pickupRunForHost(
             runtime.workspaceCwd,
             hostId,
+            Date.now(),
+            activeRunIds,
           );
           if (assignment) {
             res.json({ assignment });

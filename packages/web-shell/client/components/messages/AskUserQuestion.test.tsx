@@ -174,6 +174,17 @@ function deferred<T>(): {
 }
 
 describe('AskUserQuestion accessibility', () => {
+  it('keeps the selected answer across identical polling snapshots', () => {
+    const pending = { ...request, options: [request.options[0]!] };
+    render(false, pending);
+    act(() => optionButtons()[1]!.click());
+    rerender(false, JSON.parse(JSON.stringify(pending)));
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('true');
+    expect(container!.textContent).not.toContain('Ignore');
+    act(() => submitButton()!.click());
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', { '0': 'Blue' });
+  });
+
   it('exposes a non-modal dialog of real buttons and focuses the first option', () => {
     render(undefined);
     const panel = container!.querySelector('[data-web-shell-ask-panel]');

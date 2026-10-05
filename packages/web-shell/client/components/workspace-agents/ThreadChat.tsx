@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Activity, Check, ListTodo, LoaderCircle } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { MessageList } from '../MessageList';
+import { AskUserQuestion } from '../messages/AskUserQuestion';
 import { ChatEditor } from '../ChatEditor';
 import { Button } from '../ui/button';
 import type { Message } from '../../adapters/types';
@@ -24,6 +25,7 @@ const progressLabels: Record<string, string> = {
   thinking: '思考中…',
   tool: '正在调用工具…',
   responding: '正在回复…',
+  waiting_input: '等待你回答问题…',
 };
 
 export function ThreadChat({
@@ -36,6 +38,7 @@ export function ThreadChat({
   onDetails,
   onOpenAgentSession,
   onCancelRun,
+  onAnswerQuestion,
   onMarkDone,
   onOpenThread,
   activityOnly = false,
@@ -61,11 +64,17 @@ export function ThreadChat({
   onDetails: () => void;
   onOpenAgentSession?: (sessionId: string) => void;
   onCancelRun: (runId: string) => void;
+  onAnswerQuestion?: (
+    runId: string,
+    requestId: string,
+    answers: Record<string, string>,
+  ) => Promise<boolean>;
   onMarkDone: () => void;
   onOpenThread: (threadId: string) => void;
 }) {
   const customization = useWebShellCustomization();
   const [sending, setSending] = useState(false);
+  const [questionError, setQuestionError] = useState<string>();
   const { live, past } = buildRunRows(thread.runs);
   const messages = useMemo<Message[]>(
     () =>
@@ -251,6 +260,53 @@ export function ThreadChat({
             </WebShellCustomizationProvider>
           </div>
           <div className="p-4">
+            {live
+              .filter(
+                ({ run }) => run.status === 'running' && run.progress?.question,
+              )
+              .map(({ run }) => {
+                const question = run.progress!.question!;
+                return (
+                  <section
+                    key={`${run.id}:${question.requestId}`}
+                    className="mb-3"
+                    aria-label={`${run.agentName} 的问题`}
+                  >
+                    <p
+                      role="status"
+                      className="mb-2 text-sm text-muted-foreground"
+                    >
+                      {run.agentName} ·{' '}
+                      {question.answers
+                        ? '答案已提交，等待执行端接收…'
+                        : '等待你回答'}
+                    </p>
+                    {!question.answers && onAnswerQuestion && (
+                      <AskUserQuestion
+                        request={{
+                          id: question.requestId,
+                          toolName: 'ask_user_question',
+                          content: [],
+                          options: [
+                            {
+                              id: question.submitOptionId,
+                              label: '提交答案',
+                              kind: 'allow_once',
+                            },
+                          ],
+                          rawInput: { questions: question.questions },
+                        }}
+                        onConfirm={(id, _option, answers) =>
+                          onAnswerQuestion(run.id, id, answers ?? {})
+                        }
+                        onError={(error) => setQuestionError(String(error))}
+                        keyboardActive={false}
+                      />
+                    )}
+                  </section>
+                );
+              })}
+            {questionError && <p role="alert">{questionError}</p>}
             {sending && (
               <div
                 role="status"

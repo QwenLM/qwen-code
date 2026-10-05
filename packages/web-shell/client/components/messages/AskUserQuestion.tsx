@@ -59,12 +59,14 @@ export function AskUserQuestion({
       ? '⌘↵'
       : 'Ctrl↵';
   const { t } = useI18n();
+  const questionsJson = JSON.stringify(
+    Array.isArray(request.rawInput?.questions)
+      ? request.rawInput.questions
+      : [],
+  );
   const questions = useMemo(
-    () =>
-      Array.isArray(request.rawInput?.questions)
-        ? (request.rawInput.questions as Question[])
-        : [],
-    [request.rawInput],
+    () => JSON.parse(questionsJson) as Question[],
+    [questionsJson],
   );
   const [currentIdx, setCurrentIdx] = useState(0);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
@@ -913,16 +915,22 @@ export function AskUserQuestion({
             <p className={styles.shortcuts} title={shortcutHint}>
               {shortcutHint}
             </p>
-            <button
-              type="button"
-              className={styles.ignoreButton}
-              disabled={submitting}
-              aria-keyshortcuts="Escape"
-              data-shortcut="Esc"
-              onClick={handleCancel}
-            >
-              {t('askUser.ignore')}
-            </button>
+            {request.options.some(
+              (option) =>
+                option.kind === 'reject_once' ||
+                option.kind === 'reject_always',
+            ) && (
+              <button
+                type="button"
+                className={styles.ignoreButton}
+                disabled={submitting}
+                aria-keyshortcuts="Escape"
+                data-shortcut="Esc"
+                onClick={handleCancel}
+              >
+                {t('askUser.ignore')}
+              </button>
+            )}
             {questions.length > 1 && (
               <>
                 <button

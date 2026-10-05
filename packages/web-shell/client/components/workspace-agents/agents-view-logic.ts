@@ -194,6 +194,17 @@ export interface RunView {
     detail: string;
     outputText?: string;
     thoughtText?: string;
+    question?: {
+      requestId: string;
+      submitOptionId: string;
+      questions: Array<{
+        header: string;
+        question: string;
+        options: Array<{ label: string; description: string }>;
+        multiSelect?: boolean;
+      }>;
+      answers?: Record<string, string>;
+    };
   };
   id: string;
   agentId: string;

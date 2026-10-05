@@ -26,6 +26,7 @@
 
 import type { Application, Request, RequestHandler, Response } from 'express';
 import {
+  answerHostQuestion,
   assignThread,
   createAssignedThread,
   createThread,
@@ -1495,6 +1496,43 @@ export function registerWorkspaceAgentRoutes(
           updated: true,
           ...(dispatchError ? { dispatchError } : {}),
         });
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
+
+  app.post(
+    `${prefix}/threads/:id/runs/:runId/question`,
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      const { requestId, answers } = req.body ?? {};
+      if (
+        typeof requestId !== 'string' ||
+        !answers ||
+        typeof answers !== 'object' ||
+        Array.isArray(answers) ||
+        Object.keys(answers).length > 10 ||
+        !Object.values(answers).every(
+          (value) => typeof value === 'string' && value.length <= 10000,
+        )
+      ) {
+        res.status(400).json({ error: 'invalid_answers' });
+        return;
+      }
+      try {
+        const result = await answerHostQuestion(
+          runtime.workspaceCwd,
+          String(req.params['id']),
+          String(req.params['runId']),
+          requestId,
+          answers,
+        );
+        res
+          .status(result.ok ? 200 : 409)
+          .json(result.ok ? result : { error: result.reason });
       } catch (error) {
         fail(res, error);
       }

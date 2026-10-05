@@ -117,6 +117,8 @@ export {
   DEFAULT_RUN_LEASE_MS,
 } from './workspace-agents/host-lease.js';
 export { reportHostRunProgress } from './workspace-agents/host-lease.js';
+export { answerHostQuestion } from './workspace-agents/host-lease.js';
+export type { HostUserQuestion } from './workspace-agents/types.js';
 export type {
   HostRunAssignment,
   HostRunResult,

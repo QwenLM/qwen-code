@@ -42,6 +42,7 @@ import {
   isThreadTerminal,
   threadPriorityRank,
   type RunLease,
+  type HostUserQuestion,
   type Thread,
   type ThreadRun,
   type WorkspaceAgent,
@@ -70,6 +71,7 @@ export interface HostRunAssignment {
   attempt: number;
   prompt: string;
   contextThroughSequence: number;
+  progressSequence?: number;
   lease: RunLease;
 }
 
@@ -238,6 +240,7 @@ export async function reportHostRunProgress(
     detail: string;
     outputText?: string;
     thoughtText?: string;
+    question?: HostUserQuestion | null;
   },
 ) {
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
@@ -273,7 +276,65 @@ export async function reportHostRunProgress(
         previous?.sequence === input.sequence
           ? previous.thoughtText
           : (input.thoughtText ?? previous?.thoughtText),
+      question: input.question
+        ? {
+            ...input.question,
+            leaseId: input.leaseId,
+            ...(previous?.question?.requestId === input.question.requestId &&
+            previous.question.leaseId === input.leaseId
+              ? { answers: previous.question.answers }
+              : {}),
+          }
+        : undefined,
     };
+    await transaction.writeThread(thread);
+    return { ok: true, question: run.progress.question };
+  });
+}
+
+export async function answerHostQuestion(
+  projectRoot: string,
+  threadId: string,
+  runId: string,
+  requestId: string,
+  answers: Record<string, string>,
+) {
+  return withAgentStoreTransaction(projectRoot, async (transaction) => {
+    const thread = await transaction.readThread(threadId);
+    const run = thread?.runs.find((entry) => entry.id === runId);
+    const question = run?.progress?.question;
+    if (
+      !thread ||
+      !run ||
+      run.status !== 'running' ||
+      isThreadTerminal(thread.status) ||
+      !question ||
+      question.requestId !== requestId ||
+      run.progress?.attempt !== run.attempts ||
+      run.lease?.leaseId !== question.leaseId ||
+      run.lease.expiresAt <= Date.now()
+    ) {
+      return { ok: false, reason: 'question_expired' };
+    }
+    if (
+      Object.keys(answers).length !== question.questions.length ||
+      !question.questions.every(
+        (_, index) =>
+          typeof answers[String(index)] === 'string' &&
+          answers[String(index)]!.trim().length > 0 &&
+          answers[String(index)]!.length <= 10000,
+      )
+    ) {
+      return { ok: false, reason: 'invalid_answers' };
+    }
+    if (question.answers) {
+      return Object.keys(answers).every(
+        (key) => question.answers![key] === answers[key],
+      )
+        ? { ok: true }
+        : { ok: false, reason: 'already_answered' };
+    }
+    question.answers = answers;
     await transaction.writeThread(thread);
     return { ok: true };
   });
@@ -329,6 +390,8 @@ function assignmentFor(
     attempt: run.attempts,
     prompt: prompt.text,
     contextThroughSequence: prompt.contextThroughSequence,
+    progressSequence:
+      run.progress?.attempt === run.attempts ? run.progress.sequence : 0,
   };
 }
 
@@ -337,7 +400,9 @@ export async function pickupRunForHost(
   projectRoot: string,
   hostId: string,
   now = Date.now(),
+  activeRunIds: readonly string[] = [],
 ): Promise<HostRunAssignment | undefined> {
+  const active = new Set(activeRunIds);
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
     const agents = await transaction.readAgents();
     const roster = agents.filter(isAgentAddressable);
@@ -365,6 +430,7 @@ export async function pickupRunForHost(
       .find(
         ({ thread, run, agent }) =>
           agent !== undefined &&
+          !active.has(run.id) &&
           // Same rule the dispatcher applies. A thread that went terminal
           // while a Host held it must not have that hold extended: the work
           // is over, and renewing would keep a worker busy on it.
@@ -408,6 +474,7 @@ export async function pickupRunForHost(
           agent: WorkspaceAgent;
         } =>
           candidate.agent !== undefined &&
+          !active.has(candidate.run.id) &&
           // The dispatcher's `selectCandidates` refuses terminal threads; this
           // is the second selection path and has to agree with it. Without
           // this a Host is handed work on a thread whose caller cancelled it

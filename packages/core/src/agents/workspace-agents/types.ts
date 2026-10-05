@@ -337,6 +337,17 @@ export interface RunUsageRound {
   tokens: number;
 }
 
+export interface HostUserQuestion {
+  requestId: string;
+  submitOptionId: string;
+  questions: Array<{
+    header: string;
+    question: string;
+    options: Array<{ label: string; description: string }>;
+    multiSelect?: boolean;
+  }>;
+}
+
 /**
  * One agent turn against one thread.
  *
@@ -353,6 +364,10 @@ export interface ThreadRun {
     detail: string;
     outputText?: string;
     thoughtText?: string;
+    question?: HostUserQuestion & {
+      leaseId: string;
+      answers?: Record<string, string>;
+    };
   };
   id: string;
   agentId: string;
