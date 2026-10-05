@@ -362,6 +362,12 @@ describe('managed-agent-server e2e runner', () => {
     expect(slice.replace(/\s+/g, ' ')).toMatch(
       /read once at JVM startup|restart it with the override/i,
     );
+    // The by-hand recipe re-anchors Spring to the Prerequisites environment,
+    // which never names the Session Store, and application.yml defaults the
+    // store off — a reader who follows that path wires Spring without a
+    // store descriptor and the Harness answers every attach with
+    // 400 invalid_managed_session_store, so the slice must name the switch.
+    expect(slice).toContain('QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED');
   });
 
   it('pins the attach-time generation fence in the Harness attachment contract', () => {

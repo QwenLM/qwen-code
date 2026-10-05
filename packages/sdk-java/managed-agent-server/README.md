@@ -386,6 +386,18 @@ value exported in Prerequisites, restart it with the override in place:
 export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4171'
 ```
 
+Spring's HTTP Session Store stays off by default, and the Hosted Harness
+rejects every attach without a store descriptor, so the launch also needs
+the three values the one-shot launcher writes into `spring.env` — the
+connector refuses to start when the store is enabled with a blank base URL
+or workspace ID:
+
+```bash
+export QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'
+export QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL='http://127.0.0.1:8080'
+export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
+```
+
 `--port` is a request, not a guarantee: `qwen serve` moves to the next free
 port on a collision, and 4171 is exactly where a daemon displaced from 4170
 lands. Confirm each server's bound port in its startup line before exporting
