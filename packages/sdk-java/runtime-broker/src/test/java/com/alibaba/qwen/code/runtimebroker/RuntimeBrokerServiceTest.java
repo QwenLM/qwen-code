@@ -1167,6 +1167,66 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void v3GateAdmitsTheNativeMonitorPayloadAndStillRefusesOthers() throws Exception {
+        String payload = "{\"toolName\":\"monitor\",\"input\":{\"command\":\"du -sh .\"}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        Map<String, Object> detachedCapture = new LinkedHashMap<>();
+        detachedCapture.put("captureStatus", "detached");
+        detachedCapture.put("captureReason", null);
+        detachedCapture.put("manifest", null);
+        detachedCapture.put("previewTruncated", false);
+        detachedCapture.put("deliveryStatus", "pending");
+        Map<String, Object> detachedResult = new LinkedHashMap<>();
+        detachedResult.put("executionStatus", "success");
+        detachedResult.put("responseParts", java.util.List.of(Map.of("text", "watch started")));
+        detachedResult.put("capture", detachedCapture);
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+
+            @Override
+            public Map<String, Object> receipt(ToolExecutionRecord execution) {
+                throw new AssertionError("Detached family has no publication receipt to compare");
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(
+                    Map.of("state", "prepared"));
+            fixture.transport.statusResult = CompletableFuture.completedFuture(
+                    Map.of("state", "settled", "result", detachedResult));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+            join(fixture.service.startExecution("harness", "runtime",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+            // The Monitor payload passed the payload validator and the v3 gate,
+            // so the dispatch drove exactly one execute call to the worker.
+            ToolExecutionRecord settled = awaitExecution(fixture.executionRepository,
+                    prepared.getExecutionCallId(), ToolExecutionRecord.State.SETTLED);
+            assertEquals("success", settled.getExecutionStatus());
+            assertEquals(1, fixture.transport.executeV3Calls.get());
+
+            String editing = "{\"toolName\":\"edit\",\"input\":{\"file_path\":\"a\"}}";
+            String editingDigest = "sha256:" + HexFormat.of().formatHex(MessageDigest
+                    .getInstance("SHA-256").digest(editing.getBytes(StandardCharsets.UTF_8)));
+            ToolExecutionRecord other = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "other-key", reference, editingDigest, "pub-2"));
+            RuntimeBrokerException refusal = failure(fixture.service.startExecution(
+                    "harness", "runtime", other.getExecutionCallId(), editing, "pub-2", "token"));
+            assertEquals("runtime_payload_invalid", refusal.getCode());
+        }
+    }
+
+    @Test
     void settlesTheProcessRowWhenTheRuntimeProvesNoStartAndReleasesCleanly()
             throws Exception {
         String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";

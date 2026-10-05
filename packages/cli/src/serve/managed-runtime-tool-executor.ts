@@ -565,7 +565,10 @@ export class ManagedToolExecutor {
       if (!existing.capturePublisher?.finish) await existing.promise;
       return v3View(existing);
     }
-    if (!this.capturePublisher || toolName !== ShellTool.Name) {
+    if (
+      !this.capturePublisher ||
+      (toolName !== ShellTool.Name && toolName !== 'monitor')
+    ) {
       throw new ManagedToolUnavailableError(
         'Tool v3 capture is not available.',
       );
@@ -578,6 +581,11 @@ export class ManagedToolExecutor {
       throw new ManagedToolUnavailableError(
         'Managed context directory is unavailable.',
       );
+    }
+    // The native Monitor wire shape names its own tool: it needs no Shell
+    // tool instance — the monitor admission owns its validation.
+    if (toolName === 'monitor') {
+      return this.executeV3Monitor(request, tools, structuredClone(input));
     }
     const tool = tools.tools.get(toolName);
     if (!tool)

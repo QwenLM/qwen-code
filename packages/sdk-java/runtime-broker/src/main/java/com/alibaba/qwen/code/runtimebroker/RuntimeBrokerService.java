@@ -599,12 +599,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 || !(payload.get("input") instanceof Map)
                                 || !BrokerValues.isWellFormedJson(payload)
                                 || Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))
-                                    && !"run_shell_command".equals(toolName)) {
+                                    && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
                         if (v3) {
-                            if (!"run_shell_command".equals(payload.get("toolName"))) {
-                                throw invalid("runtime_payload_invalid", "Tool v3 requires Shell");
+                            if (!"run_shell_command".equals(payload.get("toolName"))
+                                    && !"monitor".equals(payload.get("toolName"))) {
+                                throw invalid("runtime_payload_invalid", "Tool v3 requires Shell or Monitor");
                             }
                             RuntimePublicationGrant grant = publicationVerifier.verify(record,
                                     publicationId, publicationToken);
