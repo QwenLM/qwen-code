@@ -176,6 +176,18 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-csi-worker.ts',
+    {
+      reason:
+        'The Kubernetes Downward API supplies the current Pod identity to the single-Pod CSI worker process; attestation, drain and ACK routes capture it at registration rather than from workspace environment overlays.',
+      accesses: {
+        'key:QWEN_NODE_NAME': 3,
+        'key:QWEN_POD_NAMESPACE': 3,
+        'key:QWEN_POD_UID': 3,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/managed-hook-runtime.ts',
     {
       reason:

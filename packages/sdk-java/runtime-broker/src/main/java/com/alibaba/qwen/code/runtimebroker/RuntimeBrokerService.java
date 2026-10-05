@@ -2231,7 +2231,35 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return failed(conflict("runtime_broker_recovery_blocked",
                     "Managed Runtime recovery is blocked."));
         }
-        BindingRenewal renewal = new BindingRenewal(claimed);
+        RuntimeBindingRecord admitted;
+        try {
+            provisioner.reserveResource(claimed);
+        } catch (RuntimeException failure) {
+            boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
+                    && ((request.isManagedContext() && brokerFailure.getStatusCode() == 409
+                            && "workspace_csi_busy".equals(brokerFailure.getCode()))
+                            || (!request.isManagedContext() && "kubernetes-scratch".equals(request.getProvisionerKind())
+                                    && brokerFailure.getStatusCode() == 503
+                                    && "runtime_kubernetes_capacity".equals(brokerFailure.getCode())));
+            if (!busy) {
+                blockRecoveryQuietly(claimed, failure);
+            }
+            releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
+            return failed(failure);
+        }
+        try {
+            admitted = bindingRepository.renewOperation(claimed.getBindingId(), brokerOwnerId,
+                    claimed.getOperationGeneration(), operationLeaseDuration);
+        } catch (RuntimeException failure) {
+            blockRecoveryQuietly(claimed, failure);
+            releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
+            return failed(failure);
+        }
+        if (admitted == null) {
+            releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
+            return failed(unavailable("runtime_provision_fenced", "Runtime provisioning claim expired"));
+        }
+        BindingRenewal renewal = new BindingRenewal(admitted);
         renewal.start();
         String bindingId = claimed.getBindingId();
         long operationGeneration = claimed.getOperationGeneration();
@@ -3281,6 +3309,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         } catch (RuntimeException | Error exception) {
             dispatches.remove(prepared.getExecutionCallId(), created);
             created.completeExceptionally(exception);
+            if (exception instanceof RuntimeBrokerException refused) {
+                throw refused;
+            }
             throw unavailable("runtime_execution_dispatch_failed",
                     "Runtime execution dispatch failed", exception);
         }
@@ -3505,6 +3536,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     || !ownsDispatch(current, claimed)) {
                 return current;
             }
+            if (current.getState() != ToolExecutionRecord.State.DISPATCHING) {
+                return null;
+            }
             ToolExecutionRecord replacement;
             if (current.isCancelRequested()) {
                 replacement = current.withResult(
@@ -3514,9 +3548,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 replacement = current.withState(
                         ToolExecutionRecord.State.EXECUTING, false);
             }
-            ToolExecutionRecord updated = executionRepository.compareAndSet(
-                    current, replacement, brokerOwnerId,
-                    claimed.getDispatchGeneration());
+            ToolExecutionRecord updated = current.isCancelRequested()
+                    ? executionRepository.compareAndSet(current, replacement, brokerOwnerId,
+                            claimed.getDispatchGeneration())
+                    : bindingRepository.authorizeDispatch(sessionRepository, executionRepository, current,
+                            brokerOwnerId, claimed.getDispatchGeneration());
             if (updated != null) {
                 return updated;
             }
