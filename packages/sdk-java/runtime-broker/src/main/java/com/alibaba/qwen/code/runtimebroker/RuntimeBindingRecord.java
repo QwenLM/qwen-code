@@ -380,9 +380,29 @@ public final class RuntimeBindingRecord {
                                 candidate.getScope().getWorkspaceId()));
     }
 
+    public boolean hasSameLease(RuntimeLease other) {
+        return lease == other || lease != null && other != null
+                && lease.getRuntimeInstanceId().equals(other.getRuntimeInstanceId())
+                && lease.getEndpoint().equals(other.getEndpoint())
+                && lease.getToken().equals(other.getToken())
+                && lease.getLeaseId().equals(other.getLeaseId())
+                && lease.getEpoch() == other.getEpoch();
+    }
+
     void requireSafeReplacement(RuntimeBindingRecord replacement) {
         if (drainReceipt != null && !drainReceipt.equals(replacement.drainReceipt)) {
             throw new IllegalArgumentException("Drain proof cannot be overwritten");
+        }
+        if ("kubernetes-workspace".equals(request.getProvisionerKind()) && resourceHandle != null
+                && !Objects.equals(resourceHandle, replacement.resourceHandle)) {
+            throw new IllegalArgumentException("Original CSI resource identity cannot be replaced");
+        }
+        if ("kubernetes-workspace".equals(request.getProvisionerKind()) && drainRequested
+                && (!replacement.drainRequested || replacement.state != state
+                        || !hasSameLease(replacement.lease)
+                        || !Objects.equals(resourceHandle, replacement.resourceHandle)
+                        || attestationGeneration != replacement.attestationGeneration)) {
+            throw new IllegalArgumentException("Sealed CSI binding requires durable retirement");
         }
         if (!Objects.equals(lossEvidence, replacement.lossEvidence)
                         && lossEvidence != null
