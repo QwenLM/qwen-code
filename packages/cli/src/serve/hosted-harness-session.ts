@@ -3727,6 +3727,14 @@ export function registerHostedHarnessSessionRoutes(
       // A lease a recovery load acquired must go back with the Session, or
       // the Workspace stays pinned after every later route is gone.
       await releaseLeaseNow(session);
+      // A registered observation loop outlives its turn: only the Session
+      // close settles it. Stop every live loop here — its stop_requested
+      // settle write belongs ahead of the publisher close and the log
+      // close, or the record strands on running_attached forever.
+      for (const loop of session.shell?.monitorLoops?.values() ?? [])
+        await loop.stop();
+      for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
+        await loop.stop();
       // The broker release drained the Session's background Shells and
       // their exits settled through this publisher; it closes last.
       await session.shell?.publisher?.close();

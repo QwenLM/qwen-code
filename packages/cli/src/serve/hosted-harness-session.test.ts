@@ -29,6 +29,7 @@ import type {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import type { ManagedSessionEvent } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -73,6 +74,7 @@ import type {
   ManagedHookControl,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
+import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { monitorWakeNeedsRecovery } from './hosted-monitor-wake-turn.js';
 
 const wakeDeps = vi.hoisted(() => ({
@@ -806,6 +808,159 @@ describe('Hosted Harness no-tool session', () => {
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
     ).toBe(204);
+  });
+
+  it('settles a running Monitor watch as stop_requested when the Session closes', async () => {
+    domainEnablement.monitorRun = true;
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding-1',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'registerPublisher',
+    ).mockResolvedValue('1');
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepareV3').mockResolvedValue({
+      executionCallId: 'monitor-execution',
+      runtimeBindingId: 'binding-1',
+      bindingGeneration: '1',
+    });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'executeV3').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [
+        {
+          text: 'Monitor watch started under unit qwen-mon-rt. It keeps running after this result and holds its Runtime until it exits; read its status and output through the task surface.',
+        },
+      ],
+      capture: {
+        captureStatus: 'detached',
+        captureReason: null,
+        manifest: null,
+        previewTruncated: false,
+        deliveryStatus: 'pending',
+      },
+    });
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'acknowledgeV3',
+    ).mockResolvedValue();
+    state.publicationRequest.mockImplementation(
+      async (_resources, route, _body) => {
+        if (route === '/grants') return { state: 'OPEN' };
+        throw new Error('Unexpected publication route ' + route);
+      },
+    );
+    const stop = vi.spyOn(HostedMonitorLoop.prototype, 'stop');
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const readMonitorRun = async () => {
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        key,
+      );
+      const commits = journal.events.filter(
+        (event) =>
+          event.kind === 'domain.committed' &&
+          event.payload['domain'] === 'monitor_run',
+      );
+      expect(commits.length).toBeGreaterThan(0);
+      const ref = assertManagedSessionDurableRef(
+        commits.at(-1)!.payload['recordRef'],
+        'monitor_run record',
+      );
+      return parseMonitorRun(
+        JSON.parse(
+          (
+            await LocalManagedSessionResourceStore.create({
+              runtimeBaseDir: state.root,
+              sessionKey: key,
+            }).read(ref)
+          ).toString('utf8'),
+        ),
+      );
+    };
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        captureBytes: 1024 * 1024,
+      })
+      .expect(200);
+    const clientId = created.body.clientId as string;
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const call = {
+        name: 'monitor',
+        callId: 'monitor-call',
+        args: { command: 'tail -f build.log' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: {
+              id: call.callId,
+              name: call.name,
+              args: call.args,
+            },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      return { text: 'monitor started', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'watch the build' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    // Admission attached the record but nothing settled it: a live
+    // observation loop is the only owner of its terminal write.
+    expect((await readMonitorRun()).stopReason).toBeNull();
+    expect((await readMonitorRun()).run.state).toBe('running');
+    expect((await readMonitorRun()).run.execution).toBe('running_attached');
+    expect(stop).not.toHaveBeenCalled();
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          clientId,
+        )
+      ).status,
+    ).toBe(204);
+    expect(stop).toHaveBeenCalledTimes(1);
+    const settled = await readMonitorRun();
+    expect(settled.stopReason).toBe('stop_requested');
+    expect(settled.run.state).toBe('cancelled');
+    expect(settled.run.execution).toBe('settled');
   });
 
   it('runs and queries a Hook-only operation without opening a user turn', async () => {
