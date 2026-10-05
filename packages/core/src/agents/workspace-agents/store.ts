@@ -1393,6 +1393,14 @@ export async function readAgentHosts(
   });
 }
 
+function pendingAgentHostReplacementError(registry: AgentHostsFile): Error {
+  const oldId = registry.enrollment?.supersedesHostId;
+  const old = registry.hosts.find((host) => host.id === oldId);
+  return new Error(
+    `Retry the pending Agent Host replacement first: select "${old?.name ?? oldId}" (${oldId}) in Runtimes, choose Replace, generate a fresh join command and run it on the replacement machine. Link expiry does not cancel the pending replacement.`,
+  );
+}
+
 export async function issueAgentHostEnrollment(
   projectRoot: string,
   supersedesHostId?: string,
@@ -1408,7 +1416,7 @@ export async function issueAgentHostEnrollment(
     }
     const pending = registry.enrollment?.replacementHostId;
     if (pending && supersedesHostId !== registry.enrollment?.supersedesHostId) {
-      throw new Error('Retry the pending Agent Host replacement first.');
+      throw pendingAgentHostReplacementError(registry);
     }
     const token = randomBytes(32).toString('base64url');
     const expiresAt = Date.now() + HOST_ENROLLMENT_TTL_MS;
@@ -1610,7 +1618,7 @@ export async function removeAgentHostUnlocked(
     (registry.enrollment.supersedesHostId === hostId ||
       registry.enrollment.replacementHostId === hostId)
   ) {
-    throw new Error('Retry the pending Agent Host replacement first.');
+    throw pendingAgentHostReplacementError(registry);
   }
   await writeAgentHostsUnlocked(projectRoot, {
     ...registry,

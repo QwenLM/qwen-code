@@ -56,6 +56,9 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
     `Replace ${v?.name} with a new host using a one-time join command.`,
   'collab.runtime.replaceEffects':
     'After the new host registers, the old credentials are revoked and agent bindings move to the new host. Running or cancelling tasks on the old host fail; results already being finalized are preserved.',
+  'collab.runtime.replaceRecovery': (v) =>
+    `Resuming replacement of ${v?.name} (${v?.id}). Link expiry does not cancel the pending replacement or undo migrated bindings. If the command expires, create a fresh command here and run it on the replacement machine.`,
+  'collab.runtime.refreshReplacement': 'Refresh replacement command',
   'collab.runtime.methodCommand': 'Run one command there',
   'collab.runtime.methodExisting': 'I have its address and token',
   'collab.runtime.address':
@@ -441,6 +444,9 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
     `使用一次性加入命令，用新主机替换 ${v?.name}。`,
   'collab.runtime.replaceEffects':
     '新主机注册后，旧凭据被撤销，Agent 绑定迁移到新主机。旧主机上正在运行或取消的任务会失败；已进入完成结算的结果会保留。',
+  'collab.runtime.replaceRecovery': (v) =>
+    `正在恢复对 ${v?.name}（${v?.id}）的替换。链接过期不会取消待完成的替换，也不会回滚已迁移的绑定。命令过期后，在这里生成新命令，再到替换主机上运行。`,
+  'collab.runtime.refreshReplacement': '刷新替换命令',
   'collab.runtime.methodCommand': '在那台电脑上运行一行命令',
   'collab.runtime.methodExisting': '我已有地址和令牌',
   'collab.runtime.address': '这台电脑的地址（从那台电脑看过来）',

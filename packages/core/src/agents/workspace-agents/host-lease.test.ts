@@ -25,6 +25,7 @@ import {
 import {
   authenticateAgentHost,
   getAgentsFilePath,
+  getAgentHostsFilePath,
   readAgentHosts,
   heartbeatAgentHost,
   createThread,
@@ -864,7 +865,7 @@ describe('explicit Agent Host replacement', () => {
     ).rejects.toThrow('not found');
   });
 
-  it('reuses its staged identity when binding persistence fails, without losing the recovery capability', async () => {
+  it('refreshes an expired interrupted replacement without losing its staged identity or bindings', async () => {
     const old = await enroll('old', ['qwen']);
     await placeAgent([old.id]);
     const { token } = await issueAgentHostEnrollment(PROJECT_ROOT, old.id);
@@ -885,14 +886,25 @@ describe('explicit Agent Host replacement', () => {
     const staged = (await readAgentHosts(PROJECT_ROOT)).find(
       (entry) => entry.id !== old.id,
     )!;
+    const registryPath = getAgentHostsFilePath(PROJECT_ROOT);
+    const registry = JSON.parse(await fs.readFile(registryPath, 'utf8'));
+    registry.enrollment.expiresAt = Date.now() - 1;
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+    await expect(enrollAgentHost(PROJECT_ROOT, input)).rejects.toThrow(
+      'Invalid or expired',
+    );
     await expect(issueAgentHostEnrollment(PROJECT_ROOT)).rejects.toThrow(
-      'Retry the pending',
+      `select "old" (${old.id}) in Runtimes, choose Replace`,
     );
     await expect(removeAgentHost(PROJECT_ROOT, old.id)).rejects.toThrow(
-      'Retry the pending',
+      `select "old" (${old.id}) in Runtimes, choose Replace`,
     );
     const refreshed = await issueAgentHostEnrollment(PROJECT_ROOT, old.id);
     expect(refreshed.replacementHostId).toBe(staged.id);
+    expect(refreshed.expiresAt).toBeGreaterThan(Date.now());
+    await expect(enrollAgentHost(PROJECT_ROOT, input)).rejects.toThrow(
+      'Invalid or expired',
+    );
     const replacement = await enrollAgentHost(PROJECT_ROOT, {
       ...input,
       token: refreshed.token,

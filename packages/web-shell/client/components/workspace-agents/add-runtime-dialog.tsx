@@ -291,6 +291,15 @@ export function AddRuntimeDialog({
           </p>
         ) : null}
 
+        {!connected && replacementTarget && join?.replacementHostId ? (
+          <p role="status" className="text-sm text-muted-foreground">
+            {t('collab.runtime.replaceRecovery', {
+              name: replacementTarget.label,
+              id: replacementTarget.id,
+            })}
+          </p>
+        ) : null}
+
         {connected ? (
           <div className="flex flex-col gap-3">
             <div className="flex items-center gap-3 rounded-md border border-[var(--status-done-fg)]/30 bg-[var(--status-done-bg)] p-3">
@@ -472,7 +481,11 @@ export function AddRuntimeDialog({
               </Button>
             ) : (
               <Button disabled={busy} onClick={() => void generate()}>
-                {t('collab.runtime.generate')}
+                {t(
+                  replacementTarget && join
+                    ? 'collab.runtime.refreshReplacement'
+                    : 'collab.runtime.generate',
+                )}
               </Button>
             )
           ) : (
