@@ -1721,6 +1721,40 @@ describe('getPlanModeSystemReminder', () => {
   it('should be deterministic', () => {
     expect(getPlanModeSystemReminder()).toBe(getPlanModeSystemReminder());
   });
+
+  it('instructs todo_write before exit_plan_mode for Session Workflow', () => {
+    const result = getPlanModeSystemReminder(false, true);
+
+    expectText(result, [
+      'Before converging, capture the plan as a structured Todo list',
+      'call the todo_write tool with one Todo per plan step',
+      'blockedBy naming the steps that must complete first',
+      'by calling the exit_plan_mode tool',
+    ]);
+    // The Todo list is captured first, only then is the plan presented.
+    expect(result.indexOf('todo_write')).toBeLessThan(
+      result.indexOf('by calling the exit_plan_mode tool'),
+    );
+  });
+
+  it('keeps the Todo reminder off when the gate is off or plan-only', () => {
+    // Gate off (default) and plan-only mode (SDK/subagents, which never run
+    // the interactive exit_plan_mode approval) must both stay text-only.
+    const base = getPlanModeSystemReminder();
+    expectText(base, ['exit_plan_mode'], ['todo_write']);
+    expectText(
+      getPlanModeSystemReminder(true, true),
+      ['Present your plan directly'],
+      ['todo_write'],
+    );
+    // The Session Workflow variant is exactly the base reminder with one
+    // Todo-capture sentence inserted before the presentation instruction.
+    const inserted =
+      'Before converging, capture the plan as a structured Todo list: call the todo_write tool with one Todo per plan step (each with a stable id, status "pending", and blockedBy naming the steps that must complete first), so the plan can be reviewed as a task graph. Present your plan';
+    expect(getPlanModeSystemReminder(false, true)).toBe(
+      base.replace('Present your plan', inserted),
+    );
+  });
 });
 
 describe('getManualPlanExitSystemReminder', () => {
