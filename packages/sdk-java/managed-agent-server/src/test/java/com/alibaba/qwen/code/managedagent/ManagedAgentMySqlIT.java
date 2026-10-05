@@ -71,6 +71,8 @@ class ManagedAgentMySqlIT {
     @Order(1)
     void upgradesAndExercisesStoresOnMySql() throws IOException {
         DriverManagerDataSource dataSource = dataSource();
+        BackfillWitnesses witnesses = BackfillWitnesses.forApplied(
+                BackfillWitnesses.appliedVersions(dataSource));
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration")
                 .target(MigrationVersion.fromVersion("1")).load().migrate();
@@ -94,14 +96,9 @@ class ManagedAgentMySqlIT {
                 + " VALUES (?, 'CREATE_SESSION', 'legacy-key',"
                 + " 'legacy-digest', ?, 1)", upgradeTenant, upgradeSession);
         LegacyEvents.insert(jdbc, upgradeTenant, upgradeSession);
-        // First-pass-ness comes from what this run applied, not from the
-        // migrated rows: gating on V15's item_id backfill would let a V15
-        // regression silently switch off its own witnesses. A rerun finds
-        // V2..V15 already applied and executes nothing here.
-        boolean firstPass = Flyway.configure().dataSource(dataSource)
+        Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration")
-                .target(MigrationVersion.fromVersion("15")).load().migrate()
-                .migrationsExecuted > 0;
+                .target(MigrationVersion.fromVersion("15")).load().migrate();
         LegacyLifecycleCommands.Sessions lifecycle =
                 LegacyLifecycleCommands.insert(jdbc, lifecycleTenant);
         Flyway.configure().dataSource(dataSource)
@@ -110,19 +107,24 @@ class ManagedAgentMySqlIT {
         LegacyHookRecords.insert(jdbc, hooksTenant, hooksSession);
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
-        // The one-shot backfills in V2, V15, V17 and V29 ran only on the
-        // first pass against a fresh database; a rerun cannot re-apply
-        // them to this run's seeds, so the three legacy backfill witnesses
-        // and the V2-derived consumer_progress count are gated on
-        // firstPass. A rerun still exercises the store through the
-        // idempotency conflict re-seeded below and the fresh-projection
-        // exercises; agent_revision there reads V13's column DEFAULT.
-        if (firstPass) {
+        // The gates come from what this run found already applied, never
+        // from the migrated rows: gating on V15's item_id backfill would
+        // let a V15 regression silently switch off its own witnesses. A
+        // rerun still exercises the store through the idempotency conflict
+        // re-seeded below and the fresh-projection exercises;
+        // agent_revision there reads V13's column DEFAULT.
+        if (witnesses.eventIdentity()) {
             LegacyEvents.assertBackfilled(jdbc, upgradeTenant, upgradeSession);
+        }
+        if (witnesses.pendingOperations()) {
             LegacyLifecycleCommands.assertMigrated(jdbc, lifecycleTenant,
                     lifecycle);
+        }
+        if (witnesses.hookAdmissions()) {
             LegacyHookRecords.assertBackfilled(jdbc, hooksTenant,
                     hooksSession);
+        }
+        if (witnesses.consumerProgress()) {
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                             + " managed_agent_consumer_progress WHERE tenant_id = ?"
                             + " AND session_id = ? AND consumer_name = ?",
@@ -137,10 +139,10 @@ class ManagedAgentMySqlIT {
                 }, new com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry(jdbc),
                 new ManagedAgentProperties());
         // The V9 scope backfill marked the legacy creation key
-        // workspace-unbound on the first pass; a rerun re-seeds the
-        // conflict source explicitly so the probe does not depend on the
-        // migration order.
-        if (!firstPass) {
+        // workspace-unbound when it ran; when V9 was already applied this
+        // run's seed missed it, so the conflict source is re-seeded
+        // explicitly and the probe does not depend on the migration order.
+        if (witnesses.reseedCreationScope()) {
             jdbc.update("INSERT INTO managed_session_create_scope (tenant_id,"
                             + " idempotency_key, workspace_bound) VALUES (?, ?,"
                             + " FALSE) ON DUPLICATE KEY UPDATE workspace_bound"

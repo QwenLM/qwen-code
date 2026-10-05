@@ -71,6 +71,12 @@ class SessionEventHubTest {
                     .containsExactlyElementsOf(
                             java.util.stream.LongStream.rangeClosed(89, 600)
                                     .boxed().toList());
+
+            // One below the watermark: pins CAPACITY from above too, so a
+            // ring grown to 513 can no longer keep this green.
+            SessionEventHub.Delivery justBelow = subscription.await(87,
+                    Duration.ofMillis(10));
+            assertThat(justBelow.overflowed()).isTrue();
         }
     }
 

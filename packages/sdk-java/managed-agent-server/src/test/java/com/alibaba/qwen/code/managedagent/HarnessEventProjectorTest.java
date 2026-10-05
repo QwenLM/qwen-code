@@ -58,6 +58,32 @@ class HarnessEventProjectorTest {
     }
 
     @Test
+    void projectsToolCallsWithoutLeakingOtherUpdateFields() {
+        ProjectedEvent event = projector.project(new SourceEvent(7L,
+                "session_update", Map.of("update", Map.of(
+                        "sessionUpdate", "tool_call",
+                        "toolCallId", "tool-1",
+                        "name", "read_file",
+                        "title", "Read file",
+                        "status", "completed",
+                        "rawInput", Map.of("path", "/private/workspace"),
+                        "secret", "must-not-leak")), "prompt", Map.of()),
+                "turn-1");
+
+        assertThat(event.type()).isEqualTo("item.tool_call.updated");
+        assertThat(event.data()).containsEntry("toolCallId", "tool-1")
+                .containsEntry("name", "read_file")
+                .containsEntry("title", "Read file")
+                .containsEntry("status", "completed");
+        // The same allowlist guards the tool path: the raw update map must
+        // never bleed through, at any nesting depth.
+        assertThat(event.data().toString()).doesNotContain("secret")
+                .doesNotContain("must-not-leak")
+                .doesNotContain("/private/workspace")
+                .doesNotContain("rawInput");
+    }
+
+    @Test
     void substitutesTheSafeFallbackCodeForAnOutOfAlphabetErrorCode() {
         ProjectedEvent event = projector.project(new SourceEvent(4L,
                 "turn_error", Map.of("code", "sql=1; DROP TABLE users --",

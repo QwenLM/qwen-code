@@ -16,12 +16,12 @@ import static org.mockito.Mockito.when;
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
-import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.daemon.PromptReceipt;
+import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
@@ -583,8 +583,15 @@ class QwenHostedHarnessConnectorTest {
         when(attached.getRuntimeRecovery()).thenReturn(recovery);
         when(attached.getHarnessLastEventId()).thenReturn(41L);
         when(attached.getHarnessEventEpoch()).thenReturn("epoch-7");
-        when(client.createSession(any()))
-                .thenThrow(mock(SessionCreationOutcomeUnknownException.class));
+        SessionCreationOutcomeUnknownException unknown =
+                mock(SessionCreationOutcomeUnknownException.class);
+        // A mock reads getSuppressed() and getStackTrace() as null; if the
+        // fallback regresses and the exception escapes to JUnit, surefire's
+        // reporter dereferences them and aborts the class report, losing
+        // the failing test's name.
+        when(unknown.getSuppressed()).thenReturn(new Throwable[0]);
+        when(unknown.getStackTrace()).thenReturn(new StackTraceElement[0]);
+        when(client.createSession(any())).thenThrow(unknown);
         when(client.loadSession(any())).thenReturn(attached);
         QwenHostedHarnessConnector connector = connector(client);
 
@@ -597,7 +604,13 @@ class QwenHostedHarnessConnectorTest {
         assertThat(admission.runtimeRecovery()).isSameAs(recovery);
         assertThat(admission.lastEventId()).isEqualTo(41L);
         assertThat(admission.eventEpoch()).isEqualTo("epoch-7");
-        verify(client).loadSession(any());
+        ArgumentCaptor<LoadHarnessSession> load =
+                ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).loadSession(load.capture());
+        // Passive recovery belongs to the observe-only attachment; the
+        // create fallback keeps the session on the active path.
+        assertThat(ReflectionTestUtils.getField(load.getValue(),
+                "passiveManagedRuntimeRecovery")).isEqualTo(false);
     }
 
     @Test
