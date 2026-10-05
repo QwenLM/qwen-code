@@ -621,6 +621,7 @@ export class LlmClient {
       await this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restoreRuntime.completedToolCallIds);
+      if (restoreRuntime.cancelledLastTurn) chat.markLastTurnCancelled();
       if (restoreRuntime.resumeTokenCounts) {
         const counts = restoreRuntime.resumeTokenCounts;
         uiTelemetryService.setLastPromptTokenCount(counts.promptTokenCount);
@@ -651,6 +652,7 @@ export class LlmClient {
       await this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restored.completedToolCallIds);
+      if (restored.cancelledLastTurn) chat.markLastTurnCancelled();
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
@@ -2022,10 +2024,13 @@ export class LlmClient {
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
-    this.getChat().setHistory(
+    const chat = this.getChat();
+    const cancelledLastTurn = chat.isLastTurnCancelled();
+    chat.setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
-      this.getChat().getCompletedToolCallIds(),
+      chat.getCompletedToolCallIds(),
     );
+    if (cancelledLastTurn) chat.markLastTurnCancelled();
   }
 
   /**

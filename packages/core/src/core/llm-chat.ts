@@ -2362,6 +2362,33 @@ export class LlmChat {
     this.clearPendingPartialState();
   }
 
+  private cancelledHistory?: {
+    history: Content[];
+    length: number;
+    lastEntry: Content | undefined;
+    userPushCount: number;
+  };
+
+  markLastTurnCancelled(): void {
+    this.cancelledHistory = {
+      history: this.history,
+      length: this.history.length,
+      lastEntry: this.history.at(-1),
+      userPushCount: this.userContentPushCount,
+    };
+  }
+
+  isLastTurnCancelled(): boolean {
+    const basis = this.cancelledHistory;
+    return (
+      basis !== undefined &&
+      basis.history === this.history &&
+      basis.length === this.history.length &&
+      basis.lastEntry === this.history.at(-1) &&
+      basis.userPushCount === this.userContentPushCount
+    );
+  }
+
   /**
    * Creates a new LlmChat instance.
    *
@@ -3365,6 +3392,7 @@ export class LlmChat {
       }
       // Add user content to history ONCE before any attempts. Later object
       // spreads preserve the identity marked before compression.
+      this.cancelledHistory = undefined;
       this.history.push(userContent);
       this.syncReviewedSchemasForContent(userContent);
       currentUserContent = userContent;
@@ -5527,6 +5555,7 @@ export class LlmChat {
    * Clears the chat history.
    */
   clearHistory(): void {
+    this.cancelledHistory = undefined;
     this.history = [];
     this.completedToolCallIds = [];
     if (!this.isForkedChat) {
@@ -5547,6 +5576,7 @@ export class LlmChat {
    * Adds a new entry to the chat history.
    */
   addHistory(content: Content): void {
+    this.cancelledHistory = undefined;
     this.history.push(content);
     this.syncReviewedSchemasForContent(content);
     // addHistory only runs between sends, so the partial-push marker
@@ -5701,6 +5731,7 @@ export class LlmChat {
     history: Content[],
     completedToolCallIds?: readonly string[],
   ): void {
+    this.cancelledHistory = undefined;
     this.history = history;
     this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
@@ -5726,6 +5757,7 @@ export class LlmChat {
   }
 
   truncateHistory(keepCount: number): void {
+    this.cancelledHistory = undefined;
     const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
     this.setCompletedToolCallIds(this.completedToolCallIds);
@@ -5750,6 +5782,7 @@ export class LlmChat {
   }
 
   stripThoughtsFromHistory(): void {
+    this.cancelledHistory = undefined;
     this.history = this.history
       .map(stripThoughtPartsFromContent)
       .filter((content): content is Content => content !== null);

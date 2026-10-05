@@ -181,6 +181,8 @@ import {
   LOAD_REPLAY_VERSION,
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
+  PROMPT_CANCEL_REASON_META_KEY,
+  USER_CANCEL_ABORT_REASON,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
@@ -11595,6 +11597,12 @@ export function createSessionControlPlane(
                   if (byId.get(sessionId) === entry) {
                     void forwardRunningPromptCancel(entry, pendingEntry, {
                       sessionId,
+                      _meta: {
+                        [PROMPT_CANCEL_REASON_META_KEY]:
+                          abortSignal.reason === USER_CANCEL_ABORT_REASON
+                            ? 'user'
+                            : 'interrupted',
+                      },
                     }).catch((err) => {
                       writeStderrLine(
                         `[pending-prompt] cancel forward failed after removePendingPrompt session=${sessionId}: ${extractErrorMessage(err)}`,
@@ -11811,12 +11819,7 @@ export function createSessionControlPlane(
               entry.activePromptId === runningPrompt.promptId
                 ? forwardRunningPromptCancel(entry, runningPrompt, notif)
                 : Promise.resolve();
-            runningPrompt.abortController.abort(
-              new DOMException(
-                'Prompt cancelled before dispatch',
-                'AbortError',
-              ),
-            );
+            runningPrompt.abortController.abort(USER_CANCEL_ABORT_REASON);
             await forwarding;
             return;
           }
@@ -14703,9 +14706,7 @@ export function createSessionControlPlane(
       // Abort the prompt: for 'queued' prompts the FIFO will skip
       // dispatch on the `signal.aborted` check; for 'running' prompts
       // this triggers the cancel path.
-      target.abortController.abort(
-        new DOMException('Prompt removed by user', 'AbortError'),
-      );
+      target.abortController.abort(USER_CANCEL_ABORT_REASON);
       if (target.state === 'queued') {
         // A queued prompt never dispatches once aborted — safe to drop
         // from the list immediately.

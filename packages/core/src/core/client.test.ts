@@ -699,6 +699,8 @@ describe('Gemini Client (client.ts)', () => {
       getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
       getHistory: vi.fn(() => structuredClone(history)),
       getHistoryShallow: vi.fn(() => history.map((c) => ({ ...c }))),
+      isLastTurnCancelled: vi.fn().mockReturnValue(false),
+      markLastTurnCancelled: vi.fn(),
       setHistory: vi.fn(),
     });
   /** Installs a message bus answering hook requests with `request`. */
@@ -1165,6 +1167,32 @@ describe('Gemini Client (client.ts)', () => {
         'ended',
       ]);
       expectToolBoundaryKept(resumedClient, result);
+    });
+
+    it('binds cancellation restored from selective metadata to the new chat', async () => {
+      restoreFromRuntime({
+        apiHistory: [userText('unfinished')],
+        cancelledLastTurn: true,
+        uiTelemetryEvents: [],
+        recording: { lastCompletedUuid: 'terminal', turnParentUuids: [] },
+        goalRecords: [],
+        initialTurn: 1,
+        backgroundNotificationTaskIds: [],
+      });
+      const resumed = await initializedClient();
+      expect(resumed.getChat().isLastTurnCancelled()).toBe(true);
+      const refreshedPrelude = userText(
+        '<system-reminder>\nrefreshed startup\n</system-reminder>',
+      );
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
+        [refreshedPrelude],
+        [],
+      ]);
+      await resumed.refreshStartupContextReminder();
+      expect(resumed.getHistory()[0]).toEqual(refreshedPrelude);
+      expect(resumed.getChat().isLastTurnCancelled()).toBe(true);
+      resumed.setHistory([userText('new input')]);
+      expect(resumed.getChat().isLastTurnCancelled()).toBe(false);
     });
 
     it('initializes from the selective runtime projection without the full transcript', async () => {

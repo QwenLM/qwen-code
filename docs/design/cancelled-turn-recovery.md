@@ -1,0 +1,33 @@
+# Cancelled turn recovery
+
+[English](cancelled-turn-recovery.md) | [简体中文](cancelled-turn-recovery.zh-CN.md)
+
+## Problem and scope
+
+After explicit daemon cancellation following a tool result, resumed API history resembles a crashed turn. The existing history heuristic offers continuation despite a durable cancelled `turn_result`. This change distinguishes verified daemon cancellation from an unknown interruption. It does not add a new durable ledger, infer cancellation from text, or change tool-result repair.
+
+## Identity and restore
+
+The latest actual API user entry carries the client `promptId`. Its unique active-branch user record supplies `daemonPromptId`, which must match one subsequent validated `turn_result.promptId` with state `cancelled` and the existing user-cancel timestamp `cancelledAt`. Session disposal and other aborts also settle as `cancelled`, so state alone is not user intent. Duplicate, absent, invalid or mismatched identities, and legacy cancellation records without the timestamp, keep the existing recovery behavior. A newer unmarked user entry prevents an older cancellation from being reused. Cold notifications are removed by the shared history boundary using both notification shape and the projection's authoritative trailing notification count. Reminder-bearing legacy notification fixtures remain recoverable; the current ACP recorder emits bare envelopes.
+
+Full conversation restore and selective restore use the same predicate. The transcript index retains small validated settlement hints from the active chain, including records before compression. Selective restore uses these hints independently of replay windows, without reloading historical prompt payloads or injecting terminal records into model history. Compression retains existing client prompt identities. Missing parent links keep the degraded-history guard.
+
+Retry, Continue and restored tool interaction reuse the original user record. Before resumed model execution, the recorder durably appends a `turn_attempt` with the original client identity and the new daemon identity. The latest attempt supersedes the original daemon binding, including when it crashes before producing any response or terminal. Only a unique explicit-cancel terminal after that latest binding suppresses recovery. A binding with unknown identity keeps recovery available. The record contains no user text, does not duplicate the visible prompt, and survives both the ordinary and Managed transcript projections. Actual user resubmission keeps the original history identity through the existing send option, including compression; tool-result entries do not acquire that prompt identity.
+
+Cancellation provenance travels in the bridge cancellation metadata. Explicit Cancel and queued-prompt removal carry user intent; HTTP response-close, deadlines and session teardown carry interruption. ACP preserves this reason when aborting admission and pending sends. Only user intent stamps `cancelledAt` or binds the live cancellation marker. Standard ACP cancellation without metadata retains its explicit-cancel behavior. Invalid prompt identities are discarded before settlement hints enter index byte accounting.
+
+## Runtime lifetime
+
+The initialized chat binds verified cancellation to its current history array, length, last entry and user-push count before callers clone history. History replacement, truncation, append and a new admitted input invalidate the basis. Refreshing only the startup-context prelude or clearing old tool results during idle memory-pressure cleanup carries the verified settlement onto the refreshed history. These operations preserve the cancelled turn. A new chat does not inherit it. Setup rollback cannot reactivate a cleared marker. ACP, daemon status/continue and headless continuation all consult the current chat.
+
+A live daemon cancellation requires the user-cancel abort reason and binds once to the latest owned turn's chat, while its original session remains active and the turn actually pushed user content. A delayed old settlement or a cancelled input that never reached history cannot mark another turn. The existing durable terminal is still recorded against the turn-start recorder.
+
+## Validation and acceptance
+
+Use a controlled loopback provider and a real built daemon: execute one read_file, hold the next provider response, explicitly Cancel, restart and request continuation. It must reject continuation and make no provider request. In the paired SIGKILL control, no terminal is persisted and continuation must remain accepted and execute normally. Also check live status, a later identical unanswered prompt, abandoned branches, compression, replay:none/recent/all, same-length replacement, unknown/duplicate identities and history gaps.
+
+Also verify that transport-close and prompt deadlines remain recoverable, while direct ACP cancellation remains explicit. Retry a cancelled prompt, interrupt the new attempt, and confirm the old cancellation cannot suppress it; cancel the new attempt explicitly and confirm it is suppressed, with and without compression. A malformed numeric prompt identity must leave finite index cache accounting. A failed durable attempt write must stop resumed execution before a provider call.
+
+## Risks and remaining work
+
+Legacy transcripts without authoritative daemon identity remain on the existing heuristic. This change covers recorded daemon cancellation; it does not invent terminal provenance for older or independent TUI cancellation paths. Model response and tool repair semantics remain unchanged.

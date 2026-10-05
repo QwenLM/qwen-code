@@ -483,6 +483,7 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  getPromptCancelAbortReason,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
@@ -7096,8 +7097,9 @@ class QwenAgent implements Agent {
       throw new Error(`Session not found: ${sessionId}`);
     }
     await this.runInSessionContext(session, async () => {
+      const abortReason = getPromptCancelAbortReason(params._meta);
       try {
-        await session.cancelPendingPrompt();
+        await session.cancelPendingPrompt(abortReason);
       } catch (error) {
         if (!isNotCurrentlyGeneratingCancelError(error)) {
           throw error;
@@ -7108,7 +7110,7 @@ class QwenAgent implements Agent {
       // cancelPendingPrompt cannot see them. Abort their controllers too, or a
       // cancelled prompt would run in full once admission frees.
       for (const call of this.activePromptCalls.get(sessionId) ?? []) {
-        call.controller.abort();
+        call.controller.abort(abortReason);
       }
     });
   }
@@ -9686,7 +9688,8 @@ class QwenAgent implements Agent {
         if (targetedCalls.size === 0) {
           return { cancelled: false };
         }
-        targetedCalls.forEach((call) => call.controller.abort());
+        const abortReason = getPromptCancelAbortReason(params['_meta']);
+        targetedCalls.forEach((call) => call.controller.abort(abortReason));
         await Promise.all(Array.from(targetedCalls, (call) => call.settled));
         return { cancelled: true };
       }

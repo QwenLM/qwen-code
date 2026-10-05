@@ -1490,6 +1490,22 @@ export interface TodoStopGuardQueueReleasedRequest {
 
 /** Parent-to-agent request that acknowledges prompt cancellation handling. */
 export const PROMPT_CANCEL_METHOD = 'craft/cancelPendingPrompt';
+export const PROMPT_CANCEL_REASON_META_KEY = 'qwen.cancelReason';
+export const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
+export const INTERRUPTED_PROMPT_ABORT_REASON = 'qwen:prompt-interrupted';
+
+export function getPromptCancelAbortReason(meta: unknown): string {
+  if (
+    typeof meta !== 'object' ||
+    meta === null ||
+    !(PROMPT_CANCEL_REASON_META_KEY in meta)
+  ) {
+    return USER_CANCEL_ABORT_REASON;
+  }
+  return meta[PROMPT_CANCEL_REASON_META_KEY] === 'user'
+    ? USER_CANCEL_ABORT_REASON
+    : INTERRUPTED_PROMPT_ABORT_REASON;
+}
 
 /**
  * Reverse tool channel marker (issue #5626, Phase 2). The parent serve process

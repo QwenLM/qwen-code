@@ -556,6 +556,7 @@ class Session {
       sessionId: this.sessionId,
       apiHistory: historyTail,
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
+      cancelledLastTurn: chat.isLastTurnCancelled?.(),
     });
     debugLogger.info('[Session] requestContinueLastTurn recovery', {
       sessionId: this.sessionId,

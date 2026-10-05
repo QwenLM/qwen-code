@@ -1167,6 +1167,7 @@ export async function runNonInteractive(
           sessionId,
           apiHistory: llmClient.getChat().getHistory(),
           completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
+          cancelledLastTurn: llmClient.getChat().isLastTurnCancelled?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
           kind: recoveryPlan.kind,

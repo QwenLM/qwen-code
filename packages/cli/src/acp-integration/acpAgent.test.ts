@@ -6930,43 +6930,52 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('acknowledges prompt cancellation after the tracked prompt settles', async () => {
-    const sessionId = '11111111-1111-1111-1111-111111111111';
-    await setupSessionMocks(sessionId);
-    const { agent, agentPromise } = await bootAcpAgent();
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    let finishPrompt: ((value: unknown) => void) | undefined;
-    lastSessionMock?.prompt.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          finishPrompt = resolve;
-        }),
-    );
-    const prompt = agent.prompt({ sessionId, prompt: [] });
+  it.each([
+    [undefined, 'qwen:user-cancel'],
+    [{ 'qwen.cancelReason': 'interrupted' }, 'qwen:prompt-interrupted'],
+  ])(
+    'acknowledges prompt cancellation after the tracked prompt settles with metadata=%s',
+    async (meta, reason) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      await setupSessionMocks(sessionId);
+      const { agent, agentPromise } = await bootAcpAgent();
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      let finishPrompt: ((value: unknown) => void) | undefined;
+      lastSessionMock?.prompt.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishPrompt = resolve;
+          }),
+      );
+      const prompt = agent.prompt({ sessionId, prompt: [] });
 
-    await vi.waitFor(() => expect(lastSessionMock?.prompt).toHaveBeenCalled());
-    const cancellationSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
-      | AbortSignal
-      | undefined;
+      await vi.waitFor(() =>
+        expect(lastSessionMock?.prompt).toHaveBeenCalled(),
+      );
+      const cancellationSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
+        | AbortSignal
+        | undefined;
 
-    let cancellationSettled = false;
-    const cancellation = agent
-      .extMethod(PROMPT_CANCEL_METHOD, { sessionId })
-      .finally(() => {
-        cancellationSettled = true;
-      });
-    await vi.waitFor(() => expect(cancellationSignal?.aborted).toBe(true));
-    expect(cancellationSettled).toBe(false);
-    expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
-    expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
+      let cancellationSettled = false;
+      const cancellation = agent
+        .extMethod(PROMPT_CANCEL_METHOD, { sessionId, _meta: meta })
+        .finally(() => {
+          cancellationSettled = true;
+        });
+      await vi.waitFor(() => expect(cancellationSignal?.aborted).toBe(true));
+      expect(cancellationSignal?.reason).toBe(reason);
+      expect(cancellationSettled).toBe(false);
+      expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+      expect(lastSessionMock?.cancelMcpAppCalls).not.toHaveBeenCalled();
 
-    finishPrompt?.({ stopReason: 'cancelled' });
-    await expect(cancellation).resolves.toEqual({ cancelled: true });
-    await prompt;
+      finishPrompt?.({ stopReason: 'cancelled' });
+      await expect(cancellation).resolves.toEqual({ cancelled: true });
+      await prompt;
 
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('acknowledges cancellation as a no-op when no prompt call is active', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
@@ -7017,6 +7026,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.cancel({ sessionId: callerSessionId });
     expect(admissionSignal?.aborted).toBe(true);
+    expect(admissionSignal?.reason).toBe('qwen:user-cancel');
 
     releaseAdmission();
     await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });

@@ -384,6 +384,7 @@ export interface ChatRecord {
     | 'goal_turn_end'
     | 'realtime_message'
     | 'turn_result'
+    | 'turn_attempt'
     | 'managed_session_header_v1'
     | 'managed_session_event_v1'
     | 'managed_session_commit_v1';
@@ -3496,6 +3497,30 @@ export class ChatRecordingService {
       systemPayload: payload,
     };
     await this.appendRecordStrict(record);
+  }
+
+  /** A resumed attempt must supersede an old cancellation before model execution. */
+  async recordTurnAttempt(
+    promptId: string | undefined,
+    daemonPromptId: string,
+  ): Promise<void> {
+    if (
+      (promptId !== undefined &&
+        (typeof promptId !== 'string' ||
+          promptId.length === 0 ||
+          promptId.length > TURN_RESULT_IDENTIFIER_MAX_CHARS)) ||
+      typeof daemonPromptId !== 'string' ||
+      daemonPromptId.length === 0 ||
+      daemonPromptId.length > TURN_RESULT_IDENTIFIER_MAX_CHARS
+    ) {
+      throw new TypeError('Invalid turn attempt identity');
+    }
+    await this.appendRecordStrict({
+      ...this.createBaseRecord('system'),
+      subtype: 'turn_attempt',
+      promptId,
+      daemonPromptId,
+    });
   }
 
   /**

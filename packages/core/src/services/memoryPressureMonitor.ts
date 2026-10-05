@@ -735,7 +735,9 @@ export class MemoryPressureMonitor extends EventEmitter {
             },
           );
           if (result.meta) {
+            const cancelledLastTurn = chat.isLastTurnCancelled();
             chat.setHistory(result.history, chat.getCompletedToolCallIds());
+            if (cancelledLastTurn) chat.markLastTurnCancelled();
             const memoryManager = this.coreConfig.getMemoryManager();
             if (result.meta.unresolvedEvictedMemoryBodies > 0) {
               memoryManager.markAllMemoryBodiesEvictedFromHistory();

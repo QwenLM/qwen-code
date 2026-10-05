@@ -260,6 +260,36 @@ describe('LlmChat', async () => {
   let mockConfig: Config;
   const config: GenerateContentConfig = {};
 
+  describe('cancelled recovery history basis', () => {
+    it('keeps the marker across history clones and clears it on replacement of equal length', () => {
+      chat.setHistory([userText('unfinished')]);
+      chat.markLastTurnCancelled();
+      expect(chat.isLastTurnCancelled()).toBe(true);
+      expect(chat.getHistory()).toEqual([userText('unfinished')]);
+      expect(chat.isLastTurnCancelled()).toBe(true);
+      chat.setHistory([userText('new unfinished')]);
+      expect(chat.isLastTurnCancelled()).toBe(false);
+    });
+    it.each(['clear', 'truncate', 'append', 'thoughts'] as const)(
+      'invalidates cancellation on %s',
+      (mutation) => {
+        chat.setHistory([userText('unfinished')]);
+        chat.markLastTurnCancelled();
+        if (mutation === 'clear') chat.clearHistory();
+        if (mutation === 'truncate') chat.truncateHistory(0);
+        if (mutation === 'append') chat.addHistory(userText('new input'));
+        if (mutation === 'thoughts') chat.stripThoughtsFromHistory();
+        expect(chat.isLastTurnCancelled()).toBe(false);
+      },
+    );
+    it('does not transfer cancellation to another chat using the same history', () => {
+      chat.setHistory([userText('unfinished')]);
+      chat.markLastTurnCancelled();
+      const fresh = new LlmChat(mockConfig, {}, chat.getHistory());
+      expect(fresh.isLastTurnCancelled()).toBe(false);
+    });
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockAcquireSleepInhibitor.mockReturnValue({

@@ -273,6 +273,7 @@ import {
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+import { getLastApiHistoryPromptId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { parsePromptAgentRun } from './agent-run-meta.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
@@ -305,6 +306,7 @@ import {
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+  USER_CANCEL_ABORT_REASON,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
@@ -483,7 +485,6 @@ import {
 
 const debugLogger = createDebugLogger('SESSION');
 const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
-const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const GOAL_HELD_RECOVERY_COMMANDS =
@@ -4887,7 +4888,9 @@ export class Session implements SessionContext {
     );
   }
 
-  async cancelPendingPrompt(): Promise<void> {
+  async cancelPendingPrompt(
+    requestedAbortReason: string = USER_CANCEL_ABORT_REASON,
+  ): Promise<void> {
     const hadPrompt = !!this.pendingPrompt;
     const hadCron = !!this.cronAbortController;
     const hadNotification =
@@ -4915,7 +4918,7 @@ export class Session implements SessionContext {
     const abortReason =
       this.closing || this.disposed
         ? SESSION_DISPOSE_ABORT_REASON
-        : USER_CANCEL_ABORT_REASON;
+        : requestedAbortReason;
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(abortReason);
     }
@@ -5025,7 +5028,12 @@ export class Session implements SessionContext {
         : undefined;
     if (channelTask) this.channelTaskCaptures.add(channelTask);
     const recordAdmissionCancellation = () => {
-      if (turnRecording) turnRecording.cancelledAt ??= Date.now();
+      if (
+        turnRecording &&
+        admissionCancellation?.reason === USER_CANCEL_ABORT_REASON
+      ) {
+        turnRecording.cancelledAt ??= Date.now();
+      }
     };
     admissionCancellation?.addEventListener(
       'abort',
@@ -5300,7 +5308,8 @@ export class Session implements SessionContext {
     pendingSend.signal.addEventListener('abort', recordCancellation, {
       once: true,
     });
-    const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
+    const cancelPendingSend = () =>
+      pendingSend.abort(admissionCancellation?.reason);
     if (admissionCancellation) {
       admissionCancellation.addEventListener('abort', cancelPendingSend, {
         once: true,
@@ -5477,8 +5486,30 @@ export class Session implements SessionContext {
     let rejectedByLoopProtection = false;
     let promptResult: PromptResponse | undefined;
     let promptFailureMessage: string | undefined;
+    let bindCancelledHistory: (() => void) | undefined;
     if (turnRecording) turnRecording.startedAt = Date.now();
     try {
+      const recoveryCompletion = this.pendingPromptCompletion;
+      const recoverySessionId = this.config.getSessionId();
+      const recoveryChat = this.#getCurrentChat();
+      const recoveryUserPushCount = recoveryChat.getUserContentPushCount?.();
+      let cancelledHistoryBound = false;
+      bindCancelledHistory = () => {
+        // Cancellation clears pendingPrompt; its completion still owns the history.
+        if (
+          !cancelledHistoryBound &&
+          this.pendingPromptCompletion === recoveryCompletion &&
+          pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
+          !this.config.getManagedSessionBlock?.() &&
+          recoverySessionId === this.config.getSessionId() &&
+          recoveryChat === this.#getCurrentChat() &&
+          recoveryUserPushCount !== undefined &&
+          recoveryChat.getUserContentPushCount() > recoveryUserPushCount
+        ) {
+          cancelledHistoryBound = true;
+          recoveryChat.markLastTurnCancelled?.();
+        }
+      };
       const reasoningMeta = (params as { _meta?: Record<string, unknown> })
         ._meta;
       if (
@@ -5547,6 +5578,7 @@ export class Session implements SessionContext {
           proposalTurn.settlementBlocked !== true;
       }
       await this.#settleGoalProposal(responseCapture);
+      bindCancelledHistory();
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
@@ -5610,6 +5642,7 @@ export class Session implements SessionContext {
         }
       }
       const stillOwnsPendingPrompt = this.pendingPrompt === pendingSend;
+      bindCancelledHistory?.();
       releasePendingSend();
       const shouldDrainAutomaticQueues =
         // Loop-detected turns resolved end_turn (and drained) before loop
@@ -5681,6 +5714,7 @@ export class Session implements SessionContext {
     return buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
+      cancelledLastTurn: chat.isLastTurnCancelled?.(),
       apiHistory: fullHistory
         ? chat.getHistory()
         : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
@@ -6172,6 +6206,12 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY
               ] === true;
+            const continuedPromptId = continuesCurrentWorkChain
+              ? getLastApiHistoryPromptId(
+                  this.#getCurrentChat().getHistoryShallow(),
+                )
+              : undefined;
+            let reattemptRecorded = false;
             if (
               isRestoreAskUserQuestion &&
               !findRestorableAskUserQuestion(
@@ -6879,6 +6919,16 @@ export class Session implements SessionContext {
                 let requestRouteKey = '';
 
                 try {
+                  if (
+                    continuesCurrentWorkChain &&
+                    daemonPromptId &&
+                    !reattemptRecorded
+                  ) {
+                    await this.config
+                      .getChatRecordingService()
+                      ?.recordTurnAttempt(continuedPromptId, daemonPromptId);
+                    reattemptRecorded = true;
+                  }
                   // Set where the model request is actually issued, not at
                   // the top of the turn. `modelStarted` is what
                   // `#settleGoalTurn` reads to decide between `releaseTurn`
@@ -6903,6 +6953,16 @@ export class Session implements SessionContext {
                       pendingSend.signal,
                       {
                         modelOverride: fullTurnModelOverride,
+                        historyPromptId:
+                          turnCount === 1 &&
+                          goalTurn?.origin !== 'runtime' &&
+                          !nextMessage?.parts?.some(
+                            (part) => part.functionResponse,
+                          )
+                            ? continuesCurrentWorkChain
+                              ? continuedPromptId
+                              : promptId
+                            : undefined,
                         consumeInitialMemory:
                           isFreshUserTurn && turnCount === 1,
                       },
@@ -8773,6 +8833,7 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     options: {
       skipCompression?: boolean;
+      historyPromptId?: string;
       modelOverride?: string;
       getModelOverride?: () => string | undefined;
       prepareBeforeCompression?: () => Promise<BeforeModelSendDecision>;
@@ -8956,9 +9017,14 @@ export class Session implements SessionContext {
     const goalPermit = goalTurnContext.getStore();
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
-      sourceStream = goalPermit
-        ? await chat.sendMessageStream(model, request, promptId, goalPermit)
-        : await chat.sendMessageStream(model, request, promptId);
+      sourceStream =
+        options.historyPromptId !== undefined
+          ? await chat.sendMessageStream(model, request, promptId, goalPermit, {
+              promptId: options.historyPromptId,
+            })
+          : goalPermit
+            ? await chat.sendMessageStream(model, request, promptId, goalPermit)
+            : await chat.sendMessageStream(model, request, promptId);
     } catch (error) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       throw error;

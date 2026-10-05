@@ -21,6 +21,7 @@ export interface TranscriptProjectionDiagnostic {
 }
 
 export interface TranscriptRecordInput {
+  readonly promptId?: string;
   readonly uuid: string;
   readonly parentUuid: string | null;
   readonly sessionId: string;
@@ -150,6 +151,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'goal_runtime',
   'goal_turn_end',
   'turn_result',
+  'turn_attempt',
   'user_text_elements',
   ...ARTIFACT_RECORD_SUBTYPES,
   ...MANAGED_SESSION_RECORD_SUBTYPES,
@@ -423,6 +425,10 @@ export function validateTranscriptRecord(
       uuid,
       parentUuid,
       sessionId,
+      promptId:
+        typeof value['promptId'] === 'string' && value['promptId'].length > 0
+          ? value['promptId']
+          : undefined,
       daemonPromptId:
         typeof value['daemonPromptId'] === 'string' &&
         value['daemonPromptId'].trim().length > 0

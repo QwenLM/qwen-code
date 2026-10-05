@@ -1482,6 +1482,23 @@ describe('ChatRecordingService', () => {
       expect(record.systemPayload).toEqual(payload);
     });
 
+    it('persists a resumed turn attempt without duplicating its user message', async () => {
+      user('retry me', undefined, undefined, 'client-1', 'daemon-1');
+      await svc.recordTurnAttempt('client-1', 'daemon-2');
+      const [original, attempt] = await flushedAll();
+      expect(attempt).toMatchObject({
+        type: 'system',
+        subtype: 'turn_attempt',
+        parentUuid: original.uuid,
+        promptId: 'client-1',
+        daemonPromptId: 'daemon-2',
+      });
+      expect(attempt.message).toBeUndefined();
+      expect(writes().filter((record) => record.type === 'user')).toHaveLength(
+        1,
+      );
+    });
+
     it('refuses to append payloads the bounded contract rejects', async () => {
       svc.recordTurnResult({
         promptId: 'prompt-1',
