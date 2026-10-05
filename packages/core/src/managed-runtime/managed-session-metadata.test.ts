@@ -307,6 +307,13 @@ describe('managed session metadata', () => {
         },
         { class: 'trusted_entry' },
       );
+      const bodies = path.join(
+        harness.runtimeBaseDir,
+        'resources',
+        sessionId,
+        'managed-session_metadata',
+      );
+      const published = (await fs.readdir(bodies)).length;
       enablement.sessionMetadata = false;
       await expect(
         authority.commitDomainRecord(
@@ -331,6 +338,105 @@ describe('managed session metadata', () => {
           { class: 'trusted_entry' },
         ),
       ).rejects.toThrow(/not enabled for submission/);
+      // Refused before publishing: the refusal leaves no body behind.
+      expect((await fs.readdir(bodies)).length).toBe(published);
+    });
+  });
+
+  it('refuses a stale or foreign command before publishing it', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'First title', titleSource: 'auto' },
+        },
+        { class: 'trusted_entry' },
+      );
+      const bodies = path.join(
+        harness.runtimeBaseDir,
+        'resources',
+        sessionId,
+        'managed-session_metadata',
+      );
+      const published = (await fs.readdir(bodies)).length;
+      await expect(
+        authority.commitDomainRecord(
+          { ...renameCommand('cmd-rename-2'), expectedSequence: 99 },
+          {
+            domain: 'session_metadata',
+            content: { title: 'Stale title', titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/does not match the committed sequence/);
+      await expect(
+        authority.commitDomainRecord(
+          {
+            ...renameCommand('cmd-rename-3'),
+            sessionKey: { ...sessionKey, sessionId: 'another-session' },
+          },
+          {
+            domain: 'session_metadata',
+            content: { title: 'Foreign title', titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/does not match this session/);
+      expect((await fs.readdir(bodies)).length).toBe(published);
+    });
+  });
+
+  it('refuses a retry of a command committed without a domain record', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'First title', titleSource: 'auto' },
+        },
+        { class: 'trusted_entry' },
+      );
+      const bodies = path.join(
+        harness.runtimeBaseDir,
+        'resources',
+        sessionId,
+        'managed-session_metadata',
+      );
+      const published = (await fs.readdir(bodies)).length;
+      // The command key is spent on an input, so its transaction holds no
+      // domain record for the retried commit to replay.
+      const shared = renameCommand('cmd-shared-input');
+      await authority.submitInput(shared, {
+        inputId: 'shared-1',
+        turnId: 'shared-1',
+        source: 'user',
+        contentRef: await harness.store.publish(
+          'managed-input',
+          Buffer.from('{"text":"hello"}', 'utf8'),
+        ),
+        deadline: null,
+        admissionRef: await harness.store.publish(
+          'managed-admission',
+          Buffer.from('{}', 'utf8'),
+        ),
+        wakeReason: 'input',
+      });
+      const sequence = authority.committedSequence;
+      await expect(
+        authority.commitDomainRecord(
+          shared,
+          {
+            domain: 'session_metadata',
+            content: { title: 'Shared title', titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/committed without a domain record/);
+      expect(authority.committedSequence).toBe(sequence);
+      expect((await fs.readdir(bodies)).length).toBe(published);
     });
   });
 
