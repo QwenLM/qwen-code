@@ -866,6 +866,10 @@ export class HostedWorkspaceToolTurn {
             );
           backgroundAdmitted =
             backgroundRequested &&
+            // The admitted family runs v3 only: a shell-mode turn has no
+            // publication to drive it, so admitting there would only re-
+            // send the request into the background-refusing v2 path.
+            this.publication !== undefined &&
             this.childRuns !== undefined &&
             childRunAdmissionsEnabled();
           if (typeof args['command'] !== 'string' || !args['command'].trim()) {
@@ -1893,11 +1897,11 @@ export class HostedWorkspaceToolTurn {
     model: string,
   ): Promise<Part[]> {
     if (result.executionStatus === 'not_started' && result.capture === null) {
-      await this.monitors!.settleFailed(executionCallId, {
-        stopReason: 'start_failed',
-        started: false,
-      });
-      return this.acceptShell(
+      // Prove before settle: the owner's close gate is the authority on
+      // "this start never happened". Settling the record first and then
+      // seeing the proof refused would freeze a run that actually started
+      // into a line no later fact may ever touch.
+      const parts = await this.acceptShell(
         request.call,
         executionCallId,
         saved.publicationId,
@@ -1905,6 +1909,11 @@ export class HostedWorkspaceToolTurn {
         result,
         model,
       );
+      await this.monitors!.settleFailed(executionCallId, {
+        stopReason: 'start_failed',
+        started: false,
+      });
+      return parts;
     }
     if (
       result.executionStatus !== 'success' ||
@@ -1944,8 +1953,13 @@ export class HostedWorkspaceToolTurn {
       // with the start receipt now committed, its own settle — tail
       // observation included — completes without any client retry.
       await this.publisher?.settleAttached(executionCallId);
-      // A fresh accept starts the observation lifecycle; a replay never
-      // reopens it, exactly like a replay never re-attaches.
+    }
+    // The observation lifecycle lives exactly once per owning process,
+    // keyed on the live record rather than on this call's freshness: a
+    // fresh accept starts it, and a replay after a restart — whose
+    // journal already carries the receipt — must resume it, or the
+    // watch's lines, terminal conditions and settle never arrive.
+    if (this.monitors!.record(executionCallId)?.stopReason === null) {
       await this.resumeMonitorWatch(executionCallId);
     }
     let ref: ManagedSessionDurableRef;
@@ -2138,11 +2152,11 @@ export class HostedWorkspaceToolTurn {
     model: string,
   ): Promise<Part[]> {
     if (result.executionStatus === 'not_started' && result.capture === null) {
-      await this.childRuns!.settleFailed(executionCallId, {
-        stopReason: 'start_failed',
-        started: false,
-      });
-      return this.acceptShell(
+      // Prove before settle: the owner's close gate is the authority on
+      // "this start never happened". Settling the record first and then
+      // seeing the proof refused would freeze a run that actually started
+      // into a line no later fact may ever touch.
+      const parts = await this.acceptShell(
         request.call,
         executionCallId,
         saved.publicationId,
@@ -2150,6 +2164,11 @@ export class HostedWorkspaceToolTurn {
         result,
         model,
       );
+      await this.childRuns!.settleFailed(executionCallId, {
+        stopReason: 'start_failed',
+        started: false,
+      });
+      return parts;
     }
     if (
       result.executionStatus !== 'success' ||

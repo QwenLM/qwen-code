@@ -4103,7 +4103,11 @@ it.each([
 
 function backgroundTurnRig(
   outcome: ToolResultEnvelope,
-  options: { attached?: boolean; lane?: HostedShellTurnOptions } = {},
+  options: {
+    attached?: boolean;
+    lane?: HostedShellTurnOptions;
+    notStartedProven?: boolean;
+  } = {},
 ) {
   enablement.childRun = true;
   const order: string[] = [];
@@ -4151,7 +4155,9 @@ function backgroundTurnRig(
       }
       if (route === '/grants' && operation === 'close_not_started') {
         order.push('close_not_started');
-        return { state: 'NOT_STARTED' };
+        return {
+          state: options.notStartedProven === false ? 'RUNNING' : 'NOT_STARTED',
+        };
       }
       throw new Error('Unexpected publication route ' + route);
     }),
@@ -4208,7 +4214,10 @@ function backgroundTurnRig(
   return { order, orchestrator, turn, lane: options.lane };
 }
 
-function monitorTurnRig(outcome: ToolResultEnvelope) {
+function monitorTurnRig(
+  outcome: ToolResultEnvelope,
+  opts: { notStartedProven?: boolean } = {},
+) {
   enablement.childRun = true;
   enablement.monitorRun = true;
   const order: string[] = [];
@@ -4292,7 +4301,9 @@ function monitorTurnRig(outcome: ToolResultEnvelope) {
       }
       if (route === '/grants' && operation === 'close_not_started') {
         order.push('close_not_started');
-        return { state: 'NOT_STARTED' };
+        return {
+          state: opts.notStartedProven === false ? 'RUNNING' : 'NOT_STARTED',
+        };
       }
       throw new Error('Unexpected publication route ' + route);
     }),
@@ -4482,6 +4493,143 @@ describe('hosted Monitor admission arm', () => {
       'close_not_started',
       'tool_result',
     ]);
+  });
+
+  it('rejects an unproven not_started refuse before settling the watch record', async () => {
+    const { call, parts } = monitorCall();
+    const rejectedStart: ToolResultEnvelope = {
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+      error: {
+        message:
+          'Monitor watch requires a delegated Linux cgroup v2 root on this Runtime.',
+      },
+    };
+    const rig = monitorTurnRig(rejectedStart, { notStartedProven: false });
+    turn = rig.turn;
+    await expect(
+      rig.turn.execute([call], parts, 'model', new AbortController().signal),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    // The authoritative proof failed: the record stays un-settled rather
+    // than claiming a failure that never happened.
+    expect(rig.monitors.calls.some(([name]) => name === 'settleFailed')).toBe(
+      false,
+    );
+  });
+
+  it('rejects an unproven not_started refuse before settling the Shell record', async () => {
+    const { call, parts } = backgroundCall();
+    const rejectedStart: ToolResultEnvelope = {
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+      error: {
+        message:
+          'Background Shell requires a delegated Linux cgroup v2 directory on this Runtime.',
+      },
+    };
+    const rig = backgroundTurnRig(rejectedStart, { notStartedProven: false });
+    turn = rig.turn;
+    await expect(
+      rig.turn.execute([call], parts, 'model', new AbortController().signal),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(
+      rig.orchestrator.calls.some(([name]) => name === 'settleFailed'),
+    ).toBe(false);
+  });
+
+  it('resumes a live watch on an accept replay whose loop was lost', async () => {
+    const { call, parts } = monitorCall();
+    const rig = monitorTurnRig(DETACHED);
+    turn = rig.turn;
+    await rig.turn.execute(
+      [call],
+      parts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(rig.options.monitorLoops?.has('monitor-execution')).toBe(true);
+    // The process that owned the observation loop is gone; the journal
+    // keeps the record running and its receipt, so the next accept for it
+    // must resume the loop or the run never settles again.
+    rig.options.monitorLoops = new Map();
+    const accept = (
+      rig.turn as unknown as {
+        acceptMonitor(
+          request: {
+            call: ToolCallRequestInfo;
+            input: Record<string, unknown>;
+          },
+          executionCallId: string,
+          saved: Record<string, string>,
+          result: ToolResultEnvelope,
+          model: string,
+        ): Promise<Part[]>;
+      }
+    ).acceptMonitor.bind(rig.turn);
+    const retried = await accept(
+      { call, input: call.args as Record<string, unknown> },
+      'monitor-execution',
+      {
+        publicationId: 'publication-1',
+        publicationToken: 'token-1',
+        runtimeBindingId: 'binding-1',
+        bindingGeneration: '1',
+        runtimeCallId: 'rt',
+      },
+      DETACHED,
+      'model',
+    );
+    expect(retried[0]?.functionResponse?.response).toMatchObject({
+      executionStatus: 'success',
+    });
+    expect(rig.options.monitorLoops?.has('monitor-execution')).toBe(true);
+    expect(
+      rig.monitors.calls.filter(([name]) => name === 'attach'),
+    ).toHaveLength(1);
+  });
+
+  it('refuses a background request on a Session whose flow has no publication lane', async () => {
+    enablement.childRun = true;
+    const { call: shellCall, parts } = backgroundCall();
+    const bare = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      async () => randomUUID(),
+      () => true,
+      {
+        resources: {} as never,
+        assertWritable: async () => undefined,
+      } as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        admit: async () => undefined,
+        dispatchStarted: async () => undefined,
+        attach: async () => undefined,
+        settleFailed: async () => undefined,
+        record: () => undefined,
+        settleExited: async () => undefined,
+      } as never,
+      undefined,
+    );
+    const result = await bare.execute(
+      [shellCall],
+      parts,
+      'model',
+      new AbortController().signal,
+    );
+    // shell-mode has no publication lane for the detached family, so the
+    // request refuses at admission instead of travelling v2 and failing 409.
+    expect(result[0]?.functionResponse?.response).toMatchObject({
+      error:
+        'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.',
+    });
   });
 
   it('records a monitor refusal without any funnel call on an empty session', async () => {

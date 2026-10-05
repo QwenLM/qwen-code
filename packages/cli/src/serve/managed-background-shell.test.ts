@@ -170,7 +170,11 @@ interface Rig {
 }
 
 function rig(
-  options: { withSupervisor?: boolean; prepareRejects?: boolean } = {},
+  options: {
+    withSupervisor?: boolean;
+    prepareRejects?: boolean;
+    sleepBlocked?: boolean;
+  } = {},
 ): Rig {
   const process = fakeProcess('qwen-bg-call-1');
   const sink = fakeSink();
@@ -198,7 +202,18 @@ function rig(
           : fakeProcess(spec.unitName),
     ),
   };
-  const tool = { validateToolParams: () => null };
+  const tool = {
+    validateToolParams: (params: Record<string, unknown>) => {
+      const command = params['command'];
+      if (
+        options.sleepBlocked === true &&
+        typeof command === 'string' &&
+        /^\s*sleep\s/.test(command)
+      )
+        return 'commands cannot run a standalone sleep as a foreground call';
+      return null;
+    },
+  };
   const tools: ManagedToolSet = {
     sessionId: 'runtime-session-1',
     directory,
@@ -306,6 +321,33 @@ describe('managed v3 Monitor watch', () => {
         error: { message: 'Session already runs 4 Monitor watches.' },
       },
     });
+  });
+
+  it('admits an is_monitor long wait past the foreground sleep gate', async () => {
+    const ctx = rig({ sleepBlocked: true });
+    // Mirror the ShellTool foreground guard the wire shape cannot see: a
+    // standalone sleep would be blocked as a foreground long wait, but the
+    // monitor family exists so that wait is durable rather than refused.
+    const sleepInput = { command: 'sleep 3600', is_monitor: true };
+    const view = await ctx.executor.executeV3({
+      reference: {
+        ...REFERENCE,
+        argsDigest: `sha256:${managedToolDigest(sleepInput)}`,
+      },
+      capture: CAPTURE,
+      toolName: 'run_shell_command',
+      input: sleepInput,
+    });
+    expect(view).toMatchObject({
+      state: 'settled',
+      result: {
+        executionStatus: 'success',
+        capture: { captureStatus: 'detached', manifest: null },
+      },
+    });
+    expect(ctx.supervisor.start).toHaveBeenCalledWith(
+      expect.objectContaining({ unitName: 'qwen-mon-call-1' }),
+    );
   });
 
   it('refuses the watch when the Runtime owns no delegated cgroup', async () => {

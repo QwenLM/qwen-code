@@ -587,22 +587,20 @@ export class ManagedToolExecutor {
     if (toolName === 'monitor') {
       return this.executeV3Monitor(request, tools, structuredClone(input));
     }
+    const normalized = structuredClone(input);
+    // The background and monitor families reject long waits' shell-side
+    // policies such as the foreground sleep guard — they exist exactly so
+    // that a wait is durable rather than blocked. Validate with their own
+    // admission instead of the foreground Shell tool's parameters.
+    if (normalized['is_background'] === true) {
+      return this.executeV3Background(request, tools, normalized);
+    }
+    if (normalized['is_monitor'] === true) {
+      return this.executeV3Monitor(request, tools, normalized);
+    }
     const tool = tools.tools.get(toolName);
     if (!tool)
       throw new ManagedToolUnavailableError('Foreground Shell is unavailable.');
-    const normalized = structuredClone(input);
-    if (
-      tool.validateToolParams(normalized) === null &&
-      normalized['is_background'] === true
-    ) {
-      return this.executeV3Background(request, tools, normalized);
-    }
-    if (
-      tool.validateToolParams(normalized) === null &&
-      normalized['is_monitor'] === true
-    ) {
-      return this.executeV3Monitor(request, tools, normalized);
-    }
     let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
     try {
       prepared = await this.capturePublisher.prepare({ reference, capture });
