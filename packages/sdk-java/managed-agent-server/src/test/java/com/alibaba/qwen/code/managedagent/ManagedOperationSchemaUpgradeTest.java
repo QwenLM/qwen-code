@@ -16,7 +16,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 /**
  * An additive operation-table migration must not break the store against a
  * schema that predates it: the operation mapper tolerates missing cwd
- * columns (V36) so upgrade paths like the MariaDB retention IT, which pins
+ * columns (V40) so upgrade paths like the MariaDB retention IT, which pins
  * a V31 schema before upgrading, keep reading operations. The H2 twin of
  * that invariant stays fast enough to run in the unit suite.
  */
