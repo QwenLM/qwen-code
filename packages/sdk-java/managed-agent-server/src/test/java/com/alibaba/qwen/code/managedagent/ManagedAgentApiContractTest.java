@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
@@ -58,7 +59,7 @@ import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
@@ -82,9 +83,11 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpMethod;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.web.servlet.MockMvc;
@@ -103,7 +106,8 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"
 })
-@AutoConfigureMockMvc
+// SSE responses are still being written when MockMvc runs its result printer.
+@AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
 class ManagedAgentApiContractTest {
     private static final String KNOWN_GAPS = "openapi/contract-known-gaps.txt";
@@ -118,12 +122,20 @@ class ManagedAgentApiContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
+                    entry(ApiModels.AgentDefinitionRequest.class, List.of("AgentDefinitionRequest")),
+                    entry(ApiModels.AgentDefinition.class, List.of("AgentDefinition")),
                     entry(ApiModels.PermissionResponse.class, List.of("PermissionResponse")),
                     entry(ApiModels.WebShellPermissionResponse.class, List.of("WebShellPermissionResponse")),
                     entry(ApiModels.WebShellActionQueryRequest.class, List.of("WebShellActionQueryRequest")),
                     entry(ApiModels.WebShellActionGetRequest.class, List.of("WebShellActionGetRequest")),
                     entry(ApiModels.WebShellActionRespondRequest.class, List.of("WebShellActionRespondRequest")),
                     entry(ApiModels.PublicActionList.class, List.of("PublicActionList")),
+                    entry(ApiModels.ArtifactAccess.class, List.of("ArtifactAccess")),
+                    entry(ApiModels.ArtifactResponse.class, List.of("ArtifactResponse")),
+                    entry(ApiModels.ToolResultResponse.class, List.of("ToolResultResponse")),
+                    entry(ApiModels.WebShellArtifactQueryRequest.class, List.of("WebShellArtifactQueryRequest")),
+                    entry(ApiModels.WebShellArtifactRequest.class, List.of("WebShellArtifactRequest")),
+                    entry(ApiModels.WebShellToolResultRequest.class, List.of("WebShellToolResultRequest")),
                     entry(InputBlock.class, List.of("InputBlock")),
                     entry(CreateSessionRequest.class,
                             List.of("CreateSessionRequest")),
@@ -143,7 +155,7 @@ class ManagedAgentApiContractTest {
                             List.of("SessionCapabilities")),
                     entry(PublicList.class, List.of("PublicSessionList",
                             "PublicEventList", "PublicTaskList",
-                            "PublicTurnList")),
+                            "PublicTurnList", "PublicArtifactList")),
                     entry(PublicEvent.class, List.of("PublicEvent")),
                     entry(SessionResyncRequired.class,
                             List.of("SessionResyncRequired")),
@@ -178,7 +190,7 @@ class ManagedAgentApiContractTest {
                     entry(WebShellSessionCapabilities.class,
                             List.of("WebShellSessionCapabilities")),
                     entry(WebShellPage.class, List.of("WebShellSessionPage",
-                            "WebShellTaskPage", "WebShellActionPage")),
+                            "WebShellTaskPage", "WebShellActionPage", "WebShellArtifactPage")),
                     entry(PublicTask.class, List.of("PublicTask")),
                     entry(WebShellTask.class, List.of("WebShellTask")),
                     entry(WebShellTaskQueryRequest.class,
@@ -217,6 +229,102 @@ class ManagedAgentApiContractTest {
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
     private RequestMappingHandlerMapping handlerMapping;
+
+    @Test
+    void tenantFilteredRoutesDeclareAndReturnTheActorScopeRefusal() throws Exception {
+        Map<String, String> drift = new TreeMap<>();
+        for (Operation operation : CONTRACT.operations()) {
+            if (!operation.path().equals("/v1/agents")
+                    && !operation.path().startsWith("/v1/agents/")
+                    && !operation.path().startsWith(WEB_SHELL + "/")) {
+                continue;
+            }
+            assertThat(operation.node().path("responses").path("403").path("$ref").asText())
+                    .as("%s declares the tenant filter refusal", operation.operationId())
+                    .isEqualTo("#/components/responses/Forbidden");
+            if ("planned".equals(operation.status())) {
+                continue;
+            }
+            String path = operation.path().replaceAll("\\{[^}]+}", "scope-probe");
+            MockHttpServletRequestBuilder request = request(
+                    HttpMethod.valueOf(operation.method()), path)
+                    .header(TENANT, "contract-tenant").principal(actor("other-tenant"));
+            exchange(drift, operation.operationId(), 403, request, null);
+        }
+        assertThat(drift)
+                .as("Actor-scope drift is not deferrable; fix it instead of recording a gap in %s",
+                        KNOWN_GAPS)
+                .isEmpty();
+    }
+
+    @Test
+    void everyMappedPublicRouteIsCoveredByTheSharedSurfacePredicate() {
+        // A controller method added outside the predicate's prefixes would
+        // silently skip both the tenant filter and the signature filter.
+        Set<String> uncovered = new TreeSet<>();
+        handlerMapping.getHandlerMethods().keySet().forEach(info -> {
+            for (String pattern : info.getPatternValues()) {
+                if (pattern.startsWith("/internal/")
+                        || pattern.startsWith("/error")) {
+                    continue;
+                }
+                if (!com.alibaba.qwen.code.managedagent.api.PublicSurface
+                        .covers(pattern)) {
+                    uncovered.add(pattern);
+                }
+            }
+        });
+        assertThat(uncovered)
+                .as("every public controller route must satisfy PublicSurface.covers")
+                .isEmpty();
+    }
+
+    @Test
+    void theCreatorOnlyResponderContractNamesTheOwnerlessFallThrough() {
+        // ManagedActionStore.requireOwner admits any tenant caller on a
+        // Session with neither a recorded creator nor a create command.
+        // Enumerate the responder operations structurally so a reworded or
+        // newly added responder cannot escape the qualification.
+        Set<String> responderPaths = Set.of(
+                "/v1/agents/sessions/{sessionId}/actions/{actionId}/responses",
+                "/api/agent/web-shell/v1/actions/respond");
+        int responders = 0;
+        for (Operation operation : CONTRACT.operations()) {
+            boolean responder = responderPaths.contains(operation.path());
+            JsonNode node = operation.node();
+            String description = node.path("description").asText();
+            String forbidden = node.path("responses").path("403")
+                    .path("description").asText();
+            if (responder) {
+                responders++;
+                assertThat(description + "\n" + forbidden)
+                        .as(operation.operationId())
+                        .contains("no recorded creator and no recorded"
+                                + " create command");
+            }
+            // action_forbidden is documented only where requireOwner can
+            // fire, and a 403 sibling description overrides the shared
+            // Forbidden component, so it must name its other code.
+            assertThat((description + forbidden).contains("action_forbidden"))
+                    .as(operation.operationId()).isEqualTo(responder);
+            if (!forbidden.isEmpty()) {
+                assertThat(forbidden).as(operation.operationId())
+                        .contains("actor_scope_mismatch");
+            }
+        }
+        assertThat(responders).isEqualTo(2);
+    }
+
+    @Test
+    void transcriptContractPromisesTheFullTailPastTheSnapshot() {
+        // The cursor-less transcript serves every event after the Snapshot;
+        // a server-side paging change that leaves this published sentence
+        // stale must turn the suite red, so pin the sentence itself.
+        String description = CONTRACT.operation("webShellTranscript").node()
+                .path("description").asText();
+        assertThat(description).contains("and every event after it");
+        assertThat(description).contains("limit bounds the page of events");
+    }
 
     @Test
     void mappedRoutesMatchTheSpec() {
@@ -305,6 +413,27 @@ class ManagedAgentApiContractTest {
                 {"agent_id":"qwen-code","metadata":{"title":"contract"},
                  "input":[{"type":"input_text","text":"hello"}]}
                 """)).get("id").asText();
+        exchange(drift, "listArtifacts", 401,
+                get("/v1/agents/sessions/%s/artifacts".formatted(sessionId))
+                        .header(TENANT, tenant), null);
+        exchange(drift, "getArtifactContent", 401,
+                get("/v1/agents/sessions/%s/artifacts/artifact_missing/content".formatted(sessionId))
+                        .header(TENANT, tenant), null);
+        exchange(drift, "getWebShellToolResult", 401,
+                post("/api/agent/web-shell/v1/tool-results/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));
+        exchange(drift, "getWebShellArtifact", 401,
+                post("/api/agent/web-shell/v1/artifacts/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"artifactId\":\"artifact_missing\"}".formatted(sessionId));
+        exchange(drift, "queryWebShellArtifacts", 401,
+                post("/api/agent/web-shell/v1/artifacts/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\"}".formatted(sessionId));
+        exchange(drift, "getToolResult", 401,
+                get("/v1/agents/sessions/%s/items/item_missing/tool-result".formatted(sessionId))
+                        .header(TENANT, tenant), null);
+        exchange(drift, "getArtifact", 401,
+                get("/v1/agents/sessions/%s/artifacts/artifact_missing".formatted(sessionId))
+                        .header(TENANT, tenant), null);
         MockHttpServletResponse publicStream = stream(drift,
                 "getSessionEvents",
                 get("/v1/agents/sessions/{id}/events", sessionId)
@@ -717,6 +846,31 @@ class ManagedAgentApiContractTest {
                 """
                 {"sessionId":"%s","idempotencyKey":"contract-web-foreign"}
                 """.formatted(webSessionId));
+        for (int attempt = 0; attempt < 2; attempt++) {
+            exchange(drift, "unarchiveWebShellSession", 200,
+                    post(WEB_SHELL + "/sessions/unarchive").header(TENANT, tenant),
+                    """
+                    {"sessionId":"%s","idempotencyKey":"contract-web-unarchive"}
+                    """.formatted(webSessionId));
+        }
+        exchange(drift, "unarchiveWebShellSession", 409,
+                post(WEB_SHELL + "/sessions/unarchive").header(TENANT, tenant),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-unarchive-again"}
+                """.formatted(webSessionId));
+        exchange(drift, "unarchiveWebShellSession", 404,
+                post(WEB_SHELL + "/sessions/unarchive").header(TENANT, otherTenant),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-unarchive"}
+                """.formatted(webSessionId));
+        exchange(drift, "unarchiveWebShellSession", 400,
+                post(WEB_SHELL + "/sessions/unarchive").header(TENANT, tenant), "{}");
+        exchange(drift, "unarchiveWebShellSession", 403,
+                post(WEB_SHELL + "/sessions/unarchive").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                """
+                {"sessionId":"%s","idempotencyKey":"contract-web-unarchive"}
+                """.formatted(webSessionId));
         exchange(drift, "deleteWebShellSession", 404,
                 post(WEB_SHELL + "/sessions/delete")
                         .header(TENANT, otherTenant),
@@ -888,7 +1042,23 @@ class ManagedAgentApiContractTest {
                         .header(TENANT, workspaceTenant).principal(actor(otherTenant)), null);
         exchange(drift, "getSessionMcpCatalog", 400,
                 get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId), null);
+        String hookCatalog = exchange(drift, "getSessionHookCatalog", 200,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        assertThat(json(hookCatalog).path("catalogs")).isEmpty();
+        exchange(drift, "getSessionHookCatalog", 404,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, otherTenant), null);
+        exchange(drift, "getSessionHookCatalog", 404,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "getSessionHookCatalog", 403,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor(otherTenant)), null);
+        exchange(drift, "getSessionHookCatalog", 400,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId), null);
         exchangeTurns(drift, tenant, otherTenant);
+        exchangeAgents(drift, tenant, otherTenant);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
@@ -1017,12 +1187,104 @@ class ManagedAgentApiContractTest {
                         .principal(actor(otherTenant)),
                 "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
                         .formatted(sessionId, taskId));
+
+        // The served task bodies say exactly what the shared fixture views
+        // say, down to the settled task's start and settle times.
+        JsonNode finalView = chain.get(chain.size() - 1).required("view");
+        assertThat(rest.at("/data/0/state").asText()).isEqualTo(
+                finalView.required("state").textValue());
+        assertThat(rest.at("/data/0/created_at").asLong()).isEqualTo(
+                finalView.required("createdAt").longValue());
+        assertThat(rest.at("/data/0/started_at").asLong()).isEqualTo(
+                finalView.required("startedAt").longValue());
+        assertThat(rest.at("/data/0/settled_at").asLong()).isEqualTo(
+                finalView.required("settledAt").longValue());
+        assertThat(rest.at("/data/0").hasNonNull("runtime_state")).isFalse();
+        assertThat(rest.at("/data/0").hasNonNull("definition_revision"))
+                .isFalse();
+        JsonNode detail = json(exchange(drift, "getSessionTask", 200,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        rest.at("/data/0/id").asText())
+                                .header(TENANT, tenant), null));
+        assertThat(detail.at("/state").asText()).isEqualTo(
+                finalView.required("state").textValue());
+        assertThat(detail.at("/settled_at").asLong()).isEqualTo(
+                finalView.required("settledAt").longValue());
+
+        // A Session with no Stage H record lists no task at all, the only
+        // response today's production offers, and the detail of another
+        // Session's task is the documented 404, not an error.
+        String emptySession = json(mvc.perform(post("/v1/agents/sessions")
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-empty-tasks")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\"}"))
+                .andReturn().getResponse()
+                .getContentAsString(StandardCharsets.UTF_8)).get("id")
+                .asText();
+        JsonNode emptyPage = json(exchange(drift, "listSessionTasks", 200,
+                get("/v1/agents/sessions/{id}/tasks", emptySession)
+                        .header(TENANT, tenant), null));
+        assertThat(emptyPage.get("data").size()).isZero();
+        assertThat(emptyPage.get("has_more").asBoolean()).isFalse();
+        exchange(drift, "getSessionTask", 404,
+                get("/v1/agents/sessions/{id}/tasks/{task}", emptySession,
+                        rest.at("/data/0/id").asText())
+                                .header(TENANT, tenant), null);
+        exchange(drift, "getWebShellTask", 404,
+                post(WEB_SHELL + "/tasks/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
+                        .formatted(emptySession,
+                                rest.at("/data/0/id").asText()));
     }
 
     /**
      * Pages through the Turns of a new Session: the Turn its creation ran and
      * a failed Turn written after it.
      */
+    /**
+     * Creates a definition, adds a second revision and reads both, with the
+     * idempotency, validation and cross-tenant refusals.
+     */
+    private void exchangeAgents(Map<String, String> drift, String tenant,
+            String otherTenant) throws Exception {
+        String body = """
+                {"model":{"id":"qwen3-coder-plus"},"instructions":"Review code.",
+                 "tools":[{"name":"read_file"}],
+                 "permission_policy":{"mode":"default"},
+                 "metadata":{"team":"contract"}}
+                """;
+        JsonNode created = json(exchange(drift, "createAgent", 202,
+                post("/v1/agents").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "agent-create"), body));
+        String agentId = created.path("id").asText();
+        assertThat(created.path("revision").asText()).isEqualTo("1");
+        assertThat(created.path("metadata").path("team").asText())
+                .isEqualTo("contract");
+        exchange(drift, "createAgent", 409, post("/v1/agents")
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "agent-create"),
+                body.replace("Review code.", "Other."));
+        exchange(drift, "createAgent", 400, post("/v1/agents")
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "agent create"),
+                body);
+        String changed = body.replace("Review code.", "Review code carefully.");
+        JsonNode updated = json(exchange(drift, "updateAgent", 202,
+                post("/v1/agents/{id}", agentId).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "agent-update"), changed));
+        assertThat(updated.path("id").asText()).isEqualTo(agentId);
+        assertThat(updated.path("revision").asText()).isEqualTo("2");
+        exchange(drift, "updateAgent", 404, post("/v1/agents/{id}", agentId)
+                .header(TENANT, otherTenant)
+                .header(IDEMPOTENCY_KEY, "agent-update"), changed);
+        JsonNode first = json(exchange(drift, "getAgent", 200,
+                get("/v1/agents/{id}", agentId).param("revision", "1")
+                        .header(TENANT, tenant), null));
+        assertThat(first.path("digest").asText())
+                .isEqualTo(created.path("digest").asText());
+        exchange(drift, "getAgent", 404, get("/v1/agents/{id}", agentId)
+                .header(TENANT, otherTenant), null);
+    }
+
     private void exchangeTurns(Map<String, String> drift, String tenant,
             String otherTenant) throws Exception {
         String sessionId = json(mvc.perform(post("/v1/agents/sessions")
@@ -1037,8 +1299,9 @@ class ManagedAgentApiContractTest {
                 .getContentAsString(StandardCharsets.UTF_8)).get("id")
                 .asText();
         awaitIdle(tenant, sessionId);
-        TurnRecord first = store.findLatestTurn(tenant, sessionId)
-                .orElseThrow();
+        TurnSummary first = java.util.Objects.requireNonNull(
+                store.findLatestTurns(tenant, java.util.List.of(sessionId))
+                        .get(sessionId));
         // The fixture Harness runs one Turn per Session, so the second Turn
         // is written as a failed dispatch would leave it.
         String second = "turn_" + UUID.randomUUID().toString()
@@ -1194,7 +1457,8 @@ class ManagedAgentApiContractTest {
             assertThat(session.get("agent_revision").asText()).isEqualTo("1");
             assertThat(session.get("capabilities")).isEqualTo(json("""
                     {"items":true,"snapshots":true,"artifacts":false,
-                     "resync":true,"session_lifecycle":true,"tasks":true,"actions":false}
+                     "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true,
+                     "session_archive":true,"session_unarchive":true,"session_delete":true}
                     """));
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
             assertThat(session.get("snapshot_through_sequence").asLong())
@@ -1210,7 +1474,10 @@ class ManagedAgentApiContractTest {
                         .isPositive()
                         .isEqualTo(session.get("last_event_id").asLong());
                 assertThat(other.get("capabilities"))
-                        .isEqualTo(json("{\"tasks\":true,\"actions\":false}"));
+                        .isEqualTo(json("""
+                                {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true}
+                                """));
             }
         }
 
@@ -1331,6 +1598,14 @@ class ManagedAgentApiContractTest {
                     operationId, expectedStatus, status, errorCode(content)),
                     content);
         }
+        if (status == 403 && expectedStatus == 403) {
+            String code = content.isEmpty() ? ""
+                    : json(content).path("error").path("code").asText();
+            if (!"actor_scope_mismatch".equals(code)) {
+                drift.put("code %s: expected actor_scope_mismatch, got %s"
+                        .formatted(operationId, code), content);
+            }
+        }
         String label = "response " + operationId + " " + status;
         checkRequestId(drift, label, body, content, response);
         String declared = CONTRACT.responsePointer(operation, status);
@@ -1339,8 +1614,12 @@ class ManagedAgentApiContractTest {
         }
         String schema = declared + "/content/application~1json/schema";
         if (!CONTRACT.node(schema).isMissingNode()) {
-            collect(drift, label, CONTRACT.validate(schema,
-                    objectMapper.readTree(content)));
+            if (content.isEmpty()) {
+                drift.put(label + ": empty response body", "");
+            } else {
+                collect(drift, label, CONTRACT.validate(schema,
+                        objectMapper.readTree(content)));
+            }
         }
         CONTRACT.node(declared).path("headers").fieldNames()
                 .forEachRemaining(header -> {
@@ -1604,8 +1883,8 @@ class ManagedAgentApiContractTest {
         }
         fail("""
                 The Managed Agent API drifted from %s.
-                Fix new drift. Record a line in %s only for a gap that a \
-                later slice closes.
+                Fix new drift. Actor-scope code drift is not deferrable.
+                Record eligible gaps in %s only if a later slice closes them.
                 %s
                 Remove resolved gaps from %s:
                 %s""".formatted(OpenApiContract.RESOURCE, KNOWN_GAPS,
@@ -1614,6 +1893,9 @@ class ManagedAgentApiContractTest {
     }
 
     private static List<String> knownGaps() {
+        assertThat(GAP_CATEGORIES)
+                .as("actor-scope code drift must stay unwaivable")
+                .doesNotContain("code");
         try (InputStream input = ManagedAgentApiContractTest.class
                 .getClassLoader().getResourceAsStream(KNOWN_GAPS)) {
             List<String> gaps = new String(input.readAllBytes(),

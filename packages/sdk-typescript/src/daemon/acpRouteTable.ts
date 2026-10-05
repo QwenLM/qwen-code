@@ -604,6 +604,15 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (_s, body) => bodyRecord(body),
     },
   },
+  // POST /workspace/trust/grant → _qwen/workspace/trust/grant
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/trust\/grant\/?$/,
+    mapping: {
+      method: '_qwen/workspace/trust/grant',
+      extractParams: () => ({}),
+    },
+  },
   // GET /workspace/permissions → _qwen/workspace/permissions
   {
     httpMethod: 'GET',
@@ -658,13 +667,13 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: () => ({}),
     },
   },
-  // GET /workspace/memory → _qwen/workspace/memory
+  // GET /workspace/memory?content=true → _qwen/workspace/memory
   {
     httpMethod: 'GET',
     pattern: /^\/workspace\/memory\/?$/,
     mapping: {
       method: '_qwen/workspace/memory',
-      extractParams: () => ({}),
+      extractParams: (_s, _b, _m, q) => boolParam(q, 'content'),
     },
   },
   // POST /workspace/memory → _qwen/workspace/memory/write

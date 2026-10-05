@@ -39,6 +39,8 @@ export function TrajectoryInspector({
   stale = false,
   turnSelected = false,
   hiddenByRange,
+  hiddenByCollapse,
+  onReveal,
   onClearRange,
   onClose,
 }: {
@@ -47,6 +49,8 @@ export function TrajectoryInspector({
   stale?: boolean;
   turnSelected?: boolean;
   hiddenByRange: boolean;
+  hiddenByCollapse: boolean;
+  onReveal: () => void;
   onClearRange: () => void;
   onClose: () => void;
 }) {
@@ -323,6 +327,14 @@ export function TrajectoryInspector({
           {t('trajectory.inspector.hiddenByRange')}{' '}
           <button type="button" onClick={onClearRange}>
             {t('trajectory.range.clear')}
+          </button>
+        </div>
+      )}
+      {hiddenByCollapse && row && (
+        <div className={styles.notice}>
+          {t('trajectory.inspector.hiddenByCollapse')}{' '}
+          <button type="button" onClick={onReveal}>
+            {t('trajectory.reveal')}
           </button>
         </div>
       )}

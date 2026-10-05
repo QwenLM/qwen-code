@@ -6,6 +6,7 @@
 
 import type { Application, Request, Response } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   redactMcpServersSetting,
@@ -38,6 +39,11 @@ import {
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import {
+  ACP_ROUTE_ID_PREFIX,
+  parseAcpModelOption,
+  resolveAcpFastModelSelector,
+} from '../../utils/acpModelUtils.js';
 
 const TUI_ONLY_SETTINGS = new Set([
   'general.vimMode',
@@ -261,14 +267,37 @@ export function prepareSettingWrite(
   if (key !== 'mcpServers') {
     let persistedValue = value;
     if (
-      scope === SettingScope.Workspace &&
+      key === 'fastModel' &&
       typeof value === 'string' &&
+      (value.startsWith(ACP_ROUTE_ID_PREFIX) ||
+        parseAcpModelOption(value).authType)
+    ) {
+      const { merged } = loadSettings(workspace, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: !workspaceTrusted,
+        workspaceTrusted,
+      });
+      const models = new ModelsConfig({
+        modelProvidersConfig: merged.modelProviders,
+        providerProtocolConfig: merged.providerProtocol,
+      });
+      persistedValue = resolveAcpFastModelSelector(
+        value,
+        models.getAllConfiguredModels(),
+      );
+      if (persistedValue === null) {
+        throw new Error('Fast model ACP route is unavailable');
+      }
+    }
+    if (
+      scope === SettingScope.Workspace &&
+      typeof persistedValue === 'string' &&
       isAuxModelSelectorSettingKey(key)
     ) {
-      const nul = value.indexOf('\0');
+      const nul = persistedValue.indexOf('\0');
       if (nul >= 0) {
-        const selector = value.slice(0, nul);
-        const baseUrl = value.slice(nul + 1);
+        const selector = persistedValue.slice(0, nul);
+        const baseUrl = persistedValue.slice(nul + 1);
         if (baseUrl && !isCleanPublicProviderBaseUrl(baseUrl)) {
           persistedValue = selector;
         }
@@ -280,9 +309,9 @@ export function prepareSettingWrite(
       // routing resolves against it), but the value answered to and
       // broadcast to clients must not carry userinfo credentials.
       publicValue:
-        typeof value === 'string' && isAuxModelSelectorSettingKey(key)
-          ? publicAuxModelSelectorValue(value)
-          : value,
+        typeof persistedValue === 'string' && isAuxModelSelectorSettingKey(key)
+          ? publicAuxModelSelectorValue(persistedValue)
+          : persistedValue,
     };
   }
   const existing =

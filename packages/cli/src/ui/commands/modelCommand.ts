@@ -24,8 +24,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import {
+  ACP_ROUTE_ID_PREFIX,
   isInlineModelOverrideAllowed,
   parseAcpModelOption,
+  resolveAcpFastModelSelector,
 } from '../../utils/acpModelUtils.js';
 import {
   formatAuxModelSelectorForDisplay,
@@ -690,14 +692,24 @@ export const modelCommand: SlashCommand = {
         };
       }
 
+      const fastModelSelector =
+        modelName.startsWith(ACP_ROUTE_ID_PREFIX) ||
+        parseAcpModelOption(modelName).authType
+          ? resolveAcpFastModelSelector(
+              modelName,
+              config.getAllConfiguredModels(),
+            )
+          : modelName;
       const selector = (() => {
         try {
-          return resolveModelId(modelName);
+          return fastModelSelector
+            ? resolveModelId(fastModelSelector)
+            : undefined;
         } catch {
           return undefined;
         }
       })();
-      if (!selector) {
+      if (!selector || !fastModelSelector) {
         return {
           type: 'message',
           messageType: 'error',
@@ -727,7 +739,7 @@ export const modelCommand: SlashCommand = {
 
       const fastModelToPersist = preservedAuxModelSetting(
         settings.merged?.fastModel,
-        modelName,
+        fastModelSelector,
         selector,
       );
       persistSetting(settings, 'fastModel', fastModelToPersist, scopeOverride);

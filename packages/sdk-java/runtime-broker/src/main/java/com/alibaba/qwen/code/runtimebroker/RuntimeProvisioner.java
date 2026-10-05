@@ -23,6 +23,10 @@ public interface RuntimeProvisioner extends AutoCloseable {
         return new RuntimeProvisionRequest(scope, isolationKey, kind());
     }
 
+    /** Short, bounded pre-create admission only; never creates a resource or calls a worker. */
+    default void reserveResource(RuntimeBindingRecord binding) {
+    }
+
     /**
      * Provisions with credentials the Broker created and persisted, so a
      * later Broker process can prove the same identity. The default ignores
@@ -52,6 +56,16 @@ public interface RuntimeProvisioner extends AutoCloseable {
      * Observes the physical resource behind a restored binding without
      * creating or replacing it. The default proves nothing, so a restored
      * binding waits and never guesses.
+     * <p>
+     * The broker keeps the recovery claim renewed for the duration of the
+     * call, so a slow observation may take as long as the provisioner's own
+     * declared waits. A call that never answers at all is backstopped well
+     * past those waits and surfaces as a retryable
+     * {@code runtime_broker_reconcile_timeout}. Implementations must not
+     * block the calling thread: renewal ticks run on the service's own
+     * pool, but the caller may be a completion thread shared with other
+     * work, so hand long waits to another executor and return a pending
+     * stage.
      */
     default CompletionStage<RuntimeObservation> reconcile(
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
@@ -60,13 +74,26 @@ public interface RuntimeProvisioner extends AutoCloseable {
                 RuntimeObservation.unknown(handle));
     }
 
-    /** Clears only physical holders of the saved generation after durable stop proof. */
+    /**
+     * Clears only physical holders of the saved generation after durable stop proof.
+     * The same backstop as {@link #reconcile} applies: the claim stays
+     * renewed for the call, and a never-answering call is retried later.
+     */
     default CompletionStage<Void> recoverResources(RuntimeBindingRecord binding) {
         if (binding.getRequest().isManagedContext()) {
             return CompletableFuture.failedFuture(new RuntimeBrokerException(409,
                     "runtime_broker_recovery_blocked", "Workspace recovery cleanup is unavailable.", false));
         }
         return CompletableFuture.completedFuture(null);
+    }
+
+    default boolean supportsDrainedStop() {
+        return false;
+    }
+
+    default CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(409,
+                "workspace_close_identity_unverified", "Durable worker stop is unavailable.", false));
     }
 
     /** Whether saved startup identity can be observed without relaunching it. */

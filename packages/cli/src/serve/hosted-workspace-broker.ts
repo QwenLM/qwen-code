@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseManagedRuntimeProviderResult } from './managed-runtime-provider-protocol.js';
+import type {
+  RawFileHistoryOperation,
+  HostedFileHistoryState,
+} from './hosted-file-history-protocol.js';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -19,6 +24,11 @@ import type {
   ManagedMcpControl,
   ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
+
+import type {
+  ManagedHookControl,
+  ManagedHookOperationView,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 
 export interface HostedWorkspaceBrokerOptions {
   baseUrl: string;
@@ -36,9 +46,22 @@ export class HostedWorkspaceBrokerRejection extends Error {
     readonly status: number,
     readonly code: unknown,
     readonly details?: Record<string, unknown>,
+    readonly reason?: string,
   ) {
     super(`Runtime Broker returned HTTP ${status} (${String(code)}).`);
   }
+}
+
+export function isHostedFileHistoryRefusal(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    ((cause.status === 409 &&
+      cause.code === 'managed_runtime_provider_operation_failed') ||
+      (cause.status === 400 &&
+        cause.code === 'runtime_control_operation_invalid'))
+  );
 }
 
 export class HostedWorkspaceBroker {
@@ -64,6 +87,37 @@ export class HostedWorkspaceBroker {
   ) {
     this.baseUrl = resolveManagedRuntimeBrokerBaseUrl(options.baseUrl);
     this.identity = { harnessSessionId: key.sessionId, runtimeSessionId };
+  }
+
+  async fileHistory(
+    operation: Exclude<RawFileHistoryOperation, { action: 'rewind' }>,
+  ): Promise<HostedFileHistoryState>;
+  async fileHistory(
+    operation: Extract<RawFileHistoryOperation, { action: 'rewind' }>,
+  ): Promise<{
+    state: HostedFileHistoryState;
+    filesChanged: string[];
+    filesFailed: string[];
+    conflict: boolean;
+  }>;
+  async fileHistory(operation: RawFileHistoryOperation): Promise<
+    | HostedFileHistoryState
+    | {
+        state: HostedFileHistoryState;
+        filesChanged: string[];
+        filesFailed: string[];
+        conflict: boolean;
+      }
+  >;
+  async fileHistory(operation: RawFileHistoryOperation): Promise<unknown> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    return parseManagedRuntimeProviderResult(operation, response['result'], {
+      ...this.identity,
+      turnKind: 'bootstrap',
+    });
   }
 
   async warm(): Promise<void> {
@@ -407,6 +461,27 @@ export class HostedWorkspaceBroker {
     return result as unknown as ManagedMcpOperationView;
   }
 
+  async hookControl(
+    operation: ManagedHookControl,
+  ): Promise<ManagedHookOperationView> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !==
+        (operation.kind === 'hook-status' || operation.kind === 'hook-cancel'
+          ? operation.targetOperationId
+          : operation.operationId) ||
+      !['running', 'settled', 'outcome_unknown'].includes(
+        String(result['state']),
+      )
+    )
+      throw new Error('Runtime Hook response identity is invalid.');
+    return result as unknown as ManagedHookOperationView;
+  }
+
   async acknowledgeV3(
     id: string,
     receipt: {
@@ -428,18 +503,65 @@ export class HostedWorkspaceBroker {
       throw new Error('Original Tool v3 ACK was not confirmed.');
   }
 
+  /**
+   * Read-only execution state. Only a definitive not-found resolves to
+   * undefined; an unknown outcome is not proof that execution stopped.
+   */
+  async status(id: string): Promise<{ state: string } | undefined> {
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request(`/executions/${encodeURIComponent(id)}`);
+    } catch (cause) {
+      if (cause instanceof HostedWorkspaceBrokerRejection) {
+        if (
+          cause.status === 404 &&
+          cause.code === 'runtime_execution_not_found'
+        )
+          return undefined;
+        if (
+          cause.status === 409 &&
+          cause.code === 'runtime_broker_execution_unknown'
+        )
+          return { state: 'unknown' };
+      }
+      throw cause;
+    }
+    if (response['executionCallId'] !== id)
+      throw new Error('Runtime execution identity changed.');
+    const status = object(response['status']);
+    const state = status['state'];
+    if (
+      typeof state !== 'string' ||
+      !['prepared', 'executing', 'cancel_requested', 'settled'].includes(state)
+    )
+      throw new Error('Runtime execution outcome is unknown.');
+    return { state };
+  }
+
   async acknowledge(id: string, receipt: LocalShellReceipt): Promise<void> {
-    const response = await this.request(
-      `/executions/${encodeURIComponent(id)}:acknowledge`,
-      {
-        receipt: {
-          executionCallId: receipt.executionCallId,
-          manifest: receipt.manifest,
-          deliveryStatus: receipt.deliveryStatus,
-          historyRevision: receipt.historyRevision,
-        },
+    const path = `/executions/${encodeURIComponent(id)}:acknowledge`;
+    const body = {
+      receipt: {
+        executionCallId: receipt.executionCallId,
+        manifest: receipt.manifest,
+        deliveryStatus: receipt.deliveryStatus,
+        historyRevision: receipt.historyRevision,
       },
-    );
+    };
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request(path, body);
+    } catch (cause) {
+      // The acknowledgement runs after every durable record is committed, so
+      // a lost reply is replayed the way prepare() replays its reservation:
+      // the runtime deduplicates an identical receipt.
+      if (
+        !(cause instanceof TypeError) &&
+        !(cause instanceof DOMException && cause.name === 'TimeoutError')
+      )
+        throw cause;
+      response = await this.request(path, body);
+    }
     if (
       response['executionCallId'] !== id ||
       response['acknowledged'] !== true
@@ -510,6 +632,7 @@ export class HostedWorkspaceBroker {
         details && typeof details === 'object' && !Array.isArray(details)
           ? (details as Record<string, unknown>)
           : undefined,
+        typeof parsed['error'] === 'string' ? parsed['error'] : undefined,
       );
     }
     if (

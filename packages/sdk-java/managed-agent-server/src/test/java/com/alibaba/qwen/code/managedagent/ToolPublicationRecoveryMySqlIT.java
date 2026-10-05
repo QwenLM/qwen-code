@@ -7,6 +7,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -45,9 +46,25 @@ class ToolPublicationRecoveryMySqlIT {
         fixture.recoversExpiredCandidatesWithoutChangingBytesQuotaOrOriginalDeadline(terminal);
     }
 
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void resumesHeldWriteAfterDeadlineOrClaimExpiry(boolean terminal, boolean expired) throws Exception {
+        fixture.resumesHeldWriteAfterDeadlineOrClaimExpiry(terminal, expired);
+    }
+
+    @Test
+    void sealUsesCatalogBytesToFinishBeyondTheBaseDeadline() {
+        fixture.sealUsesCatalogBytesToFinishBeyondTheBaseDeadline();
+    }
+
     @Test
     void expiredPrefixRemainsExpiredAndFencedPublicationCannotRecover() {
         fixture.expiredPrefixRemainsExpiredAndFencedPublicationCannotRecover();
+    }
+
+    @Test
+    void activePhaseWithExpiredDeadlinePreventsReserveRenewAndDispatch() {
+        fixture.activePhaseWithExpiredDeadlinePreventsReserveRenewAndDispatch();
     }
 
     @AfterEach

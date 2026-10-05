@@ -127,7 +127,7 @@ public class WebShellAgentController {
         }
         validateTraceMetadata(request.metadata());
         WebShellAdmission admission = webShell(selection == null
-                ? service.createSession(tenant.tenantId(),
+                ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         request.idempotencyKey(), request.agentId(), null,
                         request.title(), null, request.input())
                 : service.createWorkspaceSession(tenant.tenantId(),
@@ -183,6 +183,15 @@ public class WebShellAgentController {
             TenantContext tenant,
             @Valid @RequestBody WebShellLifecycleRequest request) {
         return operation(tenant, request, OperationKind.DELETE);
+    }
+
+    @PostMapping("/sessions/unarchive")
+    public ResponseEntity<WebShellSession> unarchive(TenantContext tenant,
+            @Valid @RequestBody WebShellLifecycleRequest request) {
+        var result = service.unarchiveWebShellSession(tenant.tenantId(), tenant.actorId(),
+                request.idempotencyKey(), request.sessionId());
+        return ResponseEntity.ok().header("X-Qwen-Idempotent-Replay", Boolean.toString(result.replayed()))
+                .body(result.body());
     }
 
     @PostMapping("/operations/query")

@@ -6,13 +6,24 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import * as fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToolResultSegmentLedger } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import {
+  escapeShellArg,
+  getShellConfiguration,
+} from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import type { ToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import type { ManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import type { ManagedContextBoot } from './managed-context-envelope.js';
 import { RemoteShellResultPublisher } from './remote-shell-result-publication.js';
+import {
+  createManagedToolSet,
+  ManagedToolExecutor,
+} from './managed-runtime-tool-executor.js';
 
 const digest = (bytes: Buffer): string =>
   createHash('sha256').update(bytes).digest('hex');
@@ -88,6 +99,142 @@ const request = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('remote Shell result publication', () => {
+  it('keeps an installed grant blocked before any capture or tool starts', () => {
+    const publisher = new RemoteShellResultPublisher();
+    const resolver = vi.fn(async () => undefined);
+    const executor = new ManagedToolExecutor(resolver, publisher);
+    expect(publisher.hasInstalledPublication).toBe(false);
+    publisher.install(installation, boot);
+    expect(publisher.hasInstalledPublication).toBe(true);
+    const retirementId = '550e8400-e29b-41d4-a716-446655440000';
+    executor.sealAdmission(retirementId);
+    expect(executor.getDrainObservation(retirementId)).toMatchObject({
+      workState: 'BLOCKED',
+      pendingStarts: 0,
+      pendingInvocations: 0,
+      blockers: ['publication_lifecycle_unqualified'],
+    });
+    expect(resolver).not.toHaveBeenCalled();
+  });
+
+  it.each(['segment', 'finish'])(
+    'recovers %s publication without repeating a real Shell side effect',
+    async (fault) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-expiry-'));
+      const marker = path.join(root, 'effects');
+      const script = path.join(root, 'output.cjs');
+      await fs.writeFile(
+        script,
+        `require('node:fs').appendFileSync(${JSON.stringify(marker)}, 'x'); process.stdout.write(Buffer.alloc(1048576));`,
+      );
+      const { shell } = getShellConfiguration();
+      const input = {
+        command: `${shell === 'powershell' ? '& ' : ''}${escapeShellArg(process.execPath, shell)} ${escapeShellArg(script, shell)}`,
+        is_background: false,
+      };
+      const reference = {
+        ...binding.reference,
+        argsDigest: 'sha256:' + managedToolDigest(input),
+      };
+      let failedOperation: string | undefined;
+      let recovered = false;
+      let originalBytes: Buffer | undefined;
+      let replayed = false;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: URL, init: RequestInit) => {
+          const operation = (init.headers as Record<string, string>)[
+            'X-Qwen-Tool-Publication-Operation'
+          ];
+          if (url.pathname.endsWith('/recover')) {
+            expect(operation).toBe(failedOperation);
+            recovered = true;
+            return new Response(JSON.stringify({ state: 'RETRYABLE' }));
+          }
+          if (url.pathname.includes('/operations/'))
+            return new Response(JSON.stringify({ state: 'EXPIRED' }));
+          const bytes = Buffer.from(init.body as Buffer);
+          const selected =
+            fault === 'segment'
+              ? url.pathname.includes('/segments/')
+              : url.pathname.endsWith('/finish');
+          if (selected && !failedOperation) {
+            failedOperation = operation;
+            originalBytes = Buffer.from(bytes);
+            return new Response(
+              JSON.stringify({
+                error: { code: 'managed_tool_publication_operation_expired' },
+              }),
+              { status: 409 },
+            );
+          }
+          if (operation === failedOperation) {
+            expect(recovered).toBe(true);
+            expect(bytes).toEqual(originalBytes);
+            replayed = true;
+          }
+          const receipt = url.pathname.includes('/segments/')
+            ? {
+                captureId: 'capture-a',
+                streamId: 'stdout',
+                ordinal: 0,
+                byteLength: bytes.length,
+                digest: digest(bytes),
+              }
+            : url.pathname.endsWith('/seal')
+              ? JSON.parse(bytes.toString('utf8'))
+              : url.pathname.endsWith('/finish')
+                ? {
+                    producerPhase: 'FINISHED',
+                    terminal: {
+                      byteLength: bytes.length,
+                      digest: digest(bytes),
+                    },
+                  }
+                : {
+                    resourceId: operation,
+                    kind: url.pathname.split('/resources/')[1]!.split('/')[0],
+                    schemaVersion: 1,
+                    byteLength: bytes.length,
+                    digest: digest(bytes),
+                  };
+          return new Response(JSON.stringify(receipt));
+        }),
+      );
+      const publisher = new RemoteShellResultPublisher();
+      publisher.install(
+        { ...installation, binding: { ...binding, reference } },
+        boot,
+      );
+      const executor = new ManagedToolExecutor(
+        async () => createManagedToolSet(root, 'runtime-a'),
+        publisher,
+      );
+      const execution = {
+        ...request,
+        reference,
+        toolName: 'run_shell_command',
+        input,
+      };
+      try {
+        await executor.executeV3(execution);
+        await vi.waitFor(
+          () => expect(executor.statusV3(reference).state).toBe('settled'),
+          { timeout: 10_000 },
+        );
+        expect(
+          executor.statusV3(reference).result?.capture?.captureStatus,
+        ).toBe('complete');
+        expect(replayed).toBe(true);
+        await executor.executeV3(execution);
+        expect(await fs.readFile(marker, 'utf8')).toBe('x');
+      } finally {
+        await executor.close();
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('publishes both raw streams, resources and the final envelope under one grant', async () => {
     const calls: string[] = [];
     vi.stubGlobal(
@@ -580,6 +727,167 @@ describe('remote Shell result publication', () => {
       ).toMatchObject({ status: 'ok' });
       expect(posts).toEqual([Buffer.from('original'), Buffer.from('original')]);
       expect(recoveries).toBe(1);
+    },
+  );
+
+  it.each([
+    'managed_tool_publication_claim_expired',
+    'managed_tool_publication_claim_lost',
+    'managed_tool_publication_busy',
+  ])('resumes the original retryable segment after %s', async (code) => {
+    const posts: Buffer[] = [];
+    let observations = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: URL, init: RequestInit) => {
+        expect(init.headers).toMatchObject({
+          'X-Qwen-Tool-Publication-Operation': 'seg-stdout-0',
+        });
+        expect(input.pathname.endsWith('/recover')).toBe(false);
+        if (input.pathname.includes('/operations/')) {
+          observations++;
+          return new Response(JSON.stringify({ state: 'RETRYABLE' }));
+        }
+        const bytes = Buffer.from(init.body as Buffer);
+        posts.push(bytes);
+        if (posts.length === 1)
+          return new Response(JSON.stringify({ error: { code } }), {
+            status: 409,
+          });
+        return new Response(
+          JSON.stringify({
+            captureId: 'capture-a',
+            streamId: 'stdout',
+            ordinal: 0,
+            byteLength: bytes.length,
+            digest: digest(bytes),
+          }),
+        );
+      }),
+    );
+    const publisher = new RemoteShellResultPublisher();
+    publisher.install(installation, boot);
+    const { sink } = await publisher.prepare(request);
+    const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+    expect(
+      await store.publish({
+        captureId: 'capture-a',
+        streamId: 'stdout',
+        ordinal: 0,
+        bytes: Buffer.from('original'),
+      }),
+    ).toMatchObject({ status: 'ok' });
+    expect(posts).toEqual([Buffer.from('original'), Buffer.from('original')]);
+    expect(observations).toBe(1);
+  });
+
+  it.each(
+    ['EXPIRED', 'RETRYABLE'].flatMap((state) => [
+      { state, status: 400, code: 'invalid_request' },
+      { state, status: 409, code: 'managed_tool_result_conflict' },
+    ]),
+  )(
+    'does not override HTTP $status $code with $state status',
+    async ({ state, status, code }) => {
+      let posts = 0;
+      let observations = 0;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: URL) => {
+          expect(input.pathname.endsWith('/recover')).toBe(false);
+          if (input.pathname.includes('/operations/')) {
+            observations++;
+            return new Response(JSON.stringify({ state }));
+          }
+          posts++;
+          return new Response(JSON.stringify({ error: { code } }), { status });
+        }),
+      );
+      const publisher = new RemoteShellResultPublisher();
+      publisher.install(installation, boot);
+      const { sink } = await publisher.prepare(request);
+      const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+      const publication = store.publish({
+        captureId: 'capture-a',
+        streamId: 'stdout',
+        ordinal: 0,
+        bytes: Buffer.from('original'),
+      });
+      if (status === 400) {
+        await expect(publication).rejects.toThrow('HTTP 400');
+      } else {
+        await expect(publication).resolves.toMatchObject({
+          status: 'refused',
+          code,
+        });
+      }
+      expect(posts).toBe(1);
+      expect(observations).toBe(1);
+    },
+  );
+
+  it.each([409, 429])(
+    'waits through HTTP %s recovery contention without consuming recovery attempts',
+    async (status) => {
+      const posts: Buffer[] = [];
+      let recoveryRequests = 0;
+      let recovered = false;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: URL, init: RequestInit) => {
+          expect(init.headers).toMatchObject({
+            'X-Qwen-Tool-Publication-Operation': 'seg-stdout-0',
+          });
+          if (input.pathname.endsWith('/recover')) {
+            recoveryRequests++;
+            if (recoveryRequests <= 4)
+              return new Response(
+                JSON.stringify({
+                  error: { code: 'managed_tool_publication_busy' },
+                }),
+                { status },
+              );
+            recovered = true;
+            return new Response(JSON.stringify({ state: 'RETRYABLE' }));
+          }
+          if (input.pathname.includes('/operations/'))
+            return new Response(
+              JSON.stringify({ state: recovered ? 'RETRYABLE' : 'EXPIRED' }),
+            );
+          const bytes = Buffer.from(init.body as Buffer);
+          posts.push(bytes);
+          if (!recovered)
+            return new Response(
+              JSON.stringify({
+                error: { code: 'managed_tool_publication_operation_expired' },
+              }),
+              { status: 409 },
+            );
+          return new Response(
+            JSON.stringify({
+              captureId: 'capture-a',
+              streamId: 'stdout',
+              ordinal: 0,
+              byteLength: bytes.length,
+              digest: digest(bytes),
+            }),
+          );
+        }),
+      );
+      const publisher = new RemoteShellResultPublisher();
+      publisher.install(installation, boot);
+      const { sink } = await publisher.prepare(request);
+      const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+      expect(
+        await store.publish({
+          captureId: 'capture-a',
+          streamId: 'stdout',
+          ordinal: 0,
+          bytes: Buffer.from('original'),
+        }),
+      ).toMatchObject({ status: 'ok' });
+      expect(posts).toEqual([Buffer.from('original'), Buffer.from('original')]);
+      expect(recoveryRequests).toBe(5);
     },
   );
 

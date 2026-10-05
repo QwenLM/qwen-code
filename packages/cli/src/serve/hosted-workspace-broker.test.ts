@@ -176,6 +176,68 @@ it('requires confirmation for the exact Shell receipt acknowledgement', async ()
   ).rejects.toThrow('acknowledge');
 });
 
+it('replays a Shell receipt acknowledgement whose reply was lost', async () => {
+  const attempts: Array<Record<string, unknown>> = [];
+  const broker = await fixture((_path, body) => {
+    attempts.push(body);
+    // The Broker applies the acknowledgement, but the reply never arrives.
+    if (attempts.length === 1) return { drop: true };
+    return {
+      body: { ...identity, executionCallId: 'execution', acknowledged: true },
+    };
+  });
+  await expect(
+    broker.acknowledge('execution', {
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+      outcomeRef: {
+        resourceId: 'outcome',
+        kind: 'managed-tool-outcome',
+        schemaVersion: 1,
+        byteLength: 0,
+        digest: 'a'.repeat(64),
+      },
+    }),
+  ).resolves.toBeUndefined();
+  expect(attempts).toHaveLength(2);
+  expect(attempts[1]).toEqual({
+    ...attempts[0],
+    requestId: expect.any(String),
+  });
+  expect((attempts[1] as Record<string, unknown>)['receipt']).toEqual(
+    attempts[0]!['receipt'],
+  );
+});
+
+it('does not replay a refused Shell receipt acknowledgement', async () => {
+  const attempts: Array<Record<string, unknown>> = [];
+  const broker = await fixture((_path, body) => {
+    attempts.push(body);
+    return {
+      code: 409,
+      body: { code: 'runtime_execution_conflict', message: 'conflict' },
+    };
+  });
+  await expect(
+    broker.acknowledge('execution', {
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+      outcomeRef: {
+        resourceId: 'outcome',
+        kind: 'managed-tool-outcome',
+        schemaVersion: 1,
+        byteLength: 0,
+        digest: 'a'.repeat(64),
+      },
+    }),
+  ).rejects.toBeInstanceOf(HostedWorkspaceBrokerRejection);
+  expect(attempts).toHaveLength(1);
+});
+
 it('accepts the Broker acknowledgement envelope for a remote v3 receipt', async () => {
   const broker = await fixture((_path, body) => {
     expect(body['receipt']).toEqual({
@@ -539,4 +601,149 @@ it('stops observation immediately when the original execution is terminally unkn
     details: { terminal: true, reason: 'runtime_lost' },
   });
   expect(paths).toHaveLength(1);
+});
+
+it('forwards hook recovery to the original owner and rejects a changed receipt identity', async () => {
+  let changed = false;
+  const broker = await fixture((path, body) => {
+    expect(path).toBe('/internal/runtime-broker/v1/tool-sessions/turn/control');
+    expect(body['operation']).toMatchObject({
+      kind: 'hook-status',
+      targetOperationId: 'original-hook',
+    });
+    return {
+      body: {
+        ...identity,
+        result: {
+          operationId: changed ? 'different-hook' : 'original-hook',
+          state: 'outcome_unknown',
+        },
+      },
+    };
+  });
+  const control = {
+    kind: 'hook-status' as const,
+    sessionKey: {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: 'session',
+    },
+    operationId: 'lookup',
+    targetOperationId: 'original-hook',
+  };
+  expect(await broker.hookControl(control)).toEqual({
+    operationId: 'original-hook',
+    state: 'outcome_unknown',
+  });
+  changed = true;
+  await expect(broker.hookControl(control)).rejects.toThrow(
+    'Hook response identity',
+  );
+});
+
+it('preserves a worker history refusal reason', async () => {
+  const broker = await fixture(() => ({
+    code: 409,
+    body: {
+      code: 'managed_runtime_provider_operation_failed',
+      error: 'ordinary files only',
+    },
+  }));
+  await expect(
+    broker.fileHistory({
+      kind: 'raw-file-history',
+      action: 'prepare',
+      promptId: 'prompt',
+      paths: ['dir'],
+    }),
+  ).rejects.toMatchObject({
+    status: 409,
+    code: 'managed_runtime_provider_operation_failed',
+    reason: 'ordinary files only',
+  });
+});
+
+it('resolves a durable execution status for recovery reports', async () => {
+  const broker = await fixture(() => ({
+    body: {
+      ...identity,
+      executionCallId: 'execution',
+      status: {
+        state: 'settled',
+        result: { executionStatus: 'success', responseParts: [] },
+      },
+    },
+  }));
+  await expect(broker.status('execution')).resolves.toEqual({
+    state: 'settled',
+  });
+});
+
+it('distinguishes unknown outcomes from definitive not-found records', async () => {
+  const missing = await fixture(() => ({
+    code: 404,
+    body: { code: 'runtime_execution_not_found' },
+  }));
+  await expect(missing.status('execution')).resolves.toBeUndefined();
+
+  const abandoned = await fixture(() => ({
+    code: 409,
+    body: {
+      code: 'runtime_broker_execution_unknown',
+      details: { terminal: true },
+    },
+  }));
+  await expect(abandoned.status('execution')).resolves.toEqual({
+    state: 'unknown',
+  });
+
+  const unknown = await fixture(() => ({
+    code: 409,
+    body: { code: 'runtime_broker_execution_unknown' },
+  }));
+  await expect(unknown.status('execution')).resolves.toEqual({
+    state: 'unknown',
+  });
+
+  const failing = await fixture(() => ({
+    code: 500,
+    body: { code: 'runtime_broker_internal_error' },
+  }));
+  await expect(failing.status('execution')).rejects.toEqual(
+    new HostedWorkspaceBrokerRejection(500, 'runtime_broker_internal_error'),
+  );
+
+  const busy = await fixture(() => ({
+    code: 409,
+    body: { code: 'workspace_busy' },
+  }));
+  await expect(busy.status('execution')).rejects.toEqual(
+    new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+  );
+});
+
+it('refuses a runtime state it cannot name', async () => {
+  const broker = await fixture(() => ({
+    body: {
+      ...identity,
+      executionCallId: 'execution',
+      status: { state: 'mystery' },
+    },
+  }));
+  await expect(broker.status('execution')).rejects.toThrow(
+    'Runtime execution outcome is unknown.',
+  );
+});
+
+it('refuses a status answer for a different execution', async () => {
+  const broker = await fixture(() => ({
+    body: {
+      ...identity,
+      executionCallId: 'other',
+      status: { state: 'settled' },
+    },
+  }));
+  await expect(broker.status('execution')).rejects.toThrow(
+    'Runtime execution identity changed.',
+  );
 });

@@ -81,9 +81,10 @@ main 已经提供改名（`PATCH /v1/agents/sessions/{sessionId}`）、`unarchiv
 
 ### 4.4 AgentDefinition 之前的 `agent_revision`
 
-`PublicSession.agent_revision` 是必填字段，但 `/v1/agents` 仍是 `planned`。在
-AgentDefinition 落地之前，D2 返回取自服务端 agent 配置的固定 revision。D1 只
-记录该字段缺失。
+`PublicSession.agent_revision` 是必填字段。D2 返回取自服务端 agent 配置的固定
+revision，D1 只记录该字段缺失。D8a（v1.29）把 `/v1/agents` 路由实现为已存储、
+不可变的 revision；在 D8b 让会话固定已存储的 revision 之前，会话仍使用配置的
+revision。参见 [AgentDefinition revision](2026-10-01-managed-agent-definitions.zh-CN.md)。
 
 ### 4.5 W0d 发现与空会话绑定
 
