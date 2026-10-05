@@ -40,7 +40,7 @@ H 阶段把七项能力接入 Managed 路径:MCP、Hooks、后台 Shell 与 Moni
 
 ## 决策
 
-1. **`monitor_run` 加入封闭的 v1 索引**(#12827 的问题 1)。在固定提交的存储设计中,它是 33 个 v1 名称之一,只把它的 validator 留给 H0。由于该 domain 仍不开放提交,也没有代码写入它,任何 v1 reader 目前都不会遇到 `monitor_run` 记录,因此索引保持原版本。不过只有 `commitDomainRecord` 检查 domain 是否开放:authority 通用的 `appendExecution` 与 `appendExecutionEvent` 接受 `trusted_entry` actor 提交的、索引中任何名称的 `domain.committed` 事件,因此 H0c 必须在提交 domain 记录的每条路径上执行这项检查。本变更之前的 reader 会拒绝这个名称,因此 H3 开放该 domain 时,含有这类记录的 Session 必须把这些 reader 挡在外面,例如提高其 `minimumReader`。该名称按设计中的顺序放在 `memory_job` 之后。
+1. **`monitor_run` 加入封闭的 v1 索引**(#12827 的问题 1)。在固定提交的存储设计中,它是 33 个 v1 名称之一,只把它的 validator 留给 H0。由于该 domain 仍不开放提交,也没有代码写入它,任何 v1 reader 目前都不会遇到 `monitor_run` 记录,因此索引保持原版本。原本只有 `commitDomainRecord` 检查 domain 是否开放:authority 通用的 `appendExecution` 与 `appendExecutionEvent` 接受 `trusted_entry` actor 提交的、索引中任何名称的 `domain.committed` 事件;H0c 现在已把这项检查执行到提交 domain 记录的每条路径上——domain 记录只能通过 `commitExtensionRecord` 提交,而在此路径与通用追加路径上,未开放的 domain 都被拒绝提交。本变更之前的 reader 会拒绝这个名称,因此 H3 开放该 domain 时,含有这类记录的 Session 必须把这些 reader 挡在外面,例如提高其 `minimumReader`。该名称按设计中的顺序放在 `memory_job` 之后。
 2. **一个运行块,由每条记录内嵌。** 共用的状态线、原因、身份、绑定和固定组成每条 domain 记录内的一个封闭 `run` 对象,而不是单独的 domain。H0c 据这些运行块重建 `SessionTaskView`。
 3. **Java 消费方位于控制面。** 参考设计第 1 节把产品级记录和任务投影交给 Java。无论由哪一侧提交记录(问题 2),Java 都要读取它们来构建投影,因此 `ManagedExtensionRecords` 放在 `managed-agent-server` 中,并像该模块其他代码一样读取 Jackson 树。
 4. **每次修订每条线最多前进一步。** 后一次修订可以让每条状态线保持不变,或前进一个允许的单步;执行线从 `intent` 进入,交付线从 `planned` 进入。这样每一步及其依据的证据都在下一步行动前已经提交。若接受任何可达状态,`unknown → sending` 就能以 `unknown → partial → sending` 的名义通过,而部分交付从未被记录,这正是参考设计禁止的重发。
@@ -241,7 +241,7 @@ Runtime 在任何副作用之前拒绝的派发,证明没有开始执行。未�
 
 schema 固定每条记录的结构,以及它能清晰表达的所有规则,包括全部状态、原因和停止原因规则。它无法表达 UTF-8 字节上限、NFC、格式良好的 UTF-16、可读的 2^63−1 上界、由另一字段推导出的记录 kind,或依赖另一字段的上界;TypeScript 测试列出 schema 与模块结论不同的用例。它的正则表达式遵循 ECMA-262,这是 draft 2020-12 的规定;采用其他正则语义的 validator(例如 Java 的默认实现)可能接受末尾的换行,而两个模块都会拒绝。一个依据本文编写、独立于两种语言的 Python 实现为每个用例标注了结论,它与 `managed-tool-result/1` 的做法一样放在仓库之外,生成器在它与标注不一致时停止。为 [#12887](https://github.com/QwenLM/qwen-code/issues/12887) 第 1 项新增的十个用例、以及在同一 runtime 绑定下重新隔离的 monitor 后继用例,改由一个新编写的 Python 参考标注,原生成器未取得:它只覆盖这十一个用例与其正向控制,没有重新审计其余 557 条标注,也只解释部分 schema,因此语料的 schema 权威仍是下文列出的 Ajv 校验。
 
-- **TypeScript。** `packages/core/src/managed-runtime/managed-extension-record.ts` 解析 grant、定义固定、运行块与 monitor 运行,并检查 grant 替换、定义固定对和修订。在 H0c 之前没有代码导入它。
+- **TypeScript。** `packages/core/src/managed-runtime/managed-extension-record.ts` 解析 grant、定义固定、运行块与 monitor 运行,并检查 grant 替换、定义固定对和修订。自 H0c 起,Session authority 的记录与投影模块都在导入它。
 - **Java。** `managed-agent-server` 中的 `ManagedExtensionRecords` 在 Jackson 树上实现同样的规则。一个测试回放每个用例,检查每条线上的每一对状态,固定常量,并用 schema 校验 fixtures。
 
 ## 受影响的文件
@@ -265,13 +265,13 @@ authority、存储、Harness、Broker、worker、路由和 CI workflow 均无改
 - 在两种语言中,fixtures 里的每种畸形结构和每个非法迁移都被拒绝,每个有效用例都被接受。
 - schema 与模块只在列出的、JSON Schema 无法表达的规则上结论不同。
 - `monitor_run` 位于 v1 domain 索引中,且提交时仍被拒绝。
-- 现有行为除一处解析变化外都不变:`parseManagedSessionEvent` 以及基于它的每条路径(例如 authority 的 `open` 与 `appendExecution`,以及存储扫描)现在都接受 domain 为 `monitor_run` 的 `domain.committed` 事件,而之前会拒绝它。`commitDomainRecord` 提交该 domain 时仍会拒绝。
+- 现有行为除一处解析变化外都不变:`parseManagedSessionEvent` 以及基于它的每条路径(例如 authority 的 `open` 与 `appendExecution`,以及存储扫描)现在都接受 domain 为 `monitor_run` 的 `domain.committed` 事件,而之前会拒绝它。追加这样一条事件仍会碰到 H0c 新增的两道拒绝:domain 记录只能通过 `commitExtensionRecord` 提交——`commitDomainRecord` 提交该 domain 时仍会拒绝——而开放检查会在通用追加路径上拒绝未开放的 domain。
 
 ## 开放问题
 
 1. **phase。** grant 只检查 phase 的形式。各 H 切片应在本契约中登记其 domain 的 phase,还是随各自的记录正文登记?
-2. **降级。** `SessionTaskView` 有 `degraded` 状态。本契约允许运行中或等待中的运行携带恢复原因;H0c 是否应恰好把这种情况投影为 `degraded`?
-3. **修订链。** `commitDomainRecord` 每个 domain 只保留一条修订链,而 `monitor_run` 每个 monitor 一条记录。H0c 需要按记录维护修订链,Monitor 按 `monitorId` 区分,并且要把它加上的封装与封闭的记录正文分开。
+2. **降级。** 已由 H0c 的决策 5 回答:运行中或等待中的运行若携带恢复原因,恰好投影为 `degraded`。
+3. **修订链。** 已由 H0c 的决策 3 回答:每条记录一条修订链,按记录正文自身的身份区分(Monitor 按 `monitorId`),并把提交时加上的封装与它发布的封闭正文分开。
 4. **损坏的执行。** 执行为 `corrupt` 的运行保持 `recovery_blocked`。后续切片是否应增加一个显式的运维命令来关闭这类运行,它又应记录什么证据?
 5. **不经重新 attach 离开阻塞。** 执行在 `recovery_blocked` 期间已 settled 的运行,按契约仍可迁移到 `running` 或 `waiting`,尽管没有任何东西在运行。契约是否应拒绝这一步?在任何 H 阶段 domain 开放之前这样做,不需要升级记录版本。
 6. **通知内容。** 正文只保存最后一个观测的摘要,因此覆盖多个观测的通知无法指向其他观测的摘要。H3 应从 `outputRef` 指向的输出中获取它们,还是每次修订只提交一个观测?两者都不需要新字段。

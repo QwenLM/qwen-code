@@ -3649,13 +3649,12 @@ describe('useManagedSession', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3000);
       });
-      // The error must not fire on the first stalls.
+      // The error must not fire on the first two stalls...
       expect(latest?.error).toBeUndefined();
-      for (let round = 0; round < 6 && latest?.error === undefined; round++) {
-        await act(async () => {
-          await vi.advanceTimersByTimeAsync(3000);
-        });
-      }
+      // ...and fires on exactly the third: one more 3s cadence, no slack.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
       expect(latest?.error).toMatch(/not advancing/);
       // The error is the only user-visible signal of the stall: it must
       // persist while the condition persists, not flash for one cadence.

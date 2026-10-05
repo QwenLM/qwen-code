@@ -597,8 +597,9 @@ class ManagedAgentServerIntegrationTest {
         }
 
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
-                assertThat(store.findActiveTurn(tenant, sessionId))
-                        .isEmpty());
+                assertThat(store.findActiveTurns(tenant,
+                        java.util.List.of(sessionId)))
+                        .doesNotContainKey(sessionId));
         String closeId = objectMapper.readTree(lifecycle(
                         post("/v1/agents/sessions/{id}/close", sessionId),
                         tenant, "close-active")
@@ -625,7 +626,9 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
-            assertThat(store.findActiveTurn(tenant, sessionId)).isEmpty();
+            assertThat(store.findActiveTurns(tenant,
+                    java.util.List.of(sessionId)))
+                    .doesNotContainKey(sessionId);
             assertThat(store.requireSession(tenant, sessionId).harnessBootId())
                     .isNotNull();
         });
@@ -774,7 +777,10 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.environment.errorCode")
                         .value("runtime_warm_failed"));
 
-        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+        // The snapshot gate defers a caught-up rewrite until 5s after the
+        // last one, so the trailing non-terminal event takes that long to
+        // be covered.
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
             MvcResult transcript = mvc.perform(post(
                             "/api/agent/web-shell/v1/transcript/query")
                             .header(TenantContextFilter.HEADER, tenant)
@@ -1036,9 +1042,13 @@ class ManagedAgentServerIntegrationTest {
         store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
                 "item.reasoning.delta", Map.of("text", "thought"),
                 false, "thought");
+        // The trailing event is terminal so the explicit drain below always
+        // rewrites the snapshot: the 10ms materializer may otherwise create
+        // the snapshot mid-sequence, and a non-terminal catch-up inside the
+        // 5s floor would legally leave the snapshot behind.
         store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
                 "item.output_text.delta", Map.of("text", "final"),
-                false, "final");
+                true, "final");
         store.materializeNextBatch(tenant, session.sessionId(), 100);
         assertThat(store.findSnapshot(tenant, session.sessionId()))
                 .get().satisfies(snapshot -> assertThat(snapshot.items())
@@ -1120,8 +1130,12 @@ class ManagedAgentServerIntegrationTest {
                     "item.output_text.delta", Map.of("text", text), false,
                     "single:" + text);
         }
+        // The trailing event is terminal so the explicit drain below always
+        // rewrites the snapshot: the 10ms materializer may otherwise create
+        // the snapshot mid-sequence, and a non-terminal catch-up inside the
+        // 5s floor would legally leave the snapshot behind.
         store.appendPublicEventIfAbsent(tenant, sessionId, "turn-single",
-                "item.reasoning.delta", Map.of("text", "c"), false,
+                "item.reasoning.delta", Map.of("text", "c"), true,
                 "single:c");
         store.materializeNextBatch(tenant, sessionId, 100);
 
@@ -1254,8 +1268,10 @@ class ManagedAgentServerIntegrationTest {
                 Map.of("code", "runtime_warm_failed"), false,
                 "environment:first:failed");
 
-        assertThat(store.findLatestEnvironmentEvent(tenant,
-                session.sessionId())).get().satisfies(event -> {
+        assertThat(store.findLatestEnvironmentEvents(tenant,
+                store.findLatestTurns(tenant,
+                        java.util.List.of(session.sessionId())))
+                        .get(session.sessionId())).satisfies(event -> {
                     assertThat(event.turnId()).isEqualTo(second.turnId());
                     assertThat(event.type()).isEqualTo("environment.ready");
                 });
@@ -1475,6 +1491,108 @@ class ManagedAgentServerIntegrationTest {
                                         .satisfies(part -> assertThat(
                                                 part.text()).isEqualTo("kept"))));
         assertEventsNameTheSnapshot(tenant, session.sessionId());
+    }
+
+    // #13319: a restarted model attempt retracts the published prefix of the
+    // message it replaces. Deltas of earlier committed rounds carry smaller
+    // source ids and stay; the retraction is idempotent and advances the
+    // Harness cursor either way.
+    @Test
+    void retractsInBandRetryOutputFromItsFirstDelta() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-inband-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "inband-create",
+                "sha256:" + "4".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "inband-turn", "sha256:" + "5".repeat(64),
+                session.sessionId(), List.of(),
+                "sha256:" + "6".repeat(64));
+        String owner = "inband-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        assertThat(store.bindHarness(tenant, session.sessionId(),
+                turn.turnId(), owner, "boot_1")).isTrue();
+        store.markSubmissionAttempted(tenant, session.sessionId(),
+                turn.turnId(), owner);
+        store.recordAdmission(tenant, session.sessionId(), turn.turnId(),
+                owner, "epoch_1", 1);
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                owner, "epoch_1", List.of(
+                        new HarnessEvent(2, "boot_1:epoch_1:2",
+                                new ProjectedEvent("item.output_text.delta",
+                                        Map.of("text", "kept"), false,
+                                        null, null, null)),
+                        new HarnessEvent(3, "boot_1:epoch_1:3",
+                                new ProjectedEvent("item.output_text.delta",
+                                        Map.of("text", "orphaned "), false,
+                                        null, null, null)),
+                        new HarnessEvent(4, "boot_1:epoch_1:4",
+                                new ProjectedEvent("item.output_text.delta",
+                                        Map.of("text", "prefix"), false,
+                                        null, null, null))));
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId()))
+                .isPresent();
+
+        store.retractHarnessTurnOutput(tenant, session.sessionId(),
+                turn.turnId(), owner, "epoch_1", 3, 5);
+
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 20))
+                .satisfies(events -> {
+                    assertThat(events).filteredOn(event ->
+                                    "boot_1:epoch_1:2".equals(
+                                            event.sourceKey()))
+                            .singleElement()
+                            .satisfies(event -> assertThat(event.data())
+                                    .containsEntry("text", "kept"));
+                    assertThat(events).filteredOn(event ->
+                                    event.sourceKey() != null
+                                            && (event.sourceKey().equals(
+                                                    "boot_1:epoch_1:3")
+                                                    || event.sourceKey().equals(
+                                                            "boot_1:epoch_1:4")))
+                            .allSatisfy(event -> {
+                                assertThat(event.data())
+                                        .containsEntry("text", "");
+                                assertThat(event.itemId()).isNull();
+                                assertThat(event.contentPartId()).isNull();
+                            });
+                });
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 20))
+                .filteredOn(event -> "stream.reconciled".equals(event.type()))
+                .hasSize(1);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> assertThat(
+                        record.harnessLastEventId()).isEqualTo(5));
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId()))
+                .get().satisfies(snapshot -> assertThat(snapshot.items())
+                        .filteredOn(item -> "message".equals(item.type())
+                                && "assistant".equals(item.role()))
+                        .singleElement().satisfies(item ->
+                                assertThat(item.content()).singleElement()
+                                        .satisfies(part -> assertThat(
+                                                part.text()).isEqualTo("kept"))));
+        assertEventsNameTheSnapshot(tenant, session.sessionId());
+
+        // A redelivered retraction does not retract again, but the cursor
+        // still advances past it.
+        store.retractHarnessTurnOutput(tenant, session.sessionId(),
+                turn.turnId(), owner, "epoch_1", 3, 6);
+        assertThat(store.findEvents(tenant, session.sessionId(), 0, 20))
+                .filteredOn(event -> "stream.reconciled".equals(event.type()))
+                .hasSize(1);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> assertThat(
+                        record.harnessLastEventId()).isEqualTo(6));
+
+        assertThatThrownBy(() -> store.retractHarnessTurnOutput(tenant,
+                session.sessionId(), turn.turnId(), owner, "epoch_other", 3,
+                7)).isInstanceOfSatisfying(IllegalStateException.class,
+                        error -> assertThat(error.getMessage()).contains(
+                                "event epoch changed"));
     }
 
     @Test

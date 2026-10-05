@@ -47,6 +47,7 @@ import {
   isValidAgentName,
   listThreads,
   issueAgentHostEnrollment,
+  isValidId,
   readAgentHosts,
   readWorkspaceAgents,
   readAgentWorkspace,
@@ -886,15 +887,33 @@ export function registerWorkspaceAgentRoutes(
     }
   });
 
+  const enrollMutation = deps.mutate();
+  const replaceMutation = deps.mutate({ strict: true });
   app.post(
     `${prefix}/hosts/enrollment`,
-    deps.mutate(),
+    (req, res, next) =>
+      (req.body?.supersedesHostId !== undefined
+        ? replaceMutation
+        : enrollMutation)(req, res, next),
     async (req: Request, res: Response) => {
       const runtime = runtimeFor(req, res);
       if (!runtime) return;
+      const supersedesHostId: unknown = req.body?.supersedesHostId;
+      if (
+        supersedesHostId !== undefined &&
+        (typeof supersedesHostId !== 'string' || !isValidId(supersedesHostId))
+      ) {
+        res
+          .status(400)
+          .json({ error: 'Invalid Agent Host replacement target.' });
+        return;
+      }
       try {
         res.status(201).json({
-          ...(await issueAgentHostEnrollment(runtime.workspaceCwd)),
+          ...(await issueAgentHostEnrollment(
+            runtime.workspaceCwd,
+            supersedesHostId,
+          )),
           workspaceId: runtime.workspaceId,
         });
       } catch (error) {
