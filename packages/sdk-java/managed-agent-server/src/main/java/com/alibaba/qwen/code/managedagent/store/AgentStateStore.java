@@ -123,6 +123,21 @@ public interface AgentStateStore {
         throw new UnsupportedOperationException("Lifecycle reconciliation is unavailable");
     }
 
+    /**
+     * Blocks the operation, and when {@code budgetExempt} is true records the
+     * attempt as a wait on an external condition (a live journal writer or a
+     * stale Harness view) that never consumed the terminal retry budget.
+     */
+    default void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, String failureCode, long availableAt,
+            boolean budgetExempt) {
+        if (budgetExempt) {
+            throw new UnsupportedOperationException("Lifecycle reconciliation is unavailable");
+        }
+        blockLifecycleOperation(tenantId, sessionId, operationId, owner,
+                generation, failureCode, availableAt);
+    }
+
     Optional<OperationRecord> findOperation(String tenantId,
             String sessionId, String operationId);
 
@@ -159,6 +174,24 @@ public interface AgentStateStore {
     void retryOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             long availableAt);
+
+    /**
+     * Retries the operation, and when {@code budgetExempt} is true records
+     * the attempt as a wait on an external condition (a live journal writer
+     * or a stale Harness view) that must not consume the terminal retry
+     * budget. The attempt count still grows, so the dispatch backoff keeps
+     * stretching.
+     */
+    default void retryOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            long availableAt, boolean budgetExempt) {
+        if (budgetExempt) {
+            throw new UnsupportedOperationException(
+                    "Budget-exempt retry is unavailable");
+        }
+        retryOperation(tenantId, sessionId, operationId, owner,
+                claimGeneration, availableAt);
+    }
 
     Admission replayCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest);

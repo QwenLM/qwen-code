@@ -14,6 +14,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
@@ -53,7 +54,11 @@ class OperationRetryTerminalStateTest {
 
     // A live journal writer is the one settle blocker the budget must not
     // terminate: the close can still succeed once the writer stops, so the
-    // operation keeps waiting rather than recording a failure.
+    // operation keeps waiting rather than recording a failure. Past the
+    // budget the wait is also published — the row reads recovery_blocked
+    // with its code instead of a healthy pending retry — and the attempt is
+    // recorded budget-exempt so the wait never consumes the budget the close
+    // itself still has.
     @ParameterizedTest(name = "attemptCount = {0}")
     @ValueSource(ints = {10, 40})
     void lifecycleOperationKeepsWaitingPastTheBudgetWhileAWriterIsLive(
@@ -83,12 +88,140 @@ class OperationRetryTerminalStateTest {
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
-            verify(store).retryOperation(eq("tenant"), eq("session"),
-                    eq("op-close"), anyString(), eq(1L), anyLong());
+            verify(store).blockLifecycleOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("session_close_writer_live"), anyLong(), eq(true));
+            verify(store, never()).retryOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyLong());
             verify(store, never()).failOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyString());
             verify(store, never()).completeOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // The writer wait must not consume the budget the close itself still
+    // has: an operation that waited out a live writer past the budget is
+    // rescheduled after the writer stops, not terminated on its first
+    // unblocked failure (review round 6, R6-3).
+    @Test
+    void aCloseThatWaitedOutALiveWriterKeepsItsFullBudget() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        OperationRecord claimed = lifecycleOperation(11, 11);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
+        when(harness.isAvailable()).thenReturn(true);
+        // The writer is gone, but the Harness call itself still fails.
+        when(harness.closeSession("tenant", "session"))
+                .thenThrow(new IllegalStateException("harness unreachable"));
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(false);
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        mock(RuntimeWarmer.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(store).retryOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L), anyLong());
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // Java's view of the Harness is pinned to the boot its client was
+    // constructed with, so a restarted Harness fails every call with a
+    // generation error until Java restarts too. That failure is this
+    // replica's stale view, not the close's own failure: the operation keeps
+    // waiting past the budget instead of recording an unrecoverable
+    // terminal (review round 6, R6-3).
+    @Test
+    void aStaleHarnessViewKeepsTheOperationWaitingPastTheBudget() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        OperationRecord claimed = lifecycleOperation(10);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.closeSession("tenant", "session")).thenThrow(
+                mock(HostedHarnessGenerationException.class));
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(false);
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        mock(RuntimeWarmer.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(store).retryOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L), anyLong(),
+                    eq(true));
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // The blocked reschedule is restricted to the shapes the recovery scan
+    // re-drives from BLOCKED: a delete admitted on an ACTIVE Session is not
+    // one of them, so its writer wait stays a pending retry.
+    @Test
+    void anActiveSessionDeleteWaitsOnTheWriterAsAPendingRetry() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        OperationRecord claimed = new OperationRecord("tenant", "session",
+                "op-delete", OperationKind.DELETE, "digest", "RUNNING",
+                "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1, 10);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-delete"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(true);
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        mock(RuntimeWarmer.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-delete");
+
+            verify(store).retryOperation(eq("tenant"), eq("session"),
+                    eq("op-delete"), anyString(), eq(1L), anyLong(),
+                    eq(true));
+            verify(store, never()).blockLifecycleOperation(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyString(), anyLong(), anyBoolean());
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
         } finally {
             coordinator.stopRenewals();
         }
@@ -362,8 +495,11 @@ class OperationRetryTerminalStateTest {
         try {
             coordinator.dispatch("tenant", "session", "op-delete");
 
-            verify(store).retryOperation(eq("tenant"), eq("session"),
-                    eq("op-delete"), anyString(), eq(1L), anyLong());
+            // Past the budget the writer wait is published, and the shape is
+            // one the recovery scan re-drives from BLOCKED.
+            verify(store).blockLifecycleOperation(eq("tenant"), eq("session"),
+                    eq("op-delete"), anyString(), eq(1L),
+                    eq("session_close_writer_live"), anyLong(), eq(true));
             verify(store, never()).failOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyString());
             // The closed-Session delete shape makes zero Runtime calls, in
@@ -459,8 +595,11 @@ class OperationRetryTerminalStateTest {
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
-            verify(store).retryOperation(eq("tenant"), eq("session"),
-                    eq("op-close"), anyString(), eq(1L), anyLong());
+            // Treated as live, so past the budget the wait is published like
+            // any writer wait.
+            verify(store).blockLifecycleOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("session_close_writer_live"), anyLong(), eq(true));
             verify(store, never()).failOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyString());
         } finally {
@@ -586,8 +725,12 @@ class OperationRetryTerminalStateTest {
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
+            // Within the budget the wait stays a plain pending retry, but
+            // the attempt is recorded budget-exempt so it never consumes the
+            // budget the close itself still has.
             verify(store).retryOperation(eq("tenant"), eq("session"),
-                    eq("op-close"), anyString(), eq(1L), anyLong());
+                    eq("op-close"), anyString(), eq(1L), anyLong(),
+                    eq(true));
             verify(store, never()).completeOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyBoolean());
             verify(store, never()).failOperation(anyString(), anyString(),
@@ -919,9 +1062,15 @@ class OperationRetryTerminalStateTest {
     }
 
     private static OperationRecord lifecycleOperation(int attemptCount) {
+        return lifecycleOperation(attemptCount, 0);
+    }
+
+    private static OperationRecord lifecycleOperation(int attemptCount,
+            int budgetExemptAttempt) {
         return new OperationRecord("tenant", "session", "op-close",
                 OperationKind.CLOSE, "digest", "RUNNING", "JAVA_DURABLE",
-                "LEASED", "ACTIVE", null, "owner", 1, attemptCount);
+                "LEASED", "ACTIVE", null, "owner", 1, attemptCount, null,
+                budgetExemptAttempt);
     }
 
     private static OperationRecord actionOperation(int attemptCount) {

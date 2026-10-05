@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
@@ -26,8 +27,13 @@ import org.springframework.stereotype.Component;
  * the dispatch backoff; once the retry budget is spent the operation reaches
  * a terminal failure that keeps the failure code and leaves the Session in
  * its pending status, rather than retrying forever or certifying a settle
- * that never happened. The one exception is a live journal writer: the close
- * can still succeed once it stops, so the operation keeps waiting.
+ * that never happened. The budget counts only attempts that could have made
+ * progress; two conditions keep waiting instead, and their attempts stay
+ * budget-exempt: a live journal writer (the close can still succeed once it
+ * stops; past the budget the wait is published as recovery_blocked with the
+ * session_close_writer_live code), and a generation error from Java's stale
+ * view of a restarted Harness (the close can still succeed once this replica
+ * refreshes).
  */
 @Component
 public class SessionLifecycleCoordinator {
@@ -154,17 +160,27 @@ public class SessionLifecycleCoordinator {
                     blocked = "workspace_close_identity_unverified";
                 }
             }
-            // The budget bounds every settle outcome, blocked or not, and
-            // the terminal record keeps the cause instead of certifying a
-            // completion that never settled. Two exceptions keep waiting
-            // instead: a live journal writer (the close can still succeed
-            // once it stops), and a failure thrown AFTER settle() returned —
+            // Two settle outcomes wait on a condition only time, an
+            // operator, or a restart can change, so the budget must not
+            // terminate them and their attempts must not consume it: a live
+            // journal writer (the close can still succeed once it stops),
+            // and a generation error from Java's stale view of a restarted
+            // Harness (the close can still succeed once this replica
+            // refreshes). Both reschedule through the budget-exempt baseline.
+            boolean writerLive = writerStillLive(claimed);
+            boolean staleBoot =
+                    cause instanceof HostedHarnessGenerationException;
+            // The budget bounds every settle outcome that could have made
+            // progress, blocked or not, and the terminal record keeps the
+            // cause instead of certifying a completion that never settled.
+            // A failure thrown AFTER settle() returned also keeps waiting:
             // the settle did happen then, and a terminal
             // session_lifecycle_delivery_failed would certify the opposite;
             // the completion write is simply retried (settle is idempotent).
             if (harnessConfirmed == null
-                    && claimed.attemptCount() >= maxOperationRetries
-                    && valid.get() && !writerStillLive(claimed)) {
+                    && claimed.attemptCount() - claimed.budgetExemptAttempt()
+                            >= maxOperationRetries
+                    && valid.get() && !writerLive && !staleBoot) {
                 LOG.error("Managed Session operation exhausted retries"
                                 + " tenant={} session={} operation={}"
                                 + " attempts={}",
@@ -245,6 +261,21 @@ public class SessionLifecycleCoordinator {
             if (valid.get() && blocked != null) {
                 store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(), blocked, Math.addExact(clock.millis(), delay));
+            } else if (valid.get() && writerLive
+                    && claimed.attemptCount() >= maxOperationRetries
+                    && blockedShapeRescanned(claimed)) {
+                // Past the budget the writer wait is published: the row reads
+                // recovery_blocked with its code rather than a healthy
+                // pending retry, and the recovery scan still re-drives it —
+                // the wait itself stays unbounded.
+                store.blockLifecycleOperation(tenantId, sessionId,
+                        operationId, owner, claimed.claimGeneration(),
+                        "session_close_writer_live",
+                        Math.addExact(clock.millis(), delay), true);
+            } else if (valid.get() && (writerLive || staleBoot)) {
+                store.retryOperation(tenantId, sessionId, operationId, owner,
+                        claimed.claimGeneration(),
+                        Math.addExact(clock.millis(), delay), true);
             } else if (valid.get()) {
                 store.retryOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(), Math.addExact(clock.millis(), delay));
@@ -279,6 +310,14 @@ public class SessionLifecycleCoordinator {
                     operation.operationId(), error.getMessage());
             return true;
         }
+    }
+
+    // The recovery scan re-drives a blocked CLOSE and a blocked DELETE
+    // admitted on a closed Session; every other shape must stay PENDING to
+    // be re-driven.
+    private boolean blockedShapeRescanned(OperationRecord operation) {
+        return operation.kind() == OperationKind.CLOSE
+                || closedSessionDeletion(operation);
     }
 
     // A delete of an already closed or archived bound Session makes zero

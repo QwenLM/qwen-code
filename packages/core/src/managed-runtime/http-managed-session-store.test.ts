@@ -1004,6 +1004,7 @@ describe('HTTP Managed Session store', () => {
     server.sealFailuresRemaining = 2;
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1049,6 +1050,7 @@ describe('HTTP Managed Session store', () => {
     server.sealFailuresRemaining = Number.MAX_SAFE_INTEGER;
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1103,6 +1105,7 @@ describe('HTTP Managed Session store', () => {
     const server = new FakeManagedSessionStore();
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1114,16 +1117,17 @@ describe('HTTP Managed Session store', () => {
       expect(server.renewCount).toBe(1);
 
       server.sealFailuresRemaining = Number.MAX_SAFE_INTEGER;
-      server.renewFailuresRemaining = 1;
+      server.renewFailuresRemaining = Number.MAX_SAFE_INTEGER;
       await expect(stores.close()).rejects.toThrow('backend down');
 
-      // The pending-seal tick renews before resealing; the renewal failure
-      // ends the cadence, so nothing renews or seals anymore.
+      // The pending-seal tick renews before resealing; the renewal's three
+      // transient attempts all fail, which ends the cadence, so nothing
+      // renews or seals anymore.
       await vi.advanceTimersByTimeAsync(60_000);
-      expect(server.renewCount).toBe(2);
+      expect(server.renewCount).toBe(4);
       expect(server.sealCount).toBe(1);
       await vi.advanceTimersByTimeAsync(300_000);
-      expect(server.renewCount).toBe(2);
+      expect(server.renewCount).toBe(4);
       expect(server.sealCount).toBe(1);
       expect(server.state).toBe('ACTIVE');
 
@@ -1146,6 +1150,7 @@ describe('HTTP Managed Session store', () => {
     server.sealReceiptMismatch = true;
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,

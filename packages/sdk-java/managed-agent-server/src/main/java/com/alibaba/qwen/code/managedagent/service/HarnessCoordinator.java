@@ -201,13 +201,16 @@ public class HarnessCoordinator {
             terminal = runClaimed(claimed, leaseLost,
                     submissionAttempted);
         } catch (HostedHarnessCapabilityMismatchException error) {
-            terminal = fail(claimed, error.getCode(),
+            terminal = fail(claimed, submissionAttempted.get(),
+                    error.getCode(),
                     "Hosted Harness capability policy changed.");
         } catch (HostedHarnessGenerationException error) {
-            terminal = fail(claimed, error.getCode(),
+            terminal = fail(claimed, submissionAttempted.get(),
+                    error.getCode(),
                     "Hosted Harness generation changed.");
         } catch (DaemonProtocolException error) {
-            terminal = fail(claimed, "hosted_harness_protocol_error",
+            terminal = fail(claimed, submissionAttempted.get(),
+                    "hosted_harness_protocol_error",
                     "Hosted Harness returned an invalid protocol response.");
         } catch (HarnessSessionRefusedException error) {
             // A named load refusal is fail-closed and known, but the Turn
@@ -221,7 +224,8 @@ public class HarnessCoordinator {
             if (error.getStatusCode() >= 400
                     && error.getStatusCode() < 500
                     && error.getStatusCode() != 409) {
-                terminal = fail(claimed, "hosted_harness_rejected",
+                terminal = fail(claimed, submissionAttempted.get(),
+                        "hosted_harness_rejected",
                         "Hosted Harness rejected the Turn.");
             } else {
                 terminal = transientFailure(claimed,
@@ -229,7 +233,7 @@ public class HarnessCoordinator {
             }
         } catch (RuntimeBrokerException error) {
             terminal = !submissionAttempted.get() && !error.isRetryable()
-                    ? fail(claimed, error.getCode(), error.getMessage())
+                    ? fail(claimed, false, error.getCode(), error.getMessage())
                     : transientFailure(claimed, submissionAttempted.get(), error);
         } catch (RuntimeException error) {
             terminal = transientFailure(claimed,
@@ -247,7 +251,8 @@ public class HarnessCoordinator {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
         if (session.workspace() != null && !harness.isWorkspaceFilesAvailable()) {
-            return fail(claimed, "workspace_unavailable",
+            return fail(claimed, submissionAttempted.get(),
+                    "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
         if ("CANCELLING".equals(claimed.status())
@@ -276,7 +281,8 @@ public class HarnessCoordinator {
         HarnessRuntimeRecovery runtimeRecovery = attachment.runtimeRecovery();
         if (runtimeRecovery != null
                 && runtimeRecovery.hasUnknownOutcome()) {
-            return fail(claimed, "managed_runtime_recovery_blocked",
+            return fail(claimed, submissionAttempted.get(),
+                    "managed_runtime_recovery_blocked",
                     "A prior tool execution has an unknown outcome; the"
                             + " Session was blocked without replaying it.");
         }
@@ -286,7 +292,8 @@ public class HarnessCoordinator {
             if (recoveringCancellation
                     ? !runtimeRecovery.isCancellationReady()
                     : !runtimeRecovery.isContinuationReady()) {
-                return fail(claimed, "managed_runtime_recovery_incomplete",
+                return fail(claimed, submissionAttempted.get(),
+                        "managed_runtime_recovery_incomplete",
                         "A prior tool execution is not ready for safe"
                                 + (recoveringCancellation
                                         ? " cancellation."
@@ -294,7 +301,7 @@ public class HarnessCoordinator {
             }
             if (attachment.eventEpoch() == null
                     || attachment.lastEventId() == null) {
-                return fail(claimed,
+                return fail(claimed, submissionAttempted.get(),
                         "managed_runtime_recovery_watermark_missing",
                         "Hosted Harness recovery did not return an event"
                                 + " watermark.");
@@ -309,7 +316,7 @@ public class HarnessCoordinator {
             if (!store.bindRecoveredHarness(session.tenantId(),
                     session.sessionId(), claimed.turnId(), owner,
                     session.harnessBootId(), attachment.bootId())) {
-                return fail(claimed,
+                return fail(claimed, submissionAttempted.get(),
                         "hosted_harness_recovery_generation_mismatch",
                         "Hosted Harness recovery generation changed.");
             }
@@ -358,7 +365,8 @@ public class HarnessCoordinator {
         } else {
             if (!store.bindHarness(session.tenantId(), session.sessionId(),
                     claimed.turnId(), owner, attachment.bootId())) {
-                return fail(claimed, "hosted_harness_generation_mismatch",
+                return fail(claimed, submissionAttempted.get(),
+                        "hosted_harness_generation_mismatch",
                         "Hosted Harness generation changed.");
             }
             requireLease(leaseLost);
@@ -637,10 +645,11 @@ public class HarnessCoordinator {
         }
     }
 
-    // Best-effort reconciliation for the post-admission budget terminal:
-    // cancelAdmittedTurn's attach-and-cancel sequence without its
-    // CANCELLING precondition — this call site terminates the Turn, so the
-    // cancel must land before fail() clears the dispatch owner.
+    // Best-effort reconciliation before the terminal failure of a Turn
+    // whose submission was attempted: cancelAdmittedTurn's attach-and-cancel
+    // sequence without its CANCELLING precondition — the fail() caller
+    // terminates the Turn, so the cancel must land before failTurn clears
+    // the dispatch owner.
     private void cancelAdmittedTurnBeforeTerminalFail(TurnRecord turn) {
         try {
             SessionRecord session = store.requireSession(turn.tenantId(),
@@ -668,7 +677,16 @@ public class HarnessCoordinator {
         }
     }
 
-    private boolean fail(TurnRecord turn, String code, String message) {
+    private boolean fail(TurnRecord turn, boolean submissionAttempted,
+            String code, String message) {
+        if (submissionAttempted) {
+            // The terminal record makes the admitted Turn unreachable:
+            // failTurn clears the dispatch owner and leaves the active
+            // states, so nothing could later cancel it or re-attach to
+            // journal its output. Reconcile first — best-effort cancel it
+            // through the Session's bound Harness, then record the failure.
+            cancelAdmittedTurnBeforeTerminalFail(turn);
+        }
         store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
                 owner, code, message);
         return true;
@@ -676,23 +694,28 @@ public class HarnessCoordinator {
 
     private boolean transientFailure(TurnRecord turn,
             boolean submissionAttempted, RuntimeException error) {
+        // The budget counts consecutive failures without journaled progress:
+        // the fenced cursor updates reset the counter, so the claim-time
+        // record is stale for a delivery that admitted or journaled since.
+        TurnRecord current = store.findTurn(turn.tenantId(),
+                turn.sessionId(), turn.turnId()).orElse(turn);
         if (!submissionAttempted
-                && turn.retryCount() >= maxPreAdmissionRetries) {
+                && current.retryCount() >= maxPreAdmissionRetries) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
                     failureLabel(error), error);
             if (error instanceof HarnessSessionRefusedException refusal) {
-                return fail(turn, refusal.getCode(),
+                return fail(turn, false, refusal.getCode(),
                         "Hosted Harness refused to open the Session before"
                                 + " Turn admission.");
             }
-            return fail(turn, "hosted_harness_unavailable",
+            return fail(turn, false, "hosted_harness_unavailable",
                     "Hosted Harness remained unavailable before Turn"
                             + " admission.");
         }
         if (submissionAttempted
-                && turn.retryCount() >= maxPostAdmissionRetries) {
+                && current.retryCount() >= maxPostAdmissionRetries) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
@@ -702,34 +725,29 @@ public class HarnessCoordinator {
             // named load refusal and a Runtime Broker failure each keep
             // their own code — the generic one would name a component that
             // did not fail.
-            // The terminal record makes the admitted Turn unreachable:
-            // failTurn clears the dispatch owner and leaves the active
-            // states, so nothing could later cancel it or re-attach to
-            // journal its output. Reconcile first — best-effort cancel it
-            // through the Session's bound Harness, then record the failure.
-            cancelAdmittedTurnBeforeTerminalFail(turn);
             if (error instanceof HarnessSessionRefusedException refusal) {
-                return fail(turn, refusal.getCode(),
+                return fail(turn, true, refusal.getCode(),
                         "Hosted Harness refused to open the Session after"
                                 + " Turn admission.");
             }
             if (error instanceof RuntimeBrokerException brokerError) {
-                return fail(turn, brokerError.getCode(),
+                return fail(turn, true, brokerError.getCode(),
                         brokerError.getMessage());
             }
-            return fail(turn, "hosted_harness_unavailable_after_admission",
+            return fail(turn, true,
+                    "hosted_harness_unavailable_after_admission",
                     "Hosted Harness remained unavailable after Turn"
                             + " admission.");
         }
         long delay = retryDelay(retryInitialDelay, retryMaxDelay,
-                turn.retryCount());
+                current.retryCount());
         long retryAfter = Math.addExact(clock.millis(), delay);
         store.scheduleTurnRetry(turn.tenantId(), turn.sessionId(),
                 turn.turnId(), owner, retryAfter);
         LOG.warn("Managed Turn coordination will retry tenant={} session={}"
                         + " turn={} retry={} delayMs={} failure={}",
                 turn.tenantId(), turn.sessionId(), turn.turnId(),
-                turn.retryCount() + 1, delay, failureLabel(error));
+                current.retryCount() + 1, delay, failureLabel(error));
         return true;
     }
 

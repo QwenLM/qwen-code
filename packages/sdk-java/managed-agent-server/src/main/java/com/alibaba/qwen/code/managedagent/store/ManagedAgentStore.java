@@ -200,7 +200,8 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getString("receipt_id"),
                     result.getString("lease_owner"),
                     result.getLong("claim_generation"),
-                    result.getInt("attempt_count"), result.getString("error_code"));
+                    result.getInt("attempt_count"), result.getString("error_code"),
+                    result.getInt("budget_exempt_attempt"));
     private final RowMapper<OperationTarget> operationTargetMapper =
             (result, row) -> new OperationTarget(
                     result.getString("tenant_id"),
@@ -994,9 +995,23 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, String failureCode, long availableAt) {
+        blockLifecycleOperation(tenantId, sessionId, operationId, owner,
+                generation, failureCode, availableAt, false);
+    }
+
+    @Override
+    @Transactional
+    public void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, String failureCode, long availableAt,
+            boolean budgetExempt) {
         long now = lifecycleDatabaseTime();
+        // The exempt assignment must precede the attempt_count increment:
+        // MySQL evaluates single-table UPDATE assignments left to right.
         jdbc.update("UPDATE managed_agent_operation SET state = 'RECOVERY_BLOCKED', delivery_state = 'BLOCKED',"
                 + " error_code = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, updated_at = ?,"
+                + (budgetExempt
+                        ? " budget_exempt_attempt = attempt_count + 1,"
+                        : "")
                 + " attempt_count = attempt_count + 1"
                 + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND delivery_state = 'LEASED'"
                 + " AND lease_owner = ? AND claim_generation = ? AND lease_until > ?",
@@ -1009,11 +1024,25 @@ public class ManagedAgentStore implements AgentStateStore {
     public void retryOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             long availableAt) {
+        retryOperation(tenantId, sessionId, operationId, owner,
+                claimGeneration, availableAt, false);
+    }
+
+    @Override
+    @Transactional
+    public void retryOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            long availableAt, boolean budgetExempt) {
         long delay = Math.max(0, availableAt - clock.millis());
         long now = lifecycleDatabaseTime();
         availableAt = Math.addExact(now, delay);
+        // The exempt assignment must precede the attempt_count increment:
+        // MySQL evaluates single-table UPDATE assignments left to right.
         jdbc.update("UPDATE managed_agent_operation SET delivery_state ="
                         + " 'PENDING', lease_owner = NULL, lease_until = NULL,"
+                        + (budgetExempt
+                                ? " budget_exempt_attempt = attempt_count + 1,"
+                                : "")
                         + " attempt_count = attempt_count + 1,"
                         + " available_at = ?, updated_at = ? WHERE"
                         + " tenant_id = ? AND session_id = ? AND"
@@ -1756,10 +1785,13 @@ public class ManagedAgentStore implements AgentStateStore {
             String turnId, String owner, String eventEpoch,
             long lastEventId) {
         long now = clock.millis();
+        // The admission proves coordination made progress, so the retry
+        // budget restarts: it counts consecutive failures without progress.
         int updated = jdbc.update("UPDATE managed_agent_turn SET status ="
                         + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
                         + " 'RUNNING' END, harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, updated_at = ?,"
+                        + " harness_last_event_id = ?, retry_count = 0,"
+                        + " updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -1809,10 +1841,14 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new IllegalStateException(
                     "Hosted Harness recovery epoch changed");
         }
+        // The recovery admission proves coordination made progress, so the
+        // retry budget restarts: it counts consecutive failures without
+        // progress.
         int updated = jdbc.update("UPDATE managed_agent_turn SET status ="
                         + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
                         + " 'RUNNING' END, harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, updated_at = ?,"
+                        + " harness_last_event_id = ?, retry_count = 0,"
+                        + " updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
@@ -2058,9 +2094,13 @@ public class ManagedAgentStore implements AgentStateStore {
     private int updateHarnessCursor(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             long lastSourceId, long now) {
+        // Journaling new events proves coordination made progress, so the
+        // retry budget restarts: it counts consecutive failures without
+        // progress.
         return jdbc.update("UPDATE managed_agent_turn SET"
                         + " harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, updated_at = ?,"
+                        + " harness_last_event_id = ?, retry_count = 0,"
+                        + " updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"

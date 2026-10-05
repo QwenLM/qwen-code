@@ -11,7 +11,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.DaemonProtocolException;
 import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceStream;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
@@ -24,6 +28,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -140,6 +145,156 @@ class AdmittedTurnRetryTerminalStateTest {
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                     eq("turn"), anyString(), anyLong());
         }
+    }
+
+    // The budget counts consecutive failures without journaled progress: a
+    // Turn at the budget whose delivery admitted and journaled new events
+    // since the last failure reschedules instead of terminating — the fenced
+    // cursor updates reset the counter, so the terminal decision must read
+    // the fresh record, not the claim-time one (review round 6, R6-1).
+    @ParameterizedTest(name = "retryCount = {0}")
+    @ValueSource(ints = {10, 42})
+    void admittedTurnAtTheBudgetStillRetriesAfterJournaledProgress(
+            int retryCount) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        String promptId = "11111111-1111-4111-8111-111111111111";
+        TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                promptId,
+                List.of(Map.of("type", "text", "text", "recover")),
+                "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-1", 5L,
+                "previous-owner", Long.MAX_VALUE, retryCount, null, null,
+                null, 1, 1, null, 1);
+        TurnRecord progressed = new TurnRecord("tenant", "session", "turn",
+                promptId,
+                List.of(Map.of("type", "text", "text", "recover")),
+                "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-1", 6L,
+                "previous-owner", Long.MAX_VALUE, 0, null, null,
+                null, 1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, new ContextBinding("tenant", "ws-a", 1,
+                                "storage-a", ".", "config-a", 1), "yolo",
+                        "hosted-workspace-files/1"));
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot-1"));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-1"))).thenReturn(true);
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed), Optional.of(progressed));
+        // One journaled event, then the stream drops before a terminal one.
+        when(harness.stream("tenant", "session", 5L, "epoch-1"))
+                .thenReturn(new SourceStream() {
+                    private boolean emitted;
+
+                    @Override
+                    public String eventEpoch() {
+                        return "epoch-1";
+                    }
+
+                    @Override
+                    public SourceEvent next() {
+                        if (emitted) {
+                            return null;
+                        }
+                        emitted = true;
+                        return new SourceEvent(6L, "debug", Map.of(),
+                                promptId, Map.of());
+                    }
+
+                    @Override
+                    public void close() {
+                    }
+                });
+
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(),
+                mock(RuntimeWarmer.class),
+                CoordinatorTestSupport.directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+
+        verify(store).recordHarnessEvents(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), eq("epoch-1"), any());
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(harness, never()).cancel(anyString(), anyString());
+    }
+
+    // The reconcile-before-terminal invariant is a property of the terminal
+    // write, not of one caller: a protocol error thrown after the submission
+    // was attempted still cancels the admitted Turn before failTurn clears
+    // the dispatch owner (review round 6, R5-3).
+    @Test
+    void aProtocolErrorAfterSubmissionCancelsTheAdmittedTurnFirst() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        String promptId = "11111111-1111-4111-8111-111111111111";
+        TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                promptId,
+                List.of(Map.of("type", "text", "text", "recover")),
+                "sha256:" + "a".repeat(64), "RUNNING", false, null, null,
+                "previous-owner", Long.MAX_VALUE, 0, null, null,
+                null, 1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        // The submit binds the Session to the Harness it reached, which the
+        // reconcile reads back before the terminal write.
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null,
+                        1, new ContextBinding("tenant", "ws-a", 1,
+                                "storage-a", ".", "config-a", 1), "yolo",
+                        "hosted-workspace-files/1"),
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, new ContextBinding("tenant", "ws-a", 1,
+                                "storage-a", ".", "config-a", 1), "yolo",
+                        "hosted-workspace-files/1"));
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.createOrLoad("tenant", "session", false))
+                .thenReturn(new Attachment("boot-1"));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-1"))).thenReturn(true);
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        DaemonProtocolException protocolError = mock(
+                DaemonProtocolException.class);
+        when(harness.submit(eq("tenant"), eq("session"), eq(promptId),
+                any(), anyString())).thenThrow(protocolError);
+
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(),
+                mock(RuntimeWarmer.class),
+                CoordinatorTestSupport.directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+
+        verify(store).markSubmissionAttempted(eq("tenant"), eq("session"),
+                eq("turn"), anyString());
+        InOrder order = inOrder(store, harness);
+        order.verify(harness).cancel("tenant", "session");
+        order.verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_protocol_error"),
+                anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
     }
 
     private static Dispatched dispatchTransientFailure(int retryCount) {

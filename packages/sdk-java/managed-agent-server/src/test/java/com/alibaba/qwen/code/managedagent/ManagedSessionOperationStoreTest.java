@@ -153,6 +153,65 @@ class ManagedSessionOperationStoreTest {
                 "worker", Duration.ofSeconds(30))).isEmpty();
     }
 
+    // The budget-exempt reschedule keeps the delay-growing attempt count
+    // but records the wait so the terminal budget only counts attempts that
+    // could have made progress; the plain retry and block paths leave the
+    // baseline alone. A blocked CLOSE stays re-drivable.
+    @Test
+    void budgetExemptWaitsDoNotConsumeTheTerminalBudget() {
+        ManagedAgentStore store = store();
+        String sessionId = store.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
+                List.of(), null).sessionId();
+        String operationId = store.beginOperation(TENANT, sessionId,
+                OperationKind.CLOSE, "", "close", "digest").operation()
+                .operationId();
+
+        OperationRecord first = store.claimOperation(TENANT, sessionId,
+                operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
+        store.retryOperation(TENANT, sessionId, operationId, "worker",
+                first.claimGeneration(), 0);
+        OperationRecord retried = operation(store, sessionId, operationId);
+        assertThat(retried.attemptCount()).isEqualTo(1);
+        assertThat(retried.budgetExemptAttempt()).isZero();
+
+        OperationRecord second = store.claimOperation(TENANT, sessionId,
+                operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
+        store.retryOperation(TENANT, sessionId, operationId, "worker",
+                second.claimGeneration(), 0, true);
+        OperationRecord waited = operation(store, sessionId, operationId);
+        assertThat(waited.attemptCount()).isEqualTo(2);
+        assertThat(waited.budgetExemptAttempt()).isEqualTo(2);
+
+        OperationRecord third = store.claimOperation(TENANT, sessionId,
+                operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
+        store.blockLifecycleOperation(TENANT, sessionId, operationId,
+                "worker", third.claimGeneration(), "session_close_writer_live",
+                0, true);
+        OperationRecord blocked = operation(store, sessionId, operationId);
+        assertThat(blocked.state()).isEqualTo("RECOVERY_BLOCKED");
+        assertThat(blocked.deliveryState()).isEqualTo("BLOCKED");
+        assertThat(blocked.failureCode())
+                .isEqualTo("session_close_writer_live");
+        assertThat(blocked.attemptCount()).isEqualTo(3);
+        assertThat(blocked.budgetExemptAttempt()).isEqualTo(3);
+        // The blocked CLOSE is re-driven, so the wait stays unbounded.
+        assertThat(targets(store)).containsExactly(operationId);
+
+        OperationRecord fourth = store.claimOperation(TENANT, sessionId,
+                operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
+        assertThat(fourth.budgetExemptAttempt()).isEqualTo(3);
+        store.blockLifecycleOperation(TENANT, sessionId, operationId,
+                "worker", fourth.claimGeneration(),
+                "workspace_close_identity_unverified", 0);
+        OperationRecord brokerBlocked = operation(store, sessionId,
+                operationId);
+        assertThat(brokerBlocked.attemptCount()).isEqualTo(4);
+        assertThat(brokerBlocked.budgetExemptAttempt()).isEqualTo(3);
+        assertThat(brokerBlocked.failureCode())
+                .isEqualTo("workspace_close_identity_unverified");
+    }
+
     @Test
     void blockedActiveDeletionRemainsUnavailable() {
         ManagedAgentStore store = store();

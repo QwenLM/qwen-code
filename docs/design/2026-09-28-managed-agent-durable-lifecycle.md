@@ -207,11 +207,16 @@ admitted on — a close or delete of an active Session whose settle waits for
 the writer, or a delete of a closed Session whose retention retirement
 refuses while a residual writer holds the journal: either can still succeed
 once that writer stops, so the budget does not terminate it and it keeps
-waiting until the writer stops or its lease lapses. After the Hosted Harness restarts, the Java
+waiting until the writer stops or its lease lapses. The wait's attempts stay
+budget-exempt — only attempts that could have made progress consume the
+budget — and once the budget is spent the row reads `recovery_blocked` with
+the `session_close_writer_live` code, so a wedged close is visible instead of
+reading byte-identical to a healthy retry. After the Hosted Harness
+restarts, the Java
 connector keeps the previous boot, so its calls fail with a generation error
 until Java restarts too, as Turn dispatch does; the operation waits meanwhile
-— within the same budget — and then until the old process's writer lease
-expires.
+— budget-exempt like the writer wait — and then until the old process's
+writer lease expires.
 
 A budget-terminated operation leaves its Session in the pending status
 (`closing` or `deleting`) with the failure code on the operation row, and no
@@ -253,7 +258,7 @@ Session and drains its own Runtime binding.
 | `admission_stage` | `java_durable`; at completion `harness_confirmed` if the Harness that held the Session acknowledged its close.                  |
 | `delivery_state`  | `pending` between attempts, `leased` during one, `confirmed` at the terminal state, `blocked` while recovery-blocked.           |
 | `receipt_id`      | An opaque `rcpt_` receipt that Java issues when the operation reaches a terminal state.                                         |
-| `failure_code`    | The settle failure that spent the budget, or the workspace-close code a `recovery_blocked` close waits on.                      |
+| `failure_code`    | The settle failure that spent the budget, or the code a `recovery_blocked` operation waits on: the workspace-close refusal, or `session_close_writer_live` while a Harness still holds the journal writer. |
 
 The Harness that held the Session is the one whose boot ID the Session
 recorded: Turn dispatch records the boot it attaches to, and a rename records

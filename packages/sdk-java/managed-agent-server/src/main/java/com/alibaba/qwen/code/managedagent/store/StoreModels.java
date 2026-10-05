@@ -95,18 +95,22 @@ public final class StoreModels {
     /**
      * A durable lifecycle operation. {@code sessionStatusBefore} is the
      * Session status when it was admitted; only an operation admitted on an
-     * active Session closes the Harness.
+     * active Session closes the Harness. {@code budgetExemptAttempt} is the
+     * attempt count through which failures waited on an external condition
+     * (a live journal writer, or Java's stale view of a restarted Harness)
+     * and therefore never consumed the terminal retry budget.
      */
     public record OperationRecord(String tenantId, String sessionId,
             String operationId, OperationKind kind, String requestDigest,
             String state, String admissionStage, String deliveryState,
             String sessionStatusBefore, String receiptId, String leaseOwner,
-            long claimGeneration, int attemptCount, String failureCode) {
+            long claimGeneration, int attemptCount, String failureCode,
+            int budgetExemptAttempt) {
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
                 String requestDigest, String state, String admissionStage, String deliveryState,
                 String sessionStatusBefore, String receiptId, String leaseOwner, long claimGeneration, int attemptCount) {
             this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
-                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null);
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, 0);
         }
     }
 

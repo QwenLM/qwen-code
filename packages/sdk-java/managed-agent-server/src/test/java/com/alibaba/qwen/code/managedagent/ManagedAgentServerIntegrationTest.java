@@ -1312,6 +1312,65 @@ class ManagedAgentServerIntegrationTest {
         assertThat(store.findDispatchable(retryAfter, 100)).contains(target);
     }
 
+    // The terminal retry budget counts consecutive failures without
+    // journaled progress: every fenced cursor update — admission, recovery
+    // admission, and the journaled-event cursor — restarts it (review round
+    // 6, R6-1).
+    @Test
+    void journaledProgressRestartsTheRetryBudget() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-retry-reset-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "reset-create", "sha256:" + "4".repeat(64),
+                "qwen-code", null, null, List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "reset-turn", "sha256:" + "5".repeat(64),
+                session.sessionId(), List.of(), "sha256:" + "6".repeat(64));
+        String owner = "reset-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        store.scheduleTurnRetry(tenant, session.sessionId(), turn.turnId(),
+                owner, 0);
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        store.scheduleTurnRetry(tenant, session.sessionId(), turn.turnId(),
+                owner, 0);
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> assertThat(record.retryCount())
+                        .isEqualTo(2));
+
+        store.markSubmissionAttempted(tenant, session.sessionId(),
+                turn.turnId(), owner);
+        store.recordAdmission(tenant, session.sessionId(), turn.turnId(),
+                owner, "epoch-1", 0);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> assertThat(record.retryCount())
+                        .isZero());
+
+        store.scheduleTurnRetry(tenant, session.sessionId(), turn.turnId(),
+                owner, 0);
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                owner, "epoch-1",
+                List.of(new HarnessEvent(1, "boot:epoch-1:1", null)));
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> assertThat(record.retryCount())
+                        .isZero());
+
+        store.scheduleTurnRetry(tenant, session.sessionId(), turn.turnId(),
+                owner, 0);
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        store.recordRecoveryAdmission(tenant, session.sessionId(),
+                turn.turnId(), owner, "epoch-1", "epoch-2", 5);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> assertThat(record.retryCount())
+                        .isZero());
+    }
+
     @Test
     void transfersHarnessGenerationOnlyBeforeAdmissionUnderDispatchLease() {
         pauseRecoveryScanning();
