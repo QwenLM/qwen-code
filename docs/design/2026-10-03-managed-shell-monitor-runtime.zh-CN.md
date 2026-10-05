@@ -103,7 +103,7 @@ Java 侧，增长中的 manifest 在其仍 open 期间保持为私有 Session �
 
 `listSessionTaskEvents` 与 `queryWebShellTaskEvents` 翻为 `partial`，`output_cursor`/`outputCursor` 随之一同解冻，契约次版本在合入时递增（v1.30+；对照 main 重编号，#13210 与 #13247 都在认领 v1.30）。事件种类为 `output`、`state_changed` 与 `artifact`，遵循已定契约：每个事件一个逻辑游标位置，游标按提交顺序分配，读者绝不会越过并发提交晚到的事件；持久保留 floor 在空保留集、重启与投影重建之后仍然存活。
 
-存储：SQL 中按任务有界的事件账（本 PR 的 `V40` 表，main 的迁移表追上来时已按规则重编号），与产生该事件的提交在同一事务中写入——任务的一页日志持久时写入 output 块事件，任务视图真实变化时（即 H0c 公告点，去抖的 Observation revision 若未改任何视图则不发）写入 `state_changed` 事件，输出 Artifact 首次可见时写入 `artifact` 事件。floor 只推进到其完整文本已可在任务 Artifact 中持久读取、且经任务视图的 `artifact_refs` 可发现的事件之后（契约的可见性屏障）；归档失败绝不把 floor 推过未归档输出，积压上界就是上述按任务页预算加持有的事件行，生产者背压保证其有限。
+存储：SQL 中按任务有界的事件账（本 PR 的 `V41` 表，main 的迁移表追上来时已按规则重编号），与产生该事件的提交在同一事务中写入——任务的一页日志持久时写入 output 块事件，任务视图真实变化时（即 H0c 公告点，去抖的 Observation revision 若未改任何视图则不发）写入 `state_changed` 事件，输出 Artifact 首次可见时写入 `artifact` 事件。floor 只推进到其完整文本已可在任务 Artifact 中持久读取、且经任务视图的 `artifact_refs` 可发现的事件之后（契约的可见性屏障）；归档失败绝不把 floor 推过未归档输出，积压上界就是上述按任务页预算加持有的事件行，生产者背压保证其有限。
 
 `cursor_expired` 之后拼接所用的输出分段：一个输出事件的游标区间运行在 `managed-tool-result/1` 已命名的单一流内分段序号空间：（`captureId`、`streamId`、首个 `ordinal`）到同构三元组（不含尾端），并由页的 `firstOrdinal` 与 `segments[]` 逐字对应同一空间——因此从 floor 恢复的客户端对更早内容读 Artifact、对更新内容读事件流，既不重叠也无缺口。这收齐 H0a 的后续项「H3 定义稳定的输出分段」。
 
