@@ -577,39 +577,59 @@ function assertStoredAnswer(
   for (const row of rows) {
     const [id, kind, length, digest, hex] = row.split('\t');
     const bytes = Buffer.from(hex ?? '', 'hex');
-    if (
-      !id ||
-      !kind ||
-      bytes.length !== Number(length) ||
-      createHash('sha256').update(bytes).digest('hex') !== digest ||
-      bytes.length > 65_536
-    ) {
-      throw new Error('Stored message resource failed byte/digest validation');
+    const actualDigest = createHash('sha256').update(bytes).digest('hex');
+    let reason: string | undefined;
+    if (!id) reason = 'missing resource id';
+    else if (!kind) reason = 'missing resource kind';
+    else if (!hex || hex === 'NULL') reason = 'missing inline bytes';
+    else if (bytes.length !== Number(length))
+      reason = `byte_length=${length} actual=${bytes.length}`;
+    else if (actualDigest !== digest)
+      reason = `sha256=${digest} actual=${actualDigest}`;
+    else if (bytes.length > 65_536)
+      reason = `inline body ${bytes.length}B exceeds 65536B`;
+    if (reason) {
+      throw new Error(
+        `Stored message resource failed validation: kind=${kind ?? 'unknown'} id=${id ?? 'unknown'} ${reason}`,
+      );
     }
     bodies.set(id, { kind, bytes });
   }
-  const records = [...bodies.values()]
-    .filter(({ kind }) => kind !== 'managed-message-part')
-    .map(({ kind, bytes }) => {
+  const records = [...bodies.entries()]
+    .filter(([, { kind }]) => kind !== 'managed-message-part')
+    .map(([id, { kind, bytes }]) => {
       if (kind === 'managed-message-chunks') {
-        const manifest = JSON.parse(bytes.toString('utf8')) as {
-          parts: Array<{ resourceId: string }>;
-        };
+        let manifest: { parts: Array<{ resourceId: string }> };
+        try {
+          manifest = JSON.parse(bytes.toString('utf8')) as typeof manifest;
+        } catch {
+          throw new Error(
+            `Stored message manifest is invalid JSON: kind=${kind} id=${id}`,
+          );
+        }
         bytes = Buffer.concat(
           manifest.parts.map((part) => {
             const stored = bodies.get(part.resourceId);
             if (stored?.kind !== 'managed-message-part')
-              throw new Error('Stored message part is missing');
+              throw new Error(
+                `Stored message part is missing: kind=managed-message-part id=${part.resourceId} manifest=${id}`,
+              );
             return stored.bytes;
           }),
         );
       }
-      return JSON.parse(bytes.toString('utf8')) as {
-        type: string;
-        uuid: string;
-        parentUuid: string;
-        message?: { parts?: Array<{ text?: string }> };
-      };
+      try {
+        return JSON.parse(bytes.toString('utf8')) as {
+          type: string;
+          uuid: string;
+          parentUuid: string;
+          message?: { parts?: Array<{ text?: string }> };
+        };
+      } catch {
+        throw new Error(
+          `Stored message ${kind === 'managed-message-chunks' ? 'joined-chunk' : 'inline'} record is invalid JSON: kind=${kind} id=${id}`,
+        );
+      }
     });
   const answers = records.filter(
     (record) =>
@@ -624,7 +644,7 @@ function assertStoredAnswer(
   );
   if (manifests.length !== 1)
     throw new Error(
-      'Expected one chunked long answer and an inline short control',
+      `Expected exactly one managed-message-chunks manifest, found ${manifests.length}`,
     );
 }
 

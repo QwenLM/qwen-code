@@ -5,7 +5,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -4357,6 +4357,99 @@ describe('Hosted Harness no-tool session', () => {
         expect(answer?.data?.update?.content?.text).toBe(text);
       }
       await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    },
+  );
+
+  it.each(['missing manifest', 'missing part', 'corrupt part'])(
+    'rejects cold Workspace load with a %s and recovers intact bytes',
+    async (damage) => {
+      const text = '长😀'.repeat(25_000);
+      state.model.mockImplementationOnce(async ({ textDeltas }) => {
+        await textDeltas!.delta(text);
+        return { text, model: 'test-model' };
+      });
+      await enforceInlineResourceLimit();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+      });
+      expect(created.status).toBe(200);
+      const prompt = [{ type: 'text', text: 'hello' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', created.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      const transcript = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/transcript?limit=256`),
+      ).set('X-Qwen-Client-Id', created.body.clientId as string);
+      expectFullStreamedAnswer(transcript.body, text);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .expect(204);
+
+      const resources = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const kind =
+        damage === 'missing manifest'
+          ? 'managed-message-chunks'
+          : 'managed-message-part';
+      const directory = path.join(resources.sessionRoot, kind);
+      const files = await readdir(directory);
+      expect(files.length).toBeGreaterThan(0);
+      const file = path.join(directory, files[0]);
+      const original = await readFile(file);
+      if (damage === 'corrupt part') {
+        const corrupt = Buffer.from(original);
+        corrupt[0] ^= 1;
+        await writeFile(file, corrupt);
+      } else {
+        await rm(file);
+      }
+
+      const replacement = await app(true);
+      const load = () =>
+        headers(
+          supertest(replacement).post(`/session/${SESSION_ID}/load`),
+        ).send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+        });
+      const rejected = await load();
+      expect(rejected.status).toBe(409);
+      expect(rejected.body.code).toBe('hosted_turn_recovery_required');
+
+      await writeFile(file, original);
+      const restored = await load();
+      expect(restored.status).toBe(200);
+      const cold = await headers(
+        supertest(replacement).get(
+          `/session/${SESSION_ID}/transcript?limit=256`,
+        ),
+      ).set('X-Qwen-Client-Id', restored.body.clientId as string);
+      expectFullStreamedAnswer(cold.body, text);
+      await headers(
+        supertest(replacement).delete(`/session/${SESSION_ID}`),
+      ).expect(204);
     },
   );
 
