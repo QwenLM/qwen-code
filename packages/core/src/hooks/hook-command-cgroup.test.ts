@@ -5,7 +5,14 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -66,6 +73,36 @@ describe('unit creation and attachment', () => {
       HookCommandCgroup.create('/unused-root', 'qwen-bg-shell-1'),
     ).toThrow(HookCommandIsolationUnavailableError);
     expect(resolveRoot).toHaveBeenCalledWith('/unused-root');
+  });
+
+  it('removes only the unit it created on a failed create, never a pre-existing one', async () => {
+    vi.spyOn(
+      HookCommandCgroup as unknown as {
+        resolveRoot: (root: string | undefined) => string;
+      },
+      'resolveRoot',
+    ).mockReturnValue(directory);
+    // A named unit that already exists belongs to its owner — the very
+    // process-holding cgroup the H3 recovery path re-attaches by name — so
+    // a refused create must leave it exactly where it found it.
+    const owned = join(directory, 'qwen-bg-owner');
+    await mkdir(owned);
+    try {
+      HookCommandCgroup.create('/unused-root', 'qwen-bg-owner');
+      expect.unreachable('a taken unit name must be refused');
+    } catch (cause) {
+      expect(cause).toBeInstanceOf(HookCommandIsolationUnavailableError);
+      expect((cause as HookCommandIsolationUnavailableError).reason).toBe(
+        'unit_name_taken',
+      );
+    }
+    expect(await readdir(directory)).toEqual(['qwen-bg-owner']);
+    // A unit create itself made dies with the failed start: no half-empty
+    // unit stays behind for the next caller to trip over.
+    expect(() =>
+      HookCommandCgroup.create('/unused-root', 'qwen-bg-fresh'),
+    ).toThrow(HookCommandIsolationUnavailableError);
+    expect(await readdir(directory)).toEqual(['qwen-bg-owner']);
   });
 });
 
