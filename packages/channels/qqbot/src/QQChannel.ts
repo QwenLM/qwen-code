@@ -2899,6 +2899,12 @@ export class QQChannel extends ChannelBase {
           this.dropOrphanStash(sessionId, held);
         }
       }
+      // Only the stash this send actually carries may be reported as a sealed
+      // head: a superseded stash is dropped above and never enters replyText,
+      // so handing it to the checked send would report the same characters a
+      // second time as a loss the delivery never caused.
+      const carried =
+        held !== undefined && held.turn === currentTurn ? held : undefined;
       const { entry: capturedEntry, msgId: captured } =
         this.resolveSessionReplyAnchor(sessionId);
       try {
@@ -2912,7 +2918,7 @@ export class QQChannel extends ChannelBase {
           // streamState/flushingSessions check cannot see this send.
           this.beginMsgSeqSend(captured);
           try {
-            await this.sendFinalSegmentChecked(sessionId, held, () =>
+            await this.sendFinalSegmentChecked(sessionId, carried, () =>
               this.sendMessageWithReplyContext(
                 chatId,
                 replyText,
@@ -2932,7 +2938,7 @@ export class QQChannel extends ChannelBase {
           // past REPLY_MSG_ID_TTL_MS) would look delivered to the catch below,
           // which only sees throws. Send what the base path sends and route the
           // block through the checked helper.
-          await this.sendFinalSegmentChecked(sessionId, held, () =>
+          await this.sendFinalSegmentChecked(sessionId, carried, () =>
             this.sendMessageWithReplyContext(
               chatId,
               replyText,
@@ -2942,7 +2948,7 @@ export class QQChannel extends ChannelBase {
           );
         }
       } catch (e: unknown) {
-        this.logLostSealedHead(held?.pre, sessionId, e);
+        this.logLostSealedHead(carried?.pre, sessionId, e);
         throw e;
       } finally {
         // Release for both outcomes. onPromptEnd cannot cover this branch: the
@@ -3000,6 +3006,10 @@ export class QQChannel extends ChannelBase {
         this.dropOrphanStash(sessionId, held);
       }
     }
+    // Only the stash this send actually carries may be reported as a sealed
+    // head (see the stale-state branch above).
+    const carried =
+      held !== undefined && held.turn === currentTurn ? held : undefined;
     const sourceLabel =
       segment?.sourceLabel ??
       state?.sourceLabel ??
@@ -3031,7 +3041,7 @@ export class QQChannel extends ChannelBase {
           // this msgId's counter is still being used.
           this.beginMsgSeqSend(capturedMsgId);
           try {
-            await this.sendFinalSegmentChecked(sessionId, held, () =>
+            await this.sendFinalSegmentChecked(sessionId, carried, () =>
               this.sendMessageWithReplyContext(
                 chatId,
                 remaining,
@@ -3054,7 +3064,7 @@ export class QQChannel extends ChannelBase {
               `[QQ:${this.name}] per-session reply anchor expired for final segment of ${sanitizeLogText(sessionId, 64)}\n`,
             );
           }
-          await this.sendFinalSegmentChecked(sessionId, held, () =>
+          await this.sendFinalSegmentChecked(sessionId, carried, () =>
             this.sendMessageWithReplyContext(
               chatId,
               remaining,
@@ -3064,7 +3074,7 @@ export class QQChannel extends ChannelBase {
           );
         }
       } catch (e: unknown) {
-        this.logLostSealedHead(held?.pre, sessionId, e);
+        this.logLostSealedHead(carried?.pre, sessionId, e);
         throw e;
       }
     }
@@ -3442,7 +3452,17 @@ export class QQChannel extends ChannelBase {
     // a carried seal plus a boundary seal, each derived from a capped buffer —
     // so this write site cannot grow without bound.
     const room = Math.max(0, limit - sealed.length);
-    let merged: QQOrphanStash = { turn: taggedTurn, text: sealed, pre: sealed };
+    let merged: QQOrphanStash = {
+      turn: taggedTurn,
+      text: sealed,
+      pre: sealed,
+      // The doomed entry's own [sender · task] attribution must survive the
+      // re-stash: the successor's completion would otherwise deliver this head
+      // under the main agent's identity instead of the one that wrote it.
+      ...(state.sourceLabel !== undefined
+        ? { sourceLabel: state.sourceLabel }
+        : {}),
+    };
     if (existing !== undefined) {
       const successorText = truncateUtf16Units(existing.text, room);
       const dropped = existing.text.length - successorText.length;
@@ -3497,6 +3517,15 @@ export class QQChannel extends ChannelBase {
     // drop the counter under an in-flight send and its tail would re-resolve
     // msg_seq from 1 (QQ dedupes on msg_id + msg_seq).
     this.releaseSessionReplyAnchor(sessionId);
+    // The entry's sealed head is the only copy of a boundary-cleared opening
+    // and a died session has no owner left to hand it to, so its loss must be
+    // observable like every other drop (matching the unowned-session log in
+    // handOffSealedPre) instead of vanishing with the entry below.
+    if (state?.sealedPre) {
+      process.stderr.write(
+        `[QQ:${this.name}] dropping ${state.sealedPre.length} chars of sealed head for unowned session ${sanitizeLogText(sessionId, 64)}\n`,
+      );
+    }
     this.streamState.delete(sessionId);
     this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);

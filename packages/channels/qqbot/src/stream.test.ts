@@ -5948,6 +5948,76 @@ describe('stash ownership regressions', () => {
     await drain();
     expect(sentContents()).toContain('T2-TAIL');
   });
+
+  it("keeps the doomed seal's attribution label on a fresh re-stash", async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; pre?: string; sourceLabel?: string }
+    >;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const { resolveSend } = await reachStaleStash(ch);
+
+    // Turn 1's chain settles and frees the entry; turn 2's stash remains.
+    resolveSend(mockResponse(true));
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+    expect(streamState(ch).has('s1')).toBe(false);
+
+    // Seal turn 2's head at a boundary, then drain it into a fresh entry whose
+    // chunk carries the sub-agent label the doomed turn wrote under.
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectDrain!: (e: unknown) => void;
+    const drainPromise = new Promise<MockResponse>((_r, rej) => {
+      rejectDrain = rej;
+    });
+    mockSendQQMessage.mockReturnValueOnce(drainPromise);
+    onResponseChunk(ch, 'test-chat', 'T2-REST', 's1', undefined, 'SUB-1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    const drainedState = (
+      chp['streamState'] as Map<
+        string,
+        { sealedPre?: string; sourceLabel?: string }
+      >
+    ).get('s1')!;
+    expect(drainedState.sealedPre).toBe('T2-HEAD ');
+    expect(drainedState.sourceLabel).toBe('SUB-1');
+
+    // Turn 2 parks; turn 3 starts WITHOUT emitting a chunk, so it holds no
+    // stash of its own and the handoff must take the fresh re-stash arm.
+    onPromptEnd(ch, 'test-chat', 's1');
+    expect(pendingStreamDelete.has('s1')).toBe(true);
+    setReplyMsgId(ch, 'test-chat', 'msg-C');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-C');
+
+    // Turn 2's send fails permanently, so its sealed head is re-stashed for
+    // the successor.
+    rejectDrain(new DeliveryError('FALLBACK_FAILED', 'permanent failure'));
+    await drain();
+    expect(streamState(ch).has('s1')).toBe(false);
+
+    // The re-stash must keep the doomed turn's [sender · task] label: the
+    // successor's completion reads the identity off the stash, and dropping it
+    // would deliver this head as the main agent.
+    expect(orphanBuffer.get('s1')).toEqual({
+      turn: 3,
+      text: 'T2-HEAD ',
+      pre: 'T2-HEAD ',
+      sourceLabel: 'SUB-1',
+    });
+
+    // Turn 3 drains the stash and completes: the recovered head must go out
+    // under turn 2's label, not the successor's.
+    onResponseChunk(ch, 'test-chat', 'T3-HEAD', 's1');
+    await onResponseComplete(ch, 'test-chat', 'T3-HEADT3-REST', 's1');
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+    await vi.advanceTimersByTimeAsync(20_000);
+    await drain();
+    expect(sentContents().some((c) => c.includes('SUB\\-1'))).toBe(true);
+  });
 });
 
 // The boundary must seal the live turn's buffer-resident prefix, not
@@ -8324,6 +8394,46 @@ describe('round-1 robustness pins', () => {
     stderrSpy.mockRestore();
   });
 
+  it('reports a superseded stash once instead of also as a lost sealed head', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // The reachable anchorless-stale route: this inbound turn (1) has no reply
+    // anchor of its own left (past REPLY_MSG_ID_TTL_MS), while a predecessor's
+    // deferred flush still owns the stale streamState entry (turn 0), so
+    // onResponseComplete takes its stale-state branch.
+    (
+      chp['sessionReplyMsgId'] as Map<
+        string,
+        { msgId: string; timestamp: number }
+      >
+    ).set('s1', { msgId: 'msg-A', timestamp: Date.now() - (300_000 + 1000) });
+    streamState(ch).set('s1', {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      turn: 0,
+    });
+    (chp['turnCounter'] as Map<string, number>).set('s1', 1);
+    // The stash belongs to the SUPERSEDED turn 0: this completion never carries
+    // it, so it is dropped rather than delivered.
+    stash(ch, { turn: 0, text: 'HEAD-BODY!', pre: 'HEAD-BODY!' });
+    chp['resolveRoute'] = async () => ({ block: 'permanent' });
+
+    await onResponseComplete(ch, 'test-chat', '', 's1');
+
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    // The superseded stash is dropped with its own log...
+    expect(logged).toContain('dropping 10 chars of superseded turn 0 for s1');
+    // ...but the same characters must not be reported AGAIN as a sealed-head
+    // loss caused by a delivery that never carried them.
+    expect(logged).not.toContain('sealed head');
+    stderrSpy.mockRestore();
+  });
+
   it('keeps a successor anchor installed mid-send by an anchorless-stale completion', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
@@ -8404,6 +8514,33 @@ describe('round-1 robustness pins', () => {
     expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
       'dropping 10 chars',
     );
+    stderrSpy.mockRestore();
+  });
+
+  it('logs the sealed head a session death discards with the entry', () => {
+    const ch = makeChannel();
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    // A boundary-sealed head sits on the live streamState entry — the only copy
+    // of the opening the bridge cleared from its collection.
+    streamState(ch).set('s1', {
+      chatId: 'test-chat',
+      buffer: '',
+      timer: null,
+      retryCount: 0,
+      turn: 1,
+      sealedPre: 'SEALED-HEAD-TEXT',
+    });
+
+    ch.onSessionDied('s1');
+
+    // A died session has no owner left to hand the seal to, so its loss must be
+    // observable like every other drop (and the entry must still be gone).
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'dropping 16 chars of sealed head for unowned session s1',
+    );
+    expect(streamState(ch).has('s1')).toBe(false);
     stderrSpy.mockRestore();
   });
 });
