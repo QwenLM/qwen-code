@@ -45,6 +45,13 @@ abstract class DelegatingBindingRepository implements RuntimeBindingRepository {
     }
 
     @Override
+    public ToolExecutionRecord authorizeDispatch(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, ToolExecutionRecord expected,
+            String owner, long generation) {
+        return delegate.authorizeDispatch(sessions, executions, expected, owner, generation);
+    }
+
+    @Override
     public RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, RuntimeBindingRecord expected) {
         return delegate.recoverLost(sessions, executions, expected);
@@ -67,6 +74,13 @@ abstract class DelegatingBindingRepository implements RuntimeBindingRepository {
     public RuntimeSessionRecord completeSessionRelease(
             RuntimeSessionRepository sessions, RuntimeSessionRecord expected) {
         return delegate.completeSessionRelease(sessions, expected);
+    }
+
+    @Override
+    public RuntimeSessionRecord beginSessionRelease(
+            RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeSessionRecord expected) {
+        return delegate.beginSessionRelease(sessions, executions, expected);
     }
 
     @Override

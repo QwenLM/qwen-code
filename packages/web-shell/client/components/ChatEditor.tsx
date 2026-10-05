@@ -256,6 +256,7 @@ interface ChatEditorProps {
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
+  liveVoicePortalContainer?: HTMLElement | null;
   /**
    * Where the composer's context chips (workspace selector, git branch) land.
    * `toolbar` (default) keeps both in the composer toolbar. `below` moves both
@@ -1430,6 +1431,7 @@ export const ChatEditor = memo(
       showChatWidthToggle = true,
       chatWidthToggleMin,
       visibleToolbarActions,
+      liveVoicePortalContainer,
       contextChipPlacement = 'toolbar',
       tokenCount = 0,
       contextWindow = 0,
@@ -3781,6 +3783,7 @@ export const ChatEditor = memo(
                 {showToolbarAction('voice') && (
                   <>
                     <LiveVoiceButton
+                      portalContainer={liveVoicePortalContainer}
                       hideInactiveTrigger={
                         isMobile && Boolean(showAddMenuAction)
                       }
