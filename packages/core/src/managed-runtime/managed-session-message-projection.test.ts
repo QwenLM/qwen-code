@@ -444,6 +444,54 @@ describe('managed session message projection', () => {
     ).resolves.toEqual({ title: 'Restored title', source: 'manual' });
   });
 
+  it('keeps the hot projection deliberately narrower than the reader-facing list', async () => {
+    const harness = await createHarness();
+    const turnResult = {
+      ...records[0],
+      uuid: 'rec-turn-1',
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload: {
+        promptId: 'turn-1',
+        state: 'completed',
+        stopReason: 'end_turn',
+      },
+    } as ChatRecord;
+    const fileHistory = {
+      ...records[0],
+      uuid: 'rec-history-1',
+      type: 'system',
+      subtype: 'file_history_snapshot',
+      systemPayload: { snapshots: [] },
+    } as unknown as ChatRecord;
+    const user = records[0]!;
+    const sink = new ManagedSessionRecordSink(
+      harness.authority,
+      harness.store,
+      () => HOLDS,
+    );
+    try {
+      await sink.write(user);
+      await sink.write(turnResult);
+      await sink.write(fileHistory);
+
+      // The hot projection presents turn results and domain records as
+      // events, not message content; the reader-facing list materializes
+      // them for a reader. The width distinction is documented at both
+      // projection sites.
+      await expect(sink.project()).resolves.toEqual([user]);
+    } finally {
+      await harness.close();
+    }
+    await expect(
+      readManagedSessionRecords({
+        transcriptPath: harness.transcriptPath,
+        runtimeBaseDir: harness.runtimeBaseDir,
+        sessionKey,
+      }),
+    ).resolves.toEqual([user, turnResult, fileHistory]);
+  });
+
   it.each(['none', 'before', 'after', 'both'] as const)(
     'reads historical branches, retries and resumes the state chain (state position: %s)',
     async (position) => {
