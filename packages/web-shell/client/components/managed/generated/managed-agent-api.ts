@@ -158,7 +158,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision. */
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["queryWebShellActions"];
         delete?: never;
         options?: never;
@@ -175,7 +175,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision. */
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["getWebShellAction"];
         delete?: never;
         options?: never;
@@ -192,7 +192,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision. */
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision. */
         post: operations["respondWebShellAction"];
         delete?: never;
         options?: never;
@@ -823,7 +823,7 @@ export interface components {
         /** @enum {string} */
         TaskKind: "child_agent" | "workflow" | "background_shell" | "monitor" | "automation_run";
         /**
-         * @description Logical run state. completed, failed and cancelled are terminal and are set only after the physical execution has settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically.
+         * @description Logical run state. completed is terminal and is set when the run's own line ends settled, with or without a physical execution; failed and cancelled are terminal too, and they also cover a run that ended before its execution started (cancelled before dispatch, or failed with no provable start), when no physical execution ever settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically.
          * @enum {string}
          */
         TaskState: "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "degraded" | "recovery_blocked";
@@ -961,8 +961,17 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description A trusted actor is required for this request but none was supplied. */
+        /** @description A trusted actor is required for this request but none was supplied (actor_required). In signed authentication mode (qwenSignature) every covered public and WebShell route additionally answers 401 authentication_required when the signature, timestamp or actor headers are missing, and 401 invalid_signature when the signature is wrong or stale. */
         Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description In signed authentication mode (qwenSignature) a request body beyond the configured signed-body limit (qwen.managed-agent.auth.max-signed-body-bytes, default 10 MiB) answers 413 payload_too_large before the signature is compared. */
+        PayloadTooLarge: {
             headers: {
                 [name: string]: unknown;
             };
@@ -1042,7 +1051,9 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellGetSession: {
@@ -1068,8 +1079,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellTranscript: {
@@ -1095,8 +1108,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellStreamEvents: {
@@ -1122,8 +1137,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellCreateSession: {
@@ -1154,6 +1171,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -1181,9 +1199,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellCancelTurn: {
@@ -1210,9 +1230,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellQueryWorkspaces: {
@@ -1238,8 +1260,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellQueryCwdOperation: {
@@ -1265,9 +1289,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     queryWebShellActions: {
@@ -1293,11 +1319,12 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
-            /** @description Responding requires the Session creator (action_forbidden). */
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     getWebShellAction: {
@@ -1323,11 +1350,12 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
-            /** @description Responding requires the Session creator (action_forbidden). */
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     respondWebShellAction: {
@@ -1353,12 +1381,14 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
-            /** @description Responding requires the Session creator (action_forbidden). */
+            401: components["responses"]["Unauthorized"];
+            /** @description Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or a Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL. The tenant filter's 403 actor_scope_mismatch also applies on this route. */
             403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
             404: components["responses"]["NotFound"];
             /** @description Idempotency conflict, a non-active Session (session_inactive), or an ended Action (action_expired, action_cancelled, action_already_resolved). An existing matching response replays before the Session-state check. */
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     closeWebShellSession: {
@@ -1384,9 +1414,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     archiveWebShellSession: {
@@ -1412,9 +1444,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     deleteWebShellSession: {
@@ -1440,9 +1474,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     webShellGetWorkspace: {
@@ -1468,8 +1504,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     queryWebShellTasks: {
@@ -1495,8 +1533,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     getWebShellTask: {
@@ -1522,8 +1562,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
     getWebShellToolResult: {
@@ -1577,6 +1619,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            413: components["responses"]["PayloadTooLarge"];
             /** @description Resource temporarily unavailable. */
             503: {
                 headers: {
@@ -1639,6 +1682,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            413: components["responses"]["PayloadTooLarge"];
             /** @description Resource temporarily unavailable. */
             503: {
                 headers: {
@@ -1701,6 +1745,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            413: components["responses"]["PayloadTooLarge"];
             /** @description Resource temporarily unavailable. */
             503: {
                 headers: {
@@ -1736,9 +1781,11 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
         };
     };
 }

@@ -27,6 +27,7 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -559,6 +560,73 @@ class QwenHostedHarnessConnectorTest {
                 sessions(), mock(WorkspaceExecutionStore.class)))
                 .doesNotThrowAnyException();
     }
+
+    @Test
+    void attachProvisionsTheBindingCredentialAndTheInsecureOptIn() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef session = mock(HarnessSessionRef.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(session);
+        when(session.getHarnessBootId()).thenReturn(BOOT_ID);
+        ManagedAgentProperties properties = properties();
+        properties.getSessionStore().setBindingKey(
+                "0123456789abcdef0123456789abcdef");
+        properties.getSessionStore().setAllowInsecureHttp(true);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(
+                properties, sessions(), mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+
+        ArgumentCaptor<LoadHarnessSession> load =
+                ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).loadSession(load.capture());
+        Map<String, Object> wire = ReflectionTestUtils.invokeMethod(
+                load.getValue(), "toJson");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> store =
+                (Map<String, Object>) wire.get("managedSessionStore");
+        String expectedToken = new WriterCredentialPolicy(properties)
+                .issue("tenant-a", "workspace-a", SESSION_ID);
+        assertThat(store)
+                .containsEntry("writerToken", expectedToken)
+                .containsEntry("allowInsecureHttp", true);
+    }
+
+    @Test
+    void attachOmitsTheCredentialAndOptInWhenNeitherIsConfigured() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef session = mock(HarnessSessionRef.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(session);
+        when(session.getHarnessBootId()).thenReturn(BOOT_ID);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(
+                properties(), sessions(), mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+
+        ArgumentCaptor<LoadHarnessSession> load =
+                ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).loadSession(load.capture());
+        Map<String, Object> wire = ReflectionTestUtils.invokeMethod(
+                load.getValue(), "toJson");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> store =
+                (Map<String, Object>) wire.get("managedSessionStore");
+        assertThat(store)
+                .doesNotContainKey("writerToken")
+                .doesNotContainKey("allowInsecureHttp");
+    }
+
 
     private static QwenHostedHarnessConnector connector(
             HostedHarnessClient client) {
