@@ -28,15 +28,24 @@ provisioners, and any container or remote provider. The module
 intentionally does not expose an HTTP API, wire Spring, call the Hosted
 Harness, or define public Agent resources. Those adapters belong to later PRs.
 
-Building and running this module requires JDK 21 or later. Its Maven release
-target is 21; services embedding the resulting JAR must also use JDK 21 or later.
+Building and running this module requires JDK 21 or later and Maven 3.8.9+
+(the SpotBugs gate's plugin declares that floor). Its Maven release target is
+21; services embedding the resulting JAR must also use JDK 21 or later.
 
 Build and test with:
 
 ```bash
 mvn test
 mvn checkstyle:check
+mvn verify
 ```
+
+`mvn verify` needs Maven 3.8.9+ and runs the SpotBugs high-confidence gate: a
+new warning fails the build, and a false positive goes into
+`spotbugs-excludes.xml` with a justification in the PR. To exercise only the
+gate, run `mvn verify -DskipTests` — the full suite includes
+environment-sensitive timing tests that can fail on a local machine, so CI is
+the arbiter.
 
 ## JDBC persistence
 
@@ -89,6 +98,20 @@ Durable rows alone do not make a stopped local Runtime process recoverable.
 For a binding without durable identity the embedding service must reconcile a
 persisted lease before reuse and own the process adoption or reprovisioning
 policy; a durable binding is reconciled and adopted by the Broker itself.
+
+## Trusted local recovery
+
+Durable local provisioning and trusted reboot recovery are separate opt-ins;
+see the [adoption design](../../../docs/design/2026-09-27-local-runtime-adoption.md)
+and [reboot cleanup design](../../../docs/design/2026-09-28-local-reboot-recovery.md).
+`recoverBinding(bindingId, expectedGeneration)` observes and cleans only the
+saved generation. It does not resolve current product authorization or create
+replacement workers. Managed Workspace embeddings must implement
+`RuntimeProvisioner.recoverResources` to clear their original physical holder;
+the default refuses managed cleanup. Only then may `finishLostRecovery` retire
+the saved binding. Custom binding repository implementations must implement the
+new bounded candidate query and cleanup finalization contract. There is no new
+public HTTP recovery endpoint or database migration in this slice.
 
 ## Fault gates
 

@@ -33,13 +33,13 @@ import {
   resolveThreadStatus,
 } from './thread-status.js';
 import { requireAgentRunContext, type AgentRunContext } from './run-context.js';
-import type { Thread, ThreadEvent, ThreadMessage } from './types.js';
+import type { Thread, ThreadEvent, ThreadMessage, ThreadRun } from './types.js';
 import { isThreadTerminal } from './types.js';
 import { postMessageInTransaction } from './thread-actions.js';
 import { mentionToken } from './mentions.js';
 
 /** How an agent says its run is done. `unclosed` is recorded, never chosen. */
-type RunCloseRequest =
+export type RunCloseRequest =
   | { kind: 'waiting' }
   | { kind: 'blocked'; question: string }
   | { kind: 'review'; summary: string };
@@ -253,7 +253,7 @@ function enqueue(
  * written: a close that names a run the agent does not own, or a run that is
  * not executing, is a wiring or replay error, not a workflow event.
  */
-async function closeRunInTransaction(
+export async function closeRunInTransaction(
   transaction: AgentStoreTransaction,
   input: CloseRunInput,
 ): Promise<CloseRunResult> {
@@ -548,6 +548,7 @@ export async function finishRunInTransaction(
       attempt?: number;
       error?: string;
       failureStage?: string;
+      hostResultReceipt?: ThreadRun['hostResultReceipt'];
     };
     now?: number;
   },
@@ -574,6 +575,14 @@ export async function finishRunInTransaction(
   const terminalFailureStage =
     terminalStatus === input.outcome.status
       ? input.outcome.failureStage
+      : undefined;
+  // The receipt is a record that this outcome's answer was applied, so it is
+  // dropped with the error and failure stage when settlement overrode the
+  // status: a receipt on a run that was cancelled would answer an exact
+  // re-post of that discarded result with `alreadyApplied`.
+  const terminalHostResultReceipt =
+    terminalStatus === input.outcome.status
+      ? input.outcome.hostResultReceipt
       : undefined;
 
   const closedThrough =
@@ -609,6 +618,9 @@ export async function finishRunInTransaction(
             ...run,
             status: terminalStatus,
             endedAt: now,
+            ...(terminalHostResultReceipt
+              ? { hostResultReceipt: terminalHostResultReceipt }
+              : {}),
             // A run that stopped without calling a closing tool and without
             // saying anything is recorded as `unclosed`, never as an implicit
             // success. One that answered in plain text has replied: the

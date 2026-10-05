@@ -14100,7 +14100,13 @@ describe('useLlmStream', () => {
       });
 
       await waitFor(() => {
-        expect(mockHandleSlashCommand).toHaveBeenCalledWith('/help');
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+          '/help',
+          undefined,
+          undefined,
+          undefined,
+          'test-session-id########5',
+        );
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
         expect(mockSendMessageStream).not.toHaveBeenCalled(); // No LLM call made
       });
@@ -14128,6 +14134,10 @@ describe('useLlmStream', () => {
       await waitFor(() => {
         expect(mockHandleSlashCommand).toHaveBeenCalledWith(
           '/my-custom-command',
+          undefined,
+          undefined,
+          undefined,
+          'test-session-id########5',
         );
 
         expect(localMockSendMessageStream).not.toHaveBeenCalledWith(
@@ -14165,7 +14175,13 @@ describe('useLlmStream', () => {
       });
 
       await waitFor(() => {
-        expect(mockHandleSlashCommand).toHaveBeenCalledWith('/emptycmd');
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+          '/emptycmd',
+          undefined,
+          undefined,
+          undefined,
+          'test-session-id########5',
+        );
         expect(localMockSendMessageStream).toHaveBeenCalledWith(
           '',
           expect.any(AbortSignal),
@@ -15319,6 +15335,10 @@ describe('useLlmStream', () => {
           await waitFor(() =>
             expect(mockHandleSlashCommand).toHaveBeenCalledWith(
               '/loop check status',
+              undefined,
+              undefined,
+              undefined,
+              undefined,
             ),
           );
           expect(mockSendMessageStream).not.toHaveBeenCalled();
@@ -15400,7 +15420,13 @@ describe('useLlmStream', () => {
           release();
           rerender(rerenderProps(client));
           await waitFor(() =>
-            expect(mockHandleSlashCommand).toHaveBeenCalledWith('/loop cron 0'),
+            expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+              '/loop cron 0',
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+            ),
           );
 
           expect(notificationTexts()).not.toContainEqual(
@@ -19135,7 +19161,13 @@ describe('useLlmStream', () => {
           await result.current.submitQuery(btwQuery);
         });
 
-        expect(mockHandleSlashCommand).toHaveBeenCalledWith(btwQuery);
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+          btwQuery,
+          undefined,
+          undefined,
+          undefined,
+          'test-session-id########5',
+        );
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       } finally {
         resolveFirstCall();

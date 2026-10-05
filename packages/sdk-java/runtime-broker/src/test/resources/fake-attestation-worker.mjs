@@ -184,7 +184,17 @@ server.listen(port, '127.0.0.1', () => {
     epoch: boot.epoch,
     url: `http://${host}:${address.port}`,
   };
-  const encoded = JSON.stringify(ready);
+  let encoded = JSON.stringify(ready);
+  // Splice in a raw number literal, including non-JSON ones such as 65537S.
+  for (const field of ['version', 'epoch']) {
+    const raw = args.find((arg) => arg.startsWith(`--ready-${field}=`));
+    if (raw) {
+      encoded = encoded.replace(
+        new RegExp(`"${field}":\\d+`),
+        `"${field}":${raw.slice(`--ready-${field}=`.length)}`,
+      );
+    }
+  }
   process.stdout.write(
     `${args.includes('--ready-cr') ? encoded.replace('"runtimeInstanceId":"', '"runtimeInstanceId":"\r') : encoded}\n`,
   );
@@ -215,5 +225,11 @@ function receipt(installation) {
 }
 
 const stop = () => server.close(() => process.exit(0));
-process.once('SIGTERM', stop);
+if (args.includes('--ignore-term')) {
+  // A wedged worker: SIGTERM lands but never stops it, so only the
+  // broker's forcible fallback can reclaim it.
+  process.on('SIGTERM', () => {});
+} else {
+  process.once('SIGTERM', stop);
+}
 process.once('SIGINT', stop);

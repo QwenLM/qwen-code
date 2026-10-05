@@ -112,10 +112,10 @@ class HostedHarnessMySqlIT {
                 "--spring.datasource.username=" + required("mysql.user"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
-                "--spring.datasource.hikari.maximum-pool-size=3",
-                "--spring.datasource.hikari.connection-timeout=5000",
-                "--spring.datasource.hikari.data-source-properties.connectTimeout=5000",
-                "--spring.datasource.hikari.data-source-properties.socketTimeout=10000",
+                "--spring.datasource.druid.max-active=3",
+                "--spring.datasource.druid.max-wait=5000",
+                "--spring.datasource.druid.connect-properties.connectTimeout=5000",
+                "--spring.datasource.druid.connect-properties.socketTimeout=10000",
                 "--qwen.managed-agent.session-store.enabled=true",
                 "--qwen.managed-agent.harness.enabled=false",
                 "--qwen.managed-agent.runtime-broker.enabled=false");
@@ -226,7 +226,7 @@ class HostedHarnessMySqlIT {
                 "--spring.datasource.username=" + required("mysql.user"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
-                "--spring.datasource.hikari.maximum-pool-size=3",
+                "--spring.datasource.druid.max-active=3",
                 "--qwen.managed-agent.session-store.enabled=true",
                 "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + springPort,
                 "--qwen.managed-agent.session-store.workspace-id=hosted-lifecycle-workspace",
@@ -261,7 +261,7 @@ class HostedHarnessMySqlIT {
             assertThat(awaitOperation(id, deleteId).path("admission_stage").asText())
                     .isEqualTo("java_durable");
             api("GET", "/v1/agents/sessions/" + id, null, null, 404);
-            assertThat(writerState(id)).isEqualTo("SEALED");
+            assertThat(writerState(id)).isEqualTo("DELETED");
             assertThat(modelRequests).hasSize(1);
             assertThat(modelFailure.get()).isNull();
         } catch (Exception | AssertionError failure) {

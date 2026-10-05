@@ -26,6 +26,7 @@ import {
   SessionWriterUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from '../daemon-logger.js';
+import { SessionAttachmentUploadError } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   WorkspaceRuntimeInitializationError,
   WorkspaceRuntimeStillStartingError,
@@ -54,6 +55,94 @@ function responseMock(): {
   json.mockReturnValue(response);
   return { response: response as unknown as Response, set, status, json };
 }
+
+describe('session attachment upload errors', () => {
+  it('records storage failures with their cause without exposing it to clients', () => {
+    const { response, status, json } = responseMock();
+    const cause = Object.assign(new Error('EACCES: data.csv'), {
+      code: 'EACCES',
+    });
+    const daemonLog = {
+      error: vi.fn(),
+      warn: vi.fn(),
+    } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new SessionAttachmentUploadError(
+        500,
+        'attachment_upload_storage_failed',
+        'Could not store attachment',
+        cause,
+      ),
+      { route: 'POST /session/:id/attachment-uploads/:uploadId/complete' },
+      daemonLog,
+    );
+
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      cause.message,
+      cause,
+      expect.objectContaining({
+        route: 'POST /session/:id/attachment-uploads/:uploadId/complete',
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Could not store attachment',
+      code: 'attachment_upload_storage_failed',
+    });
+  });
+
+  it('records capacity failures as expected errors', () => {
+    const { response, status } = responseMock();
+    const daemonLog = {
+      error: vi.fn(),
+      warn: vi.fn(),
+    } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new SessionAttachmentUploadError(
+        429,
+        'attachment_upload_capacity_exceeded',
+        'Attachment upload capacity is exhausted',
+      ),
+      undefined,
+      daemonLog,
+    );
+
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'Attachment upload capacity is exhausted',
+      expect.objectContaining({ errorType: 'SessionAttachmentUploadError' }),
+    );
+    expect(daemonLog.error).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith(429);
+  });
+
+  it('marks a busy store as retryable', () => {
+    const { response, status, json } = responseMock();
+    const daemonLog = { error: vi.fn() } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new SessionAttachmentUploadError(
+        503,
+        'attachment_upload_store_busy',
+        'Session attachments are being copied',
+      ),
+      undefined,
+      daemonLog,
+    );
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Session attachments are being copied',
+      code: 'attachment_upload_store_busy',
+      retryable: true,
+    });
+    expect(daemonLog.error).toHaveBeenCalled();
+  });
+});
 
 describe('startup errors across bundle boundaries', () => {
   it.each([
@@ -652,6 +741,32 @@ describe('sendBridgeError session writer errors', () => {
       error: 'Invalid transcript turn anchor',
       code: 'invalid_turn_anchor',
     });
+  });
+
+  it('maps an operation the session does not offer to 400', () => {
+    const { response, status, json } = responseMock();
+    const daemonLog = { error: vi.fn() } as unknown as DaemonLogger;
+    const error = Object.assign(
+      new Error(
+        'Invalid params: A Managed session cannot change its directory.',
+      ),
+      { data: { errorKind: 'unsupported_operation' } },
+    );
+
+    sendBridgeError(
+      response,
+      error,
+      { route: 'POST /session/:id/cd' },
+      daemonLog,
+    );
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid params: A Managed session cannot change its directory.',
+      code: 'unsupported_operation',
+    });
+    // Not reported as an unexpected bridge failure.
+    expect(daemonLog.error).not.toHaveBeenCalled();
   });
 
   it('maps runtime still starting to 503 with Retry-After', () => {

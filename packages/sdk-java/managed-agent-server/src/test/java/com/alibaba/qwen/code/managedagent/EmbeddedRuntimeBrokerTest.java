@@ -22,6 +22,19 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class EmbeddedRuntimeBrokerTest {
+    @Test
+    void stepCallBackstopExceedsEveryShippedCalleeWait() {
+        // The never-answering step backstop is twice the operation lease; it
+        // must stay above the provisioner and transport declared waits, or a
+        // slow-but-healthy runtime is cut mid-wait and never converges.
+        long stepCallTimeoutMillis = EmbeddedRuntimeBroker.LEASE.toMillis() * 2;
+        assertThat(stepCallTimeoutMillis)
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner.READY_TIMEOUT.toMillis());
+        assertThat(stepCallTimeoutMillis)
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport.REQUEST_TIMEOUT.toMillis());
+    }
+
+
     private static final String SESSION_ID =
             "550e8400-e29b-41d4-a716-446655440000";
 
@@ -29,6 +42,51 @@ class EmbeddedRuntimeBrokerTest {
     void usesFetchCompatibleDefaultBrokerPort() {
         assertThat(new ManagedAgentProperties().getRuntimeBroker().getPort())
                 .isEqualTo(4182);
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isDurableLocalProcess()).isTrue();
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isTrustedLocalRebootRecovery()).isTrue();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void rebootRecoveryRequiresDurableLocalProvisioning(boolean local) throws Exception {
+        var properties = properties();
+        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(true);
+        properties.getRuntimeBroker().setDurableLocalProcess(!local);
+        if (local) {
+            properties.getRuntimeBroker().setProvisioner("local-process");
+            properties.getRuntimeBroker().setWorkspaceId("");
+        }
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class), properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("requires durable local-process")
+                .hasMessageContaining("QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY")
+                .hasMessageContaining(local ? "enable durable local-process" : "configured: static");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void recoveryDirectoryCannotBeInsideLegacyOrManagedWorkspace(boolean managed,
+            @org.junit.jupiter.api.io.TempDir Path root) throws Exception {
+        ManagedAgentProperties properties = properties();
+        var config = properties.getRuntimeBroker();
+        config.setProvisioner("local-process");
+        config.setWorkspaceId("");
+        Path workspace = java.nio.file.Files.createDirectory(root.resolve("workspace")).toRealPath();
+        config.setWorkspaceCwd(workspace.toString());
+        config.setDurableLocalProcess(true);
+        config.setNodeExecutable("node");
+        config.setWorkerEntry("worker.js");
+        config.setCliEntry("cli.js");
+        Path storage = managed ? java.nio.file.Files.createDirectory(root.resolve("storage")).toRealPath() : workspace;
+        if (managed) {
+            config.setWorkspaceMounts(java.util.List.of(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                    "tenant", "storage", storage.toString())));
+        }
+        config.setStateDirectory(storage.resolve("recovery").toString());
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class), properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outside Workspace roots")
+                .hasMessageContaining("QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY");
     }
 
     @Test
@@ -66,7 +124,7 @@ class EmbeddedRuntimeBrokerTest {
         when(store.findSessionById(SESSION_ID)).thenReturn(Optional.of(
                 new SessionRecord("tenant-a", SESSION_ID, "qwen-code",
                         null, null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null,
-                        0, binding)));
+                        0, binding, "yolo", "hosted-workspace-files/1")));
         try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
             assertThatThrownBy(() -> broker.warm(SESSION_ID)
                     .toCompletableFuture().join())
@@ -142,6 +200,53 @@ class EmbeddedRuntimeBrokerTest {
                 .hasMessageContaining("closed");
     }
 
+    @Test
+    void refusesANonLoopbackListenAddressWithoutTheOptIn() throws Exception {
+        ManagedAgentProperties properties = properties();
+        properties.getRuntimeBroker().setHost("0.0.0.0");
+
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("could not start")
+                .cause()
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("non-loopback");
+    }
+
+    @Test
+    void refusesAV3ResultWindowBelowThePollFloor() throws Exception {
+        // An absent value binds as null and a suffix-less one as
+        // milliseconds; every shape below the floor must be refused here
+        // rather than degrade each v3 execution later.
+        for (java.time.Duration window : new java.time.Duration[] {
+                null, java.time.Duration.ZERO, java.time.Duration.ofMillis(-1),
+                java.time.Duration.ofMillis(999)}) {
+            ManagedAgentProperties properties = properties();
+            properties.getRuntimeBroker().setV3ResultWindow(window);
+
+            assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                    properties))
+                    .as("window %s", window)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("v3 result window");
+        }
+    }
+
+    @Test
+    void allowNonLoopbackLetsTheBrokerBindAWildcardAddress()
+            throws Exception {
+        ManagedAgentProperties properties = properties();
+        properties.getRuntimeBroker().setHost("0.0.0.0");
+        properties.getRuntimeBroker().setAllowNonLoopback(true);
+
+        try (EmbeddedRuntimeBroker broker = broker(
+                mock(ManagedAgentStore.class), properties)) {
+            assertThat(broker.getBaseUri()).isNotNull();
+            assertThat(broker.getBaseUri().getScheme()).isEqualTo("http");
+        }
+    }
+
     private static ManagedAgentProperties properties() throws Exception {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setCapabilityDigest("sha256:"
@@ -153,6 +258,7 @@ class EmbeddedRuntimeBrokerTest {
         broker.setPort(0);
         broker.setToken("broker-token");
         broker.setProvisioner("static");
+        broker.setTrustedLocalRebootRecovery(false);
         broker.setWorkspaceId("workspace");
         broker.setWorkspaceGeneration("generation");
         broker.setWorkspaceCwd(Path.of(".").toRealPath().toString());
