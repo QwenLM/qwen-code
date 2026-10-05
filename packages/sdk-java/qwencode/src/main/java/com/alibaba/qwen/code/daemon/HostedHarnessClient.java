@@ -540,18 +540,26 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     public void detachLifecycle(HarnessSessionRef session, Map<String, Object> authority) {
         HarnessSessionRef ref = requireSessionRef(session);
+        AttachmentState state = attachments.get(ref.getHarnessSessionId());
+        ActivePrompt prompt = activePrompts.get(ref.getHarnessSessionId());
         HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/detach",
                 Map.of("authority", authority), ref.getHarnessClientId(), "POST /session/:id/detach");
         if (response.getStatusCode() != 404) {
             requireMutationStatus(response, 204, "POST /session/:id/detach");
         }
-        removeAttachment(ref);
+        if (state != null && state.matches(ref) && attachments.remove(ref.getHarnessSessionId(), state)) {
+            state.cancel();
+            if (prompt != null) {
+                activePrompts.remove(ref.getHarnessSessionId(), prompt);
+            }
+        }
     }
 
     public void detachLifecycle(String harnessSessionId, Map<String, Object> authority) {
         ensureOpen();
         String sessionId = requireUuid(harnessSessionId, "harnessSessionId");
         AttachmentState state = attachments.get(sessionId);
+        ActivePrompt prompt = activePrompts.get(sessionId);
         HttpSupport.Response response = sendMutation(sessionPath(sessionId) + "/detach",
                 Map.of("authority", authority), null, "POST /session/:id/detach");
         if (response.getStatusCode() != 404) {
@@ -559,7 +567,9 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         if (state != null && attachments.remove(sessionId, state)) {
             state.cancel();
-            activePrompts.remove(sessionId);
+            if (prompt != null) {
+                activePrompts.remove(sessionId, prompt);
+            }
         }
     }
 

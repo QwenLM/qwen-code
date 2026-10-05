@@ -177,6 +177,7 @@ interface HostedSession {
   approval?: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
   stores?: HttpManagedSessionStores;
+  storeDescriptor: ReturnType<typeof parseBridgeManagedSessionStore>;
   lifecycle?: ManagedSessionLifecycleAuthority;
   lifecycleKind?: 'close' | 'delete';
   /** A recovery load acquired the Runtime Session for this promptId. On
@@ -1461,6 +1462,15 @@ export function registerHostedHarnessSessionRoutes(
       error(res, 409, 'hosted_harness_generation_mismatch');
       return;
     }
+    let lifecycle: ManagedSessionLifecycleAuthority | undefined;
+    try {
+      lifecycle = lifecycleAuthority(body?.['lifecycleAuthority']);
+      if (lifecycle && create)
+        throw new Error('Lifecycle load cannot create a Session.');
+    } catch {
+      error(res, 400, 'invalid_hosted_lifecycle_authority');
+      return;
+    }
     // One shape for every successful open/load answer — a takeover load
     // redriven after a lost reply must be indistinguishable from the answer
     // it replaces, so all three sites build it here.
@@ -1482,6 +1492,42 @@ export function registerHostedHarnessSessionRoutes(
         : {}),
     });
     const attached = sessions.get(sessionId);
+    if (attached !== undefined && lifecycle) {
+      if (
+        !isDeepStrictEqual(store, attached.storeDescriptor) ||
+        toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE ||
+        attached.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE ||
+        (attached.lifecycle &&
+          attached.lifecycle.operationId !== lifecycle.operationId)
+      ) {
+        error(res, 409, 'hosted_session_already_attached');
+        return;
+      }
+      if (
+        attached.active ||
+        attached.mcpBusy ||
+        attached.mcpRecovering ||
+        attached.hooksBusy
+      ) {
+        error(res, 409, 'hosted_turn_active');
+        return;
+      }
+      const previous = attached.lifecycle;
+      attached.hooksBusy = true;
+      attached.stores!.setLifecycleAuthority(lifecycle);
+      try {
+        await attached.stores!.assertWritable();
+        attached.lifecycle = lifecycle;
+        res.status(200).json(attachmentReply(attached));
+      } catch (cause) {
+        attached.stores!.setLifecycleAuthority(previous);
+        debugLogger.warn('Hosted lifecycle attachment claim rejected:', cause);
+        error(res, 503, 'managed_session_open_failed');
+      } finally {
+        attached.hooksBusy = false;
+      }
+      return;
+    }
     if (attached !== undefined && !create) {
       const passive = body?.['passiveManagedRuntimeRecovery'] === true;
       if (
@@ -1578,17 +1624,7 @@ export function registerHostedHarnessSessionRoutes(
       );
       return;
     }
-    let lifecycle: ManagedSessionLifecycleAuthority | undefined;
-    try {
-      lifecycle = lifecycleAuthority(body?.['lifecycleAuthority']);
-      if (lifecycle) {
-        if (create) throw new Error('Lifecycle load cannot create a Session.');
-        stores.setLifecycleAuthority(lifecycle);
-      }
-    } catch {
-      error(res, 400, 'invalid_hosted_lifecycle_authority');
-      return;
-    }
+    if (lifecycle) stores.setLifecycleAuthority(lifecycle);
     opening.add(sessionId);
     let managed: ManagedSession | undefined;
     try {
@@ -1703,6 +1739,7 @@ export function registerHostedHarnessSessionRoutes(
         blocked: false,
         waiters: new HostedApprovalWaiters(),
         stores,
+        storeDescriptor: store,
         lifecycle,
         ...(toolProfile ? { toolProfile } : {}),
         ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
@@ -2143,8 +2180,12 @@ export function registerHostedHarnessSessionRoutes(
       session?.lifecycle &&
       req.method !== 'GET' &&
       !['/lifecycle', '/detach', '/heartbeat'].includes(req.path)
-    )
+    ) {
+      const legacyClose = req.method === 'DELETE' && req.path === '/';
+      if (!identity(req, sessions, legacyClose))
+        return error(res, 404, 'hosted_session_not_found');
       return error(res, 409, 'hosted_lifecycle_operation_active');
+    }
     if (
       session &&
       req.method !== 'GET' &&
@@ -2158,6 +2199,8 @@ export function registerHostedHarnessSessionRoutes(
         await session.stores!.authorizeOrdinary(
           legacyClose ? 'legacy-close' : undefined,
         );
+        if (session.lifecycle)
+          return error(res, 409, 'hosted_lifecycle_operation_active');
       } catch (cause) {
         return ordinaryAuthorizationError(res, cause);
       }

@@ -126,6 +126,84 @@ class HostedHarnessClientTest {
                 Arguments.of(byId, 500, true), Arguments.of(byId, 404, false)));
     }
 
+    @ParameterizedTest
+    @MethodSource("confirmedLifecycleDetachResponses")
+    void lifecycleDetachReleasesOnlyTheOriginalPrompt(boolean byId, int status, boolean replacement) throws Exception {
+        createSessionRoute();
+        CountDownLatch detaching = new CountDownLatch(1);
+        CountDownLatch reply = new CountDownLatch(1);
+        server.createContext("/session/" + SESSION_ID + "/detach", exchange -> {
+            assertPrivateHeaders(exchange, !byId);
+            detaching.countDown();
+            if (replacement) {
+                try { assertTrue(reply.await(2, TimeUnit.SECONDS)); }
+                catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IOException(error); }
+            }
+            exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+            if (status == 204) {
+                exchange.getResponseHeaders().set("Connection", "close");
+                exchange.sendResponseHeaders(204, -1);
+                exchange.close();
+            } else sendJson(exchange, status, "{\"code\":\"session_not_found\"}", false);
+        });
+        server.createContext("/session/" + SESSION_ID + "/load", exchange ->
+                sendSessionJson(exchange, 200, sessionJson().replace(CLIENT_ID, "replacement-client")));
+        AtomicInteger calls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt", exchange -> {
+            int call = calls.incrementAndGet();
+            assertEquals(call == 1 ? CLIENT_ID : "replacement-client",
+                    exchange.getRequestHeaders().getFirst(HostedHarnessClient.CLIENT_ID_HEADER));
+            var request = JsonSupport.parseObject(readBody(exchange), "prompt");
+            exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+            sendJson(exchange, 202, "{\"promptId\":\"" + request.get("promptId")
+                    + "\",\"lastEventId\":0,\"eventEpoch\":\"" + EVENT_EPOCH + "\"}", false);
+        });
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef original = createSession(client);
+            Map<String, Object> block = Map.of("type", "text", "text", "first");
+            client.submitTurn(requestForSession(block, original));
+            var detach = executor.submit(() -> {
+                var authority = Map.<String, Object>of("operationId", "delete", "claimGeneration", 1);
+                if (byId) client.detachLifecycle(SESSION_ID, authority);
+                else client.detachLifecycle(original, authority);
+            });
+            assertTrue(detaching.await(2, TimeUnit.SECONDS));
+            HarnessSessionRef next;
+            if (!replacement) detach.get(2, TimeUnit.SECONDS);
+            next = client.loadSession(new LoadHarnessSession(SESSION_ID,
+                    ManagedSessionStoreConnection.builder().baseUri(URI.create("https://store.example/"))
+                            .tenantId("tenant").workspaceId("workspace").writerId(BOOT_ID)
+                            .leaseDuration(Duration.ofSeconds(45)).build()));
+            if (replacement) {
+                // A completed old prompt permits the replacement's new prompt before the old detach returns.
+                server.createContext("/session/" + SESSION_ID + "/status", exchange -> {
+                    exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    sendJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID + "\",\"hasActivePrompt\":false}", false);
+                });
+                client.getStatus(next);
+            }
+            var second = SubmitHarnessTurn.builder().session(next).promptId(SECOND_PROMPT_ID).addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(List.of(block))).build();
+            client.submitTurn(second);
+            reply.countDown();
+            detach.get(2, TimeUnit.SECONDS);
+            assertEquals(2, calls.get());
+            var third = SubmitHarnessTurn.builder().session(next).promptId(OTHER_BOOT_ID).addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(List.of(block))).build();
+            assertThrows(DaemonException.class, () -> client.submitTurn(third));
+            assertEquals(2, calls.get());
+        } finally {
+            reply.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    static Stream<Arguments> confirmedLifecycleDetachResponses() {
+        return Stream.of(true, false).flatMap(byId -> Stream.of(204, 404)
+                .flatMap(status -> Stream.of(true, false).map(replacement -> Arguments.of(byId, status, replacement))));
+    }
+
     @Test
     void lifecycleSettlementRetainsAttachmentAndDetachCarriesTheNewClaim() {
         server.removeContext("/capabilities");

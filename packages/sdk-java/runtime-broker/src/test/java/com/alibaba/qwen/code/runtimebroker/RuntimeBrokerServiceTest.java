@@ -1322,6 +1322,27 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void legacyDrainSettlesCancelledDispatchWithoutInvokingTheWorker() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            fixture.executionRepository.findOrCreate(ToolExecutionRecord.prepared("parked", "parked-key",
+                    session.getBindingId(), session.getRuntimeGeneration(), "harness", "runtime", "prompt", "call", "digest",
+                    reference("runtime", "digest")));
+            fixture.executionRepository.claimDispatch("parked", "broker", Duration.ofMinutes(1));
+            fixture.bindingRepository.requestHarnessDrain("tenant", "harness");
+            ToolExecutionRecord settled = join(fixture.service.cancelExecution("harness", "runtime", "parked"));
+            assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
+            assertEquals("cancelled", settled.getExecutionStatus());
+            assertTrue(settled.isCancelRequested());
+            assertSame(settled, join(fixture.service.cancelExecution("harness", "runtime", "parked")));
+            assertEquals("runtime_admission_closed", failure(fixture.service.createExecution("harness", "runtime",
+                    "new-key", reference("runtime", "other"))).getCode());
+            assertEquals(0, fixture.transport.executeCalls.get());
+            assertEquals(0, fixture.transport.cancelCalls.get());
+        }
+    }
+
+    @Test
     void settledCancellationWinsOverLateExecutionCompletion() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             CompletableFuture<Map<String, Object>> execution =

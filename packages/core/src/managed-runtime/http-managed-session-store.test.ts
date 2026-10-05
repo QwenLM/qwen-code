@@ -281,6 +281,78 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it.each([
+    ['ordinary', false],
+    ['previous', false],
+    ['same', false],
+    ['ordinary', true],
+  ] as const)(
+    'rechecks a changed claim after an in-flight %s renewal (refused=%s)',
+    async (previous, refused) => {
+      const server = new FakeManagedSessionStore();
+      const claims: Array<string | null> = [];
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'https://session-store.test',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn: async (input, init) => {
+          if (requestUrl(input).endsWith('/writers:renew')) {
+            const headers = new Headers(init?.headers);
+            claims.push(headers.get('X-Qwen-Lifecycle-Claim-Generation'));
+            if (claims.length === 1) await barrier;
+            else if (refused)
+              return jsonResponse(
+                {
+                  error: {
+                    code: 'workspace_lifecycle_claim_fenced',
+                    message: 'The lifecycle claim is fenced.',
+                  },
+                },
+                409,
+              );
+          }
+          return server.fetch(input, init);
+        },
+      });
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        if (previous !== 'ordinary')
+          stores.setLifecycleAuthority({
+            operationId: 'delete',
+            claimGeneration: previous === 'same' ? 2 : 1,
+          });
+        const old = stores.assertWritable();
+        await vi.waitFor(() => expect(claims).toHaveLength(1));
+        stores.setLifecycleAuthority({
+          operationId: 'delete',
+          claimGeneration: 2,
+        });
+        const current = stores.assertWritable();
+        release();
+        await old;
+        if (refused)
+          await expect(current).rejects.toMatchObject({
+            status: 409,
+            remoteCode: 'workspace_lifecycle_claim_fenced',
+          });
+        else await current;
+        expect(claims).toEqual(
+          previous === 'same'
+            ? ['2']
+            : [previous === 'ordinary' ? null : '1', '2'],
+        );
+      } finally {
+        release();
+        await stores.close();
+      }
+    },
+  );
+
   it('publishes bounded tool output immediately under the original writer grant', async () => {
     const server = new FakeManagedSessionStore();
     let publication: Record<string, unknown> | undefined;

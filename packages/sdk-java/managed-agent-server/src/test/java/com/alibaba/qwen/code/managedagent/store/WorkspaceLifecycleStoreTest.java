@@ -47,7 +47,7 @@ class WorkspaceLifecycleStoreTest {
     @ParameterizedTest
     @MethodSource("fencedHookTransitions")
     void lifecycleHookTransitionsRecheckNewEffectsAndKeepOriginalSettlement(boolean authority, boolean granted,
-            String before, String after, boolean replacement, boolean accepted, boolean batch) throws Exception {
+            String before, String after, boolean replacement, boolean accepted, boolean batch, boolean draining) throws Exception {
         var fixture = fixture();
         var store = new ManagedSessionStore(fixture.jdbc);
         store.setLifecycleExecution(new WorkspaceExecutionStore(fixture.jdbc,
@@ -78,6 +78,7 @@ class WorkspaceLifecycleStoreTest {
             journal.committed(request);
         }
         var operation = fixture.admit(OperationKind.DELETE);
+        if (draining) fixture.jdbc.update("UPDATE qwen_runtime_harness_drain SET phase = 'DRAINING'");
         fixture.jdbc.update("UPDATE managed_workspace_access SET can_create = ?", granted);
         ObjectNode next = execution.deepCopy();
         hookState(next, after, registration.get("catalogRef"));
@@ -116,7 +117,7 @@ class WorkspaceLifecycleStoreTest {
         } else {
             assertThatThrownBy(commit::run).isInstanceOfSatisfying(ApiException.class, error -> {
                 assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
-                assertThat(error.getCode()).isEqualTo(authority && !replacement
+                assertThat(error.getCode()).isEqualTo(draining ? "workspace_lifecycle_claim_fenced" : authority && !replacement
                         ? "workspace_lifecycle_authorization_revoked" : "workspace_lifecycle_admission_closed");
             });
             assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM qwen_managed_session_journal_head", Long.class)).isEqualTo(revision);
@@ -140,8 +141,16 @@ class WorkspaceLifecycleStoreTest {
                             values[6] = false;
                             return Arguments.of(values);
                         });
-        return Stream.concat(single, Stream.of(Arguments.of(true, true, "intent", "outcome_unknown", true, false, true),
-                Arguments.of(true, true, "intent", "outcome_unknown", false, true, true)));
+        Stream<Arguments> existing = Stream.concat(single, Stream.of(Arguments.of(true, true, "intent", "outcome_unknown", true, false, true),
+                Arguments.of(true, true, "intent", "outcome_unknown", false, true, true))).map(arguments -> {
+                    var values = java.util.Arrays.copyOf(arguments.get(), 8);
+                    values[7] = false;
+                    return Arguments.of(values);
+                });
+        return Stream.concat(existing, Stream.of(
+                Arguments.of(true, true, "intent", "dispatch_started", false, false, false, true),
+                Arguments.of(true, true, "intent", "outcome_unknown", false, false, false, true),
+                Arguments.of(true, true, "intent", "not_started_proven", false, true, false, true)));
     }
 
     private static void hookState(ObjectNode record, String execution, JsonNode result) {

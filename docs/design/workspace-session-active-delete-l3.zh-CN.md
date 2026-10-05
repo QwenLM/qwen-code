@@ -83,6 +83,15 @@ Plan 身份使用固定的紧凑 JSON 字节，不受应用 JSON 格式化配置
 恢复遇到在途、失败或已取消的本地 Session 路由时直接拒绝，
 不等待普通 acquire，也不传播其结果。
 
+接管者的 lifecycle load 只有在规范化 Store descriptor 与原 grant 完全一致、
+且 Store 接受原 writer 上的当前 claim 后，才可复用已存在且空闲的 files attachment。
+应答返回原 client 身份，不重新打开 Session 或重放 Hook。busy、外来身份或 claim
+拒绝均保留原 attachment 与此前权限。返回本地生命周期围栏前核验 client 身份，
+仍保留明确的 legacy close 例外。原从未派发执行的取消可穿过 drain 围栏结算持久
+取消结果，不调用 worker；新派发仍被拒绝。事务中的 typed claim 拒绝保留原 409
+code，并回滚全部 journal mutation。确认 lifecycle detach 后仅删除请求前捕获的
+attachment 与 prompt 状态；晚到应答不得清除替代 attachment 的心跳或 prompt 水位。
+
 每次新副作用派发前核对当前 ACL、挂载和身份。撤销后仍可查询、结算已派发工作；
 未派发 Hook 保持 recovery_blocked，直至恢复权限。unknown 保留所有权，不能
 变成取消或完成证明。沿用 H2 可能无限期阻塞的限制，独立由 #13133 跟踪。

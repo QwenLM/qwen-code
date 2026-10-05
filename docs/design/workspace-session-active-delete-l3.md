@@ -105,6 +105,19 @@ Plan identities use fixed compact JSON bytes, independent of application JSON
 formatting. Recovery rejects pending, failed or cancelled local Session routes
 without waiting for ordinary acquisition or propagating its outcome.
 
+A successor lifecycle load may adopt an existing idle files attachment only
+after its normalized Store descriptor matches the original grant and the Store
+accepts the current claim on the original writer. It returns the original client
+identity without reopening the Session or replaying Hooks. Busy, foreign and
+refused claims retain the attachment and its previous authority. Client identity
+is checked before disclosing the local lifecycle fence, preserving the explicit
+legacy close exception. Cancelling a never-dispatched original execution may
+settle its durable cancellation through a drain fence without invoking the worker;
+new dispatch remains excluded. Typed transactional claim refusals retain their
+409 code and roll back all journal mutations. Confirmed lifecycle detach removes
+only the captured attachment and prompt state; a late response cannot clear a
+replacement's heartbeat or prompt watermark.
+
 Before each new side-effect dispatch, check current ACL, mount and identity.
 After revocation, lookup and settlement of already dispatched work continue;
 undispatched Hooks stay recovery_blocked until authority returns. Unknown effects

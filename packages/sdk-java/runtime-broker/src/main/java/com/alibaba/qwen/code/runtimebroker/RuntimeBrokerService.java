@@ -2985,7 +2985,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant) {
-        bindingRepository.requireHarnessAdmission(context.session().getScope(), context.session().getHarnessSessionId(), null);
+        if (!prepared.isCancelRequested()) {
+            bindingRepository.requireHarnessAdmission(context.session().getScope(), context.session().getHarnessSessionId(), null);
+        }
         if (payload == null && ("deferred".equals(prepared.getReference().get("dispatchMode"))
                 || "deferred_v3".equals(prepared.getReference().get("dispatchMode")))
                 && !prepared.isCancelRequested()) {

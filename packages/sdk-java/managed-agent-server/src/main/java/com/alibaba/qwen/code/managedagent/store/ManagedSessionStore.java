@@ -526,6 +526,9 @@ public class ManagedSessionStore {
                 if (refusal.getStatusCode() == 409 && "workspace_unavailable".equals(refusal.getCode())) {
                     throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_authorization_revoked");
                 }
+                if (refusal.getStatusCode() == 409) {
+                    throw new ApiException(HttpStatus.CONFLICT, refusal.getCode(), refusal.getMessage());
+                }
                 throw refusal;
             }
         }

@@ -372,7 +372,15 @@ async function hookApp(asyncEnd = false) {
   expect(created.status).toBe(200);
   const authorize = (request: supertest.Test) =>
     headers(request).set('X-Qwen-Client-Id', created.body.clientId);
-  return { server, authorize, definition, catalog, requests, release };
+  return {
+    server,
+    authorize,
+    definition,
+    catalog,
+    requests,
+    release,
+    clientId: created.body.clientId,
+  };
 }
 
 describe('Hosted Harness no-tool session', () => {
@@ -499,6 +507,203 @@ describe('Hosted Harness no-tool session', () => {
       await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
         .send({})
         .expect(404);
+    },
+  );
+
+  it.each(['close', 'delete'] as const)(
+    'adopts the original idle attachment for %s without reopening or replaying Hooks',
+    async (kind) => {
+      const { server, authorize, definition, requests, clientId } =
+        await hookApp();
+      const descriptorCount = state.storeOptions.length;
+      const transcriptPath = path.join(state.root, `${SESSION_ID}.jsonl`);
+      const transcript = await readFile(transcriptPath, 'utf8');
+      state.assertWritable.mockClear();
+      const authority = { operationId: 'adopt-original', claimGeneration: 1 };
+      const load = () =>
+        headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+          ...definition,
+          lifecycleAuthority: authority,
+        });
+      const adopted = await load();
+      expect(adopted.status).toBe(200);
+      expect(adopted.body.clientId).toBe(clientId);
+      expect(state.storeOptions).toHaveLength(descriptorCount);
+      expect(state.assertWritable).toHaveBeenCalledTimes(1);
+      expect(await readFile(transcriptPath, 'utf8')).toBe(transcript);
+      expect(requests).toEqual([]);
+      const operation = {
+        kind,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+        authority,
+      };
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+      )
+        .send(operation)
+        .expect(200);
+      expect((await load()).body.clientId).toBe(adopted.body.clientId);
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+      )
+        .send(operation)
+        .expect(200);
+      expect(
+        requests
+          .filter((request) => request.kind === 'hook-execute')
+          .map((request) => request.input.hook_event_name),
+      ).toEqual(
+        kind === 'close' ? ['SessionEnd'] : ['SessionEnd', 'SessionDelete'],
+      );
+      for (const route of ['prompt', 'cancel']) {
+        await headers(
+          supertest(server).post(`/session/${SESSION_ID}/${route}`),
+        ).expect(404);
+        await headers(supertest(server).post(`/session/${SESSION_ID}/${route}`))
+          .set('X-Qwen-Client-Id', randomUUID())
+          .expect(404);
+        await authorize(
+          supertest(server).post(`/session/${SESSION_ID}/${route}`),
+        ).expect(409);
+      }
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+        .set('X-Qwen-Client-Id', randomUUID())
+        .expect(404);
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+        409,
+      );
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .send({ authority })
+        .expect(204);
+      expect(state.model).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { tenantId: 'foreign' },
+    { workspaceId: 'foreign' },
+    { writerToken: 'f'.repeat(40) },
+    { baseUrl: 'http://foreign-store.test' },
+    { writerId: randomUUID() },
+  ])(
+    'refuses lifecycle adoption with a different original grant: %s',
+    async (changed) => {
+      const { server, authorize, definition, requests } = await hookApp();
+      state.assertWritable.mockClear();
+      await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+        .send({
+          ...definition,
+          managedSessionStore: { ...store(), ...changed },
+          lifecycleAuthority: { operationId: 'adopt', claimGeneration: 1 },
+        })
+        .expect(409);
+      expect(state.assertWritable).not.toHaveBeenCalled();
+      expect(state.setLifecycleAuthority).not.toHaveBeenCalled();
+      expect(requests).toEqual([]);
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .send({})
+        .expect(204);
+    },
+  );
+
+  it('restores original authority after refused adoption and guards concurrent claims', async () => {
+    const { server, authorize, definition, requests } = await hookApp();
+    const load = (operationId: string) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+        ...definition,
+        lifecycleAuthority: { operationId, claimGeneration: 1 },
+      });
+    state.assertWritable.mockRejectedValueOnce(new Error('claim refused'));
+    expect((await load('stale')).status).toBe(503);
+    expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith(undefined);
+    let release!: () => void;
+    state.assertWritable.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((resolve) => {
+          release = () => resolve(undefined);
+        }),
+    );
+    const pending = load('current').then((response) => response);
+    await vi.waitFor(() => expect(release).toBeDefined());
+    try {
+      expect((await load('competing')).status).toBe(409);
+      expect(requests).toEqual([]);
+    } finally {
+      release();
+    }
+    expect((await pending).status).toBe(200);
+    expect((await load('other-operation')).status).toBe(409);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+      .send(definition)
+      .expect(409);
+    await headers(supertest(server).post('/session'))
+      .send({
+        ...definition,
+        lifecycleAuthority: { operationId: 'create', claimGeneration: 1 },
+      })
+      .expect(400);
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority: { operationId: 'current', claimGeneration: 1 } })
+      .expect(204);
+  });
+
+  it.each(['prompt', 'title', 'hooks/operations'])(
+    'refuses a late ordinary %s preflight after lifecycle adoption',
+    async (route) => {
+      const { server, authorize, definition, requests } = await hookApp();
+      const transcriptPath = path.join(state.root, `${SESSION_ID}.jsonl`);
+      const before = await readFile(transcriptPath, 'utf8');
+      let release!: () => void;
+      state.authorizeOrdinary.mockImplementationOnce(
+        () =>
+          new Promise<undefined>((resolve) => {
+            release = () => resolve(undefined);
+          }),
+      );
+      const prompt = [{ type: 'text', text: 'late request' }];
+      const pending = authorize(
+        supertest(server).post(`/session/${SESSION_ID}/${route}`),
+      )
+        .send(
+          route === 'title'
+            ? { title: 'late title' }
+            : route === 'hooks/operations'
+              ? {
+                  operationId: 'ea17a7bc-b8d6-4f42-9e82-3859309fe92a',
+                  event: 'Notification',
+                  input: { message: 'late', notification_type: 'test' },
+                }
+              : {
+                  prompt,
+                  promptId: PROMPT_ID,
+                  payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+                },
+        )
+        .then((response) => response);
+      await vi.waitFor(() => expect(release).toBeDefined());
+      try {
+        await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+          .send({
+            ...definition,
+            lifecycleAuthority: { operationId: 'adopt', claimGeneration: 1 },
+          })
+          .expect(200);
+      } finally {
+        release();
+      }
+      const refused = await pending;
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe('hosted_lifecycle_operation_active');
+      expect(requests).toEqual([]);
+      expect(state.model).not.toHaveBeenCalled();
+      expect(await readFile(transcriptPath, 'utf8')).toBe(before);
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .send({ authority: { operationId: 'adopt', claimGeneration: 1 } })
+        .expect(204);
     },
   );
 

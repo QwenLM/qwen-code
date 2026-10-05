@@ -410,6 +410,7 @@ class ManagedSessionStoreHttpClient {
   private readonly fetchFn: typeof fetch;
   private grant: WriterGrant | undefined;
   private renewPromise: Promise<void> | undefined;
+  private renewingAuthority?: ManagedSessionLifecycleAuthority;
   private renewTimer: NodeJS.Timeout | undefined;
   private sealed = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
@@ -971,8 +972,20 @@ class ManagedSessionStoreHttpClient {
   }
 
   private renewWriter(): Promise<void> {
-    if (this.renewPromise !== undefined) return this.renewPromise;
+    if (this.renewPromise !== undefined) {
+      if (
+        this.lifecycleAuthority?.operationId ===
+          this.renewingAuthority?.operationId &&
+        this.lifecycleAuthority?.claimGeneration ===
+          this.renewingAuthority?.claimGeneration
+      )
+        return this.renewPromise;
+      return this.renewPromise.then(() => this.renewWriter());
+    }
     const grant = this.requireGrant();
+    this.renewingAuthority = this.lifecycleAuthority
+      ? { ...this.lifecycleAuthority }
+      : undefined;
     const renewal = (async () => {
       const renewed = parseWriterGrant(
         await this.json('/writers:renew', 'POST', {
