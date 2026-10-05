@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
@@ -36,6 +37,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final WorkspaceExecutionStore workspaceExecution;
     private final DaemonApprovalMode approvalMode;
     private final ManagedActionStore actions;
+    private final WriterCredentialPolicy credentials;
     private volatile HostedHarnessClient client;
     // Sessions whose takeover load reported parked Runtime work that no
     // continue/cancel has been admitted for yet.
@@ -60,6 +62,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         this.sessions = sessions;
         this.actions = actions;
         this.workspaceExecution = workspaceExecution;
+        this.credentials = new WriterCredentialPolicy(properties);
         if (this.properties.getToken() == null
                 || this.properties.getToken().isBlank()
                 || this.properties.getCapabilityDigest() == null
@@ -399,14 +402,23 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (!sessionStore.isEnabled()) {
             return null;
         }
-        return ManagedSessionStoreConnection.builder()
-                .baseUri(URI.create(sessionStore.getBaseUrl()))
-                .tenantId(session.tenantId())
-                .workspaceId(session.workspace() == null ? workspaceId
-                        : session.workspace().getWorkspaceId())
-                .writerId(client().capabilities().getBootId())
-                .leaseDuration(sessionStore.getWriterLeaseDuration())
-                .build();
+        String workspace = session.workspace() == null ? workspaceId
+                : session.workspace().getWorkspaceId();
+        ManagedSessionStoreConnection.Builder builder =
+                ManagedSessionStoreConnection.builder()
+                        .baseUri(URI.create(sessionStore.getBaseUrl()))
+                        .tenantId(session.tenantId())
+                        .workspaceId(workspace)
+                        .writerId(client().capabilities().getBootId())
+                        .leaseDuration(
+                                sessionStore.getWriterLeaseDuration())
+                        .allowInsecureHttp(
+                                sessionStore.isAllowInsecureHttp());
+        if (credentials.isBound()) {
+            builder.writerToken(credentials.issue(session.tenantId(),
+                    workspace, session.sessionId()));
+        }
+        return builder.build();
     }
 
     private HostedHarnessClient client() {
