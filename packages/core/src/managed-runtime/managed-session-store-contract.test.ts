@@ -69,6 +69,22 @@ const fixture = JSON.parse(
 describe('Managed Session store shared contract', () => {
   it('pins headers, limits, bytes, and digests', () => {
     expect(fixture.contractVersion).toBe(1);
+    // Every header and limit is read: a key nobody asserts cannot hide.
+    expect(Object.keys(fixture.headers).sort()).toEqual([
+      'tenant',
+      'writerToken',
+    ]);
+    expect(Object.keys(fixture.limits).sort()).toEqual([
+      'maxInlineResourceBytes',
+      'maxJsonDepth',
+      'maxResourcesPerTransaction',
+      'maxTransactionBytes',
+      'maxTransactionEvents',
+      'maximumLeaseDurationMs',
+      'maximumWriterTokenLength',
+      'minimumLeaseDurationMs',
+      'minimumWriterTokenLength',
+    ]);
     expect(HTTP_MANAGED_SESSION_STORE_CONTRACT).toEqual({
       tenantHeader: fixture.headers.tenant,
       writerTokenHeader: fixture.headers.writerToken,
