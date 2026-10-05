@@ -144,6 +144,9 @@ describe('SDK Java Hosted latency baseline CI contract', () => {
     const paths = [
       'integration-tests/cli/hosted-latency-baseline.test.ts',
       'integration-tests/baselines/hosted-latency.json',
+      'integration-tests/helpers/hosted-*',
+      'integration-tests/fake-openai-server.ts',
+      'packages/sdk-typescript/src/daemon/**',
     ];
     for (const event of ['pull_request', 'push']) {
       for (const p of paths) {

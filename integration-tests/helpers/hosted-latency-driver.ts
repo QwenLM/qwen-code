@@ -351,8 +351,10 @@ try {
     const turnStoreRequests = sample.storeRequests;
     await waitUntil(() => sample.runtimeReadyMs >= 0, 45_000);
     if (proxyFailures.length > 0) {
+      const describeFailure = (v: unknown) =>
+        v instanceof Error ? `${v.name}: ${v.message}\n${v.stack}` : String(v);
       throw new Error(
-        `Proxy failures during interaction: ${JSON.stringify(proxyFailures)}`,
+        `Proxy failures during interaction: ${proxyFailures.map(describeFailure).join('; ')}`,
       );
     }
     if (sample.scenario === 'tool') {
@@ -439,14 +441,20 @@ try {
   console.log('HOSTED_LATENCY_OK', JSON.stringify({ samples, comparison }));
 } catch (cause) {
   console.error(cli.output, proxyFailures);
+  const describeFailure = (v: unknown) =>
+    v instanceof Error ? `${v.name}: ${v.message}\n${v.stack}` : String(v);
   const failureReport = {
     ...(measurement || { samples }),
     error: cause instanceof Error ? cause.stack : String(cause),
-    proxyFailures,
-    modelAssertionErrors,
+    proxyFailures: proxyFailures.map(describeFailure),
+    modelAssertionErrors: modelAssertionErrors.map(describeFailure),
   };
-  await mkdir(path.dirname(reportPath), { recursive: true });
-  await writeFile(reportPath, JSON.stringify(failureReport, null, 2) + '\n');
+  try {
+    await mkdir(path.dirname(reportPath), { recursive: true });
+    await writeFile(reportPath, JSON.stringify(failureReport, null, 2) + '\n');
+  } catch (writeError) {
+    console.error('Failed to write failure report:', writeError);
+  }
   throw cause;
 } finally {
   await cli.close();
