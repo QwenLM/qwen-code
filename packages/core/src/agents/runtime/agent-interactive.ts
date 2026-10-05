@@ -42,6 +42,7 @@ import {
   type AgentMessage,
 } from './agent-types.js';
 import type { LoopType } from '../../telemetry/types.js';
+import { describeAgentTerminateReason } from './terminate-reason.js';
 
 const debugLogger = createDebugLogger('AGENT_INTERACTIVE');
 
@@ -525,29 +526,21 @@ function terminateModeMessage(
   mode: AgentTerminateMode,
   loopType?: LoopType | null,
 ): { text: string; level: 'info' | 'warning' | 'error' } | null {
+  let level: 'warning' | 'error';
   switch (mode) {
     case AgentTerminateMode.MAX_TURNS:
-      return {
-        text: 'Agent stopped: maximum turns reached.',
-        level: 'warning',
-      };
     case AgentTerminateMode.TIMEOUT:
-      return { text: 'Agent stopped: time limit reached.', level: 'warning' };
+      level = 'warning';
+      break;
     case AgentTerminateMode.ERROR:
-      return { text: 'Agent stopped due to an error.', level: 'error' };
     case AgentTerminateMode.LOOP_DETECTED:
-      return {
-        // Name the exact detector so a stop is attributable (issue #9450)
-        // instead of collapsing every loop type into one generic label.
-        text: loopType
-          ? `Agent stopped: duplicate tool-call loop detected (${loopType}).`
-          : 'Agent stopped: duplicate tool-call loop detected.',
-        level: 'error',
-      };
+      level = 'error';
+      break;
     case AgentTerminateMode.CANCELLED:
     case AgentTerminateMode.SHUTDOWN:
-      return null;
     default:
       return null;
   }
+  const text = describeAgentTerminateReason(mode, loopType);
+  return text ? { text, level } : null;
 }

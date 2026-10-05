@@ -20,6 +20,7 @@ import { deriveConfig, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
+import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
 import { stringify as stringifyYaml } from '../utils/yaml-parser.js';
 import {
   rebuildAutoMemoryIndexAtRoot,
@@ -510,7 +511,10 @@ async function generateMemoryMetadataWithAgent(
   });
   if (result.status !== 'completed') {
     throw new Error(
-      result.terminateReason || 'Metadata migration agent failed',
+      terminateReasonMessage(
+        result.terminateReason,
+        'Metadata migration agent failed',
+      ),
     );
   }
   return {

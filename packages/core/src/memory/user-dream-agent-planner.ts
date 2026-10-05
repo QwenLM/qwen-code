@@ -9,6 +9,7 @@ import {
   runForkedAgent,
   type ForkedAgentResult,
 } from '../agents/forkedAgent.js';
+import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
@@ -127,7 +128,9 @@ export async function planUserAutoMemoryDreamByAgent(
   });
 
   if (result.status !== 'completed') {
-    throw new Error(result.terminateReason || 'User Dream agent failed');
+    throw new Error(
+      terminateReasonMessage(result.terminateReason, 'User Dream agent failed'),
+    );
   }
   return result;
 }

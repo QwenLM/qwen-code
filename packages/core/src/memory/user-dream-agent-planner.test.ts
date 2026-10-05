@@ -241,11 +241,12 @@ describe('User Dream agent planner', () => {
   });
 
   it.each([
-    ['failed', 'Model timed out'],
-    ['cancelled', 'CANCELLED'],
+    ['failed', 'Model timed out', 'Model timed out'],
+    ['cancelled', 'CANCELLED', 'Agent stopped: cancelled before completion.'],
+    ['failed', 'MAX_TURNS', 'Agent stopped: maximum turns reached.'],
   ] as const)(
-    'rejects when the agent finishes as %s',
-    async (status, reason) => {
+    'rejects when the agent finishes as %s with reason %s',
+    async (status, reason, expected) => {
       vi.mocked(runForkedAgent).mockResolvedValue({
         status,
         terminateReason: reason,
@@ -254,7 +255,7 @@ describe('User Dream agent planner', () => {
 
       await expect(
         planUserAutoMemoryDreamByAgent(config, projectRoot),
-      ).rejects.toThrow(reason);
+      ).rejects.toThrow(expected);
     },
   );
 });
