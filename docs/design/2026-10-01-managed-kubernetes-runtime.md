@@ -121,7 +121,9 @@ No private protocol schema is widened. Boot bytes and bearer credentials are not
 printed. The worker image must supply Node.js 22+, the built CLI and required
 runtime dependencies. K1 Pods are non-root, drop capabilities, disable privilege
 escalation, use RuntimeDefault seccomp and a read-only root filesystem, and have
-bounded scratch/tmp writable volumes and resource limits. These settings are not
+bounded scratch/tmp writable volumes and resource limits. K1 rejects unknown
+container security keys; explicit container user/group/non-root settings must match
+the Pod policy, and omitted inherited settings remain accepted. These settings are not
 a hostile multi-tenant isolation claim; same-UID trusted tools remain the boundary.
 
 The Kubernetes API client uses HTTPS, configured CA trust, a token file re-read
@@ -135,6 +137,17 @@ They do not establish cancellation, retirement, physical stop or output delivery
 K1 therefore has no automatic idle collection; operators must budget retained
 resources. Evidence-preserving deletion needs a later explicit retirement
 operation with the saved UIDs, settlement barriers and UID delete preconditions.
+
+A lost K1 Pod leaves a LOST binding that blocks all new K1 Sessions in the same
+tenant with non-retryable `runtime_placement_recovery_required`. Existing healthy
+Sessions and other tenants are unaffected. K1 does not emit NOT_FOUND with the
+stopped-writer evidence needed by Broker recovery, so repeated recovery, external
+Pod deletion and process restart cannot clear this durable block. The operator
+must stop new admission for the affected tenant, preserve its original binding,
+seed, resource UIDs and execution inventory, and escalate for evidence-preserving
+recovery or an explicitly reviewed placement-policy change. No in-place recovery
+is implemented; database deletion or fabricated RELEASED/stop evidence is unsafe.
+Track this K1 availability gate in #13395 without opening retirement or CSI reuse.
 
 ## K2 Workspace storage and handoff
 

@@ -94,6 +94,15 @@ class KubernetesHttpRuntimeClientTest {
     }
 
     @Test
+    void readsFullSizeArtifactChunksWithBoundedJsonEnvelopeHeadroom() {
+        var object = Map.of("kind", "ConfigMap", "binaryData", Map.of("chunk", "A".repeat(1024 * 1024)));
+        response.set(JsonCodec.encode(object));
+        assertEquals(object, client.get("configmaps", "runtimes", "worker-000").toCompletableFuture().join());
+        response.set(JsonCodec.encode(Map.of("binaryData", Map.of("chunk", "A".repeat(1024 * 1024 + 64 * 1024)))));
+        assertEquals(502, failure(client.get("configmaps", "runtimes", "worker-000").toCompletableFuture()).getStatusCode());
+    }
+
+    @Test
     void readsRotatedTokenForEachNamespacedCall() throws Exception {
         assertEquals(Map.of("kind", "Pod"), client.get("pods", "runtimes", "pod-one").toCompletableFuture().join());
         assertEquals("Bearer token-one", authorization.get());

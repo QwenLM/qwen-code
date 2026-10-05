@@ -381,6 +381,17 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
             }
             Map<?, ?> container = object(((List<?>) spec.get("containers")).getFirst());
             Map<?, ?> security = object(container.get("securityContext"));
+            if (!Set.of("allowPrivilegeEscalation", "readOnlyRootFilesystem", "capabilities", "privileged",
+                    "seccompProfile", "procMount", "runAsUser", "runAsNonRoot", "runAsGroup").containsAll(security.keySet())
+                    || !Set.of("drop", "add").containsAll(object(security.get("capabilities")).keySet())) {
+                throw conflict();
+            }
+            Map<?, ?> podSecurity = object(spec.get("securityContext"));
+            for (String field : List.of("runAsUser", "runAsNonRoot", "runAsGroup")) {
+                if (security.containsKey(field) && !Objects.equals(security.get(field), podSecurity.get(field))) {
+                    throw conflict();
+                }
+            }
             if (!absentOrEmpty(container.get("args")) || !absentOrEmpty(container.get("envFrom"))
                     || container.get("lifecycle") != null
                     || Boolean.TRUE.equals(security.get("privileged"))

@@ -435,6 +435,13 @@ K2a 没有 activate、release、超时接管或公开 selector。私有创建前
 按持久 ACK 设计增加资源保护、PVC/PV、Pod/node/container/image 与挂载核验。
 完整物理退役仍未实现。
 
+私有 CSI Pod 校验拒绝未知的 spec、container 和 security-context 字段，同时允许
+明确支持的 API 默认字段省略。特别是 container 不能覆盖 Pod 的 non-root 用户策略。
+操作失败仅失效与原 request、seed 和 handle 匹配的缓存 placement；其他 seed 或伪造
+handle 不能撤销存活原 worker。ConfigMap GET 的响应预算独立设为一 MiB 加 64 KiB，
+为最大一 MiB 的 base64 chunk 提供 JSON envelope 空间。原生 CSI 日志仍保持严格的
+一 MiB 字节上限。这些校验不实现物理 retirement。
+
 ## 验收与未定契约
 
 实现后运行现有 build/typecheck/bundle、相关 Java/TS 测试和 MySQL 契约。新目标集群

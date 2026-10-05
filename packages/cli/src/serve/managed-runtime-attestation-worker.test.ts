@@ -5,6 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { Server } from 'node:http';
 import { connect, createServer, type AddressInfo } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { Readable } from 'node:stream';
@@ -578,6 +579,12 @@ describe('boot-v3 original-worker ACK ownership', () => {
       const publisher: ManagedShellCapturePublisher | undefined = captureProfile
         ? { prepare }
         : undefined;
+      const nativeListen = Server.prototype.listen;
+      const listen = vi
+        .spyOn(Server.prototype, 'listen')
+        .mockImplementation(function (this: Server) {
+          return Reflect.apply(nativeListen, this, [0, '127.0.0.1']);
+        });
       try {
         const worker = await startManagedRuntimeAttestationWorker(
           boot,
@@ -586,6 +593,7 @@ describe('boot-v3 original-worker ACK ownership', () => {
           true,
         );
         openWorkers.add(worker);
+        expect(listen).toHaveBeenCalledWith(43190, '0.0.0.0');
         const response = await fetch(worker.ready.url + MANAGED_CSI_ACK_PATH, {
           method: 'POST',
           headers: {
@@ -606,6 +614,7 @@ describe('boot-v3 original-worker ACK ownership', () => {
         expect(prepare).not.toHaveBeenCalled();
         expect(observation).toHaveBeenCalledTimes(1);
       } finally {
+        listen.mockRestore();
         observation.mockRestore();
         vi.unstubAllEnvs();
       }

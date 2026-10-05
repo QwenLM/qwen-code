@@ -92,7 +92,9 @@ JSON envelope，并显式监听 `0.0.0.0:43190`。普通 stdin 启动继续使�
 容器 cwd 按 POSIX 词法校验，不依赖 Broker 主机操作系统。
 不扩展私有协议 schema，不打印 boot 内容或 bearer。镜像须提供 Node.js 22+、已构建
 CLI 及运行依赖。K1 Pod 使用 non-root、drop capabilities、禁止提权、RuntimeDefault
-seccomp、只读 rootfs、有界 scratch/tmp 可写卷和资源上限。这些配置不代表恶意多租户
+seccomp、只读 rootfs、有界 scratch/tmp 可写卷和资源上限。K1 拒绝未知 container 安全
+字段；显式 container 用户、组和 non-root 设置必须匹配 Pod 策略，省略的继承设置
+仍可接受。这些配置不代表恶意多租户
 隔离认证；同 UID 可信工具仍是本切片边界。
 
 Kubernetes API 客户端使用 HTTPS、配置的 CA 信任、每次请求重读 token 文件、
@@ -102,6 +104,14 @@ Kubernetes API 客户端使用 HTTPS、配置的 CA 信任、每次请求重读 
 `release` 是空操作；`close` 清理本地记账，不删除 Pod/Secret，也不证明取消、retirement、
 物理停止或输出交付。K1 因而不自动回收 idle 资源，运维须考虑保留资源的容量。
 保留证据的删除需要后续显式 retirement 操作，携带原 UID、结算屏障及 UID 条件删除。
+
+K1 Pod 丢失后，LOST binding 会使同一 tenant 的所有新 K1 Session 被不可重试的
+`runtime_placement_recovery_required` 拒绝；已有健康 Session 和其他 tenant 不受影响。
+K1 不返回带停止 writer 证据的 NOT_FOUND，因而重复 recovery、外部删除 Pod 或重启
+进程都不能清除这个持久拦截。运维必须停止受影响 tenant 的新准入，保留原 binding、
+seed、资源 UID 和 execution 清单，并升级处理以获得保留证据的恢复方案或经过明确
+评审的 placement 策略变更。本增量没有原地恢复路径；删除数据库记录、伪造 RELEASED
+或停止证据均不安全。这个 K1 可用性门禁在 #13395 跟踪，不解除 retirement 或 CSI 复用门禁。
 
 ## K2 Workspace 存储与交接
 

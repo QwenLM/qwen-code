@@ -225,6 +225,53 @@ class WorkspaceCsiRuntimeIdentityTest {
     }
 
     @Test
+    void foreignFailuresCannotRevokeTheOriginalPlacementButItsOwnFailureDoes() {
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            var request = original.getRequest();
+            var seed = original.getProvisionSeed();
+            var handle = join(provider.ensureResource(request, seed, null));
+            original = bindings.compareAndSet(original, original.withResourceHandle(handle, Instant.now()));
+            var lease = join(provider.provision(request, seed));
+            assertThat(provider.isUsable(lease)).isTrue();
+            refused(provider.provision(request, RuntimeProvisionSeed.create("another-binding", 1)));
+            assertThat(provider.isUsable(lease)).isTrue();
+            var forged = new RuntimeResourceHandle(handle.getKind(), handle.getVersion(), Map.of("forged", true));
+            assertThat(join(provider.reconcile(request, seed, forged, lease)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.CONFLICT);
+            refused(provider.ensureResource(request, seed, forged));
+            assertThat(provider.isUsable(lease)).isTrue();
+            var wrongRequest = new RuntimeProvisionRequest(request.getScope(), null, "kubernetes-workspace", "other-storage");
+            refused(provider.confirm(wrongRequest, lease));
+            assertThat(provider.isUsable(lease)).isTrue();
+            join(provider.confirm(request, lease));
+            api.objects.remove("pods");
+            refused(provider.confirm(request, lease));
+            assertThat(provider.isUsable(lease)).isFalse();
+            assertThat(api.creates).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void failedFinalAdmissionRevokesOnlyTheFreshPlacementItCreated() {
+        bindings = spy(bindings);
+        doAnswer(call -> {
+            if (attestations.get() >= 2) {
+                throw new DataAccessResourceFailureException("final admission unavailable");
+            }
+            return call.callRealMethod();
+        }).when(bindings).findById(any());
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            var lease = WorkspaceCsiRuntimeIdentity.lease(original.getProvisionSeed(), Map.of("podIp", "10.4.0.8"));
+            assertThat(attestations).hasValue(2);
+            assertThat(provider.isUsable(lease)).isFalse();
+            assertThat(api.creates).isEqualTo(2);
+        }
+    }
+
+    @Test
     void changesDuringAttestationAndFailedProtectionCannotReturnAHandle() {
         afterAttestation = () -> api.containerStatus().put("containerID", "containerd://" + "c".repeat(64));
         try (var provider = provider()) {
@@ -318,6 +365,17 @@ class WorkspaceCsiRuntimeIdentityTest {
     @Test
     void newPodRejectsUnsafeDefaultsWhileAcceptingOmittedCoreFalseBooleans() {
         for (var change : List.<Consumer<Map<String, Object>>>of(
+                pod -> {
+                    var container = WorkspaceCsiRuntimeIdentity.map(((List<?>) nested(pod, "spec").get("containers")).getFirst());
+                    nested(container, "securityContext").put("runAsUser", 0);
+                },
+                pod -> {
+                    var container = WorkspaceCsiRuntimeIdentity.map(((List<?>) nested(pod, "spec").get("containers")).getFirst());
+                    nested(container, "securityContext").put("runAsNonRoot", false);
+                },
+                pod -> nested(pod, "spec").put("hostUsers", false),
+                pod -> nested(pod, "spec").put("hostAliases", List.of(Map.of("ip", "127.0.0.1", "hostnames", List.of("override")))),
+                pod -> nested(nested(pod, "spec"), "securityContext").put("sysctls", List.of(Map.of("name", "kernel.shm_rmid_forced", "value", "0"))),
                 pod -> nested(pod, "spec").put("hostPID", true),
                 pod -> nested(pod, "spec").remove("automountServiceAccountToken"),
                 pod -> {
@@ -333,6 +391,23 @@ class WorkspaceCsiRuntimeIdentityTest {
                 assertThat(attestations).hasValue(0);
                 assertThat(api.creates).isEqualTo(2);
             }
+        }
+    }
+
+    @Test
+    void optionalApiDefaultsDoNotBecomeRequiredPodFields() {
+        api.changeCreatedPod = pod -> {
+            var spec = nested(pod, "spec");
+            spec.putAll(Map.of("hostNetwork", false, "hostPID", false, "hostIPC", false,
+                    "dnsPolicy", "ClusterFirst", "schedulerName", "default-scheduler", "terminationGracePeriodSeconds", 30));
+            var container = WorkspaceCsiRuntimeIdentity.map(((List<?>) spec.get("containers")).getFirst());
+            container.putAll(Map.of("terminationMessagePath", "/dev/termination-log", "terminationMessagePolicy", "File"));
+        };
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            var handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(handle).isNotNull();
+            assertThat(attestations).hasValue(2);
         }
     }
 

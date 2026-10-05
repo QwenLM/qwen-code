@@ -25,6 +25,7 @@ import javax.net.ssl.TrustManagerFactory;
 /** Bounded core-v1 API calls with rotating service-account tokens and explicit CA trust. */
 public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClient {
     private static final int RESPONSE_LIMIT = 1024 * 1024;
+    private static final int CONFIG_MAP_RESPONSE_LIMIT = RESPONSE_LIMIT + 64 * 1024;
     private final URI origin;
     private final Path tokenFile;
     private final HttpClient client;
@@ -52,7 +53,8 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
         }
         dnsLabel(namespace);
         dnsSubdomain(name);
-        return exchange("/api/v1/namespaces/" + namespace + "/" + resource + "/" + name, null);
+        return exchange("/api/v1/namespaces/" + namespace + "/" + resource + "/" + name, null,
+                "configmaps".equals(resource) ? CONFIG_MAP_RESPONSE_LIMIT : RESPONSE_LIMIT);
     }
 
     @Override
@@ -102,7 +104,11 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
     }
 
     private CompletionStage<Map<String, Object>> exchange(String path, Map<String, Object> body) {
-        return exchangeBytes(path, body).thenApply(bytes -> {
+        return exchange(path, body, RESPONSE_LIMIT);
+    }
+
+    private CompletionStage<Map<String, Object>> exchange(String path, Map<String, Object> body, int responseLimit) {
+        return exchangeBytes(path, body, responseLimit).thenApply(bytes -> {
             if (bytes == null) {
                 return null;
             }
@@ -115,6 +121,10 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
     }
 
     private CompletionStage<byte[]> exchangeBytes(String path, Map<String, Object> body) {
+        return exchangeBytes(path, body, RESPONSE_LIMIT);
+    }
+
+    private CompletionStage<byte[]> exchangeBytes(String path, Map<String, Object> body, int responseLimit) {
         HttpRequest request;
         try {
             byte[] tokenBytes;
@@ -139,7 +149,7 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
             return CompletableFuture.failedFuture(failure(503, true));
         }
         var exchange = client.sendAsync(request,
-                ignored -> new HttpRuntimeTransport.BoundedBodySubscriber(RESPONSE_LIMIT));
+                ignored -> new HttpRuntimeTransport.BoundedBodySubscriber(responseLimit));
         var result = exchange.thenApply(response -> {
             int status = response.statusCode();
             if (body == null && status == 404) {

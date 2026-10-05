@@ -243,6 +243,8 @@ class KubernetesRuntimeProvisionerTest {
                 api -> map(container(api).get("securityContext")).put("seccompProfile", Map.of("type", "Unconfined")),
                 api -> map(container(api).get("securityContext")).put("seccompProfile", Map.of("type", "Localhost", "localhostProfile", "custom")),
                 api -> map(container(api).get("securityContext")).put("procMount", "Unmasked"),
+                api -> map(container(api).get("securityContext")).put("runAsUser", 0),
+                api -> map(container(api).get("securityContext")).put("runAsNonRoot", false),
                 api -> map(api.object("pods").get("spec")).put("initContainers", List.of(Map.of("name", "other"))),
                 api -> map(api.object("pods").get("spec")).put("automountServiceAccountToken", true));
         for (var mutate : mutations) {
@@ -264,7 +266,9 @@ class KubernetesRuntimeProvisionerTest {
     @Test
     void refusesContainerSecurityOverridesInTheCreateResponse() {
         for (var override : List.of(Map.<String, Object>of("seccompProfile", Map.of("type", "Unconfined")),
-                Map.<String, Object>of("procMount", "Unmasked"))) {
+                Map.<String, Object>of("procMount", "Unmasked"), Map.<String, Object>of("runAsUser", 0),
+                Map.<String, Object>of("runAsNonRoot", false), Map.<String, Object>of("runAsGroup", 0),
+                Map.<String, Object>of("seLinuxOptions", Map.of("type", "unconfined_t")))) {
             var api = new FakeKubernetesRuntimeClient();
             api.podCreated = pod -> map(container(api).get("securityContext")).putAll(override);
             try (var provisioner = provisioner(api)) {
@@ -278,7 +282,8 @@ class KubernetesRuntimeProvisionerTest {
     void acceptsExplicitRuntimeDefaultContainerSecurityControls() {
         var api = new FakeKubernetesRuntimeClient();
         api.podCreated = pod -> map(container(api).get("securityContext")).putAll(Map.of(
-                "seccompProfile", Map.of("type", "RuntimeDefault"), "procMount", "Default"));
+                "seccompProfile", Map.of("type", "RuntimeDefault"), "procMount", "Default",
+                "runAsUser", 1000, "runAsNonRoot", true, "runAsGroup", 1000));
         try (var provisioner = provisioner(api)) {
             var request = request(provisioner, "/workspace");
             var handle = join(provisioner.ensureResource(request, SEED, null));

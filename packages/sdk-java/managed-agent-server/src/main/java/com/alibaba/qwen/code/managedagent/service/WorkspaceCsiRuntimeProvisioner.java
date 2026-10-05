@@ -36,6 +36,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -44,6 +45,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import org.springframework.dao.DataAccessException;
 import org.springframework.transaction.TransactionException;
@@ -145,7 +147,8 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
     @Override
     public CompletionStage<RuntimeResourceHandle> ensureResource(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed, RuntimeResourceHandle knownHandle) {
-        return async(() -> {
+        var ownedHandle = new AtomicReference<>(knownHandle);
+        return async(request, seed, ownedHandle::get, () -> {
             configured(request, seed);
             if (knownHandle != null) {
                 observe(request, seed, knownHandle);
@@ -187,6 +190,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                     value.put("mount", receipt.get("mount"));
                     value.put("identity", digest(value));
                     var handle = new RuntimeResourceHandle(kind(), VERSION, value);
+                    ownedHandle.set(handle);
                     observe(request, seed, handle, true);
                     admitted(request, seed, original);
                     return handle;
@@ -203,7 +207,8 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
 
     @Override
     public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
-        return async(() -> {
+        var retained = placements.get(seed);
+        return async(request, seed, () -> retained == null ? null : retained.handle(), () -> {
             var placement = placements.get(seed);
             require(placement != null && placement.request().equals(request));
             return observe(request, seed, placement.handle());
@@ -213,13 +218,13 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
     @Override
     public CompletionStage<RuntimeObservation> reconcile(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle handle, RuntimeLease lastLease) {
-        return async(() -> {
+        return async(request, seed, () -> handle, () -> {
             try {
                 var lease = observe(request, seed, handle);
                 require(lastLease == null || sameLease(lastLease, lease));
                 return RuntimeObservation.ready(handle, lease.getEndpoint(), lease.getRuntimeInstanceId(), lease.getLeaseId(), lease.getEpoch());
             } catch (RuntimeException error) {
-                placements.remove(seed);
+                forgetPlacement(request, seed, handle);
                 return error instanceof RuntimeBrokerException failure && failure.isRetryable()
                         || error instanceof DataAccessException || error instanceof TransactionException
                         ? RuntimeObservation.unknown(handle) : RuntimeObservation.conflict(handle);
@@ -234,10 +239,14 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
 
     @Override
     public CompletionStage<Void> confirm(RuntimeProvisionRequest request, RuntimeLease lease) {
-        return async(() -> {
-            var entry = placements.entrySet().stream().filter(value -> sameLease(value.getValue().lease(), lease)).findFirst();
-            require(entry.isPresent() && entry.get().getValue().request().equals(request));
-            observe(request, entry.get().getKey(), entry.get().getValue().handle());
+        var entry = placements.entrySet().stream().filter(value -> sameLease(value.getValue().lease(), lease)).findFirst();
+        if (entry.isEmpty() || !entry.get().getValue().request().equals(request)) {
+            return CompletableFuture.failedFuture(closed());
+        }
+        var seed = entry.get().getKey();
+        var handle = entry.get().getValue().handle();
+        return async(request, seed, () -> handle, () -> {
+            observe(request, seed, handle);
             return null;
         });
     }
@@ -487,6 +496,13 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
         uid(actual);
         if ("Pod".equals(actual.get("kind"))) {
             var spec = map(actual.get("spec"));
+            require(Set.of("restartPolicy", "automountServiceAccountToken", "enableServiceLinks", "nodeSelector",
+                    "securityContext", "containers", "volumes", "nodeName", "serviceAccountName", "serviceAccount",
+                    "schedulerName", "priority", "preemptionPolicy", "dnsPolicy", "terminationGracePeriodSeconds",
+                    "tolerations", "hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace",
+                    "initContainers", "ephemeralContainers").containsAll(spec.keySet()));
+            require(map(map(expected.get("spec")).get("securityContext")).keySet()
+                    .containsAll(map(spec.get("securityContext")).keySet()));
             require(empty(spec.get("initContainers")) && empty(spec.get("ephemeralContainers"))
                     && !Boolean.TRUE.equals(spec.get("shareProcessNamespace")));
             for (String field : List.of("hostNetwork", "hostPID", "hostIPC")) {
@@ -497,7 +513,13 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             Object readOnly = map(pvc.get("persistentVolumeClaim")).get("readOnly");
             require(readOnly == null || Boolean.FALSE.equals(readOnly));
             var container = map(list(spec.get("containers")).getFirst());
+            require(Set.of("name", "image", "imagePullPolicy", "command", "env", "ports", "readinessProbe",
+                    "resources", "securityContext", "volumeMounts", "terminationMessagePath", "terminationMessagePolicy",
+                    "args", "envFrom", "lifecycle").containsAll(container.keySet()));
             var security = map(container.get("securityContext"));
+            require(Set.of("allowPrivilegeEscalation", "readOnlyRootFilesystem", "capabilities", "privileged",
+                    "procMount", "seccompProfile").containsAll(security.keySet()));
+            require(Set.of("drop", "add").containsAll(map(security.get("capabilities")).keySet()));
             require(empty(container.get("args")) && empty(container.get("envFrom")) && container.get("lifecycle") == null
                     && !Boolean.TRUE.equals(security.get("privileged")) && empty(map(security.get("capabilities")).get("add"))
                     && (security.get("procMount") == null || "Default".equals(security.get("procMount")))
@@ -554,7 +576,15 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
         }
     }
 
-    private <T> CompletionStage<T> async(Supplier<T> operation) {
+    private void forgetPlacement(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, RuntimeResourceHandle handle) {
+        if (seed != null && handle != null) {
+            placements.computeIfPresent(seed, (ignored, current) ->
+                    current.request().equals(request) && current.handle().equals(handle) ? null : current);
+        }
+    }
+
+    private <T> CompletionStage<T> async(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            Supplier<RuntimeResourceHandle> handle, Supplier<T> operation) {
         long until = System.nanoTime() + timeout.toNanos();
         return CompletableFuture.supplyAsync(() -> {
             deadline.set(until);
@@ -567,7 +597,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             }
         }, executor).orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS)
                 .exceptionallyCompose(error -> {
-                    placements.clear();
+                    forgetPlacement(request, seed, handle.get());
                     Throwable cause = error;
                     while (cause instanceof CompletionException && cause.getCause() != null) {
                         cause = cause.getCause();

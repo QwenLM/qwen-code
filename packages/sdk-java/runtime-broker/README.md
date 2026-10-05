@@ -145,6 +145,17 @@ and `close` never delete Kubernetes objects; neither is authorization to stop a
 worker another Broker may use. Budget retained Pods and Secrets: K1 provides no
 automatic garbage collection, persistent Workspace storage or volume handoff.
 
+A lost K1 scratch Pod leaves its binding LOST and blocks every new K1 Session in
+that tenant with non-retryable `runtime_placement_recovery_required`. Existing
+healthy Sessions and other tenants remain usable. K1 never emits the stopped-writer
+proof required by `recoverBinding`, so retries, Pod deletion and Broker restart do
+not recover this tenant. Operators must stop new admission for the affected tenant,
+retain the original binding/seed/UIDs and execution inventory, and escalate for an
+evidence-preserving recovery or placement-policy change. There is no supported
+in-place recovery procedure in this increment; do not delete database rows,
+relabel the binding RELEASED, or invent stop evidence to restore admission.
+This is an outstanding K1 availability gate tracked in #13395.
+
 Each instance reserves at most 1024 retained or pending seeds before Kubernetes
 writes. At capacity, new seeds fail with retryable `runtime_kubernetes_capacity`;
 existing identities remain recoverable. Broker pre-create capacity refusal leaves
@@ -187,7 +198,9 @@ qualification. It corroborates the expected plugin Pod/DaemonSet/Node/container/
 API identity before and after a current-segment read and refuses changed log
 prefixes, incomplete lines and invalid timestamps. The HTTP client requests
 timestamps without `tailLines` or `limitBytes`, uses strict UTF-8 and rejects
-responses above one MiB. These are qualification inputs only: the durable
+responses above one MiB. ConfigMap object reads separately allow one MiB plus
+64 KiB for the JSON envelope so the largest admitted base64 worker chunk fits;
+other object reads and request bodies keep their existing one-MiB limit. These are qualification inputs only: the durable
 pre-create collector, image-specific publication/unpublish parser and physical
 retirement coordinator remain gated. Log disappearance, a fresh baseline or a
 diagnostic snapshot never releases a Workspace holder.
