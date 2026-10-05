@@ -38,9 +38,12 @@ import {
   MANAGED_SESSION_LIMITS,
   MANAGED_SESSION_MINIMUM_READER,
   ManagedSessionRecordError,
+  assertManagedSessionDigest,
   assertManagedSessionDomainEnabled,
   assertManagedSessionEventActor,
+  assertManagedSessionStableId,
   assertManagedSessionTransaction,
+  boundedString,
   managedSessionEventsDigest,
   managedSessionKeysEqual,
   parseManagedSessionCommitMarker,
@@ -1318,6 +1321,11 @@ export class LocalManagedSessionAuthority {
       );
     }
     return this.runSerial(async () => {
+      assertExtensionActor(actor.class);
+      assertCommandIdentity(command);
+      // Refused before publishing, so a retry loop leaves no body behind.
+      this.assertCommandWritable(command);
+      this.assertExpectedSequence(command);
       const previous = this.domainRecords.get(request.domain);
       const revision = (previous?.revision ?? 0) + 1;
       const recordRef = await store.publish(
@@ -1390,6 +1398,26 @@ export class LocalManagedSessionAuthority {
       // since.
       const replayed = this.replayedExtension(command);
       if (replayed !== undefined) return replayed;
+      // Every refusal the caller decides runs before any body publishes.
+      assertExtensionActor(actor.class);
+      assertCommandIdentity(command);
+      if (request.input !== undefined) {
+        const preflight = inputEvents(
+          command,
+          request.input,
+          this.committed + 2,
+          this.now(),
+        );
+        preflight.forEach((event, index) => {
+          const parsed = parseManagedSessionEvent(event);
+          assertManagedSessionEventActor(parsed, INPUT_ACTORS[index]!.class);
+          if (this.eventIds.has(parsed.eventId)) {
+            throw new ManagedSessionConflictError(
+              `event id ${parsed.eventId} is already committed.`,
+            );
+          }
+        });
+      }
       assertManagedSessionDomainEnabled(request.domain);
       const parsed = body.parse(request.record);
       await this.verifyExtensionResources(request.domain, parsed.record);
@@ -1821,7 +1849,7 @@ export class LocalManagedSessionAuthority {
     }
     // Reading and verifying run a bounded window ahead; the chain checks
     // and the state they build still follow the journal order.
-    const loads: Array<Promise<LoadedExtensionRevision>> = [];
+    const loads: Array<Promise<LoadedExtensionRevision | null>> = [];
     let started = 0;
     try {
       for (const event of events) {
@@ -1832,7 +1860,11 @@ export class LocalManagedSessionAuthority {
           load.catch(() => undefined);
           loads.push(load);
         }
-        const { domain, body, parsed, recordRef } = await loads.shift()!;
+        const loaded = await loads.shift()!;
+        if (loaded === null) {
+          continue;
+        }
+        const { domain, body, parsed, recordRef } = loaded;
         this.assertExtensionRevision(
           domain,
           body,
@@ -1863,19 +1895,24 @@ export class LocalManagedSessionAuthority {
   /** Reads one committed revision and verifies what it references. */
   private async loadExtensionRevision(
     event: ManagedSessionEvent,
-  ): Promise<LoadedExtensionRevision> {
+  ): Promise<LoadedExtensionRevision | null> {
     const domain = event.payload['domain'] as ManagedSessionDomain;
     const body = MANAGED_EXTENSION_RECORD_BODIES[domain]!;
     const recordRef = event.payload[
       'recordRef'
     ] as unknown as ManagedSessionDurableRef;
     const bytes = await this.resources!.read(recordRef);
-    const parsed = body.parse(
-      parseManagedSessionRecordJson(
-        bytes.toString('utf8'),
-        MANAGED_SESSION_LIMITS.maxEventBytes,
-      ),
+    const value = parseManagedSessionRecordJson(
+      bytes.toString('utf8'),
+      MANAGED_SESSION_LIMITS.maxEventBytes,
     );
+    // A record an envelope domain committed before its body was registered
+    // is not a Stage H body; a body that once passed the closed-key rule
+    // cannot parse one, so it is skipped intact.
+    if (isPreRegistrationEnvelope(value)) {
+      return null;
+    }
+    const parsed = body.parse(value);
     await this.verifyExtensionResources(domain, parsed.record, true);
     // The record and what it references are verified; nothing reads it again.
     await this.verifyResource(recordRef, bytes);
@@ -2627,6 +2664,33 @@ const INPUT_ACTORS: readonly ManagedSessionActor[] = [
   { class: 'authority' },
 ];
 
+/**
+ * The actor-class rule of a domain record commit, run before the body is
+ * published so a refusal leaves no orphan behind. The commit checks it
+ * again.
+ */
+function assertExtensionActor(actorClass: ManagedSessionActorClass): void {
+  assertManagedSessionEventActor(
+    { kind: 'domain.committed' } as ManagedSessionEvent,
+    actorClass,
+  );
+}
+
+/**
+ * The identity rules the commit marker will apply to the command, run
+ * before the body is published so a malformed command leaves no orphan
+ * behind. The labels name the command because it has no marker yet.
+ */
+function assertCommandIdentity(command: ManagedSessionCommand): void {
+  assertManagedSessionStableId(command.commandId, 'command.commandId');
+  boundedString(
+    command.operation,
+    'command.operation',
+    MANAGED_SESSION_LIMITS.maxTextBytes,
+  );
+  assertManagedSessionDigest(command.contentDigest, 'command.contentDigest');
+}
+
 /** Stage H revisions read ahead of the replay when a log is reopened. */
 const REBUILD_READ_AHEAD = 32;
 
@@ -2635,6 +2699,23 @@ interface LoadedExtensionRevision {
   readonly body: ManagedExtensionRecordBody;
   readonly parsed: ReturnType<ManagedExtensionRecordBody['parse']>;
   readonly recordRef: ManagedSessionDurableRef;
+}
+
+/**
+ * The envelope `commitDomainRecord` publishes: exactly the three keys every
+ * closed Stage H body rejects. A body that carries them is a record of an
+ * envelope domain committed before its body was registered, not a Stage H
+ * body, and replaying an opened log skips it.
+ */
+function isPreRegistrationEnvelope(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    'operationId' in value &&
+    'revision' in value &&
+    'previousRecordRef' in value
+  );
 }
 
 /** Hook catalog pins that must name one digest share this key. */

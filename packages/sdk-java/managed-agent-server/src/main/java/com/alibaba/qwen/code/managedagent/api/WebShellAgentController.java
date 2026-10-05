@@ -127,7 +127,7 @@ public class WebShellAgentController {
         }
         validateTraceMetadata(request.metadata());
         WebShellAdmission admission = webShell(selection == null
-                ? service.createSession(tenant.tenantId(),
+                ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         request.idempotencyKey(), request.agentId(), null,
                         request.title(), null, request.input())
                 : service.createWorkspaceSession(tenant.tenantId(),
