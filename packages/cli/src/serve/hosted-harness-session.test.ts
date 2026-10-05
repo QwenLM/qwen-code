@@ -7211,6 +7211,58 @@ describe('Hosted Harness Runtime turn takeover', () => {
     },
   );
 
+  it('records the owed adoption when a teardown strands a resident passive load', async () => {
+    const { server } = await parkToolTurn(true);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'prepared',
+    });
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    release.mockClear();
+    const stderr = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => undefined);
+    const owedLines = () =>
+      stderr.mock.calls.filter(
+        ([line]) => line.includes('stays owed') && line.includes(PROMPT_ID),
+      );
+    let finishAcquire!: () => void;
+    const acquireGate = new Promise<void>((resolve) => {
+      finishAcquire = resolve;
+    });
+    acquireSpy.mockImplementationOnce(() => acquireGate as never);
+    let loading: Promise<supertest.Response> | undefined;
+    try {
+      loading = headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+        .send({
+          managedSessionStore: store(),
+          toolProfile: FILE_PROFILE,
+          passiveManagedRuntimeRecovery: true,
+        })
+        .then((response) => response);
+      await vi.waitFor(() => expect(acquireSpy).toHaveBeenCalledOnce(), {
+        timeout: 10_000,
+      });
+      // A DELETE needs no client id, and close() fences an active Turn, MCP
+      // work and Hooks — not a parked passive recovery. It releases nothing
+      // (the lease is not recorded yet) and drops the Session.
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+        204,
+      );
+      finishAcquire();
+      const loaded = await loading;
+      expect(loaded.status).toBe(404);
+      expect(loaded.body.code).toBe('hosted_session_not_found');
+      // No route can hand the adoption back now, so it is named rather than
+      // released: a release would persist RELEASED and wedge every retried
+      // acquire of the identity.
+      expect(release).not.toHaveBeenCalled();
+      expect(owedLines()).toHaveLength(1);
+    } finally {
+      finishAcquire();
+      await loading;
+    }
+  }, 30_000);
+
   it.each(['blocked', 'exception'] as const)(
     'records a cold passive adoption after final authorization is %s',
     async (failure) => {

@@ -1459,6 +1459,7 @@ export function registerHostedHarnessSessionRoutes(
         // No single parked Turn: the first load's answer still holds, so the
         // redrive gets the same attachment restated — including a blocked
         // Session, whose recoveryRequired the coordinator already handles.
+        refusedAdoptions.delete(sessionId);
         sendAttachment(res, sessionId, resident);
         return;
       }
@@ -1499,6 +1500,7 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_turn_recovery_required');
         return;
       }
+      refusedAdoptions.delete(sessionId);
       sendAttachment(res, sessionId, resident, recovery);
       return;
     }
@@ -1586,11 +1588,15 @@ export function registerHostedHarnessSessionRoutes(
             return;
           }
         }
+        // A teardown overlapping the await above released nothing (the lease
+        // was still unrecorded) and left no route to hand it back.
         if (sessions.get(sessionId) !== resident) {
+          noteOwedAdoption(resident, sessionId);
           error(res, 404, 'hosted_session_not_found');
           return;
         }
         if (resident.mcpClosing) {
+          noteOwedAdoption(resident, sessionId);
           error(res, 409, 'hosted_session_closing');
           return;
         }
