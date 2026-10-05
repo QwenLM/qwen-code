@@ -9,11 +9,11 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TAGGED_THINKING_PARSER');
 
-// Parser uses a binary mode toggle rather than a tag stack, so
-// <think>content</thinking> is valid and cross-matching is intentional.
-// MiniMax only uses one tag type per response in practice.
+// Cross-matching aliases is intentional: <think>content</thinking> is valid.
+// The default parser keeps its binary toggle; content-only demotion tracks depth.
 const OPEN_TAGS = ['<think>', '<thinking>'] as const;
 const CLOSE_TAGS = ['</think>', '</thinking>'] as const;
+const ALL_TAGS = [...OPEN_TAGS, ...CLOSE_TAGS];
 
 /** Longest tag length across all open/close variants ('</thinking>' = 11). */
 const MAX_TAG_LENGTH = Math.max(
@@ -63,20 +63,15 @@ function findMatchingTag(
 
 export interface TaggedThinkingParserOptions {
   /**
-   * Drop closing tags encountered while in text mode instead of releasing
-   * them as visible text. The parser is a binary toggle while the demotion
-   * detector counts nesting depth, so depth-nested input (e.g.
-   * `<think></think><think>outer <think>x</think></think>`) returns the
-   * parser to text mode one tag early and the leftover closing tags are
-   * protocol remnants, not user-facing content. Only the content-only
-   * demotion path opts in; providers that expect literal tags keep the
-   * default so literal text is still preserved.
+   * Consume nested blocks' own closing tags without stripping literal
+   * closing tags in the visible answer. Only content-only demotion opts in.
    */
-  stripStrayClosingTags?: boolean;
+  trackNesting?: boolean;
 }
 
 export class TaggedThinkingParser {
   private mode: ParserMode = 'text';
+  private thoughtDepth = 0;
   private buffer = '';
 
   constructor(private readonly options: TaggedThinkingParserOptions = {}) {}
@@ -97,44 +92,41 @@ export class TaggedThinkingParser {
     let index = 0;
 
     while (index < this.buffer.length) {
-      const activeTags = this.mode === 'text' ? OPEN_TAGS : CLOSE_TAGS;
+      const activeTags =
+        this.mode === 'text'
+          ? OPEN_TAGS
+          : this.options.trackNesting
+            ? ALL_TAGS
+            : CLOSE_TAGS;
       const matchedTag = findMatchingTag(lower, index, activeTags);
 
       if (matchedTag) {
         debugLogger.debug(
           `taggedThinking: detected tag "${matchedTag}" at offset ${index}`,
         );
+        if (
+          this.mode === 'thought' &&
+          this.options.trackNesting &&
+          !matchedTag.startsWith('</')
+        ) {
+          this.thoughtDepth += 1;
+          segment += this.buffer.slice(index, index + matchedTag.length);
+          index += matchedTag.length;
+          continue;
+        }
         appendPart(parts, segment, this.mode);
         segment = '';
-        this.mode = this.mode === 'text' ? 'thought' : 'text';
+        if (this.mode === 'text') {
+          this.thoughtDepth = 1;
+          this.mode = 'thought';
+        } else if (--this.thoughtDepth === 0) {
+          this.mode = 'text';
+        }
         index += matchedTag.length;
         continue;
       }
 
-      // A closing tag while already in text mode can only be a stray
-      // remnant of depth-nested input: strip it instead of leaking it into
-      // the visible channel. The surrounding segment keeps accumulating,
-      // so `ok</think>more` collapses to a single `okmore` part.
-      if (this.options.stripStrayClosingTags && this.mode === 'text') {
-        const strayClosingTag = findMatchingTag(lower, index, CLOSE_TAGS);
-        if (strayClosingTag) {
-          debugLogger.debug(
-            `taggedThinking: stripped stray closing tag "${strayClosingTag}" at offset ${index}`,
-          );
-          index += strayClosingTag.length;
-          continue;
-        }
-      }
-
-      if (
-        !final &&
-        (isPrefixOfAnyTag(lower, index, activeTags) ||
-          // Hold partial closing-tag prefixes mid-stream (strip mode only)
-          // so a stray tag split across chunks is still recognized.
-          (this.options.stripStrayClosingTags &&
-            this.mode === 'text' &&
-            isPrefixOfAnyTag(lower, index, CLOSE_TAGS)))
-      ) {
+      if (!final && isPrefixOfAnyTag(lower, index, activeTags)) {
         break;
       }
 

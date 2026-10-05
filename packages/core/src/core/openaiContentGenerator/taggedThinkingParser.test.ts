@@ -48,6 +48,20 @@ describe('TaggedThinkingParser', () => {
     ]);
   });
 
+  it('tracks nested block closers without deleting later literal tags', () => {
+    const parser = new TaggedThinkingParser({ trackNesting: true });
+    expect(parser.parse('<think>outer <THINKING>inner')).toEqual([
+      { text: 'outer <THINKING>inner', thought: true },
+    ]);
+    expect(parser.parse('</thi')).toEqual([]);
+    const documentation = 'Close the block with `</think>`.';
+    expect(parser.parse(`nk>tail</thinking>${documentation}`, true)).toEqual([
+      { text: 'tail', thought: true },
+      { text: documentation },
+    ]);
+    expect(parser.hasUnclosedThought()).toBe(false);
+  });
+
   // ── Case insensitivity ────────────────────────────────
 
   it('should handle uppercase <THINK> tags', () => {

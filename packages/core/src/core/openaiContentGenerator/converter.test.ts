@@ -860,13 +860,7 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('demotes the leading balanced nested literal without releasing a stray closing tag', () => {
-      // The leading <think></think> balances, so the block is demoted and the
-      // remainder flows through the tagged-thinking parser's documented
-      // binary toggle (issue #10791) instead of being preserved verbatim.
-      // The depth-counted tail closes one tag earlier than the binary parser
-      // does; the leftover </think> is a protocol remnant, not the visible
-      // answer, so it must be stripped (review finding 2) instead of being
-      // released as the whole user-facing output.
+      // Nested blocks must consume both closers before returning to text.
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
       const chunks = [
@@ -888,7 +882,7 @@ describe('OpenAIContentConverter', () => {
       expect(parts).toEqual([{ text: 'outer <think>literal', thought: true }]);
     });
 
-    it('strips a stray closing tag split across chunks after demotion', () => {
+    it('preserves a literal closing tag split across chunks after demotion', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
       const chunks = ['<think></think>ok</thi', 'nk>more'];
@@ -904,12 +898,29 @@ describe('OpenAIContentConverter', () => {
         return response.candidates?.[0]?.content?.parts ?? [];
       });
 
-      // Partial closing tags are buffered inside the parser, so the remnant
-      // is stripped even when the chunk boundary splits it. Part boundaries
-      // follow chunk boundaries; the concatenated visible text is what the
-      // user sees.
-      expect(parts.map((part) => part.text).join('')).toBe('okmore');
+      expect(parts.map((part) => part.text).join('')).toBe('ok</think>more');
       expect(parts.every((part) => part.thought !== true)).toBe(true);
+    });
+
+    it('preserves documentation after a content-only thinking block', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const documentation = 'Close the block with `</think>`.';
+      const thought = converter.convertOpenAIChunkToLlm(
+        streamChunk('thought', { content: '<think>plan</thinking>' }),
+        stream,
+      );
+      const answer = converter.convertOpenAIChunkToLlm(
+        streamChunk('answer', { content: documentation }, 'stop'),
+        stream,
+      );
+
+      expect(thought.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'plan', thought: true },
+      ]);
+      expect(answer.candidates?.[0]?.content?.parts).toEqual([
+        { text: documentation },
+      ]);
     });
 
     it('fails closed for a closing tag with inner whitespace on streaming demotion', () => {
@@ -5767,10 +5778,8 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
-    it('strips stray closing tags after a nested leading demotion on non-streaming turns', () => {
-      // Non-streaming mirror of the streaming nested-demotion test (review
-      // finding 2): the depth-nested tail must not surface a dangling
-      // </think> as the user-visible answer.
+    it('consumes nested closers and preserves documentation on non-streaming turns', () => {
+      const documentation = 'Close the block with `</think>`.';
       const response = converter.convertOpenAIResponseToLlm(
         {
           object: 'chat.completion',
@@ -5783,7 +5792,8 @@ describe('OpenAIContentConverter', () => {
               message: {
                 role: 'assistant',
                 content:
-                  '<think></think><think>outer <think>literal</think></think>',
+                  '<think></think><think>outer <think>literal</think></thinking>' +
+                  documentation,
               },
               finish_reason: 'stop',
               logprobs: null,
@@ -5798,6 +5808,7 @@ describe('OpenAIContentConverter', () => {
 
       expect(response.candidates?.[0]?.content?.parts).toEqual([
         { text: 'outer <think>literal', thought: true },
+        { text: documentation },
       ]);
     });
 
@@ -6430,9 +6441,7 @@ describe('OpenAIContentConverter', () => {
       };
       const tools = [
         {
-          functionDeclarations: [
-            { name: 'stable', parametersJsonSchema },
-          ],
+          functionDeclarations: [{ name: 'stable', parametersJsonSchema }],
         },
       ] as Tool[];
       const compileStrict = vi.spyOn(SchemaValidator, 'compileStrict');

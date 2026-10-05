@@ -1303,10 +1303,10 @@ export function convertOpenAIResponseToLlm(
         // `</think >` that the parser's exact tag literals do not, and the
         // old throwaway parse would silently hide the whole message —
         // including the visible answer — in the thought channel (review
-        // finding 1 / #10982). Stray closing tags left by depth-nested
-        // input are stripped as protocol remnants (review finding 2).
+        // finding 1 / #10982). Track nested blocks so only their own
+        // closing tags are consumed; answer text keeps literal closers.
         const parser = new TaggedThinkingParser({
-          stripStrayClosingTags: true,
+          trackNesting: true,
         });
         textParts = parser.parse(choice.message.content, true);
         if (parser.hasUnclosedThought()) {
@@ -1515,14 +1515,11 @@ export function convertOpenAIChunkToLlm(
           !taggedThinkingCandidate.trimStart().startsWith('</')) ||
         contentOnlyBalancedThinkingBlock
       ) {
-        // The content-only demotion detector counts nesting depth while the
-        // parser is a binary toggle, so depth-nested input can return the
-        // parser to text mode one tag early and leak a stray closing tag as
-        // the visible answer — strip those remnants on the demotion path
-        // (review finding 2). The after-reasoning branch keeps the default
-        // parser so its literal-tag behavior is unchanged.
+        // Match the content-only detector's nesting depth without deleting
+        // literal closing tags after the block. The after-reasoning branch
+        // keeps the default parser's existing binary behavior.
         requestContext.taggedThinkingParser ??= contentOnlyBalancedThinkingBlock
-          ? new TaggedThinkingParser({ stripStrayClosingTags: true })
+          ? new TaggedThinkingParser({ trackNesting: true })
           : new TaggedThinkingParser();
         requestContext.pendingThinkingTagCandidate = undefined;
         contentParts = requestContext.taggedThinkingParser.parse(
