@@ -1067,6 +1067,7 @@ describe('verifyRecoverySession', () => {
       f.complete.clear();
       const capture = (await runRecoveryWorker(rpc)) as {
         manifestDigest: string;
+        result: { sessionCount: number; entries: number; assets: number };
       };
       context.capture = {
         operationId: context.request.operationId,
@@ -1074,9 +1075,9 @@ describe('verifyRecoverySession', () => {
       };
       context.mode = 'verify';
       f.complete.clear();
-      await expect(runRecoveryWorker(rpc)).resolves.toMatchObject({
-        manifestDigest: capture.manifestDigest,
-      });
+      const verify = (await runRecoveryWorker(rpc)) as typeof capture;
+      expect(verify.manifestDigest).toBe(capture.manifestDigest);
+      expect(verify.result).toEqual(capture.result);
     } finally {
       input.destroy();
       output.destroy();

@@ -8,6 +8,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   MANAGED_MESSAGE_CHUNKS_KIND,
+  MANAGED_MESSAGE_INLINE_BYTES,
   MANAGED_MESSAGE_KIND,
   MANAGED_MESSAGE_PART_BYTES,
   MANAGED_MESSAGE_PART_KIND,
@@ -15,6 +16,7 @@ import {
   publishManagedMessageBody,
   readManagedMessageBody,
 } from './managed-message-chunks.js';
+import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from './http-managed-session-store.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 
 class MemoryResourceStore {
@@ -54,15 +56,22 @@ class MemoryResourceStore {
 }
 
 describe('managed message chunks', () => {
+  it('keeps the inline threshold aligned with the store contract', () => {
+    expect(MANAGED_MESSAGE_INLINE_BYTES).toBe(
+      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
+    );
+    expect(MANAGED_MESSAGE_PART_BYTES).toBeLessThanOrEqual(
+      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
+    );
+  });
   it('publishes a small body as one inline message resource', async () => {
     const store = new MemoryResourceStore();
     const body = Buffer.from(JSON.stringify({ text: 'short answer' }), 'utf8');
     const ref = await publishManagedMessageBody(store, body);
     expect(ref.kind).toBe(MANAGED_MESSAGE_KIND);
     expect(store.resources.size).toBe(1);
-    await expect(
-      readManagedMessageBody((r) => store.read(r), ref),
-    ).resolves.toEqual(body);
+    const restored = await readManagedMessageBody((r) => store.read(r), ref);
+    expect(restored.equals(body)).toBe(true);
   });
 
   it('splits an oversized body into bounded parts behind a manifest', async () => {
@@ -93,9 +102,8 @@ describe('managed message chunks', () => {
     expect(managedMessageChunkParts(ref.kind, manifest.bytes)).toEqual(parts);
     expect(managedMessageChunkParts(MANAGED_MESSAGE_KIND, body)).toEqual([]);
 
-    await expect(
-      readManagedMessageBody((r) => store.read(r), ref),
-    ).resolves.toEqual(body);
+    const restored = await readManagedMessageBody((r) => store.read(r), ref);
+    expect(restored.equals(body)).toBe(true);
   });
 
   it.each([65_535, 65_536, 65_537, 224 * 1024, 3 * 1024 * 1024])(
@@ -112,9 +120,8 @@ describe('managed message chunks', () => {
           ? MANAGED_MESSAGE_KIND
           : MANAGED_MESSAGE_CHUNKS_KIND,
       );
-      await expect(
-        readManagedMessageBody((r) => store.read(r), ref),
-      ).resolves.toEqual(body);
+      const restored = await readManagedMessageBody((r) => store.read(r), ref);
+      expect(restored.equals(body)).toBe(true);
     },
   );
 
@@ -142,7 +149,8 @@ describe('managed message chunks', () => {
         busy = false;
       }
     };
-    await expect(readManagedMessageBody(read, ref)).resolves.toEqual(body);
+    const restored = await readManagedMessageBody(read, ref);
+    expect(restored.equals(body)).toBe(true);
     expect(seen).toEqual([ref, ...parts].map((part) => part.resourceId));
   });
 

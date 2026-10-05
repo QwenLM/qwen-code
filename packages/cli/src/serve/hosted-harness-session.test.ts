@@ -156,9 +156,14 @@ async function enforceInlineResourceLimit() {
 }
 
 function expectFullStreamedAnswer(
-  events: Array<{ type: string; data?: Record<string, unknown> }>,
+  page: {
+    events: Array<{ type: string; data?: Record<string, unknown> }>;
+    hasMore: boolean;
+  },
   text: string,
 ) {
+  expect(page.hasMore).toBe(false);
+  const { events } = page;
   expect(events.filter((event) => event.type === 'turn_complete')).toHaveLength(
     1,
   );
@@ -3998,7 +4003,7 @@ describe('Hosted Harness no-tool session', () => {
         { timeout: 10_000 },
       );
       const transcript = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        supertest(server).get(`/session/${SESSION_ID}/transcript?limit=256`),
       ).set('X-Qwen-Client-Id', created.body.clientId as string);
       expect(transcript.body.events).toEqual(
         expect.arrayContaining([
@@ -4014,7 +4019,7 @@ describe('Hosted Harness no-tool session', () => {
         ),
       ).toEqual([]);
       if (streamed) {
-        expectFullStreamedAnswer(transcript.body.events, text);
+        expectFullStreamedAnswer(transcript.body, text);
         await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
           .set('X-Qwen-Client-Id', created.body.clientId as string)
           .expect(204);
@@ -4026,9 +4031,9 @@ describe('Hosted Harness no-tool session', () => {
         });
         expect(reloaded.status).toBe(200);
         const cold = await headers(
-          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+          supertest(server).get(`/session/${SESSION_ID}/transcript?limit=256`),
         ).set('X-Qwen-Client-Id', reloaded.body.clientId as string);
-        expectFullStreamedAnswer(cold.body.events, text);
+        expectFullStreamedAnswer(cold.body, text);
       } else {
         const answer = transcript.body.events.find(
           (event: {
@@ -8454,75 +8459,84 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(release).toHaveBeenCalled();
   });
 
-  it('completes a streamed oversized answer after a recovered Write continuation', async () => {
-    await parkToolTurn();
-    await enforceInlineResourceLimit();
-    const text = '续接😀'.repeat(25_000);
-    state.model.mockImplementationOnce(async ({ textDeltas }) => {
-      expect(textDeltas).toBeDefined();
-      await textDeltas!.delta(text);
-      return { text, model: 'test-model' };
-    });
+  it.each(['inline', 'chunked'])(
+    'completes an answer (%s) and clears file history after a recovered Write continuation',
+    async (storage) => {
+      await parkToolTurn();
+      const text =
+        storage === 'chunked' ? '续接😀'.repeat(31_000) : 'hello back';
+      if (storage === 'chunked') {
+        await enforceInlineResourceLimit();
+        state.model.mockImplementationOnce(async ({ textDeltas }) => {
+          expect(textDeltas).toBeDefined();
+          await textDeltas!.delta(text);
+          return { text, model: 'test-model' };
+        });
+      }
 
-    // The parked Write left its file-history obligation durable.
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
-      executionStatus: 'success',
-      responseParts: [{ text: 'written' }],
-    } as never);
-    const { server, loaded } = await loadReplacement();
-    expect(loaded.status).toBe(200);
-    const clientId = loaded.body.clientId as string;
-    const recovery = loaded.body._meta?.[
-      'qwen.daemon.managedRuntimeRecovery'
-    ] as { checkpointId: string; activationId: string };
-    const historyBefore = await replacementHeaders(
-      supertest(server).get(`/session/${SESSION_ID}/files/history`),
-    ).set('X-Qwen-Client-Id', clientId);
-    expect(historyBefore.body.history.pendingTurn).toBe(PROMPT_ID);
-    const continued = await replacementHeaders(
-      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
-    )
-      .set('X-Qwen-Client-Id', clientId)
-      .send({
-        promptId: PROMPT_ID,
-        checkpointId: recovery.checkpointId,
-        activationId: recovery.activationId,
+      // The parked Write left its file-history obligation durable.
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+        executionStatus: 'success',
+        responseParts: [{ text: 'written' }],
+      } as never);
+      const { server, loaded } = await loadReplacement();
+      expect(loaded.status).toBe(200);
+      const clientId = loaded.body.clientId as string;
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as { checkpointId: string; activationId: string };
+      const historyBefore = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/files/history`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(historyBefore.body.history.pendingTurn).toBe(PROMPT_ID);
+      const continued = await replacementHeaders(
+        supertest(server).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+      expect(continued.status).toBe(200);
+      await vi.waitFor(
+        async () => {
+          const status = await replacementHeaders(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      const historyAfter = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/files/history`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(historyAfter.body.history.pendingTurn).toBeNull();
+      const transcript = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/transcript?limit=256`),
+      ).set('X-Qwen-Client-Id', clientId);
+      if (storage === 'chunked')
+        expectFullStreamedAnswer(transcript.body, text);
+      // The obligation is gone: a cold load and a file tool run normally.
+      await replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .expect(204);
+      const reloaded = await replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: storeFor(BOOT_ID_2),
+        toolProfile: FILE_PROFILE,
       });
-    expect(continued.status).toBe(200);
-    await vi.waitFor(
-      async () => {
-        const status = await replacementHeaders(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', clientId);
-        expect(status.body.hasActivePrompt).toBe(false);
-      },
-      { timeout: 10_000 },
-    );
-    const historyAfter = await replacementHeaders(
-      supertest(server).get(`/session/${SESSION_ID}/files/history`),
-    ).set('X-Qwen-Client-Id', clientId);
-    expect(historyAfter.body.history.pendingTurn).toBeNull();
-    const transcript = await replacementHeaders(
-      supertest(server).get(`/session/${SESSION_ID}/transcript`),
-    ).set('X-Qwen-Client-Id', clientId);
-    expectFullStreamedAnswer(transcript.body.events, text);
-    // The obligation is gone: a cold load and a file tool run normally.
-    await replacementHeaders(
-      supertest(server).post(`/session/${SESSION_ID}/detach`),
-    )
-      .set('X-Qwen-Client-Id', clientId)
-      .expect(204);
-    const reloaded = await replacementHeaders(
-      supertest(server).post(`/session/${SESSION_ID}/load`),
-    ).send({
-      managedSessionStore: storeFor(BOOT_ID_2),
-      toolProfile: FILE_PROFILE,
-    });
-    expect(reloaded.status).toBe(200);
-    await replacementHeaders(
-      supertest(server).delete(`/session/${SESSION_ID}`),
-    );
-  });
+      expect(reloaded.status).toBe(200);
+      await replacementHeaders(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      );
+    },
+  );
 
   it('refuses the replay of a continuation that became recovery blocked', async () => {
     await parkToolTurn();

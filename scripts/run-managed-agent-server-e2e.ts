@@ -767,9 +767,11 @@ try {
     ? 'managed-continuation-failover-e2e'
     : inflightFailover
       ? 'managed-inflight-failover-e2e'
-      : sessionFailover
-        ? 'managed-session-failover-e2e'
-        : 'real-model-e2e';
+      : bigOutput
+        ? 'managed-big-output-e2e'
+        : sessionFailover
+          ? 'managed-session-failover-e2e'
+          : 'real-model-e2e';
   const springArguments = ['-jar', springJar];
   springArguments.push(
     `--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=${tenant}`,
@@ -1094,7 +1096,9 @@ try {
             ? 'Managed continuation owner failover E2E'
             : inflightFailover
               ? 'Managed in-flight owner failover E2E'
-              : 'Managed Session owner failover E2E',
+              : bigOutput
+                ? 'Managed long-answer persistence E2E'
+                : 'Managed Session owner failover E2E',
         },
       }),
     });

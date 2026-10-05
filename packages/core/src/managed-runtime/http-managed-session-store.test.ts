@@ -68,6 +68,50 @@ const TOKEN_B = 'b'.repeat(32);
 describe('HTTP Managed Session store', () => {
   const temporaryDirectories: string[] = [];
 
+  async function createSessionOpener(server: FakeManagedSessionStore) {
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
+    return async (writerId: string, writerToken: string) => {
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://session-store.test',
+        sessionKey: SESSION_KEY,
+        writerId,
+        writerToken,
+        fetchFn: server.fetch,
+      });
+      const create =
+        writerId === 'harness-a'
+          ? {
+              definitionRef: await stores.resourceStore.publish(
+                'managed-session-definition',
+                Buffer.from('{}', 'utf8'),
+              ),
+              rootSnapshotRef: await stores.resourceStore.publish(
+                'managed-session-root-snapshot',
+                Buffer.from('{}', 'utf8'),
+              ),
+              createdBy: 'test',
+            }
+          : undefined;
+      return openManagedSession({
+        runtimeBaseDir,
+        sessionId: SESSION_KEY.sessionId,
+        transcriptPath,
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: writerId,
+        activationLeaseDurationMs: 60_000,
+        journalStore: stores.journalStore,
+        resourceStore: stores.resourceStore,
+        ...(create === undefined ? {} : { create }),
+      });
+    };
+  }
+
   afterEach(async () => {
     vi.restoreAllMocks();
     await Promise.all(
@@ -1001,47 +1045,7 @@ describe('HTTP Managed Session store', () => {
 
   it('commits the resources a Stage H record names and rebuilds it cold', async () => {
     const server = new FakeManagedSessionStore();
-    const runtimeBaseDir = await mkdtemp(
-      path.join(tmpdir(), 'managed-http-store-'),
-    );
-    temporaryDirectories.push(runtimeBaseDir);
-    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
-    const open = async (writerId: string, writerToken: string) => {
-      const stores = createHttpManagedSessionStores({
-        baseUrl: 'http://session-store.test',
-        sessionKey: SESSION_KEY,
-        writerId,
-        writerToken,
-        fetchFn: server.fetch,
-      });
-      const create =
-        writerId === 'harness-a'
-          ? {
-              definitionRef: await stores.resourceStore.publish(
-                'managed-session-definition',
-                Buffer.from('{}', 'utf8'),
-              ),
-              rootSnapshotRef: await stores.resourceStore.publish(
-                'managed-session-root-snapshot',
-                Buffer.from('{}', 'utf8'),
-              ),
-              createdBy: 'test',
-            }
-          : undefined;
-      return openManagedSession({
-        runtimeBaseDir,
-        sessionId: SESSION_KEY.sessionId,
-        transcriptPath,
-        sessionKey: SESSION_KEY,
-        cwd: '/workspace',
-        version: 'test',
-        workerId: writerId,
-        activationLeaseDurationMs: 60_000,
-        journalStore: stores.journalStore,
-        resourceStore: stores.resourceStore,
-        ...(create === undefined ? {} : { create }),
-      });
-    };
+    const open = await createSessionOpener(server);
     const first = await open('harness-a', TOKEN_A);
     const commandRef = await first.resources.publish(
       'managed-tool-args',
@@ -1440,47 +1444,7 @@ describe('HTTP Managed Session store', () => {
 
   it('commits an oversized message as chunks and projects it after a cold reopen', async () => {
     const server = new FakeManagedSessionStore();
-    const runtimeBaseDir = await mkdtemp(
-      path.join(tmpdir(), 'managed-http-store-'),
-    );
-    temporaryDirectories.push(runtimeBaseDir);
-    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
-    const open = async (writerId: string, writerToken: string) => {
-      const stores = createHttpManagedSessionStores({
-        baseUrl: 'http://session-store.test',
-        sessionKey: SESSION_KEY,
-        writerId,
-        writerToken,
-        fetchFn: server.fetch,
-      });
-      const create =
-        writerId === 'harness-a'
-          ? {
-              definitionRef: await stores.resourceStore.publish(
-                'managed-session-definition',
-                Buffer.from('{}', 'utf8'),
-              ),
-              rootSnapshotRef: await stores.resourceStore.publish(
-                'managed-session-root-snapshot',
-                Buffer.from('{}', 'utf8'),
-              ),
-              createdBy: 'test',
-            }
-          : undefined;
-      return openManagedSession({
-        runtimeBaseDir,
-        sessionId: SESSION_KEY.sessionId,
-        transcriptPath,
-        sessionKey: SESSION_KEY,
-        cwd: '/workspace',
-        version: 'test',
-        workerId: writerId,
-        activationLeaseDurationMs: 60_000,
-        journalStore: stores.journalStore,
-        resourceStore: stores.resourceStore,
-        ...(create === undefined ? {} : { create }),
-      });
-    };
+    const open = await createSessionOpener(server);
     const first = await open('harness-a', TOKEN_A);
     const record = {
       uuid: 'record-assistant-big',

@@ -203,7 +203,7 @@ class ManagedSessionStoreIntegrationTest {
                 .content(writerRequest(WRITER_A).toString())).andExpect(status().isOk());
         ObjectNode request = genesisRequest("{\"subtype\":\"session_execution_engine\"}\n"
                 + "{\"subtype\":\"managed_session_header_v1\"}\n", new byte[0]);
-        ArrayNode resources = request.putArray("resources");
+        ArrayNode resources = request.withArray("resources");
         ObjectNode manifest = objectMapper.createObjectNode();
         ArrayNode parts = manifest.putArray("parts");
         byte[] body = ("{\"text\":\"" + "长😀".repeat(32_000) + "\"}").getBytes(StandardCharsets.UTF_8);
@@ -244,15 +244,34 @@ class ManagedSessionStoreIntegrationTest {
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id=?",
                 Integer.class, session)).isEqualTo(resourceCount);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id=? AND resource_id='resource-context'",
+                Integer.class, session)).isEqualTo(1);
         ObjectNode oversized = request.deepCopy();
         ArrayNode oversizedResources = oversized.withArray("resources");
-        byte[] fullPart = new byte[ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES];
-        for (int index = 0; index < 128; index++) {
+        int inlineBytes = 0;
+        for (JsonNode resource : oversizedResources) {
+            inlineBytes += resource.get("byteLength").asInt();
+        }
+        for (int index = 0; inlineBytes < ManagedSessionStoreModels.MAX_TRANSACTION_BYTES; index++) {
+            byte[] bytes = new byte[Math.min(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES,
+                    ManagedSessionStoreModels.MAX_TRANSACTION_BYTES - inlineBytes)];
             oversizedResources.addObject().put("resourceId", "budget-part-" + index)
                     .put("kind", "managed-message-part").put("schemaVersion", 1)
-                    .put("byteLength", fullPart.length).put("digest", sha256(fullPart))
-                    .put("bytesBase64", Base64.getEncoder().encodeToString(fullPart));
+                    .put("byteLength", bytes.length).put("digest", sha256(bytes))
+                    .put("bytesBase64", Base64.getEncoder().encodeToString(bytes));
+            inlineBytes += bytes.length;
         }
+        assertThat(inlineBytes).isEqualTo(8 * 1024 * 1024);
+        mvc.perform(post(base + "/transactions:commit")
+                .header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(oversized.toString()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.replayed").value(true));
+        byte[] excess = new byte[1];
+        oversizedResources.addObject().put("resourceId", "budget-overflow")
+                .put("kind", "managed-message-part").put("schemaVersion", 1)
+                .put("byteLength", excess.length).put("digest", sha256(excess))
+                .put("bytesBase64", Base64.getEncoder().encodeToString(excess));
         mvc.perform(post(base + "/transactions:commit")
                 .header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)

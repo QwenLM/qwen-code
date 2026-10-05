@@ -402,6 +402,10 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-continuation-failover
+      - name: 'Run long-answer persistence E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-big-output
       - name: 'Upload Hosted process reports'
         if: 'always()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
