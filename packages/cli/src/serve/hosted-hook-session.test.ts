@@ -535,8 +535,8 @@ it.each([
   {
     event: HookEventName.PreToolUse,
     fields: { tool_input: { original: true, changed: false } },
-    output: { tool_input: { changed: true } },
-    expected: { tool_input: { original: true, changed: true } },
+    output: { updatedInput: { changed: true } },
+    expected: { tool_input: { changed: true } },
   },
 ])(
   'preserves native sequential input composition for $event',
@@ -552,7 +552,7 @@ it.each([
     };
     execute = async (operation) => {
       if (operation.hookId === 'second')
-        expect(operation.input).toMatchObject(expected);
+        expect(operation.input).toEqual(expect.objectContaining(expected));
       return {
         success: true,
         outcome: 'success',
