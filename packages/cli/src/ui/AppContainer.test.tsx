@@ -118,7 +118,10 @@ import type {
   PeerQueuedDelivery,
   PeerReceipt,
 } from '../peerMessaging/peer-messaging.js';
-import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
+import {
+  MAX_ACCEPTED_BACKLOG,
+  PEER_MID_TURN_BUDGET_DEFAULT,
+} from '../peerMessaging/peer-messaging.js';
 import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
@@ -8406,6 +8409,9 @@ describe('AppContainer State Management', () => {
         getHeld: () => [],
         decide: vi.fn(),
         reevaluate: vi.fn(),
+        // The mid-turn drain re-checks the recipient pin before it takes an
+        // envelope; `true` is the ordinary "still addressed to us" answer.
+        drainQueuedFrame: vi.fn(() => true),
       } as unknown as PeerMessaging;
       return {
         value,
@@ -8692,6 +8698,112 @@ describe('AppContainer State Management', () => {
       );
       expect(drainCall).not.toBeNull();
       expect(drainCall![1]).toMatch(/\bpeerMessaging\b/);
+    });
+
+    // The mid-turn drain reaches the stream hook through `midTurnPeerDrainRef`,
+    // passed positionally to useLlmStream (index 25 — see its call site in
+    // AppContainer.tsx). Only the call site reads the merged setting and the
+    // budget normaliser, so this is the one place that can pin both; every
+    // `usePeerMidTurnDrain` test feeds the hook its own inputs.
+    const MID_TURN_PEER_DRAIN_ARG_INDEX = 25;
+
+    const renderMidTurnCallSite = (agents: Record<string, unknown>) => {
+      const queue: QueuedPeerSteer[] = ['a', 'b', 'c', 'd', 'e'].map(
+        (letter) => ({
+          modelText: `<cross_session_message from="/tmp/p.sock">${letter}</cross_session_message>`,
+          displayText: `Session p: ${letter}`,
+          delivery: { msgId: `frame-${letter}`, toSessionId: 'session-a' },
+        }),
+      );
+      const drainPeerEntries = vi.fn((limit: number) =>
+        queue.splice(0, Math.max(limit, 0)),
+      );
+      const restorePeerEntries = vi.fn();
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        pendingSubmissionCount: 0,
+        addMessage: vi.fn(),
+        addPeerMessage: vi.fn(),
+        enqueueGoalTurn: vi.fn(),
+        peekNextUserBatchKey: vi.fn(),
+        hasQueuedUserMessages: vi.fn().mockReturnValue(false),
+        getPendingSubmissionCount: vi.fn().mockReturnValue(0),
+        getQueuedPeerCount: vi.fn().mockReturnValue(0),
+        claimGoalTurn: vi.fn(),
+        claimDirectUserAdmission: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        popNextSubmission: vi.fn().mockReturnValue(null),
+        restoreMessages: vi.fn(),
+        restorePeerMessage: vi.fn(),
+        drainQueue: vi.fn().mockReturnValue([]),
+        drainPeerEntries,
+        restorePeerEntries,
+      });
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={
+            {
+              ...mockSettings,
+              merged: {
+                ...mockSettings.merged,
+                agents: {
+                  ...mockSettings.merged.agents,
+                  crossSessionMessaging: true,
+                  ...agents,
+                },
+              },
+            } as unknown as LoadedSettings
+          }
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const ref = mockedUseLlmStream.mock.calls.at(-1)?.[
+        MID_TURN_PEER_DRAIN_ARG_INDEX
+      ] as { current: ((limit: number) => unknown) | null } | undefined;
+      expect(
+        ref,
+        `midTurnPeerDrainRef was not captured at arg index ${MID_TURN_PEER_DRAIN_ARG_INDEX} — useLlmStream signature may have changed`,
+      ).toBeDefined();
+      return {
+        drain: ref!.current,
+        drainPeerEntries,
+        restorePeerEntries,
+      };
+    };
+
+    it('gates the mid-turn drain on the merged setting at the call site', () => {
+      // Off (the default): the boundary must find no drain at all, so every
+      // envelope waits for the turn boundary instead of being taken from it.
+      const { drain, drainPeerEntries } = renderMidTurnCallSite({
+        crossSessionMidTurn: false,
+      });
+      expect(drain).toBeNull();
+      expect(drainPeerEntries).not.toHaveBeenCalled();
+    });
+
+    it('normalises the budget at the call site so a nonsense value is the default, not unlimited', () => {
+      // The raw value would reach `tryConsume` as `'plenty'`: neither `<= 0`
+      // nor `>= capacity` compares true, so every envelope would be taken —
+      // the ceiling silently gone while the setting reads as if it applied.
+      const { drain, restorePeerEntries } = renderMidTurnCallSite({
+        crossSessionMidTurn: true,
+        crossSessionMidTurnBudget: 'plenty',
+      });
+      expect(typeof drain).toBe('function');
+      const batch = drain?.(5) as {
+        entries: unknown[];
+        restore: () => void;
+      } | null;
+      expect(batch?.entries).toHaveLength(PEER_MID_TURN_BUDGET_DEFAULT);
+      // What the allowance could not pay for goes back to the queue.
+      expect(restorePeerEntries).toHaveBeenCalledTimes(1);
     });
 
     it('refuses peer frames once the pending backlog reaches the cap', () => {
@@ -9213,11 +9325,13 @@ describe('usePeerMidTurnDrain', () => {
     peerMessaging,
     enabled = true,
     capacity = 3,
+    sessionId = 'session-a',
     queue = [],
   }: {
     peerMessaging: PeerMessaging | null;
     enabled?: boolean;
     capacity?: number;
+    sessionId?: string;
     queue?: QueuedPeerSteer[];
   }) => {
     const drainPeerEntries = vi.fn((limit: number) =>
@@ -9225,11 +9339,15 @@ describe('usePeerMidTurnDrain', () => {
     );
     const restorePeerEntries = vi.fn();
     const addHistoryItem = vi.fn();
+    // Mutable so `setSessionId` can swap the receiving session on a rerender
+    // without remounting, which is what `/clear` does to the live container.
+    const session = { current: sessionId };
     const view = renderHook(() =>
       usePeerMidTurnDrain({
         peerMessaging,
         enabled,
         capacity,
+        sessionId: session.current,
         drainPeerEntries,
         restorePeerEntries,
         addHistoryItem,
@@ -9242,6 +9360,10 @@ describe('usePeerMidTurnDrain', () => {
       drainPeerEntries,
       restorePeerEntries,
       addHistoryItem,
+      setSessionId: (next: string) => {
+        session.current = next;
+        view.rerender();
+      },
     };
   };
 
@@ -9473,6 +9595,89 @@ describe('usePeerMidTurnDrain', () => {
     expect(restorePeerEntries).toHaveBeenCalledTimes(1);
     // Still one projection — the requeued entry keeps its `displayed` marker.
     expect(addHistoryItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the window and the notice throttle when the receiving session changes', () => {
+    // Regression pin: AppContainer mounts once and `/clear` swaps the session
+    // id in place, so without a session-scoped reset a new session started
+    // already throttled by the one it replaced and its envelopes fell back to
+    // the idle drain silently.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const first = envelope('first', 'frame-1');
+    const second = envelope('second', 'frame-2');
+    const third = envelope('third', 'frame-3');
+    const {
+      drain,
+      view,
+      queue,
+      setSessionId,
+      restorePeerEntries,
+      addHistoryItem,
+    } = renderPeerDrain({
+      peerMessaging: {
+        drainQueuedFrame: vi.fn(() => true),
+      } as unknown as PeerMessaging,
+      capacity: 1,
+      queue: [first],
+    });
+
+    expect(drain()?.entries).toHaveLength(1);
+
+    // Control, same clock and same session: the window is spent, so neither a
+    // re-render nor another boundary frees it.
+    queue.push(second);
+    expect(drain()).toBeNull();
+    expect(restorePeerEntries).toHaveBeenLastCalledWith([second]);
+    view.rerender();
+    queue.push(second);
+    expect(drain()).toBeNull();
+
+    // The next session starts clean: the same envelope the previous session
+    // was throttled on now reaches the turn.
+    setSessionId('session-b');
+    queue.push(second);
+    expect(drain()?.entries).toEqual([
+      { modelText: second.modelText, displayText: second.displayText },
+    ]);
+
+    // And its saturation earns its own notice at the same wall clock, which
+    // is the throttle timestamp being dropped too.
+    queue.push(third);
+    expect(drain()).toBeNull();
+    expect(restorePeerEntries).toHaveBeenLastCalledWith([third]);
+    expect(noticeTexts(addHistoryItem)).toHaveLength(2);
+  });
+
+  it('is inert when the window allowance is zero', () => {
+    // `0` means mid-turn off, not "throttled from the start": a drain that
+    // runs and delivers nothing still consumes stale-pin frames (sending
+    // their receipts) and writes a pause line every window.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const first = envelope('first', 'frame-1');
+    const second = envelope('second', 'frame-2');
+    const drainQueuedFrame = vi.fn(() => true);
+    const {
+      view,
+      drain,
+      queue,
+      drainPeerEntries,
+      restorePeerEntries,
+      addHistoryItem,
+    } = renderPeerDrain({
+      peerMessaging: { drainQueuedFrame } as unknown as PeerMessaging,
+      capacity: 0,
+      queue: [first, second],
+    });
+
+    expect(view.result.current).toBeNull();
+    expect(drain(5)).toBeNull();
+    expect(drainPeerEntries).not.toHaveBeenCalled();
+    expect(drainQueuedFrame).not.toHaveBeenCalled();
+    expect(restorePeerEntries).not.toHaveBeenCalled();
+    expect(addHistoryItem).not.toHaveBeenCalled();
+    expect(queue).toEqual([first, second]);
   });
 });
 

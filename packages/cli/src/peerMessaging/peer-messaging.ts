@@ -130,13 +130,9 @@ export function peerMidTurnBudgetOf(value: unknown): number {
 }
 
 /**
- * Ceiling on peer messages steered into a session's running turn.
- *
- * A peer spends this session's model work on deliveries its own user never
- * asked for, and mid-turn delivery is what makes that reachable while the
- * session is busy. Past the window's allowance, envelopes wait for the idle
- * drain instead: the sender's receipt is unchanged, nothing is lost, and a peer
- * cannot keep a session permanently busy answering it.
+ * Ceiling on peer messages steered into a session's running turn: at most
+ * `capacity` per rolling `PEER_MID_TURN_WINDOW_MS`. Past the allowance an
+ * envelope is not lost, it waits for the idle drain.
  */
 export class PeerMidTurnBudget {
   private stamps: number[] = [];

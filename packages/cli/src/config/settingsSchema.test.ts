@@ -429,10 +429,12 @@ describe('SettingsSchema', () => {
     it('should bound mid-turn cross-session delivery per window', () => {
       // The ceiling is what keeps a chatty peer from holding a busy session.
       // 0 is a real value: mid-turn off without touching the setting above.
+      // The default is `PEER_MID_TURN_BUDGET_DEFAULT`, pinned literally so a
+      // change on either side of that single source is caught.
       expect(
         getSettingsSchema().agents.properties.crossSessionMidTurnBudget,
       ).toMatchObject({
-        type: 'number',
+        type: 'integer',
         default: 3,
         minimum: 0,
         requiresRestart: false,

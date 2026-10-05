@@ -38,6 +38,7 @@ import {
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
+import { PEER_MID_TURN_BUDGET_DEFAULT } from '../peerMessaging/peer-messaging.js';
 import type { Mem0Settings } from './mem0-settings.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
@@ -3783,11 +3784,11 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
       },
       crossSessionMidTurnBudget: {
-        type: 'number',
+        type: 'integer',
         label: 'Mid-Turn Cross-Session Budget',
         category: 'Advanced',
         requiresRestart: false,
-        default: 3,
+        default: PEER_MID_TURN_BUDGET_DEFAULT,
         minimum: 0,
         description:
           'How many accepted cross-session messages may be steered into a running turn within a five-minute window before delivery falls back to turn boundaries. A peer costs this session real model work even when it is handled well, so without a ceiling a chatty peer can keep a busy session answering it indefinitely. Messages still arrive once the turn ends, and senders see no difference. Only applies while agents.crossSessionMidTurn is on; 0 keeps mid-turn delivery off without changing that setting.',

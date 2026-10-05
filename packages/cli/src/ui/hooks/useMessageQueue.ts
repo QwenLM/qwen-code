@@ -448,9 +448,9 @@ export function useMessageQueue(): UseMessageQueueReturn {
           (entry): QueuedMessage => ({
             key: nextMessageKey(),
             text: entry.modelText,
-            // Restored peers stay deferred: the drain that failed is the
-            // mid-turn one, so an undeferred restore would re-enter it
-            // immediately, and the idle drain is the guaranteed fallback.
+            // The tag keeps the envelope off the raw-text user channel;
+            // `drainPeerEntries` ignores it, so a restored `now` envelope is
+            // eligible again at a later boundary.
             deferUntilIdle: true,
             submittedPrompt: entry.displayText,
             peer: true,
@@ -491,8 +491,11 @@ export function useMessageQueue(): UseMessageQueueReturn {
   // Mid-turn selection follows two rules about who may be overtaken: an
   // envelope never overtakes user input queued ahead of it (the scan stops at
   // the first non-peer entry), and among peers the sender's stated urgency
-  // decides — a "next" stays in line and still reaches the model through the
-  // idle drain, in arrival order. The caller decides what taken means.
+  // decides — the scan skips a "next" to take a later "now", so peers run in
+  // urgency order rather than arrival order and a skipped "next" waits its
+  // turn. A restored entry re-enters at the head (see `restorePeerEntries`),
+  // so a budget-deferred "now" also sits ahead of peers queued before it.
+  // The caller decides what taken means.
   const drainPeerEntries = useCallback((limit: number): QueuedPeerSteer[] => {
     const current = queueRef.current;
     const taken: QueuedMessage[] = [];

@@ -387,6 +387,7 @@ describe('useLlmStream', () => {
     logger?: Parameters<typeof useLlmStream>[20],
     goalQueueRef?: Parameters<typeof useLlmStream>[24],
     modelSwitchedFromQuotaError = false,
+    midTurnPeerDrainRef?: Parameters<typeof useLlmStream>[25],
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -469,6 +470,7 @@ describe('useLlmStream', () => {
           undefined, // terminalWidthRef
           undefined, // midTurnRestoreRef
           goalQueueRef,
+          midTurnPeerDrainRef,
         );
       },
       {
@@ -1711,6 +1713,7 @@ describe('useLlmStream', () => {
     function renderBusyMultiRoundTask(
       initialToolCalls: TrackedToolCall[],
       goalQueueRef?: Parameters<typeof useLlmStream>[24],
+      midTurnPeerDrainRef?: Parameters<typeof useLlmStream>[25],
     ) {
       const mockManager = { setLeaderMessageCallback: vi.fn() };
       (mockConfig.getTeamManager as unknown as Mock).mockReturnValue(
@@ -1755,6 +1758,8 @@ describe('useLlmStream', () => {
         undefined,
         undefined,
         goalQueueRef,
+        undefined,
+        midTurnPeerDrainRef,
       );
 
       const leaderCallback = () => {
@@ -3668,6 +3673,121 @@ describe('useLlmStream', () => {
         { text: teammateModelText },
       ]);
       expect(mockSendMessageStream.mock.calls[2][3]).toEqual(
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+    });
+
+    it('strips and re-attaches a mixed teammate+peer boundary exactly once each', async () => {
+      // Regression pin: the boundary pushes teammates before peers, but each
+      // batch was stripped from the stored retry payload by its own callback.
+      // `stripTrailingTextsFromLastPrompt` only removes a MATCHING SUFFIX, so
+      // the teammate strip was a no-op whenever a peer text was the tail and
+      // the retry re-attach then appended the teammate a second time.
+      const peerModelText =
+        '<cross_session_message from="/tmp/peer.sock" name="a">hold the lease</cross_session_message>';
+      const peerDisplay = 'Session a: hold the lease';
+      const peerRestore = vi.fn();
+      const peerDrain = vi
+        .fn<
+          () => {
+            entries: Array<{ modelText: string; displayText: string }>;
+            restore: () => void;
+          } | null
+        >()
+        .mockReturnValueOnce({
+          entries: [{ modelText: peerModelText, displayText: peerDisplay }],
+          restore: peerRestore,
+        })
+        .mockReturnValue(null);
+      const recordNotification = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        recordThought: vi.fn(),
+        initialize: vi.fn(),
+        recordMessage: vi.fn(),
+        recordMessageTokens: vi.fn(),
+        recordToolCalls: vi.fn(),
+        getConversationFile: vi.fn(),
+        recordNotification,
+      });
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+        client,
+      } = renderBusyMultiRoundTask([createExecutingToolCall()], undefined, {
+        current: peerDrain,
+      });
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // Every send fails terminally before content: the boundary still
+      // accepts (the push landed), which is the shape the retry carrier
+      // exists for.
+      mockSendMessageStream.mockImplementation(() =>
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Error,
+            value: { error: { message: 'model overloaded' } },
+          };
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      // Both batches rode the same user message, teammates first.
+      const boundaryEntryParts = [
+        ...completed.response.responseParts,
+        { text: teammateModelText },
+        { text: peerModelText },
+      ];
+      expect(mockSendMessageStream.mock.calls[0][0]).toEqual(
+        boundaryEntryParts,
+      );
+      expect(peerDrain).toHaveBeenCalledWith(1);
+      expect(peerRestore).not.toHaveBeenCalled();
+      expect(recordNotification).toHaveBeenCalledTimes(2);
+
+      // History scans (the accept-time fingerprint capture and the retry's
+      // orphan scan) all see the accepted entry as the trailing orphan.
+      client.getHistoryShallow = vi.fn().mockReturnValue([
+        { role: 'model', parts: [{ text: 'earlier' }] },
+        { role: 'user', parts: boundaryEntryParts },
+      ]);
+
+      // Ctrl+Y: the accept stripped both envelopes out of the stored payload,
+      // so the re-attach adds each one ONCE. A batch stripped per callback
+      // leaves the teammate baked in and this payload carries it twice.
+      await act(async () => {
+        await result.current.retryLastPrompt();
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      const retried = mockSendMessageStream.mock.calls[1][0] as Part[];
+      expect(retried).toEqual(boundaryEntryParts);
+      expect(
+        retried.filter((part) => part.text === teammateModelText),
+      ).toHaveLength(1);
+      expect(
+        retried.filter((part) => part.text === peerModelText),
+      ).toHaveLength(1);
+      expect(mockSendMessageStream.mock.calls[1][3]).toEqual(
         expect.objectContaining({ type: SendMessageType.Retry }),
       );
     });

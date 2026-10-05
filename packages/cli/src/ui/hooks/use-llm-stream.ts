@@ -5906,6 +5906,13 @@ export const useLlmStream = (
           );
         }
       }
+      // The boundary envelopes in the order they were pushed after the tool
+      // responses: steer parts, then teammates, then peers. One combined
+      // strip (see `settleBoundary`) is what keeps a mixed round honest.
+      const boundaryEnvelopeTexts = [
+        ...(drainedTeammates?.entries.map((entry) => entry.modelText) ?? []),
+        ...(drainedPeers?.entries.map((entry) => entry.modelText) ?? []),
+      ];
       // Settle the drained batch exactly once. The settlement carrier below
       // is passed through the existing `steerInput` option so GeminiClient
       // settles it next to the actual history push: acceptance compares the
@@ -5921,32 +5928,13 @@ export const useLlmStream = (
         }
         const { entries, restore, generation } = drainedTeammates;
         drainedTeammates = undefined;
-        const envelopeTexts = entries.map((entry) => entry.modelText);
         // A TeamManager swap moved the generation while this batch was in
         // flight: it belongs to the outgoing team no matter how it now
         // settles, and must not be journaled into, or recorded as retry
         // debt against, the NEW team's session. (The restore side of this
         // guard lives in `drainTeammateQueue`'s restore itself.)
         const swapped = teammateQueueGenerationRef.current !== generation;
-        // The envelopes are baked into the Ctrl+Y retry payload either way:
-        // `submitQuery` stored `finalQueryToSend` (envelope parts included)
-        // in `lastPromptRef` before the client call settled. Strip them on
-        // BOTH outcomes — a restored batch is redelivered by the Idle
-        // fallback, and an accepted batch is already in the session
-        // history, so a retry that re-sends them would hand the leader the
-        // identical report twice (accepted-then-failed-mid-stream retry,
-        // or retry + Idle drain after a restore). The trailing-match guard
-        // inside the helper keeps this a no-op when settlement fires before
-        // `submitQuery` stored the payload (cancel and preempt paths below)
-        // or after a later submission overwrote it. One exception to
-        // "already in the session history": an accepted round can still
-        // fail terminally BEFORE any content, leaving the pushed entry as
-        // a trailing orphan that the Retry path pops before re-pushing the
-        // payload. The accept branch records retry debt
-        // (`boundaryEnvelopeRetryDebtRef`) so `retryLastPrompt` re-attaches
-        // the envelopes exactly when that orphan pop would drop them.
         if (accepted) {
-          stripTrailingTextsFromLastPrompt(envelopeTexts);
           if (swapped) {
             debugLogger.debug(
               `dropping ${entries.length} accepted teammate message(s): team changed while in flight`,
@@ -5999,7 +5987,6 @@ export const useLlmStream = (
           `restoring ${entries.length} teammate message(s) after failed/cancelled submission`,
         );
         restore();
-        stripTrailingTextsFromLastPrompt(envelopeTexts);
       };
       // Peer batch settles the same way: a restore requeues it with `peer`
       // intact, so the idle drain picks it up and the line is not shown twice.
@@ -6009,11 +5996,9 @@ export const useLlmStream = (
         }
         const { entries, restore } = drainedPeers;
         drainedPeers = undefined;
-        const envelopeTexts = entries.map((entry) => entry.modelText);
         if (accepted) {
-          stripTrailingTextsFromLastPrompt(envelopeTexts);
-          // Journal it like the boundary teammate path: the strip above takes
-          // the envelope out of the retry payload, so without this a
+          // Journal it like the boundary teammate path: the settlement strip
+          // takes the envelope out of the retry payload, so without this a
           // `delivered` receipt could back a message lost on `/resume`.
           const envelopeParts = entries.map((entry) => ({
             text: entry.modelText,
@@ -6033,7 +6018,28 @@ export const useLlmStream = (
           return;
         }
         restore();
-        stripTrailingTextsFromLastPrompt(envelopeTexts);
+      };
+      // One strip for the whole boundary batch, in the tail order the parts
+      // were pushed, on BOTH outcomes. `stripTrailingTextsFromLastPrompt`
+      // removes a matching suffix or nothing at all: stripped per batch, the
+      // teammate call was a no-op whenever a peer text was the actual tail,
+      // so that envelope stayed in the Ctrl+Y payload and the retry re-attach
+      // handed the model a second copy. Stripping both together also removes
+      // the dependence on the two callbacks' relative order; a batch of one
+      // kind strips exactly as it did before.
+      //
+      // A restored batch is redelivered by the Idle fallback and an accepted
+      // one is already in the session history, so a retry re-sending either
+      // would double it. The trailing-match guard in the helper keeps this a
+      // no-op when settlement fires before `submitQuery` stored the payload
+      // (the cancel and preempt exits below) or after a later submission
+      // overwrote it. The accept branches separately record retry debt so an
+      // accepted round that fails before any content does not lose the
+      // envelopes with the orphan the Retry path pops.
+      const settleBoundary = (accepted: boolean) => {
+        stripTrailingTextsFromLastPrompt(boundaryEnvelopeTexts);
+        settleDrainedTeammates(accepted);
+        settleDrainedPeers(accepted);
       };
       const submissionSettlement: SteerInput | undefined =
         drainedSteer || drainedTeammates || drainedPeers
@@ -6041,13 +6047,11 @@ export const useLlmStream = (
               parts: drainedSteer?.parts ?? [],
               accept: () => {
                 drainedSteer?.accept();
-                settleDrainedTeammates(true);
-                settleDrainedPeers(true);
+                settleBoundary(true);
               },
               restore: () => {
                 drainedSteer?.restore();
-                settleDrainedTeammates(false);
-                settleDrainedPeers(false);
+                settleBoundary(false);
               },
             }
           : undefined;
@@ -6059,8 +6063,7 @@ export const useLlmStream = (
       // above owes its own batch.
       if (continuationWasCancelled()) {
         drainedSteer?.restore();
-        settleDrainedTeammates(false);
-        settleDrainedPeers(false);
+        settleBoundary(false);
         if (toolGoalBinding) {
           if (llmClient) {
             llmClient.addHistory({
@@ -6079,8 +6082,7 @@ export const useLlmStream = (
       }
       if (toolGoalBinding?.controller.signal.aborted) {
         drainedSteer?.restore();
-        settleDrainedTeammates(false);
-        settleDrainedPeers(false);
+        settleBoundary(false);
         if (llmClient) {
           llmClient.addHistory({
             role: 'user',

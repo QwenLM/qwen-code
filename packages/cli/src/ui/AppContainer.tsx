@@ -641,7 +641,12 @@ export function useQueuedSubmissionDrain({
 
 /**
  * Mid-turn delivery of accepted peer messages. Returns null when no drain may
- * be attempted — the feature is off, or this session has no inbox.
+ * be attempted — the feature is off, this session has no inbox, or the
+ * window's allowance is zero.
+ *
+ * The budget is per receiving session: it counts against the session named by
+ * `sessionId`, and is dropped when that id changes (`/clear`, `/resume`), so a
+ * new session never inherits a throttle the previous one earned.
  *
  * The drain lives here rather than in the stream hook because only this side
  * holds the queue, the gate and the history API, and a peer batch needs all
@@ -654,6 +659,7 @@ export function usePeerMidTurnDrain({
   peerMessaging,
   enabled,
   capacity,
+  sessionId,
   drainPeerEntries,
   restorePeerEntries,
   addHistoryItem,
@@ -661,6 +667,7 @@ export function usePeerMidTurnDrain({
   peerMessaging: PeerMessaging | null;
   enabled: boolean;
   capacity: number;
+  sessionId: string;
   drainPeerEntries: (limit: number) => QueuedPeerSteer[];
   restorePeerEntries: (entries: QueuedPeerSteer[]) => void;
   addHistoryItem: (item: HistoryItemWithoutId, timestamp: number) => number;
@@ -671,8 +678,19 @@ export function usePeerMidTurnDrain({
   // When the throttling notice was last shown, so a sustained flood earns one
   // line rather than one per envelope.
   const noticeAtRef = useRef(0);
+  // AppContainer mounts once and `/clear` swaps the id in place, so the
+  // session change has to be detected here rather than by remounting.
+  const sessionIdRef = useRef(sessionId);
+  if (sessionIdRef.current !== sessionId) {
+    sessionIdRef.current = sessionId;
+    budgetRef.current = null;
+    noticeAtRef.current = 0;
+  }
 
-  if (!enabled || !peerMessaging) return null;
+  // A zero allowance is mid-turn off, not mid-turn throttled: returning the
+  // drain anyway would consume stale-pin frames and write a pause line every
+  // window for deliveries that can never happen.
+  if (!enabled || !peerMessaging || capacity <= 0) return null;
 
   return (limit: number) => {
     if (!budgetRef.current) {
@@ -2869,6 +2887,9 @@ export const AppContainer = (props: AppContainerProps) => {
     capacity: peerMidTurnBudgetOf(
       settings.merged.agents?.crossSessionMidTurnBudget,
     ),
+    // The same accessor the idle drain and the notification paths read, so
+    // the budget is scoped to the session they scope to.
+    sessionId: config.getSessionId(),
     drainPeerEntries,
     restorePeerEntries,
     addHistoryItem,
