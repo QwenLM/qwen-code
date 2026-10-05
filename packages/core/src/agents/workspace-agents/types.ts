@@ -17,6 +17,9 @@
 export const HUMAN_AUTHOR_ID = 'user';
 
 export const AGENTS_SCHEMA_VERSION = 1;
+export const AGENT_HOST_REPLACEMENT_REQUIRED =
+  'Agent Host replacement requires enrollment.';
+
 export const AGENT_HOSTS_SCHEMA_VERSION = 1;
 export const LOCAL_AGENT_RUNTIME_ID = 'local';
 
@@ -35,6 +38,8 @@ export type AgentHostView = Omit<AgentHost, 'secretHash'>;
 export interface AgentHostEnrollment {
   tokenHash: string;
   expiresAt: number;
+  supersedesHostId?: string;
+  replacementHostId?: string;
 }
 
 export interface AgentHostsFile {
