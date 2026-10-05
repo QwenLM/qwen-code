@@ -30059,6 +30059,68 @@ describe('createServeApp', () => {
       expect(atomicWriteSpy).not.toHaveBeenCalled();
     });
 
+    it('POST /workspace/trust/grant records the decision on trusted loopback without a token', async () => {
+      const grantWorkspaceTrust = vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: WS_BOUND,
+      }));
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+        workspace: {
+          getWorkspaceTrustStatus: vi.fn(async () => trustStatus),
+          grantWorkspaceTrust,
+        } as unknown as DaemonWorkspaceService,
+      });
+
+      const res = await request(app)
+        .post('/workspace/trust/grant')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(grantWorkspaceTrust).toHaveBeenCalledWith({
+        route: 'POST /workspace/trust/grant',
+        workspaceCwd: WS_BOUND,
+      });
+    });
+
+    it('POST /workspaces/:workspace/trust/grant records the decision on trusted loopback without a token', async () => {
+      const grantWorkspaceTrust = vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: WS_BOUND,
+      }));
+      const primaryBridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const primary = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: primaryBridge,
+      });
+      primary.workspaceService = {
+        getWorkspaceTrustStatus: vi.fn(async () => trustStatus),
+        grantWorkspaceTrust,
+      } as unknown as DaemonWorkspaceService;
+
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        boundWorkspace: WS_BOUND,
+        workspaceRegistry: createWorkspaceRegistry([primary]),
+      });
+
+      const res = await request(app)
+        .post('/workspaces/primary-id/trust/grant')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(grantWorkspaceTrust).toHaveBeenCalledWith({
+        route: 'POST /workspaces/:workspace/trust/grant',
+        workspaceCwd: WS_BOUND,
+      });
+    });
+
     it('POST /workspace/trust/request returns 409 when folder trust is disabled', async () => {
       const requestWorkspaceTrustChange = vi.fn();
       const bridge = fakeBridge({ knownClientIds: ['client-1'] });
