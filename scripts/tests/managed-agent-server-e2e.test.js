@@ -368,6 +368,64 @@ describe('managed-agent-server e2e runner', () => {
     // store descriptor and the Harness answers every attach with
     // 400 invalid_managed_session_store, so the slice must name the switch.
     expect(slice).toContain('QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED');
+    // The store switch is read once at JVM startup exactly like the base
+    // URL: exported below the restart cue it never reaches the reader's
+    // JVM, and every attach fails with 400 invalid_managed_session_store
+    // while the recipe reads complete — so the exports must land before the
+    // single restart. The cue is hard-wrapped, so compare on the collapsed
+    // slice; a missing cue fails closed through the -1.
+    const flat = slice.replace(/\s+/g, ' ');
+    expect(
+      flat.indexOf('QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED'),
+      'the Session Store exports must precede the Spring restart cue',
+    ).toBeLessThan(flat.indexOf('restart it with the override'));
+  });
+
+  it('keeps the review-corrections merge gates behind the CI-gated Hosted proofs', () => {
+    // The hosted-harness-mysql CI job runs HostedWorkspaceToolTurnIT (a real
+    // file-tool Turn through the packaged worker) and the three
+    // owner-failover E2E modes against the production HTTP durable-store
+    // adapter, all fail-closed via the failsafe includes and
+    // check-failsafe-reports.js. While both oracles stand, the
+    // review-corrections gates must not re-assert those capabilities as
+    // unproven — the foundation-boundary banner names that document the
+    // current authority, so the false claim reaches integrators in either
+    // language.
+    const toolTurnIt =
+      'packages/sdk-java/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java';
+    expect(
+      existsSync(new URL(`../../${toolTurnIt}`, import.meta.url)) &&
+        read('.github/workflows/sdk-java.yml').includes(
+          'test:e2e:managed-session-failover',
+        ),
+      'the Hosted tool-turn IT and the failover E2E lane must both exist for this oracle to mean anything',
+    ).toBe(true);
+    for (const [file, heading, claim] of [
+      [
+        'docs/design/2026-09-25-managed-agent-review-corrections.md',
+        '## Remaining integration gates',
+        /what remains unproven is[^.]*\./gi,
+      ],
+      [
+        'docs/design/2026-09-25-managed-agent-review-corrections.zh-CN.md',
+        '## 剩余集成门禁',
+        /仍未证明[^。]*。/g,
+      ],
+    ]) {
+      const doc = read(file);
+      expect(doc, `${file} must keep its merge-gates section`).toContain(
+        heading,
+      );
+      const gates = doc.slice(doc.indexOf(heading));
+      for (const [sentence] of gates.matchAll(claim)) {
+        expect(
+          sentence,
+          `${file} lists CI-gated Hosted capabilities as unproven`,
+        ).not.toMatch(
+          /tool turns|durable-store adapter|worker bundle|工具 Turn/i,
+        );
+      }
+    }
   });
 
   it('pins the attach-time generation fence in the Harness attachment contract', () => {

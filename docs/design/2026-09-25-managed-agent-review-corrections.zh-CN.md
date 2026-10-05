@@ -21,7 +21,7 @@
 
 ## 剩余集成门禁
 
-1. 仅 `executions/{id}:resolve` 仍返回不可重试的 501;acquire/control/release 已是真实 Broker 路由。提供 bearer token、`--no-web` 与 capability digest 后，`qwen serve --profile hosted-harness` 可在 loopback 启动并提供私有 no-tool Managed Session API。仍未证明的是真实工具 Turn 所需的 Broker 支持 Session 循环、所复制 E2E 脚本的远程 durable-store adapter 与 worker bundle、以及崩溃恢复——这些依赖必须共同集成。
+1. 仅 `executions/{id}:resolve` 仍返回不可重试的 501;acquire/control/release 已是真实 Broker 路由。提供 bearer token、`--no-web` 与 capability digest 后，`qwen serve --profile hosted-harness` 可在 loopback 启动并提供私有 no-tool Managed Session API。仍未证明的是门禁 4 所述的持久化恢复阻塞信号、in-flight 恢复、完整 Workspace 生命周期与分布式 provisioning。opt-in 的 Workspace 文件工具 Turn、HTTP durable-store adapter 以及三种 owner-failover E2E 模式均在 hosted-harness-mysql CI 任务中运行。
 2. 私有 Store 的 acquire 接受调用方自行选择的 writer token 和 tenant。writer 租约约束先后写入者，但不认证服务身份。必须为这些路由提供可信服务身份或强制私网入口策略，并与浏览器 Agent 路由区分。
 3. Harness 级 drain 仅在进程内存中标记 Session 退休，不停止 worker、不持久化退休状态，也不撤销全部私有 Broker 访问。不能把 archive/delete 宣称为 Runtime 回收。
 4. HTTP 适配器现在对 Broker `UNKNOWN` 返回 409 并拒绝继续，但尚不能表达设计承诺的持久化恢复阻塞。恢复需要明确且兼容的未知结果契约。
