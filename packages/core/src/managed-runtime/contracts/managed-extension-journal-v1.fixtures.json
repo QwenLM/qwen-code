@@ -1,4 +1,5 @@
 {
+  "contractVersion": 1,
   "sessionKey": {
     "tenantId": "tenant-a",
     "workspaceId": "workspace-a",

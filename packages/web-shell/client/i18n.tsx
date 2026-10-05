@@ -1811,6 +1811,13 @@ const EN: Messages = {
       ? `File not found in the workspace · ${v.path}`
       : 'File not found in the workspace',
   'sidebar.label': 'Workspace sidebar',
+  'sidebar.home': 'Home',
+  'sidebar.channelSettings': 'Settings',
+  'sidebar.liveSettings': 'Settings',
+  'sidebar.liveSettingsUnavailable':
+    'Live settings are not available on this server.',
+  'sidebar.more': 'More',
+  'sidebar.navigation': 'Main navigation',
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
   'sidebar.newTask': 'New task',
@@ -3920,6 +3927,7 @@ const EN: Messages = {
   'channels.workspace.label': 'Workspace',
   'channels.workspace.primary': 'Primary',
   'channels.loading': 'Loading channels',
+  'channels.configuredCount': (v) => plural(v?.count, 'configured channel'),
   'channels.configured': 'Configured channels',
   'channels.configured.description':
     'Manage the bots that receive and deliver messages for this workspace.',
@@ -5997,6 +6005,12 @@ const ZH: Messages = {
   'turnOutputs.artifactUnavailable': (v) =>
     v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
+  'sidebar.home': '首页',
+  'sidebar.channelSettings': '设置',
+  'sidebar.liveSettings': '设置',
+  'sidebar.liveSettingsUnavailable': '当前服务未提供 Live 设置。',
+  'sidebar.more': '更多',
+  'sidebar.navigation': '主导航',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
   'sidebar.newTask': '新建任务',
@@ -7938,6 +7952,7 @@ const ZH: Messages = {
   'channels.workspace.label': '工作区',
   'channels.workspace.primary': '主工作区',
   'channels.loading': '正在加载频道',
+  'channels.configuredCount': (v) => `已配置 ${v?.count ?? 0} 个频道`,
   'channels.configured': '已配置频道',
   'channels.configured.description': '管理当前工作区中负责收发消息的机器人。',
   'channels.availablePlatforms': '可连接平台',
