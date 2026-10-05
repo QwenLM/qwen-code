@@ -1080,6 +1080,39 @@ class ManagedCwdChangeOperationTest {
                 .workspace().getContextRevision()).isEqualTo(2);
     }
 
+    // The delivery machine consults isRetryable() on the probe's broker
+    // refusal: a momentary mount failure (ESTALE/EIO class) re-enters the
+    // backoff instead of certifying a permanent failure. Removing the
+    // consult (if (false ...)) must turn this block's RUNNING line red —
+    // the round-4 observable-split finding was that nothing could.
+    @Test
+    void coordinatorRetriesARetryableProbeRefusalThenSettles() {
+        Fixture fixture = fixture(true);
+        StubWarmer warmer = new StubWarmer();
+        SessionLifecycleCoordinator coordinator = fixture.coordinator(
+                warmer);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        String operationId = begin(fixture, sessionId, "key", "digest",
+                "services/b", 1).operation().operationId();
+        warmer.refuse(WorkspaceExecutionStore.unavailableTransient(
+                new java.io.IOException("stale mount handle")));
+        coordinator.dispatch(TENANT, sessionId, operationId);
+        OperationRecord waiting = fixture.store.findOperation(TENANT,
+                sessionId, operationId).orElseThrow();
+        assertThat(waiting.state()).isEqualTo("RUNNING");
+        assertThat(waiting.deliveryState()).isEqualTo("PENDING");
+        assertThat(waiting.attemptCount()).isEqualTo(1);
+        assertThat(waiting.failureCode()).isNull();
+        fixture.jdbc.update("UPDATE managed_agent_operation SET"
+                + " available_at = 0 WHERE tenant_id = ? AND session_id = ?"
+                + " AND operation_id = ?", TENANT, sessionId, operationId);
+        coordinator.recoverOperations();
+        assertThat(fixture.store.findOperation(TENANT, sessionId, operationId)
+                .orElseThrow().state()).isEqualTo("COMPLETED");
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getContextRevision()).isEqualTo(2);
+    }
+
     @Test
     void coordinatorReclaimsADeadOwnersClaimExactlyOnce() {
         Fixture fixture = fixture(true);

@@ -15,9 +15,10 @@ import org.junit.jupiter.api.Test;
 /**
  * Instance-level validation of the cwd operation request/response shapes
  * against the reviewed OpenAPI schemas, including the
- * {@code failed → failure_code required} condition. The drift harness only
- * structures-checks refusal traffic; these are the only tests that can go
- * red when the DTO records and the published schemas drift apart.
+ * {@code failed → failure_code required} condition and the oneOf unions
+ * the GET-operation routes serve. The drift harness also goes red when
+ * the DTO records and their schemas drift; what this suite adds is the
+ * discriminated cwd instances' conformance to the published contracts.
  */
 class ManagedCwdOperationContractShapeTest {
 

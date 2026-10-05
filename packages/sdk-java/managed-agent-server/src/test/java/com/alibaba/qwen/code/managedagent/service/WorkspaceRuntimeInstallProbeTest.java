@@ -130,12 +130,37 @@ class WorkspaceRuntimeInstallProbeTest {
 
     private void assertProbeRefused(WorkspaceRuntimeResolver resolver,
             String target) {
+        // Every reachable probe refusal here is the structural, terminal
+        // verdict — the retryable arm is a momentary I/O failure only, and
+        // no call site in this suite raises it.
         assertThatThrownBy(() -> resolver.verifyInstallable(
                 binding("services/api"), target))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class,
-                        error -> org.assertj.core.api.Assertions.assertThat(
-                                error.getCode())
-                                .isEqualTo("workspace_unavailable"));
+                        error -> {
+                            org.assertj.core.api.Assertions.assertThat(
+                                    error.getCode())
+                                    .isEqualTo("workspace_unavailable");
+                            org.assertj.core.api.Assertions.assertThat(
+                                    error.isRetryable()).isFalse();
+                        });
+    }
+
+    // A mount root or target directory that is GONE is the structural
+    // verdict the terminal refusal names (NoSuchFileException), not an
+    // I/O blip to retry forever — the earlier classification drew the
+    // line at the origin class and let a vanished mount wedge the
+    // Session against session_context_busy with unbounded retries.
+    @Test
+    void aVanishedTargetOrMountRootRefusesTerminally() throws Exception {
+        Path root = Files.createDirectory(temporary.resolve("mount"))
+                .toRealPath();
+        Files.createDirectories(root.resolve("gone"));
+        Files.delete(root.resolve("gone"));
+        WorkspaceRuntimeResolver resolver = resolver(root);
+        assertProbeRefused(resolver, "gone");
+
+        deleteRecursively(root);
+        assertProbeRefused(resolver, "services/api");
     }
 
     // The guard verifies the candidate binding, not the current one: a
