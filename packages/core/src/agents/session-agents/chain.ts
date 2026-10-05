@@ -17,7 +17,10 @@
 import { parseMentions } from '../workspace-agents/mentions.js';
 import { isAgentAddressable } from '../workspace-agents/store.js';
 import type { WorkspaceAgent } from '../workspace-agents/types.js';
-import { DEFAULT_AGENT_CHAIN_LIMIT } from './contract.js';
+import {
+  DEFAULT_AGENT_CHAIN_LIMIT,
+  DEFAULT_AGENT_TOKEN_BUDGET,
+} from './contract.js';
 
 export interface MentionTargets {
   /** Addressable agents to start, in first-mention order, deduplicated. */
@@ -95,4 +98,16 @@ export function normalizeAgentChainLimit(raw: unknown): number {
  */
 export function coalesceChainDepth(current: number, incoming: number): number {
   return Math.min(current, incoming);
+}
+
+/** `experimental.agentTokenBudget`: a non-negative integer, default 1M. */
+export function normalizeAgentTokenBudget(raw: unknown): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0
+    ? Math.floor(raw)
+    : DEFAULT_AGENT_TOKEN_BUDGET;
+}
+
+/** Whether agents may still wake other agents. 0 means unlimited. */
+export function isWithinTokenBudget(spent: number, budget: number): boolean {
+  return budget === 0 || spent < budget;
 }

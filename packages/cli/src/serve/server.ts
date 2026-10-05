@@ -168,7 +168,8 @@ import {
   registerSessionAgentRoutes,
   registerSessionAgentSendRoute,
 } from './routes/session-agents.js';
-import { normalizeAgentChainLimit } from '@qwen-code/qwen-code-core/agents/session-agents/chain.js';
+import { normalizeAgentChainLimit,
+  normalizeAgentTokenBudget } from '@qwen-code/qwen-code-core/agents/session-agents/chain.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
   collectBoundSessionIds,
@@ -1645,6 +1646,22 @@ export function createServeApp(
       );
     } catch {
       return normalizeAgentChainLimit(undefined);
+    }
+  };
+  // `experimental.agentTokenBudget`: tokens agents may spend in a chat
+  // session between two human messages before they stop waking each other.
+  const agentTokenBudgetFor = (workspaceCwd: string): number => {
+    try {
+      const settings = runWithoutDebugLogSession(() =>
+        loadSettings(workspaceCwd, {
+          preserveInvalidWorkspaceSettings: true,
+        }),
+      );
+      return normalizeAgentTokenBudget(
+        settings.merged.experimental?.agentTokenBudget,
+      );
+    } catch {
+      return normalizeAgentTokenBudget(undefined);
     }
   };
   // Whether the routes and recovery exist at all. Evaluated at call time over
@@ -3730,6 +3747,7 @@ export function createServeApp(
       mutate,
       isAgentCollaborationEnabledFor,
       agentChainLimitFor,
+      agentTokenBudgetFor,
       daemonLoopbackBaseUrl,
     });
     agentCollaborationRoutesMounted = true;

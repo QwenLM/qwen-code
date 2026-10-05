@@ -217,6 +217,11 @@ export function parseSessionAgentsFile(
     sessionId,
     bindings: bindings as Record<string, SessionAgentBinding>,
     runs: runs as SessionAgentRun[],
+    ...(typeof value['chainTokens'] === 'number' &&
+    Number.isFinite(value['chainTokens']) &&
+    value['chainTokens'] > 0
+      ? { chainTokens: value['chainTokens'] }
+      : {}),
   };
 }
 
@@ -306,6 +311,7 @@ export async function updateSessionAgents(
       sessionId,
       bindings: mutated.bindings,
       runs: trimTerminalRuns(mutated.runs),
+      ...(mutated.chainTokens ? { chainTokens: mutated.chainTokens } : {}),
     };
     // Validate what is about to be written with the same rules a read uses,
     // so a bad in-memory value fails here rather than wedging the next read.
@@ -328,6 +334,7 @@ export async function writeSessionAgents(
     ...file,
     bindings: structuredClone(file.bindings),
     runs: structuredClone(file.runs),
+    ...(file.chainTokens ? { chainTokens: file.chainTokens } : {}),
   }));
 }
 

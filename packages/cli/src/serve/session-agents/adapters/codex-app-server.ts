@@ -863,9 +863,15 @@ export function createCodexAppServerAdapter(
             model: input.model ?? null,
             cwd: input.cwd,
             approvalPolicy: 'on-request',
-            // TODO(multi-agent): the sandbox is left at the user's default
-            // (null). Decide whether session agents should pin one.
-            sandbox: null,
+            // Pinned to read-only so every write or command the agent wants
+            // must be escalated and therefore asks the person in the session
+            // (plan §8-1). Under `workspace-write`, `on-request` lets writes
+            // inside the workspace through without asking.
+            // TODO(multi-agent): verify against real codex CLI — that
+            // `read-only` + `on-request` turns file changes and commands into
+            // approval requests, and whether a resumed thread keeps this
+            // policy (thread/resume does not resend it).
+            sandbox: 'read-only',
             // TODO(multi-agent): verify against real codex CLI — that
             // `developerInstructions` carries the persona and persists with
             // the thread across resumes.

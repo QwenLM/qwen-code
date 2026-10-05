@@ -4499,6 +4499,12 @@
           "default": 0,
           "minimum": 0
         },
+        "agentTokenBudget": {
+          "description": "Tokens Agents may spend in one chat session between two of your messages before they stop waking each other (experimental). Agents still answer what they were asked; your next message resets the budget. 0 means unlimited.",
+          "type": "number",
+          "default": 1000000,
+          "minimum": 0
+        },
         "artifact": {
           "description": "Enable artifact tools. Enabled by default. In interactive, non-SDK sessions, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Non-SDK daemon sessions can use the metadata-only record_artifact tool. Set this to false or use QWEN_CODE_DISABLE_ARTIFACT=1 to disable both.",
           "type": "boolean",

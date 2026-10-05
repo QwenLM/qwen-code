@@ -307,6 +307,11 @@ export interface SessionAgentsFile {
   bindings: Record<string, SessionAgentBinding>;
   /** Live and recent runs; terminal runs are trimmed to the newest 50. */
   runs: SessionAgentRun[];
+  /**
+   * Tokens agent runs in this chat session have spent since the last human
+   * message (reset by a human mention). Bounded by the token budget.
+   */
+  chainTokens?: number;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -455,6 +460,15 @@ export const MIN_PROGRAM_VERSIONS: Readonly<Record<'claude' | 'codex', string>> 
  * usage per agent message. A human post resets the chain.
  */
 export const DEFAULT_AGENT_CHAIN_LIMIT = 0;
+
+/**
+ * Cumulative token budget for agent runs in one chat session between two
+ * human messages (`experimental.agentTokenBudget`). Once spent, agents may
+ * still answer what they were asked but cannot wake other agents until a
+ * person posts again. 0 means unlimited. The default matches the thread-era
+ * per-tree budget.
+ */
+export const DEFAULT_AGENT_TOKEN_BUDGET = 1_000_000;
 
 /** Budget for the conversation delta handed to an agent, in characters. */
 export const AGENT_INPUT_CHAR_BUDGET = 48_000;

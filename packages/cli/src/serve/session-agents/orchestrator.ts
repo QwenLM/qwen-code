@@ -51,6 +51,7 @@ import {
 import type { WorkspaceAgent } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
 import {
   AGENT_INPUT_CHAR_BUDGET,
+  DEFAULT_AGENT_TOKEN_BUDGET,
   AGENT_MESSAGE_SUBTYPE,
   HOST_PROTOCOL_VERSION,
   type AgentAdapter,
@@ -91,8 +92,10 @@ import {
 } from '@qwen-code/qwen-code-core/agents/session-agents/conversation-delta.js';
 import {
   isWithinChainLimit,
+  isWithinTokenBudget,
   nextChainDepth,
   normalizeAgentChainLimit,
+  normalizeAgentTokenBudget,
   resolveMentionTargets,
 } from '@qwen-code/qwen-code-core/agents/session-agents/chain.js';
 import {
@@ -231,6 +234,8 @@ export interface SessionAgentOrchestratorOptions {
   hub?: SessionAgentEventHub;
   /** `experimental.agentChainLimit` for this workspace, read per use. */
   chainLimit?: () => number;
+  /** `experimental.agentTokenBudget` for this workspace, read per use. */
+  tokenBudget?: () => number;
   /** Test seams. */
   readAgents?: (workspaceCwd: string) => Promise<WorkspaceAgent[]>;
   loadRecords?: (
@@ -462,6 +467,12 @@ function tokensMatch(expected: string, given: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+function tokenBudgetError(budget: number, names: string[]): string {
+  return `Agent token budget (${budget.toLocaleString('en-US')} tokens since your last message) reached; not started: ${names
+    .map((name) => `@${name}`)
+    .join(', ')}. Post a message to continue.`;
+}
+
 function chainLimitError(limit: number, names: string[]): string {
   return `Agent chain limit (${limit}) reached; not started: ${names
     .map((name) => `@${name}`)
@@ -531,6 +542,7 @@ export class SessionAgentOrchestrator {
   readonly bridge: SessionAgentBridge;
   private readonly hub: SessionAgentEventHub;
   private readonly chainLimit: () => number;
+  private readonly tokenBudget: () => number;
   private readonly readAgents: (
     workspaceCwd: string,
   ) => Promise<WorkspaceAgent[]>;
@@ -580,6 +592,8 @@ export class SessionAgentOrchestrator {
     this.bridge = options.bridge;
     this.hub = options.hub ?? getSessionAgentEventHub(options.workspaceCwd);
     this.chainLimit = options.chainLimit ?? (() => 0);
+    this.tokenBudget =
+      options.tokenBudget ?? (() => DEFAULT_AGENT_TOKEN_BUDGET);
     this.readAgents = options.readAgents ?? readWorkspaceAgents;
     this.loadRecords =
       options.loadRecords ??
@@ -706,6 +720,8 @@ export class SessionAgentOrchestrator {
         createdAt: this.now(),
       });
     }
+    // A person posted: the agents' shared token budget starts over.
+    delete state.file.chainTokens;
     const runs = targets.agents.map((agent) =>
       this.enqueue(state, agent, triggerId, nextChainDepth({ kind: 'human' })),
     );
@@ -1911,6 +1927,13 @@ export class SessionAgentOrchestrator {
         agents.map((agent) => agent.name),
       );
     }
+    const budget = normalizeAgentTokenBudget(this.tokenBudget());
+    if (!isWithinTokenBudget(state.file.chainTokens ?? 0, budget)) {
+      return tokenBudgetError(
+        budget,
+        agents.map((agent) => agent.name),
+      );
+    }
     for (const agent of agents) this.enqueue(state, agent, recordId, depth);
     void this.persist(state)
       .catch(() => {})
@@ -1999,9 +2022,23 @@ export class SessionAgentOrchestrator {
           chainDepth: run.chainDepth,
         });
         const limit = normalizeAgentChainLimit(this.chainLimit());
+        const budget = normalizeAgentTokenBudget(this.tokenBudget());
+        // This run's tokens count before its own mentions are routed.
+        const spent =
+          (state.file.chainTokens ?? 0) +
+          (outcome.totalTokens ?? live.totalTokens ?? 0);
         if (followUps.length > 0 && !isWithinChainLimit(depth, limit)) {
           error = chainLimitError(
             limit,
+            followUps.map((agent) => agent.name),
+          );
+          followUps = [];
+        } else if (
+          followUps.length > 0 &&
+          !isWithinTokenBudget(spent, budget)
+        ) {
+          error = tokenBudgetError(
+            budget,
             followUps.map((agent) => agent.name),
           );
           followUps = [];
@@ -2087,7 +2124,10 @@ export class SessionAgentOrchestrator {
     state.file.bindings[run.agentId] = binding;
     if (error) run.error = error;
     else delete run.error;
-    if (totalTokens !== undefined) run.totalTokens = totalTokens;
+    if (totalTokens !== undefined) {
+      run.totalTokens = totalTokens;
+      state.file.chainTokens = (state.file.chainTokens ?? 0) + totalTokens;
+    }
     // Kept on a remote run cancelled here, so a restarted daemon can still
     // answer its Host `cancelled` (see adopt).
     if (!(outcome.status === 'cancelled' && live.remote)) delete run.lease;

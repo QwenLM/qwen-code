@@ -83,7 +83,7 @@ describe('run frame bookkeeping', () => {
   });
 
   it('keeps a settled run settled against a stale snapshot', () => {
-    let map = applyRunFrame(
+    const map = applyRunFrame(
       new Map(),
       frame('r1', {
         status: 'completed',

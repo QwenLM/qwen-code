@@ -204,9 +204,8 @@ function releaseAssignment(
  */
 function deliver(res: Response, body: unknown): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const settle = (delivered: boolean) => {
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
       res.off('finish', onFinish);
       res.off('close', onClose);
       res.off('error', onError);
@@ -218,7 +217,10 @@ function deliver(res: Response, body: unknown): Promise<boolean> {
     res.once('finish', onFinish);
     res.once('close', onClose);
     res.once('error', onError);
-    timer = setTimeout(() => settle(res.writableFinished), DELIVERY_TIMEOUT_MS);
+    const timer = setTimeout(
+      () => settle(res.writableFinished),
+      DELIVERY_TIMEOUT_MS,
+    );
     timer.unref?.();
     try {
       res.json(body);

@@ -12,6 +12,8 @@ import {
   nextChainDepth,
   normalizeAgentChainLimit,
   resolveMentionTargets,
+  isWithinTokenBudget,
+  normalizeAgentTokenBudget,
 } from './chain.js';
 
 const agent = (id: string, name: string, extra: Partial<WorkspaceAgent> = {}) =>
@@ -72,5 +74,20 @@ describe('chain depth', () => {
   it('lets a human trigger reset a coalesced run', () => {
     expect(coalesceChainDepth(4, 0)).toBe(0);
     expect(coalesceChainDepth(1, 3)).toBe(1);
+  });
+});
+
+describe('agent token budget', () => {
+  it('defaults to one million tokens and accepts 0 as unlimited', () => {
+    expect(normalizeAgentTokenBudget(undefined)).toBe(1_000_000);
+    expect(normalizeAgentTokenBudget(-5)).toBe(1_000_000);
+    expect(normalizeAgentTokenBudget(0)).toBe(0);
+    expect(normalizeAgentTokenBudget(2500.7)).toBe(2500);
+  });
+
+  it('stops agent hops once the budget is spent', () => {
+    expect(isWithinTokenBudget(999_999, 1_000_000)).toBe(true);
+    expect(isWithinTokenBudget(1_000_000, 1_000_000)).toBe(false);
+    expect(isWithinTokenBudget(5_000_000, 0)).toBe(true);
   });
 });

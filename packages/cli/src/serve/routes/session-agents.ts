@@ -79,6 +79,8 @@ export interface RegisterSessionAgentRoutesDeps {
   isAgentCollaborationEnabledFor: (workspaceCwd: string) => boolean;
   /** `experimental.agentChainLimit` for a workspace; absent means unlimited. */
   agentChainLimitFor?: (workspaceCwd: string) => number;
+  /** `experimental.agentTokenBudget` per workspace (default 1M, 0 = unlimited). */
+  agentTokenBudgetFor?: (workspaceCwd: string) => number;
   /**
    * This daemon's loopback base URL (e.g. `http://127.0.0.1:<port>`), where
    * a program's `session_send` MCP child reaches the binding's send route.
@@ -154,6 +156,9 @@ export function registerSessionAgentRoutes(
       workspaceCwd,
       bridge: runtime.bridge,
       chainLimit: () => deps.agentChainLimitFor?.(workspaceCwd) ?? 0,
+      ...(deps.agentTokenBudgetFor
+        ? { tokenBudget: () => deps.agentTokenBudgetFor!(workspaceCwd) }
+        : {}),
       sessionSendUrl: (sessionId, agentId) => {
         const base = deps.daemonLoopbackBaseUrl?.();
         if (!base) return undefined;

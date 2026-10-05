@@ -4404,6 +4404,17 @@ const SETTINGS_SCHEMA = {
           'Maximum number of agent-to-agent hops when Agents @-mention each other in a chat session (experimental). A message from you resets the count. 0 means unlimited; every hop is a separate paid Agent run, and "Stop all agents" is always available.',
         showInDialog: false,
       },
+      agentTokenBudget: {
+        type: 'number',
+        label: 'Agent Token Budget',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: 1_000_000,
+        minimum: 0,
+        description:
+          'Tokens Agents may spend in one chat session between two of your messages before they stop waking each other (experimental). Agents still answer what they were asked; your next message resets the budget. 0 means unlimited.',
+        showInDialog: false,
+      },
       artifact: {
         type: 'boolean',
         label: 'Enable Artifacts',
