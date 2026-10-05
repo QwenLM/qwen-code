@@ -349,23 +349,24 @@ export function useManagedSession(
         let gap = false;
         let delayMs = 0;
         let delivered = false;
-        // Set when the proof-of-life timer below expires a terminal verdict
-        // while this attempt is still in flight: the removal stands only if
-        // the attempt goes on to answer error-free, so a throw restores it.
+        // Captured when the proof-of-life timer below fires: the expiry it
+        // accompanies stands only if the attempt goes on to answer
+        // error-free, so a throw restores the verdict.
         let expiredVerdictMessage: string | undefined;
         const connectedAt = Date.now();
         // The same duration that certifies a connection for the backoff
         // ladder below (a throw before it stretches the rung) also
-        // certifies the stream leg itself: an answer that stays error-free
-        // this long retires the leg's records — even when no new frame ever
-        // arrives to retire them. A failed attempt is no such answer: the
-        // catch below restores a verdict this removed.
+        // certifies the stream leg itself — provided the attempt actually
+        // answered. An open-but-silent connection is no answer, so the
+        // expiry is gated on a delivered frame (a replay counts: delivered
+        // is set before the replay guard). A failed attempt is no answer
+        // either: the catch below restores a verdict this removed.
         const proofOfLife = setTimeout(() => {
           // Capture from the mirror synchronously: the state update runs
           // at React's flush, which an attempt failing right after the
           // expiry would beat to the catch.
           expiredVerdictMessage = streamVerdictMessageRef.current;
-          expireAnswered('stream');
+          if (delivered) expireAnswered('stream');
         }, BASE_RETRY_DELAY_MS);
         try {
           for await (const event of provider.subscribeEvents(sessionId, {

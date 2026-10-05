@@ -685,6 +685,54 @@ describe('useManagedSession', () => {
     }
   });
 
+  it('keeps a terminal stream verdict standing through an unanswered reconnect', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          yield event(1);
+          throw Object.assign(new Error('session gone'), { status: 404 });
+        }
+        // An open-but-silent connection: it never yields, throws, or
+        // returns — a proxy black-holing the response body.
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // Attempt 2 opens at t=3000 and stays open past the +3s
+      // proof-of-life point without ever answering: wall time alone is
+      // not the leg's success evidence, so the verdict stands.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9_100);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
   it('expires a transient stream failure on an error-free idle reconnect', async () => {
     vi.useFakeTimers();
     const restoreBackoff = deterministicBackoff();
@@ -699,8 +747,8 @@ describe('useManagedSession', () => {
           throw Object.assign(new Error('upstream unavailable'), {
             status: 502,
           });
-        yield* [];
-        // A live but idle session: the reconnect stays open and quiet.
+        // A live but idle session: the reconnect replays history only.
+        yield event(1);
         await new Promise((resolve) =>
           request.signal?.addEventListener('abort', resolve),
         );
@@ -723,6 +771,54 @@ describe('useManagedSession', () => {
       });
       expect(subscribeCalls).toBe(2);
       expect(latest?.error).toBeUndefined();
+      expect(latest?.stoppedReason).toBeUndefined();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a transient stream failure standing through an unanswered reconnect', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1)
+          throw Object.assign(new Error('upstream unavailable'), {
+            status: 502,
+          });
+        yield* [];
+        // An open-but-silent connection: no frame ever arrives and the
+        // attempt neither throws nor returns — a proxy black-holing the
+        // response body.
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBe('upstream unavailable');
+      // Attempt 2 opens at t=3000 and stays open past the +3s
+      // proof-of-life point without ever answering: the transient record
+      // it never contradicted stays standing.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9_100);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.error).toBe('upstream unavailable');
       expect(latest?.stoppedReason).toBeUndefined();
     } finally {
       restoreBackoff();
