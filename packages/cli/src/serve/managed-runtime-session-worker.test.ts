@@ -1738,6 +1738,137 @@ describe.skipIf(process.platform === 'win32')(
     );
 
     it(
+      'a retirement settles what still can be proven before going terminal',
+      // The reaper's backoff spaces its ticks seconds apart.
+      { timeout: 30_000 },
+      async () => {
+        // One aged unreadable ledger retires while a second ledger's
+        // undatable group is still outstanding: the retirement keeps the
+        // lift from ever firing, but the provable entry keeps its retries —
+        // once the group dies, its ledger is swept clean even though the
+        // quarantine stands.
+        {
+          const sweeperConfig = new Config({
+            sessionId: '11111111-2222-3333-4444-555555555555',
+            targetDir: root,
+            cwd: root,
+            debugMode: false,
+            model: 'test-model',
+            usageStatisticsEnabled: false,
+            telemetry: { enabled: false },
+            deferTelemetryInitialization: true,
+          });
+          const reportSpy = vi.spyOn(
+            sweeperConfig,
+            'reportManagedEngineQuarantine',
+          );
+          const clearSpy = vi.spyOn(
+            sweeperConfig,
+            'clearManagedEngineQuarantine',
+          );
+          const ledgerDir = path.join(
+            sweeperConfig.storage.getProjectTempDir(),
+            'managed-runtime',
+          );
+          await mkdir(ledgerDir, { recursive: true });
+          // An AGED unreadable ledger: the arming sweep sets it aside.
+          const ghost = path.join(ledgerDir, 'ghost.json');
+          await writeFile(ghost, '{not a ledger', 'utf8');
+          const past = new Date(Date.now() - 120_000);
+          utimesSync(ghost, past, past);
+          // …and a stale ledger whose group the sweep cannot date, so the
+          // same rejection also names groups.
+          const leader = spawn('bash', ['-c', 'sleep 300 & exit 0'], {
+            detached: true,
+            stdio: 'ignore',
+          });
+          leader.unref();
+          leader.on('exit', () => undefined);
+          if (leader.pid === undefined) throw new Error('spawn failed');
+          const groupId = leader.pid;
+          try {
+            const memberDeadline = Date.now() + 10_000;
+            for (;;) {
+              const rows = [...queryProcessTable().values()].filter(
+                (row) => row.pgid === groupId,
+              );
+              const leaderGone = !rows.some((row) => row.pid === groupId);
+              const memberAlive = rows.some((row) => row.pid !== groupId);
+              if (
+                processGroupLiveness(groupId) === 'alive' &&
+                leaderGone &&
+                memberAlive
+              ) {
+                break;
+              }
+              if (Date.now() > memberDeadline) {
+                throw new Error('the leaderless member never appeared');
+              }
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+            const staleFile = path.join(ledgerDir, 'stale.json');
+            testInternals.writeLedgerDocument(
+              staleFile,
+              {
+                pid: 42424244,
+                pgid: 42424244,
+                incarnation: 'incarnation-stale',
+                startedAt: Date.now(),
+              },
+              [
+                {
+                  pgid: groupId,
+                  callId: 'call-1',
+                  startedAt: Date.now() - 60_000,
+                },
+              ],
+            );
+            environment = createManagedRuntimeEnvironment(
+              sweeperConfig,
+              () => ({
+                command: process.execPath,
+                args: [script],
+                env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
+              }),
+            );
+            await vi.waitFor(
+              () => {
+                expect(reportSpy).toHaveBeenCalled();
+              },
+              { timeout: 15_000 },
+            );
+            expect(clearSpy).not.toHaveBeenCalled();
+
+            // The named group dies: a reaper that retired with the ghost
+            // would never re-sweep the stale ledger, so its file going away
+            // witnesses the retry; the lift must still never come.
+            try {
+              process.kill(-groupId, 'SIGKILL');
+            } catch {
+              // gone already
+            }
+            await vi.waitFor(
+              () => {
+                expect(processGroupLiveness(groupId)).toBe('gone');
+                expect(existsSync(staleFile)).toBe(false);
+              },
+              { timeout: 15_000 },
+            );
+            await new Promise((resolve) => setTimeout(resolve, 2_500));
+            expect(clearSpy).not.toHaveBeenCalled();
+            expect(reportSpy).toHaveBeenCalledTimes(1);
+          } finally {
+            try {
+              process.kill(-groupId, 'SIGKILL');
+            } catch {
+              // gone already
+            }
+          }
+        }
+      },
+    );
+
+    it(
       'holds the quarantine while a group named by a deleted ledger still runs',
       // The reaper's backoff spaces its ticks seconds apart.
       { timeout: 30_000 },
@@ -1832,6 +1963,26 @@ describe.skipIf(process.platform === 'win32')(
               await new Promise((resolve) => setTimeout(resolve, 50));
             }
             expect(clearSpy).not.toHaveBeenCalled();
+
+            // An unrelated ledger the retry sweep CAN prove: a
+            // directory-level 'proven' earned by a ledger that did not arm
+            // the quarantine must not lift it either.
+            testInternals.writeLedgerDocument(
+              path.join(ledgerDir, 'settled.json'),
+              {
+                pid: 42424244,
+                pgid: 42424244,
+                incarnation: 'incarnation-settled',
+                startedAt: Date.now() - 60_000,
+              },
+              [
+                {
+                  pgid: 42424245,
+                  callId: 'call-9',
+                  startedAt: Date.now() - 60_000,
+                },
+              ],
+            );
 
             // Deleting the ledger must not lift: the group it named still runs.
             await rm(workFile);

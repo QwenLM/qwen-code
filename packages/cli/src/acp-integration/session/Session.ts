@@ -857,12 +857,16 @@ type ManagedConversationActivation = {
 
 /** Whether an activation failure is the liftable engine-quarantine refusal. */
 function isManagedEngineQuarantineRefusal(error: unknown): boolean {
+  // typeof null === 'object': a peer that serializes an absent `data` as
+  // null must read as no refusal at all, never throw inside the catch.
+  const data =
+    typeof error === 'object' && error !== null
+      ? (error as { data?: unknown }).data
+      : undefined;
   return (
-    typeof error === 'object' &&
-    error !== null &&
-    typeof (error as { data?: unknown }).data === 'object' &&
-    (error as { data: { errorKind?: unknown } }).data.errorKind ===
-      'managed_engine_quarantined'
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { errorKind?: unknown }).errorKind === 'managed_engine_quarantined'
   );
 }
 

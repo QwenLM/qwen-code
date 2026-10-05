@@ -2640,11 +2640,6 @@ describe('per-hunk probes against real git', () => {
         // function's screen. Paths go in through JSON.stringify rather than
         // shell interpolation: a TMPDIR holding a space would otherwise split
         // the argument and the shim would silently plant nothing.
-        // Pin the shim to CommonJS: an up-tree package.json with
-        // "type": "module" (a stray /tmp/package.json on a shared runner)
-        // otherwise flips the extensionless shim to ESM, where require is
-        // undefined and the plant never arms.
-        writeFileSync(join(shimDir, 'package.json'), '{"type":"commonjs"}');
         writeFileSync(
           join(shimDir, 'git'),
           `#!/usr/bin/env node

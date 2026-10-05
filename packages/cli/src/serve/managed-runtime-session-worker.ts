@@ -6,7 +6,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -980,34 +980,58 @@ function sweepStaleRuntimeLedgers(
     armedStaleSweeps.add(ledgerDir);
     const reason = toRuntimeError(error);
     quarantine.report(reason);
-    // Same rule as a single ledger's reaper: the lift needs the sweep's own
-    // proof — or, with the file itself gone, the deaths of the groups the
-    // last failure named. A retired ledger can never be proven — and the
-    // retirement rides the rejection, since the file it set aside is judged
-    // by no later sweep.
+    // The lift is pinned to what armed the quarantine. The files the
+    // rejection named must each be judged clean by a sweep themselves — a
+    // directory-level 'proven' an unrelated ledger earned lifts nothing,
+    // and a file gone without a judgement proves nothing either: the groups
+    // the failures named answer by liveness instead. A retired ledger can
+    // never be proven, so a retirement the rejection carries makes the end
+    // terminal — but only after everything else the directory held has been
+    // proven, since a provable group keeps its retries.
     let lastNamed = unprovenGroupsOf(error);
-    const retired = sweepRetiredLedger(error);
+    let sawRetired = sweepRetiredLedger(error);
+    const armedFiles = new Set(workFilesOf(error));
     startLedgerReaper(
       async (): Promise<LedgerReaperVerdict> => {
-        if (retired) return 'terminal';
-        let verdict: LedgerSweepVerdict;
+        // The files this pass itself judged clean.
+        const judged = new Set<string>();
         try {
-          verdict = await sweepStaleLedgers(ledgerDir, options);
+          await sweepStaleLedgers(ledgerDir, options, (workFile) =>
+            judged.add(workFile),
+          );
         } catch (retryError) {
-          if (sweepRetiredLedger(retryError)) return 'terminal';
-          lastNamed = unprovenGroupsOf(retryError);
+          sawRetired = sawRetired || sweepRetiredLedger(retryError);
+          // Accumulate, never replace: a failure that names fewer groups —
+          // or none, a ledger nobody could read — must not forget the ones
+          // earlier failures left outstanding.
+          lastNamed = [
+            ...new Set([...lastNamed, ...unprovenGroupsOf(retryError)]),
+          ];
+          for (const workFile of workFilesOf(retryError)) {
+            armedFiles.add(workFile);
+          }
           throw retryError;
         }
-        // The sweep's own proof lifts — a pass that judged a ledger clean.
-        // 'absent' judges nothing: the groups the last failure named get
-        // re-probed by liveness instead.
-        if (verdict === 'proven') return 'proven';
+        let needsLiveness = false;
+        for (const workFile of armedFiles) {
+          if (judged.has(workFile)) continue;
+          if (!existsSync(workFile)) {
+            needsLiveness = true;
+            continue;
+          }
+          // Present but unjudged on a resolving pass — it landed between
+          // the readdir and the judgement; the next tick judges it.
+          return 'unproven';
+        }
+        if (!needsLiveness) return sawRetired ? 'terminal' : 'proven';
         const alive = lastNamed.filter(
           (pgid) => processGroupLiveness(pgid) !== 'gone',
         );
-        if (alive.length === 0) return 'proven';
-        lastNamed = alive;
-        return 'unproven';
+        if (alive.length > 0) {
+          lastNamed = alive;
+          return 'unproven';
+        }
+        return sawRetired ? 'terminal' : 'proven';
       },
       () => {
         armedStaleSweeps.delete(ledgerDir);
@@ -1015,6 +1039,17 @@ function sweepStaleRuntimeLedgers(
       },
     );
   });
+}
+
+/** The ledger files a sweep rejection names. */
+function workFilesOf(error: unknown): string[] {
+  const failures = error instanceof AggregateError ? error.errors : [error];
+  return failures.flatMap((failure) =>
+    failure instanceof LedgerSweepUnprovenError ||
+    failure instanceof LedgerSweepRetiredError
+      ? [failure.workFile]
+      : [],
+  );
 }
 
 /** The group ids a sweep rejection still names as unproven. */

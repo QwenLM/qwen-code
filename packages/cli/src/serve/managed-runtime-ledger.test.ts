@@ -33,6 +33,9 @@ import {
  * root.
  */
 const rmSyncControl = vi.hoisted(() => ({ failing: new Set<string>() }));
+// A controllable readFileSync for the transient read-failure paths: enrolled
+// paths throw EMFILE, everything else passes through.
+const readFileSyncControl = vi.hoisted(() => ({ failing: new Set<string>() }));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
@@ -48,6 +51,20 @@ vi.mock('node:fs', async (importOriginal) => {
       }
       return actual.rmSync(target, options);
     },
+    readFileSync: ((target: unknown, ...rest: unknown[]): unknown => {
+      if (
+        typeof target === 'string' &&
+        readFileSyncControl.failing.has(target)
+      ) {
+        throw Object.assign(new Error(`EMFILE: too many open files`), {
+          code: 'EMFILE',
+        });
+      }
+      return (actual.readFileSync as (...args: unknown[]) => unknown)(
+        target,
+        ...rest,
+      );
+    }) as typeof actual.readFileSync,
   };
 });
 
@@ -581,6 +598,28 @@ describe('Managed Runtime ledger', () => {
         }),
       ).rejects.toBeInstanceOf(LedgerSweepUnprovenError);
       expect(signal).not.toHaveBeenCalled();
+    });
+
+    it('a momentarily unreadable ledger is retired by no sweep', async () => {
+      // A read-side failure — EMFILE under fd pressure, EIO on a failing
+      // tmpdir — is transient and says nothing about the bytes: even past
+      // the debris age the ledger stays in place, rejected unproven rather
+      // than retired, so the next pass reads it again.
+      const workFile = path.join(root, 'blocked.json');
+      makeLedgerFile(workFile, { pid: 42424246 });
+      const aged = new Date(Date.now() - 120_000);
+      utimesSync(workFile, aged, aged);
+      readFileSyncControl.failing.add(workFile);
+      await expect(sweepWorkerLedger(workFile)).rejects.toBeInstanceOf(
+        LedgerSweepUnprovenError,
+      );
+      expect(existsSync(workFile)).toBe(true);
+      expect(existsSync(path.join(root, 'blocked.unreadable'))).toBe(false);
+
+      // The transient failure past, the retry reads the same bytes clean.
+      readFileSyncControl.failing.delete(workFile);
+      await expect(sweepWorkerLedger(workFile)).resolves.toBe('proven');
+      expect(existsSync(workFile)).toBe(false);
     });
 
     it.skipIf(!POSIX)(
@@ -1125,6 +1164,105 @@ describe('Managed Runtime ledger', () => {
       expect(verdict).toBe('proven');
       expect(signal).not.toHaveBeenCalled();
       expect(existsSync(workFile)).toBe(false);
+    });
+
+    it('never matches a previous-boot record whose wall stamp stepped back', async () => {
+      // The ledger outlived a reboot AND the wall clock stepped backwards
+      // across it (chrony makestep, a snapshot restore): the wall age of
+      // such a record is negative, and a negative age matches every live
+      // process — the identity guard inverted into an ownership assertion.
+      // The boot stamp alone must judge it: a reboot killed everything the
+      // record named, so the holder of its recycled id is never signalled.
+      const workFile = path.join(root, 'ledger.json');
+      testInternals.writeLedgerDocument(
+        workFile,
+        {
+          pid: 42424246,
+          pgid: 42424246,
+          incarnation: 'incarnation-1',
+          startedAt: Date.now() + 3_600_000,
+        },
+        [
+          {
+            pgid: 202,
+            callId: 'call-1',
+            startedAt: Date.now() + 3_600_000,
+            uptimeMs: os.uptime() * 1000 + 3_600_000,
+          },
+        ],
+      );
+      const signal = vi.fn(() => 'sent' as const);
+      const verdict = await sweepWorkerLedger(workFile, {
+        sys: {
+          platform: 'linux',
+          liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+          signal,
+          table: () =>
+            new Map([
+              [
+                202,
+                {
+                  pid: 202,
+                  pgid: 202,
+                  runningMs: 5_000,
+                  args: 'node someone-else.js',
+                },
+              ],
+            ]),
+        },
+      });
+      expect(verdict).toBe('proven');
+      expect(signal).not.toHaveBeenCalled();
+      expect(existsSync(workFile)).toBe(false);
+    });
+
+    it('never matches a record whose wall stamp is in the future', async () => {
+      // Without a boot stamp — a record from before uptimeMs existed, or
+      // macOS's wall-clock domain — a backward clock step still must not
+      // invert the guard: the group is held unproven and nothing is
+      // signalled until the clock re-passes the stamp.
+      const workFile = path.join(root, 'ledger.json');
+      testInternals.writeLedgerDocument(
+        workFile,
+        {
+          pid: 42424246,
+          pgid: 42424246,
+          incarnation: 'incarnation-1',
+          startedAt: Date.now(),
+        },
+        [
+          {
+            pgid: 202,
+            callId: 'call-1',
+            startedAt: Date.now() + 3_600_000,
+          },
+        ],
+      );
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: () => 'alive',
+            signal,
+            table: () =>
+              new Map([
+                [
+                  202,
+                  {
+                    pid: 202,
+                    pgid: 202,
+                    runningMs: 5_000,
+                    args: 'node someone-else.js',
+                  },
+                ],
+              ]),
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [42424246, 202] });
+      expect(signal).not.toHaveBeenCalled();
+      expect(existsSync(workFile)).toBe(true);
     });
 
     it('on macOS an uptime-stamped record is judged on the wall clock', async () => {
@@ -2297,9 +2435,17 @@ describe('Managed Runtime ledger', () => {
         expect(written.worker.hostPid).toBe(1);
         // The record reads back, and a witnessed sweep can close it out.
         expect(testInternals.readLedgerDocument(workFile)).toBeDefined();
+        // The ledger's worker is this process itself, so the sweep gets a
+        // sys seam that cannot reach the runner: un-seamed, the witnessed
+        // branch on win32 ends in taskkill against the test's own pid.
+        const signal = vi.fn(() => 'sent' as const);
         await expect(
-          sweepWorkerLedger(workFile, { exitWitnessed: true }),
+          sweepWorkerLedger(workFile, {
+            exitWitnessed: true,
+            sys: { liveness: () => 'gone', signal, table: () => undefined },
+          }),
         ).resolves.toBe('proven');
+        expect(signal).not.toHaveBeenCalled();
         expect(existsSync(workFile)).toBe(false);
       } finally {
         if (descriptor !== undefined) {

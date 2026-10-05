@@ -481,6 +481,12 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
       !isAlive(worker.pid) && !isAlive(sleepPid) ? true : undefined,
     );
     await expect(running).rejects.toThrow();
+    // M5c.3's first half: the worker's disconnect-driven close swept its
+    // ledger too — the file is gone with the groups it named, not left
+    // behind for a later child's startup sweep.
+    await waitFor(async () =>
+      (await managedRuntimeLedgerFiles()).length === 0 ? true : undefined,
+    );
   }, 120_000);
 
   it('blocks the session when a call outcome cannot be learned', async () => {

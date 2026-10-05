@@ -245,10 +245,13 @@ function recordAgeMs(
   if (record.uptimeMs !== undefined && platform === 'linux') {
     const bootNow = os.uptime() * 1000;
     // A stamp ahead of this boot belongs to a previous one: the ledger
-    // outlived a reboot, and a negative age here would read its groups as
-    // older than any live process — the identity guard inverted into an
-    // ownership assertion. The wall clock ages such a record instead.
+    // outlived a reboot, and the reboot killed everything it named. Aging
+    // it by the wall clock instead could go negative after a backward step
+    // (chrony `makestep`, a snapshot restore) and read ANY live process as
+    // the record's — the identity guard inverted into an ownership
+    // assertion — so such a record matches nothing at all.
     if (record.uptimeMs <= bootNow) return bootNow - record.uptimeMs;
+    return Number.POSITIVE_INFINITY;
   }
   return now - record.startedAt;
 }
@@ -267,6 +270,9 @@ function isLedgerWorker(
   platform: NodeJS.Platform = process.platform,
 ): boolean {
   if (!row.args.includes('managed-runtime-worker')) return false;
+  // A record from the future — the wall clock stepped back past its stamp —
+  // matches nothing: a negative age would be older than every live process.
+  if (now < record.startedAt) return false;
   return (
     row.runningMs >= recordAgeMs(record, now, platform) - RECORD_LEAD_SKEW_MS
   );
@@ -283,6 +289,8 @@ function groupMatchesRecord(
   now: number,
   platform: NodeJS.Platform = process.platform,
 ): boolean {
+  // Same refusal as isLedgerWorker: a future-stamped record matches nothing.
+  if (now < record.startedAt) return false;
   const recordedAge = recordAgeMs(record, now, platform);
   return members.some(
     (member) => member.runningMs >= recordedAge - RECORD_LEAD_SKEW_MS,
@@ -334,9 +342,22 @@ function isFiniteNumber(value: unknown): value is number {
 function readLedgerDocument(
   workFile: string,
 ): ManagedRuntimeLedgerDocument | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(workFile, 'utf8');
+  } catch {
+    return undefined;
+  }
+  return parseLedgerDocument(raw);
+}
+
+/** The parsed ledger, or undefined when the bytes are not one. */
+function parseLedgerDocument(
+  raw: string,
+): ManagedRuntimeLedgerDocument | undefined {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(workFile, 'utf8'));
+    parsed = JSON.parse(raw);
   } catch {
     return undefined;
   }
@@ -701,15 +722,25 @@ export async function sweepWorkerLedger(
   const liveness = options.sys?.liveness ?? processGroupLiveness;
   const signal = options.sys?.signal ?? signalProcessGroup;
   const proofTimeoutMs = options.proofTimeoutMs ?? SWEEP_PROOF_TIMEOUT_MS;
-  const document = readLedgerDocument(workFile);
+  // The reader and the bytes are judged apart: a read-side failure — fd
+  // exhaustion, a failing or networked tmpdir, ENOMEM — is transient and
+  // says nothing about the ledger, so the file stays in place, unproven,
+  // for the next pass. Only bytes that are not a ledger can retire it.
+  let raw: string;
+  try {
+    raw = readFileSync(workFile, 'utf8');
+  } catch (error) {
+    if (errnoCode(error) === 'ENOENT') return 'absent';
+    throw new LedgerSweepUnprovenError(
+      workFile,
+      [],
+      `The Managed Runtime ledger ${workFile} cannot be read right now (${
+        errnoCode(error) ?? String(error)
+      }); the stop it records stays unproven.`,
+    );
+  }
+  const document = parseLedgerDocument(raw);
   if (!document) {
-    let exists = true;
-    try {
-      readFileSync(workFile);
-    } catch (error) {
-      if (errnoCode(error) === 'ENOENT') exists = false;
-    }
-    if (!exists) return 'absent';
     // A ledger nobody can read is an operator's evidence, not a retryable
     // stop: a reaper would re-read the same immutable bytes forever and
     // the quarantine could never lift. Once it outlives the debris age —
@@ -959,10 +990,14 @@ function pidAlive(pid: number): boolean {
  * worker-outlived-child identity the live table can judge is swept; corrupt
  * files and survivors collect into one rejection. A missing directory reads
  * 'absent' — nothing was ever recorded, and nothing was judged either.
+ * `onFileJudged` hears about every file this pass itself judged clean, so a
+ * caller can pin its own proof to the files it means rather than to anything
+ * the directory happened to hold.
  */
 export async function sweepStaleLedgers(
   directory: string,
   options: LedgerSweepOptions = {},
+  onFileJudged?: (workFile: string) => void,
 ): Promise<LedgerSweepVerdict> {
   let entries: Dirent[];
   try {
@@ -1013,6 +1048,7 @@ export async function sweepStaleLedgers(
       // proof wait; a shared one would age by everything before it.
       if ((await sweepWorkerLedger(workFile, options)) === 'proven') {
         judgedClean += 1;
+        onFileJudged?.(workFile);
       }
     } catch (error) {
       failures.push(error as Error);
