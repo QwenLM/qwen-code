@@ -762,7 +762,9 @@ it('re-drives a refused final forward on an attached record without any client a
   });
   await prepared.sink.finish('stdout', true);
   await prepared.sink.finish('stderr', true);
-  // The one transient failure on the final record forward.
+  // The one transient failure on the final record forward. Fake timers
+  // keep the re-drive tick parked while the pre-re-drive state is read.
+  vi.useFakeTimers();
   const advance = vi
     .spyOn(r.orchestrator, 'advanceOutput')
     .mockRejectedValueOnce(new Error('transient store 5xx'));
@@ -793,6 +795,8 @@ it('re-drives a refused final forward on an attached record without any client a
   expect(stranded.stopReason).toBeNull();
   // No client retry, no re-attach, no manual settle: the refused body's
   // own re-drive completes the record.
+  await vi.advanceTimersByTimeAsync(0);
+  vi.useRealTimers();
   await vi.waitFor(
     () => {
       const record = parseChildRun(
@@ -807,6 +811,297 @@ it('re-drives a refused final forward on an attached record without any client a
     },
     { timeout: 5_000, interval: 50 },
   );
+});
+
+it('heals a refused final forward through the bounded redrive when the store flaps twice (S15c)', async () => {
+  // One immediate tick cannot heal a brief store outage: the re-drive is
+  // bounded, so a refusal on both the forward and its first retry still
+  // lands on its second attempt.
+  const r = await rig();
+  vi.useFakeTimers();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.orchestrator.admit({
+    shellId: 'execution-flap',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'execution-flap',
+    args: { command: 'echo bye', is_background: true },
+  });
+  await r.orchestrator.dispatchStarted('execution-flap', BINDING);
+  await r.orchestrator.attach('execution-flap', BINDING, { pid: 7 });
+  const request = backgroundRequest(r.key, '1');
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'execution-flap';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-a',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  prepared.sink.setStarted(7);
+  await prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  await prepared.sink.finish('stderr', true);
+  // The route's own advance fails (#1), and the redrive's first attempt
+  // meets the same unhealthy store one backoff earlier than it would
+  // land: the bounded chain reaches its second attempt with #3.
+  const advance = vi
+    .spyOn(r.orchestrator, 'advanceOutput')
+    .mockRejectedValueOnce(new Error('transient store 5xx #1'))
+    .mockRejectedValueOnce(new Error('transient store 5xx #2'));
+  const refused = await fetch(r.descriptor.url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${r.descriptor.token}`,
+      'cache-control': 'no-store',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      operation: 'finalize',
+      executionCallId: 'execution-flap',
+      started: true,
+      failed: false,
+      process: { exitCode: 0, signal: null, previewBytes: 0 },
+      executionStatus: 'success',
+      responseParts: [],
+      previewTruncated: false,
+      error: null,
+    }),
+  });
+  expect(refused.status).toBeGreaterThanOrEqual(400);
+  expect(
+    parseChildRun(
+      session!.authority.extensionRecord('child_run', 'execution-flap')!.record,
+    ).stopReason,
+  ).toBeNull();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(
+    parseChildRun(
+      session!.authority.extensionRecord('child_run', 'execution-flap')!.record,
+    ).stopReason,
+  ).toBeNull();
+  // The backoff step's attempted number two also fires inside the
+  // fake-timer window before the wall clock resumes.
+  await vi.advanceTimersByTimeAsync(400);
+  vi.useRealTimers();
+  await vi.waitFor(
+    () => {
+      const record = parseChildRun(
+        session!.authority.extensionRecord('child_run', 'execution-flap')!
+          .record,
+      );
+      expect(record).toMatchObject({
+        stopReason: 'exited',
+        run: { state: 'settled', execution: 'settled' },
+      });
+    },
+    { timeout: 5_000, interval: 50 },
+  );
+  expect(advance.mock.calls.length).toBeGreaterThanOrEqual(3);
+});
+
+it('waits an in-flight redrive inside the drain instead of closing past it (P2-A)', async () => {
+  // A re-drive already running must land before the publisher's drain
+  // answers its close: alone among the close paths it owns a stranded
+  // record that only it can still settle.
+  const r = await rig();
+  vi.useFakeTimers();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.orchestrator.admit({
+    shellId: 'execution-drain',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'execution-drain',
+    args: { command: 'echo bye', is_background: true },
+  });
+  await r.orchestrator.dispatchStarted('execution-drain', BINDING);
+  await r.orchestrator.attach('execution-drain', BINDING, { pid: 7 });
+  const request = backgroundRequest(r.key, '1');
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'execution-drain';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-a',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  prepared.sink.setStarted(7);
+  await prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  await prepared.sink.finish('stderr', true);
+  vi.spyOn(r.orchestrator, 'advanceOutput').mockRejectedValueOnce(
+    new Error('transient store 5xx'),
+  );
+  // The in-flight settle of the tick holds a gate we control.
+  let releaseGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const original = publisher!.settleAttached.bind(publisher!);
+  const settled = vi
+    .spyOn(publisher!, 'settleAttached')
+    .mockImplementation(async (executionCallId: string) => {
+      await gate;
+      await original(executionCallId);
+    });
+  const refused = await fetch(r.descriptor.url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${r.descriptor.token}`,
+      'cache-control': 'no-store',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      operation: 'finalize',
+      executionCallId: 'execution-drain',
+      started: true,
+      failed: false,
+      process: { exitCode: 0, signal: null, previewBytes: 0 },
+      executionStatus: 'success',
+      responseParts: [],
+      previewTruncated: false,
+      error: null,
+    }),
+  });
+  expect(refused.status).toBeGreaterThanOrEqual(400);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(settled).toHaveBeenCalledOnce();
+  vi.useRealTimers();
+  const closing = publisher!.close();
+  let answered = false;
+  void closing.then(() => {
+    answered = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(answered).toBe(false);
+  releaseGate();
+  await closing;
+  const record = parseChildRun(
+    session!.authority.extensionRecord('child_run', 'execution-drain')!.record,
+  );
+  expect(record).toMatchObject({
+    stopReason: 'exited',
+    run: { state: 'settled', execution: 'settled' },
+  });
+});
+
+it('advances the record when a blind-capture revision lands, without waiting for another output (P2-B)', async () => {
+  // The boxed failure lands its own manifest revision — the record stops
+  // advertising the still-pending last healthy forward the moment the
+  // degradation is committed, not at the next edging output.
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.orchestrator.admit({
+    shellId: 'execution-blind',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'execution-blind',
+    args: { command: 'echo bye', is_background: true },
+  });
+  await r.orchestrator.dispatchStarted('execution-blind', BINDING);
+  await r.orchestrator.attach('execution-blind', BINDING, { pid: 7 });
+  const request = backgroundRequest(r.key, '1');
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'execution-blind';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-a',
+    request.reference.sessionId,
+  );
+  await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  const outputRef = () =>
+    parseChildRun(
+      session!.authority.extensionRecord('child_run', 'execution-blind')!
+        .record,
+    ).outputRef;
+  const openRef = outputRef()!;
+  expect(openRef).not.toBeNull();
+  // The one segment publish is refused by the record resources: the
+  // stream latches blind, and the announced revision lands alone, ahead
+  // of any edging, carrying exactly the failure's name.
+  const origPublish = session!.resources.publish.bind(session!.resources);
+  let failPages = 1;
+  const resourcesSpy = vi
+    .spyOn(session!.resources, 'publish')
+    .mockImplementation(async (kind: string, bytes: Buffer) => {
+      if (kind === 'managed-tool-result-page' && failPages-- > 0)
+        throw new Error('storage gone');
+      return origPublish(kind, bytes);
+    });
+  const writeOps: Array<Promise<Response>> = [];
+  for (let bucket = 0; bucket < 15; bucket++) {
+    writeOps.push(
+      fetch(r.descriptor.url, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${r.descriptor.token}`,
+          'cache-control': 'no-store',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          operation: 'write',
+          executionCallId: 'execution-blind',
+          stream: 'stdout',
+          offset: bucket * 65536,
+          bytesBase64: Buffer.alloc(65536, 6).toString('base64'),
+        }),
+      }),
+    );
+  }
+  for (const op of writeOps) expect((await op).status).toBeLessThan(300);
+  // A finish flushes the partial page — its single refused page publish
+  // latches the stream blind, and the announced revision alone reaches
+  // its record.
+  const finish = await fetch(r.descriptor.url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${r.descriptor.token}`,
+      'cache-control': 'no-store',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      operation: 'finish',
+      executionCallId: 'execution-blind',
+      stream: 'stdout',
+      complete: false,
+    }),
+  });
+  expect(finish.status).toBeLessThan(300);
+  void resourcesSpy;
+  await vi.waitFor(
+    () => {
+      const next = outputRef();
+      expect(next).not.toBeNull();
+      expect(next).not.toEqual(openRef);
+    },
+    { timeout: 5_000, interval: 50 },
+  );
+  const bytes = Buffer.from(await session!.resources.read(outputRef()!));
+  const manifest = JSON.parse(bytes.toString()) as Record<string, unknown>;
+  expect(manifest['captureStatus']).toBe('partial');
+  expect(manifest['captureReason']).toBe('storage_failed');
+  expect(manifest['executionStatus']).toBe('unknown');
 });
 
 it('swallows a refused write-arm forward and retries it on the next edging write (M8b)', async () => {
