@@ -252,9 +252,18 @@ public class HarnessCoordinator {
                 // that predecessor's own lease. Configuration-shaped 409s
                 // (the code says so) and every other failure meet it — and
                 // a codeless body must never take the contains() NPE hostage.
+                // A duplicate-admission 409 from the submit call itself is
+                // pre-admission too: no new admission happened on this
+                // pass, so the mark taken moments ago must not exempt the
+                // failure from the budget — without the exemption any
+                // Turn stuck behind another Session Turn's unsettled input
+                // would re-mark and re-POST the identical refusal forever.
                 String errorCode = error.getErrorCode();
                 terminal = transientFailure(claimed,
-                        submissionAttempted.get(), error,
+                        submissionAttempted.get()
+                                && !"hosted_prompt_recovery_required"
+                                        .equals(errorCode),
+                        error,
                         recoveryPath.get() && errorCode != null
                                 && LEASE_BOUNDED_409_CODES.contains(errorCode));
             }
@@ -357,10 +366,16 @@ public class HarnessCoordinator {
                     claimed.sessionId(), claimed.turnId()).orElseThrow();
             String previousEventEpoch = current.harnessEventEpoch();
             if (!attachment.eventEpoch().equals(previousEventEpoch)) {
+                // Only the epoch moves here, same rule as the plain-attach
+                // arms (R10-3): the consumed watermark stays put so a
+                // committed-but-undelivered journal tail still replays
+                // before this recovery's own commit.
                 store.recordRecoveryAdmission(current.tenantId(),
                         current.sessionId(), current.turnId(), owner,
-                        previousEventEpoch, attachment.eventEpoch(),
-                        attachment.lastEventId());
+                        previousEventEpoch, previousEventEpoch,
+                        attachment.eventEpoch(),
+                        current.harnessLastEventId() == null ? 0
+                                : current.harnessLastEventId());
                 requireLease(leaseLost);
                 current = store.findTurn(current.tenantId(),
                         current.sessionId(), current.turnId()).orElseThrow();
@@ -389,8 +404,8 @@ public class HarnessCoordinator {
                 }
                 store.recordRecoveryAdmission(current.tenantId(),
                         current.sessionId(), current.turnId(), owner,
-                        attachment.eventEpoch(), admission.eventEpoch(),
-                        admission.lastEventId());
+                        attachment.eventEpoch(), attachment.eventEpoch(),
+                        admission.eventEpoch(), admission.lastEventId());
                 current = store.findTurn(current.tenantId(),
                         current.sessionId(), current.turnId()).orElseThrow();
             }
@@ -403,18 +418,50 @@ public class HarnessCoordinator {
             // the Turn as hosted_harness_generation_mismatch while the
             // cancel was never issued, wedging every later prompt and the
             // Session close).
-            harness.cancel(session.tenantId(), session.sessionId());
-            requireLease(leaseLost);
+            try {
+                harness.cancel(session.tenantId(), session.sessionId());
+                requireLease(leaseLost);
+            } catch (DaemonHttpException error) {
+                // The plain cancel route aborts only a live, in-memory
+                // Turn; on a freshly attached Session whose parked Turn its
+                // old generation owned (a requested approval died with that
+                // owner), a coded 409 is the honest answer and re-issuing
+                // the same cancel cannot settle the Turn either. Adopt the
+                // attach epoch below and open the stream instead: the
+                // replay surfaces the pending Action, whose durable
+                // resolution the next redispatch settles as this cancel.
+                if (error.getStatusCode() != 409
+                        || !"hosted_turn_recovery_required"
+                                .equals(error.getErrorCode())) {
+                    throw error;
+                }
+                LOG.info("Hosted Harness cancel lands on no live Turn;"
+                                + " streaming the parked Turn instead"
+                                + " tenant={} session={} turn={}",
+                        claimed.tenantId(), claimed.sessionId(),
+                        claimed.turnId());
+            }
             // The plain attach minted this generation's own epoch: the
             // SSE that follows must stream THAT epoch, or the daemon
-            // rejects the channel on epoch mismatch (R8-1').
+            // rejects the channel on epoch mismatch (R8-1'). Only the epoch
+            // moves, though — the consumed watermark must NOT jump to the
+            // attach's journal tail, or a committed-but-undelivered tail
+            // (including this Turn's own turn.settled) is skipped forever
+            // while no action left can produce another terminal event
+            // (R10-3).
             current = claimed;
             String priorEpoch = current.harnessEventEpoch();
             if (!attachment.eventEpoch().equals(priorEpoch)) {
+                // Turn and Session epochs are expected separately: on a
+                // CANCELLING Turn whose own epoch was never recorded the
+                // Session may still carry an earlier Turn's, and the CAS
+                // must name each as it stands rather than assume equality.
                 store.recordRecoveryAdmission(current.tenantId(),
                         current.sessionId(), current.turnId(), owner,
-                        priorEpoch, attachment.eventEpoch(),
-                        attachment.lastEventId());
+                        priorEpoch, session.harnessEventEpoch(),
+                        attachment.eventEpoch(),
+                        current.harnessLastEventId() == null ? 0
+                                : current.harnessLastEventId());
                 requireLease(leaseLost);
                 current = store.findTurn(current.tenantId(),
                         current.sessionId(), current.turnId()).orElseThrow();
@@ -448,10 +495,17 @@ public class HarnessCoordinator {
                         claimed.sessionId(), claimed.turnId()).orElseThrow();
                 String priorEpoch = current.harnessEventEpoch();
                 if (!attachment.eventEpoch().equals(priorEpoch)) {
+                    // Only the epoch moves: the consumed watermark must NOT
+                    // jump to the attach's journal tail — anything the
+                    // prior generation committed but never delivered
+                    // (including this Turn's turn.settled) would be skipped
+                    // forever, and nothing left can produce another
+                    // terminal event (R10-3).
                     store.recordRecoveryAdmission(current.tenantId(),
                             current.sessionId(), current.turnId(), owner,
-                            priorEpoch, attachment.eventEpoch(),
-                            attachment.lastEventId());
+                            priorEpoch, priorEpoch, attachment.eventEpoch(),
+                            current.harnessLastEventId() == null ? 0
+                                    : current.harnessLastEventId());
                     requireLease(leaseLost);
                     current = store.findTurn(current.tenantId(),
                             current.sessionId(), current.turnId())
@@ -467,12 +521,16 @@ public class HarnessCoordinator {
                     && !attachment.bootId().equals(session.harnessBootId())
                     && store.withdrawSubmissionAttempted(claimed.tenantId(),
                             claimed.sessionId(), claimed.turnId(), owner)) {
-                // G3: the mark came from a generation that provably never
-                // admitted the prompt (the Turn carries no event epoch);
-                // withdraw it so the adopted generation may submit. A lost
-                // old-generation admission replays idempotently on the
-                // journal under the same commandId.
-                LOG.info("Withdrew the submission mark of a never-admitted"
+                // G3: the Turn carries no event epoch, so the mark's
+                // generation never consumed an admission reply; withdraw
+                // it so the adopted generation may submit. A null epoch
+                // does not prove non-admission (R10-4): a settled admission
+                // from the old generation replays idempotently on the
+                // journal under the same commandId, and an admission still
+                // unsettled answers the resubmit with a coded 409 the
+                // submit block adopts into an epoch migration instead of
+                // withdrawing a second time.
+                LOG.info("Withdrew the submission mark of a never-replied"
                                 + " Turn tenant={} session={} turn={}"
                                 + " formerGeneration={} adoptedGeneration={}",
                         claimed.tenantId(), claimed.sessionId(),
@@ -510,15 +568,53 @@ public class HarnessCoordinator {
                 store.markSubmissionAttempted(current.tenantId(),
                         current.sessionId(), current.turnId(), owner);
                 submissionAttempted.set(true);
-                Admission admission = harness.submit(session.tenantId(),
-                        session.sessionId(), current.promptId(),
-                        current.input(), current.payloadDigest());
-                requireLease(leaseLost);
-                store.recordAdmission(current.tenantId(),
-                        current.sessionId(), current.turnId(), owner,
-                        admission.eventEpoch(), admission.lastEventId());
-                current = store.findTurn(current.tenantId(),
-                        current.sessionId(), current.turnId()).orElseThrow();
+                Admission admission = null;
+                try {
+                    admission = harness.submit(session.tenantId(),
+                            session.sessionId(), current.promptId(),
+                            current.input(), current.payloadDigest());
+                    requireLease(leaseLost);
+                } catch (DaemonHttpException error) {
+                    // A coded 409 on this prompt proves the mark's lineage:
+                    // a prior generation's admission reply was lost, so no
+                    // epoch was ever recorded, yet the daemon durably holds
+                    // THIS prompt accepted and unsettled — re-POSTing can
+                    // never replay it. Adopt the attach's epoch with the
+                    // consumed watermark kept, then open the stream: the
+                    // replay surfaces the parked Turn (a requested Action
+                    // resolves durably, and a later redispatch drives what
+                    // it unlocks — R10-4). Without the prior mark this code
+                    // names a different Turn's work, so it stays a failure.
+                    if (error.getStatusCode() != 409
+                            || !"hosted_prompt_recovery_required"
+                                    .equals(error.getErrorCode())
+                            || !claimed.submissionAttempted()) {
+                        throw error;
+                    }
+                    LOG.info("Hosted Harness already holds the Turn's"
+                                    + " prompt tenant={} session={} turn={}"
+                                    + " adoptedGeneration={}",
+                            current.tenantId(), current.sessionId(),
+                            current.turnId(), attachment.bootId());
+                    store.recordRecoveryAdmission(current.tenantId(),
+                            current.sessionId(), current.turnId(), owner,
+                            null, session.harnessEventEpoch(),
+                            attachment.eventEpoch(),
+                            current.harnessLastEventId() == null ? 0
+                                    : current.harnessLastEventId());
+                    requireLease(leaseLost);
+                    current = store.findTurn(current.tenantId(),
+                            current.sessionId(), current.turnId())
+                            .orElseThrow();
+                }
+                if (admission != null) {
+                    store.recordAdmission(current.tenantId(),
+                            current.sessionId(), current.turnId(), owner,
+                            admission.eventEpoch(), admission.lastEventId());
+                    current = store.findTurn(current.tenantId(),
+                            current.sessionId(), current.turnId())
+                            .orElseThrow();
+                }
             }
         }
         if ("CANCELLING".equals(current.status())
@@ -817,6 +913,18 @@ public class HarnessCoordinator {
                 return fail(turn, refusal.getCode(),
                         "Hosted Harness refused to open the Session before"
                                 + " Turn admission.");
+            }
+            if (error instanceof DaemonHttpException http
+                    && "hosted_prompt_recovery_required"
+                            .equals(http.getErrorCode())) {
+                // R10-4: the duplicate-admission refusal is a named,
+                // fail-closed verdict on THIS prompt — record its own code
+                // like the named load refusal above, not the generic
+                // unavailable. Any other coded body keeps the older
+                // convention (it was reviewed that way).
+                return fail(turn, "hosted_prompt_recovery_required",
+                        "Hosted Harness refused the Turn before Turn"
+                                + " admission.");
             }
             return fail(turn, "hosted_harness_unavailable",
                     "Hosted Harness remained unavailable before Turn"

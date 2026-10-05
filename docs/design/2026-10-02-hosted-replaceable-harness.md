@@ -154,6 +154,13 @@ plain attach settles by `harness.cancel` directly, BEFORE the bind — the
 bind exists for submissions, and a cancel must never die stamped
 `hosted_harness_generation_mismatch` while the Turn it names cannot be
 cancelled (everything queued behind it wedges on the block it leaves).
+The cancel route is honest about what it can abort (R10-3): it 409s with
+`hosted_turn_recovery_required` when no live execution exists but the
+journal still holds the Turn unsettled (a parked approval whose owner
+died with its generation), and the coordinator then adopts the attach's
+epoch and streams instead of re-issuing a no-op cancel — the replay
+surfaces the parked Action, whose durable resolution a later redispatch
+settles as the cancel.
 
 ### D4 — A marked-but-never-admitted Turn withdraws its submission mark
 
@@ -179,13 +186,40 @@ covers exact replay). The boot-ID middleware rejecting before any Session
 route (`hosted-harness-contract.ts:68-83`) is the common case, not the
 invariant; the journal `commandId` is the invariant.
 
+Boundary of that idempotency (R10-4): replay exists only for an admission
+whose Turn settled. One still unsettled answers the resubmit with the
+coded 409 `hosted_prompt_recovery_required` instead — and a null epoch
+only ever proved the admission REPLY was lost, never that the admission
+did not land. The withdraw arm therefore resubmits exactly once; on the
+coded refusal (which it may honour only when this Turn's own submission
+mark already stood — otherwise the code names a _different_ Turn's parked
+input and stays a fail-closed pre-admission failure meeting the retry
+budget) it adopts the attachment's epoch through
+`recordRecoveryAdmission` **keeping the consumed watermark**, and opens
+the stream. Replay then surfaces the parked Turn (a pending Action
+resolves durably, and a later redispatch drives what it unlocks) instead
+of the mark churn the withdraw arm would otherwise repeat forever.
+
+That kept watermark is the same rule the two plain-attach
+epoch-migration arms now follow (R10-3): when the epoch moves to the
+newly attached generation, `harness_last_event_id` does **not** move to
+the attach's journal tail. Anything the prior generation committed but
+never delivered — including the Turn's own `turn.settled` — must still
+replay from the consumed cursor; nothing on the plain-attach path can
+produce another terminal event, so advancing the cursor to the tail
+would wedge the Turn RUNNING with its settle committed and invisible.
+
 ### D5 — "Cannot be taken over" becomes typed and terminal; "retry later" stays retriable
 
 TS: `recoverHostedRuntimeTurn` returns a discriminated result instead of
 `undefined` for the deterministic decline states, each a stable function of
 the journal — `await_action` (an approval group in `requested` state),
 `model_start` (no checkpoint yet, or a checkpoint at another model-start
-phase; also the load route's answer for a parked Turn on a no-tool Session),
+phase; also the load route's answer for a parked Turn on a no-tool Session —
+a cancellation-only load of that shape keeps the baseline retriable 409 on
+EVERY arm, first load or already-attached redrive alike, because no kernel
+is consulted on the no-tool path and a minted plain attach would wedge the
+coordinator on a no-op cancel (R10-1)),
 `shell_in_flight` (a Shell execution was in flight — produced only on a
 drive-recovery load, where the drives cannot be rebuilt; a passive load
 parks the same journal state instead), `batch_not_durable` (parked before
@@ -207,8 +241,13 @@ boundary is deliberately narrow so one store blip during a takeover load
 cannot terminally fail a Turn whose journal is intact. The load route's
 restore guard applies the same read before the takeover branch runs,
 because the restore bundle collapses both verdict kinds into one `blocked`
-bit — there a durable reason becomes the typed decline and anything else
-keeps the retriable 409.
+bit — there a durable reason becomes the typed decline for a drive
+takeover, while a bare load and every cancellation-only load keep the
+retriable 409. A plain attach never makes the journal's unsettled state
+writable: whatever the takeover answered, the prompt route itself refuses
+a fresh promptId while ANY input is unsettled
+(`hosted_prompt_recovery_required`), so no admission can stack onto a
+parked Turn's mid-flight checkpoint (R10-2).
 
 Thrown errors stay transient, exactly as today. The load route answers
 declines with new 409 code `hosted_turn_recovery_declined` plus a `reason`

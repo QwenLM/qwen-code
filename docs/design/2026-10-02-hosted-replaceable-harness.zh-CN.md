@@ -135,7 +135,12 @@ D5 解析用的错误体访问器，以及记在「边界与开放问题」里�
 `CANCELLING` Turn 直接在 bind **之前** 用 `harness.cancel` 终局——
 bind 只为提交存在，一次取消绝不能以其指向的 Turn 尚未被取消为名被
 打成 `hosted_harness_generation_mismatch`（它留下的 blocked 状态会把
-后续的一切都楔死）。
+后续的一切都楔死）。cancel 路由对「能中止什么」是诚实的（R10-3）：
+进程内没有活体执行而 journal 仍持有未结算 Turn 时（owner 随旧代
+消亡的停靠审批），它回答 409 `hosted_turn_recovery_required`；
+coordinator 随之改采 attachment 的 epoch 并开流，而不是再发一次
+必然空转的 cancel——重放把停靠的 Action 送到用户面前，其耐久落笔
+由后续重派以 cancel 的形式结算。
 
 ### D4 —— 已标记但从未准入的 Turn 撤回提交标记
 
@@ -159,13 +164,34 @@ bind 只为提交存在，一次取消绝不能以其指向的 Turn 尚未被取
 （`hosted-harness-contract.ts:68-83`）是常见情形，不是不变量；journal
 `commandId` 才是不变量。
 
+该幂等的边界（R10-4）：只有已结算 Turn 的准入才有重放。仍未结算的
+准入对重新提交回答编码化 409 `hosted_prompt_recovery_required`——
+而 epoch 为 null 从来只证明准入**回复**丢了，不证明准入没发生。
+因此撤回臂只重提交一次：遇到该编码拒绝时（且仅当本 Turn 的提交
+标记已经立着——否则这个 code 指向的是**另一个** Turn 停靠的输入，
+就必须保持为吃重试预算的 fail-closed 准入前失败），它把 attachment
+的 epoch 通过 `recordRecoveryAdmission` 采纳进来、**保持已消费
+水位不动**，然后开流。重放随之把停靠 Turn 送到用户面前（待决
+Action 可耐久落笔，后续重派驱动它所解锁的继续），而不是像旧撤回臂
+那样无限重复打标记。
+
+保留水位这条规则同样适用于两个 plain-attach 的 epoch 迁移臂
+（R10-3）：epoch 迁到新附着的代时，`harness_last_event_id`
+**不**跟随跳到 attach 的 journal 尾部。旧代已提交但从未送达的一切
+——包括该 Turn 自己的 `turn.settled`——仍须从已消费游标重放；
+plain-attach 路径上再没有任何动作能产生终态事件，把游标推进到尾部
+只会让 Turn 永远 RUNNING、其结算已提交却不可见。
+
 ### D5 —— 「接不了」类型化并终态；「稍后重试」保持可重试
 
 TS：`recoverHostedRuntimeTurn` 对确定性拒绝状态返回可判别结果，不再
 返回 `undefined`，每种都是 journal 的稳定函数——`await_action`
 （存在 `requested` 状态的审批组）、`model_start`（还没有 checkpoint，
 或 checkpoint 停在另一模型起始相位；也是 load 路由对无工具
-Session 停靠 Turn 的回答）、`shell_in_flight`（一个 Shell 执行在
+Session 停靠 Turn 的回答——同一形状的纯取消 load 在**每条**臂上
+都保持基线可重试 409，首次 load 与已附着重发一致，因为无工具路径
+根本没有内核可问，铸出 plain attach 只会让 coordinator 的 cancel
+空转楔死（R10-1））、`shell_in_flight`（一个 Shell 执行在
 飞行中——仅由 drive 恢复 load 产出，因为 drive 无法重建；passive
 load 会把同样的 journal 状态原地停靠）、`batch_not_durable`（批次停在
 `await_runtime` 之前且参数不耐久）、`checkpoint_blocked`（checkpoint
@@ -181,8 +207,12 @@ load 会把同样的 journal 状态原地停靠）、`batch_not_durable`（批�
 失败会作为瞬态重新抛出，永不 decline：这条边界刻意收窄，接管 load
 期间的一次 store 抖动不能把 journal 完好的 Turn 终态掉。load 路由的
 restore 守卫在接管分支之前做同一次判读，因为 restore bundle 会把两种
-判定折叠成一个 `blocked` 位——耐久 reason 在那里变成类型化 decline，
-其余仍回答可重试的 409。
+判定折叠成一个 `blocked` 位——耐久 reason 在那里对 drive 接管变成
+类型化 decline，而裸 load 与一切纯取消 load 保持可重试的 409。plain
+attach 绝不会让 journal 的未结算状态变成可写：无论接管回答了什么，
+prompt 路由自身都会在**任一**输入未结算时拒绝新的 promptId
+（`hosted_prompt_recovery_required`），任何准入都不可能叠上停靠
+Turn 的飞行中 checkpoint（R10-2）。
 
 抛出的错误保持瞬时，与今天完全一致。load 路由对 decline 回答新的
 409 code `hosted_turn_recovery_declined` 并带 `reason` 字段；在接管

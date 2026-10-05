@@ -63,6 +63,18 @@ vi.mock(
   '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js',
   () => ({
     HTTP_MANAGED_SESSION_STORE_CONTRACT: { maxInlineResourceBytes: 64 * 1024 },
+    // The load route's catch classifies with instanceof against this class;
+    // the wholesale module mock must still export it or the handler dies.
+    ManagedSessionStoreHttpError: class ManagedSessionStoreHttpError extends Error {
+      constructor(
+        readonly status: number,
+        readonly remoteCode: string,
+        message: string,
+      ) {
+        super(message);
+        this.name = 'ManagedSessionStoreHttpError';
+      }
+    },
     createHttpManagedSessionStores: (options: {
       sessionKey: { tenantId: string; workspaceId: string; sessionId: string };
     }) => {
