@@ -49,6 +49,14 @@ public class ManagedExtensionRecordStore {
             ManagedExtensionRecordStore.class);
     public static final String ERROR_REJECTED =
             "managed_session_extension_record_rejected";
+    /**
+     * The opening-command check of a first revision, verbatim the statement
+     * ManagedAgentMySqlIT explains, so the plan it probes is the plan the
+     * store gets.
+     */
+    public static final String OPENING_COMMAND_QUERY = "SELECT COUNT(*) FROM"
+            + " qwen_managed_session_extension_record WHERE"
+            + " session_scope_key = ? AND operation_hash = ?";
     private static final String EVENT_SUBTYPE = "managed_session_event_v1";
     private static final String COMMIT_SUBTYPE = "managed_session_commit_v1";
     private static final Set<String> EVENT_FIELDS = Set.of("v", "sequence",
@@ -160,6 +168,14 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
+     * What one journal transaction carries: the tool receipts, and the
+     * payload of its last activation.changed event (null when it has none),
+     * collected during the same pass so the commit does not parse twice.
+     */
+    record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation) {
+    }
+
+    /**
      * Applies the Stage H revisions that one journal transaction carries.
      * It runs inside the Session store's commit, after the transaction's
      * resources are stored, so {@code resources} reads each body verified.
@@ -169,15 +185,23 @@ public class ManagedExtensionRecordStore {
      * {@code eventCount} events, and its transaction must hold only those
      * events and then its commit marker, as the authority writes it.
      */
-    List<JsonNode> apply(String tenantId, String workspaceId, String sessionId,
+    ApplyResult apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
             Function<String, StoredResource> resources) {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
         List<JsonNode> receipts = new ArrayList<>();
+        JsonNode lastActivation = null;
         boolean applied = false;
         boolean shaped = true;
         String lastSubtype = null;
+        // Every event line must be scoped to the committing Session — the
+        // closed-key check both read paths enforce applies at write time
+        // too, so a misscoped line never enters the journal at all.
+        JsonNode sessionScope = JSON.createObjectNode()
+                .put("tenantId", tenantId)
+                .put("workspaceId", workspaceId)
+                .put("sessionId", sessionId);
         for (int index = 0; index < lines.length; index++) {
             JsonNode record = parse(lines[index]);
             if (record == null) {
@@ -193,17 +217,37 @@ public class ManagedExtensionRecordStore {
             }
             JsonNode event = record.path("managedSession");
             JsonNode payload = event.path("payload");
-            if ("tool.receipt".equals(event.path("kind").asText())) {
+            String kind = event.path("kind").textValue();
+            String domain = "domain.committed".equals(kind)
+                    ? payload.path("domain").textValue() : null;
+            // requireEnvelope owns the domain.committed lines for known
+            // domains (its closed-shape and scope messages are pinned by
+            // name); every other enveloped event line — including an
+            // unknown-domain one — gets the closed-key check here. A bare
+            // event-subtype line with no envelope is inert — it carries no
+            // evidence anywhere — and stays tolerated.
+            boolean envelopeOwned = domain != null
+                    && ManagedExtensionProjection.RECORD_BODIES
+                            .containsKey(domain);
+            if (event.isObject() && !envelopeOwned) {
+                require(event.path("v").asInt() == 1
+                        && sessionScope.equals(event.path("sessionKey")),
+                        "Journal event scope conflicts");
+            }
+            if ("activation.changed".equals(kind)) {
+                require(index < eventCount,
+                        "Activation change has an invalid journal position");
+                lastActivation = payload;
+            }
+            if ("tool.receipt".equals(kind)) {
                 require(index < eventCount && event.path("sequence").asLong(-1) == firstSequence + index,
                         "Tool receipt has an invalid journal position");
                 receipts.add(event);
             }
-            if (!"domain.committed".equals(event.path("kind").textValue())) {
+            if (domain == null) {
                 continue;
             }
-            String domain = payload.path("domain").textValue();
-            Body body = domain == null ? null
-                    : ManagedExtensionProjection.RECORD_BODIES.get(domain);
+            Body body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
             if (body != null) {
                 require(index < eventCount, "The Stage H record event is not"
                         + " one of the transaction's events.");
@@ -219,7 +263,7 @@ public class ManagedExtensionRecordStore {
         require(!applied || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
-        return receipts;
+        return new ApplyResult(receipts, lastActivation);
     }
 
     public TaskPage listTasks(String tenantId, String sessionId,
@@ -467,9 +511,7 @@ public class ManagedExtensionRecordStore {
                     + domain + " record " + recordId + " must open its run.");
             // The command that opens a record becomes the operation of its
             // grants, so it opens no other record.
-            Integer opened = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                            + " qwen_managed_session_extension_record WHERE"
-                            + " session_scope_key = ? AND operation_hash = ?",
+            Integer opened = jdbc.queryForObject(OPENING_COMMAND_QUERY,
                     Integer.class, scopeKey, operationHash);
             require(opened != null && opened == 0, "Command " + operationId
                     + " already opened another Stage H record.");
