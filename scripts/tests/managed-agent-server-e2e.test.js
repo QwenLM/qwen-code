@@ -149,6 +149,13 @@ describe('managed-agent-server e2e runner', () => {
   // runtimeTakeover modes.
   it('pins the runtime recovery flags for every runner mode', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toContain(
+      'const runtimeTakeover = inflightFailover || continuationFailover;',
+    );
+    expect(
+      source.match(/if \(runtimeTakeover && process\.platform !== 'linux'\)/),
+      'only Runtime takeover modes must require Linux',
+    ).not.toBeNull();
     expect(
       source.match(
         /QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY:\s*'false'/g,
@@ -176,6 +183,21 @@ describe('managed-agent-server e2e runner', () => {
   // that reads like a takeover defect instead of a config asymmetry.
   it('pins the G0 workspace admission at both launch sites', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toContain(
+      'const workspaceTurns = runtimeTakeover || bigOutput;',
+    );
+    expect(
+      source.match(
+        /\.\.\.\(workspaceTurns\s*\?\s*\{\s*workspace:\s*\{\s*workspace_id:\s*boundWorkspaceId\s*\}\s*\}/,
+      ),
+      'every workspaceTurns mode must create a Workspace-bound Session',
+    ).not.toBeNull();
+    expect(
+      source.match(
+        /directory === runtimeState && workspaceTurns\s*\?\s*\{\s*mode:\s*0o700\s*\}/,
+      ),
+      'every workspaceTurns mode must keep Runtime state owner-only',
+    ).not.toBeNull();
     expect(
       source.match(
         /QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader/g,
