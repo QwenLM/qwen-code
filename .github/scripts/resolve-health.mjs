@@ -419,19 +419,39 @@ export function assess(prs, options = {}) {
   // An edited result is not the producer's word and proves nothing either;
   // a result the RECORD carries was seen unedited by an earlier tick, so an
   // edit after the fact cannot take back the life the lane showed.
+  //
+  // One kind does not serve as life: a `dry_run` comment is posted by a
+  // `workflow_dispatch`, not by any request comment, so it proves the
+  // dispatch path works and says nothing about the request path — exactly
+  // why ANSWERING, the gate's recorded filter, the roster's edited arm and
+  // `stateOf`'s claimable all exclude it elsewhere. Admitted here, one
+  // dispatch a week keeps this arm off for a whole window each time, in
+  // the outage this arm exists to see (the request path broken while
+  // dispatch still runs: its comment is bot-authored, unedited, in-window
+  // and classifies, which is everything the arm asks). Recorded entries
+  // with no kind are from before the record kept one; they give life as
+  // they always did — a recorded `dry_run` only stops it where the record
+  // can say the kind.
   let newestLife = null;
   for (const entry of recordedResults) {
-    if (!newestLife || entry[2] > newestLife) {
+    if (
+      !(entry.length > 3 && entry[3] === 'dry_run') &&
+      (!newestLife || entry[2] > newestLife)
+    ) {
       newestLife = entry[2];
     }
   }
   for (const pr of prs) {
     for (const c of pr.comments) {
-      if (
+      const kind =
         c.created_at >= windowStart &&
         c.user === opts.bot &&
-        c.updated_at === c.created_at &&
-        classifyResult(c.body) &&
+        c.updated_at === c.created_at
+          ? classifyResult(c.body)
+          : null;
+      if (
+        kind &&
+        kind !== 'dry_run' &&
         (!newestLife || c.created_at > newestLife)
       ) {
         newestLife = c.created_at;
@@ -1387,8 +1407,28 @@ export function decide(assessment, existing, options = {}, borrowed = null) {
     // exactly that — on the same PR as well as on another, because the
     // matching in assess() will not spend one comment twice, as proof the
     // lane recovered and again as proof the lagged request was served. The
-    // ordinary close resumes as soon as every request has its own result.
+    // ordinary close resumes as soon as every request has its own result —
+    // and only on a tick whose state is fully readable. Two completeness
+    // terms guard that, each BOUNDED, never the permanent veto an absolute
+    // refusal would hand out:
+    //   - `previous`: a tick with no readable state certifies nothing,
+    //     because its carry arms are empty (R41-2: the filing tick's record
+    //     POST failed, or a marker wiped wholesale — the deficit then reads
+    //     as erasure and this close fires over requests the watch counted
+    //     unanswered). It lasts one tick: the refresh below lands a
+    //     brand-new marker, and main() borrows the newest closed tracker's
+    //     record meanwhile, so the junk-marker case delays the recovery by
+    //     one tick, never forever.
+    //   - `!existing.partial`: a tick whose NEWEST trusted state comment
+    //     was edited away reads a regressed state without knowing it
+    //     (R41-3), so the deficit rewinds and the regressed-out request
+    //     turns invisible to the veto. It also lasts one tick — the
+    //     refresh this tick writes is a newer, unedited marker — and the
+    //     check is keyed on the newest marker alone, so an old edited
+    //     comment cannot veto the close forever.
     if (
+      previous &&
+      !existing.partial &&
       latest &&
       latest.kind === 'pushed' &&
       latest.at > barrier &&
@@ -1550,7 +1590,7 @@ const STATE_AUTHORS = new Set(['github-actions[bot]', DEFAULTS.bot]);
 // only those. An edit is a forgery whoever posted it: the watch writes a
 // fresh comment per tick and never edits one.
 function trustedCommentTexts(gh, repo, number) {
-  return tsvLines(
+  const rows = tsvLines(
     gh([
       'api',
       '-X',
@@ -1562,12 +1602,35 @@ function trustedCommentTexts(gh, repo, number) {
       '--jq',
       '.[] | [.user.login, .created_at, .updated_at, (.body // "" | @base64)] | @tsv',
     ]),
-  )
+  ).map(([user, created, updated, b]) => ({
+    user,
+    created,
+    updated,
+    text: b64(b),
+  }));
+  const texts = rows
     .filter(
-      ([user, created, updated]) =>
+      ({ user, created, updated }) =>
         STATE_AUTHORS.has(user) && updated === created,
     )
-    .map(([, , , b]) => b64(b));
+    .map(({ text }) => text);
+  // The completeness half of the state contract. When the newest
+  // marker-carrying comment from a trusted account was edited, the filter
+  // above drops it and `readState` silently regresses to the older marker
+  // — the barrier, the deficit and both first-sight records rewind a whole
+  // tick with nothing marking the read as partial. The close gate reads
+  // this flag and refuses to certify on a regressed tick. It heals the
+  // next tick, when the watch's own refresh or update lands as a newer,
+  // unedited marker, so the refusal is bounded — and it is keyed on the
+  // NEWEST marker alone, so an old edited comment cannot veto the close
+  // forever. Deletion stays invisible: a marker that never reaches the
+  // feed reads as never written, which is R41-2's route instead.
+  const markers = rows.filter(
+    ({ user, text }) => STATE_AUTHORS.has(user) && STATE_RE.test(text),
+  );
+  const partial =
+    markers.length > 0 && markers.at(-1).updated !== markers.at(-1).created;
+  return { texts, partial };
 }
 
 // The newest marker-carrying tracking issue in the given state, authored
@@ -1604,7 +1667,7 @@ function findMarkerIssue(gh, repo, label, state) {
     // dropped. Gating discovery too would let a triage user delete the marker
     // by editing, and every later tick would file a duplicate.
     if (text.includes(HEALTH_MARKER)) {
-      const comments = trustedCommentTexts(gh, repo, number);
+      const { texts, partial } = trustedCommentTexts(gh, repo, number);
       // The body is what FINDS the issue, never what the watch believes. It
       // cannot be trusted as state and cannot be cheaply checked either: the
       // Issues API bumps an issue's `updated_at` on ANY comment, so
@@ -1624,7 +1687,12 @@ function findMarkerIssue(gh, repo, label, state) {
       // re-derives the barrier from the live assessment and records it in a
       // trusted comment; the requests that opened the issue are still inside
       // the window then (ticks are hours apart, the window is days).
-      return { number: Number(number), createdAt: created_at, texts: comments };
+      return {
+        number: Number(number),
+        createdAt: created_at,
+        texts,
+        partial,
+      };
     }
   }
   return null;
@@ -1679,10 +1747,12 @@ function findOpenIssueByTitle(gh, repo) {
     ) {
       continue;
     }
+    const { texts, partial } = trustedCommentTexts(gh, repo, number);
     return {
       number: Number(number),
       createdAt: created_at,
-      texts: trustedCommentTexts(gh, repo, number),
+      texts,
+      partial,
     };
   }
   return null;
@@ -1802,7 +1872,19 @@ export function main({
   // target stays the open issue: decide() addresses it by number, and the
   // closed one is never written.
   const record = existing ?? findMarkerIssue(gh, repo, opts.label, 'closed');
-  const previous = record ? readState(record.texts) : null;
+  let previous = record ? readState(record.texts) : null;
+  if (existing && previous === null) {
+    // An open tracker that carries no readable state does not block the
+    // borrow: when the filing tick's record POST failed (the two writes
+    // are not atomic) or a triage user wiped the markers, `previous` is
+    // null and every carry arm sits empty — which is what turns a heal
+    // tick into a certified false recovery (see decide()). The newest
+    // closed tracker's final record is the same information from before
+    // the incident, and its entries age out of the window the same way, so
+    // fall back to it instead of going stateless.
+    const borrowed = findMarkerIssue(gh, repo, opts.label, 'closed');
+    previous = borrowed ? readState(borrowed.texts) : null;
+  }
   const assessment = assess(prs, {
     ...opts,
     recorded: previous?.requests,
