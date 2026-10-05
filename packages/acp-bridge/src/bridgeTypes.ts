@@ -159,6 +159,10 @@ export interface BridgeManagedSessionStore {
   tenantId: string;
   workspaceId: string;
   writerId: string;
+  /** Broker-provisioned writer credential; the client self-mints when absent. */
+  writerToken?: string;
+  /** Broker opt-in for plaintext http on a trusted network. */
+  allowInsecureHttp?: boolean;
   leaseDurationMs: number;
 }
 
@@ -167,6 +171,8 @@ const MANAGED_SESSION_STORE_FIELDS = new Set([
   'tenantId',
   'workspaceId',
   'writerId',
+  'writerToken',
+  'allowInsecureHttp',
   'leaseDurationMs',
 ]);
 const MANAGED_SESSION_STORE_TENANT_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
@@ -218,11 +224,28 @@ export function parseBridgeManagedSessionStore(
       'managedSessionStore.leaseDurationMs must be an integer from 1000 through 300000',
     );
   }
+  const writerToken = record['writerToken'];
+  if (
+    writerToken !== undefined &&
+    (typeof writerToken !== 'string' ||
+      !/^[A-Za-z0-9_-]{32,512}$/u.test(writerToken))
+  ) {
+    throw new TypeError('managedSessionStore.writerToken is invalid');
+  }
+  const allowInsecureHttp = record['allowInsecureHttp'];
+  if (
+    allowInsecureHttp !== undefined &&
+    typeof allowInsecureHttp !== 'boolean'
+  ) {
+    throw new TypeError('managedSessionStore.allowInsecureHttp is invalid');
+  }
   return Object.freeze({
     baseUrl: parsedBaseUrl.toString().replace(/\/$/u, ''),
     tenantId,
     workspaceId,
     writerId,
+    ...(writerToken === undefined ? {} : { writerToken }),
+    ...(allowInsecureHttp === undefined ? {} : { allowInsecureHttp }),
     leaseDurationMs,
   });
 }

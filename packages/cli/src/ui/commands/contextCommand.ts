@@ -616,16 +616,32 @@ export async function collectContextData(
   let detailMemoryFiles: ContextMemoryDetail[];
   let detailSkills: ContextSkillDetail[];
 
+  // `displayBuiltinTools` floors at 0, so when the billed Skill definition and
+  // the MCP schemas together exceed the declared tool list, that excess would
+  // push the estimate past the window, or come straight out of `messages`
+  // against a provider total.
+  // Charge it to `mcpTools`, and charge whatever the MCP schemas cannot absorb
+  // to the Skill definition `skills` carries, so the three rows still account
+  // for exactly `allToolsTokens` plus the listing and the loaded bodies.
+  const clampDeficit = Math.max(
+    0,
+    skillToolDefinitionTokens + mcpToolsTotalTokens - allToolsTokens,
+  );
+  const clampedMcpTools = Math.max(0, mcpToolsTotalTokens - clampDeficit);
+  const clampedSkills =
+    skillsTokens - Math.max(0, clampDeficit - mcpToolsTotalTokens);
+  const clampedBuiltinTools = Math.max(
+    0,
+    allToolsTokens - skillToolDefinitionTokens - clampedMcpTools,
+  );
+
   if (!hasTokenCount) {
     totalTokens = 0;
     displaySystemPrompt = systemPromptTokens;
-    displaySkills = skillsTokens;
+    displaySkills = clampedSkills;
     displayStartupContext = startupContextTokens;
-    displayBuiltinTools = Math.max(
-      0,
-      allToolsTokens - skillToolDefinitionTokens - mcpToolsTotalTokens,
-    );
-    displayMcpTools = mcpToolsTotalTokens;
+    displayBuiltinTools = clampedBuiltinTools;
+    displayMcpTools = clampedMcpTools;
     displayMemoryFiles = memoryFilesTokens;
     // Include the conversation: a `/model` switch, `/restore` or a resume
     // zeroes the provider count while leaving `this.history` intact, and such a
@@ -658,23 +674,6 @@ export async function collectContextData(
     // overshoot is absorbed by the `messages` cap below.
     const scale = rawOverhead > totalTokens ? totalTokens / rawOverhead : 1;
 
-    // `displayBuiltinTools` floors at 0, so when the billed Skill definition and
-    // the MCP schemas together exceed the declared tool list, that excess would
-    // be charged to the overhead and taken straight back out of `messages`.
-    // Charge it to `mcpTools`, and charge whatever the MCP schemas cannot absorb
-    // to the Skill definition `skills` carries, so the three rows still account
-    // for exactly `allToolsTokens` plus the listing and the loaded bodies.
-    const clampDeficit = Math.max(
-      0,
-      skillToolDefinitionTokens + mcpToolsTotalTokens - allToolsTokens,
-    );
-    const clampedMcpTools = Math.max(0, mcpToolsTotalTokens - clampDeficit);
-    const clampedSkills =
-      skillsTokens - Math.max(0, clampDeficit - mcpToolsTotalTokens);
-    const clampedBuiltinTools = Math.max(
-      0,
-      allToolsTokens - skillToolDefinitionTokens - clampedMcpTools,
-    );
     // The clamped categories partition `rawOverhead` before scaling. Flooring
     // each share keeps their sum at or below `totalTokens`; independently
     // rounding them can overshoot the total by a token with no negative row

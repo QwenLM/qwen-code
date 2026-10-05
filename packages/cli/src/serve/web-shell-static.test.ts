@@ -361,7 +361,14 @@ describe('public PWA HTTP routes', () => {
     );
   });
 
-  it.each(['/plugins', '/channels', '/scheduled-tasks', '/goals', '/settings'])(
+  it.each([
+    '/plugins',
+    '/channels',
+    '/live',
+    '/scheduled-tasks',
+    '/goals',
+    '/settings',
+  ])(
     'serves public document %s but leaves API requests protected',
     async (route) => {
       await request(app)

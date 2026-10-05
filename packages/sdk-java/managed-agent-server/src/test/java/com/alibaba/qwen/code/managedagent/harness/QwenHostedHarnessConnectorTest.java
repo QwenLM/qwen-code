@@ -27,6 +27,7 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -64,7 +65,7 @@ class QwenHostedHarnessConnectorTest {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
-                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), profile);
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo", profile);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
         ManagedAgentProperties properties = properties();
@@ -122,7 +123,7 @@ class QwenHostedHarnessConnectorTest {
     void missingBoundProfileNeverLetsTheHarnessInferItsTools(String profile) {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
-                new ContextBinding("tenant-a", "workspace", 1, "storage", ".", "config", 1), profile);
+                new ContextBinding("tenant-a", "workspace", 1, "storage", ".", "config", 1), "yolo", profile);
         AgentStateStore sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         ManagedAgentProperties properties = properties();
@@ -149,7 +150,7 @@ class QwenHostedHarnessConnectorTest {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
-                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "hosted-workspace-files/1");
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo", "hosted-workspace-files/1");
         AgentStateStore sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
@@ -179,7 +180,7 @@ class QwenHostedHarnessConnectorTest {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
-                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "hosted-workspace-files/1");
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo", "hosted-workspace-files/1");
         AgentStateStore sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
@@ -246,7 +247,7 @@ class QwenHostedHarnessConnectorTest {
         AgentStateStore sessions = sessions();
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(
                 new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
-                        null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1, null, profile));
+                        null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1, null, "yolo", profile));
         QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties(), sessions,
                 mock(WorkspaceExecutionStore.class));
         ReflectionTestUtils.setField(connector, "client", client);
@@ -356,7 +357,7 @@ class QwenHostedHarnessConnectorTest {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
-                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "hosted-workspace-files/1");
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo", "hosted-workspace-files/1");
         AgentStateStore sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
@@ -559,6 +560,73 @@ class QwenHostedHarnessConnectorTest {
                 sessions(), mock(WorkspaceExecutionStore.class)))
                 .doesNotThrowAnyException();
     }
+
+    @Test
+    void attachProvisionsTheBindingCredentialAndTheInsecureOptIn() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef session = mock(HarnessSessionRef.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(session);
+        when(session.getHarnessBootId()).thenReturn(BOOT_ID);
+        ManagedAgentProperties properties = properties();
+        properties.getSessionStore().setBindingKey(
+                "0123456789abcdef0123456789abcdef");
+        properties.getSessionStore().setAllowInsecureHttp(true);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(
+                properties, sessions(), mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+
+        ArgumentCaptor<LoadHarnessSession> load =
+                ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).loadSession(load.capture());
+        Map<String, Object> wire = ReflectionTestUtils.invokeMethod(
+                load.getValue(), "toJson");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> store =
+                (Map<String, Object>) wire.get("managedSessionStore");
+        String expectedToken = new WriterCredentialPolicy(properties)
+                .issue("tenant-a", "workspace-a", SESSION_ID);
+        assertThat(store)
+                .containsEntry("writerToken", expectedToken)
+                .containsEntry("allowInsecureHttp", true);
+    }
+
+    @Test
+    void attachOmitsTheCredentialAndOptInWhenNeitherIsConfigured() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef session = mock(HarnessSessionRef.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(session);
+        when(session.getHarnessBootId()).thenReturn(BOOT_ID);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(
+                properties(), sessions(), mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+
+        ArgumentCaptor<LoadHarnessSession> load =
+                ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).loadSession(load.capture());
+        Map<String, Object> wire = ReflectionTestUtils.invokeMethod(
+                load.getValue(), "toJson");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> store =
+                (Map<String, Object>) wire.get("managedSessionStore");
+        assertThat(store)
+                .doesNotContainKey("writerToken")
+                .doesNotContainKey("allowInsecureHttp");
+    }
+
 
     private static QwenHostedHarnessConnector connector(
             HostedHarnessClient client) {

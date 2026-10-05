@@ -125,7 +125,8 @@ public final class ManagedExtensionRecords {
     private static final Pattern DIGEST = Pattern.compile("[0-9a-f]{64}");
     private static final Pattern PHASE = Pattern.compile(
             "[a-z][a-z0-9_]{0," + (MAX_PHASE_LENGTH - 1) + "}");
-    private static final List<String> TERMINAL = List.of("settled", "failed",
+    /** Run states after which no observation, output or run change may land. */
+    static final List<String> TERMINAL = List.of("settled", "failed",
             "cancelled");
     private static final Set<String> GRANT_KEYS = Set.of("sessionKey",
             "operationId", "domain", "operationRevision", "ownerId",
@@ -661,6 +662,44 @@ public final class ManagedExtensionRecords {
         require(Normalizer.isNormalized(value, Normalizer.Form.NFC),
                 label + " must use NFC normalization");
         return value;
+    }
+
+    /**
+     * A millisecond timestamp read leniently, shared by the commit-side
+     * extraction and the authorization journal scans: an integral number or
+     * an integral numeric string of at most 19 integer digits and at most 19
+     * decimal places, else absent. Anything fractional, out of range, or
+     * otherwise shaped is absent, so the scans and the head columns can never
+     * disagree about whether a payload was representable. The width and scale
+     * pre-checks run before any BigInteger materialization, so an
+     * exponent-form string cannot tax the reader in either direction
+     * (1e+N needs the giant integer; 1e-N expands 10^N before dividing).
+     */
+    public static Long millisLenient(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        try {
+            if (node.isNumber() || node.isTextual()) {
+                BigDecimal value = node.isTextual()
+                        ? new BigDecimal(node.textValue().trim())
+                        : node.decimalValue();
+                // A long holds at most 19 integer digits; never materialize
+                // anything wider. Widen to long first: precision - scale can
+                // itself overflow int on an extreme exponent. A scale beyond
+                // 19 decimal places is likewise absent: toBigIntegerExact on
+                // 1e-N expands 10^N before dividing, and a representable
+                // long never needs more places.
+                if ((long) value.precision() - value.scale() > 19
+                        || value.scale() > 19) {
+                    return null;
+                }
+                return value.toBigIntegerExact().longValueExact();
+            }
+        } catch (ArithmeticException | NumberFormatException error) {
+            return null;
+        }
+        return null;
     }
 
     /**
