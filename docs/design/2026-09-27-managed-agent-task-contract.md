@@ -33,7 +33,8 @@ has nothing to plan against except those daemon routes.
 - Name the MCP catalog, hook catalog, automation and channel resources, so that
   later slices fill in shapes instead of inventing paths.
 - Keep the D1 exit check: no `planned` route is mapped, and the generated
-  WebShell types do not change.
+  WebShell types do not change. H0c (#12855) has since mapped the four read
+  routes and changed the types accordingly; events and cancel stay `planned`.
 
 ## 3. Non-goals
 
@@ -59,7 +60,7 @@ an existing schema (`PublicCommandOperation`, `WebShellCommandOperation`,
 `SessionCapabilities` and `WebShellSession.capabilities`). The properties of
 the new schemas and the two new parameters need no marker of their own: only
 planned operations reach them. The generator drops all of it, and the Java
-contract test fails if the server maps any of the routes. The version becomes `1.16.0`: routes are added, and W0d (#12797) and D2 (#12822) already took `1.14.0` and `1.15.0`.
+contract test fails if the server maps any of the routes. The version becomes `1.16.0`: routes are added, and W0d (#12797) and D2 (#12822) already took `1.14.0` and `1.15.0`. H0c (#12855) has since flipped the four read operations and the ten task schemas they return to `partial`, added the served `WebShellSessionCapabilities` schema, and made `capabilities.tasks` served and required; events, cancel and the command `task_id`/`taskId` fields stay `planned`. So read the pieces below as the state before H0c, not as the current one.
 
 An enum value cannot carry the marker, and cancel reuses the command
 operation (section 4.4). The new `task_cancel` command type is therefore
@@ -338,10 +339,10 @@ that end in `query`, `get` or a verb:
 
 The cancel request carries `idempotencyKey` in the body, as
 `WebShellActionRespondRequest` and `WebShellLifecycleRequest` do.
-`SessionCapabilities.tasks` and `WebShellSession.capabilities.tasks` (both
-`planned`, default `false`) let a client learn whether a Session serves the
-task routes. Public lists are named `…List` and WebShell pages `…Page`, as in
-the Action family.
+`SessionCapabilities.tasks` and `WebShellSession.capabilities.tasks` were
+added `planned`, default `false`; H0c made both served and required, so a
+client always reads whether the Session serves the task routes. Public lists
+are named `…List` and WebShell pages `…Page`, as in the Action family.
 
 ### 4.6 Resources named for later slices
 
@@ -369,24 +370,24 @@ API contract already froze, `invalid_idempotency_key`, which the idempotent
 routes already return, the tenant filter's `invalid_tenant` and
 `actor_scope_mismatch`, and three new task codes:
 
-| Status | Code                       | When                                                                                             |
-| ------ | -------------------------- | ------------------------------------------------------------------------------------------------ |
-| `400`  | `invalid_tenant`           | `X-Qwen-Tenant-Id` is missing or malformed (tenant filter).                                      |
-| `400`  | `invalid_cursor`           | The task list cursor is malformed.                                                               |
-| `400`  | `invalid_event_cursor`     | `after` is malformed or belongs to another task.                                                 |
-| `400`  | `invalid_limit`            | `limit` is outside 1 to 100.                                                                     |
-| `400`  | `invalid_request`          | `Idempotency-Key` is missing.                                                                    |
-| `400`  | `invalid_idempotency_key`  | `Idempotency-Key` is malformed, as on the other idempotent routes.                               |
-| `400`  | `unsupported_feature`      | The Session does not serve tasks (`capabilities.tasks` is `false`).                              |
-| `403`  | `task_forbidden`           | The caller can read the task but may not cancel it. New.                                         |
-| `403`  | `actor_scope_mismatch`     | The authenticated actor belongs to another tenant or has an invalid ID (tenant filter).          |
-| `404`  | `session_not_found`        | The Session is absent or outside the caller's scope.                                             |
-| `404`  | `task_not_found`           | The task is absent or outside the caller's scope. New.                                           |
-| `409`  | `cursor_expired`           | `after` is strictly below the durable retention floor, even with no retained events.             |
-| `409`  | `task_action_unavailable`  | A new key while `action_capabilities` lacks `cancel`, which includes settled tasks. New.         |
-| `409`  | `session_not_active`       | A new cancel request targets a Session that is not active.                                       |
-| `409`  | `session_operation_active` | A new cancel request while another operation is open on the Session, as on the lifecycle routes. |
-| `409`  | `idempotency_conflict`     | The key was used with a different request.                                                       |
+| Status | Code                       | When                                                                                                                                                                                                            |
+| ------ | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400`  | `invalid_tenant`           | `X-Qwen-Tenant-Id` is missing or malformed (tenant filter).                                                                                                                                                     |
+| `400`  | `invalid_cursor`           | The task list cursor is malformed.                                                                                                                                                                              |
+| `400`  | `invalid_event_cursor`     | `after` is malformed or belongs to another task.                                                                                                                                                                |
+| `400`  | `invalid_limit`            | `limit` is outside 1 to 100.                                                                                                                                                                                    |
+| `400`  | `invalid_request`          | `Idempotency-Key` is missing.                                                                                                                                                                                   |
+| `400`  | `invalid_idempotency_key`  | `Idempotency-Key` is malformed, as on the other idempotent routes.                                                                                                                                              |
+| `400`  | `unsupported_feature`      | The Session does not serve tasks (`capabilities.tasks` is `false`). Only the still-`planned` events and cancel routes can answer it; the served read routes return it never, because the flag is always `true`. |
+| `403`  | `task_forbidden`           | The caller can read the task but may not cancel it. New.                                                                                                                                                        |
+| `403`  | `actor_scope_mismatch`     | The authenticated actor belongs to another tenant or has an invalid ID (tenant filter).                                                                                                                         |
+| `404`  | `session_not_found`        | The Session is absent or outside the caller's scope.                                                                                                                                                            |
+| `404`  | `task_not_found`           | The task is absent or outside the caller's scope. New.                                                                                                                                                          |
+| `409`  | `cursor_expired`           | `after` is strictly below the durable retention floor, even with no retained events.                                                                                                                            |
+| `409`  | `task_action_unavailable`  | A new key while `action_capabilities` lacks `cancel`, which includes settled tasks. New.                                                                                                                        |
+| `409`  | `session_not_active`       | A new cancel request targets a Session that is not active.                                                                                                                                                      |
+| `409`  | `session_operation_active` | A new cancel request while another operation is open on the Session, as on the lifecycle routes.                                                                                                                |
+| `409`  | `idempotency_conflict`     | The key was used with a different request.                                                                                                                                                                      |
 
 A caller that cannot read a task gets `404`, not `403`, as API contract
 section 10 requires. The only `403` a read route answers is the tenant
@@ -482,7 +483,9 @@ the runtime guarantees above. Before H3 or the cancel slice marks its routes
   tests, 103 validations: 50 public, 49 WebShell mirrors and 4 WebShell
   requests; `1.21.0` adds a sixth test, see section 5) and
   `ManagedSessionStoreContractFixtureTest` (3 tests) pass
-  without new gap lines.
+  without new gap lines. Since H0c the split is different:
+  `ManagedAgentApiContractTest` exercises the four served read routes, and
+  only the events and cancel stay with `PlannedTaskContractTest`.
 - Mutations fail the matching gate:
   - Removing, on one surface, the conditionals of the task, the task event,
     the task list and the `task_cancel` rule, and the minimum output length,
@@ -509,11 +512,13 @@ the runtime guarantees above. Before H3 or the cancel slice marks its routes
   for submission.
 - **H0c.** Builds the task projection, maps these routes as `partial`, and
   defines the Session events that announce task changes. Marking the routes
-  alone is not enough: `PublicCommandOperation.task_id`,
-  `WebShellCommandOperation.taskId` and both `capabilities.tasks` flags are
-  `planned` properties of their own, as is the `WebShellSession.capabilities`
-  object that holds one of them, and they stay out of the generated types
-  until they are marked too.
+  alone was not enough: `capabilities.tasks` became served and required
+  with them (#12855), inside a `WebShellSession.capabilities` object that
+  #12855 served without requiring; this change adds the object to
+  `WebShellSession.required`, mirroring the public `Session` that already
+  required it, so the generated WebShell type loses its `?`.
+  `PublicCommandOperation.task_id` and `WebShellCommandOperation.taskId`
+  stay `planned` with cancel, as the H0c design's Decision 9 says.
 - **Output recovery.** H3 defines output segmentation, and with it how a
   caller joins the task's Artifacts with the retained events after
   `cursor_expired` without overlap.

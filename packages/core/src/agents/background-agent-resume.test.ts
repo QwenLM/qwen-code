@@ -1299,7 +1299,7 @@ describe('BackgroundAgentResumeService', () => {
         getTerminateMode: () => AgentTerminateMode.GOAL,
         getFinalText: () => 'done',
       };
-      const { service, subagentManager, stubToolRegistry } = createService({
+      const { service, subagentManager } = createService({
         toolMode,
         // The session this resume runs in does have the Skill tool; the rows
         // below are about `subagentWillHaveSkillTool`, not about #12838's
@@ -1321,10 +1321,6 @@ describe('BackgroundAgentResumeService', () => {
           isSkillActive: vi.fn().mockReturnValue(true),
         },
       });
-      stubToolRegistry.getAllToolNames.mockReturnValue([
-        ToolNames.SKILL,
-        ...(hasExec ? [ToolNames.EXEC] : []),
-      ]);
       subagentManager.loadSubagent.mockResolvedValue({
         name: 'researcher',
         color: 'cyan',
