@@ -318,7 +318,12 @@ describe('issue #13328: a second concurrent Session on the same Workspace mount'
 
       // First Turn: admitted and holds the mount.
       expect((await submit(SESSION_A, clientA, PROMPT_A)).status).toBe(202);
-      await vi.waitFor(() => expect(holder).toBeDefined());
+      // The mount hold arrives over the mocked Broker control; the default
+      // 1 s window races the admission pipeline on the loaded CI runner
+      // (same family as #13411/#13323/#13430).
+      await vi.waitFor(() => expect(holder).toBeDefined(), {
+        timeout: 10_000,
+      });
       // Second Turn: also admitted (202) while the mount is busy.
       expect((await submit(SESSION_B, clientB, PROMPT_B)).status).toBe(202);
       // The second Turn settles — observe, don't yet judge.
