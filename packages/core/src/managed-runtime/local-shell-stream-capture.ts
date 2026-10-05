@@ -226,12 +226,18 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
 
   private announcing: Promise<void> | undefined;
   private announced = false;
+  /**
+   * A landed blind-capture revision must push the record forward itself,
+   * so nothing keeps advertising a healthy capture past the break.
+   */
+  onBrokenAnnounce?: (ref: ManagedSessionDurableRef) => Promise<void>;
 
   private async announceBroken(): Promise<void> {
     if (this.announced) return;
     this.announced = true;
     try {
-      await this.publish('unknown', null, null);
+      const ref = await this.publish('unknown', null, null);
+      if (this.onBrokenAnnounce) await this.onBrokenAnnounce(ref);
     } catch {
       // The announcement is itself best-effort: the last revision that did
       // publish stands, and finalize stays the sole writer of the settled
