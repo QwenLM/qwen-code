@@ -150,6 +150,84 @@ describe('EditTool', () => {
       ApprovalMode.AUTO_EDIT,
     );
 
+  describe('fuzzy trailing-newline boundaries', () => {
+    it.each([
+      {
+        name: 'deletion before a blank line',
+        content: 'before\nremove-me \n\nafter\n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+      {
+        name: 'replacement before a blank line',
+        content: 'before\nremove-me \n\nafter\n',
+        oldString: 'remove-me\n',
+        newString: 'replacement\n',
+        expected: 'before\nreplacement\n\nafter\n',
+      },
+      {
+        name: 'multiline string replacement',
+        content: 'before\nconst value = `first \nsecond`;\n\nafter\n',
+        oldString: 'const value = `first\nsecond`;\n',
+        newString: 'const value = `replacement`;\n',
+        expected: 'before\nconst value = `replacement`;\n\nafter\n',
+      },
+      {
+        name: 'deletion with multiple requested newlines',
+        content: 'before\nremove-me \n\n\nafter\n',
+        oldString: 'remove-me\n\n',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+      {
+        name: 'deletion before a whitespace-only line',
+        content: 'before\nremove-me \n \nafter\n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n \nafter\n',
+      },
+      {
+        name: 'deletion at EOF with a newline',
+        content: 'before\nremove-me \n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n',
+      },
+      {
+        name: 'replacement at EOF without a newline',
+        content: 'before\nremove-me ',
+        oldString: 'remove-me\n',
+        newString: 'replacement\n',
+        expected: 'before\nreplacement',
+      },
+      {
+        name: 'literal deletion before a blank line',
+        content: 'before\nremove-me\n\nafter\n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+      {
+        name: 'implicit whole-line deletion without a requested newline',
+        content: 'before\nremove-me \n\nafter\n',
+        oldString: 'remove-me  ',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+    ])('preserves surrounding content during $name', async (testCase) => {
+      const filePath = path.join(rootDir, 'newline-boundary.txt');
+      seedFile(filePath, testCase.content);
+
+      const result = await run(
+        edit(filePath, testCase.oldString, testCase.newString),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe(testCase.expected);
+    });
+  });
+
   /** An invocation whose calculateEdit aborts `controller`, then throws `error`. */
   const abortingInvocation = (
     fileName: string,

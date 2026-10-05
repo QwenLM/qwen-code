@@ -84,6 +84,86 @@ const two = 2;
     });
   });
 
+  it.each([
+    {
+      name: 'deleting a fuzzy line before a blank line',
+      content: 'before\nremove-me \n\nafter\n',
+      oldString: 'remove-me\n',
+      newString: '',
+      canonical: 'remove-me \n',
+    },
+    {
+      name: 'replacing a fuzzy line before a blank line',
+      content: 'before\nremove-me \n\nafter\n',
+      oldString: 'remove-me\n',
+      newString: 'replacement\n',
+      canonical: 'remove-me \n',
+    },
+    {
+      name: 'matching a multiline string before a blank line',
+      content: 'before\nconst value = `first \nsecond`;\n\nafter\n',
+      oldString: 'const value = `first\nsecond`;\n',
+      newString: 'const value = `replacement`;\n',
+      canonical: 'const value = `first \nsecond`;\n',
+    },
+    {
+      name: 'consuming only the requested multiple newlines',
+      content: 'before\nremove-me \n\n\nafter\n',
+      oldString: 'remove-me\n\n',
+      newString: '',
+      canonical: 'remove-me \n\n',
+    },
+    {
+      name: 'preserving a following whitespace-only line',
+      content: 'before\nremove-me \n \nafter\n',
+      oldString: 'remove-me\n',
+      newString: '',
+      canonical: 'remove-me \n',
+    },
+    {
+      name: 'matching a fuzzy line at EOF with a newline',
+      content: 'before\nremove-me \n',
+      oldString: 'remove-me\n',
+      newString: '',
+      canonical: 'remove-me \n',
+    },
+    {
+      name: 'preserving a literal match before a blank line',
+      content: 'before\nremove-me\n\nafter\n',
+      oldString: 'remove-me\n',
+      newString: '',
+      canonical: 'remove-me\n',
+    },
+    {
+      name: 'matching without a requested final newline',
+      content: 'before\nremove-me \n\nafter\n',
+      oldString: 'remove-me  ',
+      newString: '',
+      canonical: 'remove-me ',
+    },
+  ])('does not extend the matched slice when $name', (testCase) => {
+    expect(
+      normalizeEditStrings(
+        testCase.content,
+        testCase.oldString,
+        testCase.newString,
+      ),
+    ).toEqual({
+      oldString: testCase.canonical,
+      newString: testCase.newString,
+    });
+  });
+
+  it('keeps the fuzzy EOF fallback newline adjustment', () => {
+    expect(
+      normalizeEditStrings(
+        'before\nremove-me ',
+        'remove-me\n',
+        'replacement\n',
+      ),
+    ).toEqual({ oldString: 'remove-me ', newString: 'replacement' });
+  });
+
   // Tests for issue #1618: Preserve trailing whitespace in newString
   describe('trailing whitespace preservation in newString', () => {
     it('preserves trailing whitespace when intentionally adding to end of line', () => {

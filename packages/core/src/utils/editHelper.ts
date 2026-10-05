@@ -203,7 +203,7 @@ function findLineBasedMatch(
         offsets,
         lines,
         matchIndex,
-        patternLines.length,
+        patternLines.length - (endsWithNewline ? 1 : 0),
         endsWithNewline,
       ),
       removedTrailingFinalEmptyLine: false,
