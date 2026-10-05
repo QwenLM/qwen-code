@@ -118,6 +118,12 @@ new dispatch remains excluded. Typed transactional claim refusals retain their
 only the captured attachment and prompt state; a late response cannot clear a
 replacement's heartbeat or prompt watermark.
 
+Before a new lifecycle Hook leaves intent, restore its saved original Broker
+owner by binding and generation. A surviving Harness attachment cannot infer
+that a restarted Broker still has that owner. Failed attestation leaves the
+child intent retryable without dispatch; current authority is checked again
+before dispatch. Already unknown outcomes remain blocked and are not replayed.
+
 Before each new side-effect dispatch, check current ACL, mount and identity.
 After revocation, lookup and settlement of already dispatched work continue;
 undispatched Hooks stay recovery_blocked until authority returns. Unknown effects
@@ -198,9 +204,15 @@ Hook control path only while their persisted close claim is valid. Ordinary
 execution remains fenced; the exception cannot authorize L3 or MCP execution.
 Legacy claim validity compares database epoch milliseconds on both sides,
 independent of JVM, JDBC and database session time zones.
-Upgrade all
-coordinators and Harnesses before enabling new L3 admission. A missing protocol
-capability rejects admission rather than falling back to legacy DELETE. Do not
+Upgrade every Spring coordinator/Store first, then the Hosted Harnesses. There
+is no separate L3 enable switch. A new Harness against an old Store lacking
+ordinary execution authorization refuses all hosted Turns, including private
+Sessions; it must not treat a missing authorization route as permission.
+During the Store-first mixed-version interval, ordinary Turns remain available,
+but ACTIVE Workspace close and delete are unavailable until the Harnesses
+advertise the new lifecycle capability. Schedule this temporary loss of close
+availability as part of the rollout. A missing protocol capability rejects
+admission rather than falling back to legacy DELETE. Do not
 roll back to old coordinators while L3 operations remain unfinished. L2
 CLOSED/ARCHIVED deletion remains independent of Harness availability.
 

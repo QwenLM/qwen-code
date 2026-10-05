@@ -1116,8 +1116,14 @@ export class HostedHookSession {
       );
       this.recoveredBrokers.set(record.runtimeSessionId, broker);
     }
-    if (current && !reacquire) await this.acquire();
-    else
+    if (current && !reacquire) {
+      await this.acquire();
+      if (this.options.lifecycleAuthority?.() && broker.runtime)
+        await broker.acquire({
+          runtimeBindingId: broker.runtime.bindingId,
+          generation: broker.runtime.generation,
+        });
+    } else
       await broker.acquire(
         reacquire && record.run.runtime ? record.run.runtime : undefined,
       );

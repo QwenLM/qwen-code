@@ -92,6 +92,11 @@ Plan 身份使用固定的紧凑 JSON 字节，不受应用 JSON 格式化配置
 code，并回滚全部 journal mutation。确认 lifecycle detach 后仅删除请求前捕获的
 attachment 与 prompt 状态；晚到应答不得清除替代 attachment 的心跳或 prompt 水位。
 
+新生命周期 Hook 离开 intent 前，凭已保存的原 binding 与 generation 恢复 Broker
+owner。存活的 Harness attachment 不能据此推断重启的 Broker 仍持有原 owner。
+原身份核验失败时保留可重试的 child intent，不进行派发；派发前再次核验当前权限。
+已有 unknown 结果继续阻塞，不重放副作用。
+
 每次新副作用派发前核对当前 ACL、挂载和身份。撤销后仍可查询、结算已派发工作；
 未派发 Hook 保持 recovery_blocked，直至恢复权限。unknown 保留所有权，不能
 变成取消或完成证明。沿用 H2 可能无限期阻塞的限制，独立由 #13133 跟踪。
@@ -149,8 +154,13 @@ L3 返回 `workspace_lifecycle_journal_unverified`。未来 compaction 必须
 仍存活的 protocol-zero close attachment 仅在持久 close claim 有效时保留原 DELETE
 和原 Hook control 路径。普通执行继续被围栏阻止；此例外不能授权 L3 或 MCP 执行。
 旧 claim 的有效性统一比较数据库 epoch 毫秒，不受 JVM、JDBC 与数据库会话时区影响。
-启用 L3 准入前升级全部 coordinator 和 Harness。缺少新协议能力时拒绝准入，
-不回退到旧 DELETE。存在未完成 L3 操作时不回滚到旧 coordinator。
+先升级全部 Spring coordinator/Store，再升级 Hosted Harness；没有独立的 L3 启用开关。
+新 Harness 对接缺少普通执行授权路由的旧 Store 时，会拒绝全部托管 Turn，
+包括私有 Session；缺少授权路由不能当作执行许可。
+先升级 Store 的混合版本阶段，普通 Turn 仍可用，但 ACTIVE Workspace close 和
+delete 暂不可用，直到 Harness 宣告新生命周期能力。部署计划须包含这一暂时的
+close 不可用窗口。缺少新协议能力时拒绝准入，不回退到旧 DELETE。
+存在未完成 L3 操作时不回滚到旧 coordinator。
 L2 CLOSED/ARCHIVED 删除继续独立于 Harness 可用性。
 
 读取生命周期或普通 writer 状态前，先执行已配置的 Store writer 凭证校验。
