@@ -457,40 +457,30 @@ class ManagedAgentMySqlIT {
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
-        // Reruns: the case-tenant scopes carry a fixed idempotency key and
-        // the list assertion expects exactly the fresh Sessions of this run.
-        // Every statement here runs on its own connection, so no session
-        // variable can guard this cleanup: the delete list itself must stay
-        // child-first, and every FK to managed_agent_session is RESTRICT.
-        for (String table : List.of("managed_agent_item_part",
-                "managed_agent_item", "managed_agent_turn",
-                "managed_agent_event", "managed_agent_snapshot",
-                "managed_agent_consumer_progress",
-                "managed_agent_command", "managed_agent_operation",
-                "managed_workspace_create_command")) {
-            deleteIfTableExists(jdbc, table,
-                    "tenant_id IN ('case-tenant', 'CASE-TENANT')");
-        }
-        jdbc.update("DELETE FROM managed_agent_session WHERE tenant_id IN"
-                + " ('case-tenant', 'CASE-TENANT')");
+        // Per-run tenant ids keep reruns on a shared database isolated with
+        // no cleanup; the pair differs only by case, the property under
+        // test (tenant_id is utf8mb4_bin).
+        String lowerTenant = "case-" + UUID.randomUUID().toString()
+                .substring(0, 8);
+        String upperTenant = lowerTenant.toUpperCase(java.util.Locale.ROOT);
         ManagedAgentStore store = new ManagedAgentStore(
                 jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {
                 }, new com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry(
                         jdbc),
                 new ManagedAgentProperties());
-        Admission lower = store.insertSessionCommand("case-tenant",
+        Admission lower = store.insertSessionCommand(lowerTenant,
                 "CREATE_SESSION", "case-key", "case-digest", "qwen-code", null,
                 null, List.of(), null);
-        Admission upper = store.insertSessionCommand("CASE-TENANT",
+        Admission upper = store.insertSessionCommand(upperTenant,
                 "CREATE_SESSION", "case-key", "case-digest", "qwen-code", null,
                 null, List.of(), null);
 
         assertThat(upper.sessionId()).isNotEqualTo(lower.sessionId());
-        assertThat(store.findSession("CASE-TENANT", lower.sessionId()))
+        assertThat(store.findSession(upperTenant, lower.sessionId()))
                 .isEmpty();
-        assertThat(store.findSession("case-tenant", upper.sessionId()))
+        assertThat(store.findSession(lowerTenant, upper.sessionId()))
                 .isEmpty();
-        assertThat(store.listSessions("CASE-TENANT", null, null, null, 10)
+        assertThat(store.listSessions(upperTenant, null, null, null, 10)
                 .sessions()).extracting(session -> session.sessionId())
                 .containsExactly(upper.sessionId());
     }
@@ -1282,15 +1272,6 @@ class ManagedAgentMySqlIT {
     private static boolean isWindows() {
         return System.getProperty("os.name", "").toLowerCase()
                 .contains("win");
-    }
-
-    private static void deleteIfTableExists(JdbcTemplate jdbc, String table,
-            String where) {
-        try {
-            jdbc.update("DELETE FROM " + table + " WHERE " + where);
-        } catch (org.springframework.dao.DataAccessException ignored) {
-            // The table does not exist at this migration stage yet.
-        }
     }
 
     private static DriverManagerDataSource dataSource() {

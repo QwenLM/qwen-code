@@ -1000,6 +1000,8 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString(), anyString());
         verify(harness, never()).submit(anyString(), anyString(), anyString(),
                 any(), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
     }
 
     @Test
@@ -1052,6 +1054,8 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString(), anyString());
         verify(harness, never()).cancelManagedRuntime(anyString(),
                 anyString(), anyString(), anyString(), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
     }
 
     @Test
@@ -1107,6 +1111,12 @@ class HarnessCoordinatorTest {
         verify(store, never()).recordRecoveryAdmission(anyString(),
                 anyString(), anyString(), anyString(), anyString(),
                 anyString(), anyLong());
+        verify(harness, times(1)).continueManagedRuntime(tenantId, sessionId,
+                promptId, "checkpoint-1", "activation-1");
+        verify(harness, never()).submit(anyString(), anyString(), anyString(),
+                any(), anyString());
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
     }
 
     @Test
@@ -1164,6 +1174,12 @@ class HarnessCoordinatorTest {
         verify(store, never()).recordRecoveryAdmission(anyString(),
                 anyString(), anyString(), anyString(), anyString(),
                 anyString(), anyLong());
+        verify(harness, times(1)).continueManagedRuntime(tenantId, sessionId,
+                promptId, "checkpoint-1", "activation-1");
+        verify(harness, never()).submit(anyString(), anyString(), anyString(),
+                any(), anyString());
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
     }
 
     // A restarted model attempt retracts the prefix it published (#13319):
