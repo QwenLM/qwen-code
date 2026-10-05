@@ -188,6 +188,7 @@ describe('no-AK integration CI wiring', () => {
         './cli/daemon-invocation-context.test.ts',
         './cli/headless-workflow-skill.test.ts',
         './cli/list_directory.test.ts',
+        './cli/tool-hook-context.test.ts',
         './cli/qwen-serve-routes.test.ts',
         './cli/qwen-serve-streaming.test.ts',
         './cli/qwen-serve-standalone-concurrency.test.ts',

@@ -291,9 +291,13 @@ blocks every later lifecycle change on that Session with
 Session that D4 closed.
 
 W0e (#12839) took V16 first, so this migration is V17, the next free version
-on `main`. An open pull request that takes V17 or a later version must
-renumber past it; a gap left instead would make Flyway refuse to start a
-database that already applied the later version.
+on `main`. The O2 publication migrations follow as V18 and V19. An open pull
+request that takes V17 or a later version must renumber past it; a gap left
+instead would make Flyway refuse to start a database that already applied the
+later version. Upgrade tests apply the ordered sequence before service
+startup. Uniqueness across both migration locations is enforced without a
+database by `scripts/check-flyway-migrations.js`, which runs in the SDK Java
+workflow on every pull request and push (#12940).
 
 ## 5. Tests
 
@@ -363,6 +367,9 @@ database that already applied the later version.
 - `ManagedAgentMySqlIT` passes against `mariadb:10.11.18`, the image CI uses,
   and against `mysql:8.4`, including the V17 upgrade. `HostedHarnessMySqlIT`
   passes against `mysql:8.4` with the bundled CLI.
+- On this branch, focused H2 migration and publication tests pass 24/24. On a
+  fresh MySQL 8.4 schema, `ManagedAgentMySqlIT` passes 11/11 with V16–V19
+  applied in order. MariaDB verification of the combined sequence awaits CI.
 - The Web Shell managed component tests (73), including the generated-types
   freshness test, and its typecheck pass.
 - Each of 27 mutations fails a test: not sealing the Session at admission;

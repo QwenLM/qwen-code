@@ -18,6 +18,7 @@ import browserUseConfig from '../../packages/browser-use/vitest.config.js';
 import channelsBaseConfig from '../../packages/channels/base/vitest.config.js';
 import dingtalkConfig from '../../packages/channels/dingtalk/vitest.config.js';
 import dwsConfig from '../../packages/channels/dws/vitest.config.js';
+import emailConfig from '../../packages/channels/email/vitest.config.js';
 import feishuConfig from '../../packages/channels/feishu/vitest.config.js';
 import githubConfig from '../../packages/channels/github/vitest.config.js';
 import gitlabConfig from '../../packages/channels/gitlab/vitest.config.js';
@@ -60,6 +61,7 @@ const configs: Record<string, ExemptionConfig> = {
   'packages/channels/base': channelsBaseConfig,
   'packages/channels/dingtalk': dingtalkConfig,
   'packages/channels/dws': dwsConfig,
+  'packages/channels/email': emailConfig,
   'packages/channels/feishu': feishuConfig,
   'packages/channels/github': githubConfig,
   'packages/channels/gitlab': gitlabConfig,
@@ -120,6 +122,8 @@ const configModules: Record<
     import('../../packages/channels/dingtalk/vitest.config.js'),
   'packages/channels/dws': () =>
     import('../../packages/channels/dws/vitest.config.js'),
+  'packages/channels/email': () =>
+    import('../../packages/channels/email/vitest.config.js'),
   'packages/channels/feishu': () =>
     import('../../packages/channels/feishu/vitest.config.js'),
   'packages/channels/github': () =>
@@ -205,6 +209,7 @@ describe('shared-pool test timeout', () => {
     'packages/channels/base',
     'packages/channels/dingtalk',
     'packages/channels/dws',
+    'packages/channels/email',
     'packages/channels/feishu',
     'packages/channels/github',
     'packages/channels/gitlab',

@@ -15,8 +15,21 @@ import { ArtifactTool, type UrlOpener } from './artifact-tool.js';
 import { LocalPublisher } from './local-publisher.js';
 import { MAX_ARTIFACT_BYTES } from './html.js';
 import { readArtifactSnapshot } from './artifact-snapshots.js';
+import type { ArtifactPublisher, ArtifactPublisherKind } from './publisher.js';
 
 const signal = new AbortController().signal;
+
+const stubPublisher = (kind: ArtifactPublisherKind): ArtifactPublisher => ({
+  kind,
+  publish: async () => ({ id: 'x', url: 'https://h/x' }),
+});
+
+const failingPublisher = (err: unknown): ArtifactPublisher => ({
+  kind: 'oss',
+  publish: async () => {
+    throw err;
+  },
+});
 
 describe('ArtifactTool', () => {
   let workdir: string;
@@ -24,11 +37,11 @@ describe('ArtifactTool', () => {
   let openSpy: ReturnType<typeof vi.fn>;
   let tool: ArtifactTool;
 
-  const makeConfig = (snapshots = true): Config =>
+  const makeConfig = (): Config =>
     ({
       getFileSystemService: () => new StandardFileSystemService(),
       getTargetDir: () => workdir,
-      isArtifactSnapshotsEnabled: () => snapshots,
+      isArtifactSnapshotsEnabled: () => true,
       getSessionId: () => 'artifact-session',
       storage: {
         getRuntimeBaseDir: () => path.join(outDir, 'runtime'),
@@ -37,22 +50,34 @@ describe('ArtifactTool', () => {
         process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] !== '1',
     }) as unknown as Config;
 
+  const makeTool = (
+    overrides: Record<string, unknown> = {},
+    publisher: ArtifactPublisher = new LocalPublisher(outDir),
+  ) =>
+    new ArtifactTool(
+      { ...makeConfig(), ...overrides } as unknown as Config,
+      publisher,
+      openSpy as unknown as UrlOpener,
+    );
+
   const writeFragment = async (name: string, content: string) => {
     const p = path.join(workdir, name);
     await fs.writeFile(p, content, 'utf8');
     return p;
   };
 
+  const run = (file: string, t = tool, sig = signal) =>
+    t.build({ file_path: file }).execute(sig);
+
+  const publish = async (name: string, content: string, t = tool) =>
+    run(await writeFragment(name, content), t);
+
   beforeEach(async () => {
     workdir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-art-src-'));
     outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-art-out-'));
     vi.stubEnv('QWEN_RUNTIME_DIR', path.join(outDir, 'runtime'));
     openSpy = vi.fn(async () => {});
-    tool = new ArtifactTool(
-      makeConfig(),
-      new LocalPublisher(outDir),
-      openSpy as unknown as UrlOpener,
-    );
+    tool = makeTool();
   });
 
   afterEach(async () => {
@@ -111,10 +136,10 @@ describe('ArtifactTool', () => {
 
   it('redeploys the same source path to the same url', async () => {
     const file = await writeFragment('dash.html', '<p>v1</p>');
-    const first = await tool.build({ file_path: file }).execute(signal);
+    const first = await run(file);
 
     await fs.writeFile(file, '<p>v2</p>', 'utf8');
-    const second = await tool.build({ file_path: file }).execute(signal);
+    const second = await run(file);
 
     // Same source path → same published file (redeploy in place).
     expect(second.resultFilePaths?.[0]).toBe(first.resultFilePaths?.[0]);
@@ -140,15 +165,11 @@ describe('ArtifactTool', () => {
   });
 
   it('does not accumulate historical files without a managed artifact store', async () => {
-    tool = new ArtifactTool(
-      makeConfig(false),
-      new LocalPublisher(outDir),
-      openSpy,
-    );
+    tool = makeTool({ isArtifactSnapshotsEnabled: () => false });
     const file = await writeFragment('page.html', '<h1>Report</h1>');
     const urls = new Set<string | undefined>();
     for (let i = 0; i < 5; i++) {
-      const result = await tool.build({ file_path: file }).execute(signal);
+      const result = await run(file);
       expect(result.error).toBeUndefined();
       expect(result.artifacts).toHaveLength(1);
       expect(result.llmContent).not.toContain('saved');
@@ -163,10 +184,7 @@ describe('ArtifactTool', () => {
   it.each(['after publication', 'during snapshot write'])(
     'reclaims only the new snapshot when cancelled %s',
     async (abortPoint) => {
-      const earlierFile = await writeFragment('earlier.html', '<p>Earlier</p>');
-      const earlier = await tool
-        .build({ file_path: earlierFile })
-        .execute(signal);
+      const earlier = await publish('earlier.html', '<p>Earlier</p>');
       const priorSnapshot = earlier.artifacts![1]!;
       const runtime = path.join(outDir, 'runtime');
       const root = path.join(runtime, 'artifacts', 'snapshots');
@@ -191,9 +209,7 @@ describe('ArtifactTool', () => {
         );
       }
 
-      const result = await tool
-        .build({ file_path: file })
-        .execute(controller.signal);
+      const result = await run(file, tool, controller.signal);
 
       expect(controller.signal.aborted).toBe(true);
       expect(result.artifacts).toBeUndefined();
@@ -215,7 +231,7 @@ describe('ArtifactTool', () => {
   it('reports a saved-version failure even when latest publication succeeded', async () => {
     const file = await writeFragment('page.html', '<p>Published</p>');
     await fs.writeFile(path.join(outDir, 'runtime'), 'not a directory');
-    const result = await tool.build({ file_path: file }).execute(signal);
+    const result = await run(file);
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain(
       'historical version could not be saved',
@@ -228,11 +244,10 @@ describe('ArtifactTool', () => {
   });
 
   it('rejects a fragment with external references and does not publish', async () => {
-    const file = await writeFragment(
+    const res = await publish(
       'bad.html',
       '<script src="https://cdn.example.com/x.js"></script>',
     );
-    const res = await tool.build({ file_path: file }).execute(signal);
 
     expect(res.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
     expect(res.llmContent).toMatch(/self-contained/i);
@@ -241,19 +256,16 @@ describe('ArtifactTool', () => {
   });
 
   it('rejects a full-document fragment', async () => {
-    const file = await writeFragment(
+    const res = await publish(
       'full.html',
       '<!doctype html><html><body><p>x</p></body></html>',
     );
-    const res = await tool.build({ file_path: file }).execute(signal);
     expect(res.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
     expect(res.llmContent).toMatch(/full-document/i);
   });
 
   it('returns FILE_NOT_FOUND for a missing source file', async () => {
-    const res = await tool
-      .build({ file_path: path.join(workdir, 'nope.html') })
-      .execute(signal);
+    const res = await run(path.join(workdir, 'nope.html'));
     expect(res.error?.type).toBe(ToolErrorType.FILE_NOT_FOUND);
   });
 
@@ -261,19 +273,12 @@ describe('ArtifactTool', () => {
     const file = path.join(workdir, 'page.html');
     const controller = new AbortController();
     const readTextFile = vi.fn(async () => ({ content: '<p>x</p>' }));
-    const signalAwareTool = new ArtifactTool(
-      {
-        ...makeConfig(),
-        getFileSystemService: () => ({ readTextFile }),
-      } as unknown as Config,
-      {
-        kind: 'oss',
-        publish: async () => ({ id: 'x', url: 'https://h/x' }),
-      },
-      openSpy as unknown as UrlOpener,
+    const signalAwareTool = makeTool(
+      { getFileSystemService: () => ({ readTextFile }) },
+      stubPublisher('oss'),
     );
 
-    await signalAwareTool.build({ file_path: file }).execute(controller.signal);
+    await run(file, signalAwareTool, controller.signal);
 
     expect(readTextFile).toHaveBeenCalledWith({
       path: file,
@@ -283,19 +288,11 @@ describe('ArtifactTool', () => {
   });
 
   it('returns EXECUTION_FAILED when the publisher throws', async () => {
-    const file = await writeFragment('page.html', '<p>x</p>');
-    const failingTool = new ArtifactTool(
-      makeConfig(),
-      {
-        kind: 'oss',
-        publish: async () => {
-          throw new Error('network timeout');
-        },
-      },
-      openSpy as unknown as UrlOpener,
+    const failingTool = makeTool(
+      {},
+      failingPublisher(new Error('network timeout')),
     );
-
-    const res = await failingTool.build({ file_path: file }).execute(signal);
+    const res = await publish('page.html', '<p>x</p>', failingTool);
 
     expect(res.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
     expect(res.llmContent).toContain('network timeout');
@@ -304,8 +301,7 @@ describe('ArtifactTool', () => {
 
   it('rejects source fragments that exceed the artifact byte budget', async () => {
     const big = '<p>' + 'a'.repeat(MAX_ARTIFACT_BYTES) + '</p>';
-    const file = await writeFragment('big.html', big);
-    const res = await tool.build({ file_path: file }).execute(signal);
+    const res = await publish('big.html', big);
     expect(res.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
     expect(res.error?.message).toContain('source exceeds');
     expect(res.error?.message).toContain(`${MAX_ARTIFACT_BYTES} byte limit`);
@@ -314,8 +310,7 @@ describe('ArtifactTool', () => {
 
   it('enforces the published artifact size cap', async () => {
     const almostTooBig = 'a'.repeat(MAX_ARTIFACT_BYTES - 1);
-    const file = await writeFragment('wrapped-big.html', almostTooBig);
-    const res = await tool.build({ file_path: file }).execute(signal);
+    const res = await publish('wrapped-big.html', almostTooBig);
     expect(res.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
     expect(res.error?.message).toContain('Artifact is too large');
     expect(openSpy).not.toHaveBeenCalled();
@@ -323,24 +318,14 @@ describe('ArtifactTool', () => {
 
   it('skips auto-open when QWEN_ARTIFACT_NO_AUTO_OPEN=1', async () => {
     process.env['QWEN_ARTIFACT_NO_AUTO_OPEN'] = '1';
-    const file = await writeFragment('p.html', '<p>x</p>');
-    const res = await tool.build({ file_path: file }).execute(signal);
+    const res = await publish('p.html', '<p>x</p>');
     expect(res.error).toBeUndefined();
     expect(openSpy).not.toHaveBeenCalled();
   });
 
   it('skips auto-open when disabled by settings', async () => {
-    const file = await writeFragment('p.html', '<p>x</p>');
-    const noAutoOpenTool = new ArtifactTool(
-      {
-        ...makeConfig(),
-        shouldAutoOpenArtifact: () => false,
-      } as unknown as Config,
-      new LocalPublisher(outDir),
-      openSpy as unknown as UrlOpener,
-    );
-
-    const res = await noAutoOpenTool.build({ file_path: file }).execute(signal);
+    const noAutoOpenTool = makeTool({ shouldAutoOpenArtifact: () => false });
+    const res = await publish('p.html', '<p>x</p>', noAutoOpenTool);
 
     expect(res.error).toBeUndefined();
     expect(openSpy).not.toHaveBeenCalled();
@@ -348,16 +333,7 @@ describe('ArtifactTool', () => {
 
   it('omits browser launch from confirmation when auto-open is disabled', async () => {
     const file = await writeFragment('p.html', '<p>x</p>');
-    const noAutoOpenTool = new ArtifactTool(
-      {
-        ...makeConfig(),
-        shouldAutoOpenArtifact: () => false,
-      } as unknown as Config,
-      new LocalPublisher(outDir),
-      openSpy as unknown as UrlOpener,
-    );
-
-    const details = await noAutoOpenTool
+    const details = await makeTool({ shouldAutoOpenArtifact: () => false })
       .build({ file_path: file })
       .getConfirmationDetails(signal);
 
@@ -373,14 +349,7 @@ describe('ArtifactTool', () => {
       .fn()
       .mockReturnValueOnce(true)
       .mockReturnValueOnce(false);
-    const consistentTool = new ArtifactTool(
-      {
-        ...makeConfig(),
-        shouldAutoOpenArtifact,
-      } as unknown as Config,
-      new LocalPublisher(outDir),
-      openSpy as unknown as UrlOpener,
-    );
+    const consistentTool = makeTool({ shouldAutoOpenArtifact });
     const file = await writeFragment('p.html', '<p>x</p>');
     const invocation = consistentTool.build({ file_path: file });
 
@@ -404,106 +373,53 @@ describe('ArtifactTool', () => {
   });
 
   it('derives a title from the filename when none is given', async () => {
-    const file = await writeFragment('release-notes.html', '<p>x</p>');
-    const res = await tool.build({ file_path: file }).execute(signal);
+    const res = await publish('release-notes.html', '<p>x</p>');
     const html = await fs.readFile(res.resultFilePaths![0], 'utf8');
     expect(html).toContain('<title>release-notes</title>');
   });
 
   it('tells the user a remote backend uploads, but a local one does not', async () => {
     const file = path.join(workdir, 'p.html');
-    const remoteTool = new ArtifactTool(
-      makeConfig(),
-      { kind: 'oss', publish: async () => ({ id: 'x', url: 'https://h/x' }) },
-      openSpy as unknown as UrlOpener,
-    );
-    const remote = await remoteTool
-      .build({ file_path: file })
-      .getConfirmationDetails(signal);
-    expect((remote as { prompt: string }).prompt).toMatch(
+    const promptOf = async (t: ArtifactTool) =>
+      (
+        (await t.build({ file_path: file }).getConfirmationDetails(signal)) as {
+          prompt: string;
+        }
+      ).prompt;
+    expect(await promptOf(makeTool({}, stubPublisher('oss')))).toMatch(
       /remote host \(oss\)/i,
     );
-
-    const hostTool = new ArtifactTool(
-      makeConfig(),
-      {
-        kind: 'host',
-        publish: async () => ({ id: 'x', url: 'https://h/x' }),
-      },
-      openSpy as unknown as UrlOpener,
-    );
-    const host = await hostTool
-      .build({ file_path: file })
-      .getConfirmationDetails(signal);
-    expect((host as { prompt: string }).prompt).toMatch(
+    expect(await promptOf(makeTool({}, stubPublisher('host')))).toMatch(
       /remote host \(custom upload\)/i,
     );
-
-    const local = await tool
-      .build({ file_path: file })
-      .getConfirmationDetails(signal);
-    expect((local as { prompt: string }).prompt).not.toMatch(/remote/i);
+    expect(await promptOf(tool)).not.toMatch(/remote/i);
   });
 
-  it('reports a cancellation when the publisher aborts', async () => {
-    const file = await writeFragment('page.html', '<p>x</p>');
-    const abortErr = Object.assign(new Error('aborted'), {
-      name: 'AbortError',
-    });
-    const cancelTool = new ArtifactTool(
-      makeConfig(),
-      {
-        kind: 'oss',
-        publish: async () => {
-          throw abortErr;
-        },
-      },
-      openSpy as unknown as UrlOpener,
-    );
-    const res = await cancelTool.build({ file_path: file }).execute(signal);
-    expect(res.error).toBeUndefined();
-    expect(res.llmContent).toMatch(/cancelled/i);
-    expect(openSpy).not.toHaveBeenCalled();
-  });
-
-  it('reports a cancellation for a Node abort error', async () => {
-    const file = await writeFragment('page.html', '<p>x</p>');
-    const abortErr = Object.assign(new Error('aborted'), {
-      code: 'ABORT_ERR',
-    });
-    const cancelTool = new ArtifactTool(
-      makeConfig(),
-      {
-        kind: 'oss',
-        publish: async () => {
-          throw abortErr;
-        },
-      },
-      openSpy as unknown as UrlOpener,
-    );
-    const res = await cancelTool.build({ file_path: file }).execute(signal);
-    expect(res.error).toBeUndefined();
-    expect(res.llmContent).toMatch(/cancelled/i);
-    expect(openSpy).not.toHaveBeenCalled();
-  });
-
-  it('reports a cancellation when the signal is aborted', async () => {
+  it.each<[string, unknown, boolean]>([
+    [
+      'reports a cancellation when the publisher aborts',
+      Object.assign(new Error('aborted'), { name: 'AbortError' }),
+      false,
+    ],
+    [
+      'reports a cancellation for a Node abort error',
+      Object.assign(new Error('aborted'), { code: 'ABORT_ERR' }),
+      false,
+    ],
+    [
+      'reports a cancellation when the signal is aborted',
+      new Error('network failure'),
+      true,
+    ],
+  ])('%s', async (_title, err, preAborted) => {
     const controller = new AbortController();
-    controller.abort();
+    if (preAborted) controller.abort();
     const file = await writeFragment('page.html', '<p>x</p>');
-    const cancelTool = new ArtifactTool(
-      makeConfig(),
-      {
-        kind: 'oss',
-        publish: async () => {
-          throw new Error('network failure');
-        },
-      },
-      openSpy as unknown as UrlOpener,
+    const res = await run(
+      file,
+      makeTool({}, failingPublisher(err)),
+      controller.signal,
     );
-    const res = await cancelTool
-      .build({ file_path: file })
-      .execute(controller.signal);
     expect(res.error).toBeUndefined();
     expect(res.llmContent).toMatch(/cancelled/i);
     expect(openSpy).not.toHaveBeenCalled();

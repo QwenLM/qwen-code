@@ -16,19 +16,35 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutation;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 public interface AgentStateStore {
-    Admission insertSessionCommand(String tenantId, String operation,
+    // The annotation must sit on the default itself: the delegating body runs
+    // on the target instance, so without it the self-call bypasses the proxy.
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertSessionCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
             String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        return insertSessionCommand(tenantId, null, operation,
+                idempotencyKey, requestDigest, agentId, requestedRevision,
+                title, input, payloadDigest);
+    }
+
+    Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest);
 
     Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
@@ -57,6 +73,16 @@ public interface AgentStateStore {
             SessionMutationKind kind, String title, String harnessBootId);
 
     /**
+     * Retires the command row of a Session mutation the Harness refused
+     * before completion, so the refusal does not leave the Session's
+     * later lifecycle changes blocked by a {@code PENDING} row nothing
+     * completes. The receipt and digest survive for same-content retries
+     * and concurrent completion; completed outcomes remain replayable.
+     */
+    void abandonSessionMutation(String tenantId, String operation,
+            String idempotencyKey, String sessionId);
+
+    /**
      * Admits a close, archive or delete, or returns the operation that the
      * same actor already admitted under the key. An archive completes here;
      * a close or delete waits for {@link #completeOperation}.
@@ -64,6 +90,38 @@ public interface AgentStateStore {
     OperationAdmission beginOperation(String tenantId, String sessionId,
             OperationKind kind, String actorDigest, String idempotencyKey,
             String requestDigest);
+
+    default boolean workspaceFilesEnabled() {
+        return false;
+    }
+
+    default OperationAdmission beginWorkspaceClose(String tenantId, String sessionId,
+            String actorId, String actorDigest, String key, String digest, boolean supported) {
+        throw new UnsupportedOperationException("Workspace close is unavailable");
+    }
+
+    OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
+            OperationKind kind, String actorId, String actorDigest, String key,
+            String digest, boolean closeSupported);
+
+    boolean hasCompletedWorkspaceClose(String tenantId, String sessionId);
+
+    /** The given Sessions with a completed workspace close, in one read. */
+    Set<String> completedWorkspaceCloses(String tenantId,
+            List<String> sessionIds);
+
+    SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
+            String actorId, String scopedKey, String requestDigest);
+
+    default boolean renewLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, Duration duration) {
+        return false;
+    }
+
+    default void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
+            String owner, long generation, String failureCode, long availableAt) {
+        throw new UnsupportedOperationException("Lifecycle reconciliation is unavailable");
+    }
 
     Optional<OperationRecord> findOperation(String tenantId,
             String sessionId, String operationId);
@@ -102,15 +160,34 @@ public interface AgentStateStore {
     Optional<TurnRecord> findTurn(String tenantId, String sessionId,
             String turnId);
 
-    Optional<TurnRecord> findActiveTurn(String tenantId, String sessionId);
+    /** The active Turn of each given Session, in one round trip. */
+    Map<String, TurnSummary> findActiveTurns(String tenantId,
+            List<String> sessionIds);
 
-    Optional<TurnRecord> findLatestTurn(String tenantId, String sessionId);
+    /** The latest Turn of each given Session, in one round trip. */
+    Map<String, TurnSummary> findLatestTurns(String tenantId,
+            List<String> sessionIds);
+
+    /**
+     * The latest environment event of each Session's latest Turn, in one
+     * round trip.
+     */
+    Map<String, EventRecord> findLatestEnvironmentEvents(String tenantId,
+            Map<String, TurnSummary> latestTurns);
+
+    /**
+     * A page of a Session's Turns, newest first: by creation time, then by
+     * Turn ID, both descending. A position excludes the Turn it names and
+     * every newer one.
+     */
+    TurnPage listTurns(String tenantId, String sessionId,
+            Long beforeCreatedAt, String beforeTurnId, int limit);
+
+    Optional<TurnSummary> findTurnSummary(String tenantId, String sessionId,
+            String turnId);
 
     List<EventRecord> findEvents(String tenantId, String sessionId,
             long afterSequence, int limit);
-
-    Optional<EventRecord> findLatestEnvironmentEvent(String tenantId,
-            String sessionId);
 
     List<EventRecord> findControlEvents(String tenantId, String sessionId,
             long throughSequence);
@@ -121,7 +198,9 @@ public interface AgentStateStore {
     Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);
 
-    long findSnapshotCoveredSequence(String tenantId, String sessionId);
+    /** The snapshot's covered sequence of each given Session, in one read. */
+    Map<String, Long> findSnapshotCoveredSequences(String tenantId,
+            List<String> sessionIds);
 
     ReplayWindow findReplayWindow(String tenantId, String sessionId);
 
@@ -168,6 +247,17 @@ public interface AgentStateStore {
     void retractContinuationOutput(String tenantId, String sessionId,
             String turnId, String owner, String harnessBootId,
             String eventEpoch);
+
+    /**
+     * Retracts the published text of the in-flight message a restarted model
+     * attempt replaces (#13319): deltas of the Turn in the live epoch with a
+     * source id at or after {@code fromSourceId} are emptied, projections are
+     * rebuilt, and a {@code stream.reconciled} event is appended. The Harness
+     * cursor advances past {@code retractionSourceId} either way.
+     */
+    void retractHarnessTurnOutput(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch,
+            long fromSourceId, long retractionSourceId);
 
     void recordHarnessEvents(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
