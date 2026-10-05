@@ -15,6 +15,7 @@ import {
 import {
   setMemoryFilename,
   DEFAULT_CONTEXT_FILENAME,
+  AGENT_CONTEXT_FILENAME,
   LOCAL_CONTEXT_FILENAME,
 } from '../utils/memory-constants.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -455,9 +456,73 @@ describe('loadServerHierarchicalMemory', () => {
     });
   });
 
+  it.each(['directory', 'file'] as const)(
+    'stops loading context at the Git root with a .git %s',
+    async (gitMarker) => {
+      setMemoryFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
+      if (gitMarker === 'directory') {
+        await createEmptyDir(path.join(projectRoot, '.git'));
+      } else {
+        await createTestFile(
+          path.join(projectRoot, '.git'),
+          'gitdir: elsewhere',
+        );
+      }
+
+      const expectedPaths: string[] = [];
+      for (const filename of [
+        DEFAULT_CONTEXT_FILENAME,
+        AGENT_CONTEXT_FILENAME,
+      ]) {
+        await createTestFile(
+          path.join(testRootDir, filename),
+          `Parent ${filename} must stay out`,
+        );
+        const rootFile = await createTestFile(
+          path.join(projectRoot, filename),
+          `Root ${filename} is loaded`,
+        );
+        const cwdFile = await createTestFile(
+          path.join(cwd, filename),
+          `CWD ${filename} is loaded`,
+        );
+        expectedPaths.push(
+          path.relative(cwd, rootFile),
+          path.relative(cwd, cwdFile),
+        );
+      }
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(4);
+      expect(result.contextFilePaths).toEqual(expectedPaths);
+      for (const filename of [
+        DEFAULT_CONTEXT_FILENAME,
+        AGENT_CONTEXT_FILENAME,
+      ]) {
+        expect(result.memoryContent).toContain(`Root ${filename} is loaded`);
+        expect(result.memoryContent).toContain(`CWD ${filename} is loaded`);
+        expect(result.memoryContent).not.toContain(
+          `Parent ${filename} must stay out`,
+        );
+      }
+    },
+  );
+
   it.each(['flat', 'tree'] as const)(
-    'hydrates managed context and nested imports in %s format without rewriting files',
+    'hydrates managed context outside the Git root and nested imports in %s format without rewriting files',
     async (format) => {
+      await createEmptyDir(path.join(projectRoot, '.git'));
+      await createTestFile(
+        path.join(testRootDir, DEFAULT_CONTEXT_FILENAME),
+        'PARENT_OUTSIDE_GIT_CONTEXT',
+      );
       const root = path.join(testRootDir, 'managed');
       const original = 'Root ${CLAUDE_PLUGIN_ROOT} @./included.md';
       const context = await createTestFile(
@@ -485,6 +550,7 @@ describe('loadServerHierarchicalMemory', () => {
       expect(result.memoryContent).toContain(`Root ${root}`);
       expect(result.memoryContent).toContain(`Included ${root}`);
       expect(result.memoryContent).toContain('NESTED_MANAGED_CONTENT');
+      expect(result.memoryContent).not.toContain('PARENT_OUTSIDE_GIT_CONTEXT');
       expect(result.memoryContent).not.toContain('${CLAUDE_PLUGIN_ROOT}');
       expect(await fsPromises.readFile(context, 'utf8')).toBe(original);
       expect(await fsPromises.readFile(included, 'utf8')).toBe(
@@ -1471,7 +1537,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     it('still loads through a symlink when the target is outside the project-root scan boundary', async () => {
       // A .git marker makes cwd the project root, so the upward scan stops
-      // at its parent and never reaches testRootDir. The outside file can
+      // there and never reaches testRootDir. The outside file can
       // then only be loaded through the workspace symlink.
       await createEmptyDir(path.join(cwd, '.git'));
       await createTestFile(
