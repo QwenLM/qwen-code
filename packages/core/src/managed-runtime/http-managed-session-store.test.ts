@@ -1151,7 +1151,8 @@ describe('HTTP Managed Session store', () => {
       return server.fetch(input, init);
     });
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://127.0.0.1:8080',
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1188,7 +1189,8 @@ describe('HTTP Managed Session store', () => {
         return server.fetch(input, init);
       });
       const stores = createHttpManagedSessionStores({
-        baseUrl: 'http://127.0.0.1:8080',
+        baseUrl: 'http://session-store.test',
+        allowInsecureHttp: true,
         sessionKey: SESSION_KEY,
         writerId: 'harness-a',
         writerToken: TOKEN_A,
@@ -1221,7 +1223,8 @@ describe('HTTP Managed Session store', () => {
       return server.fetch(input, init);
     });
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://127.0.0.1:8080',
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1257,7 +1260,8 @@ describe('HTTP Managed Session store', () => {
       return server.fetch(input, init);
     });
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://127.0.0.1:8080',
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1308,7 +1312,8 @@ describe('HTTP Managed Session store', () => {
       return server.fetch(input, init);
     });
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://127.0.0.1:8080',
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1388,7 +1393,8 @@ describe('HTTP Managed Session store', () => {
       throw new Error(`Unexpected request ${url}`);
     });
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://127.0.0.1:8080',
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1420,7 +1426,8 @@ describe('HTTP Managed Session store', () => {
         : server.fetch(input, init),
     );
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://127.0.0.1:8080',
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1463,7 +1470,8 @@ describe('HTTP Managed Session store', () => {
       return server.fetch(input, init);
     });
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://127.0.0.1:8080',
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1501,7 +1509,8 @@ describe('HTTP Managed Session store', () => {
       return server.fetch(input, init);
     });
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://127.0.0.1:8080',
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
