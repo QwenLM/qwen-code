@@ -43,6 +43,7 @@ interface StoreOptions {
 }
 
 const rosterMutationQueues = new Map<string, Promise<void>>();
+const sessionMutationQueues = new Map<string, Promise<void>>();
 
 export function getAgentViewStorePaths(
   options: StoreOptions = {},
@@ -308,6 +309,28 @@ export async function writeAgentViewWorker(
     ...worker,
     schemaVersion: 1,
   });
+}
+
+export async function withAgentViewSessionMutation<T>(
+  sessionId: string,
+  options: StoreOptions,
+  action: () => Promise<T>,
+): Promise<T> {
+  const sessionDir = getAgentViewSessionPaths(sessionId, options).sessionDir;
+  const previous = sessionMutationQueues.get(sessionDir) ?? Promise.resolve();
+  const current = previous.then(action, action);
+  const queued = current
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    .finally(() => {
+      if (sessionMutationQueues.get(sessionDir) === queued) {
+        sessionMutationQueues.delete(sessionDir);
+      }
+    });
+  sessionMutationQueues.set(sessionDir, queued);
+  return current;
 }
 
 export async function readAgentViewSupervisor(
