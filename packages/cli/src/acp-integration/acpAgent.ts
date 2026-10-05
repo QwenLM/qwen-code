@@ -4396,6 +4396,7 @@ class QwenAgent implements Agent {
           skipSkillManager: true,
           skipMcpDiscovery: true,
           lenientToolWarmup: true,
+          allowManagedHandBack: false,
         });
         const manager = config.getToolRegistry()?.getMcpClientManager();
         if (!manager) {
@@ -11563,6 +11564,7 @@ class QwenAgent implements Agent {
                 skipSkillManager: true,
                 skipFileCheckpointing: true,
                 lenientToolWarmup: true,
+                allowManagedHandBack: false,
               },
             ));
           const targetService = targetConfig.getSessionSourceService();
