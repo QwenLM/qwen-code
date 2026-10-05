@@ -315,7 +315,7 @@ jobs:
     # The step ceilings leave room for the uncapped setup steps; a healthy
     # run measures ~28 min end to end. The Verify step runs the unit tests,
     # SpotBugs, Checkstyle and the Hosted*IT suite in one Maven invocation,
-    # and its green duration measured 8.4-11.7 min across ten consecutive
+    # and its green duration measured 8.4-11.7 min across the last ten green
     # main runs in Oct 2026 -- the old 12-minute ceiling left as little as
     # 18 s of headroom, and run 37346072729 died at it before failsafe wrote
     # a report. 20 minutes restores ~1.7x headroom over the slowest green run.
