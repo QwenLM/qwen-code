@@ -71,6 +71,10 @@ interface RegisteredCapture {
     remainder: string;
     decoder: StringDecoder;
     refusedBody?: Record<string, unknown>;
+    // A refused finalize whose record is already attached re-drives itself
+    // once: the route's stash alone cannot heal a stranded record whose
+    // worker finalized exactly once and moved on.
+    redrive?: NodeJS.Timeout;
     observer?: {
       onLine: (line: string) => void;
       onExit: (failed: boolean) => void;
@@ -384,6 +388,25 @@ export class HostedShellPublisher {
           // any client retry.
           entry.finalizing = undefined;
           entry.background.refusedBody = body;
+          const owner =
+            entry.background.recordDomain === 'monitor_run'
+              ? this.monitors?.record(String(id))
+              : this.childRuns?.record(String(id));
+          // An attached record that missed the final forward otherwise
+          // strands forever: the worker finalizes once and drops the hold.
+          // The same stash re-drives itself once; a retry the client or
+          // the attach path already owns guards this out.
+          if (
+            owner?.startReceiptRef &&
+            entry.background.redrive === undefined
+          ) {
+            const redrive = setTimeout(() => {
+              entry.background!.redrive = undefined;
+              void this.settleAttached(String(id)).catch(() => undefined);
+            }, 0);
+            if (typeof redrive.unref === 'function') redrive.unref();
+            entry.background.redrive = redrive;
+          }
           throw cause;
         }
         return entry.envelope;
@@ -869,6 +892,10 @@ export class HostedShellPublisher {
     const body = background?.refusedBody;
     if (!entry || !background || body === undefined) return;
     if (entry.finalizing) return;
+    if (background.redrive !== undefined) {
+      clearTimeout(background.redrive);
+      background.redrive = undefined;
+    }
     background.refusedBody = undefined;
     entry.finalizing = this.finalizeBackground(entry, body, executionCallId);
     try {
@@ -892,6 +919,9 @@ export class HostedShellPublisher {
       );
     }
     await Promise.allSettled([...this.operations]);
+    for (const entry of this.captures.values()) {
+      if (entry.background?.redrive) clearTimeout(entry.background.redrive);
+    }
     // The publisher closes only at the Session's ordered close, after the
     // last finalization landed (or accurately did not), so every capture
     // store closes here — background families included.

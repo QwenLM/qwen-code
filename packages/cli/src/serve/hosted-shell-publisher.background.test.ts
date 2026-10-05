@@ -723,6 +723,92 @@ it('completes a refused exit settle on the record’s own attach, without a clie
   expect(record.outputRef).not.toBeNull();
 });
 
+it('re-drives a refused final forward on an attached record without any client action', async () => {
+  // S15b: the worker finalizes exactly once and moves on; a single
+  // transient failure on that last forward leaves the record running
+  // forever. The refused body that owns the settle re-drives itself.
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.orchestrator.admit({
+    shellId: 'execution-strand',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'execution-strand',
+    args: { command: 'echo bye', is_background: true },
+  });
+  await r.orchestrator.dispatchStarted('execution-strand', BINDING);
+  await r.orchestrator.attach('execution-strand', BINDING, { pid: 7 });
+  const request = backgroundRequest(r.key, '1');
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'execution-strand';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-a',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  prepared.sink.setStarted(7);
+  await prepared.sink.write('stdout', Buffer.from('done\n'));
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  await prepared.sink.finish('stderr', true);
+  // The one transient failure on the final record forward.
+  const advance = vi
+    .spyOn(r.orchestrator, 'advanceOutput')
+    .mockRejectedValueOnce(new Error('transient store 5xx'));
+  const refused = await fetch(r.descriptor.url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${r.descriptor.token}`,
+      'cache-control': 'no-store',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      operation: 'finalize',
+      executionCallId: 'execution-strand',
+      started: true,
+      failed: false,
+      process: { exitCode: 0, signal: null, previewBytes: 0 },
+      executionStatus: 'success',
+      responseParts: [],
+      previewTruncated: false,
+      error: null,
+    }),
+  });
+  expect(refused.status).toBeGreaterThanOrEqual(400);
+  expect(advance).toHaveBeenCalledOnce();
+  const stranded = parseChildRun(
+    session!.authority.extensionRecord('child_run', 'execution-strand')!.record,
+  );
+  expect(stranded.stopReason).toBeNull();
+  // No client retry, no re-attach, no manual settle: the refused body's
+  // own re-drive completes the record.
+  await vi.waitFor(
+    () => {
+      const record = parseChildRun(
+        session!.authority.extensionRecord('child_run', 'execution-strand')!
+          .record,
+      );
+      expect(record).toMatchObject({
+        stopReason: 'exited',
+        run: { state: 'settled', execution: 'settled' },
+      });
+      expect(record.outputRef).not.toBeNull();
+    },
+    { timeout: 5_000, interval: 50 },
+  );
+});
+
 it('keeps an ownerless tail for the settle that its attach unblocks', async () => {
   const r = await rig();
   const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
