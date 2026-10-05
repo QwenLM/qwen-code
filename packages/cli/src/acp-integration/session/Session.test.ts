@@ -21,6 +21,7 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
+import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import type { DaemonToolLoopState } from './Session.js';
 import type {
   Content,
@@ -51,6 +52,7 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
+import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import {
   getCurrentAgentId,
@@ -30143,6 +30145,130 @@ describe('Session', () => {
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
       });
 
+      describe('in a blocked Managed session', () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-blocked',
+        };
+        const turnKey = 'goal-runtime:turn-blocked';
+        const block = new ManagedRuntimeOutcomeUnknownError(
+          'A cancelled Runtime tool call did not settle.',
+        );
+
+        beforeEach(() => {
+          mockConfig.getManagedSessionBlock = vi.fn().mockReturnValue(block);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          mockChat.sendMessageStream = vi.fn();
+        });
+
+        function goalSnapshot(status: 'active' | 'paused') {
+          return {
+            v: 2,
+            activity: 'running',
+            goal: {
+              goalId: 'goal-1',
+              revision: 1,
+              objective: 'check weather',
+              status,
+              evidenceCursor: { recordId: 'cursor-1' },
+              turnCount: 0,
+              activeTimeMs: 0,
+              tokensUsed: 0,
+              createdAt: 1234,
+              updatedAt: 1234,
+            },
+          };
+        }
+
+        // Every continuation is refused before the model, so handing the
+        // permit back for another one would loop without end.
+        it('pauses the Goal instead of queueing another continuation', async () => {
+          mockGoalRuntime.getSnapshot.mockReturnValue(goalSnapshot('active'));
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+
+          await vi.waitFor(() =>
+            expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+              action: 'pause',
+              expectedGoalId: 'goal-1',
+              expectedRevision: 1,
+              reason: core.GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED,
+            }),
+          );
+          expect(mockGoalRuntime.releaseTurn).not.toHaveBeenCalled();
+          expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        });
+
+        it('names the block when the turn that met it pauses the Goal', async () => {
+          // The turn reached the model before the session was blocked.
+          mockConfig.getManagedSessionBlock = vi
+            .fn()
+            .mockReturnValueOnce(undefined)
+            .mockReturnValue(block);
+          mockGoalRuntime.getSnapshot.mockReturnValue(goalSnapshot('active'));
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockRejectedValue(new Error(block.message));
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+
+          await vi.waitFor(() =>
+            expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+              action: 'pause',
+              expectedGoalId: 'goal-1',
+              expectedRevision: 1,
+              reason: core.GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED,
+            }),
+          );
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+        });
+
+        it.each([
+          [
+            'a pause it could not record',
+            () => {
+              mockGoalRuntime.getSnapshot.mockReturnValue(
+                goalSnapshot('active'),
+              );
+              mockGoalRuntime.dispatch.mockRejectedValueOnce(
+                new Error('write failed'),
+              );
+            },
+          ],
+          [
+            'a Goal no longer active',
+            () =>
+              mockGoalRuntime.getSnapshot.mockReturnValue(
+                goalSnapshot('paused'),
+              ),
+          ],
+        ])('queues no continuation after %s', async (_case, arrange) => {
+          arrange();
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+
+          await vi.waitFor(() =>
+            expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey, {
+              requeue: false,
+            }),
+          );
+          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledOnce();
+          expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        });
+      });
+
       it('keeps a Goal turn graceful when loop protection stops it', async () => {
         // Goal continuations are non-interactive and bypass the bridge: a
         // rejection would settle the turn as failed and pause the goal
@@ -37395,6 +37521,260 @@ describe('Session', () => {
         });
       });
 
+      describe('Managed Runtime outcome', () => {
+        it('fails the turn, reporting no result, when a call outcome is unknown', async () => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const unknown = new ManagedRuntimeOutcomeUnknownError(
+            'The Runtime worker stopped answering for a tool call.',
+            { cause: new Error('read ECONNRESET') },
+          );
+          const tool = {
+            name: 'write_file',
+            kind: core.Kind.Edit,
+            build: vi.fn().mockReturnValue({
+              params: { file_path: '/tmp/test.txt', content: 'x' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: vi.fn().mockRejectedValue(unknown),
+            }),
+          };
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'write_file',
+                      args: { file_path: '/tmp/test.txt', content: 'x' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'write the file' }],
+            }),
+          ).rejects.toMatchObject({
+            code: -32603,
+            // The cause tells an operator why the outcome was lost.
+            message: `${unknown.message} (read ECONNRESET)`,
+            data: { errorKind: 'managed_runtime_outcome_unknown' },
+          });
+          // No failure result for the model to act on, and no next request.
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).not.toHaveBeenCalled();
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+        });
+
+        it.each([false, true])(
+          'fails a cancelled turn whose call outcome became unknown (daemon context: %s)',
+          async (withContext) => {
+            mockConfig.getApprovalMode = vi
+              .fn()
+              .mockReturnValue(ApprovalMode.YOLO);
+            const unknown = new ManagedRuntimeOutcomeUnknownError(
+              'A cancelled Runtime tool call did not settle.',
+            );
+            let started!: () => void;
+            const executing = new Promise<void>((resolve) => {
+              started = resolve;
+            });
+            const tool = {
+              name: 'run_shell_command',
+              kind: core.Kind.Execute,
+              build: vi.fn().mockReturnValue({
+                params: { command: 'sleep 100' },
+                getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                execute: vi.fn((signal: AbortSignal) => {
+                  started();
+                  return new Promise((_resolve, reject) => {
+                    // The worker never settles the cancel.
+                    signal.addEventListener('abort', () => reject(unknown), {
+                      once: true,
+                    });
+                  });
+                }),
+              }),
+            };
+            mockToolRegistry.getTool.mockReturnValue(tool);
+            mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'call-1',
+                        name: 'run_shell_command',
+                        args: { command: 'sleep 100' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            );
+            const running = session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: 'run' }],
+              },
+              withContext
+                ? {
+                    version: 1,
+                    sessionId: 'test-session-id',
+                    promptId: 'daemon-prompt-id',
+                    originatorClientId: 'client-1',
+                  }
+                : undefined,
+            );
+            const outcome = running.catch((error: unknown) => error);
+            await executing;
+            void session.cancelPendingPrompt();
+            // Not a cancellation: the session is blocked.
+            expect(await outcome).toMatchObject({
+              code: -32603,
+              data: { errorKind: 'managed_runtime_outcome_unknown' },
+            });
+            expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+            expect(
+              mockChatRecordingService.recordToolResult,
+            ).not.toHaveBeenCalled();
+          },
+        );
+
+        it('releases a prepared call the user rejected', async () => {
+          const release = vi.fn().mockResolvedValue(undefined);
+          const execute = vi.fn();
+          const tool = {
+            name: 'write_file',
+            kind: core.Kind.Edit,
+            build: vi.fn().mockReturnValue({
+              params: { file_path: '/tmp/test.txt', content: 'x' },
+              getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+              getConfirmationDetails: vi.fn().mockResolvedValue({
+                type: 'info',
+                title: 'Confirm write',
+                prompt: 'write',
+                onConfirm: vi.fn(),
+              }),
+              getDescription: vi.fn().mockReturnValue('write'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute,
+              release,
+            }),
+          };
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          vi.mocked(mockClient.requestPermission).mockResolvedValue({
+            outcome: { outcome: 'cancelled' },
+          });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'call-1',
+                        name: 'write_file',
+                        args: { file_path: '/tmp/test.txt', content: 'x' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            )
+            .mockResolvedValue(createStreamWithChunks([]));
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'write the file' }],
+          });
+
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+          await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+          expect(execute).not.toHaveBeenCalled();
+        });
+
+        it('releases a prepared call that permission denied', async () => {
+          const release = vi.fn().mockResolvedValue(undefined);
+          const tool = {
+            name: 'write_file',
+            kind: core.Kind.Edit,
+            build: vi.fn().mockReturnValue({
+              params: { file_path: '/tmp/test.txt', content: 'x' },
+              getDefaultPermission: vi.fn().mockResolvedValue('deny'),
+              getDescription: vi.fn().mockReturnValue('write'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: vi.fn(),
+              release,
+            }),
+          };
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'call-1',
+                        name: 'write_file',
+                        args: { file_path: '/tmp/test.txt', content: 'x' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            )
+            .mockResolvedValue(createStreamWithChunks([]));
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'write the file' }],
+          });
+
+          // The execution environment's slot does not outlive the call.
+          await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+          expect(
+            tool.build.mock.results[0]!.value.execute,
+          ).not.toHaveBeenCalled();
+        });
+
+        it('refuses a turn in a session that is blocked', async () => {
+          const unknown = new ManagedRuntimeOutcomeUnknownError(
+            'A cancelled Runtime tool call did not settle.',
+          );
+          mockConfig.getManagedSessionBlock = vi.fn().mockReturnValue(unknown);
+          mockChat.sendMessageStream = vi.fn();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'continue' }],
+            }),
+          ).rejects.toMatchObject({
+            data: { errorKind: 'managed_runtime_outcome_unknown' },
+          });
+          expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordUserMessage,
+          ).not.toHaveBeenCalled();
+        });
+      });
+
       describe('PostToolUseFailure hook', () => {
         it('fires PostToolUseFailure hook when tool execution fails', async () => {
           const startExecutionSpanSpy = vi.spyOn(
@@ -43852,11 +44232,14 @@ describe('Session', () => {
     });
 
     it.each([false, true])(
-      'recovers from an automatic Host refusal, preserving user cancellation (agent-host=%s)',
+      'denies outside Host reads before permissions, preserving user cancellation (agent-host=%s)',
       async (agentHost) => {
         vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
           agentHost ? 'agent-host' : undefined,
         );
+        vi.mocked(
+          mockConfig.getWorkspaceContext().isPathWithinWorkspace,
+        ).mockImplementation((candidate) => candidate === process.cwd());
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
         const deniedExecute = vi.fn();
         const allowedExecute = vi.fn().mockResolvedValue({
@@ -43869,10 +44252,12 @@ describe('Session', () => {
           'info',
         );
         deniedTool.kind = core.Kind.Read;
+        const deniedInvocation = deniedTool.build();
+        deniedInvocation.params = { file_path: '/outside/denied.txt' };
+        const allowedTool = mockAllowedTool(core.ToolNames.LS, allowedExecute);
+        allowedTool.build().params = { path: process.cwd() };
         mockToolRegistry.getTool.mockImplementation((name: string) =>
-          name === core.ToolNames.READ_FILE
-            ? deniedTool
-            : mockAllowedTool(name, allowedExecute),
+          name === core.ToolNames.READ_FILE ? deniedTool : allowedTool,
         );
         const guard = vi.fn().mockResolvedValue({ allowed: true });
         mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
@@ -43903,12 +44288,18 @@ describe('Session', () => {
           },
         ]);
 
-        expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        expect(mockClient.requestPermission).toHaveBeenCalledTimes(
+          agentHost ? 0 : 1,
+        );
         expect(deniedExecute).not.toHaveBeenCalled();
         expect(result.stopAfterPermissionCancel).toBe(!agentHost);
         expect(allowedExecute).toHaveBeenCalledTimes(agentHost ? 1 : 0);
         expect(guard).toHaveBeenCalledTimes(agentHost ? 1 : 0);
         if (agentHost) {
+          expect(deniedInvocation.getDefaultPermission).not.toHaveBeenCalled();
+          expect(result.parts[0]?.functionResponse?.response).toEqual({
+            error: 'Agent Host reads are limited to the assigned workspace.',
+          });
           expect(guard).toHaveBeenCalledWith(
             expect.objectContaining({
               toolName: core.ToolNames.LS,
@@ -43932,6 +44323,155 @@ describe('Session', () => {
         );
       },
     );
+
+    it('records an approval-needing inside Host read as a policy denial, not a user cancel', async () => {
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('agent-host');
+      const insidePath = path.join(process.cwd(), 'approval-needed.txt');
+      vi.mocked(
+        mockConfig.getWorkspaceContext().isPathWithinWorkspace,
+      ).mockImplementation(
+        (candidate) => candidate === insidePath || candidate === process.cwd(),
+      );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      const refusedExecute = vi.fn();
+      const allowedExecute = vi.fn().mockResolvedValue({
+        llmContent: 'ALLOWED_HOST_DIRECTORY',
+        returnDisplay: 'ALLOWED_HOST_DIRECTORY',
+      });
+      const refusedTool = mockConfirmingTool(
+        core.ToolNames.READ_FILE,
+        refusedExecute,
+        'info',
+      );
+      refusedTool.kind = core.Kind.Read;
+      refusedTool.build().params = { file_path: insidePath };
+      const allowedTool = mockAllowedTool(core.ToolNames.LS, allowedExecute);
+      allowedTool.build().params = { path: process.cwd() };
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.READ_FILE ? refusedTool : allowedTool,
+      );
+      const guard = vi.fn().mockResolvedValue({ allowed: true });
+      mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
+      vi.mocked(mockClient.requestPermission).mockImplementation(async (p) => {
+        const reject = p.options.find(
+          (option: PermissionOption) => option.kind === 'reject_once',
+        );
+        expect(reject).toBeDefined();
+        return {
+          outcome: { outcome: 'selected', optionId: reject!.optionId },
+        };
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-host-approval', [
+        {
+          id: 'inside_read',
+          name: core.ToolNames.READ_FILE,
+          args: { file_path: insidePath },
+        },
+        {
+          id: 'inside_list',
+          name: core.ToolNames.LS,
+          args: { path: process.cwd() },
+        },
+      ]);
+
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(refusedExecute).not.toHaveBeenCalled();
+      // A Host auto-refusal is a policy denial: it must not stop the batch.
+      expect(result.stopAfterPermissionCancel).toBe(false);
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        error: `Tool "${core.ToolNames.READ_FILE}" requires approval, which is unavailable on this read-only Agent Host.`,
+      });
+      expect(allowedExecute).toHaveBeenCalledTimes(1);
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [result.parts[0]],
+        expect.objectContaining({
+          callId: 'inside_read',
+          status: 'error',
+          executionStatus: 'not_started',
+          errorType: core.ToolErrorType.EXECUTION_DENIED,
+        }),
+      );
+    });
+
+    it('checks full Host authority once after permission-hook input rewriting', async () => {
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('agent-host');
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      const originalPath = path.join(process.cwd(), 'original.txt');
+      const updatedPath = path.join(process.cwd(), 'updated.txt');
+      const permissionHook = vi
+        .spyOn(core, 'firePermissionRequestHook')
+        .mockResolvedValue({
+          hasDecision: true,
+          shouldAllow: true,
+          updatedInput: { file_path: updatedPath },
+        });
+      const preHook = vi
+        .spyOn(core, 'firePreToolUseHook')
+        .mockResolvedValue({ shouldProceed: true });
+      const upstream = vi.fn().mockImplementation(async () => {
+        expect(preHook).toHaveBeenCalledOnce();
+        return { allowed: false, reason: 'upstream Host policy denied' };
+      });
+      mockConfig.getToolInvocationGuard = vi
+        .fn()
+        .mockReturnValue(
+          createAgentHostToolInvocationGuard(
+            upstream,
+            process.cwd(),
+            (candidate) =>
+              mockConfig.getWorkspaceContext().isPathWithinWorkspace(candidate),
+          ),
+        );
+      const execute = vi.fn();
+      const tool = mockConfirmingTool(
+        core.ToolNames.READ_FILE,
+        execute,
+        'info',
+      );
+      tool.kind = core.Kind.Read;
+      tool.build().params = { file_path: originalPath };
+      mockToolRegistry.getTool.mockReturnValue(tool);
+
+      try {
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(new AbortController().signal, 'prompt-host-upstream', [
+          {
+            id: 'inside_read',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: originalPath },
+          },
+        ]);
+
+        expect(permissionHook).toHaveBeenCalledOnce();
+        expect(upstream).toHaveBeenCalledOnce();
+        expect(upstream).toHaveBeenCalledWith(
+          expect.objectContaining({
+            toolName: core.ToolNames.READ_FILE,
+            args: { file_path: updatedPath },
+            permissionChecked: true,
+            sessionId: 'test-session-id',
+            cwd: process.cwd(),
+          }),
+        );
+        expect(mockClient.requestPermission).not.toHaveBeenCalled();
+        expect(execute).not.toHaveBeenCalled();
+        expect(result.stopAfterPermissionCancel).toBe(false);
+        expect(result.parts[0]?.functionResponse?.response).toEqual({
+          error: 'upstream Host policy denied',
+        });
+      } finally {
+        permissionHook.mockRestore();
+        preHook.mockRestore();
+      }
+    });
 
     it('skips later tools after non-question permission cancellation', async () => {
       const cancelledExecute = vi.fn();
@@ -44254,9 +44794,22 @@ describe('Session', () => {
           llmContent: 'should not execute',
           returnDisplay: 'should not execute',
         });
+        const permissionToolName = agentHost
+          ? core.ToolNames.READ_FILE
+          : core.ToolNames.SHELL;
+        const permissionArgs = agentHost
+          ? { file_path: path.join(process.cwd(), 'approval-needed.txt') }
+          : { command: 'echo denied' };
+        const permissionTool = mockConfirmingTool(
+          permissionToolName,
+          permissionExecute,
+          agentHost ? 'info' : 'exec',
+        );
+        if (agentHost) permissionTool.kind = core.Kind.Read;
+        permissionTool.build().params = permissionArgs;
         mockToolRegistry.getTool.mockImplementation((name: string) =>
-          name === core.ToolNames.SHELL
-            ? mockConfirmingTool(name, permissionExecute, 'exec')
+          name === permissionToolName
+            ? permissionTool
             : mockAllowedTool(name, laterExecute),
         );
         vi.mocked(mockClient.requestPermission).mockReturnValueOnce(
@@ -44274,13 +44827,15 @@ describe('Session', () => {
           [
             {
               id: 'shell_call',
-              name: core.ToolNames.SHELL,
-              args: { command: 'echo denied' },
+              name: permissionToolName,
+              args: permissionArgs,
             },
             {
               id: 'read_call',
-              name: core.ToolNames.READ_FILE,
-              args: { file_path: '/tmp/should-not-run' },
+              name: agentHost ? core.ToolNames.LS : core.ToolNames.READ_FILE,
+              args: agentHost
+                ? { path: process.cwd() }
+                : { file_path: '/tmp/should-not-run' },
             },
           ],
         );

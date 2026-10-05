@@ -2044,6 +2044,121 @@ describe('extension tests', () => {
     });
   });
 
+  describe('bounded directory loading', () => {
+    it('overlaps at most four loads and preserves directory order and skips', async () => {
+      for (let index = 0; index < 9; index++) {
+        createExtension({
+          extensionsDir: userExtensionsDir,
+          name: `ext-${index}`,
+          addContextFile: true,
+        });
+      }
+      writeTree(path.join(userExtensionsDir, 'ext-4'), {
+        'qwen-extension.json': '{',
+      });
+      const names = fs.readdirSync(userExtensionsDir);
+      const gates = names.map(() => deferred());
+      const completed: string[] = [];
+      let active = 0;
+      let peak = 0;
+      const manager = createExtensionManager();
+      const realLoad = manager.loadExtension.bind(manager);
+      const load = vi
+        .spyOn(manager, 'loadExtension')
+        .mockImplementation(async (context, options) => {
+          const name = path.basename(context.extensionDir);
+          active++;
+          peak = Math.max(peak, active);
+          await gates[names.indexOf(name)].promise;
+          const extension = await realLoad(context, options);
+          active--;
+          completed.push(name);
+          return extension;
+        });
+
+      const loading = manager.loadExtensionsFromDir(tempHomeDir);
+      try {
+        expect(load).toHaveBeenCalledTimes(4);
+        for (const index of [3, 2, 1]) {
+          gates[index].resolve();
+          await vi.waitFor(() => expect(completed).toContain(names[index]));
+        }
+        expect(load).toHaveBeenCalledTimes(4);
+        gates[0].resolve();
+        await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(8));
+        for (const index of [7, 6, 5, 4]) gates[index].resolve();
+        await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(9));
+        gates[8].resolve();
+
+        const extensions = await loading;
+        expect(peak).toBe(4);
+        expect(completed.slice(0, 4)).toEqual([
+          names[3],
+          names[2],
+          names[1],
+          names[0],
+        ]);
+        expect(extensions.map((extension) => extension.name)).toEqual(
+          names.filter((name) => name !== 'ext-4'),
+        );
+        for (const extension of extensions) {
+          expect(extension.contextFiles).toEqual([
+            path.join(userExtensionsDir, extension.name, 'QWEN.md'),
+          ]);
+        }
+      } finally {
+        for (const gate of gates) gate.resolve();
+        await loading;
+      }
+    });
+
+    it('drains a failed batch and throws its first directory-order error', async () => {
+      for (let index = 0; index < 6; index++) addExt({ name: `ext-${index}` });
+      const names = fs.readdirSync(userExtensionsDir);
+      const first = deferred();
+      const sibling = deferred();
+      const firstError = new Error('first entry failed');
+      const laterError = new Error('later entry failed earlier');
+      let firstRejected = false;
+      let settled = false;
+      const manager = createExtensionManager();
+      const load = vi
+        .spyOn(manager, 'loadExtension')
+        .mockImplementation(async ({ extensionDir }) => {
+          const index = names.indexOf(path.basename(extensionDir));
+          if (index === 0) {
+            await first.promise;
+            firstRejected = true;
+            throw firstError;
+          }
+          if (index === 1) throw laterError;
+          if (index === 2) await sibling.promise;
+          return null;
+        });
+      const outcome = manager.loadExtensionsFromDir(tempHomeDir).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      void outcome.then(() => {
+        settled = true;
+      });
+
+      try {
+        expect(load).toHaveBeenCalledTimes(4);
+        first.resolve();
+        await vi.waitFor(() => expect(firstRejected).toBe(true));
+        expect(settled).toBe(false);
+        sibling.resolve();
+        expect(await outcome).toBe(firstError);
+        expect(load).toHaveBeenCalledTimes(4);
+      } finally {
+        first.resolve();
+        sibling.resolve();
+        await outcome;
+      }
+    });
+  });
+
   describe('refreshCacheIfSourcesChanged', () => {
     // Sources have no watcher: read-only consumers rely on this to see outside
     // mutations (`qwen extensions install` in a terminal) without scanning on

@@ -51,8 +51,15 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
   可运行（`await_runtime` 或 `results_ready`）且带 Workspace 工具 profile 的会话，Harness
   按原 `executionCallId` 逐个向 Broker 解决在途执行。continuation load 经 `execute` 重派发
   每个挂起执行 —— Broker 的持久记录保证恰好一次 —— 提交工具结果并在应答前把 checkpoint
-  推进到 `results_ready`。passive load（协调器的取消路径）只读执行状态并上报
-  `known`/`unknown`，不派发。Broker 无法交代的执行上报 `unknown`，协调器把该轮次阻塞为
+  推进到 `results_ready`。passive load（协调器的取消路径）先接管已 dead 的 owner
+  留下的 Runtime Session —— acquire 不派发任何东西 —— 然后读取执行状态并上报
+  `known`/`unknown`。load 持有该接管、自身从不释放：成功时由终结的 cancel
+  路由交还租约；失败时留作欠账——因为一次 release 会持久化为 RELEASED，而搁浅的
+  READY 身份仍然可用：重驱动的 cancel 会按当前 checkpoint 被重新接纳（daemon
+  不会对已 attach 的会话重新 load），owner 变更后的接管则幂等重 acquire。
+  在已接管、但会话尚未注册成功就被拒绝的 load 上，欠账的接管会被按身份记录并报告——
+  因为不存在可供退役的已注册会话；该记录在下一次成功加载同一会话时清除，其余情形仍只有
+  会话退休才会清偿一次遗弃。Broker 无法交代的执行上报 `unknown`，协调器把该轮次阻塞为
   `managed_runtime_recovery_blocked`，什么都不重放。
 - **continue 从 `results_ready` 起跑模型；cancel 不做新工作直接结算。**
   `managed-runtime/continue` 校验 prompt、checkpoint 与 activation 身份，以 200 回执准入
@@ -72,7 +79,8 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
 - **E2E 把 Workspace 准入当部署数据种子化**（registry 行、access 授权、Broker mount），并在
   两个 Spring owner 上都开启 `harness.workspace-files-enabled` 与可信 actor 头。物理副作用是
   固定的 `write_file`；恰好一次断言由持久执行记录、dispatch generation 与模型请求次数承载，
-  而不是文件字节。`--session-failover` 保持非绑定、不改动。
+  而不是文件字节。`--session-failover` 仍创建非绑定 Session，但这套准入接线不再按模式
+  门控：每个模式的 owner 都携带它(#13258)，其配置与其他模式一致。
 - **两个模式并入 `hosted-harness-mysql` 任务**，该任务安装 runner 私有 `mysqld` 所需的
   MySQL 二进制。
 
@@ -82,7 +90,7 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
 | ------------ | --------------------------------------------------------------------- | ------------------------- |
 | core journal | `message.delta` 事件类型（schema、harness actor、activation subject） | Managed Session 日志      |
 | CLI Harness  | load 恢复快照与结算；continue/cancel 路由；delta 流式提交             | Hosted Harness 会话       |
-| CLI Broker   | 供 passive 上报的 `status` 读取                                       | Workspace Broker          |
+| CLI Broker   | 供 passive 上报的 acquire + `status` 读取 + release                   | Workspace Broker          |
 | Java API     | `TrustedActorHeaderFilter` 与属性，默认关闭                           | 部署 opt-in               |
 | E2E runner   | 解禁；Workspace 种子、mount 与 actor 接线；`write_file` 副作用        | 本地与 CI 验证            |
 | CI workflow  | MySQL 二进制 + 两个 failover 模式进 `hosted-harness-mysql`            | Hosted MySQL 任务         |
@@ -116,11 +124,18 @@ G1 归属 #12952。issue 的切片文本曾假定接管机器已存在；本设�
 - 接管 load 的应答丢失后轮次卡死：Harness 已挂载会话，之后的 load 一律 409
   `hosted_session_already_attached`，恢复快照再也取不回来。接管 load 需要做成幂等。注意该
   load 正常最长可跑 120 秒，而协调器 `request-timeout` 默认 30 秒。
-- 含 `message.delta` 事件的 journal 无法被旧版本 Harness 打开（`managed_session_open_failed`）。
-  本构建的读取方没问题，但回滚或滚动发布期间的混合机群不行。启用 Hosted Workspace 轮次前请先
-  升级机群，或对回滚做门控。
+- 含 `message.delta` 事件的 journal 无法被旧版本 Harness 打开。发布版 0.24.7 的拒绝形态是
+  fail-closed 的 `POST /session/:id/load` 应答：503 加
+  `{"error":"managed_session_open_failed","code":"managed_session_open_failed"}` —— 比
+  journal 读取器自身的报错面早一层，且在混合机群期间由协调器持续重试。自 #13320 起，Java
+  客户端透出拒绝码（`HarnessSessionRefusedException`），协调器在重试日志与准入前重试预算耗尽
+  后的终态失败里都记录该码，滚动发布手册由此能把「journal 比读取方新」与「Harness 真不可用」
+  区分开。本构建的读取方没问题，但回滚或滚动发布期间的混合机群不行。启用 Hosted Workspace
+  轮次前请先升级机群，或对回滚做门控。
 - 首个流式分片之后才到达的模型回退或重试会让轮次终态失败（`Hosted Harness cannot retract a
 published model attempt.`）：`message.delta` 一旦落盘，部分尝试就已公开、无法撤回，轮次只能以
   `error` 结算，而不是像流式化之前那样丢弃该次尝试并重试。因此一次瞬时的 provider 容量事件会
   在流中途永久失败该轮次，而不会由协调器重试（`turn_result` 是终态）。把这类结算归类为协调器
-  可重试是后续项。
+  可重试是后续项。（其后由 #13319 改为带内撤回：发布后到达的重试改为全新 replay，Harness 落账
+  `message.retracted`，server 按源序号范围置空该消息的 delta 并发布 `stream.reconciled`——见
+  [2026-10-04-managed-midstream-retry-retraction](2026-10-04-managed-midstream-retry-retraction.zh-CN.md)。）

@@ -25,6 +25,7 @@ vi.mock('node:fs', async (importOriginal) => {
     renameSync: vi.fn(actual.renameSync),
     readFileSync: vi.fn(actual.readFileSync),
     rmSync: vi.fn(actual.rmSync),
+    unlinkSync: vi.fn(actual.unlinkSync),
   };
 });
 
@@ -38,6 +39,7 @@ describe('writeWithBackup', () => {
     vi.mocked(fs.renameSync).mockImplementation(nativeFs.renameSync);
     vi.mocked(fs.readFileSync).mockImplementation(nativeFs.readFileSync);
     vi.mocked(fs.rmSync).mockImplementation(nativeFs.rmSync);
+    vi.mocked(fs.unlinkSync).mockImplementation(nativeFs.unlinkSync);
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'write-with-backup-test-'));
     targetPath = path.join(tempDir, 'settings.json');
   });
@@ -238,6 +240,51 @@ describe('writeWithBackup', () => {
     );
     expect(fs.existsSync(targetPath)).toBe(false);
     expect(fs.readdirSync(tempDir)).toEqual([]);
+  });
+
+  it('keeps the publication error when deleting identical working artifacts fails', () => {
+    fs.writeFileSync(targetPath, 'old');
+    const failure = new Error('publication failed');
+    vi.mocked(fs.renameSync).mockImplementation(() => {
+      throw failure;
+    });
+    vi.mocked(fs.rmSync).mockImplementation(() => {
+      throw new Error('cleanup failed');
+    });
+    let error: unknown;
+    try {
+      writeWithBackupSync(targetPath, 'new');
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBe(failure);
+    expect(fs.readFileSync(targetPath, 'utf8')).toBe('old');
+  });
+
+  it('retains the recovery pointer and newer target when staging cleanup fails', () => {
+    fs.writeFileSync(targetPath, 'old');
+    vi.mocked(fs.renameSync).mockImplementation(() => {
+      nativeFs.writeFileSync(targetPath, 'newer writer');
+      throw new Error('publication failed');
+    });
+    vi.mocked(fs.unlinkSync).mockImplementation(() => {
+      throw new Error('cleanup failed');
+    });
+    let error: unknown;
+    try {
+      writeWithBackupSync(targetPath, 'new');
+    } catch (caught) {
+      error = caught;
+    }
+    const directory = fs
+      .readdirSync(tempDir)
+      .find((entry) => entry.startsWith('settings.json.write-'))!;
+    const backup = path.join(tempDir, directory, 'settings.json.orig');
+    expect(String(error)).toContain('publication failed');
+    expect(String(error)).toContain(backup);
+    expect(String(error)).not.toContain('cleanup failed');
+    expect(fs.readFileSync(backup, 'utf8')).toBe('old');
+    expect(fs.readFileSync(targetPath, 'utf8')).toBe('newer writer');
   });
 
   it('never rolls back a second writer when the first publication fails', () => {

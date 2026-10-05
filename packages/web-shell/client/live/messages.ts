@@ -83,6 +83,8 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
   'settings.liveSetup.apiKey': 'DashScope Realtime API key',
   'settings.liveSetup.apiKeyPlaceholder': 'Enter a DashScope API key',
   'settings.liveSetup.apiKeyReplace': 'Enter a new key to replace it',
+  'settings.liveSetup.keyFromModel':
+    'The selected model uses the API key from its model provider configuration.',
   'settings.liveSetup.keyFromEnv': (v) =>
     `Read from the ${v?.env ?? ''} environment variable of the selected model.`,
   'settings.liveSetup.keyFromEnvMissing': (v) =>
@@ -92,8 +94,9 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
     'Pick “Other model id…” to use any Realtime model.',
   'settings.liveSetup.modelCustom': 'Other model id…',
   'settings.liveSetup.endpoint': 'Realtime endpoint',
+  'settings.liveSetup.endpointUnchanged': 'Unchanged — keep the saved endpoint',
   'settings.liveSetup.endpointHint':
-    'The OpenAI-compatible base URL of your key’s region or dedicated domain. Leave empty for the default (Beijing).',
+    'The OpenAI-compatible base URL of your key’s region or dedicated domain. Clear the field to use the default (Beijing).',
   'settings.liveSetup.endpointFromRoute':
     "Follows the base URL of the selected model's modelProviders route.",
   'settings.liveSetup.voice': 'Voice',
@@ -129,6 +132,11 @@ export const LIVE_MESSAGES_EN: Record<string, LiveMessage> = {
   'settings.liveSetup.confirmTitle': 'Enable experimental Qwen Live?',
   'settings.liveSetup.confirmDescription':
     'Qwen Code will download, verify, install, and open the signed Qwen Live Host app. macOS will then ask you to grant Microphone, Accessibility, and Screen Recording access.',
+  'settings.liveSetup.conflict':
+    'Settings changed elsewhere while you were editing. Your draft has not been saved. Load the latest settings and review your changes before saving.',
+  'settings.liveSetup.reloadSettings': 'Discard draft and load latest settings',
+  'settings.liveSetup.keyRemovalPending': 'Key will be removed on save',
+  'settings.liveSetup.undoRemoveKey': 'Undo removal',
   'settings.liveSetup.cancel': 'Cancel',
   'settings.liveSetup.confirm': 'Enable and install',
   'live.refresh': 'Refresh status',
@@ -225,6 +233,7 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
   'settings.liveSetup.apiKey': 'DashScope Realtime API Key',
   'settings.liveSetup.apiKeyPlaceholder': '输入 DashScope API Key',
   'settings.liveSetup.apiKeyReplace': '输入新 Key 以替换当前配置',
+  'settings.liveSetup.keyFromModel': '所选模型使用模型提供商配置中的 API Key。',
   'settings.liveSetup.keyFromEnv': (v) =>
     `从所选模型的环境变量 ${v?.env ?? ''} 读取。`,
   'settings.liveSetup.keyFromEnvMissing': (v) =>
@@ -233,8 +242,9 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
   'settings.liveSetup.modelHint': '选“其他模型 id…”可填写任意 Realtime 模型。',
   'settings.liveSetup.modelCustom': '其他模型 id…',
   'settings.liveSetup.endpoint': 'Realtime 接入地址',
+  'settings.liveSetup.endpointUnchanged': '未修改，保留已保存的接入地址',
   'settings.liveSetup.endpointHint':
-    '填写 Key 所属地域或专属域名的 OpenAI 兼容 baseUrl，留空使用默认地址（北京）。',
+    '填写 Key 所属地域或专属域名的 OpenAI 兼容 baseUrl，清空后使用默认地址（北京）。',
   'settings.liveSetup.endpointFromRoute':
     '跟随所选模型在 modelProviders 中路由的 baseUrl。',
   'settings.liveSetup.voice': '音色',
@@ -270,6 +280,11 @@ export const LIVE_MESSAGES_ZH: Record<string, LiveMessage> = {
   'settings.liveSetup.confirmTitle': '启用实验性 Qwen Live？',
   'settings.liveSetup.confirmDescription':
     'Qwen Code 将自动下载、校验、安装并打开已签名的 Qwen Live Host。之后 macOS 会要求授予麦克风、辅助功能和屏幕录制权限。',
+  'settings.liveSetup.conflict':
+    '编辑期间设置已在其他地方发生变化，当前草稿尚未保存。请加载最新设置，重新核对修改后再保存。',
+  'settings.liveSetup.reloadSettings': '放弃草稿并加载最新设置',
+  'settings.liveSetup.keyRemovalPending': '保存时将移除 Key',
+  'settings.liveSetup.undoRemoveKey': '撤销移除',
   'settings.liveSetup.cancel': '取消',
   'settings.liveSetup.confirm': '启用并安装',
   'live.refresh': '刷新状态',
