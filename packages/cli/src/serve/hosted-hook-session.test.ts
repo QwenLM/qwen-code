@@ -1041,6 +1041,70 @@ it('fences a module-evaluation timeout as outcome_unknown, never not_started_pro
   ).toHaveLength(1);
 });
 
+it('reconciles an evaluation-timeout fence once the Runtime republishes a result', async () => {
+  const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl');
+  const originalControl = control.getMockImplementation()!;
+  let executedId = '';
+  control.mockImplementation(async function (
+    this: HostedWorkspaceBroker,
+    operation,
+  ) {
+    if (operation.kind === 'hook-execute') {
+      requests.push(operation);
+      executedId = operation.operationId;
+      return {
+        operationId: operation.operationId,
+        state: 'settled',
+        error: { code: 'managed_hook_module_evaluation_timeout' },
+      };
+    }
+    return originalControl.call(this, operation);
+  });
+  await expect(
+    hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  const fenced = session.authority
+    .extensionRecordsInDomain('hook_execution')
+    .find(
+      (entry) =>
+        entry.recordId.startsWith('hook-') &&
+        !entry.recordId.startsWith('hook-plan-'),
+    )!;
+  expect(fenced.run).toMatchObject({
+    state: 'recovery_blocked',
+    execution: 'outcome_unknown',
+    reason: 'outcome_unknown',
+  });
+  expect(hooks.hasPendingOperations).toBe(true);
+  // The fence is not terminal: once the evaluation definitively ends the
+  // Runtime republishes the receipt with what is then provable — the
+  // callback never ran — and the next status reconciles the record, so the
+  // Session stays usable and deletable.
+  replies.set(executedId, {
+    operationId: executedId,
+    state: 'settled',
+    result: { success: false, outcome: 'timeout', duration: 0 },
+  });
+  await hooks.status('call-1', true);
+  const reconciled = parseHookExecution(
+    session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .find(
+        (entry) =>
+          entry.recordId.startsWith('hook-') &&
+          !entry.recordId.startsWith('hook-plan-'),
+      )!.record,
+  );
+  expect(reconciled.run).toMatchObject({
+    state: 'settled',
+    execution: 'settled',
+  });
+  expect(reconciled.resultRef).not.toBeNull();
+  expect(hooks.hasPendingOperations).toBe(false);
+  await hooks.drain();
+  await hooks.close();
+});
+
 it('fences a hook-cancel that lands during module evaluation as outcome_unknown', async () => {
   const key = session.authority.sessionHeader.sessionKey;
   const modulePath = path.join(root, 'stuck-cancel-handler.mjs');

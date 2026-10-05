@@ -198,9 +198,10 @@ abandoned by a cancel or shutdown with
 outcome_unknown rather than claiming not_started_proven — or committing a
 definite cancellation — for code that may still be running. That fence is not
 terminal. Once the evaluation definitively ends, the Runtime republishes the
-receipt with what is then provable — a cancelled result when the module loaded,
-since the callback demonstrably never dispatched, or
-`managed_hook_handler_unavailable` when the module itself failed — so the next
+receipt with what is then provable — when the module loaded the callback
+demonstrably never dispatched, so an abandoned evaluation settles as a
+cancelled result and an over-budget one as a timeout result, while a module
+that itself failed settles as `managed_hook_handler_unavailable` — so the next
 status or drain reconciles the record and the Session stays usable and
 deletable. Only an evaluation that never ends keeps the fence, and with it the
 recovery barrier, for the worker's lifetime. A module whose

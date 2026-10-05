@@ -146,9 +146,10 @@ Runtime 侧结算——释放其在 16 个准入名额中占用的那一个，�
 `managed_hook_module_evaluation_abandoned` 报告因取消或关停而弃用的求值；Harness
 将两者都以 outcome_unknown 围闭，而不是对可能仍在运行的代码出具
 not_started_proven——或提交确定的取消。该围闭不是终态：求值确定结束后，Runtime
-会以此时可证明的事实重发回执——模块已加载时重发 cancelled 结果（callback 可证明
-从未派发），模块本身失败时重发 `managed_hook_handler_unavailable`——于是下一次
-status 或 drain 就能核对该记录，Session 保持可用、可删除。只有永不结束的求值才会在
+会以此时可证明的事实重发回执——模块已加载时 callback 可证明从未派发，因此因取消或
+关停而弃用的求值重发 cancelled 结果、超预算的求值重发 timeout 结果；模块本身失败时
+重发 `managed_hook_handler_unavailable`——于是下一次 status 或 drain 就能核对该记录，
+Session 保持可用、可删除。只有永不结束的求值才会在
 worker 生命周期内保留该围闭及其恢复屏障。求值失败的模块以
 `managed_hook_handler_unavailable` 结算，
 Harness 记为 not_started_proven——无论是在任何顶层语句执行前被拒绝、在顶层执行

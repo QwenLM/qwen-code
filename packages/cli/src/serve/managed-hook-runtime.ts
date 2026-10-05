@@ -77,6 +77,18 @@ export class ManagedHookError extends Error {
 
 class ManagedHookImportAbortedError extends Error {}
 
+// A handler module can reject with a value String() cannot convert, so the
+// settle path converts under a guard: a throw here would escape as an
+// unhandled rejection and kill the worker (the derived promise below is
+// fire-and-forget).
+function asError(value: unknown): Error {
+  try {
+    return value instanceof Error ? value : new Error(String(value));
+  } catch {
+    return new ManagedHookError('managed_hook_handler_unavailable');
+  }
+}
+
 // Module evaluation runs before HookRunner enforces the abort signal, so race
 // it with a budget and the operation signal: a stuck top-level await must not
 // pin an admission slot or hold close() open forever. ESM evaluation itself
@@ -115,42 +127,67 @@ function importHookModule(
     }
     signal.addEventListener('abort', onAbort, { once: true });
     entry.moduleEvaluationPending = true;
-    import(pathToFileURL(modulePath).href).then(
-      (module) => {
-        entry.moduleEvaluationPending = false;
-        settleAbandoned(entry, {
-          state: 'settled',
-          result: { success: false, outcome: 'cancelled', duration: 0 },
-        });
-        finish(undefined, module as Record<string, unknown>);
-      },
-      (error: unknown) => {
+    import(pathToFileURL(modulePath).href)
+      .then(
+        (module) => {
+          entry.moduleEvaluationPending = false;
+          settleAbandoned(entry, {
+            state: 'settled',
+            result: {
+              success: false,
+              outcome:
+                entry.view.error?.code ===
+                'managed_hook_module_evaluation_timeout'
+                  ? 'timeout'
+                  : 'cancelled',
+              duration: 0,
+            },
+          });
+          finish(undefined, module as Record<string, unknown>);
+        },
+        (error: unknown) => {
+          entry.moduleEvaluationPending = false;
+          settleAbandoned(entry, {
+            state: 'settled',
+            error: { code: 'managed_hook_handler_unavailable' },
+          });
+          finish(asError(error));
+        },
+      )
+      // Terminal handler for the derived promise: a throw inside either
+      // settle handler must settle the operation, never escape as an
+      // unhandled rejection.
+      .catch(() => {
         entry.moduleEvaluationPending = false;
         settleAbandoned(entry, {
           state: 'settled',
           error: { code: 'managed_hook_handler_unavailable' },
         });
-        finish(error instanceof Error ? error : new Error(String(error)));
-      },
-    );
+        finish(new ManagedHookError('managed_hook_handler_unavailable'));
+      });
   });
 }
 
+const FENCED_EVALUATION_CODES: ReadonlySet<string> = new Set([
+  'managed_hook_module_evaluation_abandoned',
+  'managed_hook_module_evaluation_timeout',
+]);
+
 /**
- * The abandonment fence is not terminal. Once the evaluation definitively
+ * Neither evaluation fence is terminal. Once the evaluation definitively
  * ends, republish the receipt so the Harness can reconcile the record: a
- * module that loaded proves the callback never ran, and a module that failed
- * is genuinely unavailable. Without this transition a cancel that merely raced
- * a healthy cold import leaves the Session fenced for the worker's lifetime.
- * Publishing happens only after `moduleEvaluationPending` clears, so no
- * receipt is certified while top-level code is still running.
+ * module that loaded proves the callback never ran — a cancel outcome for an
+ * abandoned evaluation, a timeout outcome for an over-budget one — and a
+ * module that failed is genuinely unavailable. Without this transition a
+ * cancel or a merely slow cold import leaves the Session fenced for the
+ * worker's lifetime. Publishing happens only after `moduleEvaluationPending`
+ * clears, so no receipt is certified while top-level code is still running.
  */
 function settleAbandoned(
   entry: Operation,
   view: Omit<ManagedHookOperationView, 'operationId'>,
 ): void {
-  if (entry.view.error?.code !== 'managed_hook_module_evaluation_abandoned')
-    return;
+  if (!FENCED_EVALUATION_CODES.has(entry.view.error?.code ?? '')) return;
   entry.view = { operationId: entry.view.operationId, ...view };
 }
 
