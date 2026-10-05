@@ -20151,6 +20151,13 @@ export function App({
                       ? () => {
                           closeMobileDrawer();
                           openPanel('live');
+                          // Leaving split view for a section column restores
+                          // the rail column just like the Home entry does.
+                          if (splitFoldedSidebarRef.current) {
+                            handleSidebarCollapsedChange(false, {
+                              exitFoldBand: true,
+                            });
+                          }
                         }
                       : undefined
                   }
@@ -20175,6 +20182,14 @@ export function App({
                   onOpenChannels={() => {
                     closeMobileDrawer();
                     openPanel('channels');
+                    if (
+                      splitFoldedSidebarRef.current &&
+                      channelSidebarEnabled
+                    ) {
+                      handleSidebarCollapsedChange(false, {
+                        exitFoldBand: true,
+                      });
+                    }
                   }}
                   onOpenManagedSessions={
                     managedAgentProvider

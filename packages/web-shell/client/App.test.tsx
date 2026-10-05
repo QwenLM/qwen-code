@@ -44623,6 +44623,138 @@ describe('App sidebar toggle shortcut (#5074 rail follow-ups)', () => {
     }
   });
 
+  it('restores the Channels column with one rail click when leaving split in the fold band', async () => {
+    window.localStorage.removeItem('qwen-code-web-shell-sidebar-collapsed');
+    const observers = new Map<Element, ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) {
+        observers.set(element, this.callback);
+      }
+      unobserve(element: Element) {
+        observers.delete(element);
+      }
+      disconnect() {}
+    } as typeof ResizeObserver;
+    try {
+      mockConnection.capabilities = {
+        qwenCodeVersion: '1.2.3',
+        features: ['session_source_metadata'],
+      };
+      window.localStorage.setItem(
+        'qwen-code-web-shell-sidebar-collapsed',
+        'true',
+      );
+      const { container } = renderApp({
+        sidebar: { primaryNav: { items: ['channels'] } },
+      });
+      await flush();
+      const layout = container.querySelector(
+        '[data-sidebar-shell]',
+      )!.parentElement!;
+      const resize = observers.get(layout)!;
+      Object.defineProperty(layout, 'clientWidth', {
+        configurable: true,
+        value: 1100,
+      });
+      await act(async () => {
+        resize([], {} as ResizeObserver);
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        container
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('true');
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-channels"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        container
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('false');
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-sidebar-collapsed'),
+      ).toBe('false');
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it('restores the Live column with one rail click when leaving split in the fold band', async () => {
+    window.localStorage.removeItem('qwen-code-web-shell-sidebar-collapsed');
+    const observers = new Map<Element, ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) {
+        observers.set(element, this.callback);
+      }
+      unobserve(element: Element) {
+        observers.delete(element);
+      }
+      disconnect() {}
+    } as typeof ResizeObserver;
+    try {
+      window.localStorage.setItem(
+        'qwen-code-web-shell-sidebar-collapsed',
+        'true',
+      );
+      const { container } = renderApp({
+        sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+      });
+      await flush();
+      const layout = container.querySelector(
+        '[data-sidebar-shell]',
+      )!.parentElement!;
+      const resize = observers.get(layout)!;
+      Object.defineProperty(layout, 'clientWidth', {
+        configurable: true,
+        value: 1100,
+      });
+      await act(async () => {
+        resize([], {} as ResizeObserver);
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        container
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('true');
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-live"]')!
+          .click();
+        await Promise.resolve();
+      });
+      expect(
+        container
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('false');
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-sidebar-collapsed'),
+      ).toBe('false');
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
   it('keeps a restored environment panel docked at 1084px of chat body when the rail is present', async () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-environment-panel-open',
