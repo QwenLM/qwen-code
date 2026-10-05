@@ -119,6 +119,7 @@ function ManagedSessionsContent({
   const [listLoading, setListLoading] = useState(false);
   const [listRevision, setListRevision] = useState(0);
   const [error, setError] = useState<string>();
+  const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [outputTarget, setOutputTarget] = useState<{
@@ -141,7 +142,9 @@ function ManagedSessionsContent({
     readPending(pendingKey),
   );
   const pendingRef = useRef(pending);
-  const focusComposer = useRef(false);
+  const focusComposer = useRef<{ sessionId: string | undefined } | undefined>(
+    undefined,
+  );
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const sessionsNavRef = useRef<HTMLElement | null>(null);
   const lifetime = useRef<AbortController | undefined>(undefined);
@@ -195,24 +198,38 @@ function ManagedSessionsContent({
   // clear to commit — the textarea is disabled while pending is set — and
   // the composer can still be absent (a workspace-binding creator replaces
   // the form) or disabled (the session cannot send), so fall back to the
-  // session list landmark rather than leave the user at <body>. While the
-  // summary is still loading the composer is only temporarily disabled, so
-  // the latch stays armed and retries once the decision is terminal.
+  // session list landmark rather than leave the user at <body>. The latch is
+  // scoped to the session whose discard armed it, and it dies as soon as
+  // focus sits somewhere the discard did not put it: a user who moved on is
+  // never pulled back. While the disablement can still lift — the summary
+  // unknown, or an admitted Turn gating sends for its whole life — the latch
+  // stays armed and retries when the summary changes.
   useEffect(() => {
-    if (!focusComposer.current || pending) return;
+    const armed = focusComposer.current;
+    if (!armed || pending) return;
+    if (armed.sessionId !== sessionId) {
+      focusComposer.current = undefined;
+      return;
+    }
     const composer =
       composerFormRef.current?.querySelector<HTMLTextAreaElement>(
         'textarea:not([disabled])',
       );
+    const parked = document.activeElement;
+    const ours = parked === document.body || parked === sessionsNavRef.current;
     if (composer) {
-      focusComposer.current = false;
-      composer.focus();
+      focusComposer.current = undefined;
+      if (ours) composer.focus();
+      return;
+    }
+    if (!ours) {
+      focusComposer.current = undefined;
       return;
     }
     sessionsNavRef.current?.focus();
-    if (detail.loading) return;
-    focusComposer.current = false;
-  }, [pending, detail.loading]);
+    // detail.summary is the re-arm trigger: a poll or clean pass lifts the
+    // disablement by delivering a new summary without touching the record.
+  }, [pending, sessionId, detail.summary]);
 
   // Depend on the value the request actually sends: a provider that drops
   // workspaceCwd must not refetch (and lose paged rows) on folder change.
@@ -290,6 +307,7 @@ function ManagedSessionsContent({
   async function submit() {
     const abort = lifetime.current;
     if (!abort || abort.signal.aborted || busy) return;
+    setDiscarded(false);
     let attempt = pendingRef.current;
     if (!attempt) {
       if (!text.trim() || (sessionId && !detail.summary?.capabilities.canSend))
@@ -389,6 +407,11 @@ function ManagedSessionsContent({
     !['created', 'completed', 'failed', 'cancelled'].includes(summary.phase);
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
+      {/* The uncertain-request row unmounts on the Discard click itself, so
+          a persistent region announces the outcome wherever focus lands. */}
+      <p role="status" className="sr-only">
+        {discarded ? t('managed.discarded') : ''}
+      </p>
       <div className="flex items-center justify-between gap-2">
         <Button
           variant="outline"
@@ -585,7 +608,8 @@ function ManagedSessionsContent({
                     // user happens to press Refresh.
                     if (pending.sessionId === undefined)
                       setListRevision((current) => current + 1);
-                    focusComposer.current = true;
+                    focusComposer.current = { sessionId };
+                    setDiscarded(true);
                   }}
                 >
                   {t('managed.discard')}

@@ -239,6 +239,7 @@ export function createJavaManagedAgentProvider(
       for await (const event of client.streamEvents(
         { sessionId, afterSequence: request.lastEventId },
         request.signal,
+        request.onEstablished,
       )) {
         if (isJavaAgentResyncRequired(event)) {
           // Events after the cursor are gone: reload the transcript.

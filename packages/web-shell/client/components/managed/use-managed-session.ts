@@ -206,6 +206,18 @@ export function useManagedSession(
           for await (const event of provider.subscribeEvents(sessionId, {
             ...opts,
             lastEventId,
+            onEstablished: () => {
+              // A re-established stream can idle on heartbeats forever, so
+              // neither an advancing event nor a completed pass may ever
+              // come: establishment itself ends its failure's condition.
+              if (abort.signal.aborted) return;
+              const release = releaseError('stream');
+              if (release.clear)
+                setState((current) => ({
+                  ...current,
+                  error: release.reveal,
+                }));
+            },
           })) {
             if (abort.signal.aborted) return;
             if (event.type === 'stream_gap') {

@@ -397,6 +397,62 @@ describe('Managed transcript projection', () => {
     });
   });
 
+  it('keeps the completion end time when a later result re-delivers the call', () => {
+    // The projector emits tool_completed and tool_result_updated as
+    // independent server events: the completion's authoritative end must
+    // survive the later result.
+    const source = { ...result, session_id: 's1', turn_id: 'p1' };
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'tool_completed', { toolCallId: 'c', output: 'done' }),
+        event(3, 'tool_result_updated', {
+          itemId: 'item-1',
+          toolCallId: 'c',
+          result: source,
+        }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'completed', endTime: 200, toolResult: source }],
+    });
+  });
+
+  it('keeps the first diagnostic end time when a second one lands on the same Turn', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'tool_started', { toolCallId: 'c', toolName: 'run' }),
+        event(3, 'runtime_failed', { message: 'warmup died' }),
+        event(4, 'runtime_failed', { message: 'warmup died again' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'failed', startTime: 200, endTime: 300 }],
+    });
+  });
+
+  it('lifts the diagnostic end-time floor when the same tool resumes', () => {
+    // The Turn keeps streaming after the non-fatal diagnostic: a tool that
+    // starts again must tick against now, not render an end before its own
+    // start.
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'runtime_failed', { message: 'warmup died' }),
+        event(3, 'tool_started', { toolCallId: 'c', toolName: 'run' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages).toHaveLength(1);
+    const group = messages[0];
+    const tool = group?.role === 'tool_group' ? group.tools[0] : undefined;
+    expect(tool).toMatchObject({ status: 'in_progress', startTime: 300 });
+    expect(tool?.endTime).toBeUndefined();
+  });
+
   it('keeps an authoritatively failed tool failed when the Turn is cancelled afterwards', () => {
     // tool_completed already resolved the failure: the diagnostic booking
     // is retired, so the Turn's cancellation cannot relabel it.

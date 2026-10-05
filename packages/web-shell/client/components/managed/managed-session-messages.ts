@@ -238,6 +238,10 @@ export function managedEventsToMessages(
       if (event.type === 'tool_started') {
         tool.status = 'in_progress';
         tool.startTime = event.at;
+        // A resumed tool outgrows the diagnostic's floor: the end is open
+        // again, while the booking survives so the Turn's terminal event
+        // can still re-stamp it.
+        if (runtimeFailed.has(tool)) tool.endTime = undefined;
       }
       if (event.type === 'tool_completed') {
         tool.status = data['failed'] === true ? 'failed' : 'completed';
@@ -272,10 +276,10 @@ export function managedEventsToMessages(
         ) {
           if (event.type === 'cancelled' && tool.status === 'failed')
             tool.wasCancelled = true;
-          // The Turn's terminal event ends a diagnostic-failed tool that
-          // never reported an authoritative result; a result-supplied end
-          // stays untouched.
-          if (tool.toolResult === undefined) tool.endTime = event.at;
+          // The Turn's terminal event ends a diagnostic-failed tool; a
+          // result-supplied end cannot occur here because the result and
+          // completion paths retire the booking when they land.
+          tool.endTime = event.at;
         }
         if (tool.status === 'pending' || tool.status === 'in_progress') {
           tool.status = 'failed';
