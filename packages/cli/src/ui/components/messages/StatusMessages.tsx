@@ -85,6 +85,17 @@ export const InfoMessage: React.FC<StatusTextProps> = ({
   />
 );
 
+// Not a notice this session made about itself, so it does not wear the plain
+// info bullet. The sender label already lives in the text (formatPeerDisplay).
+export const PeerMessage: React.FC<StatusTextProps> = ({ text }) => (
+  <StatusMessage
+    text={text}
+    prefix={ICON.EXCHANGE}
+    prefixColor={theme.status.warning}
+    textColor={theme.text.primary}
+  />
+);
+
 export const SuccessMessage: React.FC<StatusTextProps> = ({ text }) => (
   <StatusMessage
     text={text}
