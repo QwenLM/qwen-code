@@ -30,6 +30,8 @@ Only an external `content:` URI with a returned and effective write grant is acc
 
 Navigation, profile change, connection error, renderer loss, and Activity destruction invalidate the transfer. Late callbacks cannot attach to a new document or profile. An outstanding system-picker slot remains reserved until its result arrives; only that reservation is retained across Activity recreation, never file bytes, URI, or page callbacks. A normal trip to the system Save picker does not itself invalidate a text-only connection. Microphone consent is now in main: its preflight cancels Save from a microphone-authorized connection before opening a document picker or creating a destination, and offers explicit reconnection. The microphone background teardown policy remains unchanged.
 
+Connection recovery from main may restore a text-only connection in a fresh WebView after Activity recreation. It does not resume an export: destruction cancels the old transfer while its outstanding picker-result reservation is restored separately. Connection errors and renderer loss use the shared teardown before showing Retry, so recovery cannot retain download bytes or attach a stale Save result to the new page.
+
 ## Affected files and scope
 
 Native changes are limited to the mobile-shell download controller, Activity wiring, device tests, and README. Web Shell changes are limited to the internal saving helper, session-export producers, workflow-history export, artifact download producers and links, and their tests. No daemon route, SDK authentication contract, server-side credential issuance, background service, public host API, dependency, or workspace membership changes are proposed.

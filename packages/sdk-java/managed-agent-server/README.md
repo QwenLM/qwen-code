@@ -1,11 +1,15 @@
 # Qwen Managed Agent Server
 
 Standalone Spring Boot control plane for the Qwen Code Hosted Harness. It has
-no DataWorks dependency and no end-user authentication layer. A trusted
-upstream must send `X-Qwen-Tenant-Id`; the server uses that value on every
-database read and write. The HTTP server listens on `127.0.0.1` by default;
-set `QWEN_MANAGED_AGENT_SERVER_ADDRESS` when a trusted ingress needs to reach
-it. That ingress must authenticate the tenant before setting the header.
+no DataWorks dependency. The default loopback listen address keeps the
+header-asserted tenant model: a trusted upstream sends `X-Qwen-Tenant-Id`
+and the server uses that value on every database read and write. Leaving
+loopback requires authentication: set `QWEN_MANAGED_AGENT_SERVER_ADDRESS`
+**and** configure signed mode (`QWEN_MANAGED_AGENT_AUTH_MODE=signed` with
+`QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY`) so the broker verifies each request's
+HMAC signature itself, or put an authenticated gateway in front. With the
+default `auto` mode a non-loopback address refuses to start. See "Broker
+authentication and writer credentials" below.
 
 设计说明：[English](../../../docs/design/2026-09-19-managed-agent-spring-server.md) |
 [简体中文](../../../docs/design/2026-09-19-managed-agent-spring-server.zh-CN.md)
@@ -63,7 +67,9 @@ AgentDefinition revisions: [English](../../../docs/design/2026-10-01-managed-age
 O3 publishes durable Hosted foreground Shell outcomes to Items, events and
 Managed WebShell. Downloads read immutable stdout/stderr after the writer is
 sealed, without reviving a Harness. The API requires a trusted actor and a
-current Workspace read grant; a tenant header alone cannot authorize it.
+current Workspace read grant, checked at request admission and then once per
+`read-revalidation-interval` while a download is in flight; a tenant header
+alone cannot authorize it.
 
 O3 requires O2 publication to be configured, including
 `qwen.managed-agent.tool-publication.verification-bytes-per-second` and
@@ -72,25 +78,41 @@ O2 verification settings are separate from the O3 content-read timeout below.
 
 All settings below use the `qwen.managed-agent.artifacts` prefix:
 
-| Setting                | Default | Meaning                                                                                                                                                       |
-| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`              | `false` | Enable projection and public reads when O2 object storage is configured. Receipt sources are recorded even while disabled.                                    |
-| `publish-original`     | `false` | Approve original stream representations for current Workspace readers.                                                                                        |
-| `publish-preview`      | `false` | Additionally approve bounded previews for every Session reader; requires original publication approval.                                                       |
-| `max-concurrent-reads` | `4`     | Maximum simultaneous content responses per server process.                                                                                                    |
-| `read-timeout`         | `2m`    | Elapsed-time budget checked between stream chunks, capped by the fixed two-minute output read lease; storage requests also use the storage client's timeouts. |
+| Setting                      | Default | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                    | `false` | Enable projection and public reads when O2 object storage is configured. Receipt sources are recorded even while disabled.                                                                                                                                                                                                                                                                                                            |
+| `publish-original`           | `false` | Approve original stream representations for current Workspace readers.                                                                                                                                                                                                                                                                                                                                                                |
+| `publish-preview`            | `false` | Additionally approve bounded previews for every Session reader; requires original publication approval.                                                                                                                                                                                                                                                                                                                               |
+| `max-concurrent-reads`       | `4`     | Maximum simultaneous content responses per server process.                                                                                                                                                                                                                                                                                                                                                                            |
+| `read-timeout`               | `2m`    | Elapsed-time budget checked between stream chunks, capped by the fixed two-minute output read lease; storage requests also use the storage client's timeouts.                                                                                                                                                                                                                                                                         |
+| `read-revalidation-interval` | `5s`    | How often an in-flight download re-runs the access check (workspace grant, read policy, session lifecycle); `PT0S` re-verifies every chunk. A revocation lands at the first chunk boundary after the window's end; chunks written inside the window still reach the client — up to 1 MiB for a Range request, and up to a full `read-timeout`'s worth of a streaming download. Once the re-check denies, no further chunk is written. |
 
 A product can replace `ManagedArtifactPolicy` for narrower publication or
 actor rules. Published previews persist in shared events. Policy changes do
-not automatically reproject historical results; content requests always use
-the current read policy. Configure the policy before enabling projection.
+not automatically reproject historical results; content requests use the
+current read policy at admission and once per revalidation window thereafter.
+Configure the policy before enabling projection.
+
+Two sibling knobs tune the same relaxation elsewhere:
+`qwen.managed-agent.events.read-grant-recheck-interval` (default `5s`) bounds
+how often a live event stream re-checks the Workspace read grant — `PT0S`
+restores the per-event check — and
+`qwen.managed-agent.tool-publication.journal-head-authorization` (default
+`false`) switches tool-publication authorization from the journal scan to the
+session journal head's activation columns; enable it only after every writer
+in the fleet runs the V36 schema's code (the rolling-window self-healing is
+covered in the
+[query-amplification design](../../../docs/design/2026-10-02-managed-agent-query-amplification.md)
+§9).
 Original reads are capped at 1 MiB per Range request; full downloads use
 bounded segment buffers and stream with backpressure. Deployments must retain
 O2 roots and validate real OSS and slow-reader limits before enabling this
 feature. O3 does not enable public Shell execution or garbage collection.
 
 Design: [English](../../../docs/design/2026-09-29-managed-tool-result-public-projection.md) |
-[简体中文](../../../docs/design/2026-09-29-managed-tool-result-public-projection.zh-CN.md).
+[简体中文](../../../docs/design/2026-09-29-managed-tool-result-public-projection.zh-CN.md);
+revalidation window: [English](../../../docs/design/2026-10-02-managed-agent-query-amplification.md) |
+[简体中文](../../../docs/design/2026-10-02-managed-agent-query-amplification.zh-CN.md).
 
 ## Prerequisites
 
@@ -233,8 +255,12 @@ internal routes under `/internal/managed-session-store/v1/**` provide
 database-time writer leases and generations, head compare-and-set,
 idempotent transaction receipts, exact JSONL transaction bytes, paged restore
 reads, atomic checkpoint-pointer advancement, and transactional resources up
-to 64 KiB. Callers must provide the trusted tenant header and a fresh Base64URL secret in
-`X-Qwen-Managed-Writer-Token`; only its SHA-256 is persisted. Restore,
+to 64 KiB. Callers must provide the trusted tenant header and a writer
+credential in `X-Qwen-Managed-Writer-Token`; only its SHA-256 is persisted.
+Without `QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY` the credential is a
+fresh Base64URL secret the caller mints (first writer wins); with a binding
+key it must be the broker-issued HMAC over the Session scope and self-minted
+secrets are rejected. Restore,
 transaction-page, and resource reads require the same current, unexpired
 writer secret.
 
@@ -256,7 +282,8 @@ export QWEN_MANAGED_AGENT_WORKSPACE_ID='workspace-demo'
 Harness. When both the Harness and Store are enabled, Java includes a scoped
 Store descriptor in each new private Hosted Session request. The ordinary
 daemon rejects that descriptor, while the Hosted Harness uses the TypeScript
-HTTP adapter and generates its own writer secret. Workspace-bound Sessions use
+HTTP adapter with the descriptor's broker-issued writer credential (or a
+self-generated secret when no binding key is configured). Workspace-bound Sessions use
 their persisted Workspace ID for the Store scope; unbound Sessions use
 `QWEN_MANAGED_AGENT_WORKSPACE_ID`. The public Session, private journal and Runtime
 binding retain one `(tenantId, workspaceId, sessionId)` identity. The global ID
@@ -292,9 +319,52 @@ for transport identity. Responses under the private prefix use
 
 The full WebShell can keep an ordinary Qwen daemon for its existing chat,
 workspace, settings, and terminal surfaces while routing only the Managed
-panel to this Spring service. Start an ordinary `qwen serve` on port 4170 in
-addition to the private Hosted Harness used by Spring, then run from the
-repository root:
+panel to this Spring service.
+
+The one-shot launcher starts the ordinary daemon and the private Hosted
+Harness from TypeScript source, writes the Harness wiring
+(`QWEN_MANAGED_AGENT_HARNESS_*`, the rotating capability digest, and the
+HTTP Session Store that Hosted Sessions require) to a
+`spring.env` under the OS temp directory — kept outside the served
+workspace, mode-0600 on POSIX (on Windows NTFS ACLs scope the per-user temp
+directory instead, and a PowerShell `spring.env.ps1` sibling is written next
+to it) — waits for `/actuator/health` on the Spring service
+(`--skip-java-wait` bypasses), then opens the WebShell with the Managed
+panel selected:
+
+```bash
+npm run dev:managed-agent
+# In a second terminal, before the Java health wait expires (10 min).
+# Once per clone, and re-run after pulling changes to qwencode/runtime-broker (~12 s):
+mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
+mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
+# One-time, on a fresh MySQL 8 (creates the database and user the URL names):
+mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1';"
+# (official MySQL images enable skip-name-resolve, so 'qwen'@'localhost' alone never
+#  matches TCP clients; a containerized MySQL sees the gateway address — grant at
+#  'qwen'@'%' or the container-visible host instead)
+# Every run; the launcher prints this spring.env path at startup (on Windows,
+# the printed path is the spring.env.ps1 sibling):
+source <printed spring.env path>
+export SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'
+export SPRING_DATASOURCE_USERNAME='qwen'
+export SPRING_DATASOURCE_PASSWORD='replace-me'
+mvn -f packages/sdk-java/managed-agent-server/pom.xml spring-boot:run
+```
+
+The daemon, Harness and Java URLs print at startup with the `spring.env`
+path, and the full Managed URL (which carries the daemon token) prints on an
+interactive terminal; ports auto-increment when busy. The launcher verifies
+only that something Spring-Boot-shaped answers `/actuator/health` — it
+cannot prove that Spring loaded this run's `spring.env`, so restart Spring
+whenever the launcher (and its rotating token and digest) restarts. If every
+Turn then fails with `hosted_harness_rejected` in the panel: a Harness
+`400` means the Session Store wiring in `spring.env` did not load
+(`invalid_managed_session_store` — an env file from an older run), while a
+Harness `401` means a launcher restarted without restarting Spring —
+re-source the new `spring.env` and restart Spring. To wire the pieces by
+hand instead, start an ordinary `qwen serve` on port 4170 in addition to the
+private Hosted Harness used by Spring, then run from the repository root:
 
 ```bash
 QWEN_DAEMON_URL=http://127.0.0.1:4170 \
@@ -370,6 +440,55 @@ no direct store admission or test Broker replacement is needed.
 Design: [English](../../../docs/design/2026-09-29-hosted-public-workspace-admission.md)
 | [简体中文](../../../docs/design/2026-09-29-hosted-public-workspace-admission.zh-CN.md).
 
+### Broker authentication and writer credentials
+
+`QWEN_MANAGED_AGENT_AUTH_MODE` selects how the public surface
+(`/v1/agents/**` — including the bare `POST /v1/agents` collection route —
+and the WebShell adapter) authenticates its caller:
+`auto` (the default) resolves to `open` when `server.address` is loopback
+and refuses to start otherwise, `open` keeps the header-asserted tenant and
+the optional trusted-actor stand-in for local runs, and `signed` requires
+every public request to carry `X-Qwen-Actor-Id`,
+`X-Qwen-Signature-Timestamp` (epoch seconds, within
+`QWEN_MANAGED_AGENT_AUTH_ALLOWED_DRIFT`, default `5m`, minimum `1s`) and
+`X-Qwen-Signature: v1=<lowercase hex HMAC-SHA256>` over the canonical string
+below, keyed by `QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY` (at least 32 bytes):
+
+```text
+"qwen-broker-auth-v1\n" + METHOD + "\n" + undecoded request path + "\n"
++ raw query string (empty when absent) + "\n" + tenant + "\n" + actor + "\n"
++ timestamp + "\n" + lowercase hex SHA-256 of the raw request body + "\n"
++ the Idempotency-Key header value (empty when absent)
+```
+
+A repeated `Idempotency-Key` header answers 400 invalid_request, and a body
+beyond `QWEN_MANAGED_AGENT_AUTH_MAX_SIGNED_BODY_BYTES` (default 10 MiB)
+answers 413 payload_too_large. Signed mode cannot be combined with
+`QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER`.
+
+`QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY` switches writer tokens from
+self-minted to broker-provisioned: the writer credential becomes an HMAC
+over `(tenantId, workspaceId, sessionId)` that the Broker hands to the
+Harness in the attach payload, and the store rejects any other token,
+including during a free lease window. A configured key must be at least 32
+bytes. A Broker that intentionally serves the store over plaintext HTTP
+inside a trusted network sets
+`QWEN_MANAGED_AGENT_SESSION_STORE_ALLOW_INSECURE_HTTP=true`, which the
+attach payload forwards to the Harness so its client accepts the URL. The
+internal surface
+(`/internal/**`) may move to its own listener via
+`QWEN_MANAGED_AGENT_INTERNAL_SERVER_PORT` and
+`QWEN_MANAGED_AGENT_INTERNAL_SERVER_ADDRESS` (default `127.0.0.1`); either
+port then answers 404 for the other surface's routes. Leaving loopback —
+public or internal — requires signed mode or a configured binding key
+respectively, unless `QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true`
+explicitly overrides the guard. Loopback is a trust boundary only as strong
+as the host: a shared host that runs untrusted workloads (including
+model-generated commands) should configure a binding key even on loopback.
+
+Design: [English](../../../docs/design/managed-agent-broker-auth.md)
+| [简体中文](../../../docs/design/managed-agent-broker-auth.zh-CN.md).
+
 ### Broker deployment
 
 The Broker starts before the first Hosted Harness connection, so the supported
@@ -388,6 +507,26 @@ export QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY='/absolute/private/state'
 export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 export QWEN_MANAGED_AGENT_CLI_ENTRY='/absolute/path/to/dist/cli.js'
+```
+
+Two optional knobs change how the Broker listens and how long it waits for a
+dispatched v3 execution's result:
+
+```bash
+# Default false: the Broker refuses to bind a non-loopback address. This face
+# is plaintext HTTP with one global bearer token and no per-tenant
+# authorization, so set it only behind a layer that terminates TLS and
+# authorizes callers — restricting the network alone still puts that token on
+# the wire, and whoever reads it owns every execution the Broker admits.
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK='false'
+# Default 30m, minimum 1s: how long the Broker keeps polling the worker for
+# a dispatched v3 execution's result. When the window lapses the execution
+# is marked UNKNOWN instead of polling on, so a value shorter than your
+# longest tool call degrades that call to UNKNOWN. A suffix-less number
+# binds as milliseconds, which startup refuses. Raising it above 30m buys
+# nothing on the shipped path: the TypeScript client stops observing a v3
+# execution at its own fixed 30-minute deadline.
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW='30m'
 ```
 
 When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
@@ -638,8 +777,13 @@ launched by the Broker, as `node dist/cli.js managed-runtime-worker`. No
 separate worker bundle exists. The G0 integration test
 (`HostedPublicWorkspaceIT`) uses the same packaged `dist/cli.js`.
 
-The real-model run below has not been executed as evidence for this
-integration, so treat it as intended verification, not passing evidence. The
+The real-model run below creates its Session through the public route as a
+Workspace-bound G0 Session, and proves the physical tool execution through
+the durable `qwen_tool_execution` record (exactly one `SETTLED` row) rather
+than a public `item.tool_call.*` event — Broker-worker tool calls are not
+published without O2 tool publication. The run needs live model credentials,
+so no CI job executes it; it has been run locally as evidence (macOS,
+qwen3.8-max), and a green CI run therefore says nothing about this mode. The
 script also needs `java`, `mysqld`, `mysql` and `mysqladmin` on `PATH`; it
 starts its own temporary MySQL server and exits before starting anything else
 when a command or a required file is missing.
@@ -668,11 +812,14 @@ owners against the same MySQL store, and verifies that the second Turn sees the
 first Turn's prompt and answer.
 
 The in-flight and continuation variants run the same replacement-owner proof
-through a physical Workspace file tool execution. The runner seeds the
-Workspace registry and access grant as deployment data, enables the G0 file
-admission, and uses `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` for its local
-actor, so the Session is created through the public route like any other
-Workspace-bound Session:
+through a physical Workspace file tool execution. The runner configures the
+G0 public Workspace admission for every mode — it seeds the Workspace
+registry and access grant as deployment data, enables the G0 file admission,
+and uses `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` for its local actor — and
+the real-model check and both tool-driven variants create their Sessions
+through the public route as Workspace-bound Sessions, while
+`--session-failover` deliberately stays unbound to exercise the plain
+durable-owner takeover:
 
 ```bash
 npm run test:e2e:managed-inflight-failover
@@ -696,9 +843,8 @@ requires one tool execution, one further continuation, only the replacement's
 answer in the public transcript, and one terminal event. Both modes run in the
 Hosted MySQL CI job.
 
-Once the missing integration lands, a zero-delay run can check the real-model
-path. A controlled cold-start delay can then test output before Runtime
-readiness:
+A zero-delay run checks the real-model path as shown above; a controlled
+cold-start delay additionally tests output before Runtime readiness:
 
 ```bash
 npm run test:e2e:managed-agent-server -- \
