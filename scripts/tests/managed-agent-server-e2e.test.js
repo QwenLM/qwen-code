@@ -5,9 +5,18 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   createSourceFile,
+  isCallExpression,
   isFunctionDeclaration,
   isVariableStatement,
   ScriptTarget,
@@ -51,6 +60,46 @@ describe('managed-agent-server e2e runner', () => {
     return transpileModule(text, {
       compilerOptions: { target: ScriptTarget.ES2022 },
     }).outputText;
+  };
+
+  // waitUntil calls childExited, so its extraction list must name the
+  // predicate: a free identifier in generated code resolves against the
+  // global scope, and the early-exit branch would die with a ReferenceError
+  // that points at the runner instead of at this harness's extraction list.
+  // One inventory with one loader — pasted copies drift, and the drift reds
+  // a test whose author did not touch it while the other copies stay
+  // silently stale.
+  const WAIT_UNTIL_DEPS = ['waitUntil', 'receivedSignal', 'childExited'];
+  const load = (names, returns, ...params) =>
+    new Function(...params, `${extracted(names)}\nreturn { ${returns} };`);
+  const loadWaitUntil = () => load(WAIT_UNTIL_DEPS, 'waitUntil')();
+
+  // Source-level MySQL invocation sites, so client protections can be
+  // asserted per call site: a whole-file count detects a removed safeguard
+  // but stays green when a fifth invocation without one is added.
+  const mysqlCalls = (sourceText) => {
+    const ast = createSourceFile(
+      'runner.ts',
+      sourceText,
+      ScriptTarget.Latest,
+      true,
+    );
+    const calls = [];
+    const visit = (node) => {
+      if (
+        isCallExpression(node) &&
+        node.expression.getText(ast) === 'spawnSync' &&
+        node.arguments.length > 0
+      ) {
+        const binary = node.arguments[0].getText(ast);
+        if (['mysql', 'mysqladmin', 'mysqld'].includes(binary)) {
+          calls.push({ binary, text: node.getText(ast) });
+        }
+      }
+      node.forEachChild(visit);
+    };
+    visit(ast);
+    return calls;
   };
 
   it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
@@ -246,9 +295,7 @@ describe('managed-agent-server e2e runner', () => {
   });
 
   it('waitUntil surfaces the last predicate error', async () => {
-    const { waitUntil } = new Function(
-      `${extracted(['waitUntil', 'receivedSignal', 'childExited'])}\nreturn { waitUntil };`,
-    )();
+    const { waitUntil } = loadWaitUntil();
     await expect(
       waitUntil(
         'probe',
@@ -259,9 +306,7 @@ describe('managed-agent-server e2e runner', () => {
   });
 
   it('waitUntil bounds a stalled iteration by the deadline', async () => {
-    const { waitUntil } = new Function(
-      `${extracted(['waitUntil', 'receivedSignal', 'childExited'])}\nreturn { waitUntil };`,
-    )();
+    const { waitUntil } = loadWaitUntil();
     const started = Date.now();
     await expect(
       waitUntil('probe', () => new Promise(() => {}), 300),
@@ -270,14 +315,8 @@ describe('managed-agent-server e2e runner', () => {
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
-  // waitUntil calls childExited, so every extraction of it must name the
-  // predicate: a free identifier in generated code resolves against the
-  // global scope, and the early-exit branch would die with a ReferenceError
-  // that points at the runner instead of at this harness's extraction list.
   it('waitUntil reports a child that exited early', async () => {
-    const { waitUntil } = new Function(
-      `${extracted(['waitUntil', 'receivedSignal', 'childExited'])}\nreturn { waitUntil };`,
-    )();
+    const { waitUntil } = loadWaitUntil();
     await expect(
       waitUntil('probe', () => new Promise(() => {}), 300, {
         child: { exitCode: 1, signalCode: null },
@@ -289,9 +328,7 @@ describe('managed-agent-server e2e runner', () => {
   // A rejecting-then-hanging predicate must surface the real error, not the
   // synthetic stall metadata the race rejects with on later iterations.
   it('waitUntil keeps a real predicate error when a later iteration stalls', async () => {
-    const { waitUntil } = new Function(
-      `${extracted(['waitUntil', 'receivedSignal', 'childExited'])}\nreturn { waitUntil };`,
-    )();
+    const { waitUntil } = loadWaitUntil();
     let calls = 0;
     const failure = await waitUntil(
       'probe',
@@ -310,9 +347,7 @@ describe('managed-agent-server e2e runner', () => {
   // The mirror: once the predicate answers falsy, a connectivity error from
   // an earlier phase no longer describes the state the deadline found.
   it('waitUntil drops an error that later answered iterations supersede', async () => {
-    const { waitUntil } = new Function(
-      `${extracted(['waitUntil', 'receivedSignal', 'childExited'])}\nreturn { waitUntil };`,
-    )();
+    const { waitUntil } = loadWaitUntil();
     let calls = 0;
     const failure = await waitUntil(
       'probe',
@@ -333,9 +368,7 @@ describe('managed-agent-server e2e runner', () => {
   // for its own probe timeout, and wall time must stay near the budget
   // rather than near budget + a site-local probe timeout.
   it('waitUntil threads the remaining budget into a synchronous predicate', async () => {
-    const { waitUntil } = new Function(
-      `${extracted(['waitUntil', 'receivedSignal', 'childExited'])}\nreturn { waitUntil };`,
-    )();
+    const { waitUntil } = loadWaitUntil();
     const started = Date.now();
     await expect(
       waitUntil(
@@ -351,9 +384,10 @@ describe('managed-agent-server e2e runner', () => {
   });
 
   it('crashProcess reports a by-signal exit instead of throwing ESRCH', async () => {
-    const { crashProcess } = new Function(
+    const { crashProcess } = load(
+      ['crashProcess', 'childExited'],
+      'crashProcess',
       'process',
-      `${extracted(['crashProcess', 'childExited'])}\nreturn { crashProcess };`,
     )(process);
     const child = spawn('node', [
       '-e',
@@ -385,22 +419,31 @@ describe('managed-agent-server e2e runner', () => {
   // so a status-only check throws "MySQL command failed: " and the one
   // diagnostic a wedged durable-state dump exists to produce is lost.
   it('runMysql surfaces the spawn-level reason on a timeout', () => {
-    const { runMysql } = new Function(
+    const spawns = [];
+    const { runMysql } = load(
+      ['runMysql'],
+      'runMysql',
       'spawnSync',
       'mysql',
       'mysqlClientHome',
-      `${extracted(['runMysql'])}\nreturn { runMysql };`,
     )(
-      () => ({
-        status: null,
-        signal: 'SIGTERM',
-        stderr: '',
-        error: new Error('spawnSync mysql ETIMEDOUT'),
-      }),
+      (...args) => {
+        spawns.push(args);
+        return {
+          status: null,
+          signal: 'SIGTERM',
+          stderr: '',
+          error: new Error('spawnSync mysql ETIMEDOUT'),
+        };
+      },
       'mysql',
       '/tmp/mysql-client-home',
     );
     expect(() => runMysql(3306, 'SELECT 1')).toThrow(/ETIMEDOUT/);
+    // A final waitUntil poll can hand runMysql a remaining budget below one
+    // client round trip; the floor keeps the last probe possible.
+    expect(() => runMysql(3306, 'SELECT 1', 3)).toThrow(/ETIMEDOUT/);
+    expect(spawns[1][2].timeout).toBeGreaterThanOrEqual(2_000);
   });
 
   // --no-defaults does not disable $HOME/.mylogin.cnf, so a developer's
@@ -412,10 +455,22 @@ describe('managed-agent-server e2e runner', () => {
   it('isolates the MySQL client HOME under the runner scratch root', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     expect(source).toContain("path.join(temporary, 'mysql-client-home')");
-    expect(
-      source.match(/HOME: mysqlClientHome/g),
-      'the mysql client and the mysqladmin probe must both use the isolated HOME',
-    ).toHaveLength(2);
+    // Per call site, not a whole-file count: a count detects a removed
+    // override but stays green when a fifth client invocation without one is
+    // added. The mysqld server launches deliberately keep the real HOME, so
+    // the isolated override is required on the mysql/mysqladmin clients.
+    const calls = mysqlCalls(source);
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(call.text, `${call.binary} must pass --no-defaults`).toContain(
+        "'--no-defaults'",
+      );
+      if (call.binary === 'mysqld') continue;
+      expect(
+        call.text,
+        `${call.binary} must run with the isolated mysqlClientHome`,
+      ).toContain('HOME: mysqlClientHome');
+    }
   });
 
   // spawnSync blocks the event loop, so waitUntil's race cannot bound a
@@ -496,6 +551,16 @@ describe('managed-agent-server e2e runner', () => {
     expect(dockerfile).not.toMatch(
       /^ENV\s+QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST/m,
     );
+    // Pin the bind default at the file that owns it, not only at one
+    // downstream file declining to override it: every Java test passes
+    // --server.address on the command line and the e2e runner passes none,
+    // so a flipped yml default would otherwise ship silently.
+    const applicationYml = read(
+      'packages/sdk-java/managed-agent-server/src/main/resources/application.yml',
+    );
+    expect(applicationYml).toMatch(
+      /address: '\$\{QWEN_MANAGED_AGENT_SERVER_ADDRESS:127\.0\.0\.1\}'/,
+    );
     expect(dockerfile).toMatch(/\{ \[ "\$count" -eq 1 \] \|\|/);
     expect(dockerfile).toContain(
       'expected exactly one unclassified server jar',
@@ -514,5 +579,95 @@ describe('managed-agent-server e2e runner', () => {
     const readme = read('packages/sdk-java/managed-agent-server/README.md');
     expect(readme).toContain('-e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0');
     expect(readme).toMatch(/with no `-p` at all/);
+    // RuntimeBrokerHttpServer refuses a non-loopback broker bind unless the
+    // allow-non-loopback flag is set, so a documented broker wildcard opt-in
+    // must name the flag in the same block: the unguarded pair crash-loops
+    // the container the moment the broker is enabled.
+    for (const document of [dockerfile, readme]) {
+      const wildcard = document.indexOf(
+        'QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST=0.0.0.0',
+      );
+      if (wildcard === -1) continue;
+      const before = document.lastIndexOf('\n\n', wildcard);
+      const after = document.indexOf('\n\n', wildcard);
+      expect(
+        document.slice(
+          before === -1 ? 0 : before,
+          after === -1 ? undefined : after,
+        ),
+        'a documented broker wildcard bind must name ALLOW_NON_LOOPBACK=true',
+      ).toMatch(
+        /QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK='?true'?/,
+      );
+    }
+  });
+
+  // The jar-selection guard is executable shell, and the text pins above
+  // never look inside the loop body: deleting the glob break or forcing the
+  // count both left them green. Run the stage's own shell text against
+  // fixture target/ populations so the guard's behaviour is pinned, not its
+  // spelling.
+  it('fails the image build loudly when the jar selection is ambiguous', () => {
+    const probe = spawnSync('sh', ['-c', 'true']);
+    if (probe.status !== 0) return; // no sh on this host: skip rather than fail
+    const dockerfile = read(
+      'packages/sdk-java/managed-agent-server/Dockerfile',
+    );
+    const stage = dockerfile.match(
+      /cd packages\/sdk-java\/managed-agent-server\/target \\[\s\S]*?&& cp "\$main" \/tmp\/qwen-managed-agent-server\.jar/,
+    );
+    expect(
+      stage,
+      'the jar-selection RUN stage must be extractable from the Dockerfile',
+    ).not.toBeNull();
+    const script = stage[0]
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .map((line) => line.trimEnd().replace(/\\$/, ''))
+      .join(' ');
+    const populations = [
+      { jars: [], status: 1, found: 0 },
+      { jars: ['qwen-managed-agent-server-1.0.jar'], status: 0 },
+      {
+        jars: [
+          'qwen-managed-agent-server-1.0.jar',
+          'qwen-managed-agent-server-1.0-workspace-bundle.jar',
+          'qwen-managed-agent-server-1.0-operator-recovery.jar',
+        ],
+        status: 0,
+      },
+      {
+        jars: [
+          'qwen-managed-agent-server-1.0.jar',
+          'qwen-managed-agent-server-2.0.jar',
+        ],
+        status: 1,
+        found: 2,
+      },
+    ];
+    for (const { jars, status, found } of populations) {
+      const dir = mkdtempSync(join(tmpdir(), 'jar-guard-'));
+      try {
+        for (const jar of jars) writeFileSync(join(dir, jar), '');
+        const fixture = script
+          .replace(
+            'cd packages/sdk-java/managed-agent-server/target',
+            `cd '${dir.replaceAll('\\', '/')}'`,
+          )
+          .replace(
+            '/tmp/qwen-managed-agent-server.jar',
+            `'${join(dir, 'published.jar').replaceAll('\\', '/')}'`,
+          );
+        const run = spawnSync('sh', ['-c', fixture], { encoding: 'utf8' });
+        expect(run.status, `${jars.length} jars: ${run.stderr}`).toBe(status);
+        if (found !== undefined) {
+          expect(run.stderr).toContain(
+            `expected exactly one unclassified server jar, found ${found}`,
+          );
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 });

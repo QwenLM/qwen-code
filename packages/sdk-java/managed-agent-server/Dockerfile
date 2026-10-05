@@ -49,8 +49,7 @@ COPY --from=build /tmp/qwen-managed-agent-server.jar \
 # plain `docker run -p 8080:8080` must not publish it. Publishing is an
 # explicit operator opt-in (see the README's container section):
 #   docker run -p 8080:8080 \
-#     -e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0 \
-#     -e QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST=0.0.0.0 <image>
+#     -e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0 <image>
 
 EXPOSE 8080 4182
 USER 10001

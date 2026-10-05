@@ -627,7 +627,12 @@ function runMysql(port: number, sql: string, timeoutMs = 10_000): string {
     {
       encoding: 'utf8',
       env: { ...process.env, HOME: mysqlClientHome },
-      timeout: timeoutMs,
+      // waitUntil hands the lease polls its remaining budget, and the final
+      // iteration can shrink it below one client round trip; floor the probe
+      // timeout so the last poll is never handed less than it can cost. The
+      // clamp re-admits up to ~2s of overshoot per wedged poll, against the
+      // ~10s the budget threading set out to remove.
+      timeout: Math.max(2_000, timeoutMs),
     },
   );
   // A timed-out spawn sets error and leaves status null with empty stderr:

@@ -693,9 +693,13 @@ an explicit opt-in:
 ```bash
 docker run -p 8080:8080 \
   -e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0 \
-  -e QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST=0.0.0.0 \
   <image>
 ```
+
+Publishing the API needs no Runtime Broker face: the broker ships disabled
+by default, and a non-loopback broker bind is a separate opt-in — the broker
+refuses one unless `QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK=true`
+is also set (see Broker deployment above).
 
 The opt-in makes the authentication consequence load-bearing: there is no
 HTTP authentication — tenancy is whatever `X-Qwen-Tenant-Id` says — so the
