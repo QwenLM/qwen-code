@@ -74,13 +74,16 @@ Core 的忽略规则以 Session 目录为根。位于仓库子目录的 Session 
 的 `bin/python`）仍然可见，因为条目按其父目录的 realpath 判定。遍历该链接
 会被剪掉，包括普通的 workspace 依赖链接；宽泛搜索仍保留 Session 内的匹配。
 
-boot v2 的文件工具范围校验允许访问挂载内的共享位置，但排除同一 worker 中
-另一已安装 Session 所拥有的目录。兄弟绑定无法解析时，拒绝访问自身目录以外
-的文件，但自身目录仍可访问；写入前，悬空链接按其预期目标校验。这个注册表
-检查只覆盖本 worker，并不保障
-不同 worker 之间按 Session 保密。它保留 `/1` 的链接依赖读取；文件历史仍
-保留自己的写入边界。boot v1 保持更严格的 Session 边界。非 ENOENT 的解析
-错误必须拒绝，并且不得暴露 Node 诊断中的宿主物理路径。
+与 glob 的遍历一样，文件工具在任何 boot 下的范围都是 Session 目录本身：
+`read_file`、`write_file` 或 `edit` 的 realpath 一旦离开该目录就被拒绝，不论
+它落在挂载点的哪里。要区分共享位置和兄弟 Session 的目录，需要知道挂载点上
+有哪些 Session，而 worker 只在它们安装时才知道、重启后就忘了；因此基于注册
+表的豁免在重启后会放行对兄弟目录的读写，写进兄弟目录的文件还会变成那个
+Session 的 Workspace context。写入前，悬空链接按其预期目标校验；文件历史仍
+保留自己的写入边界。非 ENOENT 的解析错误必须拒绝，并且不得暴露 Node 诊断中
+的宿主物理路径。读取 Session 之外的链接依赖
+（`node_modules/@acme/ui -> ../../packages/ui`）留作后续工作：它需要一个持久的
+"哪些挂载位置是共享的"的定义。
 
 ## 上限
 
@@ -130,11 +133,8 @@ worker。这是由运维执行的要求，并非协商能力或自动安全检�
 
 **对已有 Session 的行为变化：** 因 glob 而引入的 realpath 边界检查作用于
 所有 Hosted profile（包括 `/1`）的 `read_file`、`write_file` 与 `edit`。
-在 Workspace-capability worker 上，兄弟绑定可解析时，挂载点内的共享位置仍可
-访问。自身目录外的访问，在 realpath 离开挂载点、落入另一已安装 Session 的目录，
-或有兄弟绑定无法解析时被拒绝。绑定可解析时，挂载点内的链接依赖
-（`node_modules/@acme/ui -> ../../packages/ui`）仍可读取。boot-v1 worker 没有
-Workspace 挂载点和 Session 注册表，其边界就是 Session 目录本身：经符号链接
-解析到该目录之外的路径（包括链接依赖）会被拒绝，而此前可以读取。
+在所有 worker 上，边界都是 Session 目录本身：经符号链接解析到该目录之外的
+路径（包括链接依赖 `node_modules/@acme/ui -> ../../packages/ui`）会被拒绝，
+而此前可以读取。
 
 为只读、幂等工具提供更轻的派发路径不在范围内。

@@ -132,51 +132,6 @@ export class ManagedContextMount {
     }
     return directory;
   }
-
-  /**
-   * The canonical mount root, or undefined when it is unreadable or its
-   * device and inode no longer match the pinned ones. A binding whose own
-   * directory stopped resolving is still judged against the location it
-   * occupied, which needs the same root `resolve` would have joined onto.
-   */
-  async rootDirectory(): Promise<string | undefined> {
-    if (!isHostAbsolute(this.#mountRoot)) {
-      return undefined;
-    }
-    try {
-      const root = await fs.realpath(this.#mountRoot);
-      const stats = await fs.stat(root, { bigint: true });
-      const pinned = this.#root;
-      if (
-        pinned !== undefined &&
-        (pinned.dev !== stats.dev || pinned.ino !== stats.ino)
-      ) {
-        return undefined;
-      }
-      return root;
-    } catch {
-      return undefined;
-    }
-  }
-}
-
-/**
- * Where an installed sibling Session's directory is now. `mount.resolve`
- * answers only for a canonical, readable directory; a binding that was
- * removed, or replaced by a symlink, still occupied a knowable location.
- * Judging a target against that location keeps one stale Session from
- * vetoing every other Session's reads for the worker's lifetime.
- */
-async function siblingDirectory(
-  mount: ManagedContextMount,
-  cwdRelative: string,
-): Promise<string | undefined> {
-  const resolved = await mount.resolve(cwdRelative);
-  if (resolved !== undefined) return resolved;
-  const root = await mount.rootDirectory();
-  if (root === undefined) return undefined;
-  const occupied = path.join(root, ...cwdRelative.split('/'));
-  return await fs.realpath(occupied).catch(() => occupied);
 }
 
 /**
@@ -320,31 +275,6 @@ export function registerManagedContextRoutes(
     publisher,
     mcp,
     hooks,
-    async (sessionId, realPath, ownDirectory) => {
-      // `mount.resolve` returns canonical directories only, so a lexical
-      // relative check against each installed sibling is enough.
-      const contains = (directory: string, target: string): boolean => {
-        const relative = path.relative(directory, target);
-        return (
-          relative !== '..' &&
-          !relative.startsWith(`..${path.sep}`) &&
-          !path.isAbsolute(relative)
-        );
-      };
-      for (const [otherId, binding] of installations.bindings()) {
-        if (otherId === sessionId) continue;
-        const directory = await siblingDirectory(mount, binding.cwdRelative);
-        // A binding that cannot be located at all cannot prove the outside
-        // target is shared.
-        if (directory === undefined) return true;
-        // A Session bound at an ancestor of the caller's own directory
-        // delimits no private area — it is the shared Workspace itself, and
-        // `'.'` is what a Workspace selection without `cwd_relative` binds.
-        if (contains(directory, ownDirectory)) continue;
-        if (contains(directory, realPath)) return true;
-      }
-      return false;
-    },
   );
   registerManagedRuntimeProviderRoute(
     app,

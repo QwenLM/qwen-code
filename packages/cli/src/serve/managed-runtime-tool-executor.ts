@@ -364,21 +364,6 @@ export class ManagedToolExecutor {
     private readonly capturePublisher?: ManagedShellCapturePublisher,
     private readonly mcp?: ManagedMcpRuntime,
     private readonly hooks?: ManagedHookRuntime,
-    /**
-     * True when a realpath lands inside ANOTHER installed Session's
-     * directory. The file-tool boundary is the Session directory for that
-     * case (a sibling Session's files are never this Session's business);
-     * anywhere else inside the mount — a linked dependency's real location
-     * — keeps the pre-containment behavior of reading through the symlink.
-     * `ownDirectory` is the caller's canonical Session directory, so a
-     * sibling bound at an ancestor of it can be told apart from one that
-     * delimits a private area.
-     */
-    private readonly ownsAnotherSessionDir?: (
-      sessionId: string,
-      realPath: string,
-      ownDirectory: string,
-    ) => Promise<boolean>,
   ) {}
 
   static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
@@ -903,46 +888,22 @@ export class ManagedToolExecutor {
         );
         // The glob admission makes an in-context symlink enumerable, so the
         // lexical resolve is no longer sufficient: realpath the result and
-        // refuse anything that lands outside the boundary. A create's leaf
-        // does not exist yet, so resolve the deepest ancestor that does —
-        // a genuinely absent path stays lexical and keeps the tool's own
-        // not-found answer rather than a traversal accusation.
+        // refuse anything that lands outside the Session directory. The
+        // boundary is structural, like glob's `containmentRoot`: telling a
+        // shared directory from a sibling Session's would need the set of
+        // Sessions on the mount, which this process only learns as they
+        // install and forgets on restart. A create's leaf does not exist
+        // yet, so resolve the deepest ancestor that does — a genuinely
+        // absent path stays lexical and keeps the tool's own not-found
+        // answer rather than a traversal accusation.
         const realTarget = await realpathDeepestExisting(
           params['file_path'] as string,
         );
         const realDirectory = await realpathDeepestExisting(directory);
-        const relative = path.relative(realDirectory, realTarget);
-        if (
-          relative === '..' ||
-          relative.startsWith(`..${path.sep}`) ||
-          path.isAbsolute(relative)
-        ) {
-          // The boundary is the Session directory only when the target lands
-          // in ANOTHER installed Session's directory (or its binding cannot
-          // be resolved); anywhere else inside
-          // the mount — a linked dependency's real location — stays
-          // reachable, the behavior /1 Sessions had before containment.
-          const workspaceRoot = tools.workspaceRoot;
-          const inMount =
-            workspaceRoot !== undefined &&
-            !escapesSession(
-              path.relative(
-                await realpathDeepestExisting(workspaceRoot),
-                realTarget,
-              ),
-            );
-          if (
-            !inMount ||
-            (await this.ownsAnotherSessionDir?.(
-              tools.sessionId,
-              realTarget,
-              realDirectory,
-            ))
-          ) {
-            throw new Error(
-              `Path '${entry.input['file_path'] as string}' is not within the Session working directory.`,
-            );
-          }
+        if (escapesSession(path.relative(realDirectory, realTarget))) {
+          throw new Error(
+            `Path '${entry.input['file_path'] as string}' is not within the Session working directory.`,
+          );
         }
       }
       if (entry.toolName === GlobTool.Name) {
