@@ -81,6 +81,29 @@ class WorkspaceMigrationStoreTest {
                 request.toString().getBytes(StandardCharsets.UTF_8), create);
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rejectsCsiStorageBeforeInstallingAnyMigrationFence(boolean alias) throws Exception {
+        if (alias) {
+            jdbc.update("INSERT INTO managed_workspace_csi_registration"
+                    + " (alias_key, tenant_id, storage_id, physical_key, registration_revision, registration_json)"
+                    + " VALUES (?, 'tenant', 'storage', ?, 1, '{}')",
+                    WorkspaceCsiRegistration.aliasKey("tenant", "storage"), "a".repeat(64));
+        } else {
+            jdbc.update("UPDATE managed_workspace_execution_lease SET storage_kind = 'CSI'");
+        }
+        var registration = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        byte[] marker = Files.readAllBytes(source.resolve(".qwen-managed-storage.json"));
+        assertThatThrownBy(() -> store(true)).isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+            assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+            assertThat(error.isRetryable()).isFalse();
+        });
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(registration);
+        assertThat(Files.readAllBytes(source.resolve(".qwen-managed-storage.json"))).isEqualTo(marker);
+    }
+
     @Test
     void rejectsNonPrivateStateDirectoryBeforeInstallingAnyFence() throws Exception {
         Path directory = Path.of(request.path("stateDirectory").asText());

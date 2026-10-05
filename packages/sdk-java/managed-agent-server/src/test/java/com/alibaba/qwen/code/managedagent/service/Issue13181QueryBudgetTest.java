@@ -1064,13 +1064,14 @@ class Issue13181QueryBudgetTest {
         // the activation state from the head row.
         assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
                 "for update")).isZero();
-        // Positive control: the publish path locks the head row four times
+        // Positive control: the publish path locks the head row six times
         // (claim's authorize, the retention put, the verify-open read
-        // lease, and install's authorize), so the zero above cannot pass
+        // lease, install's authorize, and each authorization's final writer
+        // lease recheck), so the zero above cannot pass
         // vacuously on a broken store.
         assertThat(fixture.ledger.count(
                 "from qwen_managed_session_journal_head", "for update"))
-                .isEqualTo(4);
+                .isEqualTo(6);
     }
 
     @Test

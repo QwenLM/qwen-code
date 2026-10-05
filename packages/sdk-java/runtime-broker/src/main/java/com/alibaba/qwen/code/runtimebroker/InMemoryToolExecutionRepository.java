@@ -82,11 +82,30 @@ public final class InMemoryToolExecutionRepository
             ToolExecutionRecord expected,
             ToolExecutionRecord replacement, String owner,
             long dispatchGeneration) {
+        return compareAndSet(expected, replacement, owner, dispatchGeneration, false);
+    }
+
+    synchronized ToolExecutionRecord authorizeDispatch(ToolExecutionRecord expected,
+            String owner, long dispatchGeneration, long bindingVersion) {
+        return compareAndSet(expected, expected.authorizeDispatch(bindingVersion), owner,
+                dispatchGeneration, true);
+    }
+
+    private ToolExecutionRecord compareAndSet(ToolExecutionRecord expected,
+            ToolExecutionRecord replacement, String owner, long dispatchGeneration,
+            boolean authorizing) {
         requireReplacement(expected, replacement);
+        if (!authorizing && !expected.sameAuthorization(replacement)) {
+            throw new IllegalArgumentException("replacement must preserve dispatch authorization");
+        }
         ToolExecutionRecord current = recordsById.get(
                 expected.getExecutionCallId());
         if (current == null
                 || !current.sameIdentity(expected)
+                || !current.sameAuthorization(expected)
+                || authorizing && (current.getState() != ToolExecutionRecord.State.DISPATCHING
+                        || current.isCancelRequested()
+                        || current.getAuthorizedDispatchGeneration() != null)
                 || current.getVersion() != expected.getVersion()
                 || current.isTerminal()
                 || current.getState() == ToolExecutionRecord.State.UNKNOWN
@@ -265,6 +284,39 @@ public final class InMemoryToolExecutionRepository
     }
 
     @Override
+    public synchronized List<ToolExecutionRecord> findByBinding(
+            String bindingId, long runtimeGeneration,
+            String afterExecutionCallId, int limit) {
+        String id = BrokerValues.requireId(bindingId, "bindingId");
+        if (runtimeGeneration <= 0 || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException(
+                    "positive runtimeGeneration and limit in [1, 100] are required");
+        }
+        String after = afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireWellFormed(
+                        BrokerValues.requireId(afterExecutionCallId, "cursor"), "cursor"));
+        TreeMap<String, ToolExecutionRecord> batch = new TreeMap<>();
+        for (ToolExecutionRecord record : recordsById.values()) {
+            if (id.equals(record.getBindingId())
+                    && runtimeGeneration == record.getRuntimeGeneration()) {
+                BrokerValues.requireWellFormed(record.getExecutionCallId(), "executionCallId");
+                String key = JdbcRepositorySupport.valueKey(record.getExecutionCallId());
+                if (key.compareTo(after) > 0) {
+                    ToolExecutionRecord previous = batch.put(key, record);
+                    if (previous != null
+                            && !previous.getExecutionCallId().equals(record.getExecutionCallId())) {
+                        throw new IllegalStateException("Tool execution-call hash collision");
+                    }
+                    if (batch.size() > limit) {
+                        batch.pollLastEntry();
+                    }
+                }
+            }
+        }
+        return List.copyOf(batch.values());
+    }
+
+    @Override
     public synchronized boolean hasActiveByRuntimeSession(
             String runtimeSessionId) {
         String id = BrokerValues.requireId(runtimeSessionId,
@@ -307,7 +359,8 @@ public final class InMemoryToolExecutionRepository
                 || candidate.getLastSequence() != 0
                 || candidate.getState()
                         != ToolExecutionRecord.State.PREPARED
-                || candidate.getDispatchOwner() != null) {
+                || candidate.getDispatchOwner() != null
+                || candidate.getAuthorizedDispatchGeneration() != null) {
             throw new IllegalArgumentException(
                     "candidate must be a new prepared execution");
         }
