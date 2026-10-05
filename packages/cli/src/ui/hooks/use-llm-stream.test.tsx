@@ -17255,6 +17255,113 @@ describe('useLlmStream', () => {
       expect(result.current.streamingState).toBe(StreamingState.Idle);
     });
 
+    it.each([false, true])(
+      'retains concurrent Shell cancellation ownership during model unwind (repeat: %s)',
+      async (repeatCancel) => {
+        const firstShell = deferred<ShellExecutionResult>();
+        const secondShell = deferred<ShellExecutionResult>();
+        const model = deferred<void>();
+        mockExecuteRuntimeShell
+          .mockResolvedValueOnce({ result: firstShell.promise })
+          .mockResolvedValueOnce({ result: secondShell.promise });
+        mockSendMessageStream.mockImplementation(() =>
+          (async function* () {
+            await model.promise;
+            yield {
+              type: ServerLlmEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+        const client = mockConfig.getLlmClient();
+        const { result, rerender } = renderHook(
+          ({ shellModeActive }) =>
+            useLlmStream(
+              client,
+              [],
+              mockAddItem,
+              mockConfig,
+              true,
+              mockLoadedSettings,
+              mockOnDebugMessage,
+              mockHandleSlashCommand,
+              shellModeActive,
+              () => 'vscode' as EditorType,
+              vi.fn(),
+              vi.fn(),
+              false,
+              vi.fn(),
+              vi.fn(),
+              vi.fn(),
+              vi.fn(),
+              80,
+              24,
+            ),
+          { initialProps: { shellModeActive: false } },
+        );
+        let foreground: Promise<void> | undefined;
+        await act(async () => {
+          foreground = result.current.submitQuery('ordinary model request');
+        });
+        await waitFor(() =>
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+        );
+        rerender({ shellModeActive: true });
+        await act(async () => {
+          await result.current.submitQuery('?btw ignored; printf first-shell');
+        });
+        const modelSignal = mockSendMessageStream.mock
+          .calls[0][1] as AbortSignal;
+        const firstSignal = mockExecuteRuntimeShell.mock
+          .calls[0][4] as AbortSignal;
+        expect(firstSignal).not.toBe(modelSignal);
+        act(() => result.current.cancelOngoingRequest());
+        const firstWasCancelled = firstSignal.aborted;
+        let secondWasCancelled = true;
+        if (repeatCancel) {
+          await act(async () => {
+            await result.current.submitQuery(
+              '?btw ignored; printf second-shell',
+            );
+          });
+          expect(mockExecuteRuntimeShell).toHaveBeenCalledTimes(2);
+          const secondSignal = mockExecuteRuntimeShell.mock
+            .calls[1][4] as AbortSignal;
+          expect(secondSignal).not.toBe(firstSignal);
+          expect(secondSignal.aborted).toBe(false);
+          act(() => result.current.cancelOngoingRequest());
+          secondWasCancelled = secondSignal.aborted;
+        }
+        await act(async () => {
+          model.resolve();
+          await foreground;
+        });
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        await act(async () => {
+          await result.current.submitQuery(
+            'next model request',
+            SendMessageType.UserQuery,
+            undefined,
+            { shellMode: false },
+          );
+        });
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        await act(async () => {
+          firstShell.resolve(shellResult(true));
+        });
+        if (repeatCancel) {
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          await act(async () => {
+            secondShell.resolve(shellResult(true));
+          });
+        }
+        expect(modelSignal.aborted).toBe(true);
+        expect(firstWasCancelled).toBe(true);
+        expect(secondWasCancelled).toBe(true);
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      },
+    );
+
     it('keeps a new shell busy when an older model emits its cancellation event', async () => {
       const shell = deferred<ShellExecutionResult>();
       const model = deferred<void>();

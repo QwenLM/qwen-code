@@ -1270,7 +1270,9 @@ export const useLlmStream = (
       const shellAbortController =
         abortControllerRef.current?.signal === signal
           ? abortControllerRef.current
-          : undefined;
+          : [...detachedToolContinuationAbortControllersRef.current].find(
+              (controller) => controller.signal === signal,
+            );
       // A tool continuation can replace the foreground controller while this
       // command is still running. Keep the shell independently cancellable.
       if (shellAbortController) {
@@ -1378,6 +1380,10 @@ export const useLlmStream = (
         controller.abort();
       }
       detachedToolContinuationAbortControllersRef.current.clear();
+      for (const controller of auxiliaryAbortRefsRef.current) {
+        controller.abort();
+      }
+      auxiliaryAbortRefsRef.current.clear();
       return;
     }
     if (streamingState !== StreamingState.Responding) {
