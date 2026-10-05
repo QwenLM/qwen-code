@@ -776,6 +776,49 @@ describe('useMessageQueue', () => {
       });
     });
 
+    it('arms nothing when a restored member carries a byte-identical twin of an earlier user-pasted block', () => {
+      // Producer-carried twin of the case above: the second member's
+      // envelope arrives as a carried `reminders` decomposition (a
+      // re-queued aggregate, whose envelope sits mid-string) and the first
+      // member is a projection-less restore whose text leads with a
+      // byte-identical user-pasted copy. The carried run encodes no
+      // position inside its own member, so without the first-occurrence
+      // re-check the restore's first-byte-match removal would delete the
+      // USER's copy and keep the injected one.
+      const { result } = renderHook(() => useMessageQueue());
+      const envelope =
+        '<system-reminder>\n1 background agent was restored from this session.\n</system-reminder>\n\n';
+      const userCopy = `${envelope}user pasted note`;
+      const requeued = `first message\n\n${envelope}second message`;
+
+      act(() => {
+        // Restored entries prepend: the carrier goes in first so the
+        // projection-less copy lands ahead of it.
+        result.current.restoreMessages(
+          [requeued],
+          'first message\n\nsecond message',
+          false,
+          undefined,
+          envelope,
+        );
+        result.current.restoreMessages([userCopy]);
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      // Exact shape: a `reminders` key here means the restore would
+      // byte-match the user's leading copy and delete it.
+      expect(popped).toEqual({
+        kind: 'user',
+        modelText: `${userCopy}\n\n${requeued}`,
+        submittedPrompt: `${userCopy}\n\n${requeued}`,
+        turnKey: expect.any(String),
+      });
+    });
+
     it('arms no reminders for a user-authored leading envelope carried as its own projection', () => {
       // The projection equals the model text, so nothing was injected —
       // the user's own <system-reminder> block is content, not a reminder.
@@ -1330,6 +1373,7 @@ describe('useMessageQueue', () => {
           [modelText],
           submittedPrompt,
           true,
+          undefined,
           envelope,
         );
       });

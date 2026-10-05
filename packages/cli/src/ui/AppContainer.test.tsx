@@ -3627,6 +3627,7 @@ describe('AppContainer State Management', () => {
         restoredText,
         false,
         undefined,
+        false,
       );
       expect(setText).toHaveBeenLastCalledWith('', {
         clearUndoHistory: true,
@@ -4932,6 +4933,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         'review this',
+        false,
       );
 
       // ESC before any output rewinds and restores the composer with the
@@ -4951,6 +4953,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         'review this',
+        false,
       );
 
       // The re-arm is one-shot: the latch was consumed by the replay, so a
@@ -4963,6 +4966,7 @@ describe('AppContainer State Management', () => {
         'next question',
         false,
         'next question',
+        false,
       );
     });
 
@@ -5048,6 +5052,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         'review this',
+        false,
       );
 
       // ESC before any output rewinds and restores the composer with the
@@ -5071,6 +5076,7 @@ describe('AppContainer State Management', () => {
         `<system-reminder>\n${notice}\n</system-reminder>\n\nreview this carefully`,
         false,
         'review this carefully',
+        false,
       );
     });
 
@@ -5157,6 +5163,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         undefined,
+        false,
       );
 
       triggerCancel(cancelInfoFor('review this', 1, 'review this', modelText));
@@ -5172,6 +5179,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         undefined,
+        false,
       );
     });
 
@@ -5258,6 +5266,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         typedText,
+        false,
       );
     });
 
@@ -5341,9 +5350,11 @@ describe('AppContainer State Management', () => {
         '<system-reminder>\nmanaged context\n</system-reminder>\n\nunrelated prompt',
         false,
         'unrelated prompt',
+        false,
       );
       expect(mockQueueMessage).not.toHaveBeenCalledWith(
         expect.stringContaining('@src/foo.ts'),
+        expect.anything(),
         expect.anything(),
         expect.anything(),
       );
@@ -5482,6 +5493,7 @@ describe('AppContainer State Management', () => {
         typedText,
         false,
         typedText,
+        false,
       );
     });
 
@@ -5546,6 +5558,7 @@ describe('AppContainer State Management', () => {
         aggregateModelText,
         false,
         aggregateModelText,
+        false,
       );
     });
 
@@ -5606,6 +5619,7 @@ describe('AppContainer State Management', () => {
         `${envelope}first message\n\nsecond message`,
         false,
         'first message\n\nsecond message',
+        false,
       );
     });
 
@@ -5670,6 +5684,7 @@ describe('AppContainer State Management', () => {
         `${envelope}${expandedPaste}\n\nsecond message`,
         false,
         `${expandedPaste}\n\nsecond message`,
+        false,
       );
     });
 
@@ -5740,6 +5755,7 @@ describe('AppContainer State Management', () => {
         `${injectedEnvelope}${userEnvelope}${expandedPaste}`,
         false,
         `${userEnvelope}${expandedPaste}`,
+        false,
       );
     });
 
@@ -5885,6 +5901,7 @@ describe('AppContainer State Management', () => {
         `${envelope}follow up`,
         false,
         'follow up',
+        false,
       );
     });
 
@@ -5968,6 +5985,7 @@ describe('AppContainer State Management', () => {
         [modelText],
         submittedPrompt,
         true,
+        undefined,
         envelope,
       );
     });
@@ -6053,6 +6071,7 @@ describe('AppContainer State Management', () => {
         `${envelope}${displayText}`,
         false,
         displayText,
+        false,
       );
     });
 
@@ -6221,6 +6240,7 @@ describe('AppContainer State Management', () => {
         `<system-reminder>\n${notice}\n</system-reminder>\n\nanother draft`,
         false,
         'another draft',
+        false,
       );
     });
 
@@ -6315,6 +6335,7 @@ describe('AppContainer State Management', () => {
         `<system-reminder>\n${other}\n</system-reminder>\n\n<system-reminder>\n${notice}\n</system-reminder>\n\nanother draft`,
         false,
         'another draft',
+        false,
       );
     });
 
@@ -6413,6 +6434,7 @@ describe('AppContainer State Management', () => {
         `<system-reminder>\n${notice}\n</system-reminder>\n\nfresh prompt`,
         false,
         'fresh prompt',
+        false,
       );
     });
 
@@ -6486,6 +6508,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         'review this',
+        false,
       );
     });
 
@@ -6586,6 +6609,7 @@ describe('AppContainer State Management', () => {
         'fresh prompt',
         false,
         'fresh prompt',
+        false,
       );
     });
 
@@ -6674,6 +6698,7 @@ describe('AppContainer State Management', () => {
         'ls -la',
         false,
         'ls -la',
+        true,
       );
 
       // Deferred, not consumed: the next model-bound submit still carries
@@ -6688,6 +6713,7 @@ describe('AppContainer State Management', () => {
         `<system-reminder>\n${notice}\n</system-reminder>\n\nnext question`,
         false,
         'next question',
+        false,
       );
     });
 
@@ -6782,6 +6808,7 @@ describe('AppContainer State Management', () => {
         `<system-reminder>\n${notice}\n</system-reminder>\n\nnext question`,
         false,
         'next question',
+        false,
       );
     });
 
@@ -6829,6 +6856,7 @@ describe('AppContainer State Management', () => {
         modelText,
         true,
         'review this',
+        false,
       );
     });
 
@@ -7363,6 +7391,7 @@ describe('AppContainer State Management', () => {
         'review this',
         false,
         'review this',
+        false,
       );
     });
 
@@ -7895,6 +7924,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         typedText,
+        false,
       );
     });
 
@@ -7953,6 +7983,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         'review this',
+        false,
       );
     });
 
@@ -9956,6 +9987,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         'second prompt',
+        false,
       );
     });
 
@@ -9990,6 +10022,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         'my prompt',
+        false,
       );
     });
 
@@ -10029,6 +10062,7 @@ describe('AppContainer State Management', () => {
         `${envelope}first message\n\nsecond message`,
         false,
         'first message\n\nsecond message',
+        false,
       );
     });
 
@@ -10056,6 +10090,7 @@ describe('AppContainer State Management', () => {
         typedText,
         false,
         typedText,
+        false,
       );
     });
 

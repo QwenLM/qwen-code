@@ -128,8 +128,9 @@ interface QueuedMessage {
    * The producer decomposition a restored aggregate carried (see
    * `restoreMessages`): the entry's text is the joined model text, so a
    * member's injected envelope can sit mid-string where the aggregation's
-   * leading-prefix arithmetic cannot re-derive it. Trusted verbatim — it
-   * was position-checked against this same text when first produced.
+   * leading-prefix arithmetic cannot re-derive it. Re-checked against the
+   * newly joined text at aggregation time — a byte-identical twin in an
+   * earlier member demotes this member to projection-less.
    */
   reminders?: string;
   deferUntilIdle: boolean;
@@ -186,7 +187,33 @@ function aggregateUserMessages(
     .map((message, index) => {
       const start = memberOffset;
       memberOffset += message.text.length + '\n\n'.length;
-      if (message.reminders !== undefined) return message.reminders;
+      if (message.reminders !== undefined) {
+        // The carried run was position-checked against the text it was
+        // produced from, not against THIS joined text: re-aggregation can
+        // seat a byte-identical twin of a carried block earlier (a
+        // projection-less member's user-pasted copy), and the restore
+        // removes armed blocks by first byte-match, which would delete the
+        // user's copy and keep the injected one. The run encodes no
+        // position inside its own member, so each block's own offset is
+        // located in the member text and only a strictly-earlier twin
+        // fails safe.
+        let rest = message.reminders;
+        while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
+          const close = rest.indexOf(
+            SYSTEM_REMINDER_CLOSE,
+            SYSTEM_REMINDER_OPEN.length,
+          );
+          if (close === -1) break;
+          const block = rest.slice(0, close + SYSTEM_REMINDER_CLOSE.length);
+          const own = message.text.indexOf(block);
+          if (own === -1 || text.indexOf(block) !== start + own) {
+            projections[index] = message.text;
+            return '';
+          }
+          rest = rest.slice(block.length).replace(/^\s+/, '');
+        }
+        return message.reminders;
+      }
       const projection = projections[index];
       if (!message.text.endsWith(projection)) return '';
       const prefix = message.text.slice(
