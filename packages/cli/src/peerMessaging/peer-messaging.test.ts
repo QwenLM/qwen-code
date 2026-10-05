@@ -39,11 +39,16 @@ import {
   type PeerFrame,
   type PeerInbox,
 } from '@qwen-code/qwen-code-core';
+
 import {
   MAX_ACCEPTED_BACKLOG,
   MESSAGING_SOCKET_ENV,
   MESSAGING_TOKEN_ENV,
+  PEER_MID_TURN_BUDGET_DEFAULT,
+  PEER_MID_TURN_WINDOW_MS,
+  PeerMidTurnBudget,
   PeerMessaging,
+  peerMidTurnBudgetOf,
   type PeerQueuedDelivery,
 } from './peer-messaging.js';
 
@@ -767,6 +772,51 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       .filter((receipt) => receipt.origMsgId === frame.msgId)
       .map((receipt) => receipt.status);
     expect(statuses).toEqual(['held', 'misaddressed']);
+  });
+
+  it('keeps the urgency the sender asked for on the queued delivery', async () => {
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      getSessionId: () => 'session-a',
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const queued: PeerQueuedDelivery[] = [];
+    started.setSubmitFn((_modelText, _displayText, delivery) => {
+      if (delivery) queued.push(delivery);
+      return true;
+    });
+
+    await send(
+      started.socketPath!,
+      peerFrame({
+        content: 'redirect the deploy',
+        from: sender.socketPath,
+        toSessionId: 'session-a',
+        priority: 'now',
+      }),
+    );
+    await settle();
+    await send(
+      started.socketPath!,
+      peerFrame({
+        content: 'whenever its turn ends',
+        from: sender.socketPath,
+        toSessionId: 'session-a',
+      }),
+    );
+    await settle();
+
+    // Only the non-default urgency is stored: `"next"` is the wire default, so
+    // absence already means it, and the mid-turn drain tests for `"now"` alone.
+    expect(queued).toHaveLength(2);
+    expect(queued[0]?.priority).toBe('now');
+    expect(queued[1]).not.toHaveProperty('priority');
   });
 
   it('drops a queued envelope whose pin the session outgrew at drain', async () => {
@@ -2667,5 +2717,84 @@ describe.skipIf(isWindows)('PeerMessaging drops', () => {
           r.origMsgId === a3.msgId,
       ),
     ).toBe(true);
+  });
+});
+
+describe('PeerMidTurnBudget', () => {
+  const T0 = 10_000_000;
+
+  it('pays for at most the capacity of the window, then refuses', () => {
+    const budget = new PeerMidTurnBudget();
+    expect([
+      budget.tryConsume(T0, 2),
+      budget.tryConsume(T0 + 1000, 2),
+      budget.tryConsume(T0 + 2000, 2),
+    ]).toEqual([true, true, false]);
+  });
+
+  it('refuses every envelope at a zero capacity', () => {
+    // 0 must mean "mid-turn delivery off", not "unlimited" — the ceiling
+    // exists because a peer spends this session's model work.
+    const budget = new PeerMidTurnBudget();
+    expect(budget.tryConsume(T0, 0)).toBe(false);
+    expect(budget.tryConsume(T0 + 1000, 0)).toBe(false);
+  });
+
+  it('frees allowance as the window rolls on', () => {
+    const budget = new PeerMidTurnBudget();
+    expect(budget.tryConsume(T0, 1)).toBe(true);
+    expect(budget.tryConsume(T0 + 1000, 1)).toBe(false);
+    // Still inside the window: nothing was freed.
+    expect(budget.tryConsume(T0 + PEER_MID_TURN_WINDOW_MS - 1, 1)).toBe(false);
+    // The first envelope has aged out, so one allowance is back.
+    expect(budget.tryConsume(T0 + PEER_MID_TURN_WINDOW_MS, 1)).toBe(true);
+  });
+
+  it('counts each delivered envelope, not each drain', () => {
+    // A drain may take one envelope at a time across many tool rounds; the
+    // ceiling is on envelopes steered into a turn, so each costs separately.
+    const budget = new PeerMidTurnBudget();
+    for (let i = 0; i < 3; i++) {
+      expect(budget.tryConsume(T0 + i * 100, 3)).toBe(true);
+    }
+    expect(budget.tryConsume(T0 + 300, 3)).toBe(false);
+  });
+
+  it('gives allowance back when a drained batch is restored', () => {
+    // A submission that never reached the model cost no mid-turn delivery, so
+    // cancelling turns repeatedly must not be able to starve the budget.
+    const budget = new PeerMidTurnBudget();
+    expect(budget.tryConsume(T0, 1)).toBe(true);
+    expect(budget.tryConsume(T0 + 10, 1)).toBe(false);
+    budget.refund(1);
+    expect(budget.tryConsume(T0 + 20, 1)).toBe(true);
+  });
+
+  it('ignores a refund of nothing', () => {
+    const budget = new PeerMidTurnBudget();
+    budget.refund(0);
+    budget.refund(-1);
+    expect(budget.tryConsume(T0, 1)).toBe(true);
+  });
+});
+
+describe('peerMidTurnBudgetOf', () => {
+  it('falls back to the default for anything unparseable', () => {
+    for (const value of [undefined, null, 'lots', {}, [], NaN, Infinity]) {
+      expect(peerMidTurnBudgetOf(value)).toBe(PEER_MID_TURN_BUDGET_DEFAULT);
+    }
+  });
+
+  it('keeps an explicit zero, which disables mid-turn delivery', () => {
+    expect(peerMidTurnBudgetOf(0)).toBe(0);
+  });
+
+  it('clamps a negative allowance to zero rather than to unlimited', () => {
+    expect(peerMidTurnBudgetOf(-1)).toBe(0);
+    expect(peerMidTurnBudgetOf(-1000)).toBe(0);
+  });
+
+  it('floors a fractional allowance', () => {
+    expect(peerMidTurnBudgetOf(2.9)).toBe(2);
   });
 });

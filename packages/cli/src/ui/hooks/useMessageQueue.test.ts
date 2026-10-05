@@ -1279,6 +1279,42 @@ describe('useMessageQueue', () => {
       });
     });
 
+    it('never lets user text queued after a peer message overtake it', () => {
+      // Batching user entries across a waiting envelope would deliver the
+      // later prompt ahead of the peer that was accepted first, so the
+      // envelope is a barrier: only entries queued before it may batch.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('first text');
+        result.current.addPeerMessage('<envelope one>', 'Session A: one');
+        result.current.addMessage('later text');
+      });
+
+      const submissions: Array<
+        ReturnType<typeof result.current.popNextSubmission>
+      > = [];
+      act(() => {
+        for (let i = 0; i < 3; i++) {
+          submissions.push(result.current.popNextSubmission());
+        }
+      });
+
+      expect(submissions[0]).toMatchObject({
+        kind: 'user',
+        modelText: 'first text',
+      });
+      expect(submissions[1]).toEqual({
+        kind: 'peer',
+        modelText: '<envelope one>',
+        displayText: 'Session A: one',
+      });
+      expect(submissions[2]).toMatchObject({
+        kind: 'user',
+        modelText: 'later text',
+      });
+    });
+
     it('restores a failed peer admission ahead of the queue, still peer', () => {
       const { result } = renderHook(() => useMessageQueue());
 
@@ -1377,6 +1413,231 @@ describe('useMessageQueue', () => {
       });
       expect(drained).toEqual([]);
       expect(result.current.messageQueue).toEqual(['<envelope one>']);
+    });
+
+    it('drains leading peer envelopes with projection and delivery pin', () => {
+      // The mid-turn channel is structured, not raw text: without these two
+      // fields the drain can neither attribute the message nor re-check its
+      // recipient before injecting it into a running turn.
+      const { result } = renderHook(() => useMessageQueue());
+      const now = (msgId: string) => ({
+        msgId,
+        from: '/tmp/peer.sock',
+        toSessionId: 's1',
+        priority: 'now' as const,
+      });
+
+      act(() => {
+        result.current.addPeerMessage(
+          '<envelope one>',
+          'Session A: one',
+          now('m1'),
+        );
+        result.current.addPeerMessage(
+          '<envelope two>',
+          'Session A: two',
+          now('m2'),
+        );
+        result.current.addMessage('typed text');
+      });
+
+      let batch: ReturnType<typeof result.current.drainPeerEntries> = [];
+      act(() => {
+        batch = result.current.drainPeerEntries(2);
+      });
+
+      expect(batch).toEqual([
+        {
+          modelText: '<envelope one>',
+          displayText: 'Session A: one',
+          delivery: now('m1'),
+        },
+        {
+          modelText: '<envelope two>',
+          displayText: 'Session A: two',
+          delivery: now('m2'),
+        },
+      ]);
+      // Typed input is not the mid-turn drain's to take.
+      expect(result.current.messageQueue).toEqual(['typed text']);
+    });
+
+    it('takes only envelopes the sender marked now', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      const pin = (msgId: string, priority: 'now' | 'next') => ({
+        msgId,
+        from: '/tmp/peer.sock',
+        toSessionId: 's1',
+        priority,
+      });
+
+      act(() => {
+        result.current.addPeerMessage(
+          '<wait>',
+          'Session A: wait',
+          pin('m1', 'next'),
+        );
+        result.current.addPeerMessage(
+          '<urgent>',
+          'Session A: urgent',
+          pin('m2', 'now'),
+        );
+      });
+
+      let batch: ReturnType<typeof result.current.drainPeerEntries> = [];
+      act(() => {
+        batch = result.current.drainPeerEntries(2);
+      });
+      // The urgency a sender stated on the frame is what the field is for, so
+      // "now" is taken past a "next" that agreed to wait for the boundary.
+      expect(batch.map(({ modelText }) => modelText)).toEqual(['<urgent>']);
+      // The deferred one keeps its place in line for the idle drain.
+      expect(result.current.messageQueue).toEqual(['<wait>']);
+    });
+
+    it('takes nothing when no envelope asks for immediate delivery', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addPeerMessage('<wait>', 'Session A: wait', {
+          msgId: 'm1',
+          from: '/tmp/peer.sock',
+          toSessionId: 's1',
+          priority: 'next',
+        });
+        // No pin at all: the wire default is "next", not "now".
+        result.current.addPeerMessage('<bare>', 'Session A: bare');
+      });
+
+      let batch: ReturnType<typeof result.current.drainPeerEntries> = [
+        { modelText: 'untouched', displayText: 'untouched' },
+      ];
+      act(() => {
+        batch = result.current.drainPeerEntries(2);
+      });
+      expect(batch).toEqual([]);
+      expect(result.current.messageQueue).toEqual(['<wait>', '<bare>']);
+    });
+
+    it('never lets a peer envelope overtake user text queued ahead of it', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('typed first');
+        result.current.addPeerMessage('<urgent>', 'Session A: urgent', {
+          msgId: 'm1',
+          from: '/tmp/peer.sock',
+          toSessionId: 's1',
+          priority: 'now',
+        });
+      });
+
+      let batch: ReturnType<typeof result.current.drainPeerEntries> = [];
+      act(() => {
+        batch = result.current.drainPeerEntries(1);
+      });
+      // Priority decides among peers only: what the user typed stays ahead.
+      expect(batch).toEqual([]);
+      expect(result.current.messageQueue).toEqual(['typed first', '<urgent>']);
+    });
+
+    it('stops a mid-turn peer drain at the limit and at the first user entry', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      const now = (msgId: string) => ({
+        msgId,
+        from: '/tmp/peer.sock',
+        toSessionId: 's1',
+        priority: 'now' as const,
+      });
+
+      act(() => {
+        result.current.addPeerMessage(
+          '<envelope one>',
+          'Session A: one',
+          now('m1'),
+        );
+        result.current.addPeerMessage(
+          '<envelope two>',
+          'Session A: two',
+          now('m2'),
+        );
+        result.current.addPeerMessage(
+          '<envelope three>',
+          'Session A: three',
+          now('m3'),
+        );
+      });
+
+      let batch: ReturnType<typeof result.current.drainPeerEntries> = [];
+      act(() => {
+        batch = result.current.drainPeerEntries(2);
+      });
+      expect(batch.map(({ modelText }) => modelText)).toEqual([
+        '<envelope one>',
+        '<envelope two>',
+      ]);
+
+      act(() => {
+        result.current.addMessage('typed text');
+      });
+      act(() => {
+        batch = result.current.drainPeerEntries(2);
+      });
+      // Only the run at the head: the envelope waits its turn beside the
+      // typed entry rather than overtaking it.
+      expect(batch.map(({ modelText }) => modelText)).toEqual([
+        '<envelope three>',
+      ]);
+      expect(result.current.messageQueue).toEqual(['typed text']);
+    });
+
+    it('restores a mid-turn batch still peer, deferred, and ahead of user text', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      const delivery = {
+        msgId: 'm1',
+        from: '/tmp/peer.sock',
+        toSessionId: 's1',
+        priority: 'now' as const,
+      };
+
+      let batch: ReturnType<typeof result.current.drainPeerEntries> = [];
+      act(() => {
+        result.current.addPeerMessage(
+          '<envelope one>',
+          'Session A: one',
+          delivery,
+        );
+        batch = result.current.drainPeerEntries(1);
+      });
+      act(() => {
+        result.current.addMessage('typed text');
+      });
+      act(() => {
+        result.current.restorePeerEntries(
+          batch.map((entry) => ({ ...entry, displayed: true })),
+        );
+      });
+
+      // The raw-text steer channel may take typed input, but it must not take
+      // the restored envelope: it carries neither attribution nor delivery pin,
+      // and peer-authored text must never reach user preprocessing.
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+      expect(drained).toEqual(['typed text']);
+      expect(result.current.messageQueue).toEqual(['<envelope one>']);
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      expect(submission).toEqual({
+        kind: 'peer',
+        modelText: '<envelope one>',
+        displayText: 'Session A: one',
+        displayed: true,
+        delivery,
+      });
     });
   });
 });

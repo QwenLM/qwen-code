@@ -88,6 +88,7 @@ import {
   shouldAutoOpenSkillReview,
   shouldDrainMessageQueue,
   useQueuedSubmissionDrain,
+  usePeerMidTurnDrain,
 } from './AppContainer.js';
 import {
   formatSessionWindowTitle,
@@ -318,7 +319,10 @@ import { useLlmStream } from './hooks/use-llm-stream.js';
 import { useVim } from './hooks/vim.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
-import { useMessageQueue } from './hooks/useMessageQueue.js';
+import {
+  useMessageQueue,
+  type QueuedPeerSteer,
+} from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
 import { useWorktreeSession } from './hooks/useWorktreeSession.js';
@@ -9185,6 +9189,290 @@ describe('AppContainer State Management', () => {
       });
       expect(noticeCount()).toBe(2);
     });
+  });
+});
+
+describe('usePeerMidTurnDrain', () => {
+  // The budget counts a rolling window and the notice throttles against it,
+  // so every drain runs at a pinned wall clock.
+  const NOW = 1_700_000_000_000;
+  const WINDOW_MS = 5 * 60 * 1000;
+  const NOTICE_TEXT = 'Peer mid-turn delivery is paused for this window';
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const envelope = (text: string, msgId: string): QueuedPeerSteer => ({
+    modelText: `<cross_session_message from="/tmp/a.sock">${text}</cross_session_message>`,
+    displayText: `Message from another session (a): ${text}`,
+    delivery: { msgId, toSessionId: 'session-a' },
+  });
+
+  const renderPeerDrain = ({
+    peerMessaging,
+    enabled = true,
+    capacity = 3,
+    queue = [],
+  }: {
+    peerMessaging: PeerMessaging | null;
+    enabled?: boolean;
+    capacity?: number;
+    queue?: QueuedPeerSteer[];
+  }) => {
+    const drainPeerEntries = vi.fn((limit: number) =>
+      queue.splice(0, Math.max(limit, 0)),
+    );
+    const restorePeerEntries = vi.fn();
+    const addHistoryItem = vi.fn();
+    const view = renderHook(() =>
+      usePeerMidTurnDrain({
+        peerMessaging,
+        enabled,
+        capacity,
+        drainPeerEntries,
+        restorePeerEntries,
+        addHistoryItem,
+      }),
+    );
+    return {
+      drain: (limit = 10) => view.result.current?.(limit) ?? null,
+      view,
+      queue,
+      drainPeerEntries,
+      restorePeerEntries,
+      addHistoryItem,
+    };
+  };
+
+  type WrittenNotice = {
+    type?: string;
+    text?: string;
+    display?: { peer?: boolean };
+  };
+
+  const writtenItems = (fn: { mock: { calls: unknown[][] } }) =>
+    fn.mock.calls.map((call) => call[0] as WrittenNotice);
+
+  const noticeTexts = (fn: { mock: { calls: unknown[][] } }) =>
+    writtenItems(fn)
+      .map((item) => item.text ?? '')
+      .filter((text) => text.includes(NOTICE_TEXT));
+
+  it('returns null when the feature is disabled and never consults the queue', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const {
+      view,
+      drain,
+      drainPeerEntries,
+      restorePeerEntries,
+      addHistoryItem,
+    } = renderPeerDrain({
+      peerMessaging: {
+        drainQueuedFrame: vi.fn(() => true),
+      } as unknown as PeerMessaging,
+      enabled: false,
+      queue: [envelope('first', 'frame-1')],
+    });
+
+    // Off by default: the tool-round boundary finds no drain at all, so every
+    // envelope stays queued for the idle path.
+    expect(view.result.current).toBeNull();
+    expect(drain(5)).toBeNull();
+    expect(drainPeerEntries).not.toHaveBeenCalled();
+    expect(restorePeerEntries).not.toHaveBeenCalled();
+    expect(addHistoryItem).not.toHaveBeenCalled();
+  });
+
+  it('returns null when this session has no inbox', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    // Enabled, but a session with no inbox can never have an accepted
+    // envelope, so the drain must not be offered at all.
+    const {
+      view,
+      drain,
+      drainPeerEntries,
+      restorePeerEntries,
+      addHistoryItem,
+    } = renderPeerDrain({
+      peerMessaging: null,
+      queue: [envelope('first', 'frame-1')],
+    });
+
+    expect(view.result.current).toBeNull();
+    expect(drain(5)).toBeNull();
+    expect(drainPeerEntries).not.toHaveBeenCalled();
+    expect(restorePeerEntries).not.toHaveBeenCalled();
+    expect(addHistoryItem).not.toHaveBeenCalled();
+  });
+
+  it('delivers a taken envelope once, with its peer attribution', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const first = envelope('first', 'frame-1');
+    const { drain, queue, restorePeerEntries, addHistoryItem } =
+      renderPeerDrain({
+        peerMessaging: {
+          drainQueuedFrame: vi.fn(() => true),
+        } as unknown as PeerMessaging,
+        queue: [first],
+      });
+
+    const batch = drain();
+    expect(batch?.entries).toEqual([
+      { modelText: first.modelText, displayText: first.displayText },
+    ]);
+    // The raw-text steer channel carries no projection, so the drain renders
+    // the attribution line in place of the user bubble that path suppresses.
+    expect(addHistoryItem).toHaveBeenCalledTimes(1);
+    expect(addHistoryItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.NOTIFICATION,
+        text: first.displayText,
+        display: { peer: true },
+      }),
+      NOW,
+    );
+    expect(restorePeerEntries).not.toHaveBeenCalled();
+    expect(first.displayed).toBe(true);
+
+    // A retry after a failed admission requeues the same entry; it must not
+    // stack a second identical line while the model still gets one message.
+    queue.push(first);
+    expect(drain()?.entries).toHaveLength(1);
+    expect(addHistoryItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('consumes a stale-pin envelope without restoring it or spending allowance', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const stale = envelope('stale', 'frame-stale');
+    const fresh = envelope('fresh', 'frame-fresh');
+    const drainQueuedFrame = vi.fn((delivery?: PeerQueuedDelivery) =>
+      delivery?.msgId === 'frame-stale' ? false : true,
+    );
+    const { drain, queue, restorePeerEntries, addHistoryItem } =
+      renderPeerDrain({
+        peerMessaging: { drainQueuedFrame } as unknown as PeerMessaging,
+        capacity: 1,
+        queue: [stale],
+      });
+
+    // drainQueuedFrame returning false means the gate already sent the
+    // `misaddressed` receipt: the envelope is consumed, not deferred.
+    expect(drain()).toBeNull();
+    expect(drainQueuedFrame).toHaveBeenCalledWith(stale.delivery);
+    expect(restorePeerEntries).not.toHaveBeenCalled();
+    expect(addHistoryItem).not.toHaveBeenCalled();
+
+    // Consuming it cost no allowance, so the next envelope still fits the
+    // one-per-window budget.
+    queue.push(fresh);
+    const batch = drain();
+    expect(batch?.entries).toEqual([
+      { modelText: fresh.modelText, displayText: fresh.displayText },
+    ]);
+    expect(restorePeerEntries).not.toHaveBeenCalled();
+  });
+
+  it('defers envelopes the window cannot pay for and notices once per window', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const first = envelope('first', 'frame-1');
+    const second = envelope('second', 'frame-2');
+    const third = envelope('third', 'frame-3');
+    const { drain, view, queue, restorePeerEntries, addHistoryItem } =
+      renderPeerDrain({
+        peerMessaging: {
+          drainQueuedFrame: vi.fn(() => true),
+        } as unknown as PeerMessaging,
+        capacity: 1,
+        queue: [first, second],
+      });
+
+    const batch = drain();
+    expect(batch?.entries).toEqual([
+      { modelText: first.modelText, displayText: first.displayText },
+    ]);
+    // The envelope the allowance could not pay for goes back to the queue, not
+    // to the trash: the idle drain is the guaranteed fallback.
+    expect(restorePeerEntries).toHaveBeenNthCalledWith(1, [second]);
+    expect(restorePeerEntries).toHaveBeenCalledTimes(1);
+
+    // One notice for the saturation, and it is this session talking about
+    // itself, so it deliberately carries no peer styling.
+    const written = writtenItems(addHistoryItem);
+    expect(written).toHaveLength(2);
+    expect(written[1]).toEqual(
+      expect.objectContaining({
+        type: MessageType.NOTIFICATION,
+        text: expect.stringContaining(NOTICE_TEXT),
+      }),
+    );
+    expect(written[1]!.text).toContain('(1 allowed)');
+    expect(written[1]!.display).toBeUndefined();
+    expect(noticeTexts(addHistoryItem)).toHaveLength(1);
+
+    // Same window, across a re-render: the throttle timestamp must live in a
+    // ref, so a further saturation earns no second line and a flood cannot
+    // grow the history once per envelope.
+    view.rerender();
+    queue.push(second);
+    expect(drain()).toBeNull();
+    expect(restorePeerEntries).toHaveBeenNthCalledWith(2, [second]);
+    expect(noticeTexts(addHistoryItem)).toHaveLength(1);
+
+    // Next window: the allowance is free again, and the notice is available
+    // again — without this the assertions above would also pass for a notice
+    // that is simply never repeated.
+    vi.setSystemTime(NOW + WINDOW_MS);
+    queue.push(second, third);
+    expect(drain()?.entries).toEqual([
+      { modelText: second.modelText, displayText: second.displayText },
+    ]);
+    expect(restorePeerEntries).toHaveBeenNthCalledWith(3, [third]);
+    expect(noticeTexts(addHistoryItem)).toHaveLength(2);
+  });
+
+  it('restore() requeues the batch, refunds the allowance and runs once', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const first = envelope('first', 'frame-1');
+    const { drain, queue, restorePeerEntries, addHistoryItem } =
+      renderPeerDrain({
+        peerMessaging: {
+          drainQueuedFrame: vi.fn(() => true),
+        } as unknown as PeerMessaging,
+        capacity: 1,
+        queue: [first],
+      });
+
+    const batch = drain();
+    expect(batch?.entries).toHaveLength(1);
+    expect(restorePeerEntries).not.toHaveBeenCalled();
+
+    batch?.restore();
+    expect(restorePeerEntries).toHaveBeenCalledTimes(1);
+    expect(restorePeerEntries).toHaveBeenCalledWith([first]);
+
+    // Idempotent: a second call (a cancel racing an admission failure) must
+    // not requeue the envelope twice.
+    batch?.restore();
+    expect(restorePeerEntries).toHaveBeenCalledTimes(1);
+
+    // The refund is what makes the retry reachable: nothing reached the model,
+    // so the window's single allowance is free again. Without it this drain
+    // defers and returns null.
+    queue.push(first);
+    const again = drain();
+    expect(again?.entries).toEqual([
+      { modelText: first.modelText, displayText: first.displayText },
+    ]);
+    expect(restorePeerEntries).toHaveBeenCalledTimes(1);
+    // Still one projection — the requeued entry keeps its `displayed` marker.
+    expect(addHistoryItem).toHaveBeenCalledTimes(1);
   });
 });
 

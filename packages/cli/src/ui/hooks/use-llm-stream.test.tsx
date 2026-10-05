@@ -6999,6 +6999,363 @@ describe('useLlmStream', () => {
     );
   });
 
+  it('delivers an accepted cross-session envelope into the tool-round submission', async () => {
+    const envelope =
+      '<cross_session_message from="/tmp/peer.sock" name="a">stop and re-check the lease</cross_session_message>';
+    const projection = 'Session a: stop and re-check the lease';
+    const recordNotification = vi.fn();
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordNotification,
+      recordMidTurnUserMessage,
+    });
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-peer-boundary',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+
+    // The raw steer channel stays empty here: a peer envelope must reach the
+    // model through its own structured path, never as steered user text.
+    const midTurnDrainRef = {
+      current: vi.fn<() => string[]>().mockReturnValue([]),
+    };
+    const restore = vi.fn();
+    const peerDrain = vi
+      .fn<
+        () => {
+          entries: Array<{ modelText: string; displayText: string }>;
+          restore: () => void;
+        } | null
+      >()
+      .mockReturnValueOnce({
+        entries: [{ modelText: envelope, displayText: projection }],
+        restore,
+      })
+      .mockReturnValue(null);
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { current: peerDrain },
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(1));
+
+    // One envelope per boundary.
+    expect(peerDrain).toHaveBeenCalledWith(1);
+    // The full envelope — attribution and authority notice intact — follows
+    // the tool responses in the same submission.
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      [...toolCallResponseParts, { text: envelope }],
+      expect.any(AbortSignal),
+      'prompt-id-peer-boundary',
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
+    );
+    // Journaled with the projection, not the raw envelope, so /resume shows
+    // the attribution line the live view showed.
+    expect(recordNotification).toHaveBeenCalledWith(
+      [{ text: envelope }],
+      projection,
+      undefined,
+      undefined,
+    );
+    // The peer is not dressed up as a user message.
+    expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    expect(
+      mockAddItem.mock.calls.some(
+        ([item]) => item.type === MessageType.USER && item.text === envelope,
+      ),
+    ).toBe(false);
+    expect(restore).not.toHaveBeenCalled();
+  });
+
+  it('restores a cross-session batch whose submission was not accepted', async () => {
+    const envelope =
+      '<cross_session_message from="/tmp/peer.sock" name="a">re-check the lease</cross_session_message>';
+    const projection = 'Session a: re-check the lease';
+    const recordNotification = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordNotification,
+    });
+    // The round's only send fails terminally before any content. That is how
+    // this harness reaches the not-delivered exit: acceptance never fires, so
+    // the settlement has to restore.
+    mockSendMessageStream.mockImplementationOnce(() =>
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.Error,
+          value: { error: { message: 'model overloaded' } },
+        };
+        yield {
+          type: ServerLlmEventType.Finished,
+          value: { reason: 'STOP', usageMetadata: undefined },
+        };
+      })(),
+    );
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-peer-restore',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+
+    const restore = vi.fn();
+    const peerDrain = vi
+      .fn<
+        () => {
+          entries: Array<{ modelText: string; displayText: string }>;
+          restore: () => void;
+        } | null
+      >()
+      .mockReturnValueOnce({
+        entries: [{ modelText: envelope, displayText: projection }],
+        restore,
+      })
+      .mockReturnValue(null);
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: vi.fn<() => string[]>().mockReturnValue([]) },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { current: peerDrain },
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(1));
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      steerInput?: SteerInput;
+    };
+    expect(sendOptions.steerInput).toEqual(
+      expect.objectContaining({ restore: expect.any(Function) }),
+    );
+
+    // Undelivered: the envelope goes back to the queue and nothing is
+    // journaled. Recording it would show a delivery the model never got and
+    // let `/resume` believe it landed.
+    await waitFor(() => expect(restore).toHaveBeenCalledTimes(1));
+    expect(recordNotification).not.toHaveBeenCalled();
+  });
+
+  it('never consults the peer drain when no mid-turn peer delivery is wired', async () => {
+    const recordNotification = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordNotification,
+    });
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-peer-off',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: vi.fn<() => string[]>().mockReturnValue([]) },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        null,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(1));
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      toolCallResponseParts,
+      expect.any(AbortSignal),
+      'prompt-id-peer-off',
+      expect.anything(),
+    );
+    expect(recordNotification).not.toHaveBeenCalled();
+  });
+
   it('provides queued steer input to core at the next sampling boundary', async () => {
     const steeredPrompt = 'focus on the error handling';
     const recordMidTurnUserMessage = vi.fn();

@@ -217,6 +217,19 @@ interface ResolvedSteerMessages {
   restoreMessages: string[];
 }
 
+/**
+ * A batch of accepted cross-session envelopes taken at a tool-round boundary.
+ * Peer envelopes cannot ride `midTurnDrainRef`: that `string[]` channel carries
+ * neither projection nor pin, and its resolver runs `@path` expansion over
+ * peer-authored text.
+ */
+export interface PeerMidTurnBatch {
+  /** The full envelopes, exactly as the model receives them. */
+  entries: Array<{ modelText: string; displayText: string }>;
+  /** Requeues the batch, still tagged peer, without re-rendering it. */
+  restore: () => void;
+}
+
 interface GoalTurnBinding {
   permit: GoalTurnPermit;
   turnKey: string;
@@ -598,6 +611,12 @@ export const useLlmStream = (
     submissionInFlightRef?: React.RefObject<boolean>;
     onSubmissionSettled?: () => void;
   } | null>,
+  // Mid-turn cross-session delivery, supplied by AppContainer, which owns the
+  // peer inbox. Null when the setting is off or the session takes no peer
+  // messages, so the hook never reads the setting itself.
+  midTurnPeerDrainRef?: React.RefObject<
+    ((limit: number) => PeerMidTurnBatch | null) | null
+  >,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -5864,6 +5883,29 @@ export const useLlmStream = (
           })),
         );
       }
+      // Accepted cross-session envelopes join the same boundary; everything
+      // that keeps them out of this batch leaves them queued rather than
+      // dropped: a null drain, a Goal turn owning the session, a detached or
+      // cancelled continuation, and every failed settlement below.
+      let drainedPeers: PeerMidTurnBatch | undefined;
+      const drainPeers = midTurnPeerDrainRef?.current;
+      if (
+        drainPeers &&
+        !continuationOwner?.survivesGenerationChange &&
+        !continuationWasCancelled() &&
+        !activeGoalAdmissionRef.current
+      ) {
+        const batch = drainPeers(1);
+        if (batch && batch.entries.length > 0) {
+          drainedPeers = batch;
+          debugLogger.debug(
+            `draining ${batch.entries.length} peer message(s) into tool-round submission`,
+          );
+          responsesToSend.push(
+            ...batch.entries.map((entry) => ({ text: entry.modelText })),
+          );
+        }
+      }
       // Settle the drained batch exactly once. The settlement carrier below
       // is passed through the existing `steerInput` option so GeminiClient
       // settles it next to the actual history push: acceptance compares the
@@ -5959,17 +6001,53 @@ export const useLlmStream = (
         restore();
         stripTrailingTextsFromLastPrompt(envelopeTexts);
       };
+      // Peer batch settles the same way: a restore requeues it with `peer`
+      // intact, so the idle drain picks it up and the line is not shown twice.
+      const settleDrainedPeers = (accepted: boolean) => {
+        if (!drainedPeers || drainedPeers.entries.length === 0) {
+          return;
+        }
+        const { entries, restore } = drainedPeers;
+        drainedPeers = undefined;
+        const envelopeTexts = entries.map((entry) => entry.modelText);
+        if (accepted) {
+          stripTrailingTextsFromLastPrompt(envelopeTexts);
+          // Journal it like the boundary teammate path: the strip above takes
+          // the envelope out of the retry payload, so without this a
+          // `delivered` receipt could back a message lost on `/resume`.
+          const envelopeParts = entries.map((entry) => ({
+            text: entry.modelText,
+          }));
+          config
+            .getChatRecordingService?.()
+            ?.recordNotification?.(
+              envelopeParts,
+              entries.map((entry) => entry.displayText).join('; '),
+              undefined,
+              toolGoalBinding?.permit,
+            );
+          boundaryEnvelopeRetryDebtRef.current.push({
+            envelopeParts,
+            pushedEntryParts: capturePushedTeammateEntry(envelopeParts),
+          });
+          return;
+        }
+        restore();
+        stripTrailingTextsFromLastPrompt(envelopeTexts);
+      };
       const submissionSettlement: SteerInput | undefined =
-        drainedSteer || drainedTeammates
+        drainedSteer || drainedTeammates || drainedPeers
           ? {
               parts: drainedSteer?.parts ?? [],
               accept: () => {
                 drainedSteer?.accept();
                 settleDrainedTeammates(true);
+                settleDrainedPeers(true);
               },
               restore: () => {
                 drainedSteer?.restore();
                 settleDrainedTeammates(false);
+                settleDrainedPeers(false);
               },
             }
           : undefined;
@@ -5982,6 +6060,7 @@ export const useLlmStream = (
       if (continuationWasCancelled()) {
         drainedSteer?.restore();
         settleDrainedTeammates(false);
+        settleDrainedPeers(false);
         if (toolGoalBinding) {
           if (llmClient) {
             llmClient.addHistory({
@@ -6001,6 +6080,7 @@ export const useLlmStream = (
       if (toolGoalBinding?.controller.signal.aborted) {
         drainedSteer?.restore();
         settleDrainedTeammates(false);
+        settleDrainedPeers(false);
         if (llmClient) {
           llmClient.addHistory({
             role: 'user',
@@ -6047,6 +6127,7 @@ export const useLlmStream = (
       modelSwitchedFromQuotaError,
       config,
       midTurnDrainRef,
+      midTurnPeerDrainRef,
       addItem,
       dualOutput,
       resolveDrainedSteerMessages,

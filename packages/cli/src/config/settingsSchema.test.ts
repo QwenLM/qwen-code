@@ -409,6 +409,37 @@ describe('SettingsSchema', () => {
       expect(crossSessionInbound.description).toContain('child processes');
     });
 
+    it('should keep mid-turn cross-session delivery off by default', () => {
+      // A peer carries none of this session's user authority, so steering a
+      // running turn is opt-in and delivery stays idle-only unless the user
+      // says otherwise. The sender has to ask too, so the wording is pinned.
+      expect(
+        getSettingsSchema().agents.properties.crossSessionMidTurn,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: false,
+        showInDialog: false,
+      });
+      expect(
+        getSettingsSchema().agents.properties.crossSessionMidTurn.description,
+      ).toContain('"now"');
+    });
+
+    it('should bound mid-turn cross-session delivery per window', () => {
+      // The ceiling is what keeps a chatty peer from holding a busy session.
+      // 0 is a real value: mid-turn off without touching the setting above.
+      expect(
+        getSettingsSchema().agents.properties.crossSessionMidTurnBudget,
+      ).toMatchObject({
+        type: 'number',
+        default: 3,
+        minimum: 0,
+        requiresRestart: false,
+        showInDialog: false,
+      });
+    });
+
     it('should offer exactly the hold lifetimes core knows how to parse', () => {
       // Three copies of this vocabulary exist: core's table, these
       // options, and the generated JSON schema. Adding an option here

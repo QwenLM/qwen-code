@@ -358,6 +358,23 @@ export const WORKSPACE_TIGHTEN_ONLY_SETTINGS = [
               ? 3
               : 2,
   },
+  {
+    section: 'agents',
+    key: 'crossSessionMidTurn',
+    // Only `true` widens delivery into a running turn, so it ranks looser
+    // than the idle-only default; an unreadable value keeps that default.
+    strictness: (value: unknown): number => (value === true ? 0 : 1),
+  },
+  {
+    section: 'agents',
+    key: 'crossSessionMidTurnBudget',
+    // A larger allowance is looser, so strictness counts down from it; an
+    // unreadable value ranks with the default rather than with "unlimited".
+    strictness: (value: unknown): number =>
+      typeof value === 'number' && Number.isFinite(value)
+        ? -Math.max(0, Math.floor(value))
+        : -3,
+  },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;

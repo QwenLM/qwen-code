@@ -3772,6 +3772,27 @@ const SETTINGS_SCHEMA = {
           { value: 'refuse', label: 'Refuse' },
         ],
       },
+      crossSessionMidTurn: {
+        type: 'boolean',
+        label: 'Mid-Turn Cross-Session Delivery',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Deliver accepted cross-session messages that the sender marked "now" between tool rounds of a running turn, instead of waiting for the session to go idle. Off by default: a peer holds none of this session\'s user authority, so by default only a turn boundary — while the user is watching — can steer work in progress. Messages sent without that urgency still arrive at the end of the turn. Requires agents.crossSessionMessaging; held and refused messages are unaffected.',
+        showInDialog: false,
+      },
+      crossSessionMidTurnBudget: {
+        type: 'number',
+        label: 'Mid-Turn Cross-Session Budget',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: 3,
+        minimum: 0,
+        description:
+          'How many accepted cross-session messages may be steered into a running turn within a five-minute window before delivery falls back to turn boundaries. A peer costs this session real model work even when it is handled well, so without a ceiling a chatty peer can keep a busy session answering it indefinitely. Messages still arrive once the turn ends, and senders see no difference. Only applies while agents.crossSessionMidTurn is on; 0 keeps mid-turn delivery off without changing that setting.',
+        showInDialog: false,
+      },
       crossSessionHeldExpiry: {
         type: 'enum',
         label: 'Held Message Expiry',

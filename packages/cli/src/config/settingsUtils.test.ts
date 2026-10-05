@@ -1239,6 +1239,8 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
       'tools.workflowNameOnly',
       'agents.crossSessionMessaging',
       'agents.crossSessionInbound',
+      'agents.crossSessionMidTurn',
+      'agents.crossSessionMidTurnBudget',
     ]);
     for (const key of keys) {
       expect(WORKSPACE_RESTRICTED_SETTING_KEYS).not.toContain(key);

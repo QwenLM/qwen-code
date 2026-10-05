@@ -53,6 +53,7 @@ import {
   type PeerDropReason,
   type PeerFrame,
   type PeerInbox,
+  type PeerMessagePriority,
   type PeerOrigin,
   peerSenderKey,
   type PeerUserFrame,
@@ -68,13 +69,18 @@ import {
 
 const debugLogger = createDebugLogger('PEER_MESSAGING');
 
-/** Identity needed to re-check a queued frame's recipient at drain time. */
+/**
+ * What the drain needs about a queued frame: identity to re-check its recipient
+ * against, plus the sender's stated urgency. Only the receiver acts on it, under
+ * its own settings, so a sender proposing `"now"` cannot promote itself.
+ */
 export interface PeerQueuedDelivery {
   msgId: string;
   admissionKey?: string;
   from?: string;
   replyToken?: string;
   toSessionId?: string;
+  priority?: PeerMessagePriority;
 }
 
 export {
@@ -103,6 +109,61 @@ export type PeerSubmitFn = (
  * the same leak the hold buffer's ceiling exists to prevent.
  */
 export const MAX_ACCEPTED_BACKLOG = MAX_HELD_MESSAGES;
+
+/** Rolling window over which the mid-turn peer delivery budget is counted. */
+export const PEER_MID_TURN_WINDOW_MS = 5 * 60 * 1000;
+
+/** Envelopes a session may steer into a running turn per window by default. */
+export const PEER_MID_TURN_BUDGET_DEFAULT = 3;
+
+/**
+ * Reads the budget setting without trusting it. A negative or unparseable value
+ * cannot mean "unlimited" — the ceiling exists because a peer can spend this
+ * session's model work — so anything unreadable falls back to the default.
+ * `0` is a real number and legitimately turns mid-turn delivery off.
+ */
+export function peerMidTurnBudgetOf(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return PEER_MID_TURN_BUDGET_DEFAULT;
+  }
+  return value < 0 ? 0 : Math.floor(value);
+}
+
+/**
+ * Ceiling on peer messages steered into a session's running turn.
+ *
+ * A peer spends this session's model work on deliveries its own user never
+ * asked for, and mid-turn delivery is what makes that reachable while the
+ * session is busy. Past the window's allowance, envelopes wait for the idle
+ * drain instead: the sender's receipt is unchanged, nothing is lost, and a peer
+ * cannot keep a session permanently busy answering it.
+ */
+export class PeerMidTurnBudget {
+  private stamps: number[] = [];
+
+  /** True when one more envelope may join the turn in flight. */
+  tryConsume(now: number, capacity: number): boolean {
+    if (capacity <= 0) return false;
+    this.stamps = this.stamps.filter(
+      (stamp) => now - stamp < PEER_MID_TURN_WINDOW_MS,
+    );
+    if (this.stamps.length >= capacity) return false;
+    this.stamps.push(now);
+    return true;
+  }
+
+  /**
+   * Gives back allowance for envelopes whose submission did not deliver them.
+   *
+   * A restored batch is delivered later by the idle drain, so it never spent a
+   * mid-turn model run; charging it anyway would let repeated cancellations
+   * starve the budget while nothing reached the model.
+   */
+  refund(count = 1): void {
+    if (count <= 0) return;
+    this.stamps.splice(-count);
+  }
+}
 
 /**
  * How long `close()` waits for folded drop receipts to reach their
@@ -1024,6 +1085,9 @@ export class PeerMessaging {
           ...(frame.toSessionId !== undefined
             ? { toSessionId: frame.toSessionId }
             : {}),
+          // Only the non-default urgency is stored: absence already means
+          // `"next"`, and the drain tests for `"now"` alone.
+          ...(frame.priority === 'now' ? { priority: frame.priority } : {}),
         },
       ) ?? false
     );

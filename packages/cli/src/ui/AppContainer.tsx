@@ -183,7 +183,11 @@ import {
 import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
-import { useLlmStream, type CancelSubmitInfo } from './hooks/use-llm-stream.js';
+import {
+  useLlmStream,
+  type CancelSubmitInfo,
+  type PeerMidTurnBatch,
+} from './hooks/use-llm-stream.js';
 import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
 import {
@@ -220,6 +224,7 @@ import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { exitCleanly } from '../utils/processUtils.js';
 import {
   useMessageQueue,
+  type QueuedPeerSteer,
   type QueuedUserSubmission,
   type UseMessageQueueReturn,
 } from './hooks/useMessageQueue.js';
@@ -274,6 +279,9 @@ import {
 } from '../peerMessaging/PeerMessagingContext.js';
 import {
   MAX_ACCEPTED_BACKLOG,
+  PEER_MID_TURN_WINDOW_MS,
+  PeerMidTurnBudget,
+  peerMidTurnBudgetOf,
   type PeerMessaging,
 } from '../peerMessaging/peer-messaging.js';
 import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
@@ -530,7 +538,11 @@ export function useQueuedSubmissionDrain({
       // notification per retry while the model receives one message.
       if (!submission.displayed) {
         addHistoryItem(
-          { type: MessageType.NOTIFICATION, text: submission.displayText },
+          {
+            type: MessageType.NOTIFICATION,
+            text: submission.displayText,
+            display: { peer: true },
+          },
           Date.now(),
         );
       }
@@ -625,6 +637,117 @@ export function useQueuedSubmissionDrain({
     submissionSettledRevision,
     submitQuery,
   ]);
+}
+
+/**
+ * Mid-turn delivery of accepted peer messages. Returns null when no drain may
+ * be attempted — the feature is off, or this session has no inbox.
+ *
+ * The drain lives here rather than in the stream hook because only this side
+ * holds the queue, the gate and the history API, and a peer batch needs all
+ * three: re-check the recipient exactly as the idle drain does, render the
+ * one-line attribution the raw-text steer channel cannot carry, and hand back
+ * a restore that requeues the envelope still tagged `peer` — restoring without
+ * the tag would put peer-authored text on the user preprocessing path.
+ */
+export function usePeerMidTurnDrain({
+  peerMessaging,
+  enabled,
+  capacity,
+  drainPeerEntries,
+  restorePeerEntries,
+  addHistoryItem,
+}: {
+  peerMessaging: PeerMessaging | null;
+  enabled: boolean;
+  capacity: number;
+  drainPeerEntries: (limit: number) => QueuedPeerSteer[];
+  restorePeerEntries: (entries: QueuedPeerSteer[]) => void;
+  addHistoryItem: (item: HistoryItemWithoutId, timestamp: number) => number;
+}): ((limit: number) => PeerMidTurnBatch | null) | null {
+  // Survives renders so the window keeps counting across them; created lazily
+  // because a session that never takes peer messages should not hold one.
+  const budgetRef = useRef<PeerMidTurnBudget | null>(null);
+  // When the throttling notice was last shown, so a sustained flood earns one
+  // line rather than one per envelope.
+  const noticeAtRef = useRef(0);
+
+  if (!enabled || !peerMessaging) return null;
+
+  return (limit: number) => {
+    if (!budgetRef.current) {
+      budgetRef.current = new PeerMidTurnBudget();
+    }
+    const budget = budgetRef.current;
+    const taken: QueuedPeerSteer[] = [];
+    // Anything the window's allowance could not pay for goes back to the queue
+    // rather than being dropped mid-drain: the idle drain is the guaranteed
+    // fallback, so "no budget" must mean "later", never "lost".
+    const deferred: QueuedPeerSteer[] = [];
+    for (const entry of drainPeerEntries(limit)) {
+      if (peerMessaging.drainQueuedFrame(entry.delivery) === false) {
+        // Stale recipient pin: drainQueuedFrame sends the `misaddressed`
+        // receipt itself, so this envelope is consumed rather than deferred,
+        // and it costs no delivery allowance.
+        continue;
+      }
+      if (!budget.tryConsume(Date.now(), capacity)) {
+        deferred.push(entry);
+        continue;
+      }
+      // The `displayed` marker keeps a retry from stacking an identical line
+      // while the model still receives one message.
+      if (!entry.displayed) {
+        addHistoryItem(
+          {
+            type: MessageType.NOTIFICATION,
+            text: entry.displayText,
+            display: { peer: true },
+          },
+          Date.now(),
+        );
+        entry.displayed = true;
+      }
+      taken.push(entry);
+    }
+    if (deferred.length > 0) {
+      restorePeerEntries(deferred);
+      debugLogger.debug(
+        `peer mid-turn budget spent (${capacity} per window); deferring ${deferred.length} envelope(s) to the idle drain`,
+      );
+      // Once per window: silent throttling is the symptom this feature exists
+      // to fix, and a per-envelope notice would let a flood write history. No
+      // sender is named — the count is this session's total.
+      const noticeAt = Date.now();
+      if (noticeAt - noticeAtRef.current >= PEER_MID_TURN_WINDOW_MS) {
+        noticeAtRef.current = noticeAt;
+        // Deliberately not peer-styled: this is the session talking about
+        // itself, not an incoming envelope.
+        addHistoryItem(
+          {
+            type: MessageType.NOTIFICATION,
+            text: `Peer mid-turn delivery is paused for this window (${capacity} allowed); peer messages still arrive when the turn ends.`,
+          },
+          noticeAt,
+        );
+      }
+    }
+    if (taken.length === 0) return null;
+    let settled = false;
+    return {
+      entries: taken.map(({ modelText, displayText }) => ({
+        modelText,
+        displayText,
+      })),
+      restore: () => {
+        if (settled) return;
+        settled = true;
+        restorePeerEntries(taken);
+        // Nothing reached the model, so the allowance was never spent.
+        budget.refund(taken.length);
+      },
+    };
+  };
 }
 
 export function getSpeculativeToolResult(response: unknown): {
@@ -2431,6 +2554,11 @@ export const AppContainer = (props: AppContainerProps) => {
     null,
   );
   const midTurnRestoreRef = useRef<((messages: string[]) => void) | null>(null);
+  // Mid-turn cross-session delivery, appended last because useLlmStream takes
+  // positional arguments. Null means the hook never attempts a peer drain.
+  const midTurnPeerDrainRef = useRef<
+    ((limit: number) => PeerMidTurnBatch | null) | null
+  >(null);
   const goalQueueRef = useRef<
     | (Pick<
         UseMessageQueueReturn,
@@ -2499,6 +2627,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
     goalQueueRef,
+    midTurnPeerDrainRef,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
@@ -2625,6 +2754,8 @@ export const AppContainer = (props: AppContainerProps) => {
     drainQueue,
     addPeerMessage,
     restorePeerMessage,
+    drainPeerEntries,
+    restorePeerEntries,
   } = useMessageQueue();
 
   midTurnDrainRef.current = drainQueue;
@@ -2728,6 +2859,20 @@ export const AppContainer = (props: AppContainerProps) => {
     getQueuedPeerCount,
     peerMessaging,
   ]);
+
+  // Opt-in mid-turn delivery of accepted peer messages. Off by default, and a
+  // session with no inbox can never take them, so the drain stays null and the
+  // boundary leaves every envelope queued for the idle path.
+  midTurnPeerDrainRef.current = usePeerMidTurnDrain({
+    peerMessaging,
+    enabled: settings.merged.agents?.crossSessionMidTurn === true,
+    capacity: peerMidTurnBudgetOf(
+      settings.merged.agents?.crossSessionMidTurnBudget,
+    ),
+    drainPeerEntries,
+    restorePeerEntries,
+    addHistoryItem,
+  });
 
   // Surface parked messages. The model never sees a held message, so
   // without a notice the only symptom is a peer that seems to be ignored.

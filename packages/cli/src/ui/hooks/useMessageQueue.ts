@@ -51,6 +51,18 @@ export interface QueuedPeerSubmission {
   delivery?: PeerQueuedDelivery;
 }
 
+/**
+ * A peer envelope taken by the mid-turn drain. Same payload as the idle
+ * submission: attribution and the recipient re-check need both fields, which
+ * the raw `string[]` steer channel cannot carry.
+ */
+export interface QueuedPeerSteer {
+  modelText: string;
+  displayText: string;
+  displayed?: boolean;
+  delivery?: PeerQueuedDelivery;
+}
+
 export type QueuedSubmission =
   | QueuedUserSubmission
   | QueuedPeerSubmission
@@ -101,6 +113,15 @@ export interface UseMessageQueueReturn {
     displayed?: boolean,
     delivery?: PeerQueuedDelivery,
   ) => void;
+  /**
+   * Takes leading peer envelopes that the sender marked "now" for a mid-turn
+   * drain, bypassing the raw-text steer channel. Stops at the first user
+   * entry, so typed input is never overtaken; among peers, "next" waits and
+   * the idle drain remains its route.
+   */
+  drainPeerEntries: (limit: number) => QueuedPeerSteer[];
+  /** Puts a mid-turn batch back, still peer, at the head of the queue. */
+  restorePeerEntries: (entries: QueuedPeerSteer[]) => void;
   drainQueue: (includeDeferred?: boolean, goalTurnActive?: boolean) => string[];
 }
 
@@ -314,8 +335,18 @@ export function useMessageQueue(): UseMessageQueueReturn {
         };
       }
 
-      const plainMessages = queueRef.current.filter(
-        ({ text, peer }) => !isSlashCommand(text) && !peer,
+      // A peer envelope is a barrier for user batching: filtering the whole
+      // queue let an entry typed after it overtake. Only entries ahead of the
+      // first waiting envelope may batch; the envelope keeps its place.
+      const firstPeerIndex = queueRef.current.findIndex(({ peer }) =>
+        Boolean(peer),
+      );
+      const aheadOfPeer =
+        firstPeerIndex === -1
+          ? queueRef.current
+          : queueRef.current.slice(0, firstPeerIndex);
+      const plainMessages = aheadOfPeer.filter(
+        ({ text }) => !isSlashCommand(text),
       );
       if (plainMessages.length > 0) {
         // One routing decision per batch: the batch is the contiguous run of
@@ -406,6 +437,36 @@ export function useMessageQueue(): UseMessageQueueReturn {
     [nextMessageKey],
   );
 
+  // Restores and mid-turn drains share one entry shape. A restore that lost
+  // `peer` would re-enter the queue as ordinary user text and take the
+  // `@path`/slash/shell preprocessing path with its attribution gone.
+  const restorePeerEntries = useCallback(
+    (entries: QueuedPeerSteer[]) => {
+      if (entries.length === 0) return;
+      queueRef.current = [
+        ...entries.map(
+          (entry): QueuedMessage => ({
+            key: nextMessageKey(),
+            text: entry.modelText,
+            // Restored peers stay deferred: the drain that failed is the
+            // mid-turn one, so an undeferred restore would re-enter it
+            // immediately, and the idle drain is the guaranteed fallback.
+            deferUntilIdle: true,
+            submittedPrompt: entry.displayText,
+            peer: true,
+            ...(entry.displayed ? { displayed: true } : {}),
+            ...(entry.delivery !== undefined
+              ? { delivery: entry.delivery }
+              : {}),
+          }),
+        ),
+        ...queueRef.current,
+      ];
+      setQueuedMessages(queueRef.current);
+    },
+    [nextMessageKey],
+  );
+
   const restorePeerMessage = useCallback(
     (
       message: string,
@@ -415,22 +476,46 @@ export function useMessageQueue(): UseMessageQueueReturn {
     ) => {
       const text = message.trim();
       if (!text) return;
-      queueRef.current = [
+      restorePeerEntries([
         {
-          key: nextMessageKey(),
-          text,
-          deferUntilIdle: true,
-          submittedPrompt: displayText,
-          peer: true,
+          modelText: text,
+          displayText,
           ...(displayed ? { displayed: true } : {}),
           ...(delivery !== undefined ? { delivery } : {}),
         },
-        ...queueRef.current,
-      ];
-      setQueuedMessages(queueRef.current);
+      ]);
     },
-    [nextMessageKey],
+    [restorePeerEntries],
   );
+
+  // Mid-turn selection follows two rules about who may be overtaken: an
+  // envelope never overtakes user input queued ahead of it (the scan stops at
+  // the first non-peer entry), and among peers the sender's stated urgency
+  // decides — a "next" stays in line and still reaches the model through the
+  // idle drain, in arrival order. The caller decides what taken means.
+  const drainPeerEntries = useCallback((limit: number): QueuedPeerSteer[] => {
+    const current = queueRef.current;
+    const taken: QueuedMessage[] = [];
+    for (const entry of current) {
+      if (!entry.peer) break;
+      if (entry.delivery?.priority !== 'now') continue;
+      if (taken.length >= limit) break;
+      taken.push(entry);
+    }
+    if (taken.length === 0) return [];
+    const takenEntries = new Set(taken);
+    const rest = current.filter((entry) => !takenEntries.has(entry));
+    queueRef.current = rest;
+    setQueuedMessages(rest);
+    return taken.map(
+      ({ text, submittedPrompt, displayed, delivery }): QueuedPeerSteer => ({
+        modelText: text,
+        displayText: submittedPrompt ?? text,
+        ...(displayed ? { displayed: true } : {}),
+        ...(delivery !== undefined ? { delivery } : {}),
+      }),
+    );
+  }, []);
 
   const drainQueue = useCallback(
     (includeDeferred = false, goalTurnActive = false): string[] => {
@@ -470,6 +555,8 @@ export function useMessageQueue(): UseMessageQueueReturn {
     popAllMessages,
     restoreMessages,
     restorePeerMessage,
+    drainPeerEntries,
+    restorePeerEntries,
     drainQueue,
   };
 }
