@@ -533,6 +533,8 @@ Exclamation commands allow you to execute system commands directly within Qwen C
 
 Environment Variables: Commands executed via `!` will set the `QWEN_CODE=1` environment variable.
 
+While a `!` command runs, queued model prompts wait until the command finishes and its result is added to the session context. Use Esc or Ctrl+C to cancel the command. Queued user input returns to the input box; other queued work can resume after the command stops.
+
 ## 4. Custom Commands
 
 Save frequently used prompts as shortcut commands to improve work efficiency and ensure consistency.

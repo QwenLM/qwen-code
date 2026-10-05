@@ -882,6 +882,7 @@ export const useLlmStream = (
   const [isResponding, setIsResponding] = useState<boolean>(false);
   // React state can lag by one render; this tracks the actual stream lifetime.
   const activeModelStreamsRef = useRef(0);
+  const activeShellSignalsRef = useRef(new Set<AbortSignal>());
   // A continuation may be admitted while an earlier submission is finalizing.
   const submissionActivitiesByGenerationRef = useRef(new Map<number, number>());
   const settleSubmissionStateIfIdle = useCallback(() => {
@@ -889,7 +890,8 @@ export const useLlmStream = (
     if (
       (submissionActivitiesByGenerationRef.current.get(currentGeneration) ??
         0) === 0 &&
-      activeModelStreamsRef.current === 0
+      activeModelStreamsRef.current === 0 &&
+      activeShellSignalsRef.current.size === 0
     ) {
       setIsResponding(false);
       setSubmissionInFlight(false);
@@ -1262,11 +1264,35 @@ export const useLlmStream = (
 
   useEffect(() => () => stopRetryCountdownTimer(), [stopRetryCountdownTimer]);
 
-  const onExec = useCallback(async (done: Promise<void>) => {
-    setIsResponding(true);
-    await done;
-    setIsResponding(false);
-  }, []);
+  const onExec = useCallback(
+    async (done: Promise<void>, signal: AbortSignal) => {
+      activeShellSignalsRef.current.add(signal);
+      const shellAbortController =
+        abortControllerRef.current?.signal === signal
+          ? abortControllerRef.current
+          : undefined;
+      // A tool continuation can replace the foreground controller while this
+      // command is still running. Keep the shell independently cancellable.
+      if (shellAbortController) {
+        auxiliaryAbortRefsRef.current.add(shellAbortController);
+      }
+      setIsResponding(true);
+      setSubmissionInFlight(true);
+      try {
+        await done;
+      } finally {
+        activeShellSignalsRef.current.delete(signal);
+        if (shellAbortController) {
+          auxiliaryAbortRefsRef.current.delete(shellAbortController);
+        }
+        if (abortControllerRef.current?.signal === signal) {
+          abortControllerRef.current = null;
+        }
+        settleSubmissionStateIfIdle();
+      }
+    },
+    [setSubmissionInFlight, settleSubmissionStateIfIdle],
+  );
   const { handleShellCommand, activeShellPtyId } = useShellCommandProcessor(
     addItem,
     setPendingHistoryItem,
@@ -1376,7 +1402,7 @@ export const useLlmStream = (
     const pendingItemAtCancel = pendingHistoryItemRef.current;
     turnCancelledRef.current = true;
     submissionLeaseGenerationRef.current += 1;
-    setSubmissionInFlight(false);
+    setSubmissionInFlight(activeShellSignalsRef.current.size > 0);
     const foregroundAbortController = abortControllerRef.current;
     if (
       foregroundAbortController &&
@@ -1477,7 +1503,7 @@ export const useLlmStream = (
         wasGoalTurn: activeGoalTurnRef.current !== null,
       });
     } finally {
-      setIsResponding(false);
+      setIsResponding(activeShellSignalsRef.current.size > 0);
       setShellInputFocused(false);
     }
   }, [
@@ -2270,7 +2296,9 @@ export const useLlmStream = (
         userMessageTimestamp,
       );
       clearRetryCountdown();
-      setIsResponding(false);
+      if (activeShellSignalsRef.current.size === 0) {
+        setIsResponding(false);
+      }
       setThought(null); // Reset thought when user cancels
     },
     [
@@ -3605,7 +3633,9 @@ export const useLlmStream = (
         ) {
           return;
         }
-        setSubmissionInFlight(false);
+        if (activeShellSignalsRef.current.size === 0) {
+          setSubmissionInFlight(false);
+        }
       };
       const isTurnContinuation =
         submitType === SendMessageType.ToolResult ||
@@ -4374,7 +4404,8 @@ export const useLlmStream = (
         if (
           foregroundAbortController &&
           !keepToolContinuationAbortController &&
-          abortControllerRef.current === foregroundAbortController
+          abortControllerRef.current === foregroundAbortController &&
+          !activeShellSignalsRef.current.has(foregroundAbortController.signal)
         ) {
           abortControllerRef.current = null;
         }

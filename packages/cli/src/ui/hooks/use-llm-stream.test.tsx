@@ -29,6 +29,7 @@ import type {
   AnyToolInvocation,
   GoalTurnPermit,
   SteerInput,
+  ShellExecutionResult,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -65,6 +66,11 @@ const mockSendMessageStream = vi
   .mockReturnValue((async function* () {})());
 const mockStartChat = vi.fn();
 const mockRunVisionBridge = vi.hoisted(() => vi.fn());
+const mockExecuteRuntimeShell = vi.hoisted(() => vi.fn());
+
+vi.mock('@qwen-code/qwen-code-core/sandbox/runtime-shell.js', () => ({
+  executeRuntimeShell: mockExecuteRuntimeShell,
+}));
 
 const MockedLlmClientClass = vi.hoisted(() =>
   vi.fn().mockImplementation(function (this: any, _config: any) {
@@ -16932,6 +16938,366 @@ describe('useLlmStream', () => {
         expect.any(AbortSignal),
       );
       expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('shell execution lifetime', () => {
+    const shellResult = (aborted = false): ShellExecutionResult => ({
+      output: 'shell result',
+      rawOutput: Buffer.from('shell result'),
+      exitCode: aborted ? null : 0,
+      signal: null,
+      aborted,
+      error: null,
+      pid: undefined,
+      executionMethod: 'child_process',
+    });
+    const deferred = <T,>() => {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((settle) => {
+        resolve = settle;
+      });
+      return { promise, resolve };
+    };
+
+    beforeEach(async () => {
+      const actual = await vi.importActual<
+        typeof import('./shellCommandProcessor.js')
+      >('./shellCommandProcessor.js');
+      vi.mocked(useShellCommandProcessor).mockImplementation(
+        actual.useShellCommandProcessor,
+      );
+      mockExecuteRuntimeShell.mockReset();
+      Object.assign(mockConfig, {
+        getTargetDir: () => '/tmp',
+        getShellExecutionConfig: () => ({}),
+        getShouldUseNodePtyShell: () => false,
+      });
+    });
+
+    afterEach(() => {
+      vi.mocked(useShellCommandProcessor).mockReturnValue({
+        handleShellCommand: vi.fn(),
+        activeShellPtyId: null,
+      });
+    });
+
+    it('holds busy after submission settles and writes shell history before the next model request', async () => {
+      const shell = deferred<ShellExecutionResult>();
+      mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+      const submissionInFlightRef = { current: false };
+      const onSubmissionSettled = vi.fn();
+      const { result, client } = renderTestHook(
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          current: {
+            peekNextUserBatchKey: () => undefined,
+            submissionInFlightRef,
+            onSubmissionSettled,
+          },
+        },
+      );
+      await act(async () => {
+        await result.current.submitQuery(
+          'printf shell-result',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+
+      expect(mockExecuteRuntimeShell).toHaveBeenCalledTimes(1);
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      expect(submissionInFlightRef.current).toBe(true);
+      expect(onSubmissionSettled).not.toHaveBeenCalled();
+      expect(client.addHistory).not.toHaveBeenCalled();
+      await act(async () => {
+        await result.current.submitQuery('summarize the diff');
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+      await act(async () => {
+        shell.resolve(shellResult());
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Idle),
+      );
+      expect(submissionInFlightRef.current).toBe(false);
+      expect(onSubmissionSettled).toHaveBeenCalledTimes(1);
+      expect(client.addHistory).toHaveBeenCalledTimes(1);
+      expect(client.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: [{ text: expect.stringContaining('printf shell-result') }],
+        }),
+      );
+      mockSendMessageStream.mockImplementation(() => {
+        expect(client.addHistory).toHaveBeenCalledTimes(1);
+        return (async function* () {})();
+      });
+      await act(async () => {
+        await result.current.submitQuery('summarize the diff');
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      'synchronous launch',
+      'asynchronous launch',
+      'asynchronous result',
+    ])('%s failure releases busy for the next request', async (failure) => {
+      const error = new Error('shell launch failed');
+      if (failure === 'synchronous launch') {
+        mockExecuteRuntimeShell.mockImplementation(() => {
+          throw error;
+        });
+      } else if (failure === 'asynchronous launch') {
+        mockExecuteRuntimeShell.mockRejectedValue(error);
+      } else {
+        mockExecuteRuntimeShell.mockResolvedValue({
+          result: Promise.reject(error),
+        });
+      }
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery(
+          'printf shell-result',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Idle),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: 'error',
+          text: 'An unexpected error occurred: shell launch failed',
+        },
+        expect.any(Number),
+      );
+      await act(async () => {
+        await result.current.submitQuery('next request');
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels the shell after submission cleanup and stays busy until the process settles', async () => {
+      const shell = deferred<ShellExecutionResult>();
+      mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery(
+          'printf shell-result',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      const signal = mockExecuteRuntimeShell.mock.calls[0][4] as AbortSignal;
+      act(() => result.current.cancelOngoingRequest());
+      expect(signal.aborted).toBe(true);
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      await act(async () => {
+        await result.current.submitQuery('next request');
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      await act(async () => {
+        shell.resolve(shellResult(true));
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Idle),
+      );
+      await act(async () => {
+        await result.current.submitQuery('next request');
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not clear a live continuation when an older cancelled shell finishes', async () => {
+      const shell = deferred<ShellExecutionResult>();
+      const model = deferred<void>();
+      mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+      mockSendMessageStream.mockImplementation(() =>
+        (async function* () {
+          await model.promise;
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery(
+          'printf shell-result',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      act(() => result.current.cancelOngoingRequest());
+      let continuation: Promise<void> | undefined;
+      await act(async () => {
+        continuation = result.current.submitQuery(
+          [
+            {
+              functionResponse: { name: 'tool', response: { output: 'done' } },
+            },
+          ],
+          SendMessageType.ToolResult,
+        );
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      await act(async () => {
+        shell.resolve(shellResult(true));
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      const modelSignal = mockSendMessageStream.mock.calls[0][1] as AbortSignal;
+      act(() => result.current.cancelOngoingRequest());
+      expect(modelSignal.aborted).toBe(true);
+      await act(async () => {
+        model.resolve();
+        await continuation;
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('keeps a shell cancellable when a delayed duplicate-tool continuation replaces the foreground controller', async () => {
+      const finalizer = deferred<void>();
+      const continuation = deferred<void>();
+      const shell = deferred<ShellExecutionResult>();
+      mockFinalizeToolResponses.mockImplementationOnce(
+        async (_config, entries) => {
+          await finalizer.promise;
+          return entries;
+        },
+      );
+      const client = new MockedLlmClientClass(mockConfig);
+      client.getHistoryToolCallFingerprints.mockReturnValue(
+        new Map([
+          [
+            'tool-history',
+            getToolCallFingerprint('shell', { command: 'echo duplicate' }),
+          ],
+        ]),
+      );
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerLlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-history',
+                providerCallId: 'tool-history',
+                name: 'shell',
+                args: { command: 'echo duplicate' },
+                isClientInitiated: false,
+                prompt_id: 'prompt-shell-boundary',
+              },
+            };
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            await continuation.promise;
+            yield {
+              type: ServerLlmEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+      mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+      const { result } = renderTestHook([], client);
+      let original: Promise<void> | undefined;
+      await act(async () => {
+        original = result.current.submitQuery('duplicate original');
+      });
+      await waitFor(() =>
+        expect(mockFinalizeToolResponses).toHaveBeenCalledTimes(1),
+      );
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => {
+        await result.current.submitQuery(
+          'printf shell-result',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      const shellSignal = mockExecuteRuntimeShell.mock
+        .calls[0][4] as AbortSignal;
+      expect(shellSignal.aborted).toBe(false);
+      await act(async () => {
+        finalizer.resolve();
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+      );
+      act(() => result.current.cancelOngoingRequest());
+      expect(
+        (mockSendMessageStream.mock.calls[1][1] as AbortSignal).aborted,
+      ).toBe(true);
+      expect(shellSignal.aborted).toBe(true);
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      await act(async () => {
+        shell.resolve(shellResult(true));
+        continuation.resolve();
+        await original;
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('keeps a new shell busy when an older model emits its cancellation event', async () => {
+      const shell = deferred<ShellExecutionResult>();
+      const model = deferred<void>();
+      mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+      mockSendMessageStream.mockImplementation(() =>
+        (async function* () {
+          await model.promise;
+          yield { type: ServerLlmEventType.UserCancelled };
+        })(),
+      );
+      const { result } = renderTestHook();
+      let oldSubmission: Promise<void> | undefined;
+      await act(async () => {
+        oldSubmission = result.current.submitQuery('old model request');
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      act(() => result.current.cancelOngoingRequest());
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      await act(async () => {
+        await result.current.submitQuery(
+          'printf shell-result',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      await act(async () => {
+        model.resolve();
+        await oldSubmission;
+      });
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      act(() => result.current.cancelOngoingRequest());
+      expect(
+        (mockExecuteRuntimeShell.mock.calls[0][4] as AbortSignal).aborted,
+      ).toBe(true);
+      await act(async () => {
+        shell.resolve(shellResult(true));
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Idle),
+      );
     });
   });
 

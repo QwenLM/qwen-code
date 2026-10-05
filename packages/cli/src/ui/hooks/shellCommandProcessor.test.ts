@@ -165,9 +165,10 @@ describe('useShellCommandProcessor', () => {
 
   it('should initiate command execution and set pending state', async () => {
     const { result } = renderProcessorHook();
+    const signal = new AbortController().signal;
 
     act(() => {
-      result.current.handleShellCommand('ls -l', new AbortController().signal);
+      result.current.handleShellCommand('ls -l', signal);
     });
 
     expect(addItemToHistoryMock).toHaveBeenCalledWith(
@@ -194,7 +195,7 @@ describe('useShellCommandProcessor', () => {
       false,
       expect.any(Object),
     );
-    expect(onExecMock).toHaveBeenCalledWith(expect.any(Promise));
+    expect(onExecMock).toHaveBeenCalledWith(expect.any(Promise), signal);
   });
 
   it('closes a dangling line continuation before appending the terminator so it is not escaped (R6-8)', async () => {

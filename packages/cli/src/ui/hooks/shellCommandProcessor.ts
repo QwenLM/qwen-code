@@ -79,7 +79,7 @@ export const useShellCommandProcessor = (
   setPendingHistoryItem: React.Dispatch<
     React.SetStateAction<HistoryItemWithoutId | null>
   >,
-  onExec: (command: Promise<void>) => void,
+  onExec: (command: Promise<void>, signal: AbortSignal) => void,
   onDebugMessage: (message: string) => void,
   config: Config,
   llmClient: LlmClient,
@@ -381,7 +381,7 @@ export const useShellCommandProcessor = (
         executeCommand(resolve);
       });
 
-      onExec(execPromise);
+      onExec(execPromise, abortSignal);
       return true;
     },
     [
