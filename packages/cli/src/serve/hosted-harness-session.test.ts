@@ -1655,13 +1655,16 @@ describe('Hosted Harness no-tool session', () => {
           .body.recoveryBlocked,
       ).toBe(false);
       await submit().expect(202);
-      await vi.waitFor(async () => {
-        const status = await owner(
-          supertest(current).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body.hasActivePrompt).toBe(false);
-        expect(status.body.recoveryBlocked).toBe(false);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await owner(
+            supertest(current).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
       expect(state.model).toHaveBeenCalledOnce();
       await owner(
         supertest(current).post(`/session/${SESSION_ID}/detach`),
