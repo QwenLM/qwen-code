@@ -143,6 +143,7 @@ function ManagedSessionsContent({
   const pendingRef = useRef(pending);
   const focusComposer = useRef(false);
   const composerFormRef = useRef<HTMLFormElement | null>(null);
+  const sessionsNavRef = useRef<HTMLElement | null>(null);
   const lifetime = useRef<AbortController | undefined>(undefined);
   const listLifetime = useRef<AbortController | undefined>(undefined);
   const listBusy = useRef(false);
@@ -191,11 +192,18 @@ function ManagedSessionsContent({
 
   // The Discard button unmounts itself, dropping focus to <body>: land it on
   // the composer that just got the draft back. The move must wait for the
-  // clear to commit — the textarea is disabled while pending is set.
+  // clear to commit — the textarea is disabled while pending is set — and
+  // the composer can still be absent (a workspace-binding creator replaces
+  // the form) or disabled (the session cannot send), so fall back to the
+  // session list landmark rather than leave the user at <body>.
   useEffect(() => {
     if (!focusComposer.current || pending) return;
     focusComposer.current = false;
-    composerFormRef.current?.querySelector('textarea')?.focus();
+    const target =
+      composerFormRef.current?.querySelector<HTMLTextAreaElement>(
+        'textarea:not([disabled])',
+      ) ?? sessionsNavRef.current;
+    target?.focus();
   }, [pending]);
 
   // Depend on the value the request actually sends: a provider that drops
@@ -396,6 +404,8 @@ function ManagedSessionsContent({
       )}
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[minmax(180px,240px)_minmax(0,1fr)]">
         <nav
+          ref={sessionsNavRef}
+          tabIndex={-1}
           aria-label={t('managed.sessions')}
           className="flex max-h-48 flex-col gap-1 overflow-y-auto md:max-h-none"
         >
@@ -539,7 +549,9 @@ function ManagedSessionsContent({
               />
             </div>
           )}
-          {pending && !busy && (
+          {/* Offered only where the handler can restore the draft: destroying
+              the only copy from a foreign session would lose it for good. */}
+          {pending && !busy && pending.sessionId === sessionId && (
             <div className="flex items-center gap-2" role="status">
               <p className="text-sm text-muted-foreground">
                 {t('managed.uncertain')}

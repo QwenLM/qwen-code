@@ -47,6 +47,23 @@ export function useManagedSession(
   const pagedRef = useRef(false);
   const pagedHeadRef = useRef<number | undefined>(undefined);
   const exhaustedRef = useRef(false);
+  // The stream loop, the summary poll and loadOlder share the error field;
+  // a success may only clear what its own writer raised, so every write is
+  // tagged with its writer here. The stall alert is the one error whose
+  // condition outlives the pass that raised it: it stays armed until an
+  // advancing event or resync ends it, and returns when the error covering
+  // it clears.
+  const errorOwnership = useRef<{
+    writer?: 'stream' | 'poll' | 'paging' | 'stall';
+    stall?: string;
+  }>({});
+  const releaseError = useCallback((writer: 'stream' | 'poll' | 'paging') => {
+    const ownership = errorOwnership.current;
+    if (ownership.writer !== writer) return { clear: false as const };
+    const reveal = ownership.stall;
+    ownership.writer = reveal === undefined ? undefined : 'stall';
+    return { clear: true as const, reveal };
+  }, []);
 
   useEffect(() => {
     const abort = new AbortController();
@@ -55,6 +72,7 @@ export function useManagedSession(
     pagedRef.current = false;
     pagedHeadRef.current = undefined;
     exhaustedRef.current = false;
+    errorOwnership.current = {};
     setLoadingOlder(false);
     setState({ sessionId, events: [], loading: Boolean(sessionId) });
     if (!sessionId) return () => abort.abort();
@@ -63,11 +81,13 @@ export function useManagedSession(
       if (!abort.signal.aborted)
         setState((current) => ({ ...current, ...change }));
     };
-    const fail = (error: unknown) =>
+    const fail = (writer: 'stream' | 'poll' | 'stall', error: unknown) => {
+      errorOwnership.current.writer = writer;
       update({
         error: error instanceof Error ? error.message : String(error),
         loading: false,
       });
+    };
     const snapshot = async (preserveLoadedPages: boolean) => {
       const [summary, transcript] = await Promise.all([
         provider.getSession(sessionId, opts),
@@ -121,6 +141,7 @@ export function useManagedSession(
           nextCursor = cursorRef.current ?? transcript.olderCursor;
         else nextCursor = cursorRef.current;
         cursorRef.current = nextCursor;
+        errorOwnership.current.writer = undefined;
         setState((current) => {
           const kept = empty
             ? current.events
@@ -149,6 +170,7 @@ export function useManagedSession(
         });
       } else {
         cursorRef.current = transcript.olderCursor;
+        errorOwnership.current.writer = undefined;
         update({
           summary,
           events: transcript.events,
@@ -159,20 +181,13 @@ export function useManagedSession(
       }
       return transcript.lastEventId;
     };
-    // The stream loop, the summary poll and loadOlder share the error
-    // field; a success may only clear what its own writer raised. stallError
-    // tracks the resync loop's stall alert so the poll can restore it (a
-    // hung stream has no pass in which to re-assert it); pollError tracks
-    // the poll's own failure.
-    let stallError: string | undefined;
-    let pollError: string | undefined;
     void (async () => {
       let lastEventId: number | undefined;
       while (!abort.signal.aborted && lastEventId === undefined) {
         try {
           lastEventId = await snapshot(false);
         } catch (error) {
-          fail(error);
+          fail('stream', error);
           await pause(abort.signal, 3000);
         }
       }
@@ -194,7 +209,8 @@ export function useManagedSession(
             if (event.id <= lastEventId) continue;
             lastEventId = event.id;
             gapStalls = 0;
-            stallError = undefined;
+            errorOwnership.current.writer = undefined;
+            errorOwnership.current.stall = undefined;
             setState((current) => ({
               ...current,
               events: mergeManagedEvents(current.events, [event]),
@@ -206,7 +222,8 @@ export function useManagedSession(
             if (head > lastEventId) {
               lastEventId = head;
               gapStalls = 0;
-              stallError = undefined;
+              errorOwnership.current.writer = undefined;
+              errorOwnership.current.stall = undefined;
               retryDelayMs = 0;
             } else {
               // A resync that cannot advance the cursor replays its trigger
@@ -218,30 +235,29 @@ export function useManagedSession(
               gapStalls += 1;
               retryDelayMs = 3000;
               if (gapStalls >= 3) {
-                stallError =
+                const stall =
                   'Managed Agent event stream is not advancing; retrying';
-                fail(new Error(stallError));
+                errorOwnership.current.stall = stall;
+                fail('stall', new Error(stall));
               }
             }
           } else if (!abort.signal.aborted) {
             // Every success path must clear a previous transient failure,
             // or an idle session keeps the stale alert forever — but only
-            // what this loop or the paging path raised: the poll's own error
-            // belongs to the poll, and a still-current stall alert belongs
-            // to the resync loop.
+            // what its own writer raised: the poll's error belongs to the
+            // poll, a paging error to loadOlder, and an armed stall alert
+            // outlives this loop's clean passes.
             const summary = await provider.getSession(sessionId, opts);
+            const release = releaseError('stream');
             if (!abort.signal.aborted)
               setState((current) => ({
                 ...current,
                 summary,
-                error:
-                  current.error === pollError || current.error === stallError
-                    ? current.error
-                    : undefined,
+                error: release.clear ? release.reveal : current.error,
               }));
           }
         } catch (error) {
-          fail(error);
+          fail('stream', error);
         }
         await pause(abort.signal, retryDelayMs);
       }
@@ -252,26 +268,24 @@ export function useManagedSession(
         if (abort.signal.aborted) return;
         try {
           const summary = await provider.getSession(sessionId, opts);
-          if (pollError === undefined) {
-            update({ summary });
-          } else {
-            const raised = pollError;
-            pollError = undefined;
-            if (!abort.signal.aborted)
-              setState((current) => ({
-                ...current,
-                summary,
-                error: current.error === raised ? stallError : current.error,
-              }));
-          }
+          // The poll's success releases only the poll's own error — an
+          // identical message from the stream loop is not the poll's to
+          // clear — and clearing the poll's banner reveals a stall alert
+          // that is still armed.
+          const release = releaseError('poll');
+          if (!abort.signal.aborted)
+            setState((current) => ({
+              ...current,
+              summary,
+              error: release.clear ? release.reveal : current.error,
+            }));
         } catch (error) {
-          pollError = error instanceof Error ? error.message : String(error);
-          fail(error);
+          fail('poll', error);
         }
       }
     })();
     return () => abort.abort();
-  }, [provider, clientId, sessionId, revision]);
+  }, [provider, clientId, sessionId, revision, releaseError]);
 
   const loadOlder = useCallback(async () => {
     const abort = lifetime.current;
@@ -312,11 +326,12 @@ export function useManagedSession(
           );
         // The fresh page wins over local copies on a shared id: the server
         // may have corrected (e.g. retracted) the text since.
+        const release = releaseError('paging');
         setState((current) => ({
           ...current,
           events: mergeManagedEvents(current.events, page.events),
           olderCursor: page.olderCursor,
-          error: undefined,
+          error: release.clear ? release.reveal : current.error,
         }));
       } catch (error) {
         if (abort.signal.aborted) return;
@@ -327,6 +342,7 @@ export function useManagedSession(
           if (moved !== undefined && allowRetry) return fetchPage(moved, false);
           return;
         }
+        errorOwnership.current.writer = 'paging';
         setState((current) => ({
           ...current,
           error: error instanceof Error ? error.message : String(error),
@@ -338,7 +354,7 @@ export function useManagedSession(
     } finally {
       if (!abort.signal.aborted) setLoadingOlder(false);
     }
-  }, [provider, clientId, sessionId, loadingOlder]);
+  }, [provider, clientId, sessionId, loadingOlder, releaseError]);
   const reload = useCallback(() => setRevision((current) => current + 1), []);
   const visible =
     state.sessionId === sessionId

@@ -330,6 +330,42 @@ describe('Managed transcript projection', () => {
     expect(messages[0]).toMatchObject({ tools: [{ status: 'failed' }] });
   });
 
+  it('leaves a diagnostic-failed tool without an end time so its completion still counts', () => {
+    // environment.failed is a non-fatal diagnostic: the Turn keeps running
+    // and the tool recovers, so its end is the result's own timestamp.
+    const source = { ...result, session_id: 's1', turn_id: 'p1' };
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'runtime_failed', { message: 'warmup died' }),
+        event(3, 'tool_started', { toolCallId: 'c', toolName: 'run' }),
+        event(4, 'tool_result_updated', {
+          itemId: 'item-1',
+          toolCallId: 'c',
+          result: source,
+        }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'completed', startTime: 300, endTime: 400 }],
+    });
+  });
+
+  it('re-marks a diagnostic-failed tool when the Turn is cancelled afterwards', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'runtime_failed', { message: 'warmup died' }),
+        event(3, 'cancelled'),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'failed', wasCancelled: true }],
+    });
+  });
+
   it('does not split the streamed answer when the active Turn reports a Runtime failure', () => {
     // environment.failed is a non-fatal diagnostic; the Turn keeps streaming.
     const messages = managedEventsToMessages(

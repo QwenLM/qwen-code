@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, startTransition, Suspense } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -9,6 +9,8 @@ const captured = vi.hoisted(() => ({
   renders: [] as unknown[],
   probeRequests: false,
   requests: [] as Array<Promise<unknown>>,
+  // Providers from commits only — a discarded render never fires an effect.
+  committed: [] as unknown[],
 }));
 
 vi.mock('./components/managed/ManagedSessionsPage', async () => {
@@ -23,6 +25,7 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
       // Issues a request from a child effect whenever the provider identity
       // changes — the same trigger ManagedSessionsContent's list effect has.
       useEffect(() => {
+        captured.committed.push(managedAgentProvider);
         if (captured.probeRequests)
           captured.requests.push(
             managedAgentProvider.listSessions({ clientId: 'probe', limit: 1 }),
@@ -45,6 +48,7 @@ describe('ManagedAgentWebShell', () => {
     captured.renders = [];
     captured.probeRequests = false;
     captured.requests = [];
+    captured.committed = [];
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -221,6 +225,98 @@ describe('ManagedAgentWebShell', () => {
     });
 
     expect(tenants).toEqual(['tenant-a', 'tenant-b']);
+  });
+
+  it('keeps the committed callbacks when a scope-switch render is discarded', async () => {
+    captured.probeRequests = true;
+    const tenants: Array<string | null> = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+      tenants.push(new Headers(init?.headers).get('x-qwen-tenant-id'));
+      return new Response(JSON.stringify({ data: [], hasMore: false }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    let gateOpen = false;
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = () => {
+        gateOpen = true;
+        resolve();
+      };
+    });
+    function Gate() {
+      if (!gateOpen) throw gate;
+      return null;
+    }
+    const shell = (scope: string, withGate: boolean) => (
+      <Suspense fallback={null}>
+        <ManagedAgentWebShell
+          baseUrl="https://product.example"
+          productScope={scope}
+          getHeaders={() => ({ 'X-Qwen-Tenant-Id': scope })}
+          fetch={fetchImpl}
+        />
+        {withGate ? <Gate /> : null}
+      </Suspense>
+    );
+
+    await act(async () => {
+      root.render(shell('tenant-a', false));
+    });
+    await act(async () => {
+      await Promise.all(captured.requests);
+    });
+    expect(tenants).toEqual(['tenant-a']);
+
+    // The transition renders tenant-b's shell but suspends before commit,
+    // so React throws the render away and the committed tree keeps showing.
+    await act(async () => {
+      startTransition(() => root.render(shell('tenant-b', true)));
+    });
+    // The discarded render must not repoint the committed provider's
+    // callbacks: the committed tree's next request still signs tenant-a.
+    const committed = captured.committed.at(-1) as ManagedAgentProvider;
+    await act(async () => {
+      await committed.listSessions({ clientId: 'probe', limit: 1 });
+    });
+    expect(tenants).toEqual(['tenant-a', 'tenant-a']);
+
+    // Once the gate releases, the transition commits and takes over.
+    await act(async () => {
+      releaseGate();
+      await gate;
+    });
+    await act(async () => {
+      await Promise.all(captured.requests);
+    });
+    expect(tenants).toEqual(['tenant-a', 'tenant-a', 'tenant-b']);
+  });
+
+  it('suppresses the internal selection write while a controlled host declines to echo', async () => {
+    const onSessionChange = vi.fn();
+    await act(async () => {
+      root.render(
+        <ManagedAgentWebShell
+          baseUrl="https://product.example"
+          sessionId="a"
+          onSessionChange={onSessionChange}
+        />,
+      );
+    });
+    const childProps = () =>
+      captured.props as {
+        sessionId?: string;
+        onSelectSession: (next: string | undefined) => void;
+      };
+    expect(childProps().sessionId).toBe('a');
+
+    await act(async () => childProps().onSelectSession('c'));
+
+    // The host owns the selection: the pick is reported, but until the host
+    // echoes it the child keeps the host-driven value.
+    expect(onSessionChange).toHaveBeenCalledWith('c');
+    expect(childProps().sessionId).toBe('a');
   });
 
   it('lets a controlled host return to no selection', async () => {

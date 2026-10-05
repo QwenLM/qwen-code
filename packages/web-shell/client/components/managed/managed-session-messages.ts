@@ -43,6 +43,11 @@ export function managedEventsToMessages(
 ): Message[] {
   const messages: Message[] = [];
   const tools = new Map<string, ACPToolCall>();
+  // Tools the non-fatal runtime_failed diagnostic failed, keyed to their
+  // Turn, so a later same-Turn cancellation can re-mark them: their status
+  // has already flipped to failed by then, which the terminal-event loop
+  // alone skips.
+  const runtimeFailed = new Map<ACPToolCall, string>();
   let textMessage:
     | Extract<Message, { role: 'assistant' | 'thinking' }>
     | undefined;
@@ -255,10 +260,23 @@ export function managedEventsToMessages(
       if (event.type === 'runtime_failed') stopStreaming();
       else settle();
       for (const tool of tools.values()) {
+        if (
+          event.type === 'cancelled' &&
+          tool.status === 'failed' &&
+          runtimeFailed.get(tool) === event.turnId
+        )
+          tool.wasCancelled = true;
         if (tool.status === 'pending' || tool.status === 'in_progress') {
           tool.status = 'failed';
-          tool.wasCancelled = event.type === 'cancelled';
-          tool.endTime = event.at;
+          // The diagnostic's Turn may still run the tool to completion:
+          // only a terminal Turn event stamps the end, which a result or
+          // completion event otherwise supplies.
+          if (event.type === 'runtime_failed')
+            runtimeFailed.set(tool, event.turnId);
+          else {
+            tool.wasCancelled = event.type === 'cancelled';
+            tool.endTime = event.at;
+          }
         }
       }
       if (event.type === 'failed' && typeof data['message'] === 'string') {

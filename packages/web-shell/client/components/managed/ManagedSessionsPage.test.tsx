@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
+import { getManagedClientId } from './managed-session-storage';
 import { I18nProvider } from '../../i18n';
 import type {
   ManagedAgentProvider,
@@ -997,7 +998,7 @@ describe('ManagedSessionsPage', () => {
     ).not.toBe(originalKey);
   });
 
-  it('does not restore the discarded draft into a different session', async () => {
+  it('offers the discard escape only in the session that owns the pending prompt', async () => {
     mocks.client.listSessions.mockResolvedValue({
       sessions: [summary('s1'), summary('s2')],
     });
@@ -1011,13 +1012,118 @@ describe('ManagedSessionsPage', () => {
 
     await click('Task s2Completed');
     await render('s2');
+    // The composer is wedged on the other session's pending record, but the
+    // destructive escape is offered only where the draft can be restored.
     expect(container.querySelector('textarea')?.disabled).toBe(true);
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (item) => item.textContent === 'Discard this request',
+      ),
+    ).toBe(false);
 
+    // The escape stays reachable from the owning session.
+    await click('Task s1Completed');
+    await render('s1');
     await click('Discard this request');
     expect(container.textContent).not.toContain(
       'request outcome is unconfirmed',
     );
-    expect(container.querySelector('textarea')?.value).toBe('');
+    expect(container.querySelector('textarea')?.value).toBe(
+      'For session A only',
+    );
+  });
+
+  function seedPending(record: {
+    idempotencyKey: string;
+    text: string;
+    sessionId?: string;
+  }) {
+    const clientId = getManagedClientId(provider.storageKey);
+    sessionStorage.setItem(
+      `qwen-managed-pending:${provider.storageKey}:${clientId}`,
+      JSON.stringify(record),
+    );
+  }
+
+  async function focusAndClickDiscard() {
+    const discard = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Discard this request',
+    );
+    expect(discard).toBeDefined();
+    discard!.focus();
+    await act(async () => {
+      discard!.click();
+      await flush();
+    });
+  }
+
+  it('restores the draft from storage when a remounted pending prompt is discarded', async () => {
+    mocks.client.createSession.mockRejectedValueOnce(
+      new TypeError('Network failed'),
+    );
+    await render();
+    await input('Keep this prompt');
+    await click('Send');
+    expect(container.textContent).toContain('request outcome is unconfirmed');
+
+    // A real remount empties the text state: the composer is fed from the
+    // persisted pending record alone.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(container.querySelector('textarea')?.value).toBe('Keep this prompt');
+
+    await click('Discard this request');
+    // The restore is the only way the draft survives the discard now.
+    expect(container.querySelector('textarea')?.value).toBe('Keep this prompt');
+    expect(container.querySelector('textarea')?.disabled).toBe(false);
+    expect(container.textContent).not.toContain(
+      'request outcome is unconfirmed',
+    );
+  });
+
+  it('moves focus to the session list when a discard has no composer to focus', async () => {
+    const bindingProvider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent-a',
+        list: vi.fn().mockResolvedValue({ data: [], supported: true }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+    } as unknown as ManagedAgentProvider;
+    seedPending({ idempotencyKey: 'key-1', text: 'Bind this draft' });
+    await render(undefined, 'en', bindingProvider);
+    // The workspace-binding creator replaces the composer form entirely.
+    expect(container.querySelector('textarea')).toBeNull();
+    expect(container.textContent).toContain('request outcome is unconfirmed');
+
+    await focusAndClickDiscard();
+
+    expect(container.textContent).not.toContain(
+      'request outcome is unconfirmed',
+    );
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+  });
+
+  it('moves focus to the session list when a discard leaves the composer disabled', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, { capabilities: { canSend: false, canCancel: false } }),
+    );
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Session draft',
+      sessionId: 's1',
+    });
+    await render('s1');
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
+    expect(container.textContent).toContain('request outcome is unconfirmed');
+
+    await focusAndClickDiscard();
+
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(container.querySelector('nav'));
   });
 
   it('does not refetch the list when a dropped workspace path changes', async () => {

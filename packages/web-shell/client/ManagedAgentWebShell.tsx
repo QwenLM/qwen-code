@@ -1,5 +1,11 @@
 import './styles/globals.css';
-import { useMemo, useRef, useState, type CSSProperties } from 'react';
+import {
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react';
 import { BrandProvider, type WebShellBrand } from './brandContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ManagedSessionsPage } from './components/managed/ManagedSessionsPage';
@@ -53,11 +59,16 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   const resolvedLanguage = normalizeLanguage(language);
   // Function props may be inline closures: route them through a ref so the
   // provider (and its caches, fetches and SSE) is rebuilt only when a real
-  // connection input changes, not on every parent render. Assigned during
-  // render: React flushes child passive effects before the parent's, so an
-  // effect would let a child of this same commit read the stale callbacks.
+  // connection input changes, not on every parent render. Assigned in a
+  // layout effect: a render React discards (a suspended or interrupted
+  // transition) must not repoint the committed tree's callbacks, and a
+  // passive effect would come too late — the layout phase of a commit
+  // finishes before any passive effect, so a child effect of that same
+  // commit still reads the fresh callbacks.
   const callbacksRef = useRef({ fetchImpl, getHeaders, saveArtifact });
-  callbacksRef.current = { fetchImpl, getHeaders, saveArtifact };
+  useLayoutEffect(() => {
+    callbacksRef.current = { fetchImpl, getHeaders, saveArtifact };
+  });
   const hasFetch = fetchImpl !== undefined;
   const hasGetHeaders = getHeaders !== undefined;
   const hasSaveArtifact = saveArtifact !== undefined;
