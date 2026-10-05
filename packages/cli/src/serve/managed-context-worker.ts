@@ -176,6 +176,14 @@ export function selectShellCapturePublisher(
   remotePublisher: RemoteShellResultPublisher,
 ): ManagedShellCapturePublisher {
   return {
+    // The retirement gate reads this flag — the selector owns both funnels'
+    // installed state, exactly like the inline composite it replaced.
+    get hasInstalledPublication() {
+      return (
+        remotePublishers.hasInstalledPublication ||
+        remotePublisher.hasInstalledPublication
+      );
+    },
     async prepare(request) {
       if (request.capture.background === true) {
         // The detached handle carries no result manifest, so an
