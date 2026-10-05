@@ -163,6 +163,17 @@ export function useManagedSession(
         setRevision((value) => value + 1);
       }
     };
+    // A terminal record expires only on its own leg's success evidence;
+    // transient records on that leg are left alone.
+    const expireFinal = (leg: SignalLeg) => {
+      if (abort.signal.aborted) return;
+      setState((current) => {
+        if (!current.signals?.[leg]?.final) return current;
+        const signals = { ...current.signals };
+        delete signals[leg];
+        return { ...current, signals };
+      });
+    };
     const snapshot = async (preserveLoadedPages: boolean) => {
       // Settle both legs first, then classify the session leg's own answer
       // before the transcript leg's: whether the bootstrap terminates for a
@@ -171,8 +182,12 @@ export function useManagedSession(
         provider.getSession(sessionId, opts),
         provider.getTranscript(sessionId, { ...opts, limit: 100 }),
       ]);
-      if (sessionRead.status === 'rejected')
+      if (sessionRead.status === 'rejected') {
+        // A fulfilled transcript read is that leg's own success evidence:
+        // retire its stale verdict before the throw discards the read.
+        if (transcriptRead.status === 'fulfilled') retire('transcript');
         throw new SnapshotLegError('session', sessionRead.reason);
+      }
       if (transcriptRead.status === 'rejected')
         throw new SnapshotLegError('transcript', transcriptRead.reason);
       const summary = sessionRead.value;
@@ -298,6 +313,15 @@ export function useManagedSession(
         let delayMs = 0;
         let delivered = false;
         const connectedAt = Date.now();
+        // The same duration that certifies a connection for the backoff
+        // ladder below (a throw before it stretches the rung) also
+        // certifies the stream leg itself: any answer that stays
+        // error-free this long refutes a standing terminal stream verdict
+        // — even when no new frame ever arrives to retire it.
+        const proofOfLife = setTimeout(
+          () => expireFinal('stream'),
+          BASE_RETRY_DELAY_MS,
+        );
         try {
           for await (const event of provider.subscribeEvents(sessionId, {
             ...opts,
@@ -358,6 +382,10 @@ export function useManagedSession(
               delayMs = failureRetryDelayMs(snapshotFailures++);
             }
           } else if (!abort.signal.aborted) {
+            // An error-free completion is the stream leg's own success
+            // evidence even when it carried nothing new: a standing
+            // terminal stream verdict cannot survive it.
+            expireFinal('stream');
             // Same policy as the gap branch: a definite answer from a
             // routine summary read is recorded, never a kill for a stream
             // that is otherwise healthy; its success retires session-leg
@@ -382,6 +410,8 @@ export function useManagedSession(
           if (delivered || Date.now() - connectedAt >= BASE_RETRY_DELAY_MS)
             failures = 0;
           delayMs = failureRetryDelayMs(failures++);
+        } finally {
+          clearTimeout(proofOfLife);
         }
         await pause(abort.signal, delayMs);
       }
@@ -470,16 +500,19 @@ export function useManagedSession(
           if (moved !== undefined && allowRetry) return fetchPage(moved, false);
           return;
         }
-        // A failed click is a transcript-leg read failing; record it with
-        // the same classification and monotonicity guard the effect's
-        // record() applies — this callback lives outside the effect
-        // closure, so it mirrors the guarded write rather than calling it:
-        // a definite 4xx goes final, anything weaker must not downgrade a
-        // standing verdict, and the next page or resync success retires it.
+        // A failed click is a transcript-leg read failing; record it on
+        // that leg with the monotonicity guard the effect's record()
+        // applies (this callback lives outside the effect closure, so it
+        // mirrors the guarded write rather than calling it). A click stays
+        // transient even on a definite 4xx: it is one-off evidence with no
+        // ladder asking again to confirm terminality — a genuinely gone
+        // session is certified by the poll loop, while a failover 404 on a
+        // live session must not stick as a terminal verdict. The guard
+        // still keeps anything weaker from downgrading a standing one, and
+        // the next page or resync success retires it.
         const message = error instanceof Error ? error.message : String(error);
-        const final = !isAuthFailure(error) && isNonRetryableClientError(error);
         setState((current) => {
-          if (current.signals?.transcript?.final && !final) return current;
+          if (current.signals?.transcript?.final) return current;
           return {
             ...current,
             signals: {
@@ -487,7 +520,7 @@ export function useManagedSession(
               transcript: {
                 leg: 'transcript',
                 message,
-                final,
+                final: false,
                 seq: ++seqRef.current,
               },
             },

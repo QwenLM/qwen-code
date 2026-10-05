@@ -488,6 +488,105 @@ describe('useManagedSession', () => {
     }
   });
 
+  it('expires a terminal stream verdict on an error-free replay-only reconnect', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          yield event(1);
+          throw Object.assign(new Error('session gone'), { status: 404 });
+        }
+        // A live but idle session: the reconnect replays history only.
+        yield event(1);
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // The reconnect opens at t=3000 and stays error-free: three seconds
+      // of proof-of-life expires the terminal verdict it contradicts.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9_100);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.stoppedLeg).toBeUndefined();
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('expires a terminal stream verdict on an error-free clean close', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          yield event(1);
+          throw Object.assign(new Error('session gone'), { status: 404 });
+        }
+        if (subscribeCalls === 2) {
+          // Replays history and closes without an error.
+          yield event(1);
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // The reconnect at t=3000 closes cleanly carrying nothing new: an
+      // error-free answer is the leg's own success evidence. The third
+      // attempt and its proof-of-life land outside this window — only the
+      // clean close could have cleared the verdict.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_100);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.stoppedLeg).toBeUndefined();
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps a stream failure visible while the summary poll is healthy', async () => {
     vi.useFakeTimers();
     const restoreBackoff = deterministicBackoff();
@@ -3115,6 +3214,53 @@ describe('useManagedSession', () => {
     }
   });
 
+  it('records a failed page fetch without claiming a terminal verdict', async () => {
+    const getTranscript = vi.fn<ManagedAgentProvider['getTranscript']>(
+      (_sessionId, request) =>
+        request.before
+          ? Promise.reject(
+              Object.assign(new Error('The Session was not found.'), {
+                status: 404,
+              }),
+            )
+          : Promise.resolve({
+              events: [event(5), event(6)],
+              olderCursor: 'cursor-5',
+              lastEventId: 6,
+            }),
+    );
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript,
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { signal?: AbortSignal },
+      ) {
+        yield event(7);
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    mountReact(<Probe provider={provider} />);
+    await flushReact();
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([5, 6, 7]),
+    );
+
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    // A failed click is one-off evidence: it surfaces the click's own
+    // message but never claims the transcript is terminally gone — a
+    // failover 404 on a live session must not stick as a verdict; the
+    // poll certifies a genuinely gone session on its own leg.
+    expect(latest?.stoppedReason).toBeUndefined();
+    expect(latest?.stoppedLeg).toBeUndefined();
+    expect(latest?.error).toBe('The Session was not found.');
+    expect(latest?.olderCursor).toBe('cursor-5');
+  });
+
   it('keeps a resync verdict standing when a later page fetch fails', async () => {
     vi.useFakeTimers();
     const restoreBackoff = deterministicBackoff();
@@ -3444,6 +3590,62 @@ describe('useManagedSession', () => {
       }
       expect(latest?.error).toBeUndefined();
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retires a stale resync verdict when a later resync fulfills the transcript read', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let snapshotCalls = 0;
+      let subscribeCalls = 0;
+      let sessionCalls = 0;
+      const provider = {
+        getSession: vi.fn(() => {
+          sessionCalls += 1;
+          return sessionCalls <= 2
+            ? Promise.resolve({ sessionId: 'session-1' })
+            : Promise.reject(
+                Object.assign(new Error('server busy'), { status: 500 }),
+              );
+        }),
+        getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(() => {
+          snapshotCalls += 1;
+          return snapshotCalls === 2
+            ? Promise.reject(
+                Object.assign(new Error('history pruned'), { status: 404 }),
+              )
+            : Promise.resolve(transcript(1));
+        }),
+        async *subscribeEvents(
+          _sessionId: string,
+          request: { lastEventId?: number },
+        ) {
+          subscribeCalls += 1;
+          yield { ...event(request.lastEventId ?? 0), type: 'stream_gap' };
+        },
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('history pruned');
+      expect(latest?.stoppedLeg).toBe('transcript');
+      // The next resync settles [session 500, transcript ok]: the
+      // fulfilled transcript read is its own leg's success evidence and
+      // must retire the stale verdict before the session-leg throw
+      // discards it.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_100);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.stoppedLeg).toBeUndefined();
+      expect(latest?.error).toBe('server busy');
+    } finally {
+      restoreBackoff();
       vi.useRealTimers();
     }
   });
