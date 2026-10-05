@@ -1406,10 +1406,17 @@ export const useLlmStream = (
     // in-flight content — reading the React-state copy at the consumer
     // would race with stream chunks that haven't re-rendered yet.
     const pendingItemAtCancel = pendingHistoryItemRef.current;
+    const shellOwnsPendingItem =
+      activeShellSignalsRef.current.size > 0 &&
+      pendingItemAtCancel?.type === 'tool_group' &&
+      pendingItemAtCancel.isUserInitiated;
     turnCancelledRef.current = true;
     submissionLeaseGenerationRef.current += 1;
     setSubmissionInFlight(activeShellSignalsRef.current.size > 0);
     const foregroundAbortController = abortControllerRef.current;
+    const shellOnlyCancellation =
+      foregroundAbortController !== null &&
+      activeShellSignalsRef.current.has(foregroundAbortController.signal);
     if (
       foregroundAbortController &&
       !foregroundAbortController.signal.aborted
@@ -1438,8 +1445,9 @@ export const useLlmStream = (
     // wakeups so the loop doesn't resume after the cancelled tick. Only clears
     // session wakeups (never cron jobs); lazily-creating an empty scheduler
     // here is inert.
-    const loopWakeupsCancelled =
-      config.getCronScheduler()?.cancelAllWakeups() ?? 0;
+    const loopWakeupsCancelled = shellOnlyCancellation
+      ? 0
+      : (config.getCronScheduler()?.cancelAllWakeups() ?? 0);
     // Cancel any in-flight auxiliary work so its Promise.then doesn't add
     // stale content after the user cancelled.
     for (const ac of auxiliaryAbortRefsRef.current) {
@@ -1454,16 +1462,18 @@ export const useLlmStream = (
     config.getArenaAgentClient()?.reportCancelled();
 
     // Log API cancellation
-    const prompt_id = config.getSessionId() + '########' + getPromptCount();
-    const cancellationEvent = new ApiCancelEvent(
-      modelOverrideRef.current ?? config.getModel(),
-      prompt_id,
-      config.getContentGeneratorConfig()?.authType,
-      loopWakeupsCancelled > 0 ? loopWakeupsCancelled : undefined,
-    );
-    logApiCancel(config, cancellationEvent);
+    if (!shellOnlyCancellation) {
+      const prompt_id = config.getSessionId() + '########' + getPromptCount();
+      const cancellationEvent = new ApiCancelEvent(
+        modelOverrideRef.current ?? config.getModel(),
+        prompt_id,
+        config.getContentGeneratorConfig()?.authType,
+        loopWakeupsCancelled > 0 ? loopWakeupsCancelled : undefined,
+      );
+      logApiCancel(config, cancellationEvent);
+    }
 
-    if (pendingHistoryItemRef.current) {
+    if (pendingHistoryItemRef.current && !shellOwnsPendingItem) {
       commitItemInOrder(pendingHistoryItemRef.current, Date.now());
     }
     addItem(
@@ -1484,7 +1494,9 @@ export const useLlmStream = (
         Date.now(),
       );
     }
-    setPendingHistoryItem(null);
+    if (!shellOwnsPendingItem) {
+      setPendingHistoryItem(null);
+    }
     clearRetryCountdown();
     // Wrap the consumer callback so a throw in AppContainer's cancel
     // handler can't strand the stream in `Responding` (which would lock

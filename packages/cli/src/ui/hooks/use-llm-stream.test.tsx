@@ -49,7 +49,11 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
-import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
+import type {
+  HistoryItem,
+  IndividualToolCallDisplay,
+  SlashCommandProcessorResult,
+} from '../types.js';
 import { MessageType, StreamingState, ToolCallStatus } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
@@ -59,6 +63,7 @@ import {
 } from '../utils/inline-image-parts.js';
 import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
+import { CronScheduler } from '@qwen-code/qwen-code-core/services/cronScheduler.js';
 
 // --- MOCKS ---
 const mockSendMessageStream = vi
@@ -17001,6 +17006,10 @@ describe('useLlmStream', () => {
           },
         },
       );
+      const callOrder: string[] = [];
+      client.addHistory.mockImplementation(() => {
+        callOrder.push('shell history');
+      });
       await act(async () => {
         await result.current.submitQuery(
           'printf shell-result',
@@ -17028,6 +17037,14 @@ describe('useLlmStream', () => {
       );
       expect(submissionInFlightRef.current).toBe(false);
       expect(onSubmissionSettled).toHaveBeenCalledTimes(1);
+      mockSendMessageStream.mockImplementationOnce(() => {
+        callOrder.push('model request');
+        return (async function* () {})();
+      });
+      await act(async () => {
+        await result.current.submitQuery('summarize the diff');
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       expect(client.addHistory).toHaveBeenCalledTimes(1);
       expect(client.addHistory).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -17035,14 +17052,7 @@ describe('useLlmStream', () => {
           parts: [{ text: expect.stringContaining('printf shell-result') }],
         }),
       );
-      mockSendMessageStream.mockImplementation(() => {
-        expect(client.addHistory).toHaveBeenCalledTimes(1);
-        return (async function* () {})();
-      });
-      await act(async () => {
-        await result.current.submitQuery('summarize the diff');
-      });
-      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      expect(callOrder).toEqual(['shell history', 'model request']);
     });
 
     it.each([
@@ -17090,7 +17100,23 @@ describe('useLlmStream', () => {
     it('cancels the shell after submission cleanup and stays busy until the process settles', async () => {
       const shell = deferred<ShellExecutionResult>();
       mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
-      const { result } = renderTestHook();
+      const submissionInFlightRef = { current: false };
+      const onSubmissionSettled = vi.fn();
+      const onCancelSubmit = vi.fn();
+      const { result } = renderTestHook(
+        [],
+        undefined,
+        undefined,
+        onCancelSubmit,
+        undefined,
+        {
+          current: {
+            peekNextUserBatchKey: () => undefined,
+            submissionInFlightRef,
+            onSubmissionSettled,
+          },
+        },
+      );
       await act(async () => {
         await result.current.submitQuery(
           'printf shell-result',
@@ -17100,8 +17126,56 @@ describe('useLlmStream', () => {
         );
       });
       const signal = mockExecuteRuntimeShell.mock.calls[0][4] as AbortSignal;
+      const pendingShell = result.current.pendingHistoryItems.find(
+        (item) => item.type === 'tool_group',
+      );
+      expect(pendingShell).toMatchObject({
+        type: 'tool_group',
+        tools: [expect.objectContaining({ status: ToolCallStatus.Executing })],
+      });
+      const callId =
+        pendingShell?.type === 'tool_group'
+          ? pendingShell.tools[0].callId
+          : undefined;
+      expect(callId).toBeDefined();
       act(() => result.current.cancelOngoingRequest());
       expect(signal.aborted).toBe(true);
+      expect(submissionInFlightRef.current).toBe(true);
+      expect(onSubmissionSettled).not.toHaveBeenCalled();
+      expect(onCancelSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ pendingItem: pendingShell }),
+      );
+      expect(result.current.pendingHistoryItems).toContainEqual(pendingShell);
+      expect(
+        mockAddItem.mock.calls.some(([item]) => item.type === 'tool_group'),
+      ).toBe(false);
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2000);
+      try {
+        act(() => {
+          mockExecuteRuntimeShell.mock.calls[0][3]({
+            type: 'data',
+            chunk: 'output during termination',
+          });
+        });
+      } finally {
+        clock.mockRestore();
+      }
+      expect(result.current.pendingHistoryItems).toContainEqual(
+        expect.objectContaining({
+          type: 'tool_group',
+          tools: [
+            expect.objectContaining({
+              callId,
+              status: ToolCallStatus.Executing,
+              resultDisplay: 'output during termination',
+            }),
+          ],
+        }),
+      );
+      act(() => result.current.cancelOngoingRequest());
+      expect(submissionInFlightRef.current).toBe(true);
+      expect(onSubmissionSettled).not.toHaveBeenCalled();
+      expect(onCancelSubmit).toHaveBeenCalledTimes(1);
       expect(result.current.streamingState).toBe(StreamingState.Responding);
       await act(async () => {
         await result.current.submitQuery('next request');
@@ -17113,10 +17187,283 @@ describe('useLlmStream', () => {
       await waitFor(() =>
         expect(result.current.streamingState).toBe(StreamingState.Idle),
       );
+      expect(submissionInFlightRef.current).toBe(false);
+      expect(onSubmissionSettled).toHaveBeenCalledTimes(1);
+      const finalRows = mockAddItem.mock.calls
+        .map(([item]) => item)
+        .filter(
+          (item) =>
+            item.type === 'tool_group' &&
+            item.tools.some(
+              (tool: IndividualToolCallDisplay) => tool.callId === callId,
+            ),
+        );
+      expect(finalRows).toEqual([
+        expect.objectContaining({
+          tools: [
+            expect.objectContaining({
+              callId,
+              status: ToolCallStatus.Canceled,
+            }),
+          ],
+        }),
+      ]);
+      expect(
+        result.current.pendingHistoryItems.some(
+          (item) => item.type === 'tool_group',
+        ),
+      ).toBe(false);
       await act(async () => {
         await result.current.submitQuery('next request');
       });
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels Shell without reporting an API cancel or removing a pending loop wakeup', async () => {
+      const shell = deferred<ShellExecutionResult>();
+      mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+      const scheduler = new CronScheduler();
+      const wakeup = scheduler.scheduleWakeup(60, 'next self-paced tick');
+      const cancelWakeups = vi.spyOn(scheduler, 'cancelAllWakeups');
+      vi.mocked(mockConfig.getCronScheduler).mockReturnValue(scheduler);
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery(
+          'printf shell-result',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      expect(mockStartNewPrompt).not.toHaveBeenCalled();
+      expect(scheduler.list().some((job) => job.id === wakeup.id)).toBe(true);
+      act(() => result.current.cancelOngoingRequest());
+      expect(mockLogApiCancel).not.toHaveBeenCalled();
+      expect(cancelWakeups).not.toHaveBeenCalled();
+      expect(scheduler.list().some((job) => job.id === wakeup.id)).toBe(true);
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Stopped the self-paced loop: cancelled 1 pending wakeup.',
+        },
+        expect.any(Number),
+      );
+      await act(async () => shell.resolve(shellResult(true)));
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      scheduler.destroy();
+    });
+    it('preserves model tool cancellation after its stream ends while an older cancelled Shell still runs', async () => {
+      const shell = deferred<ShellExecutionResult>();
+      mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+      const scheduler = new CronScheduler();
+      const wakeup = scheduler.scheduleWakeup(60, 'next self-paced tick');
+      const cancelWakeups = vi.spyOn(scheduler, 'cancelAllWakeups');
+      vi.mocked(mockConfig.getCronScheduler).mockReturnValue(scheduler);
+      let modelSignal!: AbortSignal;
+      mockSendMessageStream.mockImplementationOnce(
+        (_query, signal, promptId) => {
+          modelSignal = signal;
+          return (async function* () {
+            yield {
+              type: ServerLlmEventType.ToolCallRequest,
+              value: {
+                callId: 'foreground-tool',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: promptId,
+              },
+            };
+          })();
+        },
+      );
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery(
+          'printf shell-result',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      const shellSignal = mockExecuteRuntimeShell.mock
+        .calls[0][4] as AbortSignal;
+      act(() => result.current.cancelOngoingRequest());
+      expect(shellSignal.aborted).toBe(true);
+      await act(async () => {
+        await result.current.submitQuery(
+          [
+            {
+              functionResponse: { name: 'tool', response: { output: 'done' } },
+            },
+          ],
+          SendMessageType.ToolResult,
+        );
+      });
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [expect.objectContaining({ callId: 'foreground-tool' })],
+        expect.any(AbortSignal),
+        undefined,
+      );
+      act(() => result.current.cancelOngoingRequest());
+      const apiCalls = mockLogApiCancel.mock.calls.length;
+      const wakeupCalls = cancelWakeups.mock.calls.length;
+      const modelAborted = modelSignal.aborted;
+      const shellAborted = shellSignal.aborted;
+      const wakeupRetained = scheduler
+        .list()
+        .some((job) => job.id === wakeup.id);
+      await act(async () => shell.resolve(shellResult(true)));
+      scheduler.destroy();
+      expect(apiCalls).toBe(1);
+      expect(wakeupCalls).toBe(1);
+      expect(modelAborted).toBe(true);
+      expect(shellAborted).toBe(true);
+      expect(wakeupRetained).toBe(false);
+    });
+
+    it('keeps a detached BTW controller owned and cancels only Shell during older model unwind', async () => {
+      const scheduler = new CronScheduler();
+      const cancelWakeups = vi.spyOn(scheduler, 'cancelAllWakeups');
+      vi.mocked(mockConfig.getCronScheduler).mockReturnValue(scheduler);
+      const main = deferred<void>();
+      const btw = deferred<void>();
+      const shell = deferred<ShellExecutionResult>();
+      let mainSignal: AbortSignal | undefined;
+      let btwSignal: AbortSignal | undefined;
+      mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+      mockSendMessageStream
+        .mockImplementationOnce((_query, signal) => {
+          mainSignal = signal;
+          return (async function* () {
+            await main.promise;
+            yield { type: ServerLlmEventType.UserCancelled };
+          })();
+        })
+        .mockImplementationOnce((_query, signal, promptId) => {
+          btwSignal = signal;
+          return (async function* () {
+            yield {
+              type: ServerLlmEventType.ToolCallRequest,
+              value: {
+                callId: 'btw-detached-tool',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: promptId,
+              },
+            };
+            await btw.promise;
+          })();
+        });
+      const { result } = renderTestHook();
+      let foreground!: Promise<void>;
+      let sideQuestion!: Promise<void>;
+      await act(async () => {
+        foreground = result.current.submitQuery('foreground model');
+      });
+      await waitFor(() => expect(mainSignal).toBeDefined());
+      await act(async () => {
+        sideQuestion = result.current.submitQuery('?btw run a tool');
+      });
+      await waitFor(() => expect(btwSignal).toBeDefined());
+      expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+      act(() => result.current.cancelOngoingRequest());
+      const btwSurvivedMain = !btwSignal!.aborted;
+      const beforeShellApiCalls = mockLogApiCancel.mock.calls.length;
+      const beforeShellWakeupCancels = cancelWakeups.mock.calls.length;
+      const newlyPendingWakeup = scheduler.scheduleWakeup(
+        60,
+        'detached tool wakeup',
+      );
+      await act(async () => {
+        await result.current.submitQuery(
+          'printf shell-result',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      const shellSignal = mockExecuteRuntimeShell.mock
+        .calls[0][4] as AbortSignal;
+      act(() => result.current.cancelOngoingRequest());
+      const shellApiDelta =
+        mockLogApiCancel.mock.calls.length - beforeShellApiCalls;
+      const shellWakeupCancelDelta =
+        cancelWakeups.mock.calls.length - beforeShellWakeupCancels;
+      const newWakeupRemains = scheduler
+        .list()
+        .some((job) => job.id === newlyPendingWakeup.id);
+      const shellWasAborted = shellSignal.aborted;
+      const btwSurvivedShell = !btwSignal!.aborted;
+      await act(async () => {
+        shell.resolve(shellResult(true));
+        main.resolve();
+        btw.resolve();
+        await Promise.all([foreground, sideQuestion]);
+      });
+      act(() => result.current.cancelOngoingRequest());
+      scheduler.destroy();
+      expect(shellApiDelta).toBe(0);
+      expect(shellWakeupCancelDelta).toBe(0);
+      expect(newWakeupRemains).toBe(true);
+      expect(btwSurvivedMain).toBe(true);
+      expect(shellWasAborted).toBe(true);
+      expect(btwSurvivedShell).toBe(true);
+    });
+
+    it('cancels the owning Shell without cancelling loop wakeups while an older aborted model stream is still settling', async () => {
+      const shell = deferred<ShellExecutionResult>();
+      const model = deferred<void>();
+      mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+      mockSendMessageStream.mockImplementationOnce(() =>
+        (async function* () {
+          await model.promise;
+          yield { type: ServerLlmEventType.UserCancelled };
+        })(),
+      );
+      const { result } = renderTestHook();
+      let oldSubmission: Promise<void> | undefined;
+      const scheduler = new CronScheduler();
+      try {
+        await act(async () => {
+          oldSubmission = result.current.submitQuery('old model request');
+        });
+        await waitFor(() =>
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+        );
+        act(() => result.current.cancelOngoingRequest());
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+        const apiCancelsBeforeShell = mockLogApiCancel.mock.calls.length;
+        expect(apiCancelsBeforeShell).toBe(1);
+        const wakeup = scheduler.scheduleWakeup(60, 'next self-paced tick');
+        const cancelWakeups = vi.spyOn(scheduler, 'cancelAllWakeups');
+        vi.mocked(mockConfig.getCronScheduler).mockReturnValue(scheduler);
+        await act(async () => {
+          await result.current.submitQuery(
+            'printf shell-result',
+            SendMessageType.UserQuery,
+            undefined,
+            { shellMode: true },
+          );
+        });
+        act(() => result.current.cancelOngoingRequest());
+        expect(
+          (mockExecuteRuntimeShell.mock.calls[0][4] as AbortSignal).aborted,
+        ).toBe(true);
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(mockLogApiCancel).toHaveBeenCalledTimes(apiCancelsBeforeShell);
+        expect(cancelWakeups).not.toHaveBeenCalled();
+        expect(scheduler.list().some((job) => job.id === wakeup.id)).toBe(true);
+      } finally {
+        await act(async () => {
+          shell.resolve(shellResult(true));
+          model.resolve();
+          await oldSubmission;
+        });
+        scheduler.destroy();
+      }
     });
 
     it('does not clear a live continuation when an older cancelled shell finishes', async () => {

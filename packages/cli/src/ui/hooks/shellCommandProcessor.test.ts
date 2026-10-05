@@ -663,6 +663,52 @@ describe('useShellCommandProcessor', () => {
     expect(setShellInputFocusedMock).toHaveBeenCalledWith(false);
   });
 
+  it.each(['success', 'result rejection', 'launch rejection'])(
+    'settles after %s even if the pwd temp file cannot be removed',
+    async (outcome) => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('/test/dir');
+      vi.mocked(fs.unlinkSync).mockImplementationOnce(() => {
+        throw new Error('EPERM: operation not permitted');
+      });
+      if (outcome === 'result rejection') {
+        mockShellExecutionService.mockResolvedValue({
+          result: Promise.reject(new Error('result failed')),
+        });
+      } else if (outcome === 'launch rejection') {
+        mockShellExecutionService.mockRejectedValue(new Error('launch failed'));
+      }
+      const { result } = renderProcessorHook();
+      act(() => {
+        result.current.handleShellCommand(
+          'printf done',
+          new AbortController().signal,
+        );
+      });
+      let settled = false;
+      const done = onExecMock.mock.calls[0][0] as Promise<void>;
+      void done.then(() => {
+        settled = true;
+      });
+      await act(async () => {
+        if (outcome === 'success') {
+          resolveExecutionPromise(createMockServiceResult());
+        }
+      });
+      await vi.waitFor(() => expect(settled).toBe(true));
+      expect(fs.unlinkSync).toHaveBeenCalledTimes(1);
+      expect(addItemToHistoryMock).toHaveBeenCalledTimes(2);
+      expect(setShellInputFocusedMock).toHaveBeenLastCalledWith(false);
+      expect(result.current.activeShellPtyId).toBeNull();
+      if (outcome === 'success') {
+        expect(mockLlmClient.addHistory).toHaveBeenCalledTimes(1);
+        expect(addItemToHistoryMock.mock.calls[1][0].tools[0].status).toBe(
+          ToolCallStatus.Success,
+        );
+      }
+    },
+  );
+
   describe('Directory Change Warning', () => {
     it('should show a warning if the working directory changes', async () => {
       const tmpFile = path.join(os.tmpdir(), 'shell_pwd_abcdef.tmp');
