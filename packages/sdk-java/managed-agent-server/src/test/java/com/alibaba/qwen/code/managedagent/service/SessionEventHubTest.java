@@ -105,6 +105,34 @@ class SessionEventHubTest {
     }
 
     @Test
+    void closingTheSameSubscriberTwiceKeepsTheBufferForTheOther()
+            throws Exception {
+        SessionEventHub hub = new SessionEventHub();
+        SessionEventHub.Subscription first = hub.subscribe("tenant",
+                "session");
+        SessionEventHub.Subscription second = hub.subscribe("tenant",
+                "session");
+        first.close();
+        first.close();
+        hub.publish(List.of(event(1)));
+
+        // Observe through the surviving subscriber, never the closed
+        // handle: await on a closed Subscription short-circuits to an
+        // empty Delivery, indistinguishable from an evicted buffer.
+        // Without the idempotency guard in Subscription.close() the second
+        // close decrements references to zero and evicts the buffer while
+        // second is still subscribed, so publish silently no-ops on it.
+        SessionEventHub.Delivery delivery = second.await(0,
+                Duration.ofMillis(10));
+
+        assertThat(delivery.overflowed()).isFalse();
+        assertThat(delivery.events()).extracting(EventRecord::sequence)
+                .containsExactly(1L);
+
+        second.close();
+    }
+
+    @Test
     void publishWakesEveryParkedSubscriber() throws Exception {
         SessionEventHub hub = new SessionEventHub();
         try (SessionEventHub.Subscription first = hub.subscribe("tenant",
