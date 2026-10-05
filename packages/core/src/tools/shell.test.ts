@@ -3294,9 +3294,9 @@ describe('ShellTool', () => {
       });
 
       it('appends the hint when a long-running foreground command exits non-zero', async () => {
-        // "Ran but failed": `error` is reserved for spawn/setup failures (see
-        // shellExecutionService.ts), so exit N leaves `error: null`. Blocked
-        // >60s on a failure, "background it next time" still applies.
+        // Ordinary non-zero exits leave `error: null`; setup and unconfirmed
+        // cleanup can carry an error. After >60s, the hint still applies to
+        // this non-aborted command failure.
         const result = await runFor(75_000, 'flaky.sh', {
           output: '',
           exitCode: 1,
@@ -3308,18 +3308,32 @@ describe('ShellTool', () => {
         ]);
       });
 
-      it('omits the hint on aborted commands (timeout / user-cancel paths surface their own messaging)', async () => {
+      it('keeps cancellation precedence and omits the hint with a cleanup diagnostic', async () => {
         // `tail -f`, not `sleep N`, so the sleep validator doesn't reject it at
         // build time.
         const result = await runFor(120_000, 'tail -f /tmp/never.log', {
-          output: '',
+          output: 'partial output',
           exitCode: null,
           aborted: true,
+          error: new Error('Cleanup could not be confirmed'),
         });
-        expectText(result.llmContent, ['Command was cancelled'], [HINT]);
+        expectText(
+          result.llmContent,
+          ['Command was cancelled', 'partial output'],
+          [HINT, 'Cleanup could not be confirmed'],
+        );
+        expect(result.returnDisplay).toMatchObject({
+          outcome: 'cancelled',
+          output: 'partial output',
+          error: 'Cleanup could not be confirmed',
+        });
+        expect(result.error).toEqual({
+          message: 'Cleanup could not be confirmed',
+          type: ToolErrorType.SHELL_EXECUTE_ERROR,
+        });
       });
 
-      it('omits the hint on the timeout path (combinedSignal aborted, signal not)', async () => {
+      it('keeps timeout precedence and omits the hint with a cleanup diagnostic', async () => {
         // `aborted: true` above is the user-cancel branch. The TIMEOUT branch
         // (`combinedSignal.aborted && !signal.aborted`) needs an aborted
         // combined signal, pinned so flipping the suppression check
@@ -3335,11 +3349,26 @@ describe('ShellTool', () => {
           output: 'partial',
           exitCode: null,
           aborted: true,
+          error: new Error('Cleanup could not be confirmed'),
         });
         const result = await promise;
 
         expect(result.llmContent).toContain('Command timed out after 60000ms');
-        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_TIMEOUT);
+        const summary =
+          'Command timed out after 60000ms before it could complete.';
+        expect(result.error).toEqual({
+          message: summary,
+          type: ToolErrorType.EXECUTION_TIMEOUT,
+        });
+        expect(result.returnDisplay).toMatchObject({
+          outcome: 'timed_out',
+          output: 'partial',
+          error: summary,
+        });
+        expect(result.llmContent).toContain('partial');
+        expect(result.llmContent).not.toContain(
+          'Cleanup could not be confirmed',
+        );
         expect(result.llmContent).not.toContain(HINT);
       });
 

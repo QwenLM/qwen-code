@@ -567,14 +567,19 @@ describe('useShellCommandProcessor', () => {
   });
 
   it.each([
-    { aborted: true, status: ToolCallStatus.Canceled },
-    { aborted: false, status: ToolCallStatus.Error },
+    {
+      aborted: true,
+      status: ToolCallStatus.Canceled,
+      cancellationPrefix: 'Command was cancelled.\n',
+    },
+    { aborted: false, status: ToolCallStatus.Error, cancellationPrefix: '' },
   ])(
     'preserves cleanup diagnostics with aborted=$aborted as $status',
-    async ({ aborted, status }) => {
+    async ({ aborted, status, cancellationPrefix }) => {
       const cleanupDiagnostic =
         'Process group 12345 did not stop after SIGKILL';
       const output = 'partial command output';
+      const finalOutput = `${cancellationPrefix}${cleanupDiagnostic}\n${output}`;
       const { result } = renderProcessorHook();
       const abortController = new AbortController();
 
@@ -597,10 +602,14 @@ describe('useShellCommandProcessor', () => {
       await act(async () => await execPromise);
 
       const finalToolDisplay = addItemToHistoryMock.mock.calls[1][0].tools[0];
-      expect(finalToolDisplay.resultDisplay).toBe(
-        `${cleanupDiagnostic}\n${output}`,
-      );
+      expect.soft(finalToolDisplay.resultDisplay).toBe(finalOutput);
       expect(finalToolDisplay.status).toBe(status);
+      const modelHistoryText = (
+        vi.mocked(mockLlmClient.addHistory).mock.calls[0]![0].parts![0]! as {
+          text: string;
+        }
+      ).text;
+      expect.soft(modelHistoryText).toContain(`\`\`\`\n${finalOutput}\n\`\`\``);
     },
   );
 

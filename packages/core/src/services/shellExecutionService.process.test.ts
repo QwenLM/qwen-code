@@ -51,8 +51,11 @@ while time.monotonic() < deadline:
             time.sleep(0.01)
     except ChildProcessError:
         print('QWEN_PROCESS_REAPED:' + json.dumps(True), flush=True)
+        if code:
+            print('QWEN_PROCESS_REAPED:' + json.dumps(True), file=sys.stderr, flush=True)
         sys.exit(code)
 print('QWEN_PROCESS_REAPED:' + json.dumps(False), flush=True)
+print('QWEN_PROCESS_REAPED:' + json.dumps(False), file=sys.stderr, flush=True)
 sys.exit(code or 1)
 `;
 
@@ -98,6 +101,7 @@ import { ShellExecutionService } from SERVICE_URL;
 const [directory, scenario, transport] = process.argv.slice(2);
 const realReadFileSync = fs.readFileSync;
 const modeledProcRestriction = scenario.startsWith('restricted-');
+const procReads = { restrictedMount: 0, missing: 0, recycled: 0 };
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const stat = (pid) => {
   try {
@@ -155,13 +159,16 @@ try {
     // Model metadata only: the real mount, UIDs and safety reads stay unchanged.
     fs.readFileSync = (file, ...options) => {
       if (String(file) === '/proc/self/mountinfo') {
+        procReads.restrictedMount++;
         return '86 85 0:30 / /proc rw - proc proc rw,hidepid=2\n';
       }
       if (String(file) === '/proc/' + owned.leader.pid + '/stat') {
         if (scenario === 'restricted-missing') {
+          procReads.missing++;
           throw Object.assign(new Error('Modeled missing leader identity'), { code: 'ENOENT' });
         }
         if (scenario === 'restricted-recycled') {
+          procReads.recycled++;
           const value = realReadFileSync(file, ...options);
           const boundary = value.lastIndexOf(')');
           const fields = value.slice(boundary + 2).trim().split(/\s+/);
@@ -214,12 +221,14 @@ try {
     aborted: result.aborted,
     promoted: result.promoted === true,
     error: result.error?.message ?? null,
+    exitCode: result.exitCode,
+    signal: result.signal,
     descendantRunningAtResult,
     leaderRunningAtResult,
     descendantRunningAfterCleanup: isRunning(owned.descendant),
     leaderRunningAfterCleanup: isRunning(owned.leader),
     leaderObservedTerm: fs.existsSync(directory + '/leader-term'),
-    modeledProcRestriction,
+    procReads,
     resultAfterMs,
     signals,
   };
@@ -242,12 +251,14 @@ interface ProcessResult {
   aborted: boolean;
   promoted: boolean;
   error: string | null;
+  exitCode: number | null;
+  signal: number | null;
   descendantRunningAtResult: boolean;
   leaderRunningAtResult: boolean;
   descendantRunningAfterCleanup: boolean;
   leaderRunningAfterCleanup: boolean;
   leaderObservedTerm: boolean;
-  modeledProcRestriction: boolean;
+  procReads: { restrictedMount: number; missing: number; recycled: number };
   resultAfterMs: number;
   signals: Array<{
     pid: number;
@@ -302,11 +313,29 @@ async function runFixture(
 describe.runIf(canReapDescendants)(
   'POSIX process-group cleanup (real Linux processes with Python subreaper)',
   () => {
+    it('reports a modeled waitpid leak verdict when the supervisor rejects', async () => {
+      const modeledWaitpid = supervisor.replace(
+        'deadline = time.monotonic() + 8',
+        'os.waitpid = lambda *_: (0, 0)\ndeadline = time.monotonic() + 0.02',
+      );
+      await expect(
+        execFileAsync('python3', [
+          '-c',
+          modeledWaitpid,
+          process.execPath,
+          '-e',
+          '',
+        ]),
+      ).rejects.toThrow('QWEN_PROCESS_REAPED:false');
+    });
+
     describe.each(['child_process', 'pty'] as const)('%s', (transport) => {
       it('kills a TERM-ignoring descendant after its leader exits, before resolving', async () => {
         const result = await runFixture(transport, 'survivor');
         expect(result.aborted).toBe(true);
         expect(result.error).toBeNull();
+        expect(result.exitCode).toBe(0);
+        expect(result.signal).toBeNull();
         expect(result.leaderObservedTerm).toBe(true);
         expect(result.leaderRunningAtResult).toBe(false);
         expect(result.descendantRunningAtResult).toBe(false);
@@ -330,6 +359,8 @@ describe.runIf(canReapDescendants)(
         const result = await runFixture(transport, 'no-survivors');
         expect(result.aborted).toBe(true);
         expect(result.error).toBeNull();
+        expect(result.exitCode).toBe(0);
+        expect(result.signal).toBeNull();
         expect(result.descendantRunningAtResult).toBe(false);
         expect(result.descendantRunningAfterCleanup).toBe(false);
         expect(
@@ -384,7 +415,9 @@ describe.runIf(canReapDescendants)(
         'signals an authenticated group on %s despite modeled restricted metadata and reports unconfirmed cleanup',
         async (action) => {
           const result = await runFixture(transport, `restricted-${action}`);
-          expect(result.modeledProcRestriction).toBe(true);
+          expect(result.leaderRunningAtResult).toBe(false);
+          expect(result.descendantRunningAtResult).toBe(false);
+          expect(result.procReads.restrictedMount).toBeGreaterThan(0);
           expect(result.aborted).toBe(action === 'cancel');
           const terms = result.signals.filter(
             (entry) => entry.signal === 'SIGTERM',
@@ -399,11 +432,10 @@ describe.runIf(canReapDescendants)(
             expect(result.leaderObservedTerm).toBe(true);
             expect(kills[0].pid).toBe(terms[0].pid);
           }
-          expect(result.leaderRunningAtResult).toBe(false);
-          expect(result.descendantRunningAtResult).toBe(false);
           expect(result.leaderRunningAfterCleanup).toBe(false);
           expect(result.descendantRunningAfterCleanup).toBe(false);
           expect(result.error).toMatch(/unconfirmed/i);
+          expect(result.error).toContain('Unsupported /proc visibility');
         },
       );
 
@@ -411,7 +443,9 @@ describe.runIf(canReapDescendants)(
         'refuses destructive signals when leader authority is modeled %s under restricted metadata',
         async (identity) => {
           const result = await runFixture(transport, `restricted-${identity}`);
-          expect(result.modeledProcRestriction).toBe(true);
+          expect(
+            result.procReads[identity as 'missing' | 'recycled'],
+          ).toBeGreaterThan(0);
           expect(result.aborted).toBe(true);
           expect(result.error).toMatch(/identity|authenticate|refus/i);
           expect(result.leaderRunningAtResult).toBe(true);

@@ -60,6 +60,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 vi.mock('../hooks/shellCommandProcessor.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../hooks/shellCommandProcessor.js')>();
+  addHistoryMock.mockImplementation(actual.addShellCommandToLlmHistory);
   return {
     ...actual,
     addShellCommandToLlmHistory: addHistoryMock,
@@ -68,6 +69,7 @@ vi.mock('../hooks/shellCommandProcessor.js', async (importOriginal) => {
 
 let currentChat: object | undefined = {};
 const llmClient = {
+  addHistory: vi.fn(),
   getChat: () => {
     if (currentChat === undefined) {
       // core's real shape (R5-7): getChat() throws while the client is
@@ -118,7 +120,8 @@ describe('executeUserShell', () => {
     runtimeShellMock.mockImplementation((_runtime, ...args) =>
       executeMock(...args),
     );
-    addHistoryMock.mockReset();
+    addHistoryMock.mockClear();
+    llmClient.addHistory.mockClear();
     currentChat = {};
     osPlatformMock.mockReturnValue('linux');
   });
@@ -427,14 +430,19 @@ describe('executeUserShell', () => {
   });
 
   it.each([
-    { aborted: true, summary: 'cancelled', glyph: '-' },
-    { aborted: false, summary: 'error', glyph: 'x' },
+    {
+      aborted: true,
+      summary: 'cancelled',
+      glyph: '-',
+      cancellationPrefix: 'Command was cancelled.\n',
+    },
+    { aborted: false, summary: 'error', glyph: 'x', cancellationPrefix: '' },
   ])(
     'preserves cleanup diagnostics with aborted=$aborted as $summary',
-    async ({ aborted, summary, glyph }) => {
+    async ({ aborted, summary, glyph, cancellationPrefix }) => {
       const cleanupDiagnostic = 'Process group 4242 did not stop after SIGKILL';
       const output = 'partial command output';
-      const finalOutput = `${cleanupDiagnostic}\n${output}`;
+      const finalOutput = `${cancellationPrefix}${cleanupDiagnostic}\n${output}`;
       const { events, done, resolveResult, abort } = setup();
       if (aborted) abort();
       resolveResult(
@@ -453,7 +461,7 @@ describe('executeUserShell', () => {
       );
       const tool = items.find((item) => item.kind === 'tool');
       if (tool?.kind !== 'tool') throw new Error('no shell tool card');
-      expect(tool.output).toBe(finalOutput);
+      expect.soft(tool.output).toBe(finalOutput);
       expect(toolStatusMeta(tool)).toMatchObject({
         glyph,
         strikethrough: aborted,
@@ -464,11 +472,12 @@ describe('executeUserShell', () => {
         success: false,
         summary,
       });
-      expect(addHistoryMock).toHaveBeenCalledWith(
-        llmClient,
-        'echo hello',
-        finalOutput,
-      );
+      expect
+        .soft(addHistoryMock)
+        .toHaveBeenCalledWith(llmClient, 'echo hello', finalOutput);
+      const modelHistoryText = llmClient.addHistory.mock.calls[0]![0].parts[0]
+        .text as string;
+      expect.soft(modelHistoryText).toContain(`\`\`\`\n${finalOutput}\n\`\`\``);
     },
   );
 

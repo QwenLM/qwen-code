@@ -42,6 +42,8 @@ const owners: OwnedPosixProcessGroup[] = [];
 let kill: MockInstance<typeof process.kill>;
 let signalAction: (signal: string | number | undefined) => void;
 let mountInfo: string;
+let bootValue: string | null;
+let cachedBootId: string | undefined;
 
 function errno(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(code), { code });
@@ -82,6 +84,14 @@ function signals(): Array<string | number | undefined> {
     .filter((signal) => signal !== 0);
 }
 
+function deliverGroupSignal(signal: string | number | undefined): void {
+  if (signal === 'SIGKILL') {
+    for (const fixture of members.values()) {
+      if (fixture.pgid === PGID) fixture.state = 'Z';
+    }
+  }
+}
+
 beforeEach(() => {
   Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
   vi.useFakeTimers({
@@ -91,7 +101,17 @@ beforeEach(() => {
   member(PGID);
   member(PGID + 1);
   mountInfo = '86 85 0:30 / /proc ro,nosuid master:2 - proc proc rw\n';
-  boot.mockReturnValue('00000000-0000-0000-0000-000000000000');
+  bootValue = '00000000-0000-0000-0000-000000000000';
+  cachedBootId = undefined;
+  // readLocalBootId retains its first successful read for the life of the process.
+  boot.mockImplementation(() => {
+    if (cachedBootId !== undefined) return cachedBootId;
+    if (bootValue !== null && /^[0-9a-f-]+$/i.test(bootValue)) {
+      cachedBootId = bootValue;
+      return cachedBootId;
+    }
+    return null;
+  });
   list.mockImplementation(() =>
     [...members.keys()].map(String).concat('self', 'sys'),
   );
@@ -102,14 +122,11 @@ beforeEach(() => {
     if (!fixture) throw errno('ENOENT');
     return stat(fixture);
   });
-  signalAction = (signal) => {
-    if (signal === 'SIGKILL') {
-      for (const fixture of members.values()) fixture.state = 'Z';
-    }
-  };
+  signalAction = deliverGroupSignal;
   kill = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
     if (pid !== -PGID) throw new Error(`Rejected nonfixture target ${pid}`);
-    if (!members.size) throw errno('ESRCH');
+    if (![...members.values()].some((fixture) => fixture.pgid === PGID))
+      throw errno('ESRCH');
     signalAction(signal);
     return true;
   });
@@ -206,6 +223,23 @@ describe('OwnedPosixProcessGroup', () => {
     expect(signals()).toEqual(['SIGTERM']);
   });
 
+  it('accepts owned-group ESRCH when unrelated process-table records remain', async () => {
+    member(PGID + 2, { pgid: 4500, sid: 4500 });
+    signalAction = (signal) => {
+      if (signal === 'SIGTERM') {
+        members.delete(PGID);
+        members.delete(PGID + 1);
+      }
+      deliverGroupSignal(signal);
+    };
+    const owner = own();
+    expect(await owner.cancel()).toBeNull();
+    owner.force();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(signals()).toEqual(['SIGTERM']);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('uses zombie witnesses to authenticate live descendants', async () => {
     signalAction = (signal) => {
       if (signal === 'SIGTERM') {
@@ -258,13 +292,14 @@ describe('OwnedPosixProcessGroup', () => {
       list.mockReturnValue([String(PGID)]);
       signalAction = (signal) => {
         if (signal === 0 && permissionError) throw errno('EPERM');
+        deliverGroupSignal(signal);
       };
       const completion = own().cancel();
       await vi.advanceTimersByTimeAsync(400);
       const error = await completion;
       expect(error).toBeInstanceOf(Error);
       expect(error?.message).toContain('Unsupported /proc visibility');
-      expect(members.get(PGID + 1)!.state).toBe('S');
+      expect(members.get(PGID + 1)!.state).toBe('Z');
       expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
     },
   );
@@ -361,12 +396,13 @@ describe('OwnedPosixProcessGroup', () => {
         members.get(PGID)!.state = 'Z';
         mountInfo = mountInfo.replace('proc rw', 'proc rw,hidepid=2');
       }
+      deliverGroupSignal(signal);
     };
     const completion = own().cancel();
     await vi.advanceTimersByTimeAsync(400);
     const error = await completion;
     expect(error?.message).toContain('Unsupported /proc visibility');
-    expect(members.get(PGID + 1)!.state).toBe('S');
+    expect(members.get(PGID + 1)!.state).toBe('Z');
     expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
   });
 
@@ -375,6 +411,7 @@ describe('OwnedPosixProcessGroup', () => {
     list.mockReturnValue([String(PGID)]);
     signalAction = (signal) => {
       if (signal === 'SIGTERM') members.delete(PGID);
+      deliverGroupSignal(signal);
     };
     const owner = own();
     expect(await owner.cancel()).toBeInstanceOf(Error);
@@ -394,13 +431,13 @@ describe('OwnedPosixProcessGroup', () => {
     });
     signalAction = (signal) => {
       if (signal === 'SIGTERM') members.delete(PGID);
-      if (signal === 'SIGKILL') members.get(PGID + 1)!.state = 'Z';
+      deliverGroupSignal(signal);
     };
     const completion = own().cancel();
     await vi.advanceTimersByTimeAsync(400);
     expect((await completion)?.message).toContain('Cleanup unconfirmed');
     expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
-    expect(members.get(unreadablePid)!.state).toBe('S');
+    expect(members.get(PGID + 1)!.state).toBe('Z');
   });
 
   it('confirms a stopped group when the modeled view becomes complete after KILL', async () => {
@@ -497,7 +534,10 @@ describe('OwnedPosixProcessGroup', () => {
     Number.NaN,
     Number.POSITIVE_INFINITY,
   ])('refuses invalid PGID %s', async (pid) => {
-    expect(await own(pid).cancel()).toBeInstanceOf(Error);
+    expect((await own(pid).cancel())?.message).toBe(
+      `Refusing unsafe process group ${pid}`,
+    );
+    expect(read).not.toHaveBeenCalled();
     expect(kill).not.toHaveBeenCalled();
   });
 
@@ -543,6 +583,29 @@ describe('OwnedPosixProcessGroup', () => {
     expect(signals()).toEqual(['SIGTERM']);
   });
 
+  it('does not adopt a modeled same-PGID member from a foreign session as a surviving witness', async () => {
+    // Linux cannot put one PGID in two sessions. This malformed table tests the
+    // adoption boundary, not whether a group signal would spare such a member.
+    const foreign = member(PGID + 2, { sid: 4500 });
+    signalAction = (signal) => {
+      if (signal === 'SIGTERM') {
+        members.delete(PGID);
+        members.delete(PGID + 1);
+      }
+      deliverGroupSignal(signal);
+    };
+    const owner = own();
+    const completion = owner.cancel();
+    await vi.advanceTimersByTimeAsync(500);
+    expect((await completion)?.message).toContain(
+      'identities are gone or changed',
+    );
+    owner.force();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(signals()).toEqual(['SIGTERM']);
+    expect(foreign.state).toBe('S');
+  });
+
   it.each(['start', 'pgid', 'sid'] as const)(
     'refuses delayed escalation when the surviving witness changes %s',
     async (field) => {
@@ -551,6 +614,9 @@ describe('OwnedPosixProcessGroup', () => {
           members.delete(PGID);
           if (field === 'start') members.get(PGID + 1)!.start = '999999';
           else members.get(PGID + 1)![field] = 4500;
+          // If the old witness leaves the PGID, keep its numeric group live
+          // with an unobserved replacement rather than modeling ESRCH.
+          if (field === 'pgid') member(PGID + 2);
         }
       };
       expect(await own().cancel()).toBeInstanceOf(Error);
@@ -596,13 +662,41 @@ describe('OwnedPosixProcessGroup', () => {
     expect(signals()).toEqual([]);
   });
 
-  it('refuses missing identity data after TERM instead of escalating blindly', async () => {
+  it('refuses TERM when its last identity changes after the snapshot recheck', async () => {
+    members.delete(PGID + 1);
+    const readStat = read.getMockImplementation()!;
+    let readsAfterSnapshot: number | undefined;
+    list.mockImplementation(() => {
+      readsAfterSnapshot = 0;
+      return [String(PGID)];
+    });
+    read.mockImplementation((file: unknown) => {
+      if (file === `/proc/${PGID}/stat` && readsAfterSnapshot !== undefined) {
+        // The snapshot record and its continuity recheck still match. The next
+        // read, immediately before the signal, observes a different birth.
+        if (++readsAfterSnapshot === 3) member(PGID, { start: '999999' });
+      }
+      return readStat(file);
+    });
+    const owner = own();
+    expect((await owner.cancel())?.message).toContain(
+      'no authenticated member',
+    );
+    owner.force();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(signals()).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retains the cached boot identity after its underlying file becomes unavailable', async () => {
     signalAction = (signal) => {
-      if (signal === 'SIGTERM') boot.mockReturnValue(null);
+      if (signal === 'SIGTERM') bootValue = null;
+      deliverGroupSignal(signal);
     };
-    expect(await own().cancel()).toBeInstanceOf(Error);
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(signals()).toEqual(['SIGTERM']);
+    const completion = own().cancel();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(await completion).toBeNull();
+    expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
   });
 
   it('does not mistake an unreadable descendant beside a zombie witness for completed cleanup', async () => {
@@ -628,16 +722,51 @@ describe('OwnedPosixProcessGroup', () => {
     expect(kill).not.toHaveBeenCalled();
   });
 
-  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY])(
-    'refuses invalid grace period %s',
-    async (grace) => {
-      expect(await own().cancel(grace)).toBeInstanceOf(Error);
+  it('refuses a stat record that echoes a different PID', async () => {
+    const readStat = read.getMockImplementation()!;
+    read.mockImplementation((file: unknown) =>
+      file === `/proc/${PGID}/stat`
+        ? stat({ ...members.get(PGID)!, pid: PGID + 1 })
+        : readStat(file),
+    );
+    const completion = own().cancel();
+    await vi.advanceTimersByTimeAsync(400);
+    const error = await completion;
+    expect((error?.cause as Error).message).toBe(
+      `Invalid Linux process identity for ${PGID}`,
+    );
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['negative PGID', { pgid: -1 }],
+    ['unsafe PGID', { pgid: Number.MAX_SAFE_INTEGER + 1 }],
+    ['negative SID', { sid: -1 }],
+    ['fractional SID', { sid: 1.5 }],
+    ['nonnumeric start time', { start: '41000x' }],
+    ['multi-character state', { state: 'SS' }],
+    ['nonalphabetic state', { state: '1' }],
+  ] satisfies Array<[string, Partial<FixtureMember>]>)(
+    'refuses an individually malformed original %s before authenticating it',
+    async (_description, malformed) => {
+      const readStat = read.getMockImplementation()!;
+      read.mockImplementation((file: unknown) =>
+        file === `/proc/${PGID}/stat`
+          ? stat({ ...members.get(PGID)!, ...malformed })
+          : readStat(file),
+      );
+      const completion = own().cancel();
+      await vi.advanceTimersByTimeAsync(400);
+      const error = await completion;
+      expect((error?.cause as Error).message).toBe(
+        `Invalid Linux process identity for ${PGID}`,
+      );
       expect(kill).not.toHaveBeenCalled();
     },
   );
 
   it('refuses absent start tokens rather than adopting a liveness-only identity', async () => {
-    boot.mockReturnValue(null);
+    bootValue = null;
     expect(await own().cancel()).toBeInstanceOf(Error);
     expect(kill).not.toHaveBeenCalled();
   });

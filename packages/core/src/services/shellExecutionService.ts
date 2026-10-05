@@ -33,13 +33,15 @@ import { getShellContextEnvVars } from './shellContextEnv.js';
 import { noteConPtyHostReleased, releaseConPtyHost } from './conpty-host.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
-import { OwnedPosixProcessGroup } from './posix-process-group.js';
+import {
+  OwnedPosixProcessGroup,
+  SHELL_CANCEL_GRACE_MS as SIGKILL_TIMEOUT_MS,
+} from './posix-process-group.js';
 
 const debugLogger = createDebugLogger('SHELL_EXECUTION');
 
 const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_BUFFERED_OUTPUT_BYTES_CEILING = 256 * 1024 * 1024;
-const SIGKILL_TIMEOUT_MS = 200;
 /**
  * streamStdout settle fence: after the child exits, trailing stdio keeps
  * flowing until 'close' — but 'close' also waits on *inherited* fds, so a
@@ -1815,7 +1817,7 @@ export class ShellExecutionService {
         const performCancelKill = async (): Promise<void> => {
           if (!child.pid || exited) return;
           if (posixGroup) {
-            const cleanupError = await posixGroup.cancel(SIGKILL_TIMEOUT_MS);
+            const cleanupError = await posixGroup.cancel();
             error ??= cleanupError;
             // A permission or identity failure need not emit a leader exit.
             // Settle with the cleanup error rather than waiting indefinitely.
@@ -2457,6 +2459,10 @@ export class ShellExecutionService {
 
         let ptySettled = false;
         let recordedPtyExit: { exitCode: number; signal?: number } | undefined;
+        let resolvePtyExit!: () => void;
+        const nativePtyExit = new Promise<void>((resolve) => {
+          resolvePtyExit = resolve;
+        });
         let ptyDrain: Promise<void> | undefined;
         const drainPtyOutput = () => {
           if (ptyDrain) return ptyDrain;
@@ -2468,10 +2474,14 @@ export class ShellExecutionService {
             );
             const drain = () =>
               new Promise<void>((res) => setImmediate(res)).then(flushChain);
-            await Promise.race([
-              flushChain().then(drain).then(drain),
-              deadline,
-            ]);
+            const flush = async () => {
+              // node-pty can defer onExit until its socket closes after group cleanup.
+              // Preserve that status within the existing output-drain deadline.
+              if (posixGroup?.cancelling && !recordedPtyExit)
+                await nativePtyExit;
+              await flushChain().then(drain).then(drain);
+            };
+            await Promise.race([flush(), deadline]);
           })();
           return ptyDrain;
         };
@@ -2550,6 +2560,7 @@ export class ShellExecutionService {
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
             exited = true;
             recordedPtyExit = { exitCode, signal };
+            resolvePtyExit();
             abortSignal.removeEventListener('abort', abortHandler);
             if (!posixGroup?.cancelling) releaseGroup();
 
@@ -2969,7 +2980,7 @@ export class ShellExecutionService {
           // abort after a normal exit returns early and never sets this.
           cancelKillDispatched = true;
           if (posixGroup) {
-            const cleanupError = await posixGroup.cancel(SIGKILL_TIMEOUT_MS);
+            const cleanupError = await posixGroup.cancel();
             error ??= cleanupError;
             await drainPtyOutput();
             await finalizePty(

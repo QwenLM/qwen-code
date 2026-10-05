@@ -309,7 +309,10 @@ export const useShellCommandProcessor = (
                 finalStatus = result.aborted
                   ? ToolCallStatus.Canceled
                   : ToolCallStatus.Error;
-                finalOutput = `${result.error.message}\n${finalOutput}`;
+                const cancellationPrefix = result.aborted
+                  ? 'Command was cancelled.\n'
+                  : '';
+                finalOutput = `${cancellationPrefix}${result.error.message}\n${finalOutput}`;
               } else if (result.aborted) {
                 finalStatus = ToolCallStatus.Canceled;
                 finalOutput = `Command was cancelled.\n${finalOutput}`;

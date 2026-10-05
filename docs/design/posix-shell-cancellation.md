@@ -66,14 +66,19 @@ can overrun them, and transport draining adds latency. Return
 incomplete cleanup through the existing result
 `error` field; successful signal dispatch alone does not establish termination.
 Keep `aborted` independent of that diagnostic. Both TUI shell processors retain
-the cancellation status and display the diagnostic with the captured output.
+the cancellation status, cancellation marker and diagnostic with the captured
+output, including the text added to LLM history.
 
 Synchronous service/app-exit cleanup consumes the same force action and cancels
 grace escalation. Actual app exit cannot await confirmation, but the KILL
 dispatch is synchronous. Natural completion releases ownership immediately;
 background promotion transfers it without signals. Released owners and delayed
 timers cannot signal the group again. The execution result remains single-fire.
-Retain native exit evidence and the existing output-drain fences after cleanup;
+For PTY cancellation, await native exit evidence within the existing 200 ms
+output-drain timer budget, alongside the output fences. If no native event
+arrives within that budget, unavailable exit fields remain null. This adds no
+further timer budget and does not wait indefinitely.
+Retain the existing output-drain fences after cleanup;
 detach foreground capture before settling an error while the leader is alive.
 Cleanup timers remain referenced while settlement is pending; unref could let
 a caller awaiting only the result exit before confirmation. Full synchronous
@@ -94,8 +99,15 @@ Real Linux child-process and PTY fixtures cover surviving descendants, no
 survivors, repeated cleanup, natural completion and promotion, plus modeled
 restricted metadata with authenticated and missing/replaced identities. The
 real processes receive signals; the restrictions are mocked. Processor tests
-cover cancellation rendering with a cleanup diagnostic and an ordinary error
-control through the actual Ink/OpenTUI paths. Fixtures have
+cover cancellation display and actual LLM-history text with a cleanup diagnostic
+and an ordinary error control through the Ink/OpenTUI processor paths. Deferred
+PTY callback tests include deterministic timers and a real owned transport with
+a modeled callback delay; they do not establish a naturally occurring delay of
+that duration. Malformed stat and foreign-session table tests model invalid
+inputs, not kernel-reachable same-PGID/different-session states. Tool tests pin
+the existing cancellation/timeout precedence and hint suppression. Broader
+scheduler and sandbox diagnostic projection remains outside this repair.
+Fixtures have
 independent lifetime bounds, identity-guarded teardown and a dedicated subreaper.
 Windows unit cases verify that its existing path is retained; macOS runtime
 behavior and model/provider workflows are not validated by these tests.

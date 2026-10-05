@@ -17,6 +17,7 @@ interface MemberIdentity {
 
 const POLL_MS = 25;
 const CONFIRM_MS = 200;
+export const SHELL_CANCEL_GRACE_MS = 200;
 
 class InvalidProcIdentitySourceError extends Error {}
 
@@ -146,17 +147,13 @@ export class OwnedPosixProcessGroup {
     return this.promise !== undefined && !this.released;
   }
 
-  cancel(graceMs = 200): Promise<Error | null> {
+  cancel(): Promise<Error | null> {
     if (this.promise) return this.promise;
     const completion = this.begin();
-    if (!Number.isFinite(graceMs) || graceMs < 0) {
-      this.finish(new Error(`Invalid process-group grace period ${graceMs}`));
-      return completion;
-    }
     if (!this.prepare()) return completion;
     this.signal('SIGTERM');
     if (!this.done && !this.killAttempted) {
-      this.wait(performance.now() + graceMs, () => this.force());
+      this.wait(performance.now() + SHELL_CANCEL_GRACE_MS, () => this.force());
     }
     return completion;
   }
