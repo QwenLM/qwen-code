@@ -69,6 +69,7 @@ export interface HostedMonitorWakeDeps {
 export class HostedMonitorWakeScheduler {
   private inFlight = false;
   private closed = false;
+  private pendingKick = false;
   private retry: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
@@ -78,15 +79,26 @@ export class HostedMonitorWakeScheduler {
 
   /**
    * An observation notification landed (or a Session just opened): try to
-   * deliver what's pending. Idempotent — one pump per Session at a time.
+   * deliver what's pending. Idempotent — one pump per Session at a time,
+   * and a kick that lands mid-pump is remembered for the one after it, so
+   * a notification committed while this pump's last read ran is never
+   * swallowed with it.
    */
   kick(): void {
-    if (this.closed || this.inFlight) return;
+    if (this.closed) return;
+    if (this.inFlight) {
+      this.pendingKick = true;
+      return;
+    }
     this.inFlight = true;
     void this.pump()
       .catch((cause: unknown) => this.deps.failed(cause))
       .finally(() => {
         this.inFlight = false;
+        if (this.pendingKick && !this.closed) {
+          this.pendingKick = false;
+          this.kick();
+        }
       });
   }
 
@@ -104,7 +116,13 @@ export class HostedMonitorWakeScheduler {
     for (;;) {
       if (this.closed) return;
       const state = this.deps.state();
-      if (state === 'blocked') return;
+      // A transiently blocked Session — an MCP or Hook operation in
+      // flight, or an activation that has not come up yet — has no other
+      // kick source, so the reminder arms its own retry here too.
+      if (state === 'blocked') {
+        this.armRetry();
+        return;
+      }
       const next = await this.deps.next();
       if (next === undefined) return;
       if (state === 'busy' || this.deps.state() === 'busy') {
@@ -143,11 +161,12 @@ export class HostedMonitorWakeScheduler {
 }
 
 /**
- * The unadmittable path: every monitor notification still pending settles
- * cancelled without a model turn, under the turn-result record's own
- * idempotency key. Called on the close path so no wedged notification
- * parks the Session as `hosted_turn_recovery_required` at its next open;
- * a blocked Session is settled by its owner instead, not here.
+ * The unadmittable path: a monitor notification that never ran a turn
+ * settles cancelled without a model turn, under the turn-result record's
+ * own idempotency key. Called on the close path so no wedged notification
+ * parks the Session as `hosted_turn_recovery_required` at its next open.
+ * A notification whose wake turn already started belongs to the recovery
+ * fleet, never to a `cancelled` line on top of a turn that ran.
  */
 export async function settlePendingMonitorInputs(params: {
   readonly authority: LocalManagedSessionAuthority;
@@ -160,9 +179,14 @@ export async function settlePendingMonitorInputs(params: {
   // default page and leave the Session's owed inputs unsettled — which is
   // exactly the wedge this close-path settle exists to prevent.
   const authority = params.authority;
+  const attempted = await params.sink.project();
   const pending = pendingSessionInputs(
     authority.eventsInSequenceRange(1, authority.committedSequence),
-  ).filter((input) => input.source === 'monitor');
+  ).filter(
+    (input) =>
+      input.source === 'monitor' &&
+      !wakeHasPriorAttempt(attempted, input.turnId),
+  );
   for (const input of pending) {
     const settle: ChatRecord = {
       uuid: randomUUID(),

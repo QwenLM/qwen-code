@@ -16,6 +16,15 @@ import {
 // nothing new it has not already read. See
 // docs/design/2026-10-03-managed-shell-monitor-runtime.md.
 
+/** Legacy's per-line cap, verbatim from `monitorRegistry.ts`. */
+const EVENT_LINE_TRUNCATE = 2000;
+
+function truncateEventLine(line: string): string {
+  return line.length > EVENT_LINE_TRUNCATE
+    ? line.slice(0, EVENT_LINE_TRUNCATE) + '...[truncated]'
+    : line;
+}
+
 /** The text of one due monitor observation, wrapped for its matching turn. */
 export function monitorNotificationText(params: {
   readonly monitorId: string;
@@ -36,7 +45,11 @@ export function monitorNotificationText(params: {
     '<status>running</status>',
     `<event-count>${params.eventCount}</event-count>`,
     `<summary>Monitor "${escapeXml(truncateNotificationLabel(params.description))}" emitted event #${params.eventCount}.</summary>`,
-    `<result>${escapeXml(params.lines.map((line) => stripDisplayControlChars(line)).join('\n'))}</result>`,
+    `<result>${escapeXml(
+      params.lines
+        .map((line) => truncateEventLine(stripDisplayControlChars(line)))
+        .join('\n'),
+    )}</result>`,
     '</task-notification>',
   );
   return parts.join('\n');

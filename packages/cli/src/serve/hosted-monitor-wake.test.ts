@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -202,6 +203,67 @@ describe('HostedMonitorWakeScheduler', () => {
     scheduler.close();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(ran).toEqual([]);
+  });
+
+  it('retries a transiently blocked Session once it clears', async () => {
+    const queue: HostedMonitorWakeTurn[] = [{ turnId: 'm:1', text: 'x' }];
+    let blocked = true;
+    const ran: string[] = [];
+    const scheduler = new HostedMonitorWakeScheduler(
+      {
+        next: async () => queue[0],
+        state: () => (blocked ? 'blocked' : 'idle'),
+        runTurn: async (turn) => {
+          ran.push(turn.turnId);
+          queue.shift();
+          return 'settled';
+        },
+        failed: () => {
+          throw new Error('pump must not fail here');
+        },
+      },
+      10,
+    );
+    scheduler.kick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(ran).toEqual([]);
+    expect(queue).toHaveLength(1);
+    blocked = false;
+    await poll(() => ran.length === 1);
+    expect(ran).toEqual(['m:1']);
+    scheduler.close();
+  });
+
+  it('a kick that lands mid-pump runs the turn that arrived with it', async () => {
+    const queue: HostedMonitorWakeTurn[] = [{ turnId: 'm:1', text: 'x' }];
+    const ran: string[] = [];
+    let reads = 0;
+    const scheduler = new HostedMonitorWakeScheduler({
+      next: async () => {
+        reads += 1;
+        if (reads === 2) {
+          // The notification commits while this pump's again-read runs:
+          // without remembering it, the pump exits with the turn unseen.
+          queue.push({ turnId: 'm:2', text: 'y' });
+          scheduler.kick();
+          return undefined;
+        }
+        return queue[0];
+      },
+      state: () => 'idle',
+      runTurn: async (turn) => {
+        ran.push(turn.turnId);
+        queue.shift();
+        return 'settled';
+      },
+      failed: () => {
+        throw new Error('pump must not fail here');
+      },
+    });
+    scheduler.kick();
+    await poll(() => ran.length === 2);
+    expect(ran).toEqual(['m:1', 'm:2']);
+    scheduler.close();
   });
 });
 
@@ -472,6 +534,121 @@ describe('settlePendingMonitorInputs', () => {
           authority.eventsInSequenceRange(1, authority.committedSequence),
         ),
       ).toEqual([]);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  it('leaves an already-attempted wake turn to its recovery owner', async () => {
+    // The wake turn ran and parked with its input still owed: canceling it
+    // here would mint a "cancelled" line on top of a turn that ran and lies
+    // to the recovery fleet that closes over the parked one.
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-hosted-wake-attempted-'),
+    );
+    temporaryDirectories.add(root);
+    const runtimeBaseDir = path.join(root, 'runtime');
+    const transcriptPath = path.join(root, 'chats', `${sessionId}.jsonl`);
+    await fs.mkdir(runtimeBaseDir, { recursive: true });
+    await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+    const lease = await SessionWriterLease.acquire({
+      runtimeBaseDir,
+      sessionId,
+      transcriptPath,
+    });
+    try {
+      const resourceStore = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir,
+        sessionKey,
+      });
+      const session = await openManagedSession({
+        runtimeBaseDir,
+        sessionId,
+        transcriptPath,
+        sessionKey,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: 'worker-test',
+        activationLeaseDurationMs: 60_000,
+        lease,
+        resourceStore,
+        create: {
+          definitionRef: await resourceStore.publish(
+            'managed-definition',
+            Buffer.from('{}', 'utf8'),
+          ),
+          rootSnapshotRef: await resourceStore.publish(
+            'managed-root',
+            Buffer.from('{}', 'utf8'),
+          ),
+          createdBy: 'test',
+        },
+      });
+      const authority = session.authority;
+      const store = session.resources;
+      const monitors = new HostedMonitorSession(
+        { authority, resources: store },
+        sessionKey,
+      );
+      await monitors.admit({
+        monitorId: 'monitor-1',
+        ownerScopeId: 'scope-main',
+        executionCallId: 'call-1',
+        args: { command: 'du -sh .' },
+        maxEvents: 100,
+        idleTimeoutMs: 60_000,
+        debounceMs: 1000,
+      });
+      await monitors.dispatchStarted('monitor-1', BINDING);
+      await monitors.attach('monitor-1', BINDING, { watch: 'started' });
+      await monitors.observe(
+        'monitor-1',
+        { lines: ['one'] },
+        {
+          input: {
+            inputId: 'monitor-1:notify:1',
+            turnId: 'monitor-1:notify:1',
+            source: 'monitor',
+            contentRef: await store.publish(
+              'managed-input',
+              Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+            ),
+            deadline: null,
+            admissionRef: await store.publish(
+              'managed-admission',
+              Buffer.from('{}', 'utf8'),
+            ),
+            wakeReason: 'input',
+          },
+        },
+      );
+      // The turn its notification started left its user record behind.
+      await session.sink.write({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        daemonPromptId: 'monitor-1:notify:1',
+        cwd: '/workspace',
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'the wake' }] },
+      });
+      const settled = await settlePendingMonitorInputs({
+        authority,
+        sink: session.sink,
+        sessionId,
+        cwd: '/workspace',
+      });
+      expect(settled).toBe(0);
+      expect(
+        authority.readEvents().filter((event) => event.kind === 'turn.settled'),
+      ).toHaveLength(0);
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ).map((input) => input.turnId),
+      ).toEqual(['monitor-1:notify:1']);
     } finally {
       await lease.release().catch(() => undefined);
     }

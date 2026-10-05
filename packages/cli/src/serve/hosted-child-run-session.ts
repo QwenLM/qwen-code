@@ -146,7 +146,7 @@ export class HostedChildRunSession {
         startReceiptRef,
         run: {
           ...previous.run,
-          ...this.step(previous.run.state),
+          state: 'running',
           execution: 'running_attached',
           runtime,
         },
@@ -180,11 +180,7 @@ export class HostedChildRunSession {
           throw new Error(`Shell ${shellId} output may only advance forward.`);
         }
       }
-      return {
-        ...previous,
-        outputRef,
-        run: { ...previous.run, ...this.step(previous.run.state) },
-      };
+      return { ...previous, outputRef };
     });
   }
 
@@ -193,7 +189,6 @@ export class HostedChildRunSession {
     return this.revise(shellId, (previous) => ({
       ...previous,
       stopRequested: true,
-      run: { ...previous.run, ...this.step(previous.run.state) },
     }));
   }
 
@@ -243,17 +238,6 @@ export class HostedChildRunSession {
       stopReason: 'stop_requested',
       run: { ...previous.run, state: 'cancelled', execution: 'settled' },
     }));
-  }
-
-  /** A live run line never loops: identical steps alternate the two live
-   * states, and a terminal line is never stepped back to life. */
-  private step(state: ChildRun['run']['state']): {
-    readonly state: ChildRun['run']['state'];
-  } {
-    if (state === 'settled' || state === 'failed' || state === 'cancelled') {
-      return { state };
-    }
-    return { state: state === 'running' ? 'waiting' : 'running' };
   }
 
   private revise(

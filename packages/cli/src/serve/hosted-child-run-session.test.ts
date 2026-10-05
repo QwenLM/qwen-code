@@ -186,7 +186,7 @@ describe('HostedChildRunSession', () => {
         ),
       ).toEqual({ pid: 4242 });
       expect(attached.body.run).toMatchObject({
-        state: 'waiting',
+        state: 'running',
         execution: 'running_attached',
       });
 
@@ -208,14 +208,16 @@ describe('HostedChildRunSession', () => {
         orchestrator.advanceOutput('shell-1', manifestA),
       ).rejects.toThrow('may only advance forward');
       expect(committed(authority).body.outputRef).toEqual(manifestB);
-      // A replay of the very same reference is not a refusal: a redelivered
-      // advance must never wedge the Shell's exit leg. It still commits one
-      // liveness step, because the live run line alternates by design.
+      // A replay of the very same reference is not a refusal and commits
+      // nothing: a redelivered advance must never wedge the Shell's exit
+      // leg, and since it changes no field, the deep-equal skip owns it.
       await orchestrator.advanceOutput('shell-1', manifestB);
       expect(committed(authority).body.outputRef).toEqual(manifestB);
-      expect(committed(authority).revision).toBe(6);
-      // Live revisions step the run line: waiting after the running before it.
-      expect(advanced.body.run.state).toBe('waiting');
+      expect(committed(authority).revision).toBe(5);
+      // The live run line holds its state through every advance of a
+      // running process — the projection's `waiting` means paused, never
+      // "the second revision".
+      expect(advanced.body.run.state).toBe('running');
 
       harness.now = 5_000;
       await orchestrator.settleExited('shell-1', {
@@ -223,7 +225,7 @@ describe('HostedChildRunSession', () => {
         exitSignal: null,
       });
       const settled = committed(authority);
-      expect(settled.revision).toBe(7);
+      expect(settled.revision).toBe(6);
       expect(settled.body).toMatchObject({
         stopReason: 'exited',
         exitCode: 0,
@@ -276,7 +278,6 @@ describe('HostedChildRunSession', () => {
       await orchestrator.requestStop('shell-1');
       const draining = committed(authority);
       expect(draining.body.stopRequested).toBe(true);
-      // The attach left the line waiting; the stop request steps it back.
       expect(draining.body.run.state).toBe('running');
       await orchestrator.settleStopRequested('shell-1');
       expect(committed(authority).body).toMatchObject({
