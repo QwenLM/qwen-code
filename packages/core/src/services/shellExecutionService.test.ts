@@ -42,6 +42,13 @@ const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockGetPty = vi.hoisted(() => vi.fn());
 const mockLoadXtermHeadless = vi.hoisted(() => vi.fn());
+const mockProcessTable = vi.hoisted(
+  () =>
+    new Map<
+      number,
+      { pgid: number; sid: number; start: string; state: string }
+    >(),
+);
 const mockSerializeTerminalToObject = vi.hoisted(() => vi.fn());
 const mockSerializeTerminalToText = vi.hoisted(() =>
   vi.fn((terminal: pkg.Terminal): string => {
@@ -74,6 +81,46 @@ const mockGetShellConfiguration = vi.hoisted(() =>
 vi.mock('@lydell/node-pty', () => ({
   spawn: mockPtySpawn,
 }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    readFileSync: (
+      file: Parameters<typeof actual.readFileSync>[0],
+      options?: Parameters<typeof actual.readFileSync>[1],
+    ) => {
+      if (file === '/proc/sys/kernel/random/boot_id') {
+        return '00000000-0000-0000-0000-000000000001\n';
+      }
+      const match =
+        typeof file === 'string' && /^\/proc\/(\d+)\/stat$/.exec(file);
+      if (!match) return actual.readFileSync(file, options);
+      const pid = Number(match[1]);
+      const member = mockProcessTable.get(pid);
+      if (!member) {
+        throw Object.assign(new Error(`No synthetic process ${pid}`), {
+          code: 'ENOENT',
+        });
+      }
+      const fields = Array<string>(20).fill('0');
+      fields[0] = member.state;
+      fields[2] = String(member.pgid);
+      fields[3] = String(member.sid);
+      fields[19] = member.start;
+      return `${pid} (synthetic shell) ${fields.join(' ')}\n`;
+    },
+    readdirSync: (
+      directory: Parameters<typeof actual.readdirSync>[0],
+      options?: Parameters<typeof actual.readdirSync>[1],
+    ) => {
+      if (directory === '/proc')
+        return [...mockProcessTable.keys()].map(String);
+      return options === undefined
+        ? actual.readdirSync(directory)
+        : actual.readdirSync(directory, options);
+    },
+  };
+});
 vi.mock('child_process', () => ({
   spawn: mockCpSpawn,
   spawnSync: mockSpawnSync,
@@ -196,13 +243,50 @@ const EXPECTED_MERGED_WINDOWS_PATH =
 
 let originalProcessEnv: NodeJS.ProcessEnv;
 let onOutputEventMock: Mock<(event: ShellOutputEvent) => void>;
+const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(
+  process,
+  'platform',
+)!;
+let processStart = 0;
+
+const registerProcess = (pid: number, pgid = pid) => {
+  mockProcessTable.set(pid, {
+    pgid,
+    sid: pgid,
+    start: String(++processStart),
+    state: 'S',
+  });
+};
+const markProcessExited = (pid: number) => {
+  const member = mockProcessTable.get(pid);
+  if (member) member.state = 'Z';
+};
+const useFakeProcessTimers = () =>
+  vi.useFakeTimers({
+    toFake: [
+      'Date',
+      'performance',
+      'setTimeout',
+      'clearTimeout',
+      'setInterval',
+      'clearInterval',
+      'setImmediate',
+      'clearImmediate',
+    ],
+  });
 
 beforeEach(() => {
   originalProcessEnv = process.env;
+  // The default service fixtures model Linux, including the synthetic /proc
+  // table, regardless of the host running Vitest. Windows cases override it.
+  vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+  mockProcessTable.clear();
 });
 
 afterEach(() => {
   process.env = originalProcessEnv;
+  Object.defineProperty(process, 'platform', originalPlatformDescriptor);
+  vi.useRealTimers();
   vi.unstubAllEnvs();
 });
 
@@ -232,8 +316,9 @@ const exec = (
 
 // onData/onExit return a disposable stub, like node-pty's IDisposable: the
 // background-promote path calls .dispose() on them to detach its listeners.
-const makePty = () =>
-  Object.assign(new EventEmitter(), {
+const makePty = () => {
+  registerProcess(12345);
+  return Object.assign(new EventEmitter(), {
     pid: 12345,
     kill: vi.fn(),
     onData: vi.fn().mockReturnValue({ dispose: vi.fn() }),
@@ -241,14 +326,22 @@ const makePty = () =>
     write: vi.fn(),
     resize: vi.fn(),
   });
+};
 
 // Like a live Node ChildProcess, exitCode / signalCode are null: the promote
 // liveness guard reads them to catch an exit racing the abort handler, and
 // `undefined` would look terminal and skip the promote.
 const makeChild = (pid: number, withExitState = true) => {
+  registerProcess(pid);
   const child = new EventEmitter() as EventEmitter & Partial<ChildProcess>;
-  child.stdout = new EventEmitter() as Readable;
-  child.stderr = new EventEmitter() as Readable;
+  child.stdout = Object.assign(new EventEmitter(), {
+    pause: vi.fn(),
+    resume: vi.fn(),
+  }) as unknown as Readable;
+  child.stderr = Object.assign(new EventEmitter(), {
+    pause: vi.fn(),
+    resume: vi.fn(),
+  }) as unknown as Readable;
   child.kill = vi.fn();
   Object.defineProperty(child, 'pid', { value: pid, configurable: true });
   if (withExitState) {
@@ -260,6 +353,12 @@ const makeChild = (pid: number, withExitState = true) => {
       });
     }
   }
+  child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+    markProcessExited(pid);
+    if (withExitState) {
+      Object.assign(child, { exitCode: code, signalCode: signal });
+    }
+  });
   return child;
 };
 type MockChild = ReturnType<typeof makeChild>;
@@ -368,8 +467,10 @@ describe('ShellExecutionService', () => {
 
   const ptyData = (...chunks: Array<string | Buffer>) =>
     chunks.forEach((chunk) => mockPtyProcess.onData.mock.calls[0][0](chunk));
-  const ptyExit = (exit: object = { exitCode: 0, signal: null }) =>
+  const ptyExit = (exit: object = { exitCode: 0, signal: null }) => {
+    markProcessExited(mockPtyProcess.pid);
     mockPtyProcess.onExit.mock.calls[0][0](exit);
+  };
   // Drives the most recently registered (post-promote) exit listener.
   const postPromoteExit = (exit: object = { exitCode: 0, signal: undefined }) =>
     mockPtyProcess.onExit.mock.calls.at(-1)![0](exit);
@@ -455,8 +556,14 @@ describe('ShellExecutionService', () => {
   const pipe = () => {
     const child = Object.assign(new EventEmitter(), {
       pid: 56789,
-      stdout: new EventEmitter(),
-      stderr: new EventEmitter(),
+      stdout: Object.assign(new EventEmitter(), {
+        pause: vi.fn(),
+        resume: vi.fn(),
+      }),
+      stderr: Object.assign(new EventEmitter(), {
+        pause: vi.fn(),
+        resume: vi.fn(),
+      }),
       stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
       exitCode: null,
       signalCode: null,
@@ -2586,6 +2693,7 @@ describe('ShellExecutionService child_process fallback', () => {
         });
 
         expect(result.aborted).toBe(true);
+        expect(result.error).toBeNull();
 
         if (platform === 'linux') {
           expect(mockProcessKill).toHaveBeenCalledWith(
@@ -2928,9 +3036,9 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(settles).toHaveLength(1);
     });
 
-    it('should gracefully attempt SIGKILL on linux if SIGTERM fails', async () => {
+    it('escalates to SIGKILL when a Linux group ignores SIGTERM', async () => {
       mockPlatform.mockReturnValue('linux');
-      vi.useFakeTimers();
+      useFakeProcessTimers();
 
       // Drive the timeline by hand: don't await the result before escalation.
       const abortController = new AbortController();
@@ -2947,6 +3055,7 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(mockProcessKill).toHaveBeenCalledWith(...groupKill('SIGKILL'));
 
       finish(null, 'SIGKILL');
+      await vi.advanceTimersByTimeAsync(25);
       const result = await handle.result;
 
       vi.useRealTimers();
@@ -3092,6 +3201,345 @@ describe('ShellExecutionService child_process fallback', () => {
         }),
       );
     });
+  });
+});
+
+describe.each([
+  { transport: 'child_process', usePty: false },
+  { transport: 'PTY', usePty: true },
+])('authenticated Linux cancellation through $transport', ({ usePty }) => {
+  let child: MockChild;
+  let pty: ReturnType<typeof makePty>;
+  const pid = 12345;
+  const descendant = pid + 1;
+  const ownsProcess = () =>
+    usePty
+      ? ShellExecutionService['activePtys'].has(pid)
+      : ShellExecutionService['activeChildProcesses'].has(pid);
+  const exitLeader = () => {
+    markProcessExited(pid);
+    if (usePty) {
+      pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+    } else {
+      child.emit('exit', 0, null);
+      child.emit('close', 0, null);
+    }
+  };
+  const start = (signal: AbortSignal) =>
+    exec('owned fixture', { signal, usePty });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useFakeProcessTimers();
+    mockIsBinary.mockReturnValue(false);
+    mockPlatform.mockReturnValue('linux');
+    mockProcessKill.mockImplementation(() => true);
+    onOutputEventMock = vi.fn();
+    pty = makePty();
+    child = makeChild(pid);
+    mockCpSpawn.mockReturnValue(child);
+    mockPtySpawn.mockReturnValue(pty);
+    mockGetPty.mockResolvedValue({
+      module: { spawn: mockPtySpawn },
+      name: 'mock-pty',
+    });
+    mockLoadXtermHeadless.mockResolvedValue({ Terminal });
+  });
+
+  afterEach(() => {
+    mockProcessKill.mockImplementation(() => true);
+  });
+
+  it('retains ownership and waits for descendants when TERM synchronously exits the leader', async () => {
+    registerProcess(descendant, pid);
+    const abort = new AbortController();
+    const handle = await start(abort.signal);
+    let settled = false;
+    void handle.result.then(() => {
+      settled = true;
+    });
+    mockProcessKill.mockImplementation((_pid, signal) => {
+      if (signal === 'SIGTERM') exitLeader();
+      if (signal === 'SIGKILL') markProcessExited(descendant);
+      return true;
+    });
+
+    abort.abort();
+    expect(ownsProcess()).toBe(true);
+    expect(ShellExecutionService['posixGroups'].has(pid)).toBe(true);
+    await vi.advanceTimersByTimeAsync(199);
+    expect(settled).toBe(false);
+    expect(ownsProcess()).toBe(true);
+    expect(mockProcessKill).not.toHaveBeenCalledWith(-pid, 'SIGKILL');
+
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.runAllTimersAsync();
+    const result = await handle.result;
+    expect(result.aborted).toBe(true);
+    expect(result.error).toBeNull();
+    expect(result.exitCode).toBe(0);
+    expect(
+      mockProcessKill.mock.calls.filter(([, signal]) => signal === 'SIGKILL'),
+    ).toEqual([[-pid, 'SIGKILL']]);
+    expect(ownsProcess()).toBe(false);
+    expect(ShellExecutionService['posixGroups'].has(pid)).toBe(false);
+  });
+
+  it('force cleanup during the grace period signals once and cancels delayed escalation', async () => {
+    registerProcess(descendant, pid);
+    const abort = new AbortController();
+    const handle = await start(abort.signal);
+    mockProcessKill.mockImplementation((_pid, signal) => {
+      if (signal === 'SIGTERM') exitLeader();
+      if (signal === 'SIGKILL') markProcessExited(descendant);
+      return true;
+    });
+    abort.abort();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(ownsProcess()).toBe(true);
+
+    ShellExecutionService.cleanup();
+    ShellExecutionService.cleanup();
+    await vi.advanceTimersByTimeAsync(500);
+    const result = await handle.result;
+    expect(result.error).toBeNull();
+    expect(
+      mockProcessKill.mock.calls.filter(([, signal]) => signal === 'SIGKILL'),
+    ).toEqual([[-pid, 'SIGKILL']]);
+    expect(ShellExecutionService['posixGroups'].has(pid)).toBe(false);
+    if (usePty) {
+      expect(pty.onExit.mock.results[0].value.dispose).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('settles without escalation when TERM leaves no running group members', async () => {
+    const abort = new AbortController();
+    const handle = await start(abort.signal);
+    mockProcessKill.mockImplementation((_pid, signal) => {
+      if (signal === 'SIGTERM') exitLeader();
+      return true;
+    });
+    abort.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.runAllTimersAsync();
+    const result = await handle.result;
+    expect(result.error).toBeNull();
+    expect(result.exitCode).toBe(0);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mockProcessKill).not.toHaveBeenCalledWith(-pid, 'SIGKILL');
+    expect(ShellExecutionService['posixGroups'].has(pid)).toBe(false);
+  });
+
+  it('settles permission failures with an error even when the leader never exits', async () => {
+    const abort = new AbortController();
+    const handle = await start(abort.signal);
+    mockProcessKill.mockImplementation((_pid, signal) => {
+      if (signal === 'SIGTERM' || signal === 'SIGKILL') {
+        throw Object.assign(new Error('Operation not permitted'), {
+          code: 'EPERM',
+        });
+      }
+      return true;
+    });
+    abort.abort();
+    await vi.advanceTimersByTimeAsync(400);
+    await vi.runAllTimersAsync();
+    const result = await handle.result;
+    expect(result.aborted).toBe(true);
+    expect(result.error?.message).toMatch(/did not stop after SIGKILL/);
+    expect(result.exitCode).toBeNull();
+    expect(result.signal).toBeNull();
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(pty.kill).not.toHaveBeenCalled();
+    expect(ownsProcess()).toBe(false);
+    expect(ShellExecutionService['posixGroups'].has(pid)).toBe(false);
+  });
+
+  if (!usePty) {
+    it('drains an in-flight capture before failed cleanup settles and ignores later child output', async () => {
+      let finishWrite!: () => void;
+      const pendingWrite = new Promise<void>((resolve) => {
+        finishWrite = resolve;
+      });
+      const capture = {
+        write: vi.fn(() => pendingWrite),
+        finish: vi.fn(async () => {}),
+        setStarted: vi.fn(),
+        setProcessResult: vi.fn(),
+      };
+      const abort = new AbortController();
+      const handle = await exec('owned captured fixture', {
+        signal: abort.signal,
+        usePty: false,
+        options: { rawCapture: capture },
+      });
+      let settled = false;
+      void handle.result.then(() => {
+        settled = true;
+      });
+      child.stdout!.emit('data', Buffer.from('before cancellation'));
+      await Promise.resolve();
+      expect(capture.write).toHaveBeenCalledTimes(1);
+      mockProcessKill.mockImplementation((_pid, signal) => {
+        if (signal === 'SIGTERM' || signal === 'SIGKILL') {
+          throw Object.assign(new Error('Operation not permitted'), {
+            code: 'EPERM',
+          });
+        }
+        return true;
+      });
+
+      abort.abort();
+      await vi.advanceTimersByTimeAsync(400);
+      expect(settled).toBe(false);
+      expect(capture.finish).not.toHaveBeenCalled();
+      finishWrite();
+      await vi.runAllTimersAsync();
+      const result = await handle.result;
+      expect(result.error?.message).toMatch(/did not stop after SIGKILL/);
+      expect(capture.finish.mock.calls).toEqual([
+        ['stdout', false],
+        ['stderr', false],
+      ]);
+      const outputEvents = onOutputEventMock.mock.calls.length;
+
+      child.stdout!.emit('data', Buffer.from('late stdout'));
+      child.stderr!.emit('data', Buffer.from('late stderr'));
+      expect(() =>
+        child.emit('error', new Error('late transport error')),
+      ).not.toThrow();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(capture.write).toHaveBeenCalledTimes(1);
+      expect(capture.finish).toHaveBeenCalledTimes(2);
+      expect(onOutputEventMock).toHaveBeenCalledTimes(outputEvents);
+    });
+
+    it('preserves a delayed native exit after group cleanup confirms and ignores a prior stdin EPIPE', async () => {
+      const stdin = Object.assign(new EventEmitter(), { end: vi.fn() });
+      Object.assign(child, { stdin });
+      const abort = new AbortController();
+      const handle = await ShellExecutionService.executeLaunch(
+        {
+          executable: '/trusted/fixture',
+          args: [],
+          cwd: '/test/dir',
+          env: {},
+          stdin: 'payload',
+        },
+        onOutputEventMock,
+        abort.signal,
+        false,
+        shellExecutionConfig,
+        { streamStdout: true },
+      );
+      let settled = false;
+      void handle.result.then(() => {
+        settled = true;
+      });
+      mockProcessKill.mockImplementation((_pid, signal) => {
+        if (signal === 'SIGTERM') markProcessExited(pid);
+        return true;
+      });
+      abort.abort();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(false);
+      stdin.emit(
+        'error',
+        Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }),
+      );
+      child.stdout!.emit('data', Buffer.from('before native exit'));
+      child.emit('exit', 0, null);
+      child.stderr!.emit('data', Buffer.from('after native exit'));
+      child.emit('close', 0, null);
+      await vi.runAllTimersAsync();
+      const result = await handle.result;
+      expect(result.exitCode).toBe(0);
+      expect(result.signal).toBeNull();
+      expect(result.error).toBeNull();
+      expect(onOutputEventMock).toHaveBeenCalledWith(
+        stdoutEvent('before native exit'),
+      );
+      expect(onOutputEventMock).toHaveBeenCalledWith({
+        type: 'data',
+        stream: 'stderr',
+        chunk: 'after native exit',
+      });
+      expect(mockProcessKill).not.toHaveBeenCalledWith(-pid, 'SIGKILL');
+    });
+  }
+
+  if (usePty) {
+    it('captures descendant output delivered at group cleanup completion after early leader exit', async () => {
+      registerProcess(descendant, pid);
+      const abort = new AbortController();
+      const handle = await start(abort.signal);
+      mockProcessKill.mockImplementation((_pid, signal) => {
+        if (signal === 'SIGTERM') exitLeader();
+        if (signal === 'SIGKILL') {
+          markProcessExited(descendant);
+          void ShellExecutionService['posixGroups']
+            .get(pid)!
+            .completion!.then(() =>
+              pty.onData.mock.calls[0][0]('late descendant byte'),
+            );
+        }
+        return true;
+      });
+      abort.abort();
+      await vi.runAllTimersAsync();
+      const result = await handle.result;
+      expect(result.error).toBeNull();
+      expect(result.exitCode).toBe(0);
+      expect(mockProcessKill).toHaveBeenCalledWith(-pid, 'SIGKILL');
+      expect(result.rawOutput.toString()).toBe('late descendant byte');
+      expect(result.output).toBe('late descendant byte');
+    });
+  }
+
+  it('settles changed ownership with an error and never falls back to the leader PID', async () => {
+    const abort = new AbortController();
+    const handle = await start(abort.signal);
+    registerProcess(pid);
+    abort.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.runAllTimersAsync();
+    const result = await handle.result;
+    expect(result.aborted).toBe(true);
+    expect(result.error?.message).toMatch(/original leader identity/);
+    expect(mockProcessKill).not.toHaveBeenCalled();
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(pty.kill).not.toHaveBeenCalled();
+    expect(ownsProcess()).toBe(false);
+  });
+
+  it('does not reclaim ownership when abort arrives during natural-exit finalization', async () => {
+    const abort = new AbortController();
+    const handle = await start(abort.signal);
+    exitLeader();
+    abort.abort();
+    ShellExecutionService.cleanup();
+    await vi.advanceTimersByTimeAsync(200);
+    const result = await handle.result;
+    expect(result.error).toBeNull();
+    expect(result.exitCode).toBe(0);
+    expect(mockProcessKill).not.toHaveBeenCalled();
+    expect(ShellExecutionService['posixGroups'].has(pid)).toBe(false);
+  });
+
+  it('transfers ownership on promotion so service cleanup cannot kill the background group', async () => {
+    const abort = new AbortController();
+    const handle = await start(abort.signal);
+    abort.abort(bg('owned-background'));
+    await vi.runAllTimersAsync();
+    const result = await handle.result;
+    expect(result.promoted).toBe(true);
+    expect(result.aborted).toBe(false);
+    expect(ShellExecutionService['posixGroups'].has(pid)).toBe(false);
+    ShellExecutionService.cleanup();
+    expect(mockProcessKill).not.toHaveBeenCalledWith(-pid, 'SIGTERM');
+    expect(mockProcessKill).not.toHaveBeenCalledWith(-pid, 'SIGKILL');
+    expect(ownsProcess()).toBe(false);
   });
 });
 
