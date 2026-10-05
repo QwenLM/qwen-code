@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,10 +16,17 @@ import {
   ManagedSessionMessageProjection,
   projectManagedSessionRecords,
 } from './managed-session-message-projection.js';
-import type { ManagedSessionStoreHttpError } from './http-managed-session-store.js';
-import { createHttpManagedSessionStores } from './http-managed-session-store.js';
+import {
+  ManagedSessionStoreHttpError,
+  ManagedSessionStoreTransportError,
+  createHttpManagedSessionStores,
+} from './http-managed-session-store.js';
 import type { McpConfiguration } from './managed-mcp-record.js';
 import type { HookExecution, HookRegistration } from './managed-hook-record.js';
+import {
+  managedSessionEventsDigest,
+  parseManagedSessionEvent,
+} from './managed-session-records.js';
 import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
@@ -77,12 +85,98 @@ describe('HTTP Managed Session store', () => {
     );
   });
 
+  async function bootStoresAndSession(
+    server: FakeManagedSessionStore,
+  ): Promise<{
+    stores: ReturnType<typeof createHttpManagedSessionStores>;
+    session: Awaited<ReturnType<typeof openManagedSession>>;
+  }> {
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{"model":"test"}', 'utf8'),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{"version":1,"messages":[]}', 'utf8'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath,
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: {
+        definitionRef,
+        rootSnapshotRef,
+        createdBy: 'test',
+      },
+    });
+    return { stores, session };
+  }
+
+  async function appendMessage(
+    session: Awaited<ReturnType<typeof openManagedSession>>,
+    index: number,
+    contentRef: ManagedSessionDurableRef,
+  ): Promise<void> {
+    await session.authority.appendExecutionEvent(
+      {
+        operation: 'message.commit',
+        commandId: `m-${index}`,
+        sessionKey: SESSION_KEY,
+        contentDigest: 'e'.repeat(64),
+      },
+      (sequence) => ({
+        v: 1,
+        sequence,
+        eventId: `message:m-${index}`,
+        sessionKey: SESSION_KEY,
+        kind: 'message.committed',
+        occurredAt: index,
+        subject: {
+          type: 'activation',
+          scopeId: session.activation.activationId,
+          activationId: session.activation.activationId,
+          epoch: session.activation.epoch,
+        },
+        payload: {
+          messageId: `m-${index}`,
+          role: 'user',
+          contentRef,
+          parentMessageId: index === 1 ? null : `m-${index - 1}`,
+        },
+      }),
+      {
+        class: 'harness',
+        activation: session.activation,
+      },
+    );
+  }
+
   it('verifies committed publication receipts with the scoped Session writer', async () => {
     const server = new FakeManagedSessionStore();
     const request = { executionCallId: 'execution-1', historyRevision: 7 };
     const verified = vi.fn();
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -119,11 +213,49 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('refuses plaintext http on non-loopback hosts without an opt-in', () => {
+    const options = {
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: (async () => jsonResponse({})) as typeof fetch,
+    };
+    for (const baseUrl of [
+      'http://session-store.test',
+      'http://203.0.113.10:8080',
+      'http://[fd00::1]:8080',
+      'http://127.example.com:8080',
+    ]) {
+      expect(() =>
+        createHttpManagedSessionStores({ ...options, baseUrl }),
+      ).toThrow(/plaintext HTTP/);
+    }
+    for (const baseUrl of [
+      'http://127.0.0.1:8080',
+      'http://127.1:8080',
+      'http://localhost:8080',
+      'http://broker.localhost',
+      'http://[::1]:8080',
+      'https://broker.example.com',
+    ]) {
+      expect(() =>
+        createHttpManagedSessionStores({ ...options, baseUrl }),
+      ).not.toThrow();
+    }
+    expect(() =>
+      createHttpManagedSessionStores({
+        ...options,
+        baseUrl: 'http://session-store.test',
+        allowInsecureHttp: true,
+      }),
+    ).not.toThrow();
+  });
+
   it('publishes bounded tool output immediately under the original writer grant', async () => {
     const server = new FakeManagedSessionStore();
     let publication: Record<string, unknown> | undefined;
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -189,7 +321,7 @@ describe('HTTP Managed Session store', () => {
   it('refuses a changed durable publication receipt rather than staging it', async () => {
     const server = new FakeManagedSessionStore();
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -230,7 +362,7 @@ describe('HTTP Managed Session store', () => {
     const requests: Array<Record<string, unknown>> = [];
     let outcomeRef: ManagedSessionDurableRef;
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -245,7 +377,7 @@ describe('HTTP Managed Session store', () => {
             429,
           );
         const committed = await server.fetch(
-          `http://session-store.test/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}/transactions:commit`,
+          `http://127.0.0.1:8080/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}/transactions:commit`,
           init,
         );
         return jsonResponse({
@@ -342,7 +474,7 @@ describe('HTTP Managed Session store', () => {
       let armed = false;
       let replay: unknown;
       const stores = createHttpManagedSessionStores({
-        baseUrl: 'http://session-store.test',
+        baseUrl: 'http://127.0.0.1:8080',
         sessionKey: SESSION_KEY,
         writerId: 'harness-a',
         writerToken: TOKEN_A,
@@ -479,7 +611,7 @@ describe('HTTP Managed Session store', () => {
     temporaryDirectories.push(runtimeBaseDir);
     const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
     const firstStores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -623,7 +755,7 @@ describe('HTTP Managed Session store', () => {
     await first.close();
     const committedBeforeRestore = server.commits.length;
     const secondStores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-b',
       writerToken: TOKEN_B,
@@ -677,7 +809,7 @@ describe('HTTP Managed Session store', () => {
     temporaryDirectories.push(runtimeBaseDir);
     const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
     const firstStores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -757,7 +889,7 @@ describe('HTTP Managed Session store', () => {
     await first.close();
 
     const secondStores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-b',
       writerToken: TOKEN_B,
@@ -804,7 +936,7 @@ describe('HTTP Managed Session store', () => {
       ),
     );
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -825,7 +957,7 @@ describe('HTTP Managed Session store', () => {
   it('persists a fenced recovery block through the active writer', async () => {
     const server = new FakeManagedSessionStore();
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -857,7 +989,7 @@ describe('HTTP Managed Session store', () => {
     );
     temporaryDirectories.push(runtimeBaseDir);
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -918,7 +1050,7 @@ describe('HTTP Managed Session store', () => {
       return response;
     });
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -970,6 +1102,7 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -999,6 +1132,412 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('retries journal reads through a transport failure and a transient 5xx', async () => {
+    const server = new FakeManagedSessionStore();
+    const failures = [
+      new TypeError('fetch failed'),
+      jsonResponse({ error: { code: 'boom', message: 'stored' } }, 503),
+    ];
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?') && failures.length > 0) {
+        const failure = failures.shift()!;
+        if (failure instanceof Error) throw failure;
+        return failure;
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await handle.read();
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(3);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it.each([500, 502, 503, 504])(
+    'recovers a journal read through two transient %i answers',
+    async (status) => {
+      const server = new FakeManagedSessionStore();
+      let dropped = 2;
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+        if (requestUrl(input).includes('/restore?') && dropped > 0) {
+          dropped--;
+          return jsonResponse(
+            { error: { code: 'boom', message: 'stored' } },
+            status,
+          );
+        }
+        return server.fetch(input, init);
+      });
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://session-store.test',
+        allowInsecureHttp: true,
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn,
+      });
+      try {
+        const handle = await stores.journalStore.open({
+          sessionKey: SESSION_KEY,
+        });
+        await handle.read();
+        expect(
+          fetchFn.mock.calls.filter(([input]) =>
+            requestUrl(input).includes('/restore?'),
+          ),
+        ).toHaveLength(3);
+      } finally {
+        await stores.close();
+      }
+    },
+  );
+
+  it('answers the last consecutive transient read failure with the path and attempt count', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?'))
+        return jsonResponse(
+          { error: { code: 'boom', message: 'stored' } },
+          503,
+        );
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(handle.read()).rejects.toThrow(ManagedSessionStoreHttpError);
+      await expect(handle.read()).rejects.toMatchObject({
+        status: 503,
+        remoteCode: 'boom',
+      });
+      await expect(handle.read()).rejects.toThrow(
+        /GET \/restore\?[^ ]* failed after 3 attempts/,
+      );
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(9);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('answers the last consecutive transport failure with the path and attempt count', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?'))
+        throw new TypeError('fetch failed');
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(handle.read()).rejects.toThrow(
+        ManagedSessionStoreTransportError,
+      );
+      await expect(handle.read()).rejects.toThrow(
+        /GET \/restore\?[^ ]* failed after 3 attempts/,
+      );
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(6);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('retries a journal read whose response body drops mid-stream', async () => {
+    const server = new FakeManagedSessionStore();
+    let dropped = true;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (dropped && requestUrl(input).includes('/restore?')) {
+        dropped = false;
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"part'));
+              controller.error(new TypeError('terminated'));
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              'Cache-Control': 'no-store',
+              'Content-Type': 'application/json',
+            },
+          },
+        );
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await handle.read();
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(2);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('retries a resource read whose response body drops mid-stream', async () => {
+    const bytes = Buffer.from('{"captured":true}');
+    const ref = {
+      resourceId: 'segment-mid-stream',
+      kind: 'managed-tool-result-content',
+      schemaVersion: 1,
+      byteLength: bytes.byteLength,
+      digest: createHash('sha256').update(bytes).digest('hex'),
+    };
+    let dropped = true;
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const url = requestUrl(input);
+      if (url.endsWith('/writers:acquire'))
+        return jsonResponse({
+          writerGeneration: 1,
+          leaseUntil: Date.now() + 300_000,
+          journalRevision: 0,
+          committedSequence: 0,
+          activationEpoch: 0,
+        });
+      if (url.endsWith('/writers:seal'))
+        return jsonResponse({
+          writerGeneration: 1,
+          state: 'SEALED',
+          replayed: false,
+        });
+      if (url.includes('/resources/')) {
+        if (dropped) {
+          dropped = false;
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(bytes.subarray(0, 4));
+                controller.error(new TypeError('terminated'));
+              },
+            }),
+            {
+              status: 200,
+              headers: {
+                'Cache-Control': 'no-store',
+                'Content-Type': 'application/octet-stream',
+              },
+            },
+          );
+        }
+        return new Response(bytes, {
+          status: 200,
+          headers: {
+            'Cache-Control': 'no-store',
+            'Content-Type': 'application/octet-stream',
+            'X-Qwen-Resource-Kind': ref.kind,
+            'X-Qwen-Resource-Schema-Version': String(ref.schemaVersion),
+            'X-Qwen-Resource-Digest': ref.digest,
+          },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await expect(stores.resourceStore.read(ref)).resolves.toEqual(bytes);
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/resources/'),
+        ),
+      ).toHaveLength(2);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('blocks a wedged read for no longer than one requestTimeoutMs', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>((input, init) =>
+      requestUrl(input).includes('/restore?')
+        ? new Promise<Response>((_resolve, reject) => {
+            const signal = (init as RequestInit | undefined)?.signal;
+            signal?.addEventListener('abort', () =>
+              reject(signal.reason as Error),
+            );
+          })
+        : server.fetch(input, init),
+    );
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      requestTimeoutMs: 60,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      const started = Date.now();
+      await expect(handle.read()).rejects.toThrow(
+        ManagedSessionStoreTransportError,
+      );
+      await expect(handle.read()).rejects.toThrow(/GET \/restore\?/);
+      const elapsed = Date.now() - started;
+      // One wedged read must settle near one timeout, never three: the
+      // deadline-boundary guard races the libuv timer, so a sub-millisecond
+      // early abort can add one doomed ~1ms attempt plus backoff; bound the
+      // result by the guarantee, not an exact count.
+      expect(elapsed).toBeLessThan(900);
+      const restores = fetchFn.mock.calls.filter(([input]) =>
+        requestUrl(input).includes('/restore?'),
+      );
+      expect(restores.length).toBeGreaterThanOrEqual(1);
+      expect(restores.length).toBeLessThanOrEqual(3);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('does not retry a read answered with a refusal status', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?'))
+        return jsonResponse(
+          { error: { code: 'managed_session_not_found', message: 'gone' } },
+          404,
+        );
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(handle.read()).rejects.toThrow(ManagedSessionStoreHttpError);
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('retries a lease renewal dropped mid-flight but never a commit', async () => {
+    const server = new FakeManagedSessionStore();
+    let dropRenew = true;
+    let dropBlock = true;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      const url = requestUrl(input);
+      if (dropRenew && url.endsWith('/writers:renew')) {
+        dropRenew = false;
+        throw new TypeError('fetch failed');
+      }
+      if (dropBlock && url.endsWith('/recovery:block')) {
+        dropBlock = false;
+        throw new TypeError('fetch failed');
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await stores.assertWritable();
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/writers:renew'),
+        ),
+      ).toHaveLength(2);
+      await expect(
+        handle.blockRecovery!({
+          status: 'BLOCKED_RESOURCE',
+          detailCode: 'managed_session_test',
+        }),
+      ).rejects.toThrow(ManagedSessionStoreTransportError);
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/recovery:block'),
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await stores.close();
+    }
+  });
+
   it('commits the resources a Stage H record names and rebuilds it cold', async () => {
     const server = new FakeManagedSessionStore();
     const runtimeBaseDir = await mkdtemp(
@@ -1008,7 +1547,7 @@ describe('HTTP Managed Session store', () => {
     const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
     const open = async (writerId: string, writerToken: string) => {
       const stores = createHttpManagedSessionStores({
-        baseUrl: 'http://session-store.test',
+        baseUrl: 'http://127.0.0.1:8080',
         sessionKey: SESSION_KEY,
         writerId,
         writerToken,
@@ -1302,7 +1841,7 @@ describe('HTTP Managed Session store', () => {
       );
       temporaryDirectories.push(runtimeBaseDir);
       const stores = createHttpManagedSessionStores({
-        baseUrl: 'http://session-store.test',
+        baseUrl: 'http://127.0.0.1:8080',
         sessionKey: SESSION_KEY,
         writerId: 'harness-a',
         writerToken: TOKEN_A,
@@ -1405,6 +1944,7 @@ describe('HTTP Managed Session store', () => {
         { class: 'trusted_entry' },
       );
       const written = {
+        contractVersion: 1,
         sessionKey: SESSION_KEY,
         writerId: 'harness-a',
         commits: server.commits,
@@ -1421,9 +1961,287 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('restores a journal spanning more than one transaction page', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const messageRef = await stores.resourceStore.publish(
+      'managed-message',
+      Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+    );
+    for (let index = 1; index <= 105; index++) {
+      await appendMessage(session, index, messageRef);
+    }
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    const scan = await journal.read();
+    expect(scan.committed).toBe(session.authority.committedSequence);
+    // 107 transactions over a 100-per-page limit takes two page fetches.
+    expect(server.transactionReads).toBe(2);
+    await session.close();
+  });
+
+  it('rejects a journal whose stored revisions are not contiguous', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    await expect(journal.read()).resolves.toBeDefined();
+    server.editStoredTransaction(1, { journalRevision: 42 });
+    await expect(journal.read()).rejects.toThrow(/not contiguous/);
+    await session.close();
+  });
+
+  it('rejects a journal whose transaction bytes do not match their metadata', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    await expect(journal.read()).resolves.toBeDefined();
+    server.editStoredTransaction(0, { recordDigest: '0'.repeat(64) });
+    await expect(journal.read()).rejects.toThrow(/do not match their metadata/);
+    await session.close();
+  });
+
+  it.each([
+    ['committedSequence', 99],
+    ['lastCommitDigest', 'a'.repeat(64)],
+    ['activationEpoch', 7],
+  ])(
+    'rejects a journal that does not match the durable head (%s=%s)',
+    async (key, value) => {
+      const server = new FakeManagedSessionStore();
+      const { stores, session } = await bootStoresAndSession(server);
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(journal.read()).resolves.toBeDefined();
+      server.headOverrides[key] = value;
+      await expect(journal.read()).rejects.toThrow(
+        /do not match the durable head/,
+      );
+      await session.close();
+    },
+  );
+
+  it.each([
+    ['recoveryStatus', 'BLOCKED_RESOURCE'],
+    ['storageVersion', 2],
+    ['state', 'SEALED'],
+    ['writerGeneration', 2],
+    ['compactedThroughRevision', 1],
+  ])(
+    'rejects a restore head not addressable by this writer (%s=%s)',
+    async (key, value) => {
+      const server = new FakeManagedSessionStore();
+      const { stores, session } = await bootStoresAndSession(server);
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(journal.read()).resolves.toBeDefined();
+      server.headOverrides[key] = value;
+      await expect(journal.read()).rejects.toThrow(
+        /not readable by this v1 writer/,
+      );
+      await session.close();
+    },
+  );
+
+  it('rejects stored transaction metadata that disagrees with its records', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    await expect(journal.read()).resolves.toBeDefined();
+    // The metadata/records equality runs after the byte/digest check, so a
+    // eventsDigest tamper — not a byte tamper — is what reaches it.
+    server.editStoredTransaction(0, { eventsDigest: '1'.repeat(64) });
+    await expect(journal.read()).rejects.toThrow(
+      /metadata does not match its records/,
+    );
+    await session.close();
+  });
+
+  it('rejects when a page reports no more while the head is still ahead', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    await appendMessage(
+      session,
+      1,
+      await stores.resourceStore.publish(
+        'managed-message',
+        Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+      ),
+    );
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    // A real (non-empty) page that claims to end the journal while the head
+    // says otherwise must fail the read, not silently truncate history.
+    server.pageOverrides['hasMore'] = false;
+    server.headOverrides['journalRevision'] = 99;
+    await expect(journal.read()).rejects.toThrow(
+      /ended before the journal head/,
+    );
+    await session.close();
+  });
+
+  it('rejects an empty transaction page while the journal head is ahead', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    server.pageOverrides['transactions'] = [];
+    await expect(journal.read()).rejects.toThrow(/did not advance the journal/);
+    await session.close();
+  });
+
+  it('rejects a transaction page whose nextRevision disagrees with itself', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    server.pageOverrides['nextRevision'] = 0;
+    await expect(journal.read()).rejects.toThrow(
+      /nextRevision is inconsistent/,
+    );
+    await session.close();
+  });
+
+  it('rejects a commit receipt that does not echo the submitted transaction', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    server.receiptOverrides['journalRevision'] = 42;
+    const messageRef = await stores.resourceStore.publish(
+      'managed-message',
+      Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+    );
+    await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+      /receipt does not match/,
+    );
+    // The write-failure latch stops every later write through this authority,
+    // including the release close() would commit.
+    expect(session.authority.writesStopped).toBe(true);
+    await session.close().catch(() => undefined);
+  });
+
+  it('surfaces a typed 409 for a resource missing server-side and keeps staged bytes for retry', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+
+    // A staged-but-never-committed body must survive the failed append.
+    const retryRef = await stores.resourceStore.publish(
+      'managed-message',
+      Buffer.from('{"retry":true}', 'utf8'),
+    );
+    // A staged ref the failed transaction actually carries, so the retry
+    // assertion below measures bytes the commit body posts, not just
+    // clear() not running.
+    const stagedRef = await stores.resourceStore.publish(
+      'managed-session_metadata',
+      Buffer.from('{"title":"t"}', 'utf8'),
+    );
+    const missingRef: ManagedSessionDurableRef = {
+      resourceId: 'res-never-staged',
+      kind: 'managed-session_metadata',
+      schemaVersion: 1,
+      byteLength: 2,
+      digest: createHash('sha256').update('{}').digest('hex'),
+    };
+    const committedSoFar = session.authority.committedSequence;
+    const events = [
+      {
+        v: 1,
+        sequence: committedSoFar + 1,
+        eventId: 'domain:missing:1',
+        sessionKey: SESSION_KEY,
+        kind: 'domain.committed' as const,
+        occurredAt: 1,
+        payload: {
+          domain: 'session_metadata',
+          version: 1,
+          operationId: 'op-missing',
+          recordRef: missingRef,
+        },
+      },
+      {
+        v: 1,
+        sequence: committedSoFar + 2,
+        eventId: 'domain:staged:2',
+        sessionKey: SESSION_KEY,
+        kind: 'domain.committed' as const,
+        occurredAt: 2,
+        payload: {
+          domain: 'session_metadata',
+          version: 1,
+          operationId: 'op-staged',
+          recordRef: stagedRef,
+        },
+      },
+    ];
+    const marker = {
+      transactionId: 'txn-missing',
+      commandId: 'op-missing',
+      operation: 'commitDomainRecord',
+      contentDigest: 'f'.repeat(64),
+      firstSequence: events[0].sequence,
+      lastSequence: events[1].sequence,
+      eventCount: 2,
+      eventsDigest: managedSessionEventsDigest(
+        events.map((event) => parseManagedSessionEvent(event)),
+      ),
+      previousCommitDigest: session.authority.commitProof.committedPrefixHash,
+    };
+    const envelope = (
+      subtype: string,
+      managedSession: unknown,
+      uuid: string,
+    ) => ({
+      uuid,
+      parentUuid: null,
+      sessionId: SESSION_KEY.sessionId,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'system',
+      subtype,
+      cwd: '/workspace',
+      version: 'test',
+      managedSession,
+    });
+    await expect(
+      journal.appendTransaction([
+        envelope('managed_session_event_v1', events[0], 'rec-missing-event'),
+        envelope('managed_session_event_v1', events[1], 'rec-staged-event'),
+        envelope('managed_session_commit_v1', marker, 'rec-missing-marker'),
+      ]),
+    ).rejects.toMatchObject({
+      status: 409,
+      remoteCode: 'managed_session_resource_missing',
+    } satisfies Partial<ManagedSessionStoreHttpError>);
+
+    // Re-post the same transaction: a failed commit must not release the
+    // bytes it carries, or the retry loses them to the same 409 forever.
+    await expect(
+      journal.appendTransaction([
+        envelope('managed_session_event_v1', events[0], 'rec-retry-event'),
+        envelope('managed_session_event_v1', events[1], 'rec-retry-event-2'),
+        envelope('managed_session_commit_v1', marker, 'rec-retry-marker'),
+      ]),
+    ).rejects.toMatchObject({ status: 409 });
+    const retried = server.commits.at(-1);
+    const stagedInRetry = (
+      retried?.['resources'] as Array<Record<string, unknown>>
+    ).find(
+      (resource) => String(resource['resourceId']) === stagedRef.resourceId,
+    );
+    expect(stagedInRetry?.['bytesBase64']).toBeDefined();
+
+    // The 409 landed before anything committed, so the failed commit released
+    // nothing: the head is unmoved and the previously staged body is still
+    // readable.
+    await expect(journal.read()).resolves.toMatchObject({
+      committed: session.authority.committedSequence,
+    });
+    await expect(stores.resourceStore.read(retryRef)).resolves.toEqual(
+      Buffer.from('{"retry":true}', 'utf8'),
+    );
+    await session.close();
+  });
+
   it('rejects resources that require the unimplemented OSS path', async () => {
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1442,8 +2260,16 @@ describe('HTTP Managed Session store', () => {
 class FakeManagedSessionStore {
   readonly commits: Array<Record<string, unknown>> = [];
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
+  readonly headOverrides: Record<string, unknown> = {};
+  readonly pageOverrides: Record<string, unknown> = {};
+  readonly receiptOverrides: Record<string, unknown> = {};
   transactionReads = 0;
   sealCount = 0;
+
+  editStoredTransaction(index: number, patch: Record<string, unknown>): void {
+    Object.assign(this.transactions[index]!, patch);
+  }
+
   readonly fetch = vi.fn<typeof fetch>(async (input, init) => {
     const url = new URL(requestUrl(input));
     const headers = new Headers(init?.headers);
@@ -1505,6 +2331,7 @@ class FakeManagedSessionStore {
         ...(this.recoveryDetailCode === null
           ? {}
           : { recoveryDetailCode: this.recoveryDetailCode }),
+        ...this.headOverrides,
       });
     }
     if (suffix === '/recovery:block') {
@@ -1522,11 +2349,13 @@ class FakeManagedSessionStore {
     if (suffix === '/transactions') {
       this.transactionReads++;
       const after = Number(url.searchParams.get('afterRevision') ?? 0);
-      const transactions = this.transactions.slice(after, after + 100);
+      const limit = Number(url.searchParams.get('limit') ?? 100);
+      const transactions = this.transactions.slice(after, after + limit);
       return jsonResponse({
         transactions,
         nextRevision: after + transactions.length,
         hasMore: after + transactions.length < this.transactions.length,
+        ...this.pageOverrides,
       });
     }
     if (suffix === '/transactions:commit') {
@@ -1593,6 +2422,7 @@ class FakeManagedSessionStore {
         committedSequence: body['lastSequence'],
         commitDigest: body['commitDigest'],
         replayed: false,
+        ...this.receiptOverrides,
       });
     }
     if (suffix.startsWith('/resources/')) {

@@ -1,11 +1,15 @@
 # Qwen Managed Agent Server
 
 Standalone Spring Boot control plane for the Qwen Code Hosted Harness. It has
-no DataWorks dependency and no end-user authentication layer. A trusted
-upstream must send `X-Qwen-Tenant-Id`; the server uses that value on every
-database read and write. The HTTP server listens on `127.0.0.1` by default;
-set `QWEN_MANAGED_AGENT_SERVER_ADDRESS` when a trusted ingress needs to reach
-it. That ingress must authenticate the tenant before setting the header.
+no DataWorks dependency. The default loopback listen address keeps the
+header-asserted tenant model: a trusted upstream sends `X-Qwen-Tenant-Id`
+and the server uses that value on every database read and write. Leaving
+loopback requires authentication: set `QWEN_MANAGED_AGENT_SERVER_ADDRESS`
+**and** configure signed mode (`QWEN_MANAGED_AGENT_AUTH_MODE=signed` with
+`QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY`) so the broker verifies each request's
+HMAC signature itself, or put an authenticated gateway in front. With the
+default `auto` mode a non-loopback address refuses to start. See "Broker
+authentication and writer credentials" below.
 
 设计说明：[English](../../../docs/design/2026-09-19-managed-agent-spring-server.md) |
 [简体中文](../../../docs/design/2026-09-19-managed-agent-spring-server.zh-CN.md)
@@ -251,8 +255,12 @@ internal routes under `/internal/managed-session-store/v1/**` provide
 database-time writer leases and generations, head compare-and-set,
 idempotent transaction receipts, exact JSONL transaction bytes, paged restore
 reads, atomic checkpoint-pointer advancement, and transactional resources up
-to 64 KiB. Callers must provide the trusted tenant header and a fresh Base64URL secret in
-`X-Qwen-Managed-Writer-Token`; only its SHA-256 is persisted. Restore,
+to 64 KiB. Callers must provide the trusted tenant header and a writer
+credential in `X-Qwen-Managed-Writer-Token`; only its SHA-256 is persisted.
+Without `QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY` the credential is a
+fresh Base64URL secret the caller mints (first writer wins); with a binding
+key it must be the broker-issued HMAC over the Session scope and self-minted
+secrets are rejected. Restore,
 transaction-page, and resource reads require the same current, unexpired
 writer secret.
 
@@ -274,7 +282,8 @@ export QWEN_MANAGED_AGENT_WORKSPACE_ID='workspace-demo'
 Harness. When both the Harness and Store are enabled, Java includes a scoped
 Store descriptor in each new private Hosted Session request. The ordinary
 daemon rejects that descriptor, while the Hosted Harness uses the TypeScript
-HTTP adapter and generates its own writer secret. Workspace-bound Sessions use
+HTTP adapter with the descriptor's broker-issued writer credential (or a
+self-generated secret when no binding key is configured). Workspace-bound Sessions use
 their persisted Workspace ID for the Store scope; unbound Sessions use
 `QWEN_MANAGED_AGENT_WORKSPACE_ID`. The public Session, private journal and Runtime
 binding retain one `(tenantId, workspaceId, sessionId)` identity. The global ID
@@ -430,6 +439,55 @@ no direct store admission or test Broker replacement is needed.
 
 Design: [English](../../../docs/design/2026-09-29-hosted-public-workspace-admission.md)
 | [简体中文](../../../docs/design/2026-09-29-hosted-public-workspace-admission.zh-CN.md).
+
+### Broker authentication and writer credentials
+
+`QWEN_MANAGED_AGENT_AUTH_MODE` selects how the public surface
+(`/v1/agents/**` — including the bare `POST /v1/agents` collection route —
+and the WebShell adapter) authenticates its caller:
+`auto` (the default) resolves to `open` when `server.address` is loopback
+and refuses to start otherwise, `open` keeps the header-asserted tenant and
+the optional trusted-actor stand-in for local runs, and `signed` requires
+every public request to carry `X-Qwen-Actor-Id`,
+`X-Qwen-Signature-Timestamp` (epoch seconds, within
+`QWEN_MANAGED_AGENT_AUTH_ALLOWED_DRIFT`, default `5m`, minimum `1s`) and
+`X-Qwen-Signature: v1=<lowercase hex HMAC-SHA256>` over the canonical string
+below, keyed by `QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY` (at least 32 bytes):
+
+```text
+"qwen-broker-auth-v1\n" + METHOD + "\n" + undecoded request path + "\n"
++ raw query string (empty when absent) + "\n" + tenant + "\n" + actor + "\n"
++ timestamp + "\n" + lowercase hex SHA-256 of the raw request body + "\n"
++ the Idempotency-Key header value (empty when absent)
+```
+
+A repeated `Idempotency-Key` header answers 400 invalid_request, and a body
+beyond `QWEN_MANAGED_AGENT_AUTH_MAX_SIGNED_BODY_BYTES` (default 10 MiB)
+answers 413 payload_too_large. Signed mode cannot be combined with
+`QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER`.
+
+`QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY` switches writer tokens from
+self-minted to broker-provisioned: the writer credential becomes an HMAC
+over `(tenantId, workspaceId, sessionId)` that the Broker hands to the
+Harness in the attach payload, and the store rejects any other token,
+including during a free lease window. A configured key must be at least 32
+bytes. A Broker that intentionally serves the store over plaintext HTTP
+inside a trusted network sets
+`QWEN_MANAGED_AGENT_SESSION_STORE_ALLOW_INSECURE_HTTP=true`, which the
+attach payload forwards to the Harness so its client accepts the URL. The
+internal surface
+(`/internal/**`) may move to its own listener via
+`QWEN_MANAGED_AGENT_INTERNAL_SERVER_PORT` and
+`QWEN_MANAGED_AGENT_INTERNAL_SERVER_ADDRESS` (default `127.0.0.1`); either
+port then answers 404 for the other surface's routes. Leaving loopback —
+public or internal — requires signed mode or a configured binding key
+respectively, unless `QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true`
+explicitly overrides the guard. Loopback is a trust boundary only as strong
+as the host: a shared host that runs untrusted workloads (including
+model-generated commands) should configure a binding key even on loopback.
+
+Design: [English](../../../docs/design/managed-agent-broker-auth.md)
+| [简体中文](../../../docs/design/managed-agent-broker-auth.zh-CN.md).
 
 ### Broker deployment
 
@@ -811,6 +869,8 @@ runner.
 ### W1c offline Workspace migration
 
 See the [English design](../../../docs/design/workspace-storage-migration.md) and [Chinese design](../../../docs/design/workspace-storage-migration.zh-CN.md). Run only after every service is upgraded, admission/dispatch is disabled, accepted work is settled, Harness writers are stopped, and automatic restart is disabled. The source remains accessible on the same trusted Linux host. Export the original canonical absolute `QWEN_HOME` in the private maintenance and registration commands as well as the Broker/Harness environment, with no symlink components. `fileHistoryRoot` must equal the canonical `$QWEN_HOME/file-history` directory. Preserve that home and its independent history volume; do not move it with the Workspace.
+
+W1c adds Flyway V41–V43 after main's V40 Session creator migration, preserving all published migration bytes and applied history. Databases using earlier unpublished W1c migration numbers require fresh disposable fixtures; do not repair production Flyway history to reuse them.
 
 The private artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-migration.jar`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full request file contains `version` (the JSON integer `1`), `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Fence admission is storage-scoped for bound Sessions; unbound legacy Sessions are outside that ownership. Metadata transactions share the tenant placement lock, so other storages of the same tenant may wait until those transactions finish; file scans and physical retirement hold no such lock. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
 

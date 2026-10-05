@@ -14,7 +14,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -190,7 +192,7 @@ class WorkspaceRecoveryStoreTest {
         for (int i = 0; i < 35; i++) ids.add(session(i % 2 == 0 ? "workspace-a" : "workspace-b"));
         jdbc.update("UPDATE managed_agent_session SET status = 'ARCHIVED' WHERE session_id = ?", ids.getFirst());
         jdbc.update("UPDATE managed_agent_session SET status = 'DELETED', deleted_at = 1 WHERE session_id = ?", ids.getLast());
-        var before = jdbc.queryForList("SELECT * FROM managed_agent_session ORDER BY session_id");
+        var before = sessionRows();
         var capture = capture();
         assertThat(call(capture, "context").path("sessionCount").asInt()).isEqualTo(35);
         JsonNode first = call(capture, "sessions");
@@ -211,7 +213,7 @@ class WorkspaceRecoveryStoreTest {
         capture.call("asset", asset);
         capture().call("asset", asset);
         assertThat(call(capture, "assetPage").path("assets")).hasSize(1);
-        assertThat(jdbc.queryForList("SELECT * FROM managed_agent_session ORDER BY session_id")).isEqualTo(before);
+        assertThat(sessionRows()).isEqualTo(before);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_head", Integer.class)).isZero();
         assertThatThrownBy(() -> capture.call("asset", object().put("key", key).set("metadata", object().put("type", "changed"))))
                 .hasMessageContaining("asset_conflict");
@@ -452,5 +454,19 @@ class WorkspaceRecoveryStoreTest {
 
     private static JsonNode call(WorkspaceRecoveryStore store, String method) {
         return store.call(method, object());
+    }
+
+    // byte[] columns (creator_actor_key) compare by reference in a Map;
+    // hex them so the immutability assertion compares content.
+    private List<Map<String, Object>> sessionRows() {
+        return jdbc.queryForList("SELECT * FROM managed_agent_session"
+                        + " ORDER BY session_id").stream()
+                .map(row -> {
+                    Map<String, Object> copy = new LinkedHashMap<>(row);
+                    copy.replaceAll((key, value) -> value instanceof byte[] b
+                            ? java.util.HexFormat.of().formatHex(b) : value);
+                    return copy;
+                })
+                .toList();
     }
 }
