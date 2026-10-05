@@ -46,7 +46,7 @@ export function managedEventsToMessages(
   // Tools the non-fatal runtime_failed diagnostic failed, keyed to their
   // Turn, so a later same-Turn cancellation can re-mark them: their status
   // has already flipped to failed by then, which the terminal-event loop
-  // alone skips.
+  // alone skips. An authoritative result or completion retires the booking.
   const runtimeFailed = new Map<ACPToolCall, string>();
   let textMessage:
     | Extract<Message, { role: 'assistant' | 'thinking' }>
@@ -210,7 +210,12 @@ export function managedEventsToMessages(
             result.preview.text +
             (result.preview.truncated === true ? `\n${truncatedLabel}` : '');
         }
-        tool.endTime ??= event.at;
+        // An authoritative result stays authoritative: it supersedes the
+        // diagnostic floor, and the booking retires so a later terminal
+        // event can neither move the end nor re-mark the tool.
+        if (runtimeFailed.has(tool)) tool.endTime = event.at;
+        else tool.endTime ??= event.at;
+        runtimeFailed.delete(tool);
       }
       if (tool.toolResult) {
         if (
@@ -238,6 +243,7 @@ export function managedEventsToMessages(
         tool.status = data['failed'] === true ? 'failed' : 'completed';
         tool.wasCancelled = data['cancelled'] === true;
         tool.endTime = event.at;
+        runtimeFailed.delete(tool);
         if (typeof data['output'] === 'string') {
           tool.rawOutput =
             data['output'] +
@@ -261,19 +267,25 @@ export function managedEventsToMessages(
       else settle();
       for (const tool of tools.values()) {
         if (
-          event.type === 'cancelled' &&
-          tool.status === 'failed' &&
+          event.type !== 'runtime_failed' &&
           runtimeFailed.get(tool) === event.turnId
-        )
-          tool.wasCancelled = true;
+        ) {
+          if (event.type === 'cancelled' && tool.status === 'failed')
+            tool.wasCancelled = true;
+          // The Turn's terminal event ends a diagnostic-failed tool that
+          // never reported an authoritative result; a result-supplied end
+          // stays untouched.
+          if (tool.toolResult === undefined) tool.endTime = event.at;
+        }
         if (tool.status === 'pending' || tool.status === 'in_progress') {
           tool.status = 'failed';
           // The diagnostic's Turn may still run the tool to completion:
-          // only a terminal Turn event stamps the end, which a result or
-          // completion event otherwise supplies.
-          if (event.type === 'runtime_failed')
+          // the diagnostic only floors the end, which a result, a
+          // completion or the Turn's terminal event otherwise moves.
+          if (event.type === 'runtime_failed') {
             runtimeFailed.set(tool, event.turnId);
-          else {
+            tool.endTime = event.at;
+          } else {
             tool.wasCancelled = event.type === 'cancelled';
             tool.endTime = event.at;
           }

@@ -48,20 +48,25 @@ export function useManagedSession(
   const pagedHeadRef = useRef<number | undefined>(undefined);
   const exhaustedRef = useRef(false);
   // The stream loop, the summary poll and loadOlder share the error field;
-  // a success may only clear what its own writer raised, so every write is
-  // tagged with its writer here. The stall alert is the one error whose
+  // a success may only clear what its own writer raised, so every live
+  // condition is booked under its writer here and a release reveals the
+  // highest-priority survivor. The stall alert is the one error whose
   // condition outlives the pass that raised it: it stays armed until an
-  // advancing event or resync ends it, and returns when the error covering
-  // it clears.
+  // advancing event or resync ends it, and outranks every booked entry. A
+  // poll entry is never revealed by another writer's release: the poll
+  // re-asserts on its own 3 s cadence, while stream and paging conditions
+  // may never re-assert.
   const errorOwnership = useRef<{
-    writer?: 'stream' | 'poll' | 'paging' | 'stall';
+    writers: Map<'stream' | 'poll' | 'paging', string>;
     stall?: string;
-  }>({});
+  }>({ writers: new Map() });
   const releaseError = useCallback((writer: 'stream' | 'poll' | 'paging') => {
     const ownership = errorOwnership.current;
-    if (ownership.writer !== writer) return { clear: false as const };
-    const reveal = ownership.stall;
-    ownership.writer = reveal === undefined ? undefined : 'stall';
+    if (!ownership.writers.delete(writer)) return { clear: false as const };
+    const reveal =
+      ownership.stall ??
+      ownership.writers.get('stream') ??
+      ownership.writers.get('paging');
     return { clear: true as const, reveal };
   }, []);
 
@@ -72,7 +77,7 @@ export function useManagedSession(
     pagedRef.current = false;
     pagedHeadRef.current = undefined;
     exhaustedRef.current = false;
-    errorOwnership.current = {};
+    errorOwnership.current = { writers: new Map() };
     setLoadingOlder(false);
     setState({ sessionId, events: [], loading: Boolean(sessionId) });
     if (!sessionId) return () => abort.abort();
@@ -81,12 +86,13 @@ export function useManagedSession(
       if (!abort.signal.aborted)
         setState((current) => ({ ...current, ...change }));
     };
-    const fail = (writer: 'stream' | 'poll' | 'stall', error: unknown) => {
-      errorOwnership.current.writer = writer;
-      update({
-        error: error instanceof Error ? error.message : String(error),
-        loading: false,
-      });
+    const fail = (writer: 'stream' | 'poll', error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      // The tag is only meaningful to the run that raised it: a superseded
+      // run's late rejection must not book itself into the fresh ledger.
+      if (!abort.signal.aborted)
+        errorOwnership.current.writers.set(writer, message);
+      update({ error: message, loading: false });
     };
     const snapshot = async (preserveLoadedPages: boolean) => {
       const [summary, transcript] = await Promise.all([
@@ -141,7 +147,7 @@ export function useManagedSession(
           nextCursor = cursorRef.current ?? transcript.olderCursor;
         else nextCursor = cursorRef.current;
         cursorRef.current = nextCursor;
-        errorOwnership.current.writer = undefined;
+        errorOwnership.current.writers.clear();
         setState((current) => {
           const kept = empty
             ? current.events
@@ -170,7 +176,7 @@ export function useManagedSession(
         });
       } else {
         cursorRef.current = transcript.olderCursor;
-        errorOwnership.current.writer = undefined;
+        errorOwnership.current.writers.clear();
         update({
           summary,
           events: transcript.events,
@@ -209,7 +215,7 @@ export function useManagedSession(
             if (event.id <= lastEventId) continue;
             lastEventId = event.id;
             gapStalls = 0;
-            errorOwnership.current.writer = undefined;
+            errorOwnership.current.writers.clear();
             errorOwnership.current.stall = undefined;
             setState((current) => ({
               ...current,
@@ -219,26 +225,28 @@ export function useManagedSession(
           }
           if (gap) {
             const head = await snapshot(true);
-            if (head > lastEventId) {
-              lastEventId = head;
-              gapStalls = 0;
-              errorOwnership.current.writer = undefined;
-              errorOwnership.current.stall = undefined;
-              retryDelayMs = 0;
-            } else {
-              // A resync that cannot advance the cursor replays its trigger
-              // identically: slow to the normal cadence, and after a few
-              // stalls surface an error instead of spinning. The resync's
-              // setState clears error each pass, so re-assert on every stall
-              // — that keeps the banner up for the whole stall and clears a
-              // transient error once resyncs succeed again.
-              gapStalls += 1;
-              retryDelayMs = 3000;
-              if (gapStalls >= 3) {
-                const stall =
-                  'Managed Agent event stream is not advancing; retrying';
-                errorOwnership.current.stall = stall;
-                fail('stall', new Error(stall));
+            if (!abort.signal.aborted) {
+              if (head > lastEventId) {
+                lastEventId = head;
+                gapStalls = 0;
+                errorOwnership.current.writers.clear();
+                errorOwnership.current.stall = undefined;
+                retryDelayMs = 0;
+              } else {
+                // A resync that cannot advance the cursor replays its
+                // trigger identically: slow to the normal cadence, and after
+                // a few stalls surface an error instead of spinning. The
+                // resync's setState clears error each pass, so re-assert on
+                // every stall — that keeps the banner up for the whole stall
+                // and clears a transient error once resyncs succeed again.
+                gapStalls += 1;
+                retryDelayMs = 3000;
+                if (gapStalls >= 3) {
+                  const stall =
+                    'Managed Agent event stream is not advancing; retrying';
+                  errorOwnership.current.stall = stall;
+                  update({ error: stall, loading: false });
+                }
               }
             }
           } else if (!abort.signal.aborted) {
@@ -248,13 +256,14 @@ export function useManagedSession(
             // poll, a paging error to loadOlder, and an armed stall alert
             // outlives this loop's clean passes.
             const summary = await provider.getSession(sessionId, opts);
-            const release = releaseError('stream');
-            if (!abort.signal.aborted)
+            if (!abort.signal.aborted) {
+              const release = releaseError('stream');
               setState((current) => ({
                 ...current,
                 summary,
                 error: release.clear ? release.reveal : current.error,
               }));
+            }
           }
         } catch (error) {
           fail('stream', error);
@@ -272,13 +281,14 @@ export function useManagedSession(
           // identical message from the stream loop is not the poll's to
           // clear — and clearing the poll's banner reveals a stall alert
           // that is still armed.
-          const release = releaseError('poll');
-          if (!abort.signal.aborted)
+          if (!abort.signal.aborted) {
+            const release = releaseError('poll');
             setState((current) => ({
               ...current,
               summary,
               error: release.clear ? release.reveal : current.error,
             }));
+          }
         } catch (error) {
           fail('poll', error);
         }
@@ -342,10 +352,11 @@ export function useManagedSession(
           if (moved !== undefined && allowRetry) return fetchPage(moved, false);
           return;
         }
-        errorOwnership.current.writer = 'paging';
+        const message = error instanceof Error ? error.message : String(error);
+        errorOwnership.current.writers.set('paging', message);
         setState((current) => ({
           ...current,
-          error: error instanceof Error ? error.message : String(error),
+          error: message,
         }));
       }
     };

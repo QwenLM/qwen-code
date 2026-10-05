@@ -330,7 +330,7 @@ describe('Managed transcript projection', () => {
     expect(messages[0]).toMatchObject({ tools: [{ status: 'failed' }] });
   });
 
-  it('leaves a diagnostic-failed tool without an end time so its completion still counts', () => {
+  it('stamps the result-supplied end time on a diagnostic-failed tool that recovers', () => {
     // environment.failed is a non-fatal diagnostic: the Turn keeps running
     // and the tool recovers, so its end is the result's own timestamp.
     const source = { ...result, session_id: 's1', turn_id: 'p1' };
@@ -363,6 +363,115 @@ describe('Managed transcript projection', () => {
     );
     expect(messages[0]).toMatchObject({
       tools: [{ status: 'failed', wasCancelled: true }],
+    });
+  });
+
+  it('stamps the Turn end on a diagnostic-failed tool that never reported', () => {
+    // The diagnostic only floors the end; the terminal Turn event moves it
+    // to the Turn's own end, so the duration cannot grow with the clock.
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'tool_started', { toolCallId: 'c', toolName: 'run' }),
+        event(3, 'runtime_failed', { message: 'warmup died' }),
+        event(4, 'completed'),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'failed', startTime: 200, endTime: 400 }],
+    });
+  });
+
+  it('bounds a diagnostic-failed tool at the diagnostic when the Turn never ends', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'tool_started', { toolCallId: 'c', toolName: 'run' }),
+        event(3, 'runtime_failed', { message: 'warmup died' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'failed', startTime: 200, endTime: 300 }],
+    });
+  });
+
+  it('keeps an authoritatively failed tool failed when the Turn is cancelled afterwards', () => {
+    // tool_completed already resolved the failure: the diagnostic booking
+    // is retired, so the Turn's cancellation cannot relabel it.
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'runtime_failed', { message: 'warmup died' }),
+        event(3, 'tool_completed', {
+          toolCallId: 'c',
+          failed: true,
+          cancelled: false,
+          output: 'boom exit 1',
+        }),
+        event(4, 'cancelled'),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [
+        {
+          status: 'failed',
+          wasCancelled: false,
+          endTime: 300,
+          rawOutput: 'boom exit 1',
+        },
+      ],
+    });
+  });
+
+  it('keeps an error result authoritative when the Turn is cancelled afterwards', () => {
+    const source = {
+      ...result,
+      session_id: 's1',
+      turn_id: 'p1',
+      execution_status: 'error',
+    };
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'runtime_failed', { message: 'warmup died' }),
+        event(3, 'tool_result_updated', {
+          itemId: 'item-1',
+          toolCallId: 'c',
+          result: source,
+        }),
+        event(4, 'cancelled'),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'failed', wasCancelled: false, endTime: 300 }],
+    });
+  });
+
+  it('does not re-mark a tool when a different Turn is cancelled', () => {
+    // The diagnostic books the p1 tool under p2 (the Turn it arrived on);
+    // the authoritative completion retires the booking, so p2's
+    // cancellation cannot reach back into p1.
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }, 'p1'),
+        event(
+          2,
+          'accepted',
+          { prompt: [{ type: 'text', text: 'Next' }] },
+          'p2',
+        ),
+        event(3, 'runtime_failed', { message: 'warmup died' }, 'p2'),
+        event(5, 'tool_completed', { toolCallId: 'c', failed: true }, 'p1'),
+        event(6, 'cancelled', undefined, 'p2'),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'failed', wasCancelled: false, endTime: 500 }],
     });
   });
 

@@ -195,16 +195,24 @@ function ManagedSessionsContent({
   // clear to commit — the textarea is disabled while pending is set — and
   // the composer can still be absent (a workspace-binding creator replaces
   // the form) or disabled (the session cannot send), so fall back to the
-  // session list landmark rather than leave the user at <body>.
+  // session list landmark rather than leave the user at <body>. While the
+  // summary is still loading the composer is only temporarily disabled, so
+  // the latch stays armed and retries once the decision is terminal.
   useEffect(() => {
     if (!focusComposer.current || pending) return;
-    focusComposer.current = false;
-    const target =
+    const composer =
       composerFormRef.current?.querySelector<HTMLTextAreaElement>(
         'textarea:not([disabled])',
-      ) ?? sessionsNavRef.current;
-    target?.focus();
-  }, [pending]);
+      );
+    if (composer) {
+      focusComposer.current = false;
+      composer.focus();
+      return;
+    }
+    sessionsNavRef.current?.focus();
+    if (detail.loading) return;
+    focusComposer.current = false;
+  }, [pending, detail.loading]);
 
   // Depend on the value the request actually sends: a provider that drops
   // workspaceCwd must not refetch (and lose paged rows) on folder change.
@@ -549,37 +557,40 @@ function ManagedSessionsContent({
               />
             </div>
           )}
-          {/* Offered only where the handler can restore the draft: destroying
-              the only copy from a foreign session would lose it for good. */}
-          {pending && !busy && pending.sessionId === sessionId && (
+          {pending && !busy && (
             <div className="flex items-center gap-2" role="status">
               <p className="text-sm text-muted-foreground">
                 {t('managed.uncertain')}
               </p>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  // An escape from a permanently failing retry: reuse the
-                  // draft text without minting a new idempotency key.
-                  pendingRef.current = undefined;
-                  setPending(undefined);
-                  persistPending(pendingKey, undefined);
-                  // The pending record is client-scoped but the draft
-                  // belongs to the session it was written for: restore it
-                  // only there.
-                  if (pending.sessionId === sessionId) setText(pending.text);
-                  setError(undefined);
-                  // A create that committed server-side before an
-                  // unconfirmed failure is otherwise invisible until the
-                  // user happens to press Refresh.
-                  if (pending.sessionId === undefined)
-                    setListRevision((current) => current + 1);
-                  focusComposer.current = true;
-                }}
-              >
-                {t('managed.discard')}
-              </Button>
+              {/* Offered only where the handler can restore the draft:
+                  destroying the only copy from a foreign session would lose
+                  it for good. */}
+              {pending.sessionId === sessionId && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    // An escape from a permanently failing retry: reuse the
+                    // draft text without minting a new idempotency key.
+                    pendingRef.current = undefined;
+                    setPending(undefined);
+                    persistPending(pendingKey, undefined);
+                    // The pending record is client-scoped but the draft
+                    // belongs to the session it was written for: restore it
+                    // only there.
+                    if (pending.sessionId === sessionId) setText(pending.text);
+                    setError(undefined);
+                    // A create that committed server-side before an
+                    // unconfirmed failure is otherwise invisible until the
+                    // user happens to press Refresh.
+                    if (pending.sessionId === undefined)
+                      setListRevision((current) => current + 1);
+                    focusComposer.current = true;
+                  }}
+                >
+                  {t('managed.discard')}
+                </Button>
+              )}
             </div>
           )}
           {pendingApproval && (

@@ -1012,9 +1012,11 @@ describe('ManagedSessionsPage', () => {
 
     await click('Task s2Completed');
     await render('s2');
-    // The composer is wedged on the other session's pending record, but the
-    // destructive escape is offered only where the draft can be restored.
+    // The composer is wedged on the other session's pending record: the
+    // explanation stays, but the destructive escape is offered only where
+    // the draft can be restored.
     expect(container.querySelector('textarea')?.disabled).toBe(true);
+    expect(container.textContent).toContain('request outcome is unconfirmed');
     expect(
       [...container.querySelectorAll('button')].some(
         (item) => item.textContent === 'Discard this request',
@@ -1124,6 +1126,37 @@ describe('ManagedSessionsPage', () => {
 
     expect(document.activeElement).not.toBe(document.body);
     expect(document.activeElement).toBe(container.querySelector('nav'));
+  });
+
+  it('moves focus to the composer once a discard’s loading window ends', async () => {
+    let releaseSummary!: (value: ManagedAgentSessionSummary) => void;
+    mocks.client.getSession.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionSummary>((resolve) => {
+          releaseSummary = resolve;
+        }),
+    );
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Restore me',
+      sessionId: 's1',
+    });
+    await render('s1');
+    // The summary is still loading: the composer is disabled on the pending
+    // record alone, so the discard can only park focus on the session list.
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
+
+    await focusAndClickDiscard();
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+
+    await act(async () => {
+      releaseSummary(summary('s1'));
+      await flush();
+    });
+    // The composer became focusable holding the restored draft: the latch
+    // was still armed, so focus lands there now.
+    expect(container.querySelector('textarea')?.value).toBe('Restore me');
+    expect(document.activeElement).toBe(container.querySelector('textarea'));
   });
 
   it('does not refetch the list when a dropped workspace path changes', async () => {
