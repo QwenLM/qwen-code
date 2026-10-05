@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { Lexer } from 'marked';
 
 const OPEN = '<' + 'invoke';
 const CLOSE = '</' + 'invoke>';
@@ -706,9 +707,6 @@ describe('complete taught-dialect recovery (#10692)', () => {
     '<tool_call><function=write_file>' +
       '<parameter=file_path>a.ts</parameter>' +
       '<parameter=content>before</function>after</parameter></function></tool_call>',
-    '<tool_call><function=read_file><parameter=file_path>a.ts</parameter></tool_call>' +
-      '<tool_call><function=run_shell_command>' +
-      '<parameter=command>pwd</parameter></function></tool_call>',
   ])(
     'preserves malformed blocks instead of dispatching partial calls: %s',
     (text) => {
@@ -719,6 +717,44 @@ describe('complete taught-dialect recovery (#10692)', () => {
       });
     },
   );
+
+  it('recovers the intact call after an envelope whose block never closed', () => {
+    // The first envelope never closes its function block, so nothing may be
+    // dispatched from it — but the rescan still finds the intact second call,
+    // and the malformed envelope stays visible in remainingText.
+    const tcOpen = '<' + 'tool_call>';
+    const tcClose = '</' + 'tool_call>';
+    const fnOpen = '<' + 'function=';
+    const fnClose = '</' + 'function>';
+    const truncated = [
+      tcOpen,
+      fnOpen,
+      'read_file>',
+      PARAM_OPEN,
+      '=file_path>a.ts',
+      PARAM_CLOSE,
+      tcClose,
+    ].join('');
+    const intact = [
+      tcOpen,
+      fnOpen,
+      'run_shell_command>',
+      PARAM_OPEN,
+      '=command>pwd',
+      PARAM_CLOSE,
+      fnClose,
+      tcClose,
+    ].join('');
+    const text = truncated + intact;
+    const result = tryRecoverXmlToolCalls(text);
+    expect(
+      result.functionCallParts.map((part) => part.functionCall?.name),
+    ).toEqual(['run_shell_command']);
+    expect(result.functionCallParts[0]?.functionCall?.args).toEqual({
+      command: 'pwd',
+    });
+    expect(result.remainingText).toBe(truncated);
+  });
 
   it('preserves a parameterless block whose name contains parameter syntax', () => {
     const parameterless = "<invoke name='<parameter=x>y</parameter>'></invoke>";
@@ -743,4 +779,141 @@ describe('complete taught-dialect recovery (#10692)', () => {
       });
     },
   );
+});
+
+describe('borrowed closers, lexer cost and rejected-block masking', () => {
+  const FN_CLOSE = '</' + 'function>';
+  const TC_OPEN = '<' + 'tool_call>';
+  const TC_CLOSE = '</' + 'tool_call>';
+  const EXAMPLE_CLOSE = '</' + 'example>';
+  const readBlock = [
+    '<function=read_file>',
+    PARAM_OPEN,
+    '=file_path>b.ts',
+    PARAM_CLOSE,
+    FN_CLOSE,
+  ].join('');
+
+  it('does not dispatch a truncated block that borrows the next call closers', () => {
+    const text = [
+      TC_OPEN,
+      '\n<function=write_file>\n',
+      PARAM_OPEN,
+      '=file_path>a.txt',
+      PARAM_CLOSE,
+      '\n',
+      PARAM_OPEN,
+      '=content>hello\n',
+      TC_OPEN,
+      '\n<function=run_shell_command>',
+      PARAM_OPEN,
+      '=command>pwd',
+      PARAM_CLOSE,
+      FN_CLOSE,
+      '\n',
+      TC_CLOSE,
+    ].join('');
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(true);
+    expect(
+      result.functionCallParts.map((part) => part.functionCall?.name),
+    ).toEqual(['run_shell_command']);
+    expect(result.functionCallParts[0]?.functionCall?.args).toEqual({
+      command: 'pwd',
+    });
+    // The truncated block stays visible instead of being dispatched with the
+    // next call's markup as its content.
+    expect(result.remainingText).toContain('hello');
+    expect(result.remainingText).not.toContain(FN_CLOSE);
+  });
+
+  it('leaves a truncated block inert when no donor close follows', () => {
+    const fnOpen = '<' + 'function=';
+    const text = [
+      fnOpen,
+      'write_file>',
+      PARAM_OPEN,
+      '=file_path>a.txt',
+      PARAM_CLOSE,
+      PARAM_OPEN,
+      '=content>hello',
+    ].join('');
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('does not run the markdown lexer when the text has no example tag', () => {
+    const spy = vi.spyOn(Lexer, 'lexInline');
+    try {
+      // Unterminated link openers are the super-linear case for marked's
+      // inline lexer; with no example tag in the text none of it may run.
+      const text = '[a]('.repeat(50) + '\n' + readBlock;
+      const result = tryRecoverXmlToolCalls(text);
+      expect(
+        result.functionCallParts.map((part) => part.functionCall?.name),
+      ).toEqual(['read_file']);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('still runs the markdown lexer when an example tag is present', () => {
+    const spy = vi.spyOn(Lexer, 'lexInline');
+    try {
+      const documentation = '<example>model:\n' + readBlock + EXAMPLE_CLOSE;
+      expect(tryRecoverXmlToolCalls(documentation).recovered).toBe(false);
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('degrades to no example filtering when the lexer throws', () => {
+    const spy = vi.spyOn(Lexer, 'lexInline').mockImplementation((): never => {
+      throw new Error('lexer boom');
+    });
+    try {
+      const text = '<example>model:\n' + readBlock;
+      let result!: ReturnType<typeof tryRecoverXmlToolCalls>;
+      expect(() => {
+        result = tryRecoverXmlToolCalls(text);
+      }).not.toThrow();
+      expect(
+        result.functionCallParts.map((part) => part.functionCall?.name),
+      ).toEqual(['read_file']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('does not let a rejected block parameter swallow a later valid call', () => {
+    // The write_file block is rejected — its content parameter never closes
+    // and borrows the function close tag — yet its parameter data must still
+    // be masked out of the prose the example scan reads. Unclosed, that
+    // literal example opener would swallow everything to the end of the text.
+    const fnOpen = '<' + 'function=';
+    const rejected = [
+      fnOpen,
+      'write_file>',
+      PARAM_OPEN,
+      '=file_path>a.txt',
+      PARAM_CLOSE,
+      PARAM_OPEN,
+      '=content><example>note',
+      FN_CLOSE,
+      'tail',
+      PARAM_CLOSE,
+      FN_CLOSE,
+    ].join('');
+    const text = rejected + '\n' + readBlock;
+    const result = tryRecoverXmlToolCalls(text);
+    expect(
+      result.functionCallParts.map((part) => part.functionCall?.name),
+    ).toEqual(['read_file']);
+    expect(result.remainingText).toContain('<example>note');
+  });
 });

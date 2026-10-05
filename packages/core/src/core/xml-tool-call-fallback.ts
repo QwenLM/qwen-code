@@ -11,6 +11,10 @@ const TOOL_CALL_PATTERN =
   /<invoke\s+name=["']([^"']+)["']>([\s\S]*?)<\/invoke>|<function=([^\s<>]+)>([\s\S]*?)<\/function>/g;
 const PARAMETER_PATTERN =
   /<parameter(?:\s+name=["']([^"']+)["']|=([^\s<>]+))>([\s\S]*?)<\/parameter>/g;
+// Parameter open tags. Scanned over a block body to detect a parameter that
+// was never closed: PARAMETER_PATTERN then borrows the close tag of a later
+// block, which leaves `outsideParameters` empty and slips past the guard.
+const PARAM_OPEN_PATTERN = /<parameter(?:\s+name=["'][^"']*["']|=[^\s<>]+)?>/g;
 
 export interface ExtractedToolCall {
   name: string;
@@ -127,6 +131,13 @@ function computeExampleRanges(
   text: string,
   parameterRanges: Array<[number, number]>,
 ): Array<[number, number]> {
+  // marked's inline lexer is super-linear on unterminated link/emphasis runs
+  // and nothing bounds the model's output length, so it is only worth running
+  // when the text can actually produce an example range. The tag scan below
+  // re-checks every candidate against `tagPositions`, so skipping the lexer
+  // here can only yield "no ranges" — which is what an example-free text has.
+  if (!text.includes('<example') && !text.includes('</example')) return [];
+
   const tagPositions = new Set<number>();
   function collectTags(tokens: Token[], raw: string, baseOffset: number) {
     let cursor = 0;
@@ -152,7 +163,13 @@ function computeExampleRanges(
   }
   proseParts.push(text.slice(cursor));
   const prose = proseParts.join('');
-  collectTags(Lexer.lexInline(prose), prose, 0);
+  try {
+    collectTags(Lexer.lexInline(prose), prose, 0);
+  } catch {
+    // The regex-only implementation this replaced could not throw; a lexer
+    // failure must degrade to "no example ranges", not abort the turn.
+    tagPositions.clear();
+  }
 
   const ranges: Array<[number, number]> = [];
   const tags = /<\/?example(?=[\s/>])(?:[^>"']|"[^"]*"|'[^']*')*>/g;
@@ -192,21 +209,44 @@ function computeExampleRanges(
  */
 function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
   const blocks: ToolCallBlock[] = [];
+  // Parameter spans are a property of the raw text, not of which blocks the
+  // guard accepts: they mask parameter data out of the prose handed to the
+  // markdown lexer and out of fence tracking. Deriving them from accepted
+  // blocks only left a rejected block's data unmasked, where a literal example
+  // tag in it could swallow a later valid call.
   const parameterRanges: Array<[number, number]> = [];
-  TOOL_CALL_PATTERN.lastIndex = 0;
+  PARAMETER_PATTERN.lastIndex = 0;
+  let rangeMatch: RegExpExecArray | null;
+  while ((rangeMatch = PARAMETER_PATTERN.exec(text)) !== null) {
+    parameterRanges.push([
+      rangeMatch.index,
+      rangeMatch.index + rangeMatch[0].length,
+    ]);
+  }
 
+  TOOL_CALL_PATTERN.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = TOOL_CALL_PATTERN.exec(text)) !== null) {
     const toolName = match[1] ?? match[3];
     const paramsBlock = match[2] ?? match[4];
+    // A rejected block may have swallowed a complete later block, so rescan
+    // from just after this block's open tag instead of its borrowed close.
+    const resumeAt = match.index + match[0].indexOf('>') + 1;
     PARAMETER_PATTERN.lastIndex = 0;
     const outsideParameters = paramsBlock.replace(PARAMETER_PATTERN, '');
+    PARAM_OPEN_PATTERN.lastIndex = 0;
     // A missing close must not borrow a later block's parameters or recover
-    // only the arguments preceding a prematurely matched function close.
+    // only the arguments preceding a prematurely matched function close. A
+    // borrowed close leaves no residual tag for the second test to see, so
+    // count the open tags the accepted matches did not close.
     if (
       /<\/?(?:function|invoke|parameter)(?:[\s=>]|$)/.test(outsideParameters) ||
-      /^ {0,3}(?:`{3,}|~{3,})/m.test(outsideParameters)
+      /^ {0,3}(?:`{3,}|~{3,})/m.test(outsideParameters) ||
+      paramsBlock.match(PARAM_OPEN_PATTERN)?.length !==
+        (outsideParameters.match(PARAM_OPEN_PATTERN)?.length ?? 0) +
+          (paramsBlock.match(PARAMETER_PATTERN)?.length ?? 0)
     ) {
+      TOOL_CALL_PATTERN.lastIndex = resumeAt;
       continue;
     }
 
@@ -215,13 +255,6 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       unknown
     >;
     PARAMETER_PATTERN.lastIndex = 0;
-    const ranges: Array<[number, number]> = [];
-    const bodyStart =
-      match.index +
-      match[0].length -
-      paramsBlock.length -
-      (match[1] !== undefined ? '</invoke>'.length : '</function>'.length);
-
     let paramMatch: RegExpExecArray | null;
     while ((paramMatch = PARAMETER_PATTERN.exec(paramsBlock)) !== null) {
       const paramName = paramMatch[1] ?? paramMatch[2];
@@ -229,10 +262,6 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
         stripDelimitingNewlines(paramMatch[3]),
       );
       args[paramName] = parseParameterValue(paramValue);
-      ranges.push([
-        bodyStart + paramMatch.index,
-        bodyStart + paramMatch.index + paramMatch[0].length,
-      ]);
     }
 
     if (toolName && Object.keys(args).length > 0) {
@@ -242,7 +271,6 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
         start: match.index,
         end: match.index + match[0].length,
       });
-      parameterRanges.push(...ranges);
     }
   }
 
