@@ -53,6 +53,7 @@ const mocks = vi.hoisted(() => ({
   installManagedNpmUpdate: vi.fn(),
   runWorkspaceRecoveryWorker: vi.fn(),
   runSessionSendMcp: vi.fn(),
+  runManagedRuntimeAttestationWorker: vi.fn(),
 }));
 
 vi.mock('./commands/agents/session-send-mcp-server.js', () => ({
@@ -61,6 +62,10 @@ vi.mock('./commands/agents/session-send-mcp-server.js', () => ({
 
 vi.mock('./serve/workspace-recovery-worker.js', () => ({
   runWorkspaceRecoveryWorker: mocks.runWorkspaceRecoveryWorker,
+}));
+
+vi.mock('./serve/managed-runtime-attestation-worker.js', () => ({
+  runManagedRuntimeAttestationWorker: mocks.runManagedRuntimeAttestationWorker,
 }));
 
 vi.mock('./llm.js', () => ({
@@ -810,12 +815,30 @@ describe('runCliEntry', () => {
     expect(mocks.main).not.toHaveBeenCalled();
   });
 
-  it('rejects arguments on the hidden Runtime worker route', async () => {
-    await runCliEntry(['managed-runtime-worker', '--help']);
+  it.each([
+    ['managed-runtime-worker', '--help'],
+    ['managed-runtime-worker', '--container-boot'],
+    ['managed-runtime-worker', '--container-boot', '/boot.json', 'extra'],
+    ['managed-runtime-worker', '/boot.json', '--container-boot'],
+  ])('rejects invalid hidden Runtime worker arguments: %j', async (...argv) => {
+    await runCliEntry(argv);
 
     expect(process.exitCode).toBe(1);
     expect(stderr.join('')).toContain(
       'Managed Runtime worker arguments are invalid.',
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.runManagedRuntimeAttestationWorker).not.toHaveBeenCalled();
+  });
+
+  it('passes the boot file to the container worker without starting the CLI', async () => {
+    await runCliEntry([
+      'managed-runtime-worker',
+      '--container-boot',
+      '/boot.json',
+    ]);
+    expect(mocks.runManagedRuntimeAttestationWorker).toHaveBeenCalledWith(
+      '/boot.json',
     );
     expect(mocks.main).not.toHaveBeenCalled();
   });
