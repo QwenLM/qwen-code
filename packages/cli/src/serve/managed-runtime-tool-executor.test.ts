@@ -5,8 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { promises as fs } from 'node:fs';
-import { readFileSync } from 'node:fs';
+import { promises as fs, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
