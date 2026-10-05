@@ -301,6 +301,31 @@ describe('restoreQQState', () => {
     expect(msgSeqMap.get('msg_abc')).toBe(5);
   });
 
+  it('keeps a sequence counter whose msg_seq is still held by a session anchor', () => {
+    fsStore[statePath] = JSON.stringify({
+      replyMsgId: [['u1', 'msg-current']],
+      msgSeqMap: [
+        ['msg-current', 2],
+        ['msg-live', 5],
+      ],
+    });
+    const ch = makeChannel();
+    // A live session is still anchored to msg-live (the chat-level entry only
+    // names the newer msg-current), so restoring must not drop its counter.
+    const sessionReplyMsgId = (
+      ch as unknown as {
+        sessionReplyMsgId: Map<string, { msgId: string; timestamp: number }>;
+      }
+    ).sessionReplyMsgId;
+    sessionReplyMsgId.set('s1', { msgId: 'msg-live', timestamp: Date.now() });
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const msgSeqMap = (ch as unknown as { msgSeqMap: Map<string, number> })
+      .msgSeqMap;
+    expect(msgSeqMap.get('msg-live')).toBe(5);
+    expect(msgSeqMap.get('msg-current')).toBe(2);
+  });
+
   it('discards sequence counters without a restored reply context', () => {
     fsStore[statePath] = JSON.stringify({
       replyMsgId: [['u1', 'msg-current']],

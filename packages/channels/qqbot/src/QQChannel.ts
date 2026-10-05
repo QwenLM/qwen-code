@@ -3795,8 +3795,15 @@ export class QQChannel extends ChannelBase {
           );
         }
       }
+      // Same holder predicate as every other msg_seq reclamation site: a
+      // cold-start restore is reached with the in-memory holder collections
+      // intact (INVALID_SESSION / non-1000 WS close set coldStart without a
+      // restart), and replyContextByMessageId only names each chat's *latest*
+      // msgId. Filtering on that map alone dropped the counter a session
+      // anchored to an older msgId still needed, so the next anchored flush
+      // restarted at msg_seq 1 and QQ deduped the tail away.
       for (const msgId of this.msgSeqMap.keys()) {
-        if (!this.replyContextByMessageId.has(msgId)) {
+        if (!this.isMsgSeqStillInUse(msgId)) {
           this.msgSeqMap.delete(msgId);
         }
       }
