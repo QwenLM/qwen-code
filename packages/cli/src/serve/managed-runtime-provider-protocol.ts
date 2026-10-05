@@ -622,9 +622,8 @@ function confirmationFitSlots(
   };
   switch (target['type']) {
     case 'edit':
-      if (target['fileDiff'] !== PROVIDER_RESULT_STUB) collect('fileDiff');
-      if (target['originalContent'] !== PROVIDER_RESULT_STUB)
-        collect('originalContent');
+      // Display-only fields (fileDiff, originalContent) are stubbed
+      // upstream; they are never head-and-tail cut.
       collect('newContent');
       break;
     case 'exec':
@@ -774,6 +773,8 @@ export function fitManagedRuntimeProviderResult(
     Buffer.byteLength(JSON.stringify(root), 'utf8') <= budgetBytes;
   if (fits()) return value;
   if (operation.kind === 'confirmation') {
+    let size = Buffer.byteLength(JSON.stringify(root), 'utf8');
+    if (size <= budgetBytes) return value;
     if (root['type'] === 'edit') {
       root['hideModify'] = true;
       root['warnings'] = [
@@ -782,27 +783,38 @@ export function fitManagedRuntimeProviderResult(
           : []),
         `Content was truncated to fit the ${budgetBytes}-byte Managed Runtime wire limit; the change shown is partial.`,
       ];
-      // Display-only fields are replaced with a stub string first so
-      // newContent (the actual bytes written on approval) survives intact.
-      if (typeof root['fileDiff'] === 'string') {
-        root['fileDiff'] = PROVIDER_RESULT_STUB;
-      }
-      if (!fits() && typeof root['originalContent'] === 'string') {
+      size = Buffer.byteLength(JSON.stringify(root), 'utf8');
+      const stubBytes = jsonTextBytes(PROVIDER_RESULT_STUB);
+      // Sacrifice originalContent first (which is not rendered in the
+      // confirmation body) only if it is large enough that stubbing it saves bytes.
+      if (
+        size > budgetBytes &&
+        typeof root['originalContent'] === 'string' &&
+        jsonTextBytes(root['originalContent']) > stubBytes
+      ) {
         root['originalContent'] = PROVIDER_RESULT_STUB;
+        size = Buffer.byteLength(JSON.stringify(root), 'utf8');
       }
-      if (fits()) return value;
+      // Replace fileDiff only when still over budget and it is large enough
+      // that stubbing it reduces payload size, preserving real diffs whenever possible.
+      if (
+        size > budgetBytes &&
+        typeof root['fileDiff'] === 'string' &&
+        jsonTextBytes(root['fileDiff']) > stubBytes
+      ) {
+        root['fileDiff'] = PROVIDER_RESULT_STUB;
+        size = Buffer.byteLength(JSON.stringify(root), 'utf8');
+      }
+      if (size <= budgetBytes) return value;
     }
     const slots = confirmationFitSlots(root).map((slot) => ({
       slot,
       bytes: jsonTextBytes(slot.get()),
       floor: jsonTextBytes(providerFitNotice(slot.get().length, budgetBytes)),
     }));
-    const size = Buffer.byteLength(JSON.stringify(root), 'utf8');
-    if (size > budgetBytes) {
-      const level = providerFitLevel(slots, size - budgetBytes);
-      for (const { slot, bytes } of slots)
-        if (bytes > level) cutProviderFitSlot(slot, level, budgetBytes);
-    }
+    const level = providerFitLevel(slots, size - budgetBytes);
+    for (const { slot, bytes } of slots)
+      if (bytes > level) cutProviderFitSlot(slot, level, budgetBytes);
     return value;
   }
   const status = operation.kind === 'execute' ? undefined : root;

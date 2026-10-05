@@ -996,6 +996,41 @@ describe('managed-runtime-provider/1', () => {
       ).toEqual(editDetails);
     });
 
+    it('preserves a small real fileDiff and stubs originalContent when originalContent absorbs overflow', () => {
+      const realDiff = '@@ -1 +1 @@\n-a\n+b';
+      const editDetails: {
+        type: string;
+        title: string;
+        fileName: string;
+        filePath: string;
+        fileDiff: string;
+        originalContent: string | null;
+        newContent: string;
+        hideModify: boolean;
+        warnings?: string[];
+      } = {
+        type: 'edit',
+        title: 'Edit',
+        fileName: 'file.txt',
+        filePath: '/workspace/file.txt',
+        fileDiff: realDiff,
+        originalContent: 'o'.repeat(budget * 2),
+        newContent: 'n'.repeat(budget / 2),
+        hideModify: false,
+      };
+      fitManagedRuntimeProviderResult(confirmation, editDetails, budget);
+      expect(
+        Buffer.byteLength(JSON.stringify(editDetails), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(editDetails.fileDiff).toBe(realDiff);
+      expect(editDetails.originalContent).toBe(PROVIDER_RESULT_STUB);
+      expect(editDetails.newContent).toBe('n'.repeat(budget / 2));
+      expect(editDetails.hideModify).toBe(true);
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, editDetails, session),
+      ).toEqual(editDetails);
+    });
+
     it('preserves pre-existing warnings when fitting an over-budget edit confirmation', () => {
       const editDetails: {
         type: string;
