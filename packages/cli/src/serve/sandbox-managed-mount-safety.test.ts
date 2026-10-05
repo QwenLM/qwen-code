@@ -287,6 +287,117 @@ describe.skipIf(process.platform === 'win32')(
       await requireRefusal(managed);
     });
 
+    it.each(['rw', '', 'ro'])(
+      'refuses an unrelated %s mount inside the managed destination',
+      async (mode) => {
+        const managed = path.join(root, 'managed');
+        const other = path.join(root, 'other');
+        fs.mkdirSync(path.join(managed, 'pkg'), { recursive: true });
+        fs.mkdirSync(other);
+        vi.stubEnv('SANDBOX_MOUNTS', `${other}:${managed}/pkg:${mode}`);
+        await requireRefusal(managed);
+      },
+    );
+
+    it.each(['pkg/nested', 'pkg/../pkg', 'pkg/'])(
+      'refuses a writable overlay at normalized descendant %s',
+      async (relative) => {
+        const managed = path.join(root, 'managed');
+        const other = path.join(root, 'other');
+        fs.mkdirSync(path.join(managed, 'pkg', 'nested'), { recursive: true });
+        fs.mkdirSync(other);
+        vi.stubEnv('SANDBOX_MOUNTS', `${other}:${managed}/${relative}:rw`);
+        await requireRefusal(managed);
+      },
+    );
+
+    it('refuses a writable descendant of a generated settings alias', async () => {
+      const managed = path.join(qwenHome, 'prepared');
+      const other = path.join(root, 'other');
+      fs.mkdirSync(path.join(managed, 'pkg'), { recursive: true });
+      fs.mkdirSync(other);
+      vi.stubEnv('SANDBOX_MOUNTS', `${other}:/home/node/.qwen/prepared/pkg:rw`);
+      await requireRefusal(managed);
+    });
+
+    it('refuses an unrelated readonly descendant of an explicit ancestor alias', async () => {
+      const parent = path.join(root, 'deployment');
+      const managed = path.join(parent, 'prepared');
+      const other = path.join(root, 'other');
+      fs.mkdirSync(path.join(managed, 'pkg'), { recursive: true });
+      fs.mkdirSync(other);
+      vi.stubEnv(
+        'SANDBOX_MOUNTS',
+        `${parent}:/deployment-alias:rw,${other}:/deployment-alias/prepared/pkg:ro`,
+      );
+      await requireRefusal(managed);
+    });
+
+    it('allows a readonly overlay from the corresponding managed subtree', async () => {
+      const managed = path.join(root, 'managed');
+      const pkg = path.join(managed, 'pkg');
+      fs.mkdirSync(pkg, { recursive: true });
+      vi.stubEnv('SANDBOX_MOUNTS', `${pkg}:${pkg}:ro`);
+      expect(await launch(managed)).toContainEqual({
+        source: pkg,
+        destination: pkg,
+        readOnly: true,
+      });
+    });
+
+    it('allows a corresponding readonly subtree through a canonical source alias', async () => {
+      const managed = path.join(root, 'managed');
+      const pkg = path.join(managed, 'pkg');
+      const alias = path.join(root, 'pkg-alias');
+      fs.mkdirSync(pkg, { recursive: true });
+      fs.symlinkSync(pkg, alias, 'dir');
+      vi.stubEnv('SANDBOX_MOUNTS', `${alias}:${pkg}:ro`);
+      expect(await launch(managed)).toContainEqual({
+        source: alias,
+        destination: pkg,
+        readOnly: true,
+      });
+    });
+
+    it('allows a readonly overlay matching a symlinked deployed subtree', async () => {
+      const managed = path.join(root, 'managed');
+      const deployed = path.join(root, 'deployed-pkg');
+      const pkg = path.join(managed, 'pkg');
+      fs.mkdirSync(managed);
+      fs.mkdirSync(deployed);
+      fs.symlinkSync(deployed, pkg, 'dir');
+      vi.stubEnv('SANDBOX_MOUNTS', `${deployed}:${pkg}:ro`);
+      expect(await launch(managed)).toContainEqual({
+        source: deployed,
+        destination: pkg,
+        readOnly: true,
+      });
+    });
+
+    it('refuses a readonly overlay when its managed counterpart is missing', async () => {
+      const managed = path.join(root, 'managed');
+      const other = path.join(root, 'other');
+      fs.mkdirSync(managed);
+      fs.mkdirSync(other);
+      vi.stubEnv('SANDBOX_MOUNTS', `${other}:${managed}/missing:ro`);
+      await requireRefusal(managed);
+    });
+
+    it('allows a writable destination with only a shared managed prefix', async () => {
+      const managed = path.join(root, 'managed');
+      const other = path.join(root, 'other');
+      const destination = `${managed}-other/pkg`;
+      fs.mkdirSync(managed);
+      fs.mkdirSync(other);
+      fs.mkdirSync(destination, { recursive: true });
+      vi.stubEnv('SANDBOX_MOUNTS', `${other}:${destination}:rw`);
+      expect(await launch(managed)).toContainEqual({
+        source: other,
+        destination,
+        readOnly: false,
+      });
+    });
+
     it.each(['', '/'])(
       'reuses an existing identical read-only mount with destination suffix %s',
       async (suffix) => {

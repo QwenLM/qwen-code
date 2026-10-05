@@ -884,6 +884,29 @@ export async function start_sandbox(
         protectManagedRoot(containerSpelling);
       }
     }
+
+    for (const mount of mounts) {
+      for (const destination of protectedDestinations) {
+        if (!mount.to.startsWith(`${destination}/`)) continue;
+        let compatibleReadOnlySource = false;
+        if (mount.readOnly) {
+          const relative = path.posix.relative(destination, mount.to);
+          try {
+            compatibleReadOnlySource =
+              fs.realpathSync.native(
+                hostPath.join(managedExtensionsDir, ...relative.split('/')),
+              ) === mount.from;
+          } catch {
+            // A missing subtree cannot establish the overlay's provenance.
+          }
+        }
+        if (!compatibleReadOnlySource) {
+          throw new FatalSandboxError(
+            `Cannot protect managed extensions '${managedExtensionsDir}': sandbox mount '${mount.from}:${mount.to}' overlays protected destination '${destination}'. Choose separate mount paths.`,
+          );
+        }
+      }
+    }
   }
 
   // copy additional environment variables from SANDBOX_ENV
