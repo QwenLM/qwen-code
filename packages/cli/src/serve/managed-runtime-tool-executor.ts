@@ -938,6 +938,26 @@ export class ManagedToolExecutor {
         },
       });
     }
+    // Directory admission before any side effect: a refused watch is a
+    // plain not_started answer, never an attached capture abandoned by the
+    // refusal.
+    let directory = tools.directory;
+    if (
+      typeof normalized['directory'] === 'string' &&
+      normalized['directory'] !== ''
+    ) {
+      if (!tools.admitsDirectory(normalized['directory'])) {
+        return settle({
+          executionStatus: 'not_started',
+          responseParts: [],
+          capture: null,
+          error: {
+            message: `Directory '${normalized['directory']}' is not within any of the registered workspace directories.`,
+          },
+        });
+      }
+      directory = normalized['directory'];
+    }
     let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
     try {
       prepared = await this.capturePublisher.prepare({
@@ -967,23 +987,6 @@ export class ManagedToolExecutor {
     const sink = prepared.sink;
     const publisher = prepared.publisher ?? this.capturePublisher;
     const unitName = `qwen-mon-${reference.callId.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
-    let directory = tools.directory;
-    if (
-      typeof normalized['directory'] === 'string' &&
-      normalized['directory'] !== ''
-    ) {
-      if (!tools.admitsDirectory(normalized['directory'])) {
-        return settle({
-          executionStatus: 'not_started',
-          responseParts: [],
-          capture: null,
-          error: {
-            message: `Directory '${normalized['directory']}' is not within any of the registered workspace directories.`,
-          },
-        });
-      }
-      directory = normalized['directory'];
-    }
     let watchHandle: Awaited<ReturnType<ManagedMonitorWatcher['start']>>;
     let bufferedBytes = 0;
     let paused = false;

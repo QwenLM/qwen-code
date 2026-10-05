@@ -319,7 +319,13 @@ export class HostedShellPublisher {
       }
       entry.offsets[stream] += bytes.byteLength;
       await sink.write(stream, bytes);
-      await this.advanceBackgroundManifest(entry, String(id));
+      try {
+        await this.advanceBackgroundManifest(entry, String(id));
+      } catch {
+        // A record-side forward failure never poisons a byte that already
+        // landed: the next edging write retries the forward. The tray's
+        // settle arms keep their fail-stop, which is where integrity lives.
+      }
       if (
         entry.background?.recordDomain === 'monitor_run' &&
         stream === 'stdout'
@@ -343,7 +349,12 @@ export class HostedShellPublisher {
         throw new Error('Invalid Shell finish.');
       entry.ended[stream] = true;
       await sink.finish(stream, body['complete']);
-      await this.advanceBackgroundManifest(entry, String(id));
+      try {
+        await this.advanceBackgroundManifest(entry, String(id));
+      } catch {
+        // Same retry rule as the write op: the stream's durable seal
+        // landed, the record forward retries on the next arm.
+      }
       return { accepted: true };
     }
     if (body['operation'] === 'finalize') {
@@ -626,7 +637,6 @@ export class HostedShellPublisher {
         );
       }
       if (owner.startReceiptRef === null) return;
-      background.lastManifest = current;
       if (background.recordDomain === 'monitor_run') {
         if (!this.monitors) return;
         await this.monitors.advanceOutput(executionCallId, current);
@@ -634,6 +644,10 @@ export class HostedShellPublisher {
         if (!this.childRuns) return;
         await this.childRuns.advanceOutput(executionCallId, current);
       }
+      // Advance mark comes last: a thrown forward is retried by the next
+      // edging write with the same or a newer manifest — never latched
+      // permanently ahead of the record.
+      background.lastManifest = current;
     }
   }
 

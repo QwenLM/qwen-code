@@ -808,6 +808,47 @@ it('keeps an ownerless tail for the settle that its attach unblocks', async () =
   expect(observation.lines).toEqual(['first', 'last']);
 });
 
+it('retries the record forward a wedge threw once instead of latching its write', async () => {
+  const r = await rig();
+  const request = backgroundRequest(r.key, '1');
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'execution-bg';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-a',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  prepared.sink.setStarted(7);
+  const broken = vi
+    .spyOn(r.orchestrator, 'advanceOutput')
+    .mockRejectedValueOnce(new Error('record wedge'));
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.write('stdout', Buffer.from('one\ntwo\n'));
+  await prepared.sink.finish('stdout', true);
+  await prepared.sink.finish('stderr', true);
+  const envelope = await prepared.sink.finalize('success', [], undefined);
+  expect(envelope.capture?.captureStatus).toBe('complete');
+  // The thrown arm retried on the next edging write instead of latching:
+  // the record ends pinned at the very manifest the byte chain reached.
+  expect(broken.mock.calls.length).toBeGreaterThanOrEqual(2);
+  const record = parseChildRun(
+    session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
+  );
+  expect(record.outputRef).toEqual(envelope.capture!.manifest!);
+});
+
 it('settles an unproven background end as a failure, never as an exit', async () => {
   const r = await rig();
   const request = backgroundRequest(r.key, '1');

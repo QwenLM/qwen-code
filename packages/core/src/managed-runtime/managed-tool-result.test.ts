@@ -22,6 +22,7 @@ import {
   isToolResultEnvelopeOf,
   isToolResultManifestChainLink,
   isToolResultManifestSuccessor,
+  type ToolResultManifest,
   isToolResultPageAt,
   isToolResultPageSuccessor,
   parseToolResultEnvelope,
@@ -390,16 +391,16 @@ describe('Managed tool result contract', () => {
     },
   );
 
-  it('links only the same capture identity and the very next revision', () => {
-    const before = { ...fixtures.manifest, revision: 7 } as unknown as {
-      revision: number;
-    };
+  it('links only the same capture identity on a later, content-extending revision', () => {
+    const before = { ...fixtures.manifest, revision: 7 } as ToolResultManifest;
     expect(
       isToolResultManifestChainLink(before, { ...before, revision: 8 }),
     ).toBe(true);
+    // A gap the funnel missed once is content-intact by construction and
+    // lands like any later link.
     expect(
       isToolResultManifestChainLink(before, { ...before, revision: 9 }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       isToolResultManifestChainLink(before, { ...before, revision: 7 }),
     ).toBe(false);
@@ -415,6 +416,17 @@ describe('Managed tool result contract', () => {
         ...before,
         revision: 8,
         executionCallId: 'other-call',
+      }),
+    ).toBe(false);
+    // A later revision whose contents chain does not extend the earlier
+    // one loses its place, captured or not.
+    expect(
+      isToolResultManifestChainLink(before, {
+        ...before,
+        revision: 8,
+        contents: before.contents.map((entry, index) =>
+          index === 0 ? { ...entry, streamId: 'stderr' } : entry,
+        ),
       }),
     ).toBe(false);
     // Unlike the successor rule the earlier revision need not stay pending:

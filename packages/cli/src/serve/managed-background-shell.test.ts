@@ -350,6 +350,25 @@ describe('managed v3 Monitor watch', () => {
     );
   });
 
+  it('refuses a workspace-foreign monitor directory before any capture exists', async () => {
+    const ctx = rig();
+    const view = await execute(ctx, {
+      command: 'tail -f build.log',
+      is_monitor: true,
+      directory: '/tmp/elsewhere-qwen-watch',
+    });
+    expect(view).toMatchObject({
+      result: {
+        executionStatus: 'not_started',
+        error: {
+          message:
+            "Directory '/tmp/elsewhere-qwen-watch' is not within any of the registered workspace directories.",
+        },
+      },
+    });
+    expect(ctx.publisher.prepares).toBe(0);
+  });
+
   it('refuses the watch when the Runtime owns no delegated cgroup', async () => {
     const ctx = rig({ withSupervisor: false });
     const view = await execute(ctx, MONITOR_INPUT);

@@ -50,7 +50,9 @@ function manifestBody(over: {
   revision: number;
   captureId?: string;
   executionCallId?: string;
+  streamId?: string;
 }): Buffer {
+  const { streamId = 'stdout', ...body } = over;
   return Buffer.from(
     JSON.stringify({
       toolResult: 'managed-tool-result/1',
@@ -73,7 +75,7 @@ function manifestBody(over: {
       signal: null,
       contents: [
         {
-          streamId: 'stdout',
+          streamId,
           role: 'stdout',
           mimeType: 'application/octet-stream',
           state: 'open',
@@ -83,7 +85,7 @@ function manifestBody(over: {
           body: { pages: [] },
         },
       ],
-      ...over,
+      ...body,
     }),
     'utf8',
   );
@@ -331,14 +333,21 @@ describe('HostedChildRunSession', () => {
       await expect(
         orchestrator.advanceOutput('shell-1', foreign),
       ).rejects.toThrow('lineage');
-      // A skipped revision loses the pages between them the same way.
-      const gap = await publish(manifestBody({ revision: 3 }));
-      await expect(orchestrator.advanceOutput('shell-1', gap)).rejects.toThrow(
-        'lineage',
+      // A jump the funnel missed once lands whole: the contents chain
+      // already carries every skipped revision forward.
+      const leapt = await publish(manifestBody({ revision: 3 }));
+      await orchestrator.advanceOutput('shell-1', leapt);
+      expect(committed(authority).body.outputRef).toEqual(leapt);
+      const backward = await publish(manifestBody({ revision: 2 }));
+      await expect(
+        orchestrator.advanceOutput('shell-1', backward),
+      ).rejects.toThrow('lineage');
+      const brokenChain = await publish(
+        manifestBody({ revision: 4, streamId: 'stderr' }),
       );
-      const rev2 = await publish(manifestBody({ revision: 2 }));
-      await orchestrator.advanceOutput('shell-1', rev2);
-      expect(committed(authority).body.outputRef).toEqual(rev2);
+      await expect(
+        orchestrator.advanceOutput('shell-1', brokenChain),
+      ).rejects.toThrow('lineage');
       // And no manifest ever anchors another call's capture onto this record.
       const elsewhere = await publish(
         manifestBody({ revision: 1, executionCallId: 'call-elsewhere' }),
