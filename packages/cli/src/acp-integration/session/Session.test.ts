@@ -52,6 +52,7 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
+import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import {
   getCurrentAgentId,
@@ -44231,11 +44232,14 @@ describe('Session', () => {
     });
 
     it.each([false, true])(
-      'recovers from an automatic Host refusal, preserving user cancellation (agent-host=%s)',
+      'denies outside Host reads before permissions, preserving user cancellation (agent-host=%s)',
       async (agentHost) => {
         vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
           agentHost ? 'agent-host' : undefined,
         );
+        vi.mocked(
+          mockConfig.getWorkspaceContext().isPathWithinWorkspace,
+        ).mockImplementation((candidate) => candidate === process.cwd());
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
         const deniedExecute = vi.fn();
         const allowedExecute = vi.fn().mockResolvedValue({
@@ -44248,10 +44252,12 @@ describe('Session', () => {
           'info',
         );
         deniedTool.kind = core.Kind.Read;
+        const deniedInvocation = deniedTool.build();
+        deniedInvocation.params = { file_path: '/outside/denied.txt' };
+        const allowedTool = mockAllowedTool(core.ToolNames.LS, allowedExecute);
+        allowedTool.build().params = { path: process.cwd() };
         mockToolRegistry.getTool.mockImplementation((name: string) =>
-          name === core.ToolNames.READ_FILE
-            ? deniedTool
-            : mockAllowedTool(name, allowedExecute),
+          name === core.ToolNames.READ_FILE ? deniedTool : allowedTool,
         );
         const guard = vi.fn().mockResolvedValue({ allowed: true });
         mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
@@ -44282,12 +44288,18 @@ describe('Session', () => {
           },
         ]);
 
-        expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        expect(mockClient.requestPermission).toHaveBeenCalledTimes(
+          agentHost ? 0 : 1,
+        );
         expect(deniedExecute).not.toHaveBeenCalled();
         expect(result.stopAfterPermissionCancel).toBe(!agentHost);
         expect(allowedExecute).toHaveBeenCalledTimes(agentHost ? 1 : 0);
         expect(guard).toHaveBeenCalledTimes(agentHost ? 1 : 0);
         if (agentHost) {
+          expect(deniedInvocation.getDefaultPermission).not.toHaveBeenCalled();
+          expect(result.parts[0]?.functionResponse?.response).toEqual({
+            error: 'Agent Host reads are limited to the assigned workspace.',
+          });
           expect(guard).toHaveBeenCalledWith(
             expect.objectContaining({
               toolName: core.ToolNames.LS,
@@ -44311,6 +44323,155 @@ describe('Session', () => {
         );
       },
     );
+
+    it('records an approval-needing inside Host read as a policy denial, not a user cancel', async () => {
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('agent-host');
+      const insidePath = path.join(process.cwd(), 'approval-needed.txt');
+      vi.mocked(
+        mockConfig.getWorkspaceContext().isPathWithinWorkspace,
+      ).mockImplementation(
+        (candidate) => candidate === insidePath || candidate === process.cwd(),
+      );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      const refusedExecute = vi.fn();
+      const allowedExecute = vi.fn().mockResolvedValue({
+        llmContent: 'ALLOWED_HOST_DIRECTORY',
+        returnDisplay: 'ALLOWED_HOST_DIRECTORY',
+      });
+      const refusedTool = mockConfirmingTool(
+        core.ToolNames.READ_FILE,
+        refusedExecute,
+        'info',
+      );
+      refusedTool.kind = core.Kind.Read;
+      refusedTool.build().params = { file_path: insidePath };
+      const allowedTool = mockAllowedTool(core.ToolNames.LS, allowedExecute);
+      allowedTool.build().params = { path: process.cwd() };
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.READ_FILE ? refusedTool : allowedTool,
+      );
+      const guard = vi.fn().mockResolvedValue({ allowed: true });
+      mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
+      vi.mocked(mockClient.requestPermission).mockImplementation(async (p) => {
+        const reject = p.options.find(
+          (option: PermissionOption) => option.kind === 'reject_once',
+        );
+        expect(reject).toBeDefined();
+        return {
+          outcome: { outcome: 'selected', optionId: reject!.optionId },
+        };
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-host-approval', [
+        {
+          id: 'inside_read',
+          name: core.ToolNames.READ_FILE,
+          args: { file_path: insidePath },
+        },
+        {
+          id: 'inside_list',
+          name: core.ToolNames.LS,
+          args: { path: process.cwd() },
+        },
+      ]);
+
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      expect(refusedExecute).not.toHaveBeenCalled();
+      // A Host auto-refusal is a policy denial: it must not stop the batch.
+      expect(result.stopAfterPermissionCancel).toBe(false);
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        error: `Tool "${core.ToolNames.READ_FILE}" requires approval, which is unavailable on this read-only Agent Host.`,
+      });
+      expect(allowedExecute).toHaveBeenCalledTimes(1);
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [result.parts[0]],
+        expect.objectContaining({
+          callId: 'inside_read',
+          status: 'error',
+          executionStatus: 'not_started',
+          errorType: core.ToolErrorType.EXECUTION_DENIED,
+        }),
+      );
+    });
+
+    it('checks full Host authority once after permission-hook input rewriting', async () => {
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('agent-host');
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      const originalPath = path.join(process.cwd(), 'original.txt');
+      const updatedPath = path.join(process.cwd(), 'updated.txt');
+      const permissionHook = vi
+        .spyOn(core, 'firePermissionRequestHook')
+        .mockResolvedValue({
+          hasDecision: true,
+          shouldAllow: true,
+          updatedInput: { file_path: updatedPath },
+        });
+      const preHook = vi
+        .spyOn(core, 'firePreToolUseHook')
+        .mockResolvedValue({ shouldProceed: true });
+      const upstream = vi.fn().mockImplementation(async () => {
+        expect(preHook).toHaveBeenCalledOnce();
+        return { allowed: false, reason: 'upstream Host policy denied' };
+      });
+      mockConfig.getToolInvocationGuard = vi
+        .fn()
+        .mockReturnValue(
+          createAgentHostToolInvocationGuard(
+            upstream,
+            process.cwd(),
+            (candidate) =>
+              mockConfig.getWorkspaceContext().isPathWithinWorkspace(candidate),
+          ),
+        );
+      const execute = vi.fn();
+      const tool = mockConfirmingTool(
+        core.ToolNames.READ_FILE,
+        execute,
+        'info',
+      );
+      tool.kind = core.Kind.Read;
+      tool.build().params = { file_path: originalPath };
+      mockToolRegistry.getTool.mockReturnValue(tool);
+
+      try {
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(new AbortController().signal, 'prompt-host-upstream', [
+          {
+            id: 'inside_read',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: originalPath },
+          },
+        ]);
+
+        expect(permissionHook).toHaveBeenCalledOnce();
+        expect(upstream).toHaveBeenCalledOnce();
+        expect(upstream).toHaveBeenCalledWith(
+          expect.objectContaining({
+            toolName: core.ToolNames.READ_FILE,
+            args: { file_path: updatedPath },
+            permissionChecked: true,
+            sessionId: 'test-session-id',
+            cwd: process.cwd(),
+          }),
+        );
+        expect(mockClient.requestPermission).not.toHaveBeenCalled();
+        expect(execute).not.toHaveBeenCalled();
+        expect(result.stopAfterPermissionCancel).toBe(false);
+        expect(result.parts[0]?.functionResponse?.response).toEqual({
+          error: 'upstream Host policy denied',
+        });
+      } finally {
+        permissionHook.mockRestore();
+        preHook.mockRestore();
+      }
+    });
 
     it('skips later tools after non-question permission cancellation', async () => {
       const cancelledExecute = vi.fn();
@@ -44633,9 +44794,22 @@ describe('Session', () => {
           llmContent: 'should not execute',
           returnDisplay: 'should not execute',
         });
+        const permissionToolName = agentHost
+          ? core.ToolNames.READ_FILE
+          : core.ToolNames.SHELL;
+        const permissionArgs = agentHost
+          ? { file_path: path.join(process.cwd(), 'approval-needed.txt') }
+          : { command: 'echo denied' };
+        const permissionTool = mockConfirmingTool(
+          permissionToolName,
+          permissionExecute,
+          agentHost ? 'info' : 'exec',
+        );
+        if (agentHost) permissionTool.kind = core.Kind.Read;
+        permissionTool.build().params = permissionArgs;
         mockToolRegistry.getTool.mockImplementation((name: string) =>
-          name === core.ToolNames.SHELL
-            ? mockConfirmingTool(name, permissionExecute, 'exec')
+          name === permissionToolName
+            ? permissionTool
             : mockAllowedTool(name, laterExecute),
         );
         vi.mocked(mockClient.requestPermission).mockReturnValueOnce(
@@ -44653,13 +44827,15 @@ describe('Session', () => {
           [
             {
               id: 'shell_call',
-              name: core.ToolNames.SHELL,
-              args: { command: 'echo denied' },
+              name: permissionToolName,
+              args: permissionArgs,
             },
             {
               id: 'read_call',
-              name: core.ToolNames.READ_FILE,
-              args: { file_path: '/tmp/should-not-run' },
+              name: agentHost ? core.ToolNames.LS : core.ToolNames.READ_FILE,
+              args: agentHost
+                ? { path: process.cwd() }
+                : { file_path: '/tmp/should-not-run' },
             },
           ],
         );
