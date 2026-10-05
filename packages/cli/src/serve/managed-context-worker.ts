@@ -161,12 +161,11 @@ function isHostAbsolute(mountRoot: string): boolean {
 }
 
 /**
- * Picks the capture funnel of one prepare. A background Shell or Monitor
- * capture belongs to the record funnel of its owning Session: the detached
- * handle carries no result manifest, so an unregistered Session funnel is
- * the one place the record could never settle — admission refuses it
- * instead of silently parking the capture on the publication. Foreground
- * captures keep the exclusive-mode rule.
+ * Picks the capture funnel of one prepare by the capture's own identity. A
+ * background Shell or Monitor capture belongs to the record funnel of its
+ * Session; a foreground result belongs to its own publication grant, and
+ * the same Session owning both at once is a legal, ordinary topology — a
+ * Session-level mixed-mode check can never tell the two apart.
  */
 export function selectShellCapturePublisher(
   remotePublishers: ManagedShellPublisherRegistry,
@@ -174,9 +173,12 @@ export function selectShellCapturePublisher(
 ): ManagedShellCapturePublisher {
   return {
     async prepare(request) {
-      const local = remotePublishers.hasSession(request.reference.sessionId);
       if (request.capture.background === true) {
-        if (!local)
+        // The detached handle carries no result manifest, so an
+        // unregistered Session funnel is the one place the record could
+        // never settle — admission refuses it instead of silently parking
+        // the capture on the publication.
+        if (!remotePublishers.hasSession(request.reference.sessionId))
           throw new Error(
             'Background captures require their Session publisher.',
           );
@@ -185,11 +187,17 @@ export function selectShellCapturePublisher(
           publisher: remotePublishers,
         };
       }
-      const remote = remotePublisher.hasExecution(
-        request.capture.executionCallId,
-      );
-      if (local && remote) throw new Error('Shell publication modes conflict.');
-      const selected = local ? remotePublishers : remotePublisher;
+      if (remotePublisher.hasExecution(request.capture.executionCallId)) {
+        // The foreground result's own funnel; the Session's background
+        // lane registered beside it is not a conflict.
+        return {
+          ...(await remotePublisher.prepare(request)),
+          publisher: remotePublisher,
+        };
+      }
+      const selected = remotePublishers.hasSession(request.reference.sessionId)
+        ? remotePublishers
+        : remotePublisher;
       return {
         ...(await selected.prepare(request)),
         publisher: selected,

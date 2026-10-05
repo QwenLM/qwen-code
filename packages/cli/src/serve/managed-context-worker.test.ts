@@ -1628,24 +1628,30 @@ describe('selectShellCapturePublisher', () => {
     expect(remotePublisher.prepare).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ['the conflict rule on a doubly owned foreground capture', true, true],
-    ['the Session on a foreground capture it alone owns', true, false],
-  ])('keeps the foreground rule: %s', async (_case, local, remote) => {
-    const { remotePublishers, remotePublisher } = doubles(local, remote);
+  it('hands a foreground execution its own publication while the Session lane is registered', async () => {
+    const { remotePublishers, remotePublisher } = doubles(true, true);
     const publisher = selectShellCapturePublisher(
       remotePublishers as never,
       remotePublisher as never,
     );
-    const outcome = publisher.prepare(request(false) as never);
-    if (local && remote) {
-      await expect(outcome).rejects.toThrow(
-        'Shell publication modes conflict.',
-      );
-    } else {
-      await expect(outcome).resolves.toMatchObject({
-        identity: { lane: 'local' },
-      });
-    }
+    // The mixed topology is ordinary now: the execution belongs to its
+    // publication grant, the background lane to the Session — sharing them
+    // is never a conflict.
+    const prepared = await publisher.prepare(request(false) as never);
+    expect(remotePublisher.prepare).toHaveBeenCalledOnce();
+    expect(remotePublishers.prepare).not.toHaveBeenCalled();
+    expect(prepared.identity).toEqual({ lane: 'remote' });
+    expect(prepared.publisher).toBe(remotePublisher);
+  });
+
+  it('keeps the Session publisher for a foreground capture when it is the only owner', async () => {
+    const { remotePublishers, remotePublisher } = doubles(true, false);
+    const publisher = selectShellCapturePublisher(
+      remotePublishers as never,
+      remotePublisher as never,
+    );
+    const prepared = await publisher.prepare(request(false) as never);
+    expect(prepared.identity).toEqual({ lane: 'local' });
+    expect(prepared.publisher).toBe(remotePublishers);
   });
 });
