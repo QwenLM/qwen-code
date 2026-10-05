@@ -1453,6 +1453,26 @@ export function registerHostedHarnessSessionRoutes(
     const resident = sessions.get(sessionId);
     const passiveRecovery = body?.['passiveManagedRuntimeRecovery'] === true;
     const driveRecovery = body?.['driveRuntimeRecovery'] === true;
+    // Both resident reattach branches below answer from the same connection,
+    // so the frozen binding is checked once, before either branch runs. A
+    // foreign tenant or Workspace stays hidden behind a 404; a drifted
+    // Session Store address is the caller's own lookup failing, and the one
+    // caller settles a 404 as a terminal Turn failure, so it answers the
+    // retryable conflict instead.
+    if (resident !== undefined && !create) {
+      const key = resident.managed.authority.sessionHeader.sessionKey;
+      if (
+        key.tenantId !== store.tenantId ||
+        key.workspaceId !== store.workspaceId
+      ) {
+        error(res, 404, 'hosted_session_not_found');
+        return;
+      }
+      if (resident.storeBaseUrl !== store.baseUrl) {
+        error(res, 409, 'hosted_session_store_mismatch');
+        return;
+      }
+    }
     if (
       opening.has(sessionId) ||
       (resident && (create || (!passiveRecovery && !driveRecovery)))
@@ -1520,20 +1540,23 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_turn_recovery_required');
         return;
       }
+      // A teardown admitted during the await above released nothing (the
+      // lease was not recorded yet) and left no route to hand it back.
+      if (sessions.get(sessionId) !== resident) {
+        noteOwedAdoption(resident, sessionId);
+        error(res, 404, 'hosted_session_not_found');
+        return;
+      }
+      if (resident.mcpClosing) {
+        noteOwedAdoption(resident, sessionId);
+        error(res, 409, 'hosted_session_closing');
+        return;
+      }
       refusedAdoptions.delete(sessionId);
       sendAttachment(res, sessionId, resident, recovery);
       return;
     }
     if (resident) {
-      const key = resident.managed.authority.sessionHeader.sessionKey;
-      if (
-        key.tenantId !== store.tenantId ||
-        key.workspaceId !== store.workspaceId ||
-        resident.storeBaseUrl !== store.baseUrl
-      ) {
-        error(res, 404, 'hosted_session_not_found');
-        return;
-      }
       if (
         toolProfile === undefined &&
         (resident.toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||

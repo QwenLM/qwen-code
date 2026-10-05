@@ -6407,17 +6407,27 @@ describe('Hosted Harness tool approvals', () => {
 
   it('passively reattaches a live Turn and cancels it without opening another writer', async () => {
     const { server, clientId, answer, status } = await waitingSession();
-    for (const changed of [
-      { tenantId: 'other' },
-      { workspaceId: 'other' },
-      { baseUrl: 'http://other-store.test' },
-    ]) {
-      await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
-        .send({
+    // The frozen binding fences both resident reattach branches: a foreign
+    // tenant or Workspace stays hidden behind a 404, while a drifted Session
+    // Store address refuses with the retryable conflict its only caller needs
+    // to retry instead of failing the Turn.
+    for (const [changed, expected] of [
+      [{ tenantId: 'other' }, 404],
+      [{ workspaceId: 'other' }, 404],
+      [{ baseUrl: 'http://other-store.test' }, 409],
+    ] as const) {
+      for (const recovery of [
+        { passiveManagedRuntimeRecovery: true },
+        { driveRuntimeRecovery: true },
+      ]) {
+        const refused = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({
           managedSessionStore: { ...store(), ...changed },
-          passiveManagedRuntimeRecovery: true,
-        })
-        .expect(404);
+          ...recovery,
+        });
+        expect(refused.status).toBe(expected);
+      }
     }
     await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
       .send({ managedSessionStore: store(), toolProfile: files })
@@ -7620,6 +7630,65 @@ describe('Hosted Harness Runtime turn takeover', () => {
     } finally {
       finishAcquire();
       await loading;
+    }
+  }, 30_000);
+
+  it('records the owed adoption when a teardown strands a drive redrive', async () => {
+    await parkToolTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'prepared',
+    });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'written' }],
+    } as never);
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    const stderr = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => undefined);
+    const owedLines = () =>
+      stderr.mock.calls.filter(
+        ([line]) => line.includes('stays owed') && line.includes(PROMPT_ID),
+      );
+    const { server, loaded } = await loadReplacement();
+    expect(loaded.status).toBe(200);
+    release.mockClear();
+    let finishAcquire!: () => void;
+    const acquireGate = new Promise<void>((resolve) => {
+      finishAcquire = resolve;
+    });
+    acquireSpy.mockImplementationOnce(() => acquireGate as never);
+    let redriving: Promise<supertest.Response> | undefined;
+    try {
+      redriving = replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({
+          managedSessionStore: storeFor(BOOT_ID_2),
+          toolProfile: FILE_PROFILE,
+          driveRuntimeRecovery: true,
+        })
+        .then((response) => response);
+      await vi.waitFor(() => expect(acquireSpy).toHaveBeenCalledOnce(), {
+        timeout: 10_000,
+      });
+      // The close route fences an active Turn, MCP work and Hooks — not a
+      // parked redrive whose await has not recorded its lease yet.
+      await replacementHeaders(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      ).expect(204);
+      finishAcquire();
+      const redriven = await redriving;
+      expect(redriven.status).toBe(404);
+      expect(redriven.body.code).toBe('hosted_session_not_found');
+      // The teardown handed the lease it could see; the redrive's own
+      // adoption is named instead of released, because a release would
+      // persist RELEASED and wedge every retried acquire of the identity.
+      expect(release).toHaveBeenCalledOnce();
+      expect(owedLines()).toHaveLength(1);
+    } finally {
+      finishAcquire();
+      await redriving;
     }
   }, 30_000);
 
