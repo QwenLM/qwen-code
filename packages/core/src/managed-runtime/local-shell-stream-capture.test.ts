@@ -55,6 +55,9 @@ interface Rig {
   holdFirstStderrPage(): void;
   readonly firstStderrPageSeen: Promise<void>;
   releaseFirstStderrPage(): void;
+  holdFirstManifestPublish(): void;
+  readonly firstManifestPublishSeen: Promise<void>;
+  releaseFirstManifestPublish(): void;
 }
 
 const IDENTITY = {
@@ -87,6 +90,15 @@ async function rig(options: { segmentsPerPage?: number } = {}): Promise<Rig> {
   const firstStderrPageReleased = new Promise<void>((resolve) => {
     releaseFirstStderrPage = resolve;
   });
+  let holdManifestPublish = false;
+  let markFirstManifestPublishSeen: () => void = () => undefined;
+  let releaseFirstManifestPublish: () => void = () => undefined;
+  const firstManifestPublishSeen = new Promise<void>((resolve) => {
+    markFirstManifestPublishSeen = resolve;
+  });
+  const firstManifestPublishReleased = new Promise<void>((resolve) => {
+    releaseFirstManifestPublish = resolve;
+  });
   const rigState: Rig = {
     captured: null as unknown as LocalShellStreamCapture,
     segments: [],
@@ -104,6 +116,13 @@ async function rig(options: { segmentsPerPage?: number } = {}): Promise<Rig> {
     firstStderrPageSeen,
     releaseFirstStderrPage: () => {
       releaseFirstStderrPage();
+    },
+    holdFirstManifestPublish: () => {
+      holdManifestPublish = true;
+    },
+    firstManifestPublishSeen,
+    releaseFirstManifestPublish: () => {
+      releaseFirstManifestPublish();
     },
   };
   let manifestPublishes = 0;
@@ -141,6 +160,11 @@ async function rig(options: { segmentsPerPage?: number } = {}): Promise<Rig> {
         holdStderrPage = false;
         markFirstStderrPageSeen();
         return firstStderrPageReleased.then(persist);
+      }
+      if (kind === MANAGED_TOOL_RESULT_KINDS.manifest && holdManifestPublish) {
+        holdManifestPublish = false;
+        markFirstManifestPublishSeen();
+        return firstManifestPublishReleased.then(persist);
       }
       return persist();
     },
@@ -322,12 +346,12 @@ describe('LocalShellStreamCapture', () => {
     }
   });
 
-  it('stops loudly instead of folding a mid-flush segment into an in-flight page', async () => {
+  it('freezes the revision at its own flush boundary while a mid-flush segment opens its own next page', async () => {
     // A manifest revision flushes both streams, so the reviser's await can
     // straddle an append on the flushed stream's own queue. The segment
-    // arriving in that window must begin a fresh pending page; folding it
-    // into the in-flight page counts it into accounting the page does not
-    // carry, a lie the manifest validator must refuse loudly.
+    // arriving in that window must begin a fresh pending page — folding it
+    // into the in-flight page would count it into accounting the page does
+    // not carry; the frozen descriptor never has to learn that broken.
     const r = await rig({ segmentsPerPage: 10 });
     await r.captured.open();
     r.captured.setStarted(1);
@@ -357,15 +381,17 @@ describe('LocalShellStreamCapture', () => {
     expect(firstStderrPage.segments.map((segment) => segment.digest)).toEqual([
       digest(2),
     ]);
-    expect(r.captured.brokenReason).toEqual({ reason: 'storage_failed' });
+    // F4 R1/R2: the straddled segment opens its own next page instead of
+    // poisoning the revision flushed behind it — no latch, no storage_failed.
+    expect(r.captured.brokenReason).toBeNull();
     await r.captured.finish('stderr', true);
     const final = await r.captured.finalize('success', [], undefined, {
       exitCode: 0,
       signalName: null,
     });
     expect(final.capture).toMatchObject({
-      captureStatus: 'partial',
-      captureReason: 'storage_failed',
+      captureStatus: 'complete',
+      captureReason: null,
     });
     const stderrSegments = r.pages
       .map(
@@ -378,6 +404,27 @@ describe('LocalShellStreamCapture', () => {
       .filter((page) => page.streamId === 'stderr')
       .flatMap((page) => page.segments.map((segment) => segment.digest));
     expect(stderrSegments).toEqual([digest(2), digest(3)]);
+  });
+
+  it('serializes overlapping publishes so revision numbers walk exactly one step each (F4 R2)', async () => {
+    // A manifest held at its own publish proves the single-flight slot:
+    // the sibling publish's work lands its number exactly one step later,
+    // never sharing the stale counter a non-serialized chain would leak.
+    const r = await rig({ segmentsPerPage: 1 });
+    await r.captured.open();
+    r.captured.setStarted(1);
+    await r.captured.write('stdout', Buffer.alloc(64 * 1024, 1));
+    await r.captured.write('stderr', Buffer.alloc(64 * 1024, 2));
+    r.holdFirstManifestPublish();
+    const finishingStdOut = r.captured.finish('stdout', false);
+    const finishingStdErr = r.captured.finish('stderr', false);
+    await r.firstManifestPublishSeen;
+    r.releaseFirstManifestPublish();
+    await Promise.all([finishingStdOut, finishingStdErr]);
+    const revisions = r.manifests.map(
+      (manifest) => manifest['revision'] as number,
+    );
+    expect(revisions).toEqual(revisions.map((_, index) => index + 1));
   });
 
   it('continues the page cursor and links every page to its manifest slot', async () => {
@@ -547,8 +594,8 @@ describe('LocalShellStreamCapture', () => {
     r.refusePagePublishes = 1;
     await r.captured.write('stdout', Buffer.alloc(1024 * 1024, 3));
     expect(r.captured.brokenReason).toEqual({ reason: 'storage_failed' });
-    // The announcement rides the stream's own queue, ahead of finalize.
-    await r.captured.finish('stderr', false);
+    // The announcement rides its owner's queue, ahead of finalize.
+    await r.captured.finish('stdout', false);
     expect(r.manifests).toHaveLength(2);
     const announced = r.manifests.at(-1)!;
     expect(announced['executionStatus']).toBe('unknown');

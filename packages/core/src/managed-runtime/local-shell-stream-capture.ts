@@ -59,6 +59,9 @@ interface StreamState {
   ended: boolean;
   sealed: boolean;
   queue: Promise<void>;
+  /** The descriptor as its last flush froze it: an append after the
+   * boundary opens a fresh page rather than touching the snapshot. */
+  frozenSnapshot: ToolResultContentDescriptor;
 }
 
 function stream(id: StreamId): StreamState {
@@ -76,6 +79,16 @@ function stream(id: StreamId): StreamState {
     ended: false,
     sealed: false,
     queue: Promise.resolve(),
+    frozenSnapshot: {
+      streamId: id,
+      role: id,
+      mimeType: 'application/octet-stream',
+      state: 'open',
+      byteLength: 0,
+      digest: createHash('sha256').digest('hex'),
+      missingRanges: [],
+      body: { pages: [] },
+    },
   };
 }
 
@@ -211,17 +224,14 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     };
     // The latch is silent forever, but the manifest must stop advertising
     // a healthy open capture the moment the stream goes blind: mark every
-    // stream blind here and queue the announcement behind both streams'
-    // in-flight work, so the degradation revision publishes ahead of every
-    // settle attempt — finalize itself awaits it before publishing.
-    const announcing = Promise.all(
-      BOTH.map((id) => {
-        const state = this.streams[id];
-        state.ended = true;
-        return (state.queue = state.queue.then(() => this.announceBroken()));
-      }),
-    ).then(() => undefined);
-    this.announcing = announcing;
+    // stream blind here and queue one sole announcement behind the
+    // left-most stream's in-flight work, so the degradation revision
+    // publishes ahead of every settle attempt — finalize awaits it.
+    for (const id of BOTH) this.streams[id].ended = true;
+    const owner = this.streams['stdout'];
+    this.announcing = owner.queue = owner.queue.then(() =>
+      this.announceBroken(),
+    );
   }
 
   private announcing: Promise<void> | undefined;
@@ -302,14 +312,53 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
    * front: an append landing mid-`await` — possible when a manifest
    * revision flushes this stream from the other stream's queue — starts a
    * fresh pending page instead of being counted here and then discarded.
+   * Every call — empty or after a complete page — freezes the descriptor
+   * snapshot at its own boundary, so the snapshot the revision built
+   * later still names exactly what this particular flush had at hand.
    */
+  private freezeSnapshot(
+    state: StreamState,
+    digest: string,
+    byteLength: number,
+  ): void {
+    state.frozenSnapshot = {
+      streamId: state.id,
+      role: state.id,
+      mimeType: 'application/octet-stream',
+      state: state.sealed ? 'sealed' : state.ended ? 'incomplete' : 'open',
+      // The used buffer is still in memory, so its bytes sit behind the
+      // running digest chain: byteLength counts only published segments.
+      byteLength,
+      digest,
+      // Only an ended-but-unsealed stream reports a missing tail: an
+      // open stream has nothing provably missing yet.
+      missingRanges:
+        state.ended && !state.sealed ? [{ start: byteLength, end: null }] : [],
+      body: {
+        pages: [...state.pages],
+      } as ToolResultContentDescriptor['body'],
+    };
+  }
+
   private async flushPage(state: StreamState): Promise<void> {
-    if (state.pendingSegments.length === 0) return;
+    if (state.pendingSegments.length === 0) {
+      this.freezeSnapshot(
+        state,
+        state.hash.copy().digest('hex'),
+        state.byteLength,
+      );
+      return;
+    }
     await this.assertWritable();
     if (state.pages.length >= MANAGED_TOOL_RESULT_LIMITS.maxPagesPerStream) {
       throw new Error('size_limit');
     }
     const segments = state.pendingSegments.splice(0);
+    // The two integers that freeze must carry come from exactly this
+    // boundary: anything appended meanwhile opens a fresh page, never
+    // sneaks into the revision being built right now.
+    const frozenDigest = state.hash.copy().digest('hex');
+    const frozenByteLength = state.byteLength;
     const page = parseToolResultPage({
       toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
       type: 'page',
@@ -339,6 +388,7 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
       });
       state.pageOffset += byteLength;
       state.pageOrdinal += segments.length;
+      this.freezeSnapshot(state, frozenDigest, frozenByteLength);
     } catch (cause) {
       // A refused page write restores its batch so the degradation
       // announcement and any later settle flush can try again; a spliced
@@ -354,38 +404,40 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
    * running, settled fields once sealed. Only a pending revision gains a
    * successor, by the shared `isToolResultManifestSuccessor` rules. The
    * manifest validator requires each descriptor's pages to add up to its
-   * stored byte length, so every pending page flushes first — including
-   * the other stream's, which is why `flushPage` derives its accounting
-   * from the batch it splices out before awaiting.
+   * stored byte length, so each stream's descriptor is frozen in its own
+   * queue cell right after its flush — an append on that stream may only
+   * start the next page, never the revision being built here. The publish
+   * itself is single-flight: revision numbers only advance in commit
+   * order, so two overlapping flushes can never collide or skip.
    */
   private async publish(
     executionStatus: 'success' | 'error' | 'cancelled' | 'unknown',
     exitCode: number | null,
     signal: string | null,
   ): Promise<ManagedSessionDurableRef> {
-    for (const id of BOTH) await this.flushPage(this.streams[id]);
-    const contents: ToolResultContentDescriptor[] = BOTH.map((id) => {
+    const task = this.publishChain.then(() =>
+      this.publishSnapshot(executionStatus, exitCode, signal),
+    );
+    // A failed publish must not wedge the chain: the next publish retries
+    // its same step fresh, with a new snapshot under the same revision
+    // slot — fail-stop stays inside the attempt that failed.
+    this.publishChain = task.catch(() => undefined);
+    return task;
+  }
+
+  private publishChain: Promise<unknown> = Promise.resolve();
+
+  private async publishSnapshot(
+    executionStatus: 'success' | 'error' | 'cancelled' | 'unknown',
+    exitCode: number | null,
+    signal: string | null,
+  ): Promise<ManagedSessionDurableRef> {
+    const contents: ToolResultContentDescriptor[] = [];
+    for (const id of BOTH) {
       const state = this.streams[id];
-      return {
-        streamId: state.id,
-        role: state.id,
-        mimeType: 'application/octet-stream',
-        state: state.sealed ? 'sealed' : state.ended ? 'incomplete' : 'open',
-        // The used buffer is still in memory, so its bytes sit behind the
-        // running digest chain: byteLength counts only published segments.
-        byteLength: state.byteLength,
-        digest: state.hash.copy().digest('hex'),
-        // Only an ended-but-unsealed stream reports a missing tail: an
-        // open stream has nothing provably missing yet.
-        missingRanges:
-          state.ended && !state.sealed
-            ? [{ start: state.byteLength, end: null }]
-            : [],
-        body: {
-          pages: [...state.pages],
-        } as ToolResultContentDescriptor['body'],
-      };
-    });
+      await this.flushPage(state);
+      contents.push(state.frozenSnapshot);
+    }
     const broken = this.broken;
     const captureStatus = impliedStatus(contents);
     const manifest = parseToolResultManifest({
