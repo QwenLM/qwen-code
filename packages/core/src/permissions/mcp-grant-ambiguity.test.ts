@@ -146,6 +146,55 @@ describe('registry-backed MCP allow ambiguity', () => {
     },
   );
 
+  it.each(['foo__bar', 'foo::bar'])(
+    'keeps a whole-server wildcard from the nested key %s',
+    async (server) => {
+      const own = tool('foo', 'deploy');
+      const foreign = tool(server, 'deploy');
+      const { pm } = setup('mcp__foo__*', [own, foreign]);
+      expect(await pm.evaluate(context(own))).toBe('allow');
+      expect(await pm.evaluate(context(foreign))).toBe('default');
+      expect(pm.hasRelevantRules(context(foreign))).toBe(false);
+    },
+  );
+
+  it('requires confirmation when a tool prefix also names a different server', async () => {
+    const first = tool('foo', 'bar__deploy_x');
+    const second = tool('foo__bar', 'deploy_y');
+    const { pm, registry } = setup('mcp__foo__bar__deploy*', [first, second]);
+    expect(registry.getMcpToolIdentities()).toHaveLength(2);
+    for (const entry of [first, second]) {
+      expect(await pm.evaluate(context(entry))).toBe('default');
+      expect(pm.hasRelevantRules(context(entry))).toBe(false);
+    }
+    registry.removeMcpToolsByServer('foo__bar');
+    expect(await pm.evaluate(context(first))).toBe('allow');
+  });
+
+  it('refuses a shared registered cut head across long server keys', async () => {
+    const first = tool(
+      'https://mcp.services.example.internal/sse?team=abc.def',
+      'deploy',
+    );
+    const second = tool(
+      'https://mcp.services.example.internal/sse?team=abc.deg',
+      'deploy',
+      true,
+    );
+    expect(first.name.slice(0, 56)).toBe(second.name.slice(0, 56));
+    const { pm, registry } = setup(first.name.slice(0, 56) + '*', [
+      first,
+      second,
+    ]);
+    expect(registry.getMcpToolIdentities()).toHaveLength(2);
+    for (const entry of [first, second]) {
+      expect(await pm.evaluate(context(entry))).toBe('default');
+      expect(pm.hasRelevantRules(context(entry))).toBe(false);
+    }
+    registry.removeMcpToolsByServer(second.serverName);
+    expect(await pm.evaluate(context(first))).toBe('allow');
+  });
+
   it('preserves the unique registered exact name even when server aliases collide', async () => {
     const other = tool('foo:bar', 'get+x');
     const { pm } = setup(other.name, [tool('foo_bar', 'get_x'), other]);

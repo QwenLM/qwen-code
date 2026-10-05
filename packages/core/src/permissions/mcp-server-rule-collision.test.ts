@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { matchesAgentToolBlocklist } from '../agents/runtime/subagent-plan-tool-policy.js';
 import {
   matchesMcpPattern,
   matchesRule,
@@ -1365,54 +1366,68 @@ describe('wildcard arms read the producer identity, not a re-split (R13-1/R17-1/
   });
 });
 
-describe('restrictive rules retain exact truncated legacy spellings (R15-1)', () => {
+describe('restrictive rules retain withheld legacy exact and prefix spellings', () => {
   it.each([
     ['s'.repeat(22), 't'.repeat(40)],
+    [
+      'https://mcp.services.example/internal/sse?team=abc.def',
+      'deploy_service',
+      'mcp__https___mcp.services.ex*',
+    ],
+    ['https://mcp.' + 'a'.repeat(10), 't'.repeat(40), 'mcp__https___mcp.*'],
+    ['https://mcp.' + 'a'.repeat(12), 't'.repeat(40), 'mcp__https___mcp.*'],
     ['s'.repeat(24), 't'.repeat(40)],
     ['weather-forecast-server-premium', 'get_extended_forecast_for_next_week'],
     ['a__very_long_server_key_name_alpha', 't'.repeat(40)],
     ['a__very_long_server_key_name_beta', 't'.repeat(40)],
-  ])('keeps deny/ask without widening allow for %s', async (server, name) => {
-    const tool = prodTool(server, name);
-    const legacy = generateLegacyMcpToolName(`mcp__${server}__${name}`);
-    expect(tool.permissionAliases).not.toContain(legacy);
-    const ctx = producerContext(tool);
-    const deny = makePm({ permissionsDeny: [legacy] });
+  ])(
+    'keeps deny/ask without widening allow for %s',
+    async (server, name, savedRule?: string) => {
+      const tool = prodTool(server, name);
+      const legacy = generateLegacyMcpToolName(`mcp__${server}__${name}`);
+      expect(tool.permissionAliases).not.toContain(legacy);
+      const rule = savedRule ?? legacy;
+      const ctx = producerContext(tool);
+      const deny = makePm({
+        permissionsDeny: [rule],
+        permissionsAllow: [tool.name],
+      });
 
-    expect(await deny.evaluate(ctx)).toBe('deny');
-    expect(deny.findMatchingDenyRule(ctx)).toBe(legacy);
-    expect(deny.hasRelevantRules(ctx)).toBe(true);
-    expect(
-      await deny.isToolEnabled(
-        tool.name,
-        tool.permissionAliases,
-        ctx.mcpIdentity,
-      ),
-    ).toBe(false);
-    expect(
-      matchesToolPattern(
-        legacy,
-        tool.name,
-        tool.permissionAliases,
-        ctx.mcpIdentity,
-      ),
-    ).toBe(true);
+      expect(await deny.evaluate(ctx)).toBe('deny');
+      expect(deny.findMatchingDenyRule(ctx)).toBe(rule);
+      expect(deny.hasRelevantRules(ctx)).toBe(true);
+      expect(
+        await deny.isToolEnabled(
+          tool.name,
+          tool.permissionAliases,
+          ctx.mcpIdentity,
+        ),
+      ).toBe(false);
+      expect(
+        matchesAgentToolBlocklist(
+          [rule],
+          tool.name,
+          tool.permissionAliases,
+          ctx.mcpIdentity,
+        ),
+      ).toBe(true);
 
-    const ask = makePm({
-      permissionsAsk: [legacy],
-      permissionsAllow: [tool.name],
-    });
+      const ask = makePm({
+        permissionsAsk: [rule],
+        permissionsAllow: [tool.name],
+      });
 
-    expect(await ask.evaluate(ctx)).toBe('ask');
-    expect(ask.hasMatchingAskRule(ctx)).toBe(true);
+      expect(await ask.evaluate(ctx)).toBe('ask');
+      expect(ask.hasMatchingAskRule(ctx)).toBe(true);
 
-    const allow = makePm({ permissionsAllow: [legacy] });
+      const allow = makePm({ permissionsAllow: [rule] });
 
-    expect(await allow.evaluate(ctx)).toBe('default');
-    expect(allow.hasRelevantRules(ctx)).toBe(false);
-    const unrelated = prodTool('unrelated', name);
-    expect(await deny.evaluate(producerContext(unrelated))).toBe('default');
-  });
+      expect(await allow.evaluate(ctx)).toBe('default');
+      expect(allow.hasRelevantRules(ctx)).toBe(false);
+      const unrelated = prodTool('unrelated', name);
+      expect(await deny.evaluate(producerContext(unrelated))).toBe('default');
+    },
+  );
 });
 
 describe('a restrictive wildcard that is a literal prefix of the registered name keeps covering its own key (R17-1)', () => {
@@ -1470,7 +1485,6 @@ describe('a restrictive wildcard that is a literal prefix of the registered name
 });
 
 const URL52 = 'https://mcp.services.example.internal/sse?team=infra';
-const URL60 = 'https://mcp.services.example.internal/sse?team=infra-staging';
 
 describe('wildcards copied from a budget-cut registration (R18-1)', () => {
   it.each([
@@ -1506,16 +1520,6 @@ describe('wildcards copied from a budget-cut registration (R18-1)', () => {
 
       expect(await ask.evaluate(ctx)).toBe('ask');
     }
-  });
-
-  it('never grants: allow on a cut prefix reaches neither the tool nor a sibling key', async () => {
-    const own = prodTool(URL52, 'deploy');
-    const sibling = prodTool(URL60, 'deploy');
-    expect(sibling.name.slice(0, 56)).toBe(own.name.slice(0, 56));
-    const allow = makePm({ permissionsAllow: [own.name.slice(0, 56) + '*'] });
-
-    expect(await allow.evaluate(producerContext(own))).toBe('default');
-    expect(await allow.evaluate(producerContext(sibling))).toBe('default');
   });
 
   it.each([

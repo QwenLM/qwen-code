@@ -1800,69 +1800,75 @@ export function hasAmbiguousMcpGrant(
   registeredIdentities: readonly McpToolIdentity[],
 ): boolean {
   const rawName = `mcp__${identity.serverName}__${identity.serverToolName}`;
-  const rawGrant = matchesMcpPattern(pattern, rawName, rawName);
   const registeredName = normalizeMcpToolName(rawName);
-  const rawBoundary = `mcp__${identity.serverName}__`;
-  const prefix = pattern.endsWith('*') ? pattern.slice(0, -1) : undefined;
-  const matchesSpelling = (spelling: string): boolean =>
-    prefix === undefined ? pattern === spelling : spelling.startsWith(prefix);
-  const serverAliases = mcpSegmentSpellings(identity.serverName).filter(
-    (spelling) => spelling !== identity.serverName,
+  const others = registeredIdentities.filter(
+    (other) =>
+      other.serverName !== identity.serverName ||
+      other.serverToolName !== identity.serverToolName,
   );
-  const toolSpellings = [registeredName, generateLegacyMcpToolName(rawName)];
-
-  return registeredIdentities.some((other) => {
-    if (
-      other.serverName === identity.serverName &&
-      other.serverToolName === identity.serverToolName
-    ) {
-      return false;
-    }
-    if (rawGrant) {
-      // A whole-server wildcard keeps its own authority; sibling separators
-      // may overlap real leading tool underscores in either direction.
-      const otherBoundary = `mcp__${other.serverName}__`;
-      return (
-        prefix !== undefined &&
-        prefix !== rawBoundary &&
-        prefix.startsWith(rawBoundary) &&
-        ((identity.serverName.startsWith(other.serverName) &&
-          /^_+$/.test(identity.serverName.slice(other.serverName.length))) ||
-          (prefix === otherBoundary &&
-            other.serverName.startsWith(identity.serverName) &&
-            /^_+$/.test(other.serverName.slice(identity.serverName.length))))
-      );
-    }
-    const otherRawName = `mcp__${other.serverName}__${other.serverToolName}`;
-    const otherRegisteredName = normalizeMcpToolName(otherRawName);
-    // A unique exact registration is an authority; a shortened alias is not.
-    if (pattern === registeredName) {
-      return otherRegisteredName === pattern;
-    }
-    if (
-      other.serverName !== identity.serverName &&
-      serverAliases.some((spelling) => {
-        const server = `mcp__${spelling}`;
-        return (
-          mcpSegmentSpellings(other.serverName).includes(spelling) &&
-          (pattern === server ||
-            pattern.startsWith(`${server}__`) ||
-            (prefix !== undefined && server.startsWith(prefix)))
-        );
-      })
-    ) {
-      return true;
-    }
-    const otherSpellings = [
-      otherRawName,
-      otherRegisteredName,
-      generateLegacyMcpToolName(otherRawName),
-    ];
-    return toolSpellings.some(
-      (spelling) =>
-        otherSpellings.includes(spelling) && matchesSpelling(spelling),
+  const spellings = (other: McpToolIdentity): string[] => {
+    const raw = `mcp__${other.serverName}__${other.serverToolName}`;
+    return [raw, normalizeMcpToolName(raw), generateLegacyMcpToolName(raw)];
+  };
+  // Exact registered and raw names retain their own authority.
+  if (pattern === registeredName) {
+    return others.some((other) => spellings(other)[1] === pattern);
+  }
+  if (pattern === rawName || pattern === `mcp__${identity.serverName}`) {
+    return false;
+  }
+  if (!pattern.endsWith('*')) {
+    return others.some(
+      (other) =>
+        spellings(other).includes(pattern) ||
+        (other.serverName !== identity.serverName &&
+          mcpSegmentSpellings(other.serverName).some(
+            (server) => pattern === `mcp__${server}`,
+          )),
     );
-  });
+  }
+
+  const prefix = pattern.slice(0, -1);
+  const claims = registeredIdentities.flatMap((other) =>
+    mcpSegmentSpellings(other.serverName)
+      .map((server) => `mcp__${server}__`)
+      .filter((boundary) => prefix.startsWith(boundary))
+      .map((boundary) => ({ serverName: other.serverName, boundary })),
+  );
+  const wholeServer = registeredIdentities.find(
+    (other) => prefix === `mcp__${other.serverName}__`,
+  );
+  if (wholeServer !== undefined) {
+    return wholeServer.serverName !== identity.serverName;
+  }
+  // Offsets within one underscore run share a separator; distinct runs
+  // leave the rule ambiguous between a server key and a tool-name prefix.
+  if (
+    new Set(claims.map(({ boundary }) => boundary.replace(/_+$/, ''))).size > 1
+  ) {
+    return true;
+  }
+  const rawOwner = claims.find(
+    ({ serverName }) => serverName === prefix.split('__')[1],
+  );
+  if (
+    rawOwner !== undefined
+      ? rawOwner.serverName !== identity.serverName
+      : claims.some(({ serverName }) => serverName !== identity.serverName)
+  ) {
+    return true;
+  }
+  // Deliberate coarse raw prefixes remain broad. A cut or lossy head must
+  // instead have a unique live claimant, including App-only registrations.
+  if (rawName.startsWith(prefix)) return false;
+  const ownSpellings = spellings(identity);
+  return others.some((other) =>
+    spellings(other).some(
+      (spelling) =>
+        spelling.startsWith(prefix) &&
+        (claims.length === 0 || ownSpellings.includes(spelling)),
+    ),
+  );
 }
 
 /**
@@ -1912,7 +1918,7 @@ function matchesMcpName(
   );
 }
 
-// Lossy exact aliases and registered prefixes may restrict multiple tools.
+// Producer-owned legacy spellings and registered cuts retain restrictions.
 // This fallback belongs only to deny/ask/blocklist matching, never grants.
 function matchesRestrictiveMcpName(
   pattern: string,
@@ -1920,10 +1926,13 @@ function matchesRestrictiveMcpName(
   identity: McpToolIdentity | undefined,
 ): boolean {
   if (identity === undefined) return false;
+  const rawName = `mcp__${identity.serverName}__${identity.serverToolName}`;
   if (
-    pattern ===
-    generateLegacyMcpToolName(
-      `mcp__${identity.serverName}__${identity.serverToolName}`,
+    matchesMcpName(
+      pattern,
+      toolName,
+      [rawName, generateLegacyMcpToolName(rawName)],
+      identity,
     )
   ) {
     return true;
