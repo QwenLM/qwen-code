@@ -188,6 +188,13 @@ export class SessionApiHistoryAccumulator {
   private lastMaterialRecord?: ChatRecord;
 
   add(record: ChatRecord): void {
+    // Internal calls have no model-emitted function-call partner.
+    if (
+      record.type === 'tool_result' &&
+      record.subtype === 'code_mode_tool_result'
+    ) {
+      return;
+    }
     if (record.type === 'system') {
       if (record.subtype === 'slash_command') {
         const payload = record.systemPayload as
