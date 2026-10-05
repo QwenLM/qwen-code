@@ -203,6 +203,7 @@ function findLineBasedMatch(
         offsets,
         lines,
         matchIndex,
+        // The trailing split element is covered by the newline flag.
         patternLines.length - (endsWithNewline ? 1 : 0),
         endsWithNewline,
       ),

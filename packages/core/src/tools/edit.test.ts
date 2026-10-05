@@ -152,6 +152,43 @@ describe('EditTool', () => {
 
   describe('fuzzy trailing-newline boundaries', () => {
     it.each([
+      ['fuzzy', 'a \n\na \nb\n'],
+      ['literal', 'a\n\na\nb\n'],
+    ])('rejects repeated %s lines without writing', async (_mode, content) => {
+      const filePath = path.join(rootDir, 'repeated-lines.txt');
+      seedFile(filePath, content);
+      const write = vi.spyOn(fsService, 'writeTextFile');
+
+      const result = await run(edit(filePath, 'a\n', 'replacement\n'));
+
+      expect(result.error?.type).toBe(
+        ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+      );
+      expect(result.llmContent).toContain('Found 2 occurrences');
+      expect(readText(filePath)).toBe(content);
+      expect(write).not.toHaveBeenCalled();
+      expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['fuzzy', 'a \n\na \nb\n'],
+      ['literal', 'a\n\na\nb\n'],
+    ])(
+      'replaces both repeated %s lines when explicitly enabled',
+      async (_mode, content) => {
+        const filePath = path.join(rootDir, 'repeated-lines.txt');
+        seedFile(filePath, content);
+
+        const result = await run(
+          edit(filePath, 'a\n', 'replacement\n', { replace_all: true }),
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe('replacement\n\nreplacement\nb\n');
+      },
+    );
+
+    it.each([
       {
         name: 'deletion before a blank line',
         content: 'before\nremove-me \n\nafter\n',

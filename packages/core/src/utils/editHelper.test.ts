@@ -164,6 +164,17 @@ const two = 2;
     ).toEqual({ oldString: 'remove-me ', newString: 'replacement' });
   });
 
+  it('keeps repeated fuzzy lines visible to occurrence counting', () => {
+    const content = 'a \n\na \nb\n';
+    const normalized = normalizeEditStrings(content, 'a\n', 'replacement\n');
+
+    expect(normalized).toEqual({
+      oldString: 'a \n',
+      newString: 'replacement\n',
+    });
+    expect(countOccurrences(content, normalized.oldString)).toBe(2);
+  });
+
   // Tests for issue #1618: Preserve trailing whitespace in newString
   describe('trailing whitespace preservation in newString', () => {
     it('preserves trailing whitespace when intentionally adding to end of line', () => {
