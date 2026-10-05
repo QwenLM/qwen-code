@@ -2706,6 +2706,7 @@ describe('MemoryManager', () => {
     it('runs a manual dream through the managed path and releases the lock', async () => {
       const mgr = new MemoryManager();
       const config = makeMockConfig();
+      const controller = new AbortController();
       vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
         touchedTopics: ['project'],
         createdEntries: 1,
@@ -2721,6 +2722,8 @@ describe('MemoryManager', () => {
         tmp.projectRoot,
         config,
         'sess-1',
+        undefined,
+        controller.signal,
       );
 
       expect(result.systemMessage).toContain('consolidated');
@@ -2728,7 +2731,7 @@ describe('MemoryManager', () => {
         tmp.projectRoot,
         expect.any(Date),
         config,
-        undefined,
+        controller.signal,
         {
           trigger: 'manual',
           recordMetadata: true,

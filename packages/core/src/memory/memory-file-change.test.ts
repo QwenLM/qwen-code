@@ -1215,6 +1215,57 @@ describe('memory file change hook', () => {
     ).resolves.toBe(42);
   });
 
+  it('cancels a queued window before the active window closes', async () => {
+    const projectRoot = await setup();
+    let release!: () => void;
+    let entered!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const close = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const active = withCoalescedMemoryChanges(
+      projectRoot,
+      undefined,
+      async () => {
+        entered();
+        await close;
+      },
+    );
+    await opened;
+    const controller = new AbortController();
+    const callback = vi.fn(async () => {});
+    const cancelled = withCoalescedMemoryChanges(
+      projectRoot,
+      undefined,
+      callback,
+      controller.signal,
+    ).catch((error: unknown) => error);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      controller.abort();
+      await expect(
+        Promise.race([
+          cancelled,
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve('still queued'), 100);
+          }),
+        ]),
+      ).resolves.toBe(controller.signal.reason);
+      expect(callback).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(timer);
+      release();
+      await active;
+      await cancelled;
+    }
+    await expect(
+      withCoalescedMemoryChanges(projectRoot, undefined, async () => 42),
+    ).resolves.toBe(42);
+    expect(callback).not.toHaveBeenCalled();
+  });
+
   it('coalesces nested work without waiting for its own window', async () => {
     const projectRoot = await setup();
     const file = path.join(getUserAutoMemoryRoot(), 'nested.md');

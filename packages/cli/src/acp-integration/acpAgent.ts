@@ -9783,6 +9783,17 @@ class QwenAgent implements Agent {
         };
       }
       case 'qwen/settings/setMemory': {
+        const sessionId = params['sessionId'];
+        if (
+          sessionId !== undefined &&
+          sessionId !== null &&
+          (typeof sessionId !== 'string' || sessionId.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid sessionId: expected a non-empty string',
+          );
+        }
         const updates = toRecord(params['updates']);
         // Mutate a freshly loaded settings object and adopt it, mirroring the
         // other settings mutation handlers, instead of writing through the
@@ -9826,7 +9837,6 @@ class QwenAgent implements Agent {
             // file events already carry. Without one, pass no id so the event
             // falls back to the settings workspace's newest registration
             // instead of the bootstrap Config's launch-directory id.
-            const sessionId = params['sessionId'];
             const deliveryId =
               typeof sessionId === 'string' && sessionId.length > 0
                 ? (this.sessions

@@ -2488,10 +2488,11 @@ export class MemoryManager {
     config: Config,
     sessionId: string,
     now = new Date(),
+    abortSignal?: AbortSignal,
   ): Promise<AutoMemoryDreamResult> {
     return this.track(
       randomUUID(),
-      this.prepareManualDream(projectRoot, config, sessionId, now),
+      this.prepareManualDream(projectRoot, config, sessionId, now, abortSignal),
     );
   }
 
@@ -2500,7 +2501,9 @@ export class MemoryManager {
     config: Config,
     sessionId: string,
     now: Date,
+    abortSignal?: AbortSignal,
   ): Promise<AutoMemoryDreamResult> {
+    abortSignal?.throwIfAborted();
     await ensureAutoMemoryScaffold(projectRoot, now);
     const alreadyRunning: AutoMemoryDreamResult = {
       touchedTopics: [],
@@ -2548,7 +2551,7 @@ export class MemoryManager {
         projectRoot,
         now,
         config,
-        undefined,
+        abortSignal,
         {
           trigger: 'manual',
           recordMetadata: true,

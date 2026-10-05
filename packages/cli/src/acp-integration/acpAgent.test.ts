@@ -19787,9 +19787,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
-  it.each(['unknown', 'uninitialized'])(
+  it.each([
+    ['unknown', 'unknown-session'],
+    ['uninitialized', 'requesting-session'],
+    ['empty', ''],
+    ['number', 42],
+    ['object', {}],
+  ] as const)(
     'qwen/settings setMemory does not reroute a named %s session',
-    async (sessionState) => {
+    async (sessionState, sessionId) => {
       const memoryFileChange = await import(
         '@qwen-code/qwen-code-core/memory/memory-file-change.js'
       );
@@ -19851,18 +19857,24 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }),
       });
       try {
-        await expect(
-          agent.extMethod('qwen/settings/setMemory', {
-            cwd: workspace,
-            sessionId:
-              sessionState === 'unknown'
-                ? 'unknown-session'
-                : 'requesting-session',
-            updates: { enableManagedAutoMemory: false },
-          }),
-        ).resolves.toEqual({
-          settings: expect.objectContaining({ enableManagedAutoMemory: false }),
+        const request = agent.extMethod('qwen/settings/setMemory', {
+          cwd: workspace,
+          sessionId,
+          updates: { enableManagedAutoMemory: false },
         });
+        if (sessionState === 'unknown' || sessionState === 'uninitialized') {
+          await expect(request).resolves.toEqual({
+            settings: expect.objectContaining({
+              enableManagedAutoMemory: false,
+            }),
+          });
+        } else {
+          await expect(request).rejects.toThrow(
+            'Invalid sessionId: expected a non-empty string',
+          );
+          expect(settings.setValue).not.toHaveBeenCalled();
+          expect(mergedMemory['enableManagedAutoMemory']).toBe(true);
+        }
         await new Promise<void>((resolve) => setImmediate(resolve));
         expect(olderSeen).toEqual([]);
         expect(newerSeen).toEqual([]);

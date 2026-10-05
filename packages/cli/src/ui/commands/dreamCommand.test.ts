@@ -66,6 +66,7 @@ describe('dreamCommand', () => {
     // managed-memory paths with the file tools the consolidation prompt
     // requires, so /dream must not submit that prompt to the main model.
     const projectRoot = path.join('tmp', 'dream-project');
+    const controller = new AbortController();
     const buildConsolidationPrompt = vi.fn().mockReturnValue('dream prompt');
     const runManualDream = vi.fn().mockResolvedValue({
       touchedTopics: [],
@@ -78,6 +79,7 @@ describe('dreamCommand', () => {
       systemMessage: 'Managed auto-memory dream (agent): consolidated',
     });
     const context = createMockCommandContext({
+      abortSignal: controller.signal,
       services: {
         config: {
           getProjectRoot: vi.fn().mockReturnValue(projectRoot),
@@ -97,6 +99,8 @@ describe('dreamCommand', () => {
       projectRoot,
       context.services.config,
       'session-1',
+      undefined,
+      controller.signal,
     );
     expect(buildConsolidationPrompt).not.toHaveBeenCalled();
     expect(result).toEqual({

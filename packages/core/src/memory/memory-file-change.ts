@@ -746,16 +746,24 @@ export async function withCoalescedMemoryChanges<T>(
   if (memoryWindowOwner.getStore()?.active) return fn();
   // Every window includes shared user memory. Serialize before taking either
   // snapshot so raw shell writes retain their owning session.
-  return memoryWindowMutex.runExclusive(async () => {
-    signal?.throwIfAborted();
-    const owner = { active: true };
-    try {
-      return await memoryWindowOwner.run(owner, () =>
-        runMemoryChangeWindow(projectRoot, deliveryId, fn),
-      );
-    } finally {
-      owner.active = false;
-    }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal?.reason);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    void memoryWindowMutex
+      .runExclusive(async () => {
+        signal?.removeEventListener('abort', onAbort);
+        signal?.throwIfAborted();
+        const owner = { active: true };
+        try {
+          return await memoryWindowOwner.run(owner, () =>
+            runMemoryChangeWindow(projectRoot, deliveryId, fn),
+          );
+        } finally {
+          owner.active = false;
+        }
+      })
+      .then(resolve, reject)
+      .finally(() => signal?.removeEventListener('abort', onAbort));
   });
 }
 
