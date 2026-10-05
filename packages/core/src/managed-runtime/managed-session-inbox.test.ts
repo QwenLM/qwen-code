@@ -24,6 +24,7 @@ import {
   managedSessionPayloadRef,
   type ManagedSessionUserMessageInput,
 } from './managed-session-inbox.js';
+import { MANAGED_SESSION_LIMITS } from './managed-session-records.js';
 
 const limits = { maxPending: 10, maxPendingPerTenant: 5 };
 
@@ -61,6 +62,34 @@ describe('FileManagedSessionInbox', () => {
   let root: string;
   let filePath: string;
   let now: number;
+
+  const nested = (levels: number): unknown => {
+    let payload: unknown = null;
+    for (let index = 0; index < levels; index++) {
+      payload = { nested: payload };
+    }
+    return payload;
+  };
+
+  it('bounds payload depth at the shared managed-session JSON depth limit', async () => {
+    const inbox = await openInbox();
+    await expect(
+      inbox.admit(
+        userMessage('exact', {
+          payload: nested(MANAGED_SESSION_LIMITS.maxJsonDepth),
+        }),
+        limits,
+      ),
+    ).resolves.toMatchObject({ created: true });
+    await expect(
+      inbox.admit(
+        userMessage('over', {
+          payload: nested(MANAGED_SESSION_LIMITS.maxJsonDepth + 1),
+        }),
+        limits,
+      ),
+    ).rejects.toThrow(/maximum JSON depth/);
+  });
 
   const openInbox = (maxPayloadBytes?: number) =>
     FileManagedSessionInbox.open(filePath, {

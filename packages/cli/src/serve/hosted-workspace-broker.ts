@@ -539,17 +539,29 @@ export class HostedWorkspaceBroker {
   }
 
   async acknowledge(id: string, receipt: LocalShellReceipt): Promise<void> {
-    const response = await this.request(
-      `/executions/${encodeURIComponent(id)}:acknowledge`,
-      {
-        receipt: {
-          executionCallId: receipt.executionCallId,
-          manifest: receipt.manifest,
-          deliveryStatus: receipt.deliveryStatus,
-          historyRevision: receipt.historyRevision,
-        },
+    const path = `/executions/${encodeURIComponent(id)}:acknowledge`;
+    const body = {
+      receipt: {
+        executionCallId: receipt.executionCallId,
+        manifest: receipt.manifest,
+        deliveryStatus: receipt.deliveryStatus,
+        historyRevision: receipt.historyRevision,
       },
-    );
+    };
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request(path, body);
+    } catch (cause) {
+      // The acknowledgement runs after every durable record is committed, so
+      // a lost reply is replayed the way prepare() replays its reservation:
+      // the runtime deduplicates an identical receipt.
+      if (
+        !(cause instanceof TypeError) &&
+        !(cause instanceof DOMException && cause.name === 'TimeoutError')
+      )
+        throw cause;
+      response = await this.request(path, body);
+    }
     if (
       response['executionCallId'] !== id ||
       response['acknowledged'] !== true
