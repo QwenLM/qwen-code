@@ -1859,8 +1859,13 @@ describe('Managed context tool gate', () => {
     expect(JSON.stringify(sibling)).not.toContain('sibling');
   });
 
-  it.each(['removed', 'replaced by a file'])(
-    'keeps a linked dependency readable when a sibling Session directory is %s',
+  it.each([
+    'removed',
+    'replaced by a file',
+    'replaced by a symlink loop',
+    'redirected to a shared directory',
+  ])(
+    'keeps stale sibling ownership scoped when its directory is %s',
     async (state) => {
       // `mount.resolve` answers undefined for a sibling whose directory was
       // removed or stopped being a directory — reachable from inside that
@@ -1897,13 +1902,28 @@ describe('Managed context tool gate', () => {
       fs.rmSync(stale, { recursive: true });
       if (state === 'replaced by a file')
         fs.writeFileSync(stale, 'not a directory');
+      if (state === 'replaced by a symlink loop')
+        fs.symlinkSync(
+          stale,
+          stale,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      if (state === 'redirected to a shared directory')
+        symlinkDirectory(path.join(root, 'packages/ui'), stale);
 
       const after = await read('call-2', 'node_modules/@acme/ui/src/index.ts');
-      expect(after.result.executionStatus).toBe('success');
-      expect(JSON.stringify(after)).toContain('ui-source');
-      // The stale binding still vouches for the location it occupied.
+      if (state === 'redirected to a shared directory') {
+        expect(after.result.executionStatus).toBe('error');
+        expect(JSON.stringify(after)).not.toContain('ui-source');
+      } else {
+        expect(after.result.executionStatus).toBe('success');
+        expect(JSON.stringify(after)).toContain('ui-source');
+      }
       const sibling = await read('call-3', 'peek/secret.txt');
       expect(sibling.result.executionStatus).toBe('error');
+      const own = await read('call-4', 'src/index.ts');
+      expect(own.result.executionStatus).toBe('success');
+      expect(JSON.stringify(own)).toContain('mine');
     },
   );
 

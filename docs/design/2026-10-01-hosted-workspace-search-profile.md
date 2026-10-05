@@ -95,12 +95,15 @@ its in-Session matches.
 
 The boot-v2 file-tool containment permits shared locations inside the mount
 and excludes directories owned by another Session installed in the same
-worker. An unresolved sibling binding refuses directory-external access;
-own-directory access remains available. Dangling links are checked against
+worker. A stale sibling whose location cannot be resolved retains its occupied
+path without refusing unrelated shared reads. A resolvable redirect retains
+ownership of its target, including a formerly shared directory; access there is
+refused until the binding is repaired. Own-directory access remains available.
+Dangling links are checked against
 their intended targets before a write. That registry check is worker-local, not a confidentiality guarantee
 across separate workers. It preserves `/1` linked-dependency reads; file
 history retains its own write boundary. Boot v1 keeps the stricter Session
-boundary. Non-ENOENT resolution failures must fail without exposing Node's
+boundary. Non-ENOENT resolution failures of the requested target must fail without exposing Node's
 physical-path diagnostics.
 
 ## Bounds
@@ -161,12 +164,14 @@ worker-derived capability advertisement before it can be supported.
 **Behavior change for existing Sessions:** the realpath containment that
 glob made necessary applies to `read_file`, `write_file` and `edit` on every
 Hosted profile, `/1` included. On a Workspace-capability worker, shared
-locations inside the mount remain reachable when sibling bindings resolve.
+locations inside the mount remain reachable when no sibling owns that target.
 Directory-external access is refused when its realpath leaves the mount,
-lands in another installed Session's directory, or a sibling binding cannot
-be resolved. A linked dependency inside the mount
-(`node_modules/@acme/ui -> ../../packages/ui`) still reads through with resolved
-bindings. A boot-v1
+lands in another installed Session's directory, or the mount root cannot be
+verified. A removed or unresolvable sibling location does not veto unrelated
+shared dependencies. A sibling redirected into a shared directory continues to
+exclude that destination. A linked dependency inside the mount
+(`node_modules/@acme/ui -> ../../packages/ui`) still reads through when it is not
+owned by a sibling. A boot-v1
 worker has no Workspace mount or Session registry, so its boundary is the
 Session directory itself: a path that resolves through a symlink outside it,
 a linked dependency included, is refused where it previously read through.

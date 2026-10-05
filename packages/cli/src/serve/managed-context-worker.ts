@@ -164,9 +164,9 @@ export class ManagedContextMount {
 /**
  * Where an installed sibling Session's directory is now. `mount.resolve`
  * answers only for a canonical, readable directory; a binding that was
- * removed, or replaced by a symlink, still occupied a knowable location.
- * Judging a target against that location keeps one stale Session from
- * vetoing every other Session's reads for the worker's lifetime.
+ * removed, or replaced by a symlink, still has a knowable location. A
+ * resolvable redirect retains ownership of its target; a resolution error
+ * retains the occupied path without vetoing unrelated shared reads.
  */
 async function siblingDirectory(
   mount: ManagedContextMount,
@@ -177,7 +177,11 @@ async function siblingDirectory(
   const root = await mount.rootDirectory();
   if (root === undefined) return undefined;
   const occupied = path.join(root, ...cwdRelative.split('/'));
-  return await realpathDeepestExisting(occupied);
+  try {
+    return await realpathDeepestExisting(occupied);
+  } catch {
+    return occupied;
+  }
 }
 
 /**
