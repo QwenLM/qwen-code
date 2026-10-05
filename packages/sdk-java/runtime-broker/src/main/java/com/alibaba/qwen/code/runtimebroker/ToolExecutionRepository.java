@@ -60,6 +60,21 @@ public interface ToolExecutionRepository {
     List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
             String afterExecutionCallId, int limit);
 
+    /**
+     * At most 100 executions in any state for this exact binding generation,
+     * across all Sessions, ordered by execution ID hash. The exclusive cursor
+     * is an execution ID and need not remain in any particular state.
+     * A null cursor starts the scan; limit must be in [1, 100]. Cursor and
+     * returned execution IDs must be well-formed text for unambiguous hashing.
+     * This inventory is not a snapshot or proof that physical writers stopped.
+     * Custom repositories must implement it before supporting retirement.
+     */
+    default List<ToolExecutionRecord> findByBinding(String bindingId,
+            long runtimeGeneration, String afterExecutionCallId, int limit) {
+        throw new UnsupportedOperationException(
+                "Binding execution inventory is unavailable");
+    }
+
     boolean hasActiveByRuntimeSession(String runtimeSessionId);
 
     boolean hasActiveByRuntimeSession(String bindingId, long runtimeGeneration,

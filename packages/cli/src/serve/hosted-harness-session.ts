@@ -18,6 +18,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { Application, Request, Response } from 'express';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
@@ -54,6 +55,7 @@ import {
   assertManagedSessionStableId,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import {
@@ -127,6 +129,30 @@ const RESTORE_CONTAINER_KINDS = new Set([
   'managed-hook-plan',
   'managed-hook-message-chunks',
 ]);
+const debugLogger = createDebugLogger('HOSTED_HARNESS_SESSION');
+
+/**
+ * The prompt deadline timer and the cancel route abort the same controller,
+ * so the deadline aborts with a distinguishing reason; settlement reads it
+ * back to keep an expiry from being recorded as a user cancellation.
+ */
+const HOSTED_TURN_DEADLINE = new Error(
+  'The Hosted Harness Turn deadline expired.',
+);
+
+/**
+ * The terminal classification of a turn whose runner threw. A deadline
+ * expiry is an attributable failure, never a cancellation.
+ */
+function settledTurnOutcome(abort: AbortController): {
+  state: 'cancelled' | 'error';
+  stopReason: string;
+} {
+  if (!abort.signal.aborted) return { state: 'error', stopReason: 'error' };
+  return abort.signal.reason === HOSTED_TURN_DEADLINE
+    ? { state: 'error', stopReason: 'deadline_exceeded' }
+    : { state: 'cancelled', stopReason: 'cancelled' };
+}
 
 interface HostedSession {
   managed: ManagedSession;
@@ -199,8 +225,19 @@ function object(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function error(res: Response, status: number, code: string): void {
-  res.status(status).json({ error: code, code });
+function error(
+  res: Response,
+  status: number,
+  code: string,
+  message?: string,
+): void {
+  res
+    .status(status)
+    .json(
+      message === undefined
+        ? { error: code, code }
+        : { error: code, code, message },
+    );
 }
 
 function identity(
@@ -993,6 +1030,24 @@ async function eventEnvelope(
       },
     };
   }
+  if (event.kind === 'message.retracted') {
+    // A restarted model attempt retracts the orphaned prefix it published
+    // (#13319). The coordinator blanks the turn's deltas from
+    // `fromSequence` onward and announces the repair as `stream.reconciled`.
+    const turnId = event.payload['turnId'];
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'message_retracted',
+      ...(typeof turnId === 'string' ? { promptId: turnId } : {}),
+      data: {
+        sessionId,
+        turnId: event.payload['turnId'],
+        messageId: event.payload['messageId'],
+        fromSequence: event.payload['fromSequence'],
+      },
+    };
+  }
   if (
     event.kind === 'message.committed' &&
     (event.payload['role'] === 'assistant' ||
@@ -1048,30 +1103,37 @@ async function eventEnvelope(
   if (event.kind === 'turn.settled') {
     const promptId = event.payload['turnId'] as string;
     const outcome = event.payload['outcome'];
-    return outcome === 'completed' || outcome === 'cancelled'
-      ? {
-          v: 1,
-          id: event.sequence,
-          type: 'turn_complete',
+    if (outcome === 'completed' || outcome === 'cancelled') {
+      return {
+        v: 1,
+        id: event.sequence,
+        type: 'turn_complete',
+        promptId,
+        data: {
+          sessionId,
           promptId,
-          data: {
-            sessionId,
-            promptId,
-            stopReason: event.payload['stopReason'] ?? 'end_turn',
-          },
-        }
-      : {
-          v: 1,
-          id: event.sequence,
-          type: 'turn_error',
-          promptId,
-          data: {
-            sessionId,
-            promptId,
-            code: 'hosted_turn_failed',
-            message: 'Hosted Harness turn failed.',
-          },
-        };
+          stopReason: event.payload['stopReason'] ?? 'end_turn',
+        },
+      };
+    }
+    // A deadline expiry keeps its own error code so the coordinator's
+    // projection stays distinguishable from both a cancellation and an
+    // unattributed failure.
+    const expired = event.payload['stopReason'] === 'deadline_exceeded';
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'turn_error',
+      promptId,
+      data: {
+        sessionId,
+        promptId,
+        code: expired ? 'hosted_turn_deadline_exceeded' : 'hosted_turn_failed',
+        message: expired
+          ? 'The Hosted Harness Turn exceeded its deadline.'
+          : 'Hosted Harness turn failed.',
+      },
+    };
   }
   return {
     v: 1,
@@ -1218,14 +1280,19 @@ async function executeHostedTurn(
             cause instanceof HostedHookRecoveryRequiredError
           )
             throw cause;
-          state = abort.signal.aborted ? 'cancelled' : 'error';
-          stopReason = state;
+          const outcome = settledTurnOutcome(abort);
+          state = outcome.state;
+          stopReason = outcome.stopReason;
           if (state === 'error') {
+            // The model layer surfaces any abort as a cancellation, so a
+            // deadline expiry names the deadline, not the thrown cause.
             writeStderrLineSafe(
-              'qwen serve: Hosted Harness turn ' +
-                promptId +
-                ' failed: ' +
-                String(cause),
+              stopReason === 'deadline_exceeded'
+                ? `qwen serve: Hosted Harness turn ${promptId} exceeded its deadline.`
+                : 'qwen serve: Hosted Harness turn ' +
+                    promptId +
+                    ' failed: ' +
+                    String(cause),
             );
           }
         }
@@ -1238,14 +1305,18 @@ async function executeHostedTurn(
         await session.managed.sink.write(turnResult);
       }),
   );
-  await running.finally(() =>
-    toolTurn?.close().catch((cause: unknown) => {
+  // Session availability must not gate on publisher cleanup: the drain is
+  // unbounded, and a stalled Session Store would otherwise leave the Session
+  // permanently unavailable and undeletable. Each turn owns its publisher,
+  // so a next turn shares no listener or capture state with this drain.
+  await running.finally(() => {
+    void toolTurn?.close().catch((cause: unknown) => {
       session.blocked = true;
       writeStderrLineSafe(
         'qwen serve: Hosted Shell publisher cleanup failed: ' + String(cause),
       );
-    }),
-  );
+    });
+  });
   if (!turnResult) throw new Error('Hosted turn did not settle.');
   return turnResult;
 }
@@ -1340,15 +1411,105 @@ export function registerHostedHarnessSessionRoutes(
     let store;
     try {
       store = parseBridgeManagedSessionStore(body?.['managedSessionStore']);
-    } catch {
-      error(res, 400, 'invalid_managed_session_store');
+    } catch (cause) {
+      debugLogger.warn('managed session store descriptor rejected:', cause);
+      error(
+        res,
+        400,
+        'invalid_managed_session_store',
+        cause instanceof Error ? cause.message : String(cause),
+      );
       return;
     }
     if (store.writerId !== contract.bootId) {
       error(res, 409, 'hosted_harness_generation_mismatch');
       return;
     }
-    if (sessions.has(sessionId) || opening.has(sessionId)) {
+    // One shape for every successful open/load answer — a takeover load
+    // redriven after a lost reply must be indistinguishable from the answer
+    // it replaces, so all three sites build it here.
+    const attachmentReply = (
+      session: HostedSession,
+      recovery?: HostedRuntimeRecoveryReport,
+    ) => ({
+      sessionId,
+      clientId: session.clientId,
+      workspaceCwd: cwd,
+      lastEventId: session.managed.authority.committedSequence,
+      eventEpoch: epoch,
+      ...(session.approval ? { approvalMode: session.approval.mode } : {}),
+      ...(session.blocked || session.hooks?.hasPendingOperations
+        ? { recoveryRequired: true }
+        : {}),
+      ...(recovery
+        ? { _meta: { 'qwen.daemon.managedRuntimeRecovery': recovery } }
+        : {}),
+    });
+    const attached = sessions.get(sessionId);
+    if (attached !== undefined && !create) {
+      const passive = body?.['passiveManagedRuntimeRecovery'] === true;
+      if (
+        !attached.hooks &&
+        (passive || body?.['driveRuntimeRecovery'] === true)
+      ) {
+        // A takeover load whose reply was lost is redriven against the
+        // Session it already attached — the writer fence above proves this
+        // load targets this generation, and no continue/cancel can have been
+        // admitted since (its identities ride the lost reply), so the
+        // attached state is still exactly what the first load left behind.
+        // Answer again from that state instead of wedging the Turn on a 409
+        // loop; the re-run is read-only apart from the Broker acquire, which
+        // is idempotent under the same Runtime Session identity.
+        const parked = unsettledPromptId(attached);
+        if (parked !== undefined) {
+          if (
+            attached.active !== undefined ||
+            attached.toolProfile === undefined ||
+            !brokerOptions
+          ) {
+            error(res, 409, 'hosted_session_already_attached');
+            return;
+          }
+          let recovery: HostedRuntimeRecoveryReport;
+          try {
+            const recovered = await recoverHostedRuntimeTurn({
+              session: attached.managed,
+              sessionId,
+              cwd,
+              promptId: parked,
+              brokerOptions,
+              passive,
+              leaseAlreadyHeld: attached.runtimeLeaseHeld !== undefined,
+            });
+            if (recovered === undefined) {
+              error(res, 409, 'hosted_session_already_attached');
+              return;
+            }
+            recovery = recovered.report;
+            if (recovered.acquiredRuntime)
+              attached.runtimeLeaseHeld =
+                recovered.report.executions[0]?.runtimeSessionId ??
+                recovered.promptId;
+          } catch (cause) {
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness recovery re-answer of session ${sessionId} failed: ${String(cause)}`,
+            );
+            // Retry-inviting, like the first load's recovery failure; the
+            // attached Session keeps its owed lease for the next redrive.
+            error(res, 409, 'hosted_turn_recovery_required');
+            return;
+          }
+          res.status(200).json(attachmentReply(attached, recovery));
+          return;
+        }
+        // No single parked Turn: the first load's answer still holds, so the
+        // redrive gets the same attachment restated — including a blocked
+        // Session, whose recoveryRequired the coordinator already handles.
+        res.status(200).json(attachmentReply(attached));
+        return;
+      }
+    }
+    if (attached !== undefined || opening.has(sessionId)) {
       error(res, 409, 'hosted_session_already_attached');
       return;
     }
@@ -1357,12 +1518,30 @@ export function registerHostedHarnessSessionRoutes(
       workspaceId: store.workspaceId,
       sessionId,
     };
-    const stores = createHttpManagedSessionStores({
-      baseUrl: store.baseUrl,
-      sessionKey,
-      writerId: store.writerId,
-      leaseDurationMs: store.leaseDurationMs,
-    });
+    let stores: ReturnType<typeof createHttpManagedSessionStores>;
+    try {
+      stores = createHttpManagedSessionStores({
+        baseUrl: store.baseUrl,
+        sessionKey,
+        writerId: store.writerId,
+        leaseDurationMs: store.leaseDurationMs,
+        ...(store.writerToken === undefined
+          ? {}
+          : { writerToken: store.writerToken }),
+        ...(store.allowInsecureHttp === undefined
+          ? {}
+          : { allowInsecureHttp: store.allowInsecureHttp }),
+      });
+    } catch (cause) {
+      debugLogger.warn('managed session store descriptor refused:', cause);
+      error(
+        res,
+        400,
+        'invalid_managed_session_store',
+        cause instanceof Error ? cause.message : String(cause),
+      );
+      return;
+    }
     opening.add(sessionId);
     let managed: ManagedSession | undefined;
     try {
@@ -1539,6 +1718,9 @@ export function registerHostedHarnessSessionRoutes(
           !(takeover && fileHistory.pendingTurn === unsettled) &&
           !(await canSettleHostedFileHistory(managed, fileHistory)))
       ) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Session ${sessionId} load refused (file_history_pending): ${JSON.stringify({ pendingTurn: fileHistory.pendingTurn, pendingUndo: fileHistory.pendingUndo, unsettled: unsettled ?? null, takeover })}`,
+        );
         await managed.close();
         error(
           res,
@@ -1551,6 +1733,24 @@ export function registerHostedHarnessSessionRoutes(
       }
       const restore = await managed.authority.restoreBundle();
       if (restore.recoveryStatus !== 'ok') {
+        // The restore bundle is a spec'd closed set with no reason field, so
+        // the blocked reason is re-read at the tag site. That read hits the
+        // Store again, so a faulting Store must not take the tag down too.
+        let blocked = '';
+        try {
+          const authorization =
+            await managed.authority.harnessRunAuthorization();
+          if (authorization.status === 'blocked') {
+            blocked = ` reason=${authorization.reason}`;
+            if (authorization.message !== undefined)
+              blocked += ` message=${stripAnsiAndControl(authorization.message).slice(0, 4096)}`;
+          }
+        } catch {
+          // The refusal still names the basis and boundary without it.
+        }
+        writeStderrLineSafe(
+          `qwen serve: Hosted Session ${sessionId} load refused (restore_${restore.recoveryStatus}): basis=${String(restore.restoreBasis)} through=${restore.throughSequence}${blocked}`,
+        );
         await managed.close();
         error(res, 409, 'hosted_turn_recovery_required');
         return;
@@ -1564,8 +1764,20 @@ export function registerHostedHarnessSessionRoutes(
             stores.toolResultResources,
             restore.throughSequence,
           );
+        } catch (cause) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} load refused (workspace_verify): ${stripAnsiAndControl(String(cause)).slice(0, 4096)}`,
+          );
+          await managed.close();
+          error(res, 409, 'hosted_turn_recovery_required');
+          return;
+        }
+        try {
           await stores.assertWritable();
-        } catch {
+        } catch (cause) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} load refused (workspace_writable): ${stripAnsiAndControl(String(cause)).slice(0, 4096)}`,
+          );
           await managed.close();
           error(res, 409, 'hosted_turn_recovery_required');
           return;
@@ -1583,6 +1795,9 @@ export function registerHostedHarnessSessionRoutes(
         // executions under their original ids (or report them for a
         // cancellation) and answer with the recovery snapshot.
         if (toolProfile === undefined || !brokerOptions) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} load refused (takeover_unavailable): profile=${toolProfile ?? 'none'} broker=${brokerOptions ? 'ready' : 'none'}`,
+          );
           await managed.close();
           error(res, 409, 'hosted_turn_recovery_required');
           return;
@@ -1597,6 +1812,9 @@ export function registerHostedHarnessSessionRoutes(
             passive: body?.['passiveManagedRuntimeRecovery'] === true,
           });
           if (recovered === undefined) {
+            writeStderrLineSafe(
+              `qwen serve: Hosted Session ${sessionId} load refused (takeover_unrecovered): prompt=${unsettled}`,
+            );
             await managed.close();
             error(res, 409, 'hosted_turn_recovery_required');
             return;
@@ -1704,14 +1922,15 @@ export function registerHostedHarnessSessionRoutes(
         )
           settlePromptId = promptId;
       }
+      // close() releases the activation, which commits a record and advances
+      // committedSequence; bind the boundary once so the guard and the tag
+      // name the deciding value.
+      const unsettledThrough = workspaceProfile
+        ? restore.throughSequence
+        : managed.authority.committedSequence;
       if (
         incompletePublication ||
-        (hasUnsettledInput(
-          session,
-          workspaceProfile
-            ? restore.throughSequence
-            : managed.authority.committedSequence,
-        ) &&
+        (hasUnsettledInput(session, unsettledThrough) &&
           !resume &&
           !settlePromptId &&
           !session.hooks &&
@@ -1725,6 +1944,9 @@ export function registerHostedHarnessSessionRoutes(
         // can ever see the owed lease again — record it and say so, or the
         // strand is silent until retirement.
         noteOwedAdoption(session, sessionId);
+        writeStderrLineSafe(
+          `qwen serve: Hosted Session ${sessionId} load refused (unsettled_input): ${JSON.stringify({ incompletePublication: !create && workspaceProfile ? incompletePublication : null, unsettled: [...unsettledInputsThrough(session, unsettledThrough)], resume: resume?.promptId ?? null, settle: settlePromptId ?? null, through: unsettledThrough })}`,
+        );
         await managed.close();
         error(res, 409, 'hosted_turn_recovery_required');
         return;
@@ -1732,9 +1954,12 @@ export function registerHostedHarnessSessionRoutes(
       if (!create && workspaceProfile) {
         try {
           await stores.assertWritable();
-        } catch {
+        } catch (cause) {
           // Same owed-lease discipline as the refusal above.
           noteOwedAdoption(session, sessionId);
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} load refused (workspace_writable): ${stripAnsiAndControl(String(cause)).slice(0, 4096)}`,
+          );
           await managed.close();
           error(res, 409, 'hosted_turn_recovery_required');
           return;
@@ -1793,21 +2018,9 @@ export function registerHostedHarnessSessionRoutes(
       // The registered Session now carries the owed lease itself; the
       // refusal-time record is discharged.
       refusedAdoptions.delete(sessionId);
-      res.status(200).json({
-        sessionId,
-        clientId: session.clientId,
-        workspaceCwd: cwd,
-        lastEventId: managed.authority.committedSequence,
-        eventEpoch: epoch,
-        // A Harness older than approvals omits this, so a caller can tell.
-        ...(pinned ? { approvalMode: pinned.mode } : {}),
-        ...(session.blocked || session.hooks?.hasPendingOperations
-          ? { recoveryRequired: true }
-          : {}),
-        ...(recovery
-          ? { _meta: { 'qwen.daemon.managedRuntimeRecovery': recovery } }
-          : {}),
-      });
+      // A Harness older than approvals omits approvalMode, so a caller can
+      // tell.
+      res.status(200).json(attachmentReply(session, recovery));
       if (settlePromptId) {
         const originalPromptId = settlePromptId;
         const abort = new AbortController();
@@ -1953,7 +2166,10 @@ export function registerHostedHarnessSessionRoutes(
     const timer =
       deadlineMs === undefined
         ? undefined
-        : setTimeout(() => abort.abort(), deadlineMs as number);
+        : setTimeout(
+            () => abort.abort(HOSTED_TURN_DEADLINE),
+            deadlineMs as number,
+          );
     timer?.unref();
     session.active = { promptId, digest, abort };
     void (async () => {
@@ -2036,9 +2252,9 @@ export function registerHostedHarnessSessionRoutes(
             `qwen serve: Hosted Harness turn ${promptId} could not finish after admission; retrying settlement: ${String(cause)}`,
           );
           try {
-            const state = abort.signal.aborted ? 'cancelled' : 'error';
+            const outcome = settledTurnOutcome(abort);
             await session.managed.sink.write(
-              turnResult ?? turnResultRecord(state, state),
+              turnResult ?? turnResultRecord(outcome.state, outcome.stopReason),
             );
           } catch (settleCause) {
             session.blocked = true;
@@ -2750,16 +2966,16 @@ export function registerHostedHarnessSessionRoutes(
           );
         }
       } finally {
-        try {
-          await toolTurn?.close();
-        } catch (cause) {
+        // Clear availability before the unbounded publisher drain, per the
+        // discipline in executeHostedTurn.
+        releaseRecoveredRuntime(session);
+        session.active = undefined;
+        void toolTurn?.close().catch((cause: unknown) => {
           session.blocked = true;
           writeStderrLineSafe(
             `qwen serve: Hosted Shell publisher cleanup failed: ${String(cause)}`,
           );
-        }
-        releaseRecoveredRuntime(session);
-        session.active = undefined;
+        });
       }
     })();
   });

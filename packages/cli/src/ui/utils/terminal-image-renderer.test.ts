@@ -62,6 +62,13 @@ describe('terminalImageRenderer', () => {
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'terminal-image-test-'));
+    // The fake renderer executables below are CommonJS scripts; scope them
+    // explicitly so a "type": "module" package.json above os.tmpdir()
+    // cannot flip them to ESM.
+    await fs.writeFile(
+      path.join(tempDir, 'package.json'),
+      '{"type":"commonjs"}',
+    );
     imagePath = path.join(tempDir, 'pixel.png');
     await fs.writeFile(imagePath, PNG_1X1);
   });

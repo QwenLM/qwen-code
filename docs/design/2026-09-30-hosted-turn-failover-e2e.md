@@ -169,9 +169,18 @@ Known follow-ups from the maintainer's real-environment verification:
   can legitimately take up to 120 s while the default coordinator
   `request-timeout` is 30 s.
 - A journal that contains `message.delta` events cannot be opened by a
-  Harness of an older build (`managed_session_open_failed`). Readers of this
-  build are fine; a rollback or a mixed fleet during a rolling deploy is not.
-  Upgrade the fleet before enabling Hosted Workspace turns, or gate rollback.
+  Harness of an older build. The released 0.24.7 refusal shape is a
+  fail-closed `POST /session/:id/load` answer: 503 with
+  `{"error":"managed_session_open_failed","code":"managed_session_open_failed"}`
+  — one step before the journal reader's own surface, and retried by the
+  coordinator while the fleet stays mixed. Since #13320 the Java client
+  surfaces the refusal code (`HarnessSessionRefusedException`) and the
+  coordinator names it in retry logs and in the recorded terminal failure
+  once the pre-admission retry budget runs out, so the rolling-deploy
+  runbook can tell "journal newer than the reader" apart from a genuinely
+  unavailable Harness. Readers of this build are fine; a rollback or a mixed
+  fleet during a rolling deploy is not. Upgrade the fleet before enabling
+  Hosted Workspace turns, or gate rollback.
 - A model fallback or retry that lands after the first streamed chunk fails
   the Turn terminally (`Hosted Harness cannot retract a published model
 attempt.`): once `message.delta` records are journaled, the partial attempt
@@ -180,4 +189,9 @@ attempt.`): once `message.delta` records are journaled, the partial attempt
   pre-streaming behavior did. A transient provider capacity event mid-stream
   therefore fails the Turn permanently rather than being retried by the
   coordinator (a `turn_result` is terminal). Classifying this settlement as
-  retryable for the coordinator is a follow-up.
+  retryable for the coordinator is a follow-up. (Superseded by #13319's
+  in-band retraction: a retry landing after publication replays the request
+  fresh, the Harness journals `message.retracted`, and the server empties the
+  message's deltas by source-sequence range and publishes
+  `stream.reconciled` — see
+  [2026-10-04-managed-midstream-retry-retraction](2026-10-04-managed-midstream-retry-retraction.md).)
