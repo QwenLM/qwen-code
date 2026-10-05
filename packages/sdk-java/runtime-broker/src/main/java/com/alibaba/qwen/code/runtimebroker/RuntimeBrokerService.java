@@ -59,7 +59,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
     // inside this window; sequential observations share the one lookup.
     static final Duration UNKNOWN_LOOKUP_COOLDOWN =
             Duration.ofSeconds(1);
-    /** Floor for {@code v3ResultWindow}: rejects a duration bound as milliseconds. */
+    /**
+     * Floor for {@code v3ResultWindow}: refuses sub-second durations. A
+     * suffix-less config value binds as seconds, so a stale
+     * milliseconds-style override is accepted — always write the suffix.
+     */
     public static final Duration MIN_V3_RESULT_WINDOW = Duration.ofSeconds(1);
     private static final Duration DEFAULT_V3_RESULT_WINDOW =
             Duration.ofMinutes(30);
@@ -189,10 +193,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
         this.v3ResultWindow = requireDuration(v3ResultWindow,
                 "v3ResultWindow");
         if (this.v3ResultWindow.compareTo(MIN_V3_RESULT_WINDOW) < 0) {
-            // A suffix-less duration config binds as milliseconds, so a
-            // window meant as "30" minutes arrives as 30ms and would
-            // silently degrade every v3 execution to UNKNOWN. Refuse values
-            // below a floor no intended configuration lands under.
+            // A suffix-less duration config binds as seconds, so the floor
+            // refuses only sub-second values; a stale milliseconds-style
+            // override passes as that many seconds. Refuse values below a
+            // floor no intended configuration lands under.
             throw new IllegalArgumentException(
                     "v3ResultWindow must be at least "
                             + MIN_V3_RESULT_WINDOW);

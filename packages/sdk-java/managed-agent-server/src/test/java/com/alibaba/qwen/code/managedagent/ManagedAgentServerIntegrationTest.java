@@ -1796,29 +1796,42 @@ class ManagedAgentServerIntegrationTest {
     void anOversizedDurableRecordIsAdmittedThenRejectedByTheHarness()
             throws Exception {
         // The 4M aggregate is an admission ceiling only: a command whose
-        // serialized prompt exceeds the Hosted Harness's 64 KiB
-        // durable-record limit is accepted and persisted, then fails the
-        // Turn when the Harness refuses it (413 -> hosted_harness_rejected).
+        // serialized prompt or durable Session-store record exceeds the
+        // Hosted Harness's 64 KiB durable-record limit is accepted and
+        // persisted, then fails the Turn when the Harness refuses it
+        // (413 -> hosted_harness_rejected).
         String tenant = "tenant-oversized-" + UUID.randomUUID();
+        // Prompt arm: the serialized prompt itself is over the limit.
+        assertHarnessRejectsOversizedCommand(tenant, "prompt",
+                "x".repeat(100_000));
+        // Record arm: the serialized prompt stays under the limit (the
+        // single-block wrapper adds 27 bytes), but the durable record's
+        // envelope pushes it over, so the Turn still fails. A fake
+        // checking only the serialized prompt admits this command.
+        assertHarnessRejectsOversizedCommand(tenant, "record",
+                "x".repeat(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES
+                        - 100));
+    }
+
+    private void assertHarnessRejectsOversizedCommand(String tenant,
+            String arm, String text) throws Exception {
         String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {"idempotencyKey":"oversized-create",
-                                 "agentId":"qwen-code","input":[]}
-                                """))
+                        .content("{\"idempotencyKey\":\"oversized-create-"
+                                + arm + "\",\"agentId\":\"qwen-code\","
+                                + "\"input\":[]}"))
                 .andExpect(status().isAccepted()).andReturn()
                 .getResponse().getContentAsString())
                 .get("sessionId").asText();
         mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
                         .header(TenantContextFilter.HEADER, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"idempotencyKey\":\"oversized-submit\","
-                                + "\"sessionId\":\"" + sessionId + "\","
-                                + "\"input\":[{\"type\":\"input_text\","
-                                + "\"text\":\"" + "x".repeat(100_000)
-                                + "\"}]}"))
+                        .content("{\"idempotencyKey\":\"oversized-submit-"
+                                + arm + "\",\"sessionId\":\"" + sessionId
+                                + "\",\"input\":[{\"type\":\"input_text\","
+                                + "\"text\":\"" + text + "\"}]}"))
                 .andExpect(status().isAccepted());
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                 mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
@@ -1925,11 +1938,32 @@ class ManagedAgentServerIntegrationTest {
         public Admission submit(String tenantId, String sessionId,
                 String promptId,
                 List<Map<String, Object>> input, String payloadDigest) {
-            // The real Hosted Harness refuses a prompt whose durable record
-            // exceeds the Session store's inline limit with a 413; mirror
-            // that here so the admission-vs-delivery gap is observable.
+            // The real Hosted Harness refuses with a 413 when EITHER the
+            // serialized prompt OR its durable Session-store record exceeds
+            // the inline limit; mirror both arms so the
+            // admission-vs-delivery gap is observable. The record arm wraps
+            // the joined block texts in the envelope the real record()
+            // adds; the fields the fake cannot know (uuid, parentUuid,
+            // timestamp, cwd) take fixed-size stand-ins.
+            var mapper = new ObjectMapper();
+            String text = input.stream()
+                    .map(block -> String.valueOf(block.get("text")))
+                    .collect(java.util.stream.Collectors.joining("\n"));
+            Map<String, Object> record = Map.of(
+                    "uuid", "00000000-0000-4000-8000-000000000000",
+                    "parentUuid", "00000000-0000-4000-8000-000000000000",
+                    "sessionId", sessionId,
+                    "timestamp", "2000-01-01T00:00:00.000Z",
+                    "type", "user",
+                    "cwd", ".",
+                    "version", "hosted-harness/1",
+                    "daemonPromptId", promptId,
+                    "message", Map.of("role", "user",
+                            "parts", List.of(Map.of("text", text))));
             try {
-                if (new ObjectMapper().writeValueAsBytes(input).length
+                if (mapper.writeValueAsBytes(input).length
+                        > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES
+                        || mapper.writeValueAsBytes(record).length
                         > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES) {
                     DaemonHttpException tooLarge =
                             mock(DaemonHttpException.class);

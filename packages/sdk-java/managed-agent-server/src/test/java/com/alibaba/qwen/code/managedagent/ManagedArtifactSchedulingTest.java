@@ -9,6 +9,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedArtifactConfiguration;
 import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
@@ -22,6 +24,7 @@ import org.springframework.boot.autoconfigure.task.TaskSchedulingAutoConfigurati
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -70,9 +73,9 @@ class ManagedArtifactSchedulingTest {
         context.register(
                 SchedulingHarness.class,
                 TaskSchedulingAutoConfiguration.class,
-                com.alibaba.qwen.code.managedagent.config.ManagedArtifactConfiguration.class);
+                ManagedArtifactConfiguration.class);
         context.registerBean(
-                com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class,
+                ManagedAgentProperties.class,
                 fixture::properties);
         context.registerBean(
                 com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy.class,
@@ -109,18 +112,14 @@ class ManagedArtifactSchedulingTest {
         // The typed property, not a hardcoded constant, is the cadence:
         // mutating messageMaterializerTask to schedule with a literal
         // Duration turns this red.
-        var properties = new com.alibaba.qwen.code.managedagent.config
-                .ManagedAgentProperties();
+        var properties = new ManagedAgentProperties();
         properties.getEvents().setMaterializeInterval(
                 java.time.Duration.ofMillis(10));
-        org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler
-                scheduler = mock(org.springframework.scheduling.concurrent
-                        .ThreadPoolTaskScheduler.class);
-        new com.alibaba.qwen.code.managedagent.config
-                .ManagedArtifactConfiguration().messageMaterializerTask(
-                        scheduler,
-                        new MessageMaterializer(mock(AgentStateStore.class)),
-                        properties);
+        ThreadPoolTaskScheduler scheduler = mock(ThreadPoolTaskScheduler.class);
+        new ManagedArtifactConfiguration().messageMaterializerTask(
+                scheduler,
+                new MessageMaterializer(mock(AgentStateStore.class)),
+                properties);
         verify(scheduler).scheduleWithFixedDelay(any(Runnable.class),
                 eq(java.time.Duration.ofMillis(10)));
     }
@@ -147,10 +146,9 @@ class ManagedArtifactSchedulingTest {
         var context = new AnnotationConfigApplicationContext();
         context.register(SchedulingHarness.class,
                 TaskSchedulingAutoConfiguration.class,
-                com.alibaba.qwen.code.managedagent.config.ManagedArtifactConfiguration.class);
-        context.registerBean(
-                com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class,
-                com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties::new);
+                ManagedArtifactConfiguration.class);
+        context.registerBean(ManagedAgentProperties.class,
+                ManagedAgentProperties::new);
         context.registerBean("materializer", MessageMaterializer.class,
                 () -> new MessageMaterializer(state));
         context.registerBean("defaultPoolHog", DefaultPoolHog.class,

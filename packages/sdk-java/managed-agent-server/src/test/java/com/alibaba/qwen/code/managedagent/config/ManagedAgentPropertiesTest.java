@@ -3,12 +3,17 @@ package com.alibaba.qwen.code.managedagent.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
+import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
+import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import java.util.List;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.Scheduled;
 
 class ManagedAgentPropertiesTest {
     private static final String DURABLE_KEY = "qwen.managed-agent.runtime-broker.durable-local-process";
@@ -115,16 +120,22 @@ class ManagedAgentPropertiesTest {
     @Test
     void unitLessNumericOverridesBindInTheDeclaredUnit() {
         // Without @DurationUnit this binds PT0.12S — a 120 ms lease renewed
-        // every 20 s invites double execution.
+        // every 20 s invites double execution. The v3 result window is the
+        // documented case: a stale milliseconds-style 1800000 meant as 30
+        // minutes binds as PT500H, so the suffix is mandatory.
         new ApplicationContextRunner()
                 .withPropertyValues(
-                        "qwen.managed-agent.dispatch.lease-duration=120")
+                        "qwen.managed-agent.dispatch.lease-duration=120",
+                        "qwen.managed-agent.runtime-broker.v3-result-window=1800000")
                 .withUserConfiguration(PropertiesConfiguration.class)
                 .run(started -> {
                     assertThat(started).hasNotFailed();
                     assertThat(started.getBean(ManagedAgentProperties.class)
                             .getDispatch().getLeaseDuration())
                             .isEqualTo(java.time.Duration.ofSeconds(120));
+                    assertThat(started.getBean(ManagedAgentProperties.class)
+                            .getRuntimeBroker().getV3ResultWindow())
+                            .isEqualTo(java.time.Duration.ofSeconds(1_800_000));
                 });
     }
 
@@ -137,10 +148,8 @@ class ManagedAgentPropertiesTest {
         assertThat(new ManagedAgentProperties().getEvents()
                 .getMaterializeInterval())
                 .isEqualTo(java.time.Duration.ofMillis(100));
-        assertThat(com.alibaba.qwen.code.managedagent.service
-                .MessageMaterializer.class.getMethods())
-                .noneMatch(method -> method.isAnnotationPresent(
-                        org.springframework.scheduling.annotation.Scheduled.class));
+        assertThat(MessageMaterializer.class.getMethods())
+                .noneMatch(method -> method.isAnnotationPresent(Scheduled.class));
     }
 
     @Test
@@ -149,26 +158,19 @@ class ManagedAgentPropertiesTest {
         // "${...scan-delay:1s}" placeholder; only this pin keeps the claim
         // true when one fallback is retuned without the others.
         String expected = "${qwen.managed-agent.dispatch.scan-delay:1s}";
-        assertThat(scanDelayFallback(
-                com.alibaba.qwen.code.managedagent.service
-                        .ActionResponseCoordinator.class)).isEqualTo(expected);
-        assertThat(scanDelayFallback(
-                com.alibaba.qwen.code.managedagent.service
-                        .HarnessCoordinator.class)).isEqualTo(expected);
-        assertThat(scanDelayFallback(
-                com.alibaba.qwen.code.managedagent.service
-                        .SessionLifecycleCoordinator.class))
+        assertThat(scanDelayFallback(ActionResponseCoordinator.class))
+                .isEqualTo(expected);
+        assertThat(scanDelayFallback(HarnessCoordinator.class))
+                .isEqualTo(expected);
+        assertThat(scanDelayFallback(SessionLifecycleCoordinator.class))
                 .isEqualTo(expected);
     }
 
     private static String scanDelayFallback(Class<?> coordinator) {
         return java.util.Arrays.stream(coordinator.getDeclaredMethods())
-                .map(method -> method.getAnnotation(
-                        org.springframework.scheduling.annotation
-                                .Scheduled.class))
+                .map(method -> method.getAnnotation(Scheduled.class))
                 .filter(java.util.Objects::nonNull)
-                .map(org.springframework.scheduling.annotation.Scheduled
-                        ::fixedDelayString)
+                .map(Scheduled::fixedDelayString)
                 .filter(value -> value.contains("dispatch.scan-delay"))
                 .findFirst().orElseThrow();
     }

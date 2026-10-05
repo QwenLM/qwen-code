@@ -215,9 +215,9 @@ class EmbeddedRuntimeBrokerTest {
 
     @Test
     void refusesAV3ResultWindowBelowThePollFloor() throws Exception {
-        // An absent value binds as null and a suffix-less one as
-        // milliseconds; every shape below the floor must be refused here
-        // rather than degrade each v3 execution later.
+        // An absent value binds as null and a suffix-less one as seconds;
+        // every shape below the floor must be refused here rather than
+        // degrade each v3 execution later.
         for (java.time.Duration window : new java.time.Duration[] {
                 null, java.time.Duration.ZERO, java.time.Duration.ofMillis(-1),
                 java.time.Duration.ofMillis(999)}) {

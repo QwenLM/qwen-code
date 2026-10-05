@@ -464,9 +464,11 @@ export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK='false'
 # a dispatched v3 execution's result. When the window lapses the execution
 # is marked UNKNOWN instead of polling on, so a value shorter than your
 # longest tool call degrades that call to UNKNOWN. A suffix-less number
-# binds as milliseconds, which startup refuses. Raising it above 30m buys
-# nothing on the shipped path: the TypeScript client stops observing a v3
-# execution at its own fixed 30-minute deadline.
+# binds as seconds: startup refuses a value below the 1s floor but accepts
+# a stale milliseconds-style override (1800000 becomes 1800000 seconds),
+# so always write the suffix. Raising it above 30m buys nothing on the
+# shipped path: the TypeScript client stops observing a v3 execution at
+# its own fixed 30-minute deadline.
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW='30m'
 ```
 

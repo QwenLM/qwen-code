@@ -1032,10 +1032,10 @@ class Issue13183RegressionTest {
     }
 
     /**
-     * The window is validated against a floor: a suffix-less duration config
-     * binds as milliseconds, so a window meant as "30" minutes arrives as
-     * 30ms and construction fails instead of silently degrading every v3
-     * execution to UNKNOWN.
+     * The window is validated against a floor: a sub-second window would
+     * silently degrade every v3 execution to UNKNOWN, so construction
+     * refuses it. A suffix-less duration config binds as seconds, so the
+     * floor no longer catches a stale milliseconds-style override.
      */
     @Test
     void v3ResultWindowBelowTheFloorIsRefused() {

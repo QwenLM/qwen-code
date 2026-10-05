@@ -428,7 +428,7 @@ export interface components {
             /** @description Planned; phase one rejects non-blank values. */
             environmentId?: string | null;
             title?: string | null;
-            /** @description Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected. */
+            /** @description Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
             workspace?: components["schemas"]["WebShellWorkspaceSelection"];
@@ -439,7 +439,7 @@ export interface components {
             idempotencyKey: string;
             /** Format: uuid */
             sessionId: string;
-            /** @description Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected. */
+            /** @description Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected. */
             input?: components["schemas"]["InputBlock"][];
             metadata?: components["schemas"]["WebShellMetadata"];
         };

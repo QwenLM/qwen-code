@@ -3513,7 +3513,7 @@
             "description": "Optional explicit revision; omitted resolves current revision atomically at admission."
           },
           "input": {
-            "description": "Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected.",
+            "description": "Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected.",
             "type": "array",
             "maxItems": 100,
             "items": {
@@ -3558,7 +3558,7 @@
             "const": "agent.session.input.message"
           },
           "input": {
-            "description": "Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected.",
+            "description": "Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected.",
             "type": "array",
             "minItems": 1,
             "maxItems": 100,
@@ -4458,7 +4458,7 @@
             "maxLength": 512
           },
           "input": {
-            "description": "Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected.",
+            "description": "Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected.",
             "type": "array",
             "maxItems": 100,
             "items": {
@@ -4494,7 +4494,7 @@
             "format": "uuid"
           },
           "input": {
-            "description": "Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected.",
+            "description": "Each block adds to a 4,000,000-character aggregate admission budget per command (per-block 1,000,000-character cap applies). Admission ceiling only: a command whose serialized prompt or durable Session-store record exceeds the Hosted Harness's 64 KiB durable-record limit is accepted and then fails the Turn with hosted_harness_rejected.",
             "type": "array",
             "minItems": 1,
             "maxItems": 100,

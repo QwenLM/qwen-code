@@ -85,6 +85,7 @@ public class ManagedAgentService {
     // The per-block cap (1M chars) times the per-list cap (100) would
     // otherwise admit ~100M characters in a single command.
     private static final int MAX_AGGREGATE_INPUT_CHARS = 4 * 1000 * 1000;
+    private static final int MAX_BLOCK_INPUT_CHARS = 1000 * 1000;
     private final AgentStateStore store;
     private final ManagedWorkspaceRegistry workspaces;
     private final RequestDigests digests;
@@ -962,7 +963,17 @@ public class ManagedAgentService {
                         "unsupported_input",
                         "Phase 1 accepts non-empty text input only.");
             }
-            totalChars += block.text().length();
+            // Code points, matching the published schema's maxLength; a
+            // String.length() count would disagree on astral-plane text.
+            int blockChars = block.text().codePointCount(0,
+                    block.text().length());
+            if (blockChars > MAX_BLOCK_INPUT_CHARS) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "invalid_input",
+                        "Input block exceeds the " + MAX_BLOCK_INPUT_CHARS
+                                + " character per-block limit.");
+            }
+            totalChars += blockChars;
             if (totalChars > MAX_AGGREGATE_INPUT_CHARS) {
                 throw new ApiException(HttpStatus.BAD_REQUEST,
                         "invalid_input",
