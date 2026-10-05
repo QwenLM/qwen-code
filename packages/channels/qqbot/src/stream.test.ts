@@ -2976,9 +2976,10 @@ describe('buffer limit flush (#11)', () => {
   });
 });
 
-// The send path now reports why it did not reach the wire, but only
-// deliverCancelledStash acts on it: the streaming path must keep treating a
-// route it could not resolve as a settled (dropped) send, exactly as before.
+// The send path now reports why it did not reach the wire, and the streaming
+// path routes a route-blocked send through the same transient-retry /
+// permanent-teardown arms a thrown DeliveryError uses instead of recording it
+// delivered.
 describe('send path route reporting', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -4119,9 +4120,19 @@ describe('cancel/flush coordination', () => {
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
     expect(seqMap.get('msg-A')).toBe(1);
 
-    // A newer message moves the chat-level entry (ordinary group traffic), so
-    // only the in-flight marker can protect the counter.
+    // A newer message moves the chat-level entry (ordinary group traffic), and
+    // setReplyMsgId deliberately leaves the previous msgId's routing entry in
+    // replyContextByMessageId; evict that too, so only the in-flight marker can
+    // protect the counter.
     setReplyMsgId(ch, 'test-chat', 'msg-C');
+    (chp['deleteReplyContext'] as (c: unknown) => void).call(ch, {
+      chatId: 'test-chat',
+      msgId: 'msg-A',
+      timestamp: Date.now(),
+    });
+    expect(
+      (chp['replyContextByMessageId'] as Map<string, unknown>).has('msg-A'),
+    ).toBe(false);
 
     // Expire the token: the terminal send suspends in resolveRoute →
     // fetchToken, BEFORE it reads msgSeqMap.
