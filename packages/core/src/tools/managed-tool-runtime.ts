@@ -640,7 +640,16 @@ export class ManagedToolRuntime {
       this.sharedFileHistory
         ? this.sharedFileHistory.execute(() => this.run(entry))
         : this.run(entry),
-    );
+    ).catch((error: unknown) => {
+      entry.result ??= {
+        executionStatus: 'not_started',
+        error: {
+          message: error instanceof Error ? error.message : String(error),
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      };
+      throw error;
+    });
     void entry.execution.catch(() => {});
     return entry.execution.then((result) => structuredClone(result));
   }
