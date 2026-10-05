@@ -1005,6 +1005,44 @@ describe('MemoryPressureMonitor', () => {
       expect(chat.isLastTurnCancelled()).toBe(false);
     });
 
+    it('does not invent a cancellation when idle compaction runs on a clean chat', async () => {
+      const { LlmChat } = await import('../core/llm-chat.js');
+      const chat = new LlmChat(
+        { getToolRegistry: () => undefined } as unknown as Config,
+        {},
+        [
+          ...readFileHistory(),
+          content('user', { text: 'finished request' }),
+          content(
+            'model',
+            fnCall('read_file', { path: '/latest.ts' }, 'latest'),
+          ),
+          content(
+            'user',
+            fnResponse('read_file', { output: 'latest' }, 'latest'),
+          ),
+        ],
+      );
+      const monitor = createMonitor({
+        llmClient: { isInitialized: () => true, getChat: () => chat },
+      });
+
+      await checkAt(monitor, 11 * GB);
+
+      expect(
+        chat
+          .getHistory()
+          .some((entry) =>
+            entry.parts?.some(
+              (part) =>
+                part.functionResponse?.response?.['output'] ===
+                MICROCOMPACT_CLEARED_MESSAGE,
+            ),
+          ),
+      ).toBe(true);
+      expect(chat.isLastTurnCancelled()).toBe(false);
+    });
+
     it('skips compaction when client is not initialized', async () => {
       const setHistory = vi.fn();
       const monitor = createMonitor({
