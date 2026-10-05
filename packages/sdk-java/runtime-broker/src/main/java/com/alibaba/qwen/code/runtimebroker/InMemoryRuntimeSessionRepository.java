@@ -65,7 +65,8 @@ public final class InMemoryRuntimeSessionRepository
                         && harnessSessionId.equals(record.getSession().getHarnessSessionId())
                         && runtimeSessionId.equals(record.getRuntimeSessionId())).limit(2).toList();
         if (matches.size() > 1) {
-            throw new IllegalStateException("Historical Runtime Session is ambiguous");
+            throw new RuntimeBrokerException(409, "runtime_session_ambiguous",
+                    "Historical Runtime Session is ambiguous", false);
         }
         return matches.isEmpty() ? null : matches.getFirst();
     }

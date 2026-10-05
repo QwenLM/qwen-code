@@ -156,7 +156,8 @@ public final class JdbcRuntimeSessionRepository
                                 && runtimeSessionId.equals(record.getRuntimeSessionId())) {
                             matches.add(record);
                             if (matches.size() > 1) {
-                                throw new IllegalStateException("Historical Runtime Session is ambiguous");
+                                throw new RuntimeBrokerException(409, "runtime_session_ambiguous",
+                                        "Historical Runtime Session is ambiguous", false);
                             }
                         }
                     }

@@ -47,7 +47,11 @@ class WorkspaceMigrationRepositoryTest {
             assertNull(repository.findHistorical("missing-tenant", "harness", "runtime"));
             repository.findOrCreate(new RuntimeSessionRecord(new RuntimeSession("harness", "runtime", "bootstrap", target),
                     "binding-new", 1, RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
-            assertThrows(IllegalStateException.class, () -> repository.findHistorical("tenant", "harness", "runtime"));
+            var ambiguity = assertThrows(RuntimeBrokerException.class,
+                    () -> repository.findHistorical("tenant", "harness", "runtime"));
+            assertEquals(409, ambiguity.getStatusCode());
+            assertEquals("runtime_session_ambiguous", ambiguity.getCode());
+            assertFalse(ambiguity.isRetryable());
         }
     }
 }

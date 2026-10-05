@@ -34,7 +34,7 @@ V42 将两个迁移表的身份比较修正为二进制 utf8mb4，兼容默认�
 
 运维在完成后更新部署挂载并重启 Broker/Harness。配置与 SQL 身份不一致时拒绝执行。私有维护进程必须继承与部署相同的规范绝对 QWEN_HOME，路径不能包含符号链接，fileHistoryRoot 必须等于其规范 file-history 目录。私有 Node 探针使用现有 Storage 解析器和该继承环境，固定历史卷身份，位于源、目标和 bundle 之外。新准入/provisioning 检查环境与目录身份，每 Turn 不扫描备份；无需扩展 Worker boot/attestation 协议。
 
-新文件 Turn 和 undo 获取新的 placement/context/attestation/activation 回执。旧 status/cancel/release 保留保存的 binding/generation/scope。历史 Runtime Session 查找使用精确 tenant/Harness/Runtime 身份，拒绝歧义，不依赖当前挂载 scope。非唯一 Runtime Session ID 索引先定位候选，再检查完整 tenant/Harness 身份和歧义；单列 VARCHAR(512) 在 utf8mb4 下仅需 2048 字节，不新增摘要字段或回填。独立 Broker 初始化同步 schema，并为已有表补齐索引。不改写旧 cwd、持久 handle、执行 ID 或 attestation。
+新文件 Turn 和 undo 获取新的 placement/context/attestation/activation 回执。旧 status/cancel/release 保留保存的 binding/generation/scope。历史 Runtime Session 查找使用精确 tenant/Harness/Runtime 身份，拒绝歧义，不依赖当前挂载 scope。 歧义返回不可重试的 `409 runtime_session_ambiguous`，不选择或释放任何候选。非唯一 Runtime Session ID 索引先定位候选，再检查完整 tenant/Harness 身份和歧义；单列 VARCHAR(512) 在 utf8mb4 下仅需 2048 字节，不新增摘要字段或回填。独立 Broker 初始化同步 schema，并为已有表补齐索引。不改写旧 cwd、持久 handle、执行 ID 或 attestation。
 
 ## 验证与验收
 
