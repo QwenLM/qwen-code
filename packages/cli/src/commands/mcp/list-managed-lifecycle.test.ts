@@ -91,6 +91,9 @@ describe('MCP list managed lifecycle safety', () => {
     vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
       false,
     );
+    vi.spyOn(KeychainTokenStorage.prototype, 'getKeytar').mockResolvedValue(
+      null,
+    );
     vi.spyOn(process, 'cwd').mockReturnValue(workspace);
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
   });

@@ -59,6 +59,9 @@ describe('managed extension read safety', () => {
     vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
       false,
     );
+    vi.spyOn(KeychainTokenStorage.prototype, 'getKeytar').mockResolvedValue(
+      null,
+    );
   });
 
   afterEach(() => {

@@ -44,6 +44,7 @@ async function createManagedEpisode(
   vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
     false,
   );
+  vi.spyOn(KeychainTokenStorage.prototype, 'getKeytar').mockResolvedValue(null);
   const managedExtensionsDir = join(root, 'deployment');
   const deployed = join(managedExtensionsDir, 'bundle');
   const workspace = join(root, 'workspace');

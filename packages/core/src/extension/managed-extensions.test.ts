@@ -122,6 +122,9 @@ describe('managed extensions', () => {
     vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
       false,
     );
+    vi.spyOn(KeychainTokenStorage.prototype, 'getKeytar').mockResolvedValue(
+      null,
+    );
     store = new ExtensionStore({
       extensionsDir: user,
       storeDir: path.join(temporary, 'home', 'extension-store'),

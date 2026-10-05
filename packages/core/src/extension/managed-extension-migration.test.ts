@@ -105,6 +105,9 @@ describe('managed extension activation migration', () => {
     vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
       false,
     );
+    vi.spyOn(KeychainTokenStorage.prototype, 'getKeytar').mockResolvedValue(
+      null,
+    );
     vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     configurations = [];

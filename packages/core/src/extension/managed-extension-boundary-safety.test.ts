@@ -46,6 +46,9 @@ describe('managed extension boundary safety', () => {
     vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
       false,
     );
+    vi.spyOn(KeychainTokenStorage.prototype, 'getKeytar').mockResolvedValue(
+      null,
+    );
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     store = new ExtensionStore();
     enablementPath = path.join(

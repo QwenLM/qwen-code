@@ -680,11 +680,14 @@ export async function hasStoredExtensionSecrets(
       // Probe both backends: which one HybridTokenStorage would pick depends
       // on this process's keychain availability, not on where the value was
       // written, so a single-backend probe can miss a value that exists.
-      for (const storage of [
-        new KeychainTokenStorage(serviceName),
-        new FileTokenStorage(serviceName),
-      ]) {
-        if (!(await storage.isAvailable())) continue;
+      const keychain = new KeychainTokenStorage(serviceName);
+      for (const storage of [keychain, new FileTokenStorage(serviceName)]) {
+        if (!(await storage.isAvailable())) {
+          if (storage === keychain && (await keychain.getKeytar())) {
+            return true;
+          }
+          continue;
+        }
         let keys: string[];
         try {
           keys = await storage.listSecrets();
@@ -719,6 +722,7 @@ export async function clearStoredExtensionSecrets(
     extensionId,
     workspaceCwds,
   );
+  const failures: unknown[] = [];
   for (const scope of [
     ExtensionSettingScope.USER,
     ExtensionSettingScope.WORKSPACE,
@@ -737,14 +741,26 @@ export async function clearStoredExtensionSecrets(
       // Clear in both backends: which one HybridTokenStorage picked at write
       // time depended on that process's keychain availability, not this
       // one's.
-      for (const storage of [
-        new KeychainTokenStorage(serviceName),
-        new FileTokenStorage(serviceName),
-      ]) {
-        await clearKeychainSettings(storage);
+      const keychain = new KeychainTokenStorage(serviceName);
+      for (const storage of [keychain, new FileTokenStorage(serviceName)]) {
+        try {
+          if (
+            storage === keychain &&
+            !(await keychain.isAvailable()) &&
+            (await keychain.getKeytar())
+          ) {
+            throw new Error(
+              'Keychain backend is unavailable; stored extension secret cleanup is incomplete.',
+            );
+          }
+          await clearKeychainSettings(storage);
+        } catch (error) {
+          failures.push(error);
+        }
       }
     }
   }
+  if (failures.length > 0) throw failures[0];
 }
 
 interface settingsChanges {

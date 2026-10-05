@@ -3219,6 +3219,9 @@ describe('extension management v2 REST', () => {
       vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
         false,
       );
+      vi.spyOn(KeychainTokenStorage.prototype, 'getKeytar').mockResolvedValue(
+        null,
+      );
       const managedRoot = path.join(root, 'deployment');
       const deployed = path.join(managedRoot, 'bundle');
       const userPath = path.join(root, 'home', 'extensions', 'demo');
