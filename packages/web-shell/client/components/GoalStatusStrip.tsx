@@ -44,6 +44,40 @@ export function getGoalTokenLabel(
       });
 }
 
+/**
+ * Active time, against its ceiling when `model.goalMaxActiveMinutes` armed
+ * one for this Goal.
+ */
+export function getGoalActiveTimeLabel(
+  goal: NonNullable<GoalSnapshotV2['goal']>,
+  activeTimeMs: number,
+  t: ReturnType<typeof useI18n>['t'],
+): string {
+  return goal.activeTimeBudgetMs === undefined
+    ? formatRuntime(activeTimeMs)
+    : t('goal.activeOfBudget', {
+        used: formatRuntime(activeTimeMs),
+        budget: formatRuntime(goal.activeTimeBudgetMs),
+      });
+}
+
+/**
+ * Finished turns against the ceiling `model.goalMaxTurns` armed. A Goal with
+ * no turn ceiling shows no turn figure here: the strip is one line, and the
+ * count alone says nothing about how much room is left. Zero stays hidden,
+ * as it does for tokens.
+ */
+export function getGoalTurnBudgetLabel(
+  goal: NonNullable<GoalSnapshotV2['goal']>,
+  t: ReturnType<typeof useI18n>['t'],
+): string | undefined {
+  if (goal.turnBudget === undefined || goal.turnCount <= 0) return undefined;
+  return t('goal.turnsOfBudget', {
+    count: goal.turnCount,
+    budget: goal.turnBudget,
+  });
+}
+
 export function GoalStatusStrip({
   snapshot,
   busy = false,
@@ -67,6 +101,7 @@ export function GoalStatusStrip({
   const canPause = goal.status === 'active';
   const canResume = canResumeGoal(goal);
   const tokenLabel = getGoalTokenLabel(goal, t);
+  const turnLabel = getGoalTurnBudgetLabel(goal, t);
 
   return (
     <div
@@ -87,8 +122,18 @@ export function GoalStatusStrip({
           ·
         </span>
         <span className={styles.elapsed} data-testid="goal-active-elapsed">
-          {formatRuntime(getGoalActiveTimeMs(snapshot, now))}
+          {getGoalActiveTimeLabel(goal, getGoalActiveTimeMs(snapshot, now), t)}
         </span>
+        {turnLabel ? (
+          <>
+            <span className={styles.separator} aria-hidden="true">
+              ·
+            </span>
+            <span className={styles.elapsed} data-testid="goal-active-turns">
+              {turnLabel}
+            </span>
+          </>
+        ) : null}
         {tokenLabel ? (
           <>
             <span className={styles.separator} aria-hidden="true">

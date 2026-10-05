@@ -49,7 +49,7 @@ describe('deepseekProvider', () => {
     });
     expect(models?.[2]?.capabilities?.reasoning).toEqual({
       thinking: true,
-      efforts: ['high', 'max'],
+      efforts: ['low', 'high', 'max'],
       defaultEffort: 'high',
       disableField: 'thinking',
     });

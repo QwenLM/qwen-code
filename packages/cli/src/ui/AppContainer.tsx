@@ -44,6 +44,8 @@ import {
   ideContextStore,
   createDebugLogger,
   describeDeliveryStatus,
+  describeDropReason,
+  PEER_ADMISSION_LIMITS,
   parseHeldExpiry,
   describeHoldCause,
   describePeerInboxFailure,
@@ -64,6 +66,8 @@ import {
   SpeculationEvent,
   logWorkflowKeyword,
   WorkflowKeywordEvent,
+  resolveWorkflowSizeGuidelineSetting,
+  type WorkflowSizeGuidelineSetting,
   startSpeculation,
   acceptSpeculation,
   abortSpeculation,
@@ -78,6 +82,7 @@ import {
   SendMessageType,
   clearWorktreeSession,
   restoreWorktreeContext,
+  WorktreeRestoreRefusedError,
   GitWorktreeService,
   readWorktreeSessionMarker,
   isSessionRuntimeActive,
@@ -86,6 +91,7 @@ import {
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
+  computeResumedPromptCountSeed,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
 import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
@@ -153,6 +159,7 @@ import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import {
   computeApiTruncationIndex,
+  isIdentifiedRetainedTurn,
   isRealUserTurn,
 } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
@@ -161,6 +168,7 @@ import {
   useVimModeActions,
 } from './contexts/VimModeContext.js';
 import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
+import { ToolDetailsExpandedProvider } from './contexts/ToolDetailsExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -185,10 +193,8 @@ import {
   isContextFilesAnnouncement,
   isSlashCommand,
 } from './utils/commandUtils.js';
-import {
-  detectWorkflowKeyword,
-  buildWorkflowSteeringNotice,
-} from './utils/workflow-keyword.js';
+import { buildWorkflowKeywordPrefix } from './utils/workflow-keyword.js';
+import { buildWorkflowSizeGuidelineChangePrefix } from './utils/workflow-size-notice.js';
 import { parseSlashCommand } from './commands/commands.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
@@ -211,6 +217,7 @@ import { sendNotification } from '../services/notificationService.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from './handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
+import { exitCleanly } from '../utils/processUtils.js';
 import {
   useMessageQueue,
   type QueuedUserSubmission,
@@ -566,6 +573,11 @@ export function useQueuedSubmissionDrain({
           ...(submission.submittedPrompt === undefined
             ? {}
             : { submittedPrompt: submission.submittedPrompt }),
+          // Route on the intent recorded at submit time, not the live
+          // shell-mode flag (#11626).
+          ...(submission.shellMode === undefined
+            ? {}
+            : { shellMode: submission.shellMode }),
           onAdmissionFailed: () => {
             // Deferred until idle, the same recovery the direct /btw
             // path uses: admission failed because a turn is active,
@@ -576,6 +588,7 @@ export function useQueuedSubmissionDrain({
               [submission.modelText],
               submission.submittedPrompt,
               true,
+              submission.shellMode,
             );
             markAdmissionFailed();
           },
@@ -966,6 +979,18 @@ export const AppContainer = (props: AppContainerProps) => {
     });
   }, []);
 
+  const [expandedToolBatchIds, setExpandedToolBatchIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set<string>());
+  const expandToolBatch = useCallback((batchId: string) => {
+    setExpandedToolBatchIds((prev) => {
+      if (prev.has(batchId)) return prev;
+      const next = new Set(prev);
+      next.add(batchId);
+      return next;
+    });
+  }, []);
+
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
   const { stdin, setRawMode } = useStdin();
@@ -1012,6 +1037,10 @@ export const AppContainer = (props: AppContainerProps) => {
    * parent checkout. (PR #4174 review #3259975249.)
    */
   const pendingWorktreeNoticeRef = useRef<string | null>(null);
+  // The size guideline the model was last told about; null until the first
+  // prompt, when the startup value (the one in the tool description) applies.
+  const announcedWorkflowSizeGuidelineRef =
+    useRef<WorkflowSizeGuidelineSetting | null>(null);
   // One-shot announcement of the context files (QWEN.md / context.fileName)
   // attached to the system prompt, shown alongside the first real prompt so
   // users can verify discovery (e.g., catch typos in context.fileName)
@@ -1194,17 +1223,13 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         loadHistoryWithLatchReconciliation(historyItems);
 
-        // Seed the prompt counter from the resumed conversation so new
-        // promptIds don't collide with restored file history snapshots.
-        const userTurnCount = resumedSessionData.conversation.messages.filter(
-          (m) =>
-            m.type === 'user' &&
-            m.subtype !== 'mid_turn_user_message' &&
-            m.subtype !== 'realtime_message',
-        ).length;
-        if (userTurnCount > 0) {
-          seedPromptCount(userTurnCount);
-        }
+        // Seed past identities already claimed by the resumed transcript.
+        seedPromptCount(
+          computeResumedPromptCountSeed(
+            resumedSessionData.conversation.messages,
+            config.getSessionId(),
+          ),
+        );
 
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
@@ -1234,7 +1259,7 @@ export const AppContainer = (props: AppContainerProps) => {
         // produce an INFO message the model sees on the next turn.
         // Skipped when Phase D-1 already injected a --worktree startup
         // notice above (startup wins over resume on the same prompt).
-        if (!startupWorktreeNotice) {
+        if (!startupWorktreeNotice && !config.getShellExecutionSandbox?.()) {
           try {
             const sessionPath = config
               .getSessionService()
@@ -1242,9 +1267,21 @@ export const AppContainer = (props: AppContainerProps) => {
             const restored = await restoreWorktreeContext(
               sessionPath,
               (err) => {
+                // An ownership refusal means the session loads WITHOUT its
+                // worktree binding — the model is never told the worktree
+                // exists, so later edits land in the original checkout.
+                // That must be visible, not a debug line.
+                if (err instanceof WorktreeRestoreRefusedError) {
+                  historyManager.addItem(
+                    { type: MessageType.WARNING, text: err.message },
+                    Date.now(),
+                  );
+                  return;
+                }
                 // eslint-disable-next-line no-console
                 console.debug('worktree session restore warning:', err);
               },
+              config.getSessionId(),
             );
             if (restored.contextMessage) {
               // UI: show the notice in the transcript so the user knows.
@@ -1295,6 +1332,7 @@ export const AppContainer = (props: AppContainerProps) => {
     });
 
     registerCleanup(async () => {
+      if (config.getShellExecutionSandbox?.()) return;
       const ideClient = await IdeClient.getInstance();
       await ideClient.disconnect();
     });
@@ -1696,7 +1734,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen,
     openApprovalModeDialog,
     handleApprovalModeSelect,
-  } = useApprovalModeCommand(settings, config);
+  } = useApprovalModeCommand(settings, config, historyManager.addItem);
 
   const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
     useEffortCommand(settings, config, historyManager.addItem);
@@ -1791,6 +1829,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     isModelDialogOpen,
     isFastModelMode,
+    isAdvisorModelMode,
     isVoiceModelMode,
     isVisionModelMode,
     isCompactionModelMode,
@@ -1861,6 +1900,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // re-arms the latch when the rebuilt history has no announcement.
     loadHistory: loadHistoryWithLatchReconciliation,
     startNewSession,
+    seedPromptCount,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
@@ -1871,6 +1911,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings,
     historyManager,
     startNewSession,
+    seedPromptCount,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
@@ -1885,6 +1926,7 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useDeleteCommand({
     config,
     addItem: historyManager.addItem,
+    logger,
   });
 
   const [isHelpDialogOpen, setHelpDialogOpen] = useState(false);
@@ -2071,7 +2113,7 @@ export const AppContainer = (props: AppContainerProps) => {
         config.getLlmClient()?.requestShutdown();
         setTimeout(async () => {
           await runExitCleanup();
-          process.exit(0);
+          await exitCleanly(0);
         }, 100);
       },
       setDebugMessage,
@@ -2176,6 +2218,16 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
       setShowWorktreeExitDialog(false);
+      if (choice === 'remove' && config.getShellExecutionSandbox?.()) {
+        historyManager.addItem(
+          {
+            type: MessageType.ERROR,
+            text: 'Worktree removal is unavailable in tool sandbox.',
+          },
+          Date.now(),
+        );
+        return;
+      }
       if (choice === 'remove' && activeWorktree) {
         try {
           // Anchor at the repo top-level (captured at enter time) rather
@@ -2329,6 +2381,7 @@ export const AppContainer = (props: AppContainerProps) => {
         config.getContextRuleExcludes(),
         {
           loadReason: 'refresh',
+          extensionRuleSources: config.getExtensionRuleSources(),
           onInstructionsLoaded: createInstructionsLoadedCallback(() =>
             config.getHookSystem(),
           ),
@@ -2733,14 +2786,52 @@ export const AppContainer = (props: AppContainerProps) => {
   // them, and nothing here needs to remember what was announced.
   useEffect(() => {
     if (!peerMessaging) return;
-    return peerMessaging.onReceipt(({ status, address, previous }) => {
+    return peerMessaging.onReceipt((receipt) => {
+      const { status, address, previous } = receipt;
       if (status === 'delivered' && previous !== 'held') return;
+      // A dropped receipt can stand for a burst, so it says how many
+      // rather than repeating itself — the whole reason the far side
+      // folded it was to keep a flood from becoming this many lines.
+      if (status === 'dropped') {
+        const count = receipt.dropped ?? 1;
+        const why = receipt.dropReason
+          ? ` — ${describeDropReason(receipt.dropReason)}`
+          : '';
+        // A repeat is the one reason that does not mean "unsent": the
+        // receiver turned it away *because* the identical text was
+        // already accepted there. Advising a fold would have the model
+        // reword it and get the same instruction delivered twice.
+        const advice =
+          receipt.dropReason === 'duplicate'
+            ? count === 1
+              ? ' The identical message was accepted there within the last ' +
+                `${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s, so there is nothing to re-send.`
+              : ' The identical messages were accepted there within the last ' +
+                `${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s, so there is nothing to re-send.`
+            : count === 1
+              ? ' Treat it as unsent; fold what still matters into one later message.'
+              : ' Treat them as unsent; fold what still matters into one later message.';
+        historyManager.addItem(
+          {
+            type: MessageType.INFO,
+            text:
+              count === 1
+                ? `Message to ${address}: it was dropped at that session's inbox${why}.${advice}`
+                : `Messages to ${address}: ${count} were dropped at that session's inbox${why}.${advice}`,
+          },
+          Date.now(),
+        );
+        return;
+      }
       // The wire text for `expired` speaks of a held message, which is
       // only right when the message was held. A delivery corrected to
-      // expired means the session exited with it unread; an expiry with
-      // no delivery at all means the gate could not queue it (its accept
-      // backlog was full) or the session went away — the peer may well be
-      // alive, so the notice must not claim it exited.
+      // expired means the session exited with it unread. An expiry with
+      // no delivery at all usually means the message arrived as that
+      // session was shutting down — but `previous` records what this
+      // sender *heard*, not what the receiver did, and a `held` receipt
+      // can be lost to the outbound ceiling under exactly the flood this
+      // feature is about, so the claim stays disjunctive and keeps the
+      // advice.
       const detail =
         status !== 'expired'
           ? describeDeliveryStatus(status)
@@ -2748,11 +2839,71 @@ export const AppContainer = (props: AppContainerProps) => {
             ? 'That session exited before it read your message; it was not delivered.'
             : previous === 'held'
               ? describeDeliveryStatus(status)
-              : 'Your message expired without being delivered; that session was too busy to queue it, or has exited. Retry once it is idle.';
+              : 'Your message was not delivered; that session was shutting down, or could not keep it. Retry once it is idle.';
       historyManager.addItem(
         {
           type: MessageType.INFO,
           text: `Message to ${address}: ${detail}`,
+        },
+        Date.now(),
+      );
+    });
+  }, [historyManager, peerMessaging]);
+
+  // Say when a peer is being turned away at this session's own inbox.
+  // Already throttled to one line per sender per minute, carrying the
+  // count of what it stands for: a message about a flood that scaled
+  // with the flood would do to the transcript what the flood was going
+  // to do anyway.
+  useEffect(() => {
+    if (!peerMessaging) return;
+    return peerMessaging.onDropped(({ frame, origin, reason, suppressed }) => {
+      const name = flattenPeerLabel(frame.fromName ?? '');
+      const address = frame.from ? flattenPeerLabel(frame.from) : '';
+      // Same attribution the delivered envelope uses, and for the same
+      // reason: a controller is named by the label its user gave it, and
+      // a sender's own `fromName` never decides which of the three this
+      // line calls it.
+      // The trust category first, then whatever the sender called itself.
+      // `fromName` is peer-chosen and not unique, so a line that led with
+      // it could read as the user's own session — and the two sibling
+      // lines (the held notice above, and the delivered envelope) both
+      // state the category.
+      const who =
+        name.length > 0 ? (address ? `${name} (${address})` : name) : address;
+      const selfSentWho = name || address;
+      const sender = origin.controller
+        ? `a trusted controller (${flattenPeerLabel(origin.controller.label)})`
+        : origin.selfSent
+          ? selfSentWho
+            ? `a process this session started (${selfSentWho})`
+            : 'a process this session started'
+          : who
+            ? `another session (${who})`
+            : 'another session';
+      // A rate limit has two walls and the verdict does not say which, so
+      // the wording names the one thing that is certainly true: this
+      // session is over its limit. Asserting the *sender's* own rate
+      // would accuse a peer that sent one message while somebody else
+      // filled the shared bucket.
+      const cause =
+        reason === 'rate-limited'
+          ? 'this session is taking peer messages faster than it accepts them'
+          : reason === 'duplicate'
+            ? `it repeated its previous message within ${PEER_ADMISSION_LIMITS.dedupWindowMs / 1000} s`
+            : "this session's queue of undelivered peer messages is full";
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text:
+            `Dropped a message from ${sender}: ${cause}.` +
+            // Not "similar": once the session-wide notice budget is spent
+            // the count carries other senders' and other reasons' drops
+            // too, and naming one peer beside a total that is not its own
+            // is how the wrong peer gets blamed for a flood.
+            (suppressed > 0
+              ? ` (+${suppressed} more dropped during this notice window)`
+              : ''),
         },
         Date.now(),
       );
@@ -3024,8 +3175,14 @@ export const AppContainer = (props: AppContainerProps) => {
           );
         }
       }
+      // Shell-mode submissions go to bash, not the model: a leading
+      // `<system-reminder>` is a syntax error there, and consuming the
+      // one-shot notice here would drop it before any model turn ever sees
+      // it. Leave it armed for the next model-bound prompt (#11626).
       const recoveredAgentsNotice =
-        !isSlashCommand(userPromptText) && !isBtwCommand(userPromptText)
+        !shellModeActive &&
+        !isSlashCommand(userPromptText) &&
+        !isBtwCommand(userPromptText)
           ? config.consumePendingRecoveredAgentsNotice()
           : null;
       if (recoveredAgentsNotice) {
@@ -3036,10 +3193,16 @@ export const AppContainer = (props: AppContainerProps) => {
       // Phase C: one-shot worktree restore reminder. Set during --resume
       // when the persisted sidecar names a live worktree. We only inject
       // on top-level user prompts (not btw-during-response, not slash
-      // commands — those go through different paths). Once consumed,
-      // clear the ref so subsequent prompts aren't repeatedly prefixed.
+      // commands, not shell-mode commands — those go through different
+      // paths). Once consumed, clear the ref so subsequent prompts aren't
+      // repeatedly prefixed; a skipped shell-mode submission leaves the
+      // ref armed for the next model-bound prompt (#11626).
       const worktreeNotice = pendingWorktreeNoticeRef.current;
-      if (worktreeNotice && !isSlashCommand(submittedValue)) {
+      if (
+        worktreeNotice &&
+        !shellModeActive &&
+        !isSlashCommand(submittedValue)
+      ) {
         pendingWorktreeNoticeRef.current = null;
         submittedValue =
           `<system-reminder>\n${worktreeNotice}\n</system-reminder>\n\n` +
@@ -3060,17 +3223,49 @@ export const AppContainer = (props: AppContainerProps) => {
         // Skip `?btw`/`/btw` side-questions: prefixing a system-reminder would
         // break the BTW routing check below (which tests `submittedValue`),
         // queuing the side question as a normal prompt instead.
-        !isBtwCommand(userPromptText) &&
-        detectWorkflowKeyword(userPromptText)
+        !isBtwCommand(userPromptText)
       ) {
-        setWorkflowKeywordActive(true);
-        logWorkflowKeyword(config, new WorkflowKeywordEvent());
-        submittedValue =
-          `<system-reminder>\n${buildWorkflowSteeringNotice()}\n</system-reminder>\n\n` +
-          submittedValue;
+        // A `null` result means no reminder for this submission: the keyword
+        // is absent, the Workflow tool is not in this session, or this is a
+        // shell-mode command, which goes to bash rather than to the model.
+        const prefix = buildWorkflowKeywordPrefix(config, userPromptText, {
+          shellMode: shellModeActive,
+        });
+        if (prefix) {
+          setWorkflowKeywordActive(true);
+          logWorkflowKeyword(config, new WorkflowKeywordEvent());
+          submittedValue = prefix + submittedValue;
+        }
+      }
+      // The Workflow tool description states the size guideline it was built
+      // with. When the user changes the setting mid-session, say so on the next
+      // prompt the model reads, and move the runtime thresholds with it.
+      if (
+        config.isWorkflowsEnabled() &&
+        !shellModeActive &&
+        !isSlashCommand(userPromptText) &&
+        !isBtwCommand(userPromptText)
+      ) {
+        const currentSizeGuideline = resolveWorkflowSizeGuidelineSetting(
+          settings.merged.tools?.workflowSizeGuideline,
+        );
+        const sizePrefix = buildWorkflowSizeGuidelineChangePrefix(
+          announcedWorkflowSizeGuidelineRef.current ??
+            config.getWorkflowSizeGuideline(),
+          currentSizeGuideline,
+        );
+        announcedWorkflowSizeGuidelineRef.current = currentSizeGuideline;
+        if (sizePrefix) {
+          config.setWorkflowSizeGuideline(
+            currentSizeGuideline.isDefault
+              ? undefined
+              : currentSizeGuideline.size,
+          );
+          submittedValue = sizePrefix + submittedValue;
+        }
       }
       if (options?.deferUntilIdle) {
-        addMessage(submittedValue, true, submittedPrompt);
+        addMessage(submittedValue, true, submittedPrompt, shellModeActive);
         return;
       }
       if (
@@ -3090,7 +3285,12 @@ export const AppContainer = (props: AppContainerProps) => {
           submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
             ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
             onAdmissionFailed: () => {
-              addMessage(submittedValue, true, submittedPrompt);
+              addMessage(
+                submittedValue,
+                true,
+                submittedPrompt,
+                shellModeActive,
+              );
             },
           }),
         ).catch((error) => {
@@ -3188,7 +3388,7 @@ export const AppContainer = (props: AppContainerProps) => {
           })
           .catch(() => {
             // Fallback: submit normally
-            addMessage(submittedValue, false, submittedPrompt);
+            addMessage(submittedValue, false, submittedPrompt, shellModeActive);
           });
         speculationRef.current = IDLE_SPECULATION;
         return;
@@ -3218,7 +3418,7 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
-      addMessage(submittedValue, false, submittedPrompt);
+      addMessage(submittedValue, false, submittedPrompt, shellModeActive);
     },
     [
       addMessage,
@@ -3232,6 +3432,7 @@ export const AppContainer = (props: AppContainerProps) => {
       llmClient,
       historyManager,
       settings.merged.ui?.disableWorkflowKeywordTrigger,
+      settings.merged.tools?.workflowSizeGuideline,
       setBufferText,
       shellModeActive,
       vimEnabled,
@@ -3713,15 +3914,17 @@ export const AppContainer = (props: AppContainerProps) => {
     useState<StartupIdeConnectionStatus>({ state: 'idle' });
 
   useEffect(() => {
+    if (config.getShellExecutionSandbox?.()) return;
     const getIde = async () => {
       const ideClient = await IdeClient.getInstance();
       const currentIde = ideClient.getCurrentIde();
       setCurrentIDE(currentIde || null);
     };
     getIde();
-  }, []);
+  }, [config]);
   const shouldShowIdePrompt = Boolean(
-    currentIDE &&
+    !config.getShellExecutionSandbox?.() &&
+      currentIDE &&
       !config.getIdeMode() &&
       !settings.merged.ide?.hasSeenNudge &&
       !idePromptAnswered,
@@ -3795,7 +3998,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,
-  } = useIdeTrustListener();
+  } = useIdeTrustListener(!config.getShellExecutionSandbox?.());
   const {
     isFeedbackDialogOpen,
     openFeedbackDialog,
@@ -3912,6 +4115,12 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingState,
     updateInfo,
     agentViewState.activeView,
+    // The agent tab footer grows with its own status row / queued messages /
+    // input text, none of which the deps above track; AgentComposer syncs
+    // this key to AgentViewContext whenever they change so the footer is
+    // re-measured and the transcript viewport does not stay stale-high
+    // (#9507). Mirrors the LiveAgentPanel layout key (#5798).
+    agentViewState.agentComposerLayoutKey,
     embeddedShellFocused,
     messageQueue.length,
     isInputActive,
@@ -4031,6 +4240,20 @@ export const AppContainer = (props: AppContainerProps) => {
   const handleRewindConfirm = useCallback(
     async (userItem: HistoryItem, option: RestoreOption) => {
       try {
+        if (
+          config.getShellExecutionSandbox?.() &&
+          (option === 'code' || option === 'both')
+        ) {
+          historyManager.addItem(
+            {
+              type: 'error',
+              text: 'File restore is unavailable in tool sandbox.',
+            },
+            Date.now(),
+          );
+          return;
+        }
+
         // For 'both', validate that conversation can be truncated BEFORE
         // touching files — otherwise we'd roll back the workspace while
         // the conversation stays at the newer state.
@@ -4066,9 +4289,16 @@ export const AppContainer = (props: AppContainerProps) => {
               historyManager.addItem(
                 {
                   type: 'error',
-                  text: t(
-                    'Cannot rewind to a turn that was compressed. Try a more recent turn.',
-                  ),
+                  text: isIdentifiedRetainedTurn(
+                    historyManager.history,
+                    userItem.id,
+                  )
+                    ? t(
+                        'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
+                      )
+                    : t(
+                        'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+                      ),
                 },
                 Date.now(),
               );
@@ -4887,6 +5117,7 @@ export const AppContainer = (props: AppContainerProps) => {
       skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
+      isAdvisorModelMode,
       isVoiceModelMode,
       isVisionModelMode,
       isCompactionModelMode,
@@ -5035,6 +5266,7 @@ export const AppContainer = (props: AppContainerProps) => {
       skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
+      isAdvisorModelMode,
       isVoiceModelMode,
       isVisionModelMode,
       isCompactionModelMode,
@@ -5368,6 +5600,14 @@ export const AppContainer = (props: AppContainerProps) => {
     [thoughtExpanded, expandedThoughtHeadIds, toggleThoughtExpanded],
   );
 
+  const toolDetailsExpandedValue = useMemo(
+    () => ({
+      expandedBatchIds: expandedToolBatchIds,
+      expandBatch: expandToolBatch,
+    }),
+    [expandedToolBatchIds, expandToolBatch],
+  );
+
   return (
     <VirtualViewportContext.Provider value={useTerminalBuffer}>
       <UIStateContext.Provider value={uiState}>
@@ -5380,17 +5620,19 @@ export const AppContainer = (props: AppContainerProps) => {
               }}
             >
               <ThoughtExpandedProvider value={thoughtExpandedValue}>
-                <RenderModeProvider value={renderModeValue}>
-                  <TerminalOutputProvider value={writeRaw}>
-                    <ShellFocusContext.Provider value={isFocused}>
-                      <ContextMenuProvider
-                        onMenuChange={handleContextMenuChange}
-                      >
-                        <App />
-                      </ContextMenuProvider>
-                    </ShellFocusContext.Provider>
-                  </TerminalOutputProvider>
-                </RenderModeProvider>
+                <ToolDetailsExpandedProvider value={toolDetailsExpandedValue}>
+                  <RenderModeProvider value={renderModeValue}>
+                    <TerminalOutputProvider value={writeRaw}>
+                      <ShellFocusContext.Provider value={isFocused}>
+                        <ContextMenuProvider
+                          onMenuChange={handleContextMenuChange}
+                        >
+                          <App />
+                        </ContextMenuProvider>
+                      </ShellFocusContext.Provider>
+                    </TerminalOutputProvider>
+                  </RenderModeProvider>
+                </ToolDetailsExpandedProvider>
               </ThoughtExpandedProvider>
             </AppContext.Provider>
           </ConfigContext.Provider>

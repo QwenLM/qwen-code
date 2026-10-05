@@ -46,6 +46,7 @@ import {
   registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
+  resolveChannelLocale,
   selectFirstModel,
   sessionsPath,
 } from './runtime.js';
@@ -111,6 +112,13 @@ function channelMemoryOptions(
   };
 }
 
+function isUnverifiablePidfileError(err: unknown): err is Error {
+  return (
+    err instanceof Error &&
+    (err as NodeJS.ErrnoException).code === 'channel_service_conflict'
+  );
+}
+
 async function writeServiceInfoOrExit(
   channels: string[],
   cleanup: () => Promise<void>,
@@ -123,6 +131,12 @@ async function writeServiceInfoOrExit(
       writeStderrLine(
         'Error: Channel service was started concurrently. Use "qwen channel status" to inspect it.',
       );
+      process.exit(1);
+    }
+    if (isUnverifiablePidfileError(err)) {
+      // Retrying cannot clear a record this side can never verify, so the
+      // pidfile's own recovery step replaces the concurrent-startup advice.
+      writeStderrLine(`Error: ${err.message}`);
       process.exit(1);
     }
     throw err;
@@ -358,6 +372,7 @@ async function startSingle(
   name: string,
   proxy: string | undefined,
   cronEnabled: boolean,
+  locale: 'en' | 'zh',
   displayLanguage?: string,
 ): Promise<void> {
   checkDuplicateInstance();
@@ -417,6 +432,7 @@ async function startSingle(
   const channels: Map<string, ChannelBase> = new Map();
 
   const channel = await createChannel(name, config, bridge, {
+    locale,
     router,
     proxy,
     ...(displayLanguage ? { displayLanguage } : {}),
@@ -516,6 +532,7 @@ async function startSingle(
 async function startAll(
   proxy: string | undefined,
   cronEnabled: boolean,
+  locale: 'en' | 'zh',
   displayLanguage?: string,
 ): Promise<void> {
   checkDuplicateInstance();
@@ -583,6 +600,7 @@ async function startAll(
     channels.set(
       name,
       await createChannel(name, config, bridge, {
+        locale,
         router,
         proxy,
         ...(displayLanguage ? { displayLanguage } : {}),
@@ -715,15 +733,16 @@ export const startCommand: CommandModule<object, { name?: string }> = {
       settings.merged.proxy as string | undefined,
     );
     const cronEnabled = isChannelCronEnabled(settings);
+    const locale = resolveChannelLocale(settings.merged.general?.language);
     const displayLanguage = resolveLanguage(
       resolveLanguageSetting(
         settings.merged.general?.language as string | undefined,
       ),
     );
     if (argv.name) {
-      await startSingle(argv.name, proxy, cronEnabled, displayLanguage);
+      await startSingle(argv.name, proxy, cronEnabled, locale, displayLanguage);
     } else {
-      await startAll(proxy, cronEnabled, displayLanguage);
+      await startAll(proxy, cronEnabled, locale, displayLanguage);
     }
   },
 };

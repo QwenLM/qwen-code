@@ -82,14 +82,14 @@ In daemon-managed mode, every named channel's `cwd` must resolve to exactly one 
 Inbound:  Platform message
             → Envelope (with attachments)
             → GroupGate (group policy + mention gating)
-            → SenderGate (allowlist / pairing / open)
+            → SenderGate (privatePolicy for personal messages; groups.senders
+              for group members, default open)
             → Slash commands (/clear, /help, /status)
             → SessionRouter (resolve or create agent session)
             → Resolve attachments (images → bridge, files → prompt text)
             → ChannelAgentBridge.prompt() → agent
 
 Outbound: Agent response
-            → BlockStreamer (if enabled: split into blocks at paragraph boundaries)
             → sendMessage() → platform
 ```
 
@@ -103,9 +103,8 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | --------------- | ------------------------------------------------------------------------------------ |
 | `ChannelBase`   | Abstract base class — extend this to build a channel adapter                         |
 | `AcpBridge`     | Current standalone `qwen channel start` bridge implementation over `qwen-code --acp` |
-| `BlockStreamer` | Progressive multi-message delivery for block streaming                               |
 | `SessionRouter` | Maps senders to agent sessions with configurable scoping                             |
-| `SenderGate`    | DM access control (allowlist / pairing / open)                                       |
+| `SenderGate`    | Sender access control (allowlist / pairing / open), one axis per side                |
 | `GroupGate`     | Group chat policy and @mention gating                                                |
 | `PairingStore`  | Pairing code generation, approval, and allowlist persistence                         |
 
@@ -120,8 +119,9 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | `ChannelConfig`      | Channel configuration from `settings.json`                               |
 | `ChannelPlugin`      | Plugin factory interface (what you export)                               |
 | `Envelope`           | Normalized inbound message format                                        |
-| `SenderPolicy`       | `'allowlist' \| 'pairing' \| 'open'`                                     |
+| `PrivatePolicy`      | `'disabled' \| 'allowlist' \| 'pairing' \| 'open'`                       |
 | `GroupPolicy`        | `'disabled' \| 'allowlist' \| 'pairing' \| 'open'`                       |
+| `GroupSenderPolicy`  | `'open' \| 'allowlist'` — never `pairing`                                |
 | `SessionScope`       | `'user' \| 'chat_thread' \| 'single'`; legacy `'thread'` is deprecated   |
 | `GroupConfig`        | Per-group settings (e.g. `requireMention`)                               |
 | `SessionTarget`      | Maps a session back to its channel/sender/chat                           |
@@ -153,8 +153,6 @@ constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, opt
 | `onToolCall(chatId, event)`                                | Hook called on agent tool invocations — override to show indicators                                                                                   |
 | `onResponseChunk(chatId, chunk, sessionId, segment)`       | Hook called per streaming text chunk — override for progressive display while preserving immutable `segment.sourceLabel` attribution (default: no-op) |
 | `onResponseComplete(chatId, fullText, sessionId, segment)` | Hook called when full response is ready — override to customize delivery (default: attributes delivery with `segment.sourceLabel` in named-task mode) |
-
-**Block streaming:** When `blockStreaming: "on"` is set in the channel config, the base class automatically splits the agent's streaming response into multiple messages at paragraph boundaries. See [Block Streaming](#block-streaming) below.
 
 **Built-in slash commands:** `/clear` (`/reset`, `/new`), `/help`, `/status`
 
@@ -272,7 +270,7 @@ constructor(bridge: ChannelAgentBridge, defaultCwd: string, scope?: SessionScope
 ### SenderGate
 
 ```typescript
-constructor(policy: SenderPolicy, allowedUsers?: string[], pairingStore?: PairingStore)
+constructor(policy: PrivatePolicy, allowedUsers?: string[], pairingStore?: PairingStore)
 ```
 
 | Method                         | Description                                                          |
@@ -283,9 +281,29 @@ constructor(policy: SenderPolicy, allowedUsers?: string[], pairingStore?: Pairin
 
 | Policy      | Behavior                                                                                                  |
 | ----------- | --------------------------------------------------------------------------------------------------------- |
+| `disabled`  | Nobody allowed; no pairing requests                                                                       |
 | `open`      | Everyone allowed                                                                                          |
 | `allowlist` | Only `allowedUsers` allowed                                                                               |
 | `pairing`   | Check allowlist, then approved pairings, then generate a pairing code (8-char, 1hr expiry, max 3 pending) |
+
+**Per-conversation gate:** `this.gate` is the direct-message gate. A group
+resolves its own `senders` (`groups[chatId]`, then `groups["*"]`, field by
+field; every admitted group defaults to `open`). Any
+sender check an adapter makes itself must go through
+`this.senderGateFor({ isGroup, chatId })` rather than `this.gate`, or the
+group's setting is silently ignored on that lane. A group gate never carries
+`pairing`: an approval there would also unlock direct messages.
+
+**Operators:** commands that act on a shared session (`/approve`, `/cancel`,
+`/clear`, `/loop`, the loop tool, steering, ...) check
+`isSharedSessionOperator`, not the sender gates. Only explicit `config.operators`
+grants shared-session operator permissions; omitted or empty means nobody.
+Private policy, user pairing, and group member admission never imply this role.
+
+`resolvePrivatePolicy(config)` resolves the four-value private policy. Explicit
+`privatePolicy` takes precedence over deprecated `dmPolicy` and `senderPolicy`;
+otherwise disabled DM policy wins, then sender policy, then legacy `allowlist`.
+Group sender policy is independent and only accepts `open` or `allowlist`.
 
 ### GroupGate
 
@@ -363,27 +381,11 @@ interface Attachment {
 
 `handleInbound()` automatically resolves attachments: images with `data` are sent to the model as vision input, files with `filePath` get their path appended to the prompt text so the agent can read them with its tools.
 
-## Block Streaming
+## Response delivery
 
-When `blockStreaming: "on"` is set in a channel's config, the agent's response is delivered as multiple separate messages instead of one large wall of text. The `BlockStreamer` accumulates streaming chunks and emits completed blocks based on paragraph boundaries and size heuristics.
+For an inbound turn the base class forwards streaming chunks to adapter callbacks and routes the completed response through `onResponseComplete`. Scheduled loop runs, webhook-triggered tasks, and background replies forward chunks the same way but deliver through `pushProactive` / `deliverBackgroundReply`, so an adapter that enables proactive send must not treat `onResponseComplete` as its only delivery seam. Adapters may provide native progressive display, such as updating an existing card in place. Platform length splitting is unchanged.
 
-**Config fields** (on `ChannelConfig`):
-
-| Field                    | Type                     | Default         | Description                                                                 |
-| ------------------------ | ------------------------ | --------------- | --------------------------------------------------------------------------- |
-| `blockStreaming`         | `'on' \| 'off'`          | `'off'`         | Enable/disable block streaming                                              |
-| `blockStreamingChunk`    | `{ minChars, maxChars }` | `{ 400, 1000 }` | `minChars`: don't emit until this size. `maxChars`: force-emit at this size |
-| `blockStreamingCoalesce` | `{ idleMs }`             | `{ 1500 }`      | Emit buffered text after this many ms of silence from the agent             |
-
-**How it works:**
-
-1. Text accumulates as the agent streams its response
-2. When the buffer reaches `minChars` and hits a paragraph break (`\n\n`), that block is sent as a separate message
-3. If the buffer reaches `maxChars` without a paragraph break, it force-splits at the best break point (newline > space)
-4. If the agent goes quiet for `idleMs`, the buffer is flushed (as long as it's past `minChars`)
-5. When the agent finishes, any remaining text is sent immediately regardless of `minChars`
-
-Block streaming and `onResponseChunk` work independently — plugins can override `onResponseChunk` for their own purposes while block streaming handles delivery.
+The obsolete `blockStreaming`, `blockStreamingChunk`, and `blockStreamingCoalesce` settings have been removed. The base class no longer sends separate messages at paragraph boundaries or after an idle timer.
 
 ## Further reading
 

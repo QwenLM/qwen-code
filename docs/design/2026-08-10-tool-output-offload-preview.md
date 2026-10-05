@@ -1,5 +1,7 @@
 # Tool Output Offload/Preview: State Transitions and Privacy Model
 
+[English](2026-08-10-tool-output-offload-preview.md) | [简体中文](2026-08-10-tool-output-offload-preview.zh-CN.md)
+
 > Design note required by [#4184](https://github.com/QwenLM/qwen-code/issues/4184)
 > (acceptance criterion: "A design note documents the offload/preview state
 > transition and privacy model"). Mitigation implemented in #4880; retention
@@ -22,7 +24,7 @@ conversation history:
 graph TB
     A[Raw tool output] --> S{Already truncated? (prefix, marker, or stub)}
     S -- yes --> J[Metadata appended after truncation, never bisected]
-    S -- no --> G{Persistence gate: over configured threshold + 3k headroom, and not exempt?}
+    S -- no --> G{Persistence gate: over configured threshold + 3k headroom, not exempt, and no producer budget marker?}
     G -- yes --> F[Full payload persisted to session temp file, mode 0o600]
     G -- no --> B{Per-tool budget declared?}
     B -- yes --> C[Scheduler per-tool bound, e.g. grep 20k]
@@ -46,14 +48,22 @@ Key properties:
 - **Persistence gate first** (for tools without in-tool truncation).
   `maybePersistLargeToolResult` runs before the scheduler's per-tool/global
   truncation: any non-exempt result over the configured threshold + 3k headroom
-  (default 28k) is persisted and stubbed to a preview right away. Exempt:
-  `read_file`, `read_mcp_resource`, `enter_plan_mode` (self-managed).
-  Shell output over 30k and MCP output over 500k truncate in-tool during
-  `execute()` before the gate sees the result; the sentinel check at entry
-  then routes them past the gate. Results below those in-tool thresholds
-  pass through the gate normally. Consequently, per-tool budgets above 28k
-  (agent 32k, web-search 102k) are second-level bounds — the gate offloads
-  first.
+  (default 28k) is persisted and stubbed to a preview right away. Exempt by
+  name: `exec`, `read_file`, `read_mcp_resource`, `enter_plan_mode`
+  (self-managed). A second exemption route is the producer-applied budget
+  marker (`outputBudgetApplied`; Shell foreground sets it today): the producer
+  already sized that body against its own declared budget, so the gate stands
+  down and the per-tool pass becomes the single authority — see
+  [Shell Output Budget: One Decision Per Body](./shell-output-budget-single-entry.md).
+  Unmarked Shell paths (an explicit background launch and the
+  foreground→background promote handoff, both of which return before the
+  truncation block) still pass through the gate normally; timed-out and
+  cancelled foreground bodies that reach the truncation block are marked.
+  Shell output over 30k and MCP output over 500k
+  truncate in-tool during `execute()` before the gate sees the result; the
+  sentinel check at entry then routes them past the gate. Consequently,
+  per-tool budgets above 28k (agent 32k, web-search 102k) are second-level
+  bounds for unmarked results — the gate offloads first.
 - **Bounded before history.** Every layer acts before the result is recorded,
   so history never holds an unbounded payload.
 - **Recoverable, never dropped.** Oversized output is persisted to a session
@@ -78,14 +88,14 @@ Key properties:
 
 ## 3. Thresholds
 
-| Layer            | Budget                                                                                                  | Configurable                                                             |
-| ---------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Persistence gate | configured threshold + 3k headroom (default 28k); exempt: read_file, read_mcp_resource, enter_plan_mode | `settings.tools.truncateToolOutputThreshold`                             |
-| Per-tool         | shell 30k, grep 20k, mcp 500k, agent 32k/tail, web-search 102k, read-file self-managed                  | No (declared by tool)                                                    |
-| Global           | 25k chars + 1000 lines                                                                                  | `settings.tools.truncateToolOutputThreshold` / `truncateToolOutputLines` |
-| Combined pass    | 2x of the applicable budget                                                                             | No                                                                       |
-| Per-message      | 200k chars                                                                                              | `settings.tools.toolOutputBatchBudget`                                   |
-| Disk persistence | 50MB per file, 500MB per session                                                                        | No                                                                       |
+| Layer            | Budget                                                                                                                                                     | Configurable                                                             |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Persistence gate | configured threshold + 3k headroom (default 28k); exempt: exec, read_file, read_mcp_resource, enter_plan_mode, plus results carrying `outputBudgetApplied` | `settings.tools.truncateToolOutputThreshold`                             |
+| Per-tool         | shell 30k, grep 20k, mcp 500k, agent 32k/tail, web-search 102k, read-file self-managed                                                                     | No (declared by tool)                                                    |
+| Global           | 25k chars + 1000 lines                                                                                                                                     | `settings.tools.truncateToolOutputThreshold` / `truncateToolOutputLines` |
+| Combined pass    | 2x of the applicable budget                                                                                                                                | No                                                                       |
+| Per-message      | 200k chars                                                                                                                                                 | `settings.tools.toolOutputBatchBudget`                                   |
+| Disk persistence | 50MB per file, 500MB per session                                                                                                                           | No                                                                       |
 
 Per-tool budgets are char-only: when a tool declares one, the global line cap
 is disabled for it so self-managed paging (read-file) and char budgets (grep)

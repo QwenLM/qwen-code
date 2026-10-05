@@ -383,7 +383,6 @@ export function useNewSessionSuggestion({
   }, [
     clearPending,
     clearSuggestion,
-    contextUsageRatio,
     dialogOpen,
     enabled,
     generateContent,

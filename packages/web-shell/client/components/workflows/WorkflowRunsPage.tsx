@@ -387,14 +387,18 @@ export function WorkflowRunsPage({
                                 <span className={styles.savedDescription}>
                                   {workflow.source === 'project'
                                     ? t('workflowRuns.projectDescription')
-                                    : t('workflowRuns.userDescription')}
+                                    : workflow.source === 'extension'
+                                      ? t('workflowRuns.extensionDescription')
+                                      : t('workflowRuns.userDescription')}
                                 </span>
                               </span>
                             </button>
                             <Badge variant="outline">
                               {workflow.source === 'project'
                                 ? t('workflowRuns.project')
-                                : t('workflowRuns.user')}
+                                : workflow.source === 'extension'
+                                  ? t('workflowRuns.extension')
+                                  : t('workflowRuns.user')}
                             </Badge>
                             <Button
                               type="button"

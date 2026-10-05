@@ -13,7 +13,16 @@ on:
     # to surface a regression as it lands; a failure there files an issue with
     # `type/bug`, `status/ready-for-agent` and `autofix/approved`, so expect
     # one per red merge, not per red nightly only.
-    workflows: ['E2E Tests', 'SDK Python', 'Qwen Code CI']
+    # 'SDK Java' is on the list for its post-merge push run. Its path filter
+    # watches the SDK's embedding surfaces too (packages/cli/src/serve/**,
+    # packages/acp-bridge/**, packages/cli/src/acp-integration/**), so it
+    # fires on roughly half of recent merges to `main`, not only on SDK
+    # changes — and that run is the only signal when a merge result is broken
+    # in a way neither PR could see: two green branches whose Flyway
+    # migrations claim one version collide only after both land (#12940: main
+    # red for two hours while three more merges stacked on it). It has no
+    # scheduled run, so the push arm covers it.
+    workflows: ['E2E Tests', 'SDK Java', 'SDK Python', 'Qwen Code CI']
     types: ['completed']
     # Trigger-level branch filter, not only the `if` below: 'Qwen Code CI'
     # completes on every pull request, and without this each of those would
@@ -86,9 +95,15 @@ jobs:
             "${jobs_json}" 2>/dev/null \
             > "${RUNNER_TEMP}/failed-jobs.tsv" || true
 
+          # gh >= 2.97.0 (GHSA-3m3g-3wcr-px46) refuses to print a response
+          # carrying terminal escape sequences unless opted in, and the
+          # colourised vitest/pytest logs always carry them: without the flag
+          # every download fails and the plan below falls back to a
+          # per-commit issue naming no failing test. The analyzer strips ANSI
+          # before matching, so none of it reaches an issue body.
           for job_id in "${job_ids[@]}"; do
             if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" \
-              > "${log_dir}/${job_id}.log"; then
+              --allow-escape-sequences > "${log_dir}/${job_id}.log"; then
               # A missing log only costs precision: with no identifiable test the
               # plan below falls back to the per-commit issue.
               echo "::warning::Could not download the log of job ${job_id}"

@@ -92,6 +92,7 @@ import {
   registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
+  resolveChannelLocale,
   selectFirstModel,
   type ParsedChannel,
 } from './runtime.js';
@@ -545,6 +546,7 @@ export async function runChannelDaemonWorker(
     undefined,
     settings.merged.proxy as string | undefined,
   );
+  const locale = resolveChannelLocale(settings.merged.general?.language);
   const displayLanguage = resolveLanguage(
     resolveLanguageSetting(
       settings.merged.general?.language as string | undefined,
@@ -680,6 +682,7 @@ export async function runChannelDaemonWorker(
         name,
         await abortableStartup(
           createChannel(name, config, bridgeFacade, {
+            locale,
             ...(proxy ? { proxy } : {}),
             ...(displayLanguage ? { displayLanguage } : {}),
             router: createdRouter,
@@ -987,7 +990,7 @@ function reportStartupToSupervisor(
     process.once('disconnect', onDisconnect);
     signal.addEventListener('abort', onAbort, { once: true });
     try {
-      send.call(process, message, (error) => {
+      send.call(process, message, (error: Error | null) => {
         if (error) {
           finish(new Error('Channel worker startup report failed.'));
         }

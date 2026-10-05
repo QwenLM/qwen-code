@@ -87,8 +87,9 @@ describe('palette parity (semantic tokens → opentui palette)', () => {
   it('maps Qwen Dark through its semantic tokens with the hljs default text', () => {
     const definition = getOpenTuiTheme('Qwen Dark');
     expect(definition).toBeDefined();
-    // Semantic text.primary is empty for this theme; ink falls back to the
-    // theme default color, so opentui must too.
+    // Semantic text.primary is empty for this theme and ink then emits no
+    // foreground at all; the fallback is this port's own, because both its
+    // plain-text colour and the markdown syntax `default` token read this key.
     expect(definition!.palette.text).toBe('#bfbdb6');
     expect(definition!.palette.dim).toBe('#6C7086');
     expect(definition!.palette.accent).toBe('#CBA6F7');
@@ -108,7 +109,12 @@ describe('palette parity (semantic tokens → opentui palette)', () => {
       green: '#50fa7b',
       red: '#ff5555',
       yellow: '#fff783',
+      warningDim: '#8B7530',
+      errorDim: '#8B3A4A',
       purple: '#8be9fd',
+      symbol: '#8be9fd',
+      borderFocused: '#8be9fd',
+      borderDefault: '#6272a4',
       hover: '#282a36',
     });
   });
@@ -122,6 +128,47 @@ describe('palette parity (semantic tokens → opentui palette)', () => {
     expect(definition!.syntaxStyles['keyword']).toEqual({ fg: 'blue' });
     expect(definition!.syntaxStyles['string']).toEqual({ fg: 'yellow' });
     expect(definition!.syntaxStyles['comment']).toEqual({ fg: 'green' });
+  });
+});
+
+describe('gradient parity (ui.gradient → wordmark ramp)', () => {
+  it('carries the ramp ink resolves, at any stop count', () => {
+    expect(getOpenTuiTheme('Dracula')!.gradient).toEqual([
+      '#ff79c6',
+      '#8be9fd',
+    ]);
+    expect(getOpenTuiTheme('Shades Of Purple')!.gradient).toEqual([
+      '#4d21fc',
+      '#847ace',
+      '#ff628c',
+    ]);
+  });
+
+  it('inherits the semantic ramp for themes that share a semantic set', () => {
+    // Qwen Dark declares its own gold GradientColors, but it is constructed
+    // with darkSemanticColors, whose `ui.gradient` is the dark base ramp — so
+    // that is what ink's Header paints, and what the port must paint too.
+    expect(getOpenTuiTheme('Qwen Dark')!.gradient).toEqual([
+      '#4796E4',
+      '#847ACE',
+      '#C3677F',
+    ]);
+    expect(getOpenTuiTheme('ANSI')!.gradient).toEqual([
+      '#4796E4',
+      '#847ACE',
+      '#C3677F',
+    ]);
+  });
+
+  it('yields no ramp for NoColor, so the logo renders uncolored as in ink', () => {
+    const previous = process.env['NO_COLOR'];
+    process.env['NO_COLOR'] = '1';
+    try {
+      expect(getActiveOpenTuiTheme().gradient).toEqual([]);
+    } finally {
+      if (previous === undefined) delete process.env['NO_COLOR'];
+      else process.env['NO_COLOR'] = previous;
+    }
   });
 });
 

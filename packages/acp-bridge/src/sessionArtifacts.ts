@@ -10,11 +10,15 @@ import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import {
   collectRecordableWorkspaceFiles,
+  deleteArtifactSnapshot,
+  retainArtifactSnapshot,
+  Storage,
   isOfficeDocumentExtension,
   isPrototypeMetadataKey,
   isRecordableDerivedChild,
   isAdoptableContentFingerprintKey,
   isReservedWorkspaceMetadataKey,
+  getWebPreviewSnapshotId,
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   MAX_DIRECTORY_ARTIFACT_FILES,
   PUBLISHED_CONTENT_SHA256_METADATA_KEY,
@@ -231,6 +235,7 @@ export class SessionArtifactAuthorizationError extends Error {
 interface SessionArtifactStoreOptions {
   sessionId: string;
   workspaceCwd: string;
+  runtimeBaseDir?: string;
   maxArtifacts?: number;
   persistence?: SessionArtifactPersistence;
 }
@@ -263,6 +268,7 @@ interface WorkspaceStatusExpected {
 export class SessionArtifactStore {
   private readonly sessionId: string;
   private readonly workspaceCwd: string;
+  private readonly runtimeBaseDir: string;
   private readonly maxArtifacts: number;
   private readonly persistence?: SessionArtifactPersistence;
   private readonly artifacts = new Map<string, StoredArtifact>();
@@ -280,12 +286,15 @@ export class SessionArtifactStore {
     string,
     PersistedSessionArtifact
   >();
+  // Failed removals or partial restores can leave ownership without a live record.
+  private readonly pendingSnapshotRemovals = new Set<string>();
   private lastRestoreWarnings: string[] = [];
   private lastRestoreWarningDetails: SessionArtifactWarningDetail[] = [];
 
   constructor(options: SessionArtifactStoreOptions) {
     this.sessionId = options.sessionId;
     this.workspaceCwd = options.workspaceCwd;
+    this.runtimeBaseDir = options.runtimeBaseDir ?? Storage.getRuntimeBaseDir();
     this.maxArtifacts = options.maxArtifacts ?? 200;
     this.persistence = options.persistence;
   }
@@ -397,6 +406,11 @@ export class SessionArtifactStore {
         }
       }
       const changes: SessionArtifactChange[] = [];
+      let rollbackArtifacts: DaemonSessionArtifact[] = [];
+      const rollback = async () => {
+        this.restoreState(before);
+        await this.reclaimSnapshotFiles(rollbackArtifacts);
+      };
       try {
         for (const normalized of coalesceByIdentity(normalizedResults)) {
           const artifact = this.applyStickyEphemeralOverride(normalized);
@@ -476,6 +490,27 @@ export class SessionArtifactStore {
             .filter((change) => change.action === 'created')
             .map((change) => change.artifactId),
         );
+        rollbackArtifacts = changes.flatMap((change) =>
+          change.action !== 'removed' && change.artifact
+            ? [change.artifact]
+            : [],
+        );
+        for (const artifact of rollbackArtifacts) {
+          try {
+            await retainArtifactSnapshot(
+              artifact,
+              this.runtimeBaseDir,
+              this.sessionId,
+            );
+          } catch (error) {
+            if (validationStrict || persistenceStrict) throw error;
+            warnings.push(
+              `artifact ${artifact.id} kept without retaining its snapshot: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
         const overflowRemoved = await this.evictOverflow(
           createdIds,
           changes,
@@ -496,7 +531,7 @@ export class SessionArtifactStore {
           try {
             persistenceWarnings = await this.persistChanges(changes, true);
           } catch (error) {
-            this.restoreState(before);
+            await rollback();
             const artifactIds = changes
               .filter(shouldCommitBeforeDurablePersistence)
               .map((change) => change.artifactId);
@@ -539,13 +574,22 @@ export class SessionArtifactStore {
           ),
         );
         stripDurableTombstoneMarkers(changes);
+        await this.reclaimSnapshotFiles([
+          ...changes
+            .filter(
+              (change) =>
+                change.action === 'removed' && change.reason === 'eviction',
+            )
+            .map((change) => change.artifact),
+          ...overflowRemoved.droppedArtifacts,
+        ]);
       } catch (error) {
         if (
           validationStrict ||
           persistenceStrict ||
           error instanceof SessionArtifactAuthorizationError
         ) {
-          this.restoreState(before);
+          await rollback();
         }
         throw error;
       }
@@ -681,6 +725,7 @@ export class SessionArtifactStore {
         ? []
         : await this.persistChanges(changes, false);
       stripDurableTombstoneMarkers(changes);
+      await this.reclaimSnapshotFiles([removeChange.artifact]);
       const warningDetails = detailsForPersistenceWarnings(
         warnings,
         changes,
@@ -757,7 +802,8 @@ export class SessionArtifactStore {
             input,
             ++this.receivedSeq,
             artifact.storage === 'published' &&
-              !isFileArtifactUrl(artifact.url),
+              (!isFileArtifactUrl(artifact.url) ||
+                Boolean(getWebPreviewSnapshotId(artifact))),
             {
               metadataBudget: 'persisted',
               workspaceExpected: workspaceExpectedFromArtifact(artifact),
@@ -807,6 +853,23 @@ export class SessionArtifactStore {
               retention !== 'ephemeral' ? true : undefined,
             insertSeq: ++this.insertSeq,
           };
+          // retainArtifactSnapshot already tolerates missing bytes (ENOENT)
+          // and existing references (EEXIST); anything it still throws is a
+          // bookkeeping failure, so keep the restored record and let the read
+          // path report the snapshot as unavailable instead of dropping it.
+          try {
+            await retainArtifactSnapshot(
+              stored,
+              this.runtimeBaseDir,
+              this.sessionId,
+            );
+          } catch (error) {
+            warnings.push(
+              `restored artifact ${stored.id} without retaining its snapshot: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
           this.artifacts.set(stored.id, stored);
           restoredCount++;
         } catch (error) {
@@ -852,10 +915,37 @@ export class SessionArtifactStore {
           insertSeq: ++this.insertSeq,
         });
       }
+      if (!warnings.some(isArtifactSnapshotCompletenessWarning)) {
+        this.pendingSnapshotRemovals.clear();
+      }
       const evicted = await this.evictOverflow(new Set(), []);
       if (evicted.removed.length > 0) {
         warnings.push('restored artifact list pruned to live limit');
-        warnings.push(...(await this.persistChanges(evicted.removed, false)));
+        const persistenceWarnings = await this.persistChanges(
+          evicted.removed,
+          false,
+        );
+        warnings.push(...persistenceWarnings);
+        if (persistenceWarnings.length === 0) {
+          await this.reclaimSnapshotFiles(
+            evicted.removed.map((change) => change.artifact),
+          );
+        }
+      }
+      const restoredIds = new Set([
+        ...snapshot.artifacts.map((artifact) => artifact.id),
+        ...preservedLiveEphemeralArtifacts.map((artifact) => artifact.id),
+      ]);
+      const discarded = [...previousState.artifacts.values()].filter(
+        (artifact) => !restoredIds.has(artifact.id),
+      );
+      if (warnings.some(isArtifactSnapshotCompletenessWarning)) {
+        for (const artifact of previousState.artifacts.values()) {
+          const id = getWebPreviewSnapshotId(artifact);
+          if (id) this.pendingSnapshotRemovals.add(id);
+        }
+      } else {
+        await this.reclaimSnapshotFiles(discarded);
       }
       this.setLastRestoreWarnings(warnings);
       return warnings;
@@ -879,6 +969,7 @@ export class SessionArtifactStore {
         this.persistenceSeq = sequence;
         this.durableEventsSinceSnapshot = 0;
         this.consecutiveSnapshotFailures = 0;
+        this.pendingSnapshotRemovals.clear();
         return [];
       } catch (error) {
         writeStderrLine(
@@ -907,7 +998,9 @@ export class SessionArtifactStore {
       const normalized = await this.normalizeInput(
         input,
         ++this.receivedSeq,
-        artifact.storage === 'published' && !isFileArtifactUrl(artifact.url),
+        artifact.storage === 'published' &&
+          (!isFileArtifactUrl(artifact.url) ||
+            Boolean(getWebPreviewSnapshotId(artifact))),
         {
           metadataBudget: 'persisted',
           workspaceExpected: workspaceExpectedFromArtifact(artifact),
@@ -957,6 +1050,7 @@ export class SessionArtifactStore {
     tombstonedClientIds: Map<string, string | undefined>;
     stickyEphemeralIds: Set<string>;
     markerArtifacts: Map<string, PersistedSessionArtifact>;
+    pendingSnapshotRemovals: Set<string>;
     lastRestoreWarnings: string[];
     lastRestoreWarningDetails: SessionArtifactWarningDetail[];
   } {
@@ -976,6 +1070,7 @@ export class SessionArtifactStore {
       tombstonedClientIds: new Map(this.tombstonedClientIds),
       stickyEphemeralIds: new Set(this.stickyEphemeralIds),
       markerArtifacts: new Map(this.markerArtifacts),
+      pendingSnapshotRemovals: new Set(this.pendingSnapshotRemovals),
       lastRestoreWarnings: [...this.lastRestoreWarnings],
       lastRestoreWarningDetails: [...this.lastRestoreWarningDetails],
     };
@@ -992,6 +1087,7 @@ export class SessionArtifactStore {
     tombstonedClientIds: Map<string, string | undefined>;
     stickyEphemeralIds: Set<string>;
     markerArtifacts: Map<string, PersistedSessionArtifact>;
+    pendingSnapshotRemovals: Set<string>;
     lastRestoreWarnings: string[];
     lastRestoreWarningDetails: SessionArtifactWarningDetail[];
   }): void {
@@ -1019,6 +1115,10 @@ export class SessionArtifactStore {
     this.markerArtifacts.clear();
     for (const [id, artifact] of state.markerArtifacts) {
       this.markerArtifacts.set(id, artifact);
+    }
+    this.pendingSnapshotRemovals.clear();
+    for (const id of state.pendingSnapshotRemovals) {
+      this.pendingSnapshotRemovals.add(id);
     }
     this.setLastRestoreWarnings(state.lastRestoreWarnings);
     this.lastRestoreWarningDetails = [...state.lastRestoreWarningDetails];
@@ -1071,6 +1171,9 @@ export class SessionArtifactStore {
       await this.persistence.recordEvent(payload);
       this.persistenceSeq = sequence;
       for (const change of durableChanges) {
+        const snapshotId =
+          change.artifact && getWebPreviewSnapshotId(change.artifact);
+        if (snapshotId) this.pendingSnapshotRemovals.delete(snapshotId);
         if (change.action === 'removed') continue;
         const stored = this.artifacts.get(change.artifactId);
         if (!stored) continue;
@@ -1118,6 +1221,7 @@ export class SessionArtifactStore {
       this.persistenceSeq = sequence;
       this.durableEventsSinceSnapshot = 0;
       this.consecutiveSnapshotFailures = 0;
+      this.pendingSnapshotRemovals.clear();
     } catch (error) {
       this.consecutiveSnapshotFailures = Math.min(
         this.consecutiveSnapshotFailures + 1,
@@ -1187,6 +1291,9 @@ export class SessionArtifactStore {
     for (const change of changes) {
       if (change.action === 'removed') {
         removalNotPersisted = true;
+        const snapshotId =
+          change.artifact && getWebPreviewSnapshotId(change.artifact);
+        if (snapshotId) this.pendingSnapshotRemovals.add(snapshotId);
         if (change.reason === 'explicit') {
           this.rememberTombstone(change);
           this.stickyEphemeralIds.delete(change.artifactId);
@@ -1901,14 +2008,45 @@ export class SessionArtifactStore {
     }
   }
 
+  private async reclaimSnapshotFiles(
+    artifacts: ReadonlyArray<DaemonSessionArtifact | undefined>,
+  ): Promise<void> {
+    for (const artifact of artifacts) {
+      if (!artifact) continue;
+      const id = getWebPreviewSnapshotId(artifact);
+      if (
+        !id ||
+        this.pendingSnapshotRemovals.has(id) ||
+        [...this.artifacts.values()].some(
+          (kept) => getWebPreviewSnapshotId(kept) === id,
+        )
+      )
+        continue;
+      try {
+        await deleteArtifactSnapshot(
+          artifact,
+          this.runtimeBaseDir,
+          this.sessionId,
+        );
+      } catch {
+        // Reclamation must never break the store's removal paths.
+      }
+    }
+  }
+
   private async evictOverflow(
     createdIds: Set<string>,
     changes: SessionArtifactChange[],
     strict = false,
-  ): Promise<{ removed: SessionArtifactChange[]; droppedCreated: number }> {
+  ): Promise<{
+    removed: SessionArtifactChange[];
+    droppedCreated: number;
+    droppedArtifacts: DaemonSessionArtifact[];
+  }> {
     const removed: SessionArtifactChange[] = [];
+    const droppedArtifacts: DaemonSessionArtifact[] = [];
     if (this.artifacts.size <= this.maxArtifacts) {
-      return { removed, droppedCreated: 0 };
+      return { removed, droppedCreated: 0, droppedArtifacts };
     }
 
     const createdInThisBatch = new Set(createdIds);
@@ -1963,13 +2101,14 @@ export class SessionArtifactStore {
       }
       this.artifacts.delete(artifact.id);
       droppedCreated++;
+      droppedArtifacts.push(toPublicArtifact(artifact));
       writeStderrLine(
         `[artifacts] session=${this.sessionId} action=dropped reason="max artifacts exceeded" artifactId=${artifact.id}`,
       );
       removePriorChange(changes, artifact.id);
     }
 
-    return { removed, droppedCreated };
+    return { removed, droppedCreated, droppedArtifacts };
   }
 }
 

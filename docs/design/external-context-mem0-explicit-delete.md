@@ -14,15 +14,15 @@
 
 ## 2. 实现前核对的事实
 
-| 事实                                                                                                                                             | 设计影响                                                                             |
-| ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| V2 搜索输出把 ID 截断到 128 code point、正文截断到 1000，并为总输出预算继续缩短正文。                                                            | 搜索只能提供候选，不能提供完整删除确认；ID 不能继续静默截断后作为删除定位符。        |
-| writer 的 `stored` 返回最长 256 字符的完整 ASCII memory ID；`accepted` 可能只有操作 ID。                                                         | 完整写入回执可提供候选 ID；不将 operation ID 自动转换成 memory ID。                  |
-| 普通 MCP 的审批在实际执行工具之前发生，审批载荷携带当前完整参数。                                                                                | delete handler 内部的 GET 无法回填先前审批；完整正文须作为下一次 forget 调用的参数。 |
-| Web Shell 已支持通用 MCP 参数的完整字面展示和格式字符转义。                                                                                      | 复用这条路径，预计不改 UI 和 daemon wire protocol。                                  |
-| 现有 MCP client 没有协商 elicitation，MCP App 结果资源也不是执行前确认。                                                                         | 不依赖额外客户端弹窗，不安装 TUI 专属确认 Hook。                                     |
-| Holo 文档列出单条 GET/DELETE 使用同一个带记录 ID 的路径，但未给出完整 GET/DELETE 回执或条件删除语义。                                            | 路径可作为验收起点；不能推断 scope 字段、404、响应正文或原子条件删除行为。           |
-| Mem0 Platform 文档的 GET 返回顶层 scope，未找到为 404；当前 OSS server 的 GET 未找到可返回 HTTP 200 + JSON null，删除成功 message 的标点也不同。 | 明确配置未找到的表示；仅识别有限的删除确认回执，不自动探测或改用批量接口。           |
+| 事实                                                                                                                                             | 设计影响                                                                              |
+| ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| V2 搜索输出把 ID 截断到 128 code point、正文截断到 1000，并为总输出预算继续缩短正文。                                                            | 搜索只能提供候选，不能提供完整删除确认；ID 不能继续静默截断后作为删除定位符。         |
+| writer 的 `stored` 返回最长 256 字符的完整 ASCII memory ID；`accepted` 可能只有操作 ID。                                                         | 完整写入回执可提供候选 ID；不将 operation ID 自动转换成 memory ID。                   |
+| 普通 MCP 的审批在实际执行工具之前发生，审批载荷携带当前完整参数。                                                                                | delete handler 内部的 GET 无法回填先前审批；完整正文须作为下一次 forget 调用的参数。  |
+| Web Shell 已支持通用 MCP 参数的完整字面展示和格式字符转义。                                                                                      | 复用这条路径，预计不改 UI 和 daemon wire protocol。                                   |
+| 现有 MCP client 没有协商 elicitation，MCP App 结果资源也不是执行前确认。                                                                         | 不依赖额外客户端弹窗，不安装 TUI 专属确认 Hook。                                      |
+| Holo 文档列出单条 GET/DELETE 使用同一个带记录 ID 的路径，但未给出完整 GET/DELETE 回执或条件删除语义。                                            | 路径可作为验收起点；不能推断 scope 字段、404、响应正文或原子条件删除行为。            |
+| Mem0 Platform 文档的 GET 返回顶层 scope，未找到为 404；当前 OSS server 的 GET 未找到可返回 HTTP 200 + JSON null，删除成功 message 的标点也不同。 | 明确配置未找到的表示；DELETE 按 HTTP 状态和 JSON 解析处理，不自动探测或改用批量接口。 |
 
 Holo 路径依据：[创建和调用长记忆服务](https://www.alibabacloud.com/help/tc/hologres/user-guide/create-and-use-long-memory-service)。Platform 回执依据：[Get Memory](https://docs.mem0.ai/api-reference/memory/get-memory)、[Delete Memory](https://docs.mem0.ai/api-reference/memory/delete-memory)。OSS 依据为固定提交 [dae67f74 的 server](https://github.com/mem0ai/mem0/blob/dae67f74f5cc7bf138c7d7d6f9cec5ce4b4373b3/server/main.py#L443) 和 [memory 实现](https://github.com/mem0ai/mem0/blob/dae67f74f5cc7bf138c7d7d6f9cec5ce4b4373b3/mem0/memory/main.py#L1208)，它们不是 Holo 部署版本的实现证明。此次限定检索未找到独立的外部记忆显式删除 issue，不据此断言没有其他跟踪项。
 
@@ -46,7 +46,7 @@ sequenceDiagram
     D->>S: GET 同一精确 ID
     D->>D: ID、scope、全文一致才继续
     D->>S: 单次 DELETE 同一 ID
-    S-->>D: 已识别的成功回执
+    S-->>D: 成功 HTTP 状态与有效 JSON
     D->>S: 单次 GET 复核不存在
     D-->>A: deleted / not_deleted / unknown
     A-->>U: 删除结果
@@ -132,8 +132,8 @@ sequenceDiagram
 - GET、DELETE 共享同一个记录地址。pathPrefix 是通过现有静态路径校验、以 `/` 结束的绝对路径；pathSuffix 只能为 `""` 或 `"/"`。把已验证的 ID 作为单个路径段进行编码。必须拒绝 `.`/`..`，避免 URL 规范化把单条 DELETE 变成集合 DELETE。禁止请求模板、动态 origin、任意 headers、GET/DELETE body、filters 和批量路径回退。
 - 成功 GET 只接受 HTTP 200 的单个根对象；idField 复用 `id` / `memory_id`，contentField 复用 `memory` / `content` / `text`。scope 只读取服务定义的顶层 user_id、agent_id、app_id，全部已配置字段严格匹配，不从自定义 metadata 猜归属。
 - `record.notFound` 只能为 `http-404` 或 `null-200`，分别匹配 HTTP 404、HTTP 200 且完整 JSON 值为 null。只按选定规则解释；空数组、空对象、缺字段和另一种形状不是“不存在”。
-- 首版只识别同步 DELETE 的 HTTP 200 对象回执，message 必须精确为已核实的两种单条成功文本之一：`Memory deleted successfully` 或 `Memory deleted successfully!`。error/errors 存在且非 null（含空字符串或空数组）、冲突 status/event、非零或非法 cascade_count 都归为 unknown。可接受缺省或 SUCCEEDED status、缺省或 DELETE event；其余未知状态不猜测。其后还须做一次精确 GET 复核。
-- 不支持 202 异步回执、204 空响应、自定义成功表达式、JSONPath、轮询和协议自动探测。取得新的真实契约后再决定是否扩充，不从其他厂商或批量删除文档推导支持。
+- DELETE 与官方客户端一致：接受成功 HTTP 状态并解析有界 UTF-8 JSON，不匹配 message 文案，也不额外约束 status/event/cascade_count/error 字段。随后必须执行一次精确 GET，只有确认不存在才返回 deleted。
+- 202 等成功状态仍需有效 JSON 和随后的精确 GET 确认不存在；不轮询。204 空响应、无效 JSON 或非成功 HTTP 状态返回 unknown，不自动重试。
 
 每个配置文件最多 64 KiB；每个 HTTP 响应最多 1 MiB，严格 UTF-8/JSON，有效目标正文再受 4000 code point 上限约束。禁用重定向。timeoutMs 允许 100–30000 ms，forget 的一个总 deadline 覆盖前置 GET、DELETE 和复核 GET，开始于工具实际执行后，不包含人工审批等待。合并调用取消信号，不给每个阶段重新发放完整时间预算。
 
@@ -143,13 +143,13 @@ sequenceDiagram
 
 | 状态          | 条件                                                                                 | 含义                                                                                                                          |
 | ------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| `deleted`     | 已识别的同步成功回执，且紧接的一次精确 GET 按选定协议确认不存在                      | 服务确认删除，单条读取已复核；不保证所有索引、备份或历史消息同步清除。                                                        |
+| `deleted`     | 成功 HTTP 状态与有效 JSON，且紧接的一次精确 GET 按选定协议确认不存在                 | 成功 HTTP 状态与有效 JSON，精确读取已复核不存在，不解释服务回执正文；不保证所有索引、备份或历史消息同步清除。                 |
 | `not_deleted` | 输入/配置不可用、调用在 DELETE 前取消，或前置 GET 失败、找不到目标、scope/正文不匹配 | 本次没有发送 DELETE；使用固定 reason 区分 invalid_input、target_unavailable、target_changed、verification_failed、cancelled。 |
 | `unknown`     | DELETE 已开始后取消、超时、断线、非预期 HTTP/回执，或成功回执后的 GET 没能确认不存在 | 本次可能已删除；停止，不自动重试，不声称恢复或撤销。                                                                          |
 
 输出包含状态、合法输入的 memoryId 和固定说明；不回显正文、credential、endpoint 或上游 message。not_deleted/unknown 使用 MCP isError；非法 MCP schema 也可能在 handler 前被协议层直接拒绝。
 
-DELETE 自身的 404 不能当作“本次删除成功”；成功回执后的 GET 失败也不能借搜索结果为空补成 deleted。若 DELETE 回执未知，立即返回 unknown，不通过后续观察推断是哪一个调用造成的删除。用户可显式发起 context_get 核查，但该读取不追溯证明原请求执行结果。
+DELETE 自身的 404 不能当作“本次删除成功”；成功响应后的 GET 失败也不能借搜索结果为空补成 deleted。非成功 HTTP 状态或 JSON 解析失败立即返回 unknown。用户可显式发起 context_get 核查。
 
 ## 7. 审批、信任与并发边界
 
@@ -198,7 +198,7 @@ deleted 不代表服务搜索索引已同步，也不会移除 Qwen 已有 trans
 
 Holo 待确认的事实为：精确 GET 的完整 ID/正文/真实 scope 形状，未找到的表示，单条 DELETE 的同步回执、无级联/批量副作用，以及 ID/归属的生命周期保证。确认这些事实后，使用本次新建的合成目标和同/异 scope 对照记录完成拒绝、批准、精确 GET 消失、搜索传播和对照记录不变验证，再按精确 ID 清理。不得删除既有业务记录。
 
-服务端协议验收通过后才能宣布 Holo 支持；本地实现和合成 daemon 验收可先独立进行。若 Holo 响应不符合上述有限语法，应据真实证据调整设计，不能用宽泛 2xx 判成功或静默选择另一个路径。
+服务端协议验收通过后才能宣布相应服务支持。成功 HTTP 状态不是删除完成的充分条件，必须解析 JSON 并通过精确 GET 确认不存在；不静默选择其他路径。
 
 ## 10. 设计调研基线的代码依据
 

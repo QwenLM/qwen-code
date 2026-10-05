@@ -1,23 +1,35 @@
 name: 'SDK Java'
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       - 'main'
       - 'release/**'
     paths:
       - 'packages/sdk-java/**'
+      - '**/.mvn/**'
       - 'packages/core/src/config/approval-modes.json'
+      - 'packages/core/src/managed-runtime/**'
+      - 'packages/cli/src/config/**'
+      - 'packages/core/src/config/**'
+      - 'packages/core/src/core/**'
       - 'packages/cli/src/commands/serve.ts'
       - 'packages/cli/src/serve/**'
       - 'packages/cli/src/acp-integration/**'
       - 'packages/acp-bridge/**'
       - 'integration-tests/fake-openai-server.ts'
+      - 'integration-tests/helpers/hosted-*'
+      - 'integration-tests/cli/hosted-latency-baseline.test.ts'
+      - 'integration-tests/baselines/hosted-latency.json'
       - 'package.json'
-      - 'package-lock.json'
+      - 'pnpm-lock.yaml'
       - 'docs/developers/sdk-java.md'
       - 'docs/design/java-daemon-sdk-alpha.md'
       - 'scripts/run-java-daemon-sdk-e2e.ts'
+      - 'scripts/run-managed-agent-server-e2e.ts'
+      - 'scripts/check-failsafe-reports.js'
+      - 'scripts/check-flyway-migrations.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
   push:
@@ -26,17 +38,28 @@ on:
       - 'release/**'
     paths:
       - 'packages/sdk-java/**'
+      - '**/.mvn/**'
       - 'packages/core/src/config/approval-modes.json'
+      - 'packages/core/src/managed-runtime/**'
+      - 'packages/cli/src/config/**'
+      - 'packages/core/src/config/**'
+      - 'packages/core/src/core/**'
       - 'packages/cli/src/commands/serve.ts'
       - 'packages/cli/src/serve/**'
       - 'packages/cli/src/acp-integration/**'
       - 'packages/acp-bridge/**'
       - 'integration-tests/fake-openai-server.ts'
+      - 'integration-tests/helpers/hosted-*'
+      - 'integration-tests/cli/hosted-latency-baseline.test.ts'
+      - 'integration-tests/baselines/hosted-latency.json'
       - 'package.json'
-      - 'package-lock.json'
+      - 'pnpm-lock.yaml'
       - 'docs/developers/sdk-java.md'
       - 'docs/design/java-daemon-sdk-alpha.md'
       - 'scripts/run-java-daemon-sdk-e2e.ts'
+      - 'scripts/run-managed-agent-server-e2e.ts'
+      - 'scripts/check-failsafe-reports.js'
+      - 'scripts/check-flyway-migrations.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
 
@@ -106,8 +129,20 @@ jobs:
           distribution: 'temurin'
           java-version: '${{ matrix.java }}'
           cache: 'maven'
-          cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
+          cache-dependency-path: |-
+            packages/sdk-java/qwencode/pom.xml
+            packages/sdk-java/runtime-broker/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
+
+      # The runtime-broker process tests spawn the Node fixture worker.
+      # Self-hosted keeps relying on the runner's own Node, matching the
+      # daemon-e2e job's stance.
+      - name: 'Set up Node.js 22 (hosted)'
+        if: "${{ runner.environment == 'github-hosted' && matrix.java == '21' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
 
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -123,6 +158,7 @@ jobs:
         working-directory: 'packages/sdk-java/qwencode'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MATRIX_JAVA: '${{ matrix.java }}'
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
@@ -131,10 +167,21 @@ jobs:
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress clean test
+          if [ "${MATRIX_JAVA}" = "21" ]; then
+            cd ../runtime-broker
+            mvn --batch-mode --no-transfer-progress clean test
+          fi
 
       - name: 'Run Java SDK tests (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         working-directory: 'packages/sdk-java/qwencode'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: 'mvn --batch-mode --no-transfer-progress clean test'
+
+      - name: 'Run Runtime Broker state tests'
+        if: "${{ runner.environment == 'github-hosted' && matrix.java == '21' }}"
+        working-directory: 'packages/sdk-java/runtime-broker'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress clean test'
@@ -146,12 +193,249 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
 
+      - name: 'Run Runtime Broker state Checkstyle'
+        if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '21' }}"
+        working-directory: 'packages/sdk-java/runtime-broker'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
+
       - name: 'Build release artifacts'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
         working-directory: 'packages/sdk-java/qwencode'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true package'
+
+  # The Flyway duplicate-version guard of #12940. managed-agent-server
+  # allocates migration versions by hand across two locations that share one
+  # sequence, so two green PRs can collide once both merge; the test that
+  # catches it boots a database and runs only in the slow lanes below. This
+  # job is the fast lane: a filename scan, seconds in, on every pull request —
+  # whose checkout is the prospective merge result — and on every push.
+  # runtime-broker and qwencode carry no migrations today but share the
+  # namespace: managed-agent-server depends on both at compile scope, so
+  # Flyway resolves classpath:db/migration across the jars and a version
+  # claimed in any of them collides with managed-agent-server's exactly like
+  # an in-module duplicate.
+  #
+  # Trusted triggers run on the ECS pool (#13245): a five-second scan sat 26
+  # minutes in the hosted queue. Untrusted fork PRs stay hosted, and the
+  # default merge-ref checkout is kept on both — the merge result is the point.
+  flyway-migrations:
+    name: 'Flyway migration version uniqueness'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 5
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Check Flyway migration versions are unique'
+        run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'
+
+  mysql-integration:
+    name: 'Runtime Broker and Managed Agent MariaDB / Java 21'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 15
+    services:
+      mariadb:
+        image: 'mariadb:10.11.18'
+        env:
+          MARIADB_DATABASE: 'runtime_broker_test'
+          MARIADB_ROOT_PASSWORD: 'runtime-broker'
+        ports:
+          - '3306:3306'
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Set up Java'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+          cache-dependency-path: |-
+            packages/sdk-java/qwencode/pom.xml
+            packages/sdk-java/runtime-broker/pom.xml
+            packages/sdk-java/managed-agent-server/pom.xml
+          settings-path: '${{ runner.temp }}/setup-java-m2'
+
+      - name: 'Run Runtime Broker MySQL integration tests'
+        working-directory: 'packages/sdk-java/runtime-broker'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: >-
+          mvn --batch-mode --no-transfer-progress -Pmysql-integration
+          -Dmysql.url='jdbc:mysql://127.0.0.1:3306/runtime_broker_test?allowPublicKeyRetrieval=true&useSSL=false'
+          -Dmysql.user=root -Dmysql.password=runtime-broker clean verify
+
+      - name: 'Install Managed Agent dependencies'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+          # These steps only stage jars; the SpotBugs gate lives on the
+          # `clean verify` invocations (pinned by scripts/tests/spotbugs-gate.test.js).
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
+
+      - name: 'Run Managed Agent tests, Checkstyle, and MySQL integration'
+        working-directory: 'packages/sdk-java/managed-agent-server'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: >-
+          mvn --batch-mode --no-transfer-progress -Pmysql-integration
+          -Dmysql.url='jdbc:mysql://127.0.0.1:3306/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false'
+          -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check
+
+      # Maven passes a selection narrowed by a profile, MAVEN_ARGS or
+      # .mvn/maven.config, so compare what ran with the source tree.
+      - name: 'Check that every non-Hosted integration test class ran'
+        run: 'node scripts/check-failsafe-reports.js non-hosted packages/sdk-java/runtime-broker packages/sdk-java/managed-agent-server'
+
+  hosted-harness-mysql:
+    name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
+    runs-on: 'ubuntu-latest'
+    # The step ceilings (12+10+20) leave room for the uncapped setup steps;
+    # a healthy run measured ~20 min end to end.
+    timeout-minutes: 60
+    services:
+      mysql:
+        image: 'mysql:8.4.6'
+        env:
+          MYSQL_DATABASE: 'hosted_harness_test'
+          MYSQL_ROOT_PASSWORD: 'hosted-fixture'
+        ports:
+          - '3306/tcp'
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -phosted-fixture"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+      - name: 'Set up Java'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+          cache-dependency-path: 'packages/sdk-java/**/pom.xml'
+          settings-path: '${{ runner.temp }}/setup-java-m2'
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: 'Enable Corepack'
+        run: 'corepack enable'
+      - name: 'Install, build and bundle CLI'
+        run: |-
+          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+      - name: 'Install Managed Agent dependencies'
+        id: 'managed_dependencies'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+          # These steps only stage jars; the SpotBugs gate lives on the
+          # `clean verify` invocations (pinned by scripts/tests/spotbugs-gate.test.js).
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
+      - name: 'Verify Hosted Java, Spring and MySQL processes'
+        timeout-minutes: 12
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
+        run: >-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml
+          -Phosted-harness-mysql
+          -Dnode.executable="$(command -v node)"
+          -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js"
+          -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false"
+          -Dmysql.user=root -Dmysql.password=hosted-fixture clean verify checkstyle:check
+      - name: 'Check that every Hosted integration test class ran'
+        run: 'node scripts/check-failsafe-reports.js hosted packages/sdk-java/managed-agent-server'
+      - name: 'Check Hosted latency measurements'
+        run: |-
+          test -s packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
+          cd integration-tests
+          npx vitest run cli/hosted-latency-baseline.test.ts
+      - name: 'Run Runtime Broker fault gates'
+        timeout-minutes: 10
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: >-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml
+          -Pfault-gates -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js" test
+      - name: 'Install MySQL binaries for the failover E2E'
+        run: |-
+          if ! command -v mysqld >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends mysql-server mysql-client
+          fi
+      - name: 'Run session owner failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-session-failover
+      - name: 'Run in-flight owner failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-inflight-failover
+      - name: 'Run continuation owner failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-continuation-failover
+      - name: 'Upload Hosted process reports'
+        if: 'always()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'hosted-harness-mysql-reports'
+          path: |
+            packages/sdk-java/managed-agent-server/target/failsafe-reports/
+            packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
+          retention-days: 7
+
+      - name: 'Verify O4 filesystem process and capacity gates'
+        id: 'o4_mysql'
+        if: "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}"
+        timeout-minutes: 12
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
+          MYSQL_PWD: 'hosted-fixture'
+          QWEN_O4_MYSQL_PASSWORD: 'hosted-fixture'
+        run: |-
+          mysql --no-defaults --protocol=TCP --host=127.0.0.1 --port="${MYSQL_PORT}" --user=root -e 'CREATE DATABASE qwen_o4_ci'
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml \
+            -Po4-mysql-gates \
+            -Dqwen.o4.mysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/qwen_o4_ci?allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dqwen.o4.mysql.user=root clean verify checkstyle:check && \
+            node scripts/check-failsafe-reports.js o4-mysql packages/sdk-java/managed-agent-server
+
+      - name: 'Upload O4 gate reports'
+        if: "${{ always() && steps.o4_mysql.outcome != 'skipped' }}"
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'o4-mysql-gate-reports'
+          path: 'packages/sdk-java/managed-agent-server/target/failsafe-reports/'
+          retention-days: 7
 
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'
@@ -199,7 +483,7 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22'
-          cache: 'npm'
+          package-manager-cache: false
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -232,7 +516,7 @@ jobs:
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
       - name: 'Install Node.js dependencies'
-        run: 'npm ci --prefer-offline --no-audit --progress=false'
+        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
 
       - name: 'Build Qwen Code'
         run: 'npm run build'

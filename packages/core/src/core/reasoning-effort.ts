@@ -5,7 +5,9 @@
  */
 
 import type { Config } from '../config/config.js';
+import { normalize } from './tokenLimits.js';
 import type { ModelReasoningCapabilities } from '../models/types.js';
+import type { ContentGeneratorConfig } from './contentGenerator.js';
 
 /**
  * Unified reasoning-effort ladder exposed to users (e.g. via `/effort`).
@@ -40,6 +42,111 @@ export const REASONING_EFFORT_RANKS: Record<ReasoningEffort, number> = {
   xhigh: 60,
   max: 70,
 };
+
+export function getGptReasoningCapabilities(model: string | undefined):
+  | {
+      efforts: readonly ReasoningEffort[];
+      defaultEffort: ReasoningEffort;
+      defaultEnabled: boolean;
+      thinkingMandatory: boolean;
+    }
+  | undefined {
+  const normalized = normalize(
+    (model ?? '').trim().replace(/:batch(?=:|$)/gi, ''),
+  )
+    .replace(/-\d{4}-\d{2}-\d{2}$/, '')
+    .replace(/^(gpt-5\.\d+)(?:\.\d+)+(?=-|$)/, '$1');
+  switch (normalized) {
+    case 'gpt-5':
+    case 'gpt-5-mini':
+    case 'gpt-5-nano':
+    case 'gpt-5.1-codex':
+      return {
+        efforts: ['low', 'medium', 'high'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5-pro':
+      return {
+        efforts: ['high'],
+        defaultEffort: 'high',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5.1':
+      return {
+        efforts: ['low', 'medium', 'high'],
+        defaultEffort: 'medium',
+        defaultEnabled: false,
+        thinkingMandatory: false,
+      };
+    case 'gpt-5.2':
+    case 'gpt-5.4':
+    case 'gpt-5.4-mini':
+    case 'gpt-5.4-nano':
+      return {
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: false,
+        thinkingMandatory: false,
+      };
+    case 'gpt-5.1-codex-max':
+    case 'gpt-5.2-codex':
+    case 'gpt-5.3-codex':
+      return {
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5.2-pro':
+    case 'gpt-5.4-pro':
+      return {
+        efforts: ['medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5.5':
+      return {
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: false,
+      };
+    case 'gpt-5.5-pro':
+      return {
+        efforts: ['medium', 'high', 'xhigh'],
+        defaultEffort: 'high',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    case 'gpt-5.6':
+    case 'gpt-5.6-sol':
+    case 'gpt-5.6-terra':
+    case 'gpt-5.6-luna':
+      return {
+        efforts: REASONING_EFFORT_TIERS,
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: false,
+      };
+    case 'gpt-6-astra':
+      return {
+        efforts: REASONING_EFFORT_TIERS,
+        defaultEffort: 'medium',
+        defaultEnabled: true,
+        thinkingMandatory: true,
+      };
+    default:
+      return undefined;
+  }
+}
+
+export function isReasoningEffortPlaceholder(value: unknown): boolean {
+  return value == null || value === '';
+}
 
 /**
  * Normalize free-form user input to a canonical tier. Accepts separators and a
@@ -80,10 +187,9 @@ export function normalizeReasoningEffort(
  *
  * Rank-based, mirroring openclaw's `clampThinkingLevel`: if the exact tier is
  * supported, keep it; otherwise prefer the next stronger supported tier, and
- * only walk down when nothing at or above the request is available. Because an
- * unsupported `xhigh`/`max` will have no supported tier at or above it (the
- * model's supported list omits them), this naturally caps over-strong requests
- * to the model ceiling without raising cost.
+ * only walk down when nothing at or above the request is available. Requests
+ * above the model ceiling are capped; requests below its floor are raised to
+ * the weakest supported tier.
  *
  * `supported` defaults to the full ladder (no clamping).
  */
@@ -124,6 +230,65 @@ export function applyReasoningEffort(
 ): boolean {
   config.setReasoningEffort(effort);
   return config.getReasoningEffort() === effort;
+}
+
+/**
+ * Write `effort` onto a content-generator config's `reasoning` block. This is
+ * the one rule for putting a tier on a config: `/effort` applies it to the
+ * session (`Config.setReasoningEffort`) and a workflow `agent({ effort })`
+ * applies it to that agent's own copy of the config.
+ *
+ * A config with thinking explicitly turned off (`reasoning: false`) is left
+ * alone and `false` is returned. Otherwise the tier replaces `reasoning.effort`
+ * while sibling fields such as `budget_tokens` survive, and `undefined`
+ * removes the tier. Removing the last key collapses `reasoning` back to
+ * `undefined` rather than leaving an empty `{}`: an empty object is truthy, so
+ * downstream `if (cfg.reasoning)` checks would treat reasoning as active and
+ * the pipeline would emit `reasoning: {}` as wire noise.
+ *
+ * The block is replaced, never mutated, so a config that shares its
+ * `reasoning` object with another — a per-agent config spread from the
+ * session's — never changes the other one. No clamping happens here: each
+ * provider maps the tier onto what the target model accepts when it builds a
+ * request.
+ */
+export function setGeneratorReasoningEffort(
+  cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
+  effort: ReasoningEffort | undefined,
+): boolean {
+  if (!cfg || cfg.reasoning === false) {
+    return false;
+  }
+  const next: { effort?: ReasoningEffort; budget_tokens?: number } = {
+    ...(cfg.reasoning ?? {}),
+  };
+  if (effort) {
+    next.effort = effort;
+  } else {
+    delete next.effort;
+  }
+  cfg.reasoning = Object.keys(next).length > 0 ? next : undefined;
+  return true;
+}
+
+/**
+ * The tiers `/effort` offers for a model with this parsed reasoning
+ * capability: none for a toggle-only model, the declared list otherwise, and
+ * the whole ladder when the model declares nothing (the provider clamps then).
+ * The one tier rule shared by `/effort` (the CLI's picker and command) and a
+ * workflow agent's per-call effort; each site keeps its own capability lookup.
+ */
+export function reasoningEffortsForCapability(
+  reasoning:
+    | { readonly toggleOnly: true }
+    | {
+        readonly toggleOnly?: false;
+        readonly efforts: readonly ReasoningEffort[];
+      }
+    | undefined,
+): readonly ReasoningEffort[] {
+  if (!reasoning) return REASONING_EFFORT_TIERS;
+  return reasoning.toggleOnly ? [] : reasoning.efforts;
 }
 
 /**

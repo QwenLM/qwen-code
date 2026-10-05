@@ -21,7 +21,7 @@ import { useState } from 'react';
 import { Box, Text } from 'ink';
 import {
   type Config,
-  type SavedWorkflowSource,
+  type SavedWorkflowScope,
   saveWorkflowScript,
   validateWorkflowName,
 } from '@qwen-code/qwen-code-core';
@@ -50,7 +50,7 @@ export const WorkflowSaveOverlay: React.FC<WorkflowSaveOverlayProps> = ({
   onClose,
 }) => {
   const [name, setName] = useState(initialName);
-  const [scope, setScope] = useState<SavedWorkflowSource>('project');
+  const [scope, setScope] = useState<SavedWorkflowScope>('project');
   const [phase, setPhase] = useState<Phase>('edit');
   const [message, setMessage] = useState<string>('');
 

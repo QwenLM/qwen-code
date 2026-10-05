@@ -24,7 +24,11 @@
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parsePositiveIntegerEnv } from '../utils/env.js';
-import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
 import { escapeXml } from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
@@ -278,6 +282,7 @@ export interface BackgroundActivity {
  * sidecar metadata path, message queue, and resume hooks.
  */
 export interface AgentTask extends TaskBase {
+  sourceTurnId?: string;
   kind: 'agent';
   /**
    * @deprecated Read `id` instead; kept as a synonym during the back-compat
@@ -325,8 +330,8 @@ export interface AgentTask extends TaskBase {
   result?: string;
   error?: string;
   /**
-   * Present only when the task is intentionally kept paused but cannot be
-   * safely resumed under the current conditions.
+   * Present when the task cannot accept input or be continued, including
+   * one-shot executors and paused tasks blocked from recovery.
    */
   resumeBlockedReason?: string;
   stats?: AgentCompletionStats;
@@ -392,6 +397,7 @@ export interface BackgroundTaskRegisterOptions {
 }
 
 export interface NotificationMeta {
+  sourceTurnId?: string;
   agentId: string;
   status: TaskStatus;
   stats?: AgentCompletionStats;
@@ -450,13 +456,19 @@ export type BackgroundActivityChangeCallback = (entry: AgentTask) => void;
  */
 export type BackgroundApprovalChangeCallback = (entry: AgentTask) => void;
 
+export type ResidentAgentContinuationResult =
+  | 'continued'
+  | 'fallback'
+  | 'capacity_wait'
+  | 'not_completed';
+
 /**
  * Session-scoped handle for a background agent whose runtime remains alive
  * after a completed turn. The handle is deliberately not part of AgentTask:
  * task state is serializable, while the live runtime is process-local.
  */
 export interface ResidentBackgroundAgent {
-  continue(message: string): boolean;
+  continue(input: AgentExternalInput): ResidentAgentContinuationResult;
   dispose(): void;
 }
 
@@ -704,6 +716,10 @@ export class BackgroundTaskRegistry {
       ? ((registration as AgentTask).notified ?? false)
       : false;
     entry.todoWorkChainId ??= todoWorkChainContext.getStore();
+    if (!options.preserveNotificationState) {
+      entry.sourceTurnId =
+        getInvocationContext()?.promptId ?? promptIdContext.getStore();
+    }
     entry.pendingMessages = registration.pendingMessages ?? [];
     // Resolve the parent's display name at registration time — before the
     // parent can evict — so the UI's orphan annotation survives it. Owned
@@ -787,10 +803,14 @@ export class BackgroundTaskRegistry {
     this.residentAgents.set(agentId, resident);
   }
 
-  continueResidentAgent(agentId: string, message: string): boolean {
+  continueResidentAgent(
+    agentId: string,
+    message: string,
+  ): ResidentAgentContinuationResult {
     const entry = this.agents.get(agentId);
     const resident = this.residentAgents.get(agentId);
-    if (!resident || entry?.status !== 'completed') return false;
+    if (entry?.status !== 'completed') return 'not_completed';
+    if (!resident) return 'fallback';
     return resident.continue(message);
   }
 
@@ -1513,6 +1533,7 @@ export class BackgroundTaskRegistry {
     const entry = this.agents.get(agentId);
     if (
       !entry ||
+      entry.resumeBlockedReason !== undefined ||
       entry.status !== 'running' ||
       this.finishingAgents.has(agentId)
     ) {
@@ -1768,6 +1789,7 @@ export class BackgroundTaskRegistry {
 
     const meta: NotificationMeta = {
       agentId: entry.agentId,
+      sourceTurnId: entry.sourceTurnId,
       status: entry.status,
       stats: entry.stats,
       toolUseId: entry.toolUseId,

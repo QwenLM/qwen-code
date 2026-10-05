@@ -712,14 +712,16 @@ export function AskUserQuestion({
             aria-label={collapsed ? t('common.expand') : t('common.collapse')}
             title={collapsed ? t('common.expand') : t('common.collapse')}
           >
+            {collapsed ? t('common.expand') : t('common.collapse')}
             <svg
+              aria-hidden="true"
               viewBox="0 0 16 16"
               className={`${styles.collapseIcon} ${
                 collapsed ? styles.collapseIconCollapsed : ''
               }`}
             >
               <path
-                d="M4 6l4 4 4-4"
+                d="M4 10l4-4 4 4"
                 fill="none"
                 stroke="currentColor"
                 strokeLinecap="round"

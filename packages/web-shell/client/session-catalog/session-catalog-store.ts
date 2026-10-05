@@ -172,6 +172,9 @@ function liveSessionSnapshotsEqual(
       prior.clientCount !== session.clientCount ||
       prior.hasActivePrompt !== session.hasActivePrompt ||
       prior.activeWorkState !== session.activeWorkState ||
+      prior.hasRunningBackgroundTasks !== session.hasRunningBackgroundTasks ||
+      JSON.stringify(prior.backgroundTurn) !==
+        JSON.stringify(session.backgroundTurn) ||
       prior.isWaitingForPermission !== session.isWaitingForPermission ||
       prior.isWaitingForUserQuestion !== session.isWaitingForUserQuestion ||
       prior.updatedAt !== session.updatedAt
@@ -216,6 +219,7 @@ export class SessionCatalogStore {
   private readonly liveStateFailureStreaks = new Map<string, number>();
   private liveSessionRevision = 0;
   private readonly liveSessionRevisions = new Map<string, number>();
+  private readonly liveSessionRequestTimes = new Map<string, number>();
   private readonly liveSessionsByWorkspace = new Map<
     string,
     ReadonlyMap<string, DaemonSessionLiveState>
@@ -234,6 +238,38 @@ export class SessionCatalogStore {
 
   getSnapshot(query: SessionCatalogQuery): SessionCatalogSnapshot {
     return this.getOrCreateEntry(query).snapshot;
+  }
+
+  /**
+   * Reads a display name the catalog already holds for a session, scheduling
+   * nothing. A history session's name exists only here — neither the load
+   * response nor the metadata events carry it — so the header seeds the title
+   * from this cache instead of waiting for a round-trip.
+   */
+  peekSessionDisplayName(
+    sessionId: string,
+    workspaceCwd: string | undefined,
+  ): string | undefined {
+    if (!workspaceCwd) return undefined;
+    let displayName: string | undefined;
+    let updatedAt = -Infinity;
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd) continue;
+      const name = entry.snapshot.page?.sessions.find(
+        // A page can hold sessions from another workspace (the daemon merges
+        // live runtime state), so match the row's workspace too, not just the
+        // entry's.
+        (session) =>
+          session.sessionId === sessionId &&
+          (!session.workspaceCwd || session.workspaceCwd === workspaceCwd),
+      )?.displayName;
+      const candidateUpdatedAt = entry.snapshot.updatedAt ?? 0;
+      if (name?.trim() && candidateUpdatedAt >= updatedAt) {
+        displayName = name;
+        updatedAt = candidateUpdatedAt;
+      }
+    }
+    return displayName;
   }
 
   getEmptySnapshot(): SessionCatalogSnapshot {
@@ -644,6 +680,10 @@ export class SessionCatalogStore {
     return this.liveSessionsByWorkspace.has(workspaceCwd);
   }
 
+  getLiveSessionRequestStartedAt(workspaceCwd: string): number | undefined {
+    return this.liveSessionRequestTimes.get(workspaceCwd);
+  }
+
   getLiveSessionRevision(workspaceCwd: string): number | undefined {
     return this.liveSessionRevisions.get(workspaceCwd);
   }
@@ -702,7 +742,11 @@ export class SessionCatalogStore {
   applyLiveState(
     workspaceCwd: string,
     liveSessions: readonly DaemonSessionLiveState[],
+    requestStartedAt?: number,
   ): ReadonlySet<string> {
+    if (requestStartedAt === undefined)
+      this.liveSessionRequestTimes.delete(workspaceCwd);
+    else this.liveSessionRequestTimes.set(workspaceCwd, requestStartedAt);
     this.recordLiveSessions(workspaceCwd, liveSessions);
     const liveById = new Map(
       liveSessions.map((session) => [session.sessionId, session]),
@@ -753,6 +797,10 @@ export class SessionCatalogStore {
           session.clientCount === clientCount &&
           session.hasActivePrompt === hasActivePrompt &&
           session.activeWorkState === activeWorkState &&
+          session.hasRunningBackgroundTasks ===
+            live?.hasRunningBackgroundTasks &&
+          JSON.stringify(session.backgroundTurn) ===
+            JSON.stringify(live?.backgroundTurn) &&
           session.isWaitingForPermission === isWaitingForPermission &&
           session.isWaitingForUserQuestion === isWaitingForUserQuestion &&
           session.updatedAt === updatedAt
@@ -766,6 +814,8 @@ export class SessionCatalogStore {
           clientCount,
           hasActivePrompt,
           activeWorkState,
+          backgroundTurn: live?.backgroundTurn,
+          hasRunningBackgroundTasks: live?.hasRunningBackgroundTasks,
           isWaitingForPermission,
           isWaitingForUserQuestion,
           ...(updatedAt !== undefined ? { updatedAt } : {}),
@@ -820,6 +870,7 @@ export class SessionCatalogStore {
   private clearLiveSessions(workspaceCwd: string): void {
     if (!this.liveSessionsByWorkspace.delete(workspaceCwd)) return;
     this.liveSessionRevisions.delete(workspaceCwd);
+    this.liveSessionRequestTimes.delete(workspaceCwd);
     const observationListeners =
       this.liveSessionObservationListeners.get(workspaceCwd);
     if (observationListeners) {
@@ -1007,6 +1058,7 @@ export class SessionCatalogStore {
     this.liveStatePendingActivity.clear();
     this.liveStateFailureStreaks.clear();
     this.liveSessionRevisions.clear();
+    this.liveSessionRequestTimes.clear();
     this.liveSessionsByWorkspace.clear();
     this.liveSessionListeners.clear();
     this.liveSessionObservationListeners.clear();
@@ -1547,4 +1599,17 @@ export function loadSessionCatalogOnce(
   options?: { fresh?: boolean },
 ): Promise<DaemonSessionListPage> {
   return getSessionCatalogStore(client).loadOnce(query, options);
+}
+
+/** Sync read of a cached display name; see `SessionCatalogStore.peekSessionDisplayName`. */
+export function peekSessionCatalogDisplayName(
+  client: DaemonClient,
+  sessionId: string | undefined,
+  workspaceCwd: string | undefined,
+): string | undefined {
+  if (!sessionId) return undefined;
+  return getSessionCatalogStore(client).peekSessionDisplayName(
+    sessionId,
+    workspaceCwd,
+  );
 }

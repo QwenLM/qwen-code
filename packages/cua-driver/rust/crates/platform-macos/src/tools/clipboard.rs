@@ -1,27 +1,35 @@
 use std::{path::Path, sync::Mutex};
 
-use clipboard_rs::{common::RustImage, Clipboard, ClipboardContext, ContentFormat};
+use clipboard_rs::common::RustImage;
 use cua_driver_core::clipboard::ClipboardBackend;
+use objc2::rc::autoreleasepool;
+use objc2::runtime::ProtocolObject;
+use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString};
+use objc2_foundation::{NSArray, NSData, NSString, NSURL};
 
 pub struct MacosClipboard {
-    context: Result<Mutex<ClipboardContext>, String>,
+    access: Mutex<()>,
 }
 
 impl MacosClipboard {
     pub fn new() -> Self {
         Self {
-            context: ClipboardContext::new()
-                .map(Mutex::new)
-                .map_err(|error| error.to_string()),
+            access: Mutex::new(()),
         }
     }
 
-    fn context(&self) -> Result<std::sync::MutexGuard<'_, ClipboardContext>, String> {
-        self.context
-            .as_ref()
-            .map_err(Clone::clone)?
+    fn with_board<T>(
+        &self,
+        operation: impl FnOnce(&NSPasteboard) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _access = self
+            .access
             .lock()
-            .map_err(|_| "clipboard lock was poisoned".to_owned())
+            .map_err(|_| "clipboard lock was poisoned".to_owned())?;
+        autoreleasepool(|_| {
+            let board = super::pasteboard::general_pasteboard().map_err(|e| e.to_string())?;
+            operation(&board)
+        })
     }
 }
 
@@ -39,35 +47,58 @@ fn absolute_existing_file(path: &str) -> Result<String, String> {
 
 impl ClipboardBackend for MacosClipboard {
     fn available_formats(&self) -> Result<Vec<String>, String> {
-        self.context()?
-            .available_formats()
-            .map_err(|e| e.to_string())
+        self.with_board(|board| unsafe {
+            let types = board
+                .types()
+                .ok_or_else(|| "clipboard format query failed".to_owned())?;
+            Ok(types.to_vec().iter().map(|kind| kind.to_string()).collect())
+        })
     }
 
     fn read_text(&self) -> Result<Option<String>, String> {
-        let context = self.context()?;
-        if context.has(ContentFormat::Text) {
-            context.get_text().map(Some).map_err(|e| e.to_string())
-        } else {
-            Ok(None)
-        }
+        self.with_board(|board| unsafe {
+            Ok(board
+                .stringForType(NSPasteboardTypeString)
+                .map(|text| text.to_string()))
+        })
     }
 
     fn write_text(&self, text: String) -> Result<(), String> {
-        self.context()?.set_text(text).map_err(|e| e.to_string())
+        self.with_board(|board| unsafe {
+            board.clearContents();
+            board
+                .setString_forType(&NSString::from_str(&text), NSPasteboardTypeString)
+                .then_some(())
+                .ok_or_else(|| "clipboard text write failed".into())
+        })
     }
 
     fn write_image(&self, absolute_path: &str) -> Result<(), String> {
         let path = absolute_existing_file(absolute_path)?;
         let image = clipboard_rs::RustImageData::from_path(&path).map_err(|e| e.to_string())?;
-        self.context()?.set_image(image).map_err(|e| e.to_string())
+        let png = image.to_png().map_err(|e| e.to_string())?;
+        self.with_board(|board| unsafe {
+            board.clearContents();
+            board
+                .setData_forType(
+                    Some(&NSData::with_bytes(png.get_bytes())),
+                    NSPasteboardTypePNG,
+                )
+                .then_some(())
+                .ok_or_else(|| "clipboard image write failed".into())
+        })
     }
 
     fn write_file_url(&self, absolute_path: &str) -> Result<(), String> {
         let path = absolute_existing_file(absolute_path)?;
-        self.context()?
-            .set_files(vec![path])
-            .map_err(|e| e.to_string())
+        self.with_board(|board| unsafe {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(&path));
+            board.clearContents();
+            board
+                .writeObjects(&NSArray::from_vec(vec![ProtocolObject::from_retained(url)]))
+                .then_some(())
+                .ok_or_else(|| "clipboard file URL write failed".into())
+        })
     }
 }
 

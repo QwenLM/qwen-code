@@ -42,9 +42,10 @@ function lintStep(name) {
 }
 
 describe('ci.yml disk-pressure evidence', () => {
-  it('starts sampling before npm ci and preserves those samples for upload', () => {
+  it('starts sampling before the install and preserves those samples for upload', () => {
     const install = step('Install dependencies').run;
-    const npmCi = install.indexOf('npm ci');
+    const npmCi = install.indexOf('pnpm install');
+    assert.ok(npmCi !== -1, 'the install step must run pnpm install');
 
     assert.match(
       install,
@@ -241,9 +242,11 @@ describe('ci.yml disk-pressure evidence', () => {
 
   it('keeps install failure status while writing the pre-install sample', () => {
     const root = mkdtempSync(join(tmpdir(), 'ci-disk-pressure-'));
-    const npm = join(root, 'npm');
-    writeFileSync(npm, '#!/usr/bin/env bash\nexit 42\n');
-    chmodSync(npm, 0o755);
+    // The install step runs `corepack pnpm install`; stub corepack so the
+    // failing exit comes from the install command itself.
+    const corepack = join(root, 'corepack');
+    writeFileSync(corepack, '#!/usr/bin/env bash\nexit 42\n');
+    chmodSync(corepack, 0o755);
 
     try {
       const result = spawnSync(

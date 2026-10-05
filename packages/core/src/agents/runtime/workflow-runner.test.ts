@@ -4,15 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getEventListeners } from 'node:events';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../../config/config.js';
+import { TurnBudget } from '../../core/turn-budget.js';
 import {
   getWorkflowTaskMutationKey,
   isTerminalWorkflowStatus,
+  isWorkflowRunPersistenceActive,
   tryWithWorkflowTaskMutation,
   WorkflowRunRegistry,
   type WorkflowTask,
@@ -22,40 +26,67 @@ import {
   deriveAgentKey,
   deriveArgsSeed,
   WorkflowJournal,
-  type JournalReplay,
+  type JournalLoadResult,
 } from './workflow-journal.js';
 import {
   WorkflowRunner,
   WorkflowScriptNotLaunchedError,
+  WorkflowJournalUnavailableError,
   WorkflowStartCancelledError,
 } from './workflow-runner.js';
+import {
+  claimInterruptedWorkflowRuns,
+  readWorkflowCheckpoint,
+} from '../workflow-checkpoint.js';
 import { compileWorkflowScript } from './workflow-sandbox.js';
+import {
+  WORKFLOW_SIZE_GUIDELINE_AGENTS,
+  WORKFLOW_SIZE_WARNING_AGENTS_ENV,
+} from './workflow-size.js';
 
 const {
   createProductionDispatchMock,
   journalWrites,
   logWorkflowRunMock,
+  logWorkflowSizeWarningMock,
   persistInlineWorkflowScriptMock,
   resolveSavedWorkflowScriptMock,
+  readWorkflowSnapshotMock,
   writeLineMock,
+  writeWorkflowCheckpointMock,
   writeWorkflowSnapshotMock,
 } = vi.hoisted(() => ({
   createProductionDispatchMock: vi.fn(),
   journalWrites: [] as Array<() => void>,
   logWorkflowRunMock: vi.fn(),
+  logWorkflowSizeWarningMock: vi.fn(),
   persistInlineWorkflowScriptMock: vi.fn(),
   resolveSavedWorkflowScriptMock: vi.fn(),
+  readWorkflowSnapshotMock: vi.fn().mockResolvedValue(undefined),
   writeLineMock: vi.fn(),
+  writeWorkflowCheckpointMock: vi.fn(),
   writeWorkflowSnapshotMock: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../../telemetry/loggers.js', () => ({
   logWorkflowRun: logWorkflowRunMock,
+  logWorkflowSizeWarning: logWorkflowSizeWarningMock,
 }));
 
-vi.mock('../workflow-snapshot.js', () => ({
+vi.mock('../workflow-snapshot.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../workflow-snapshot.js')>()),
+  readWorkflowSnapshot: readWorkflowSnapshotMock,
   writeWorkflowSnapshot: writeWorkflowSnapshotMock,
 }));
+
+vi.mock('../workflow-checkpoint.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../workflow-checkpoint.js')>();
+  writeWorkflowCheckpointMock.mockImplementation(
+    actual.writeWorkflowCheckpoint,
+  );
+  return { ...actual, writeWorkflowCheckpoint: writeWorkflowCheckpointMock };
+});
 
 vi.mock('../../utils/jsonl-utils.js', async (importOriginal) => {
   const actual =
@@ -83,6 +114,56 @@ vi.mock('./workflow-saved.js', async (importOriginal) => {
     resolveSavedWorkflowScript: resolveSavedWorkflowScriptMock,
   };
 });
+
+type StartOptions = Parameters<typeof WorkflowRunner.start>[0];
+
+/** `WorkflowRunner.start`, with a fresh signal and no args unless given. */
+function startRun(config: Config, options: Partial<StartOptions>) {
+  return WorkflowRunner.start({
+    config,
+    signal: new AbortController().signal,
+    args: undefined,
+    ...options,
+  });
+}
+
+const unused = async () => 'unused';
+
+/** Starts a run and waits for it to settle; returns the handle. */
+async function runSettled(config: Config, options: Partial<StartOptions>) {
+  const handle = await startRun(config, options);
+  await handle.completion;
+  return handle;
+}
+
+/** Starts a run and expects it to settle ok; returns the handle. */
+async function runOk(config: Config, options: Partial<StartOptions>) {
+  const handle = await startRun(config, options);
+  await expect(handle.completion).resolves.toMatchObject({ ok: true });
+  return handle;
+}
+
+/** A resolved saved workflow saved under its own name. */
+const savedWorkflow = (name: string, scriptPath: string, script: string) => ({
+  name,
+  scriptPath,
+  script,
+  savedWorkflowName: name,
+});
+
+/** The per-agent counts a run's telemetry event reports. */
+const agentCounts = (
+  completed: number,
+  failed: number,
+  cached: number,
+  respawned: number,
+) =>
+  expect.objectContaining({
+    agents_completed: completed,
+    agents_failed: failed,
+    agents_cached: cached,
+    agents_respawned: respawned,
+  });
 
 function configWithRegistry(): {
   config: Config;
@@ -116,6 +197,8 @@ function stubStorage(config: Config, root: string): void {
     storage: {
       getWorkflowRunJournalPath: (runId: string) =>
         path.join(root, runId, 'journal.jsonl'),
+      getWorkflowRunSnapshotPath: (runId: string) =>
+        path.join(root, `${runId}.json`),
       getWorkflowRunsDir: () => root,
       getGeneratedWorkflowsDir: () => path.join(root, 'generated'),
       getInlineWorkflowScriptPath: (runId: string) =>
@@ -147,25 +230,385 @@ function observeSettlement(registry: WorkflowRunRegistry): {
   return { abortCount: () => aborts, terminalStatuses };
 }
 
+const EMPTY_LOADED_JOURNAL: JournalLoadResult = {
+  kind: 'loaded',
+  replay: { results: new Map(), started: new Map(), failed: new Set() },
+};
+
+/** A loaded journal replaying `replay` over otherwise empty records. */
+const loadedJournal = (
+  replay: Partial<Extract<JournalLoadResult, { kind: 'loaded' }>['replay']>,
+): JournalLoadResult => ({
+  kind: 'loaded',
+  replay: {
+    results: new Map(),
+    started: new Map(),
+    failed: new Set(),
+    ...replay,
+  },
+});
+
+/** A config over a fresh storage root (see stubStorage). */
+async function storedConfig() {
+  const { config, registry } = configWithRegistry();
+  const root = await makeStorageRoot();
+  stubStorage(config, root);
+  return { config, registry, root };
+}
+
+const inlineDir = (root: string) => path.join(root, 'generated', 'inline');
+
+/** A dispatch whose calls stay pending until the test settles the latest. */
+function heldDispatch() {
+  const held: {
+    dispatch: () => Promise<string>;
+    resolve?: (value: string) => void;
+    reject?: (error: Error) => void;
+  } = {
+    dispatch: () =>
+      new Promise<string>((resolve, reject) => {
+        held.resolve = resolve;
+        held.reject = reject;
+      }),
+  };
+  return held;
+}
+
+// Whether `promise` settles within all microtasks plus a timer tick, so a
+// negative check tells a pause gate from a gate-less resolve (which settles in
+// a few microtasks without one).
+async function settlesWithinATick(promise: Promise<unknown>) {
+  let settled = false;
+  void promise.then(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  return settled;
+}
+
+/** Holds the next inline-script persist until `release`, then writes it. */
+function holdNextPersist(root: string, mkdir = false) {
+  const persist: { release?: () => void } = {};
+  persistInlineWorkflowScriptMock.mockImplementationOnce(
+    async (_config: Config, runId: string, script: string) => {
+      await new Promise<void>((resolve) => {
+        persist.release = resolve;
+      });
+      const file = path.join(inlineDir(root), `${runId}.js`);
+      if (mkdir) await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, script, 'utf8');
+      return file;
+    },
+  );
+  return persist;
+}
+
+type CheckpointWrite =
+  typeof import('../workflow-checkpoint.js').writeWorkflowCheckpoint;
+
+/** Routes the next checkpoint write through `wrap`, handing it the real write. */
+async function wrapNextCheckpointWrite(
+  wrap: (
+    write: () => ReturnType<CheckpointWrite>,
+  ) => ReturnType<CheckpointWrite>,
+) {
+  const { writeWorkflowCheckpoint } = await vi.importActual<
+    typeof import('../workflow-checkpoint.js')
+  >('../workflow-checkpoint.js');
+  writeWorkflowCheckpointMock.mockImplementationOnce(
+    (...args: Parameters<CheckpointWrite>) =>
+      wrap(() => writeWorkflowCheckpoint(...args)),
+  );
+}
+
+/** Starts a (one-agent) run with a held dispatch; waits for the dispatch. */
+async function startHeld(config: Config, options: Partial<StartOptions> = {}) {
+  const held = heldDispatch();
+  const handle = await startRun(config, {
+    script: 'return await agent("work")',
+    dispatch: held.dispatch,
+    ...options,
+  });
+  await vi.waitFor(() => expect(held.resolve).toBeDefined());
+  return { held, handle };
+}
+
+/** Resumes `runId` with a one-agent script. */
+const resumeRun = (
+  config: Config,
+  runId: string,
+  options: Partial<StartOptions> = {},
+) =>
+  startRun(config, {
+    script: 'return await agent("work")',
+    resumeFromRunId: runId,
+    ...options,
+  });
+
 describe('WorkflowRunner', () => {
   beforeEach(() => {
     createProductionDispatchMock.mockReset();
     journalWrites.length = 0;
     logWorkflowRunMock.mockClear();
     persistInlineWorkflowScriptMock.mockClear();
+    writeWorkflowCheckpointMock.mockClear();
     resolveSavedWorkflowScriptMock.mockReset();
     writeLineMock.mockReset();
     writeLineMock.mockResolvedValue(undefined);
     writeWorkflowSnapshotMock.mockClear();
     writeWorkflowSnapshotMock.mockResolvedValue(undefined);
+    readWorkflowSnapshotMock.mockReset();
+    readWorkflowSnapshotMock.mockResolvedValue(undefined);
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
     await Promise.all(
       storageRoots
         .splice(0)
         .map((root) => fs.rm(root, { recursive: true, force: true })),
     );
+  });
+
+  // The only path from the Workflow tool's authoring hint to a backgrounded
+  // run's notification goes through the runner's registration. A backgrounded
+  // run has no trailer; without this the hint would never reach it.
+  it('carries the authoring hint into a failed background run notification', async () => {
+    const { config, registry } = configWithRegistry();
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    const hint =
+      'hint: Load the `workflow-authoring` skill for the script reference if you have not, fix the script, and retry.';
+
+    const handle = await startRun(config, {
+      script: 'throw new Error("boom")',
+      runInBackground: true,
+      dispatch: unused,
+      authoringHint: hint,
+    });
+    await handle.completion;
+    await vi.waitFor(() => expect(completion).toHaveBeenCalled());
+
+    const modelText = completion.mock.calls[0][1] as string;
+    const recovery = modelText.slice(
+      modelText.indexOf('<recovery>'),
+      modelText.indexOf('</recovery>'),
+    );
+    expect(recovery).toContain(hint);
+  });
+
+  // The Workflow tool shows the user the file a `scriptPath` or `name` call
+  // loads, then hands that same read to the runner. Reading the path again
+  // here would run whatever the file holds by then, not what was approved.
+  it('runs the script a caller already loaded instead of reading scriptPath again', async () => {
+    const { config, registry } = await storedConfig();
+    resolveSavedWorkflowScriptMock.mockClear();
+
+    const handle = await startRun(config, {
+      scriptPath: '/saved/audit.js',
+      loadScript: async () =>
+        savedWorkflow('audit', '/saved/audit.js', "return 'approved';"),
+    });
+    const settlement = await handle.completion;
+
+    expect(settlement.ok && settlement.outcome.result).toBe('approved');
+    expect(resolveSavedWorkflowScriptMock).not.toHaveBeenCalled();
+    expect(handle.scriptPath).toBe('/saved/audit.js');
+    expect(registry.get(handle.runId)?.workflowName).toBe('audit');
+  });
+
+  // A model call in a name-only session refuses nesting by path; the Workflow
+  // tool asks for that per call, so a host's own run — same session, no flag —
+  // nests freely. Any other malformed ref reaches the resolver untouched.
+  it('refuses a nested workflow({scriptPath}) only for a call that asks it to', async () => {
+    const nested = savedWorkflow(
+      'audit',
+      '/saved/audit.js',
+      "return 'nested';",
+    );
+    for (const restrict of [true, false]) {
+      const { config, registry } = configWithRegistry();
+      // Locked either way: the flag, not the session, decides.
+      Object.assign(config, { isWorkflowNameOnly: () => true });
+      stubStorage(config, await makeStorageRoot());
+      resolveSavedWorkflowScriptMock.mockReset();
+      resolveSavedWorkflowScriptMock.mockResolvedValue(nested);
+
+      const byPath = await startRun(config, {
+        script: "return await workflow({ scriptPath: '/saved/audit.js' });",
+        dispatch: unused,
+        ...(restrict ? { restrictNestedScriptPaths: true } : {}),
+      });
+      const pathSettlement = await byPath.completion;
+      if (restrict) {
+        expect(pathSettlement.ok).toBe(false);
+        expect(!pathSettlement.ok && pathSettlement.message).toContain(
+          "workflow({scriptPath}): this session restricts workflows to named workflows (tools.workflowNameOnly) — nest with workflow('<name>') instead.",
+        );
+        expect(resolveSavedWorkflowScriptMock).not.toHaveBeenCalled();
+      } else {
+        expect(pathSettlement.ok && pathSettlement.outcome.result).toBe(
+          'nested',
+        );
+      }
+      expect(registry.get(byPath.runId)).not.toHaveProperty('resumeName');
+
+      const byName = await startRun(config, {
+        script: "return await workflow('audit');",
+        dispatch: unused,
+        ...(restrict ? { restrictNestedScriptPaths: true } : {}),
+      });
+      const nameSettlement = await byName.completion;
+      expect(nameSettlement.ok && nameSettlement.outcome.result).toBe('nested');
+      expect(resolveSavedWorkflowScriptMock).toHaveBeenCalledWith(
+        'audit',
+        config,
+      );
+    }
+  });
+
+  it('leaves a malformed nested ref to the resolver under the restriction', async () => {
+    const { config } = await storedConfig();
+    resolveSavedWorkflowScriptMock.mockReset();
+    resolveSavedWorkflowScriptMock.mockRejectedValue(
+      new Error(
+        'workflow() expects a workflow name (string) or {scriptPath: string}.',
+      ),
+    );
+
+    const handle = await startRun(config, {
+      script: 'return await workflow(42);',
+      dispatch: unused,
+      restrictNestedScriptPaths: true,
+    });
+    const settlement = await handle.completion;
+
+    expect(resolveSavedWorkflowScriptMock).toHaveBeenCalledWith(42, config);
+    expect(!settlement.ok && settlement.message).toContain(
+      'workflow() expects a workflow name',
+    );
+    expect(!settlement.ok && settlement.message).not.toContain(
+      'tools.workflowNameOnly',
+    );
+  });
+
+  // The name a locked session resumes by must lead back to the script that
+  // ran. The runner checks once, as the run starts.
+  it('records a resume name only when the name resolves to the script that ran', async () => {
+    const root = await makeStorageRoot();
+    const ran = path.join(root, 'audit.js');
+    const other = path.join(root, 'other-audit.js');
+    await fs.writeFile(ran, "return 'ran';", 'utf8');
+    await fs.writeFile(other, "return 'other';", 'utf8');
+
+    const start = async (nameOnly: boolean, resolvesTo: string) => {
+      const { config, registry } = configWithRegistry();
+      Object.assign(config, { isWorkflowNameOnly: () => nameOnly });
+      stubStorage(config, root);
+      resolveSavedWorkflowScriptMock.mockReset();
+      resolveSavedWorkflowScriptMock.mockResolvedValue(
+        savedWorkflow('audit', resolvesTo, "return 'ran';"),
+      );
+      const handle = await runSettled(config, {
+        scriptPath: ran,
+        loadScript: async () => savedWorkflow('audit', ran, "return 'ran';"),
+        dispatch: unused,
+      });
+      return registry.get(handle.runId);
+    };
+
+    expect((await start(true, ran))?.resumeName).toBe('audit');
+    expect(resolveSavedWorkflowScriptMock).toHaveBeenCalledWith(
+      'audit',
+      expect.anything(),
+    );
+    expect((await start(true, other))?.resumeName).toBeUndefined();
+    const unlocked = await start(false, ran);
+    expect(unlocked?.resumeName).toBeUndefined();
+    expect(resolveSavedWorkflowScriptMock).not.toHaveBeenCalled();
+  });
+
+  async function generatedReview(script: string) {
+    const { config, registry, root } = await storedConfig();
+    const scriptPath = path.join(
+      root,
+      'generated',
+      'review',
+      'session',
+      `qwen-review-0123456789-${createHash('sha256').update(script).digest('hex')}.js`,
+    );
+    await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+    await fs.writeFile(scriptPath, script);
+    resolveSavedWorkflowScriptMock.mockResolvedValue({ scriptPath, script });
+    return { config, registry, scriptPath };
+  }
+
+  it('dispatches a generated review through a ten-agent window before any result returns', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_WORKFLOW_CONCURRENCY', undefined);
+    vi.stubEnv('QWEN_CODE_MAX_TOOL_CONCURRENCY', undefined);
+    vi.stubEnv('QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS', undefined);
+    vi.stubEnv('QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES', undefined);
+    vi.stubEnv('QWEN_REVIEW_DEADLINE_EPOCH', undefined);
+    const { config, scriptPath } = await generatedReview(
+      'return await parallel(args.map((p) => () => agent(p)));',
+    );
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    createProductionDispatchMock.mockReturnValue(async (prompt: string) => {
+      started.push(prompt);
+      await new Promise<void>((resolve) => {
+        releases.push(resolve);
+      });
+      return prompt;
+    });
+    const controller = new AbortController();
+    try {
+      const handle = await startRun(config, {
+        scriptPath,
+        args: Array.from({ length: 11 }, (_, i) => String(i)),
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(started).toHaveLength(10));
+      expect(started).toEqual(Array.from({ length: 10 }, (_, i) => String(i)));
+      expect(createProductionDispatchMock.mock.calls[0]?.[4]).toEqual({
+        max_turns: 500,
+        max_time_minutes: 100,
+      });
+      releases[0]!();
+      await vi.waitFor(() => expect(started).toHaveLength(11));
+      releases.forEach((release) => release());
+      expect((await handle.completion).ok).toBe(true);
+    } finally {
+      controller.abort();
+      releases.forEach((release) => release());
+    }
+  });
+
+  it('keeps an ordinary workflow on generic dispatch bounds despite review metadata', async () => {
+    const { config } = configWithRegistry();
+    createProductionDispatchMock.mockReturnValue(async () => 'done');
+    const handle = await startRun(config, {
+      script:
+        "export const meta = { name: 'review-step-3a', description: 'review' }; return await agent('read');",
+    });
+    expect((await handle.completion).ok).toBe(true);
+    expect(createProductionDispatchMock.mock.calls[0]?.[4]).toBeUndefined();
+  });
+
+  it('runs beyond the generic thirty-minute limit and aborts at the review limit', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_WORKFLOW_SECONDS', undefined);
+    vi.stubEnv('QWEN_REVIEW_DEADLINE_EPOCH', undefined);
+    const { config, registry, scriptPath } = await generatedReview(
+      'await new Promise(() => {})',
+    );
+    vi.useFakeTimers();
+    const handle = await startRun(config, { scriptPath, dispatch: unused });
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+    expect(registry.get(handle.runId)?.status).toBe('running');
+    await vi.advanceTimersByTimeAsync((6 * 60 - 30) * 60 * 1000);
+    expect((await handle.completion).ok).toBe(false);
+    expect(registry.get(handle.runId)?.status).toBe('failed');
   });
 
   it('passes the registry approval bridge only to production dispatch', async () => {
@@ -176,11 +619,8 @@ describe('WorkflowRunner', () => {
     );
     createProductionDispatchMock.mockReturnValue(async () => 'done');
 
-    const productionHandle = await WorkflowRunner.start({
-      config: production.config,
-      signal: new AbortController().signal,
+    const productionHandle = await startRun(production.config, {
       script: 'return await agent("work")',
-      args: undefined,
       runInBackground: true,
     });
     await expect(productionHandle.completion).resolves.toMatchObject({
@@ -205,11 +645,8 @@ describe('WorkflowRunner', () => {
 
     const injected = configWithRegistry();
     const injectedBridge = vi.spyOn(injected.registry, 'bridgeApprovalEvents');
-    const injectedHandle = await WorkflowRunner.start({
-      config: injected.config,
-      signal: new AbortController().signal,
+    const injectedHandle = await startRun(injected.config, {
       script: 'return await agent("work")',
-      args: undefined,
       dispatch: async () => 'injected',
     });
     await expect(injectedHandle.completion).resolves.toMatchObject({
@@ -222,64 +659,44 @@ describe('WorkflowRunner', () => {
   it('retains the original args needed to retry a failed run from its journal', async () => {
     const { config, registry } = configWithRegistry();
     const args = { target: 'web-shell', checks: ['correctness'] };
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const handle = await runSettled(config, {
       script: 'return args.target',
       args,
       runInBackground: true,
-      dispatch: async () => 'unused',
+      dispatch: unused,
     });
-
-    await handle.completion;
 
     expect(registry.get(handle.runId)?.args).toEqual(args);
   });
 
   it('retains a saved workflow name when resuming with an inline script', async () => {
     const { config, registry } = configWithRegistry();
-    resolveSavedWorkflowScriptMock.mockResolvedValueOnce({
-      name: 'review',
-      savedWorkflowName: 'review',
+    resolveSavedWorkflowScriptMock.mockResolvedValueOnce(
+      savedWorkflow('review', '/tmp/review.js', 'return "done"'),
+    );
+    const initial = await runSettled(config, {
       scriptPath: '/tmp/review.js',
-      script: 'return "done"',
-    });
-    const initial = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
-      scriptPath: '/tmp/review.js',
-      args: undefined,
       runInBackground: true,
-      dispatch: async () => 'unused',
+      dispatch: unused,
     });
-    await initial.completion;
 
-    const resumed = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    await runSettled(config, {
       script: 'return "resumed"',
-      args: undefined,
       resumeFromRunId: initial.runId,
       runInBackground: true,
-      dispatch: async () => 'unused',
+      dispatch: unused,
     });
-    await resumed.completion;
 
     expect(registry.get(initial.runId)?.workflowName).toBe('review');
   });
 
   it('records sandbox logs in the replay event ledger', async () => {
     const { config, registry } = configWithRegistry();
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const handle = await runSettled(config, {
       script: 'log("repository loaded"); return "done";',
-      args: undefined,
       runInBackground: true,
-      dispatch: async () => 'unused',
+      dispatch: unused,
     });
-
-    await handle.completion;
 
     expect(registry.get(handle.runId)?.events).toEqual([
       expect.objectContaining({
@@ -290,19 +707,62 @@ describe('WorkflowRunner', () => {
     ]);
   });
 
+  it('keeps a respawn diagnostic through final log replacement and telemetry', async () => {
+    const { config, registry } = await storedConfig();
+    const runId = 'wf_respawned';
+    const key = deriveAgentKey(deriveArgsSeed(undefined), 'work', {
+      label: 'scout',
+    });
+    vi.spyOn(WorkflowJournal.prototype, 'load').mockResolvedValueOnce(
+      loadedJournal({
+        started: new Map([
+          [key, [{ type: 'started', key, agentId: 'agent-1' }]],
+        ]),
+      }),
+    );
+
+    const handle = await startRun(config, {
+      script: `return await agent('work', { label: 'scout' });`,
+      resumeFromRunId: runId,
+      dispatch: async () => {
+        throw new Error('provider failed before classification');
+      },
+    });
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: null },
+    });
+    const line =
+      '[resume] respawning "scout": interrupted in a previous run (1 prior attempt)';
+    expect(registry.get(runId)).toMatchObject({
+      status: 'completed',
+      agentsRespawned: 1,
+      recentLogs: [line],
+    });
+    expect(
+      registry
+        .get(runId)
+        ?.events.filter(
+          (event) => event.type === 'log' && event.message === line,
+        ),
+    ).toHaveLength(1);
+    expect(logWorkflowRunMock).toHaveBeenCalledWith(
+      config,
+      agentCounts(1, 1, 0, 1),
+    );
+  });
+
   it('keeps sandbox and registry phase projections equal for normalization-colliding titles', async () => {
     const { config, registry } = configWithRegistry();
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const handle = await startRun(config, {
       script:
         'phase("\\u001b[1mBuild\\u001b[0m");' +
         'phase("Build");' +
         'await agent("x", { phase: "\\u001b[1mBuild\\u001b[0m" });' +
         'return 1;',
-      args: undefined,
       runInBackground: true,
-      dispatch: async () => 'unused',
+      dispatch: unused,
     });
 
     const settlement = await handle.completion;
@@ -319,14 +779,11 @@ describe('WorkflowRunner', () => {
     const attempt = await tryWithWorkflowTaskMutation(
       getWorkflowTaskMutationKey(config, runId),
       () =>
-        WorkflowRunner.start({
-          config,
-          signal: new AbortController().signal,
+        startRun(config, {
           script: 'return "retried"',
-          args: undefined,
           resumeFromRunId: runId,
           runInBackground: true,
-          dispatch: async () => 'unused',
+          dispatch: unused,
         }),
     );
     expect(attempt.acquired).toBe(true);
@@ -343,26 +800,23 @@ describe('WorkflowRunner', () => {
   });
 
   it('replays a readable journal when its advertised path cannot be created', async () => {
-    const { config, registry } = configWithRegistry();
-    stubStorage(config, await makeStorageRoot());
+    const { config, registry } = await storedConfig();
     const runId = 'wf_1234abcd';
     const key = deriveAgentKey(deriveArgsSeed(undefined), 'work', {});
-    vi.spyOn(WorkflowJournal.prototype, 'load').mockResolvedValueOnce({
-      results: new Map([
-        [key, { type: 'result', key, agentId: 'agent-1', result: 'cached' }],
-      ]),
-      started: new Map(),
-    });
+    vi.spyOn(WorkflowJournal.prototype, 'load').mockResolvedValueOnce(
+      loadedJournal({
+        results: new Map([
+          [key, { type: 'result', key, agentId: 'agent-1', result: 'cached' }],
+        ]),
+      }),
+    );
     vi.spyOn(WorkflowJournal.prototype, 'ensureExists').mockResolvedValueOnce(
       false,
     );
     const dispatch = vi.fn(async () => 'live');
 
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const handle = await startRun(config, {
       script: 'return await agent("work")',
-      args: undefined,
       resumeFromRunId: runId,
       dispatch,
     });
@@ -374,30 +828,29 @@ describe('WorkflowRunner', () => {
     expect(dispatch).not.toHaveBeenCalled();
     expect(handle.journalPath).toBeUndefined();
     expect(registry.get(runId)?.journalPath).toBeUndefined();
+    expect(logWorkflowRunMock).toHaveBeenCalledWith(
+      config,
+      agentCounts(1, 0, 1, 0),
+    );
   });
 
   it('cancels a pending background resume before registration', async () => {
-    const { config, registry } = configWithRegistry();
+    const { config, registry, root } = await storedConfig();
     const runId = 'wf_1234abcd';
-    const root = await makeStorageRoot();
-    stubStorage(config, root);
-    let resolveLoad: ((replay: JournalReplay) => void) | undefined;
+    let resolveLoad: ((loaded: JournalLoadResult) => void) | undefined;
     const loadSpy = vi
       .spyOn(WorkflowJournal.prototype, 'load')
       .mockImplementationOnce(
         () =>
-          new Promise<JournalReplay>((resolve) => {
+          new Promise<JournalLoadResult>((resolve) => {
             resolveLoad = resolve;
           }),
       );
-    const start = WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const start = startRun(config, {
       script: 'return "retried"',
-      args: undefined,
       resumeFromRunId: runId,
       runInBackground: true,
-      dispatch: async () => 'unused',
+      dispatch: unused,
     });
 
     try {
@@ -406,109 +859,170 @@ describe('WorkflowRunner', () => {
 
       await vi.waitFor(() => expect(resolveLoad).toBeDefined());
       registry.abortAll();
-      resolveLoad!({ results: new Map(), started: new Map() });
+      resolveLoad!(EMPTY_LOADED_JOURNAL);
 
       await expect(start).rejects.toThrow('Workflow start was cancelled.');
       expect(registry.isStarting(runId)).toBe(false);
       expect(registry.get(runId)).toBeUndefined();
-      await expect(
-        fs.readdir(path.join(root, 'generated', 'inline')),
-      ).rejects.toThrow();
+      await expect(fs.readdir(inlineDir(root))).rejects.toThrow();
     } finally {
-      resolveLoad?.({ results: new Map(), started: new Map() });
+      resolveLoad?.(EMPTY_LOADED_JOURNAL);
       await start.catch(() => undefined);
       loadSpy.mockRestore();
     }
   });
 
-  it('rejects a cancellation that lands while the inline script is persisted', async () => {
-    const { config, registry } = configWithRegistry();
-    const root = await makeStorageRoot();
-    stubStorage(config, root);
-    let releasePersist: (() => void) | undefined;
-    persistInlineWorkflowScriptMock.mockImplementationOnce(
-      async (_config: Config, runId: string, script: string) => {
-        await new Promise<void>((resolve) => {
-          releasePersist = resolve;
-        });
-        const file = path.join(root, 'generated', 'inline', `${runId}.js`);
-        await fs.mkdir(path.dirname(file), { recursive: true });
-        await fs.writeFile(file, script, 'utf8');
-        return file;
+  // A fresh run's `launched` record is queued without being awaited. A start
+  // cancelled while it is still in flight fails on the next synchronous check
+  // and removes the journal; the removal has to wait for that append, or the
+  // append lands afterwards and leaves a run id that never registered with a
+  // non-empty journal, which a later resume would accept.
+  it('leaves no journal behind when a start is cancelled with its launch record in flight', async () => {
+    const { config, registry, root } = await storedConfig();
+    resolveSavedWorkflowScriptMock.mockResolvedValueOnce(
+      savedWorkflow('audit', '/tmp/audit.js', 'return await agent("work")'),
+    );
+    // The real append, a beat late, so it is still in flight when the start
+    // fails and cleans up.
+    const { writeLine } = await vi.importActual<
+      typeof import('../../utils/jsonl-utils.js')
+    >('../../utils/jsonl-utils.js');
+    let appendSettled!: () => void;
+    const appended = new Promise<void>((resolve) => {
+      appendSettled = resolve;
+    });
+    writeLineMock.mockImplementation(async (file: string, entry: unknown) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      try {
+        await writeLine(file, entry);
+      } finally {
+        appendSettled();
+      }
+    });
+    // The cancel lands while the journal is being created, so the launch
+    // record is queued and the very next check fails the start.
+    const ensureExists = WorkflowJournal.prototype.ensureExists;
+    vi.spyOn(WorkflowJournal.prototype, 'ensureExists').mockImplementationOnce(
+      async function (this: WorkflowJournal) {
+        const created = await ensureExists.call(this);
+        registry.abortAll();
+        return created;
       },
     );
-    const start = WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const dispatch = vi.fn(async () => 'live');
+
+    await expect(
+      startRun(config, {
+        scriptPath: '/tmp/audit.js',
+        runInBackground: true,
+        dispatch,
+      }),
+    ).rejects.toThrow('Workflow start was cancelled.');
+    await appended;
+
+    // The launch record was really written; it just must not outlive the
+    // cleanup.
+    expect(writeLineMock).toHaveBeenCalledTimes(1);
+    expect(writeLineMock.mock.calls[0][1]).toEqual({
+      type: 'launched',
+      version: 1,
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    await expect(fs.readdir(root)).resolves.toEqual([]);
+  });
+
+  it('rejects a cancellation that lands while the inline script is persisted', async () => {
+    const { config, registry, root } = await storedConfig();
+    const persist = holdNextPersist(root, true);
+    const start = startRun(config, {
       script: 'return "done"',
-      args: undefined,
       runInBackground: true,
-      dispatch: async () => 'unused',
+      dispatch: unused,
     });
 
     await vi.waitFor(() =>
       expect(registry.listStartingRunIds()).toHaveLength(1),
     );
     const runId = registry.listStartingRunIds()[0]!;
-    await vi.waitFor(() => expect(releasePersist).toBeDefined());
+    await vi.waitFor(() => expect(persist.release).toBeDefined());
     expect(registry.cancelStarting(runId)).toBe(true);
-    releasePersist!();
+    persist.release!();
 
     await expect(start).rejects.toBeInstanceOf(WorkflowStartCancelledError);
     expect(registry.get(runId)).toBeUndefined();
     await expect(
-      fs.access(path.join(root, 'generated', 'inline', `${runId}.js`)),
+      fs.access(path.join(inlineDir(root), `${runId}.js`)),
     ).rejects.toThrow();
     await expect(
       fs.access(path.join(root, runId, 'journal.jsonl')),
     ).rejects.toThrow();
   });
 
-  it('restores resume artifacts when cancellation lands before registration', async () => {
-    const { config, registry } = configWithRegistry();
-    const root = await makeStorageRoot();
-    stubStorage(config, root);
-    const initial = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
-      script: 'return "original"',
-      args: undefined,
-      dispatch: async () => 'unused',
+  // Starts a background resume of `runId`, cancels it while its inline script
+  // is being persisted, and expects the start to reject as cancelled.
+  async function cancelResumeWhilePersisting(
+    config: Config,
+    registry: WorkflowRunRegistry,
+    root: string,
+    runId: string,
+  ) {
+    const persist = holdNextPersist(root);
+    const resume = startRun(config, {
+      script: 'return "never ran"',
+      resumeFromRunId: runId,
+      runInBackground: true,
+      dispatch: unused,
     });
-    await initial.completion;
+    await vi.waitFor(() => expect(persist.release).toBeDefined());
+    expect(registry.cancelStarting(runId)).toBe(true);
+    persist.release!();
+    await expect(resume).rejects.toBeInstanceOf(WorkflowStartCancelledError);
+  }
+
+  it('restores resume artifacts when cancellation lands before registration', async () => {
+    const { config, registry, root } = await storedConfig();
+    const initial = await runSettled(config, {
+      script: 'return "original"',
+      dispatch: unused,
+    });
     const journalPath = initial.journalPath!;
     const scriptPath = initial.scriptPath!;
     const journalBefore = await fs.readFile(journalPath, 'utf8');
-    let releasePersist: (() => void) | undefined;
-    persistInlineWorkflowScriptMock.mockImplementationOnce(
-      async (_config: Config, runId: string, script: string) => {
-        await new Promise<void>((resolve) => {
-          releasePersist = resolve;
-        });
-        const file = path.join(root, 'generated', 'inline', `${runId}.js`);
-        await fs.writeFile(file, script, 'utf8');
-        return file;
-      },
-    );
 
-    const resume = WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
-      script: 'return "never ran"',
-      args: undefined,
-      resumeFromRunId: initial.runId,
-      runInBackground: true,
-      dispatch: async () => 'unused',
-    });
-    await vi.waitFor(() => expect(releasePersist).toBeDefined());
-    expect(registry.cancelStarting(initial.runId)).toBe(true);
-    releasePersist!();
-
-    await expect(resume).rejects.toBeInstanceOf(WorkflowStartCancelledError);
+    await cancelResumeWhilePersisting(config, registry, root, initial.runId);
     await expect(fs.readFile(scriptPath, 'utf8')).resolves.toBe(
       'return "original"',
     );
     await expect(fs.readFile(journalPath, 'utf8')).resolves.toBe(journalBefore);
+  });
+
+  // After a restart there is no registry entry to restore the script from;
+  // the run's snapshot is what still holds it. Without reading it, a resume
+  // that failed to start left the original run's copy overwritten by the
+  // script of the attempt that never ran.
+  it('restores the original inline script from its snapshot when a resume fails to start after a restart', async () => {
+    const root = await makeStorageRoot();
+    const first = configWithRegistry();
+    stubStorage(first.config, root);
+    const initial = await runSettled(first.config, {
+      script: 'return "original"',
+      dispatch: unused,
+    });
+    const scriptPath = initial.scriptPath!;
+
+    // A second process: fresh registry, same storage, the run in a snapshot.
+    const { config, registry } = configWithRegistry();
+    stubStorage(config, root);
+    readWorkflowSnapshotMock.mockResolvedValueOnce({
+      runId: initial.runId,
+      script: 'return "original"',
+    });
+
+    await cancelResumeWhilePersisting(config, registry, root, initial.runId);
+    expect(readWorkflowSnapshotMock).toHaveBeenCalledTimes(1);
+    await expect(fs.readFile(scriptPath, 'utf8')).resolves.toBe(
+      'return "original"',
+    );
   });
 
   it.each([
@@ -525,23 +1039,18 @@ describe('WorkflowRunner', () => {
         getExperimentalZedIntegration: () => zed,
       });
 
-      const handle = await WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
+      const handle = await runSettled(config, {
         script: 'return "done"',
-        args: undefined,
         runInBackground: background,
-        dispatch: async () => 'unused',
+        dispatch: unused,
       });
-      await handle.completion;
 
       expect(registry.get(handle.runId)?.resumeInBackground).toBe(expected);
     },
   );
 
   it('cancels a pending background script load before registration', async () => {
-    const { config, registry } = configWithRegistry();
-    stubStorage(config, await makeStorageRoot());
+    const { config, registry } = await storedConfig();
     let finishLoad:
       | ((saved: { name: string; script: string; scriptPath: string }) => void)
       | undefined;
@@ -551,13 +1060,10 @@ describe('WorkflowRunner', () => {
           finishLoad = resolve;
         }),
     );
-    const start = WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const start = startRun(config, {
       scriptPath: '/tmp/review.js',
-      args: undefined,
       runInBackground: true,
-      dispatch: async () => 'unused',
+      dispatch: unused,
     });
     const saved = {
       name: 'review',
@@ -610,14 +1116,11 @@ describe('WorkflowRunner', () => {
 
     try {
       await expect(
-        WorkflowRunner.start({
-          config,
-          signal: new AbortController().signal,
+        startRun(config, {
           script: 'return "retried"',
-          args: undefined,
           resumeFromRunId: runId,
           runInBackground: true,
-          dispatch: async () => 'unused',
+          dispatch: unused,
         }),
       ).rejects.toThrow(`Workflow run ${runId} is already being modified.`);
       expect(loadSpy).not.toHaveBeenCalled();
@@ -633,24 +1136,19 @@ describe('WorkflowRunner', () => {
   it('keeps one registry-owned handle through exactly-once completion', async () => {
     const { config, registry } = configWithRegistry();
     const observed = observeSettlement(registry);
-    let resolveDispatch: ((value: string) => void) | undefined;
+    const held = heldDispatch();
     const caller = new AbortController();
-    const handle = await WorkflowRunner.start({
-      config,
+    const handle = await startRun(config, {
       signal: caller.signal,
       script: 'return await agent("work")',
-      args: undefined,
-      dispatch: () =>
-        new Promise<string>((resolve) => {
-          resolveDispatch = resolve;
-        }),
+      dispatch: held.dispatch,
     });
 
     expect(registry.getHandle(handle.runId)).toBe(handle);
     expect(registry.get(handle.runId)?.status).toBe('running');
 
-    await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
-    resolveDispatch?.('done');
+    await vi.waitFor(() => expect(held.resolve).toBeDefined());
+    held.resolve?.('done');
 
     const first = await handle.completion;
     const second = await handle.completion;
@@ -676,32 +1174,44 @@ describe('WorkflowRunner', () => {
     const { config, registry } = configWithRegistry();
     writeWorkflowSnapshotMock.mockResolvedValue(true);
     const notify = vi.spyOn(registry, 'notifySnapshotPersisted');
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const handle = await runOk(config, {
       script: 'return await agent("work")',
-      args: undefined,
       dispatch: async () => 'done',
     });
-    await expect(handle.completion).resolves.toMatchObject({ ok: true });
 
     expect(writeWorkflowSnapshotMock).toHaveBeenCalledOnce();
     expect(notify).toHaveBeenCalledOnce();
     expect(notify).toHaveBeenCalledWith(handle.runId);
   });
 
+  it('passes the storage snapshot destination into a truncated completion', async () => {
+    const { config, registry } = configWithRegistry();
+    const root = await makeStorageRoot();
+    stubStorage(config, root);
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return "x".repeat(30_000)',
+      args: undefined,
+      notifyOnCompletion: true,
+    });
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+    expect(completion).toHaveBeenCalledOnce();
+    const model = completion.mock.calls[0][1] as string;
+    expect(model).toContain(path.join(root, `${handle.runId}.json`));
+    expect(model).toContain('after finalization (if persistence succeeds)');
+  });
+
   it('does not notify when the snapshot write fails', async () => {
     const { config, registry } = configWithRegistry();
     writeWorkflowSnapshotMock.mockResolvedValue(false);
     const notify = vi.spyOn(registry, 'notifySnapshotPersisted');
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    await runOk(config, {
       script: 'return await agent("work")',
-      args: undefined,
       dispatch: async () => 'done',
     });
-    await expect(handle.completion).resolves.toMatchObject({ ok: true });
 
     expect(writeWorkflowSnapshotMock).toHaveBeenCalledOnce();
     expect(notify).not.toHaveBeenCalled();
@@ -710,12 +1220,9 @@ describe('WorkflowRunner', () => {
   it('settles failure and caller cancellation through the same owner', async () => {
     const failed = configWithRegistry();
     const failedObserved = observeSettlement(failed.registry);
-    const failedHandle = await WorkflowRunner.start({
-      config: failed.config,
-      signal: new AbortController().signal,
+    const failedHandle = await startRun(failed.config, {
       script: 'throw new Error("boom")',
-      args: undefined,
-      dispatch: async () => 'unused',
+      dispatch: unused,
     });
     const failedResult = await failedHandle.completion;
     expect(failedResult.ok).toBe(false);
@@ -726,20 +1233,12 @@ describe('WorkflowRunner', () => {
     const cancelled = configWithRegistry();
     const cancelledObserved = observeSettlement(cancelled.registry);
     const caller = new AbortController();
-    let rejectDispatch: ((error: Error) => void) | undefined;
-    const cancelledHandle = await WorkflowRunner.start({
-      config: cancelled.config,
-      signal: caller.signal,
-      script: 'return await agent("work")',
-      args: undefined,
-      dispatch: () =>
-        new Promise<string>((_resolve, reject) => {
-          rejectDispatch = reject;
-        }),
-    });
-    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+    const { held, handle: cancelledHandle } = await startHeld(
+      cancelled.config,
+      { signal: caller.signal },
+    );
     caller.abort();
-    rejectDispatch?.(new Error('aborted'));
+    held.reject?.(new Error('aborted'));
     const cancelledResult = await cancelledHandle.completion;
     expect(cancelledResult.ok).toBe(false);
     expect(cancelled.registry.get(cancelledHandle.runId)?.status).toBe(
@@ -755,21 +1254,10 @@ describe('WorkflowRunner', () => {
   it('records caller-aborted dispatches as cancelled', async () => {
     const { config, registry } = configWithRegistry();
     const caller = new AbortController();
-    let rejectDispatch: ((error: Error) => void) | undefined;
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: caller.signal,
-      script: 'return await agent("work")',
-      args: undefined,
-      dispatch: () =>
-        new Promise<string>((_resolve, reject) => {
-          rejectDispatch = reject;
-        }),
-    });
-    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+    const { held, handle } = await startHeld(config, { signal: caller.signal });
 
     caller.abort();
-    rejectDispatch?.(new Error('Request was aborted'));
+    held.reject?.(new Error('Request was aborted'));
     await handle.completion;
 
     expect(registry.get(handle.runId)?.dispatches).toEqual([
@@ -789,25 +1277,16 @@ describe('WorkflowRunner', () => {
     const { config, registry } = configWithRegistry();
     const observed = observeSettlement(registry);
     const caller = new AbortController();
-    let resolveDispatch: ((value: string) => void) | undefined;
-    const handle = await WorkflowRunner.start({
-      config,
+    const { held, handle } = await startHeld(config, {
       signal: caller.signal,
-      script: 'return await agent("work")',
-      args: undefined,
       runInBackground: true,
-      dispatch: () =>
-        new Promise<string>((resolve) => {
-          resolveDispatch = resolve;
-        }),
     });
-    await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
 
     caller.abort();
     expect(observed.abortCount()).toBe(0);
     expect(registry.get(handle.runId)?.status).toBe('running');
 
-    resolveDispatch?.('done');
+    held.resolve?.('done');
     await expect(handle.completion).resolves.toMatchObject({ ok: true });
     expect(registry.get(handle.runId)?.status).toBe('completed');
     expect(observed.terminalStatuses).toEqual(['completed']);
@@ -825,16 +1304,11 @@ describe('WorkflowRunner', () => {
         return Promise.resolve();
       },
     );
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const handle = await runOk(config, {
       script: 'agent("fire and forget"); return "done"',
-      args: undefined,
       runInBackground: true,
       dispatch: () => new Promise<string>(() => undefined),
     });
-
-    await expect(handle.completion).resolves.toMatchObject({ ok: true });
 
     expect(registry.get(handle.runId)).toMatchObject({ status: 'completed' });
     expect(snapshotDispatchStatuses).toEqual(['cancelled']);
@@ -843,9 +1317,64 @@ describe('WorkflowRunner', () => {
     ]);
   });
 
+  it.each([true, false])(
+    'drains journal writes before releasing persistence with registry=%s',
+    async (withRegistry) => {
+      const { config, registry } = configWithRegistry();
+      if (!withRegistry) {
+        Object.assign(config, { getWorkflowRunRegistry: () => undefined });
+      }
+      stubStorage(config, await makeStorageRoot());
+      let releaseWrite: (() => void) | undefined;
+      writeLineMock.mockImplementation(
+        (_file: string, record: { type: string }) =>
+          record.type === 'result'
+            ? new Promise<void>((resolve) => {
+                releaseWrite = resolve;
+              })
+            : Promise.resolve(),
+      );
+      const handle = await WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: 'return await agent("work")',
+        args: undefined,
+        dispatch: async () => 'done',
+      });
+      let settled = false;
+      void handle.completion.then(() => {
+        settled = true;
+      });
+      try {
+        await vi.waitFor(() => expect(releaseWrite).toBeDefined());
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(settled).toBe(false);
+        expect(isWorkflowRunPersistenceActive(config, handle.runId)).toBe(true);
+        if (withRegistry) {
+          expect(registry.getHandle(handle.runId)).toBe(handle);
+          await vi.waitFor(async () => {
+            expect(
+              await readWorkflowCheckpoint(config, handle.runId),
+            ).toBeDefined();
+          });
+        }
+      } finally {
+        releaseWrite?.();
+        await handle.completion;
+      }
+      expect(isWorkflowRunPersistenceActive(config, handle.runId)).toBe(false);
+      expect(registry.getHandle(handle.runId)).toBeUndefined();
+      expect(
+        await readWorkflowCheckpoint(config, handle.runId),
+      ).toBeUndefined();
+    },
+  );
+
   it('freezes snapshot and telemetry before late dispatches drain', async () => {
-    const { config, registry } = configWithRegistry();
-    stubStorage(config, await makeStorageRoot());
+    const { config, registry } = await storedConfig();
+    // The run's `launched` record is let through; every write after it is
+    // held, so the one held write is the agent's `started` line.
+    writeLineMock.mockResolvedValueOnce(undefined);
     writeLineMock.mockImplementation(
       () =>
         new Promise<void>((resolve) => {
@@ -857,34 +1386,23 @@ describe('WorkflowRunner', () => {
       snapshotAgentsCompleted = entry.agentsCompleted;
       return Promise.resolve();
     });
-    let finishDispatch: ((result: string) => void) | undefined;
+    const held = heldDispatch();
 
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const handle = await startRun(config, {
       script: 'agent("fire and forget"); return "done"',
-      args: undefined,
       runInBackground: true,
-      dispatch: () =>
-        new Promise<string>((resolve) => {
-          finishDispatch = resolve;
-        }),
+      dispatch: held.dispatch,
     });
 
     await vi.waitFor(() => {
       expect(registry.get(handle.runId)?.status).toBe('completed');
       expect(journalWrites).toHaveLength(1);
     });
-    finishDispatch?.('late result');
+    held.resolve?.('late result');
     await vi.waitFor(() =>
       expect(registry.get(handle.runId)?.agentsCompleted).toBe(1),
     );
-    let settled = false;
-    void handle.completion.then(() => {
-      settled = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(settled).toBe(false);
+    expect(await settlesWithinATick(handle.completion)).toBe(false);
     journalWrites[0]?.();
     await expect(handle.completion).resolves.toMatchObject({ ok: true });
 
@@ -898,35 +1416,15 @@ describe('WorkflowRunner', () => {
 
   it('holds an in-flight agent result until a paused run resumes', async () => {
     const { config, registry } = configWithRegistry();
-    let resolveDispatch: ((value: string) => void) | undefined;
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
-      script: 'return await agent("work")',
-      args: undefined,
-      runInBackground: true,
-      dispatch: () =>
-        new Promise<string>((resolve) => {
-          resolveDispatch = resolve;
-        }),
-    });
-    await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
+    const { held, handle } = await startHeld(config, { runInBackground: true });
 
     expect(registry.pause(handle.runId)).toBe(true);
     expect(registry.get(handle.runId)?.status).toBe('pausing');
-    resolveDispatch?.('done');
+    held.resolve?.('done');
     await vi.waitFor(() =>
       expect(registry.get(handle.runId)?.status).toBe('paused'),
     );
-    let settled = false;
-    void handle.completion.then(() => {
-      settled = true;
-    });
-    // Flush all microtasks + a timer tick so the negative check
-    // distinguishes the pause gate from a gate-less resolve
-    // (which settles in a few microtasks without one).
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(settled).toBe(false);
+    expect(await settlesWithinATick(handle.completion)).toBe(false);
 
     expect(registry.resume(handle.runId)).toBe(true);
     await expect(handle.completion).resolves.toMatchObject({ ok: true });
@@ -935,52 +1433,30 @@ describe('WorkflowRunner', () => {
 
   it('holds an in-flight agent rejection until a paused run resumes', async () => {
     const { config, registry } = configWithRegistry();
-    let rejectDispatch: ((error: Error) => void) | undefined;
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
-      script: 'return await agent("work")',
-      args: undefined,
-      runInBackground: true,
-      dispatch: () =>
-        new Promise<string>((_resolve, reject) => {
-          rejectDispatch = reject;
-        }),
-    });
-    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+    const { held, handle } = await startHeld(config, { runInBackground: true });
 
     registry.pause(handle.runId);
-    rejectDispatch?.(new Error('agent failed'));
+    held.reject?.(new Error('agent failed'));
     await vi.waitFor(() =>
       expect(registry.get(handle.runId)?.status).toBe('paused'),
     );
-    let settled = false;
-    void handle.completion.then(() => {
-      settled = true;
-    });
-    // Flush all microtasks + a timer tick so the negative check
-    // distinguishes the pause gate from a gate-less resolve
-    // (which settles in a few microtasks without one).
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(settled).toBe(false);
+    expect(await settlesWithinATick(handle.completion)).toBe(false);
 
     registry.resume(handle.runId);
-    await expect(handle.completion).resolves.toMatchObject({ ok: false });
-    expect(registry.get(handle.runId)?.status).toBe('failed');
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: null },
+    });
+    expect(registry.get(handle.runId)?.status).toBe('completed');
   });
 
   it('keeps queued agents stopped while pausing and starts them after resume', async () => {
-    const originalConcurrency =
-      process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
-    process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = '1';
-    try {
-      const { config, registry } = configWithRegistry();
-      const started: string[] = [];
-      const finishes = new Map<string, (value: string) => void>();
-      const handle = await WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
-        script: `return await parallel([
+    vi.stubEnv('QWEN_CODE_MAX_WORKFLOW_CONCURRENCY', '1');
+    const { config, registry } = configWithRegistry();
+    const started: string[] = [];
+    const finishes = new Map<string, (value: string) => void>();
+    const handle = await startRun(config, {
+      script: `return await parallel([
           async () => {
             await agent("first");
             // Chain a follow-up dispatch off the first result: if the pause
@@ -990,99 +1466,70 @@ describe('WorkflowRunner', () => {
           },
           () => agent("second"),
         ])`,
-        args: undefined,
-        runInBackground: true,
-        dispatch: (prompt) =>
-          new Promise<string>((resolve) => {
-            started.push(prompt);
-            finishes.set(prompt, resolve);
-          }),
-      });
-      await vi.waitFor(() => expect(started).toEqual(['first']));
+      runInBackground: true,
+      dispatch: (prompt) =>
+        new Promise<string>((resolve) => {
+          started.push(prompt);
+          finishes.set(prompt, resolve);
+        }),
+    });
+    await vi.waitFor(() => expect(started).toEqual(['first']));
 
-      expect(registry.pause(handle.runId)).toBe(true);
-      finishes.get('first')?.('first done');
-      await vi.waitFor(() =>
-        expect(registry.get(handle.runId)?.status).toBe('paused'),
-      );
-      expect(started).toEqual(['first']);
-      expect(registry.get(handle.runId)).toMatchObject({
-        agentsDispatched: 2,
-        agentsCompleted: 1,
-      });
-      let settled = false;
-      void handle.completion.then(() => {
-        settled = true;
-      });
-      // Flush all microtasks + a timer tick so the negative check
-      // distinguishes the pause gate from a gate-less resolve
-      // (which settles in a few microtasks without one).
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(settled).toBe(false);
+    expect(registry.pause(handle.runId)).toBe(true);
+    finishes.get('first')?.('first done');
+    await vi.waitFor(() =>
+      expect(registry.get(handle.runId)?.status).toBe('paused'),
+    );
+    expect(started).toEqual(['first']);
+    expect(registry.get(handle.runId)).toMatchObject({
+      agentsDispatched: 2,
+      agentsCompleted: 1,
+    });
+    expect(await settlesWithinATick(handle.completion)).toBe(false);
 
-      expect(registry.resume(handle.runId)).toBe(true);
-      await vi.waitFor(() => expect(started).toEqual(['first', 'second']));
-      finishes.get('second')?.('second done');
-      await vi.waitFor(() =>
-        expect(started).toEqual(['first', 'second', 'first-follow-up']),
-      );
-      finishes.get('first-follow-up')?.('follow-up done');
-      await expect(handle.completion).resolves.toMatchObject({ ok: true });
-    } finally {
-      if (originalConcurrency === undefined) {
-        delete process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
-      } else {
-        process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = originalConcurrency;
-      }
-    }
+    expect(registry.resume(handle.runId)).toBe(true);
+    await vi.waitFor(() => expect(started).toEqual(['first', 'second']));
+    finishes.get('second')?.('second done');
+    await vi.waitFor(() =>
+      expect(started).toEqual(['first', 'second', 'first-follow-up']),
+    );
+    finishes.get('first-follow-up')?.('follow-up done');
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
   });
 
   it('cancels a paused run without starting queued agents or deadlocking', async () => {
-    const originalConcurrency =
-      process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
-    process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = '1';
-    try {
-      const { config, registry } = configWithRegistry();
-      const started: string[] = [];
-      let finishFirst: ((value: string) => void) | undefined;
-      const handle = await WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
-        script: `return await parallel([
+    vi.stubEnv('QWEN_CODE_MAX_WORKFLOW_CONCURRENCY', '1');
+    const { config, registry } = configWithRegistry();
+    const started: string[] = [];
+    let finishFirst: ((value: string) => void) | undefined;
+    const handle = await startRun(config, {
+      script: `return await parallel([
           () => agent("first"),
           () => agent("second"),
         ])`,
-        args: undefined,
-        runInBackground: true,
-        dispatch: (prompt) =>
-          new Promise<string>((resolve) => {
-            started.push(prompt);
-            if (prompt === 'first') finishFirst = resolve;
-          }),
-      });
-      await vi.waitFor(() => expect(started).toEqual(['first']));
-      registry.pause(handle.runId);
-      finishFirst?.('first done');
-      await vi.waitFor(() =>
-        expect(registry.get(handle.runId)?.status).toBe('paused'),
-      );
+      runInBackground: true,
+      dispatch: (prompt) =>
+        new Promise<string>((resolve) => {
+          started.push(prompt);
+          if (prompt === 'first') finishFirst = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(started).toEqual(['first']));
+    registry.pause(handle.runId);
+    finishFirst?.('first done');
+    await vi.waitFor(() =>
+      expect(registry.get(handle.runId)?.status).toBe('paused'),
+    );
 
-      registry.cancel(handle.runId, Date.now());
+    registry.cancel(handle.runId, Date.now());
 
-      await expect(handle.completion).resolves.toMatchObject({ ok: false });
-      expect(registry.get(handle.runId)).toMatchObject({
-        status: 'cancelled',
-        agentsDispatched: 2,
-        agentsCompleted: 2,
-      });
-      expect(started).toEqual(['first']);
-    } finally {
-      if (originalConcurrency === undefined) {
-        delete process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'];
-      } else {
-        process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = originalConcurrency;
-      }
-    }
+    await expect(handle.completion).resolves.toMatchObject({ ok: false });
+    expect(registry.get(handle.runId)).toMatchObject({
+      status: 'cancelled',
+      agentsDispatched: 2,
+      agentsCompleted: 2,
+    });
+    expect(started).toEqual(['first']);
   });
 
   it('settles a cancelled paused run as cancelled even if its awaited dispatch succeeded', async () => {
@@ -1092,21 +1539,9 @@ describe('WorkflowRunner', () => {
     // registry entry, telemetry, and snapshot.
     const { config, registry } = configWithRegistry();
     const observed = observeSettlement(registry);
-    let finishDispatch: ((value: string) => void) | undefined;
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
-      script: 'return await agent("work")',
-      args: undefined,
-      runInBackground: true,
-      dispatch: () =>
-        new Promise<string>((resolve) => {
-          finishDispatch = resolve;
-        }),
-    });
-    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+    const { held, handle } = await startHeld(config, { runInBackground: true });
     registry.pause(handle.runId);
-    finishDispatch?.('done');
+    held.resolve?.('done');
     await vi.waitFor(() =>
       expect(registry.get(handle.runId)?.status).toBe('paused'),
     );
@@ -1130,24 +1565,15 @@ describe('WorkflowRunner', () => {
     // absorbs the abort and still returns normally must not settle ok
     // while the registry entry, telemetry, and snapshot say cancelled.
     const { config, registry } = configWithRegistry();
-    let rejectDispatch: ((error: Error) => void) | undefined;
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const { held, handle } = await startHeld(config, {
       script:
         'try { return await agent("work"); } catch { return "fallback"; }',
-      args: undefined,
       runInBackground: true,
-      dispatch: () =>
-        new Promise<string>((_resolve, reject) => {
-          rejectDispatch = reject;
-        }),
     });
-    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
     expect(registry.get(handle.runId)?.status).toBe('running');
 
     registry.cancel(handle.runId, Date.now());
-    rejectDispatch?.(new Error('aborted'));
+    held.reject?.(new Error('aborted'));
 
     await expect(handle.completion).resolves.toMatchObject({
       ok: false,
@@ -1164,26 +1590,14 @@ describe('WorkflowRunner', () => {
     // normally while the registry entry, snapshot, and telemetry say
     // 'failed'. The handle must not report ok: true.
     const { config, registry } = configWithRegistry();
-    let finishDispatch: ((value: string) => void) | undefined;
-    const handle = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
-      script: 'return await agent("work")',
-      args: undefined,
-      runInBackground: true,
-      dispatch: () =>
-        new Promise<string>((resolve) => {
-          finishDispatch = resolve;
-        }),
-    });
-    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+    const { held, handle } = await startHeld(config, { runInBackground: true });
     registry.fail(
       handle.runId,
       'Failed to resolve workflow approval: wfap_1',
       Date.now(),
     );
     handle.abort();
-    finishDispatch?.('done');
+    held.resolve?.('done');
 
     await expect(handle.completion).resolves.toMatchObject({
       ok: false,
@@ -1192,44 +1606,465 @@ describe('WorkflowRunner', () => {
     expect(registry.get(handle.runId)?.status).toBe('failed');
   });
 
+  describe('resuming across a restart', () => {
+    // A resume replays a journal. With none on disk it used to dispatch every
+    // agent again under the old id while reading as a continuation.
+    it('refuses a resume whose journal is not on disk, before anything is spent or written', async () => {
+      const { config, registry, root } = await storedConfig();
+      const dispatch = vi.fn(async () => 'live');
+
+      const start = resumeRun(config, 'wf_1234abcd', { dispatch });
+      await expect(start).rejects.toThrow(
+        'No journal found for workflow run wf_1234abcd, so there is nothing to resume. To run the workflow from the start, call Workflow again without resumeFromRunId.',
+      );
+      // Typed, so a host resuming on a caller's behalf can answer it as the
+      // run's state rather than as its own fault.
+      await expect(start).rejects.toBeInstanceOf(
+        WorkflowJournalUnavailableError,
+      );
+      await expect(start).rejects.toMatchObject({
+        runId: 'wf_1234abcd',
+        reason: 'missing',
+      });
+
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(registry.get('wf_1234abcd')).toBeUndefined();
+      expect(registry.isStarting('wf_1234abcd')).toBe(false);
+      expect(writeWorkflowSnapshotMock).not.toHaveBeenCalled();
+      expect(persistInlineWorkflowScriptMock).not.toHaveBeenCalled();
+      // The refusal must not leave behind the journal it found missing.
+      await expect(fs.readdir(root)).resolves.toEqual([]);
+    });
+
+    it('refuses a resume whose script has a dynamic import, leaving its files as they were', async () => {
+      const { config, registry, root } = await storedConfig();
+      const runId = 'wf_1234abcd';
+      const files: Record<string, string> = {
+        [path.join(runId, 'journal.jsonl')]: '{"kind":"prior"}\n',
+        [`${runId}.json`]: '{"status":"completed"}',
+        [path.join('generated', 'inline', `${runId}.js`)]:
+          'return await agent("work")',
+      };
+      for (const [name, content] of Object.entries(files)) {
+        await fs.mkdir(path.dirname(path.join(root, name)), {
+          recursive: true,
+        });
+        await fs.writeFile(path.join(root, name), content);
+      }
+      const dispatch = vi.fn(async () => 'live');
+
+      const start = resumeRun(config, runId, {
+        script: 'await agent("work");\nawait import("node:fs");',
+        dispatch,
+      });
+      await expect(start).rejects.toBeInstanceOf(
+        WorkflowScriptNotLaunchedError,
+      );
+      await expect(start).rejects.toThrow(/line 2: dynamic import\(\)/);
+
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(registry.get(runId)).toBeUndefined();
+      expect(registry.isStarting(runId)).toBe(false);
+      expect(writeWorkflowSnapshotMock).not.toHaveBeenCalled();
+      expect(persistInlineWorkflowScriptMock).not.toHaveBeenCalled();
+      for (const [name, content] of Object.entries(files)) {
+        await expect(fs.readFile(path.join(root, name), 'utf8')).resolves.toBe(
+          content,
+        );
+      }
+      await expect(fs.readdir(root)).resolves.toEqual(
+        expect.arrayContaining(['generated', runId, `${runId}.json`]),
+      );
+      await expect(fs.readdir(root)).resolves.toHaveLength(3);
+    });
+
+    it('refuses a resume whose journal cannot be read, and says why', async () => {
+      const { config, registry, root } = await storedConfig();
+      // A directory where the journal file should be.
+      await fs.mkdir(path.join(root, 'wf_1234abcd', 'journal.jsonl'), {
+        recursive: true,
+      });
+      const dispatch = vi.fn(async () => 'live');
+
+      const start = resumeRun(config, 'wf_1234abcd', { dispatch });
+      await expect(start).rejects.toThrow(
+        /^Could not read the journal for workflow run wf_1234abcd: \S/,
+      );
+      await expect(start).rejects.toMatchObject({
+        name: 'WorkflowJournalUnavailableError',
+        runId: 'wf_1234abcd',
+        reason: 'unreadable',
+      });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(registry.get('wf_1234abcd')).toBeUndefined();
+    });
+
+    // Journals written before the `launched` record exist as empty files for
+    // runs that had cached nothing yet; those run ids must stay resumable.
+    it('resumes a run whose journal exists and holds nothing', async () => {
+      const { config, root } = await storedConfig();
+      await fs.mkdir(path.join(root, 'wf_1234abcd'), { recursive: true });
+      await fs.writeFile(path.join(root, 'wf_1234abcd', 'journal.jsonl'), '');
+      const dispatch = vi.fn(async () => 'live');
+
+      const handle = await resumeRun(config, 'wf_1234abcd', { dispatch });
+
+      await expect(handle.completion).resolves.toMatchObject({
+        ok: true,
+        outcome: { result: 'live' },
+      });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('opens a fresh journal with a launched record, and never a resumed one', async () => {
+      const { config } = await storedConfig();
+      const types = () =>
+        writeLineMock.mock.calls.map(
+          ([, entry]) => (entry as { type: string }).type,
+        );
+
+      const first = await runSettled(config, {
+        script: 'return await agent("work")',
+        dispatch: async () => 'live',
+      });
+      expect(types()).toEqual(['launched', 'started', 'result']);
+      expect(writeLineMock.mock.calls[0][1]).toEqual({
+        type: 'launched',
+        version: 1,
+      });
+
+      writeLineMock.mockClear();
+      const resumed = await resumeRun(config, first.runId, {
+        dispatch: async () => 'live',
+      });
+      await resumed.completion;
+      expect(types()).not.toContain('launched');
+    });
+
+    it('does not mark a launch when the journal could not be created', async () => {
+      const { config } = await storedConfig();
+      vi.spyOn(WorkflowJournal.prototype, 'ensureExists').mockResolvedValueOnce(
+        false,
+      );
+
+      const handle = await runSettled(config, {
+        script: 'return "done"',
+        dispatch: unused,
+      });
+
+      expect(handle.journalPath).toBeUndefined();
+      expect(writeLineMock).not.toHaveBeenCalled();
+    });
+
+    // The registry does not outlive the process. After a restart the snapshot
+    // is what still says the run carried a reference; without reading it the
+    // resumed run would settle unattributed and overwrite that snapshot.
+    it('refuses a resume whose snapshot carries a source reference its journal lacks', async () => {
+      const { config, registry } = await storedConfig();
+      vi.spyOn(WorkflowJournal.prototype, 'load').mockResolvedValueOnce(
+        EMPTY_LOADED_JOURNAL,
+      );
+      readWorkflowSnapshotMock.mockResolvedValueOnce({
+        runId: 'wf_1234abcd',
+        sourceRef: { id: 'definition-7', revision: 'rev-3' },
+      });
+      const dispatch = vi.fn(async () => 'live');
+
+      await expect(
+        resumeRun(config, 'wf_1234abcd', { dispatch }),
+      ).rejects.toThrow(
+        'Workflow source metadata is missing from its journal.',
+      );
+
+      expect(readWorkflowSnapshotMock).toHaveBeenCalledWith(
+        config,
+        'wf_1234abcd',
+      );
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(registry.get('wf_1234abcd')).toBeUndefined();
+      expect(writeWorkflowSnapshotMock).not.toHaveBeenCalled();
+    });
+
+    it('resumes when neither the snapshot nor the journal carries a source reference', async () => {
+      const { config } = await storedConfig();
+      vi.spyOn(WorkflowJournal.prototype, 'load').mockResolvedValueOnce(
+        EMPTY_LOADED_JOURNAL,
+      );
+      readWorkflowSnapshotMock.mockResolvedValueOnce({ runId: 'wf_1234abcd' });
+
+      const handle = await resumeRun(config, 'wf_1234abcd', {
+        dispatch: async () => 'live',
+      });
+
+      await expect(handle.completion).resolves.toMatchObject({ ok: true });
+    });
+
+    it('asks the live registry entry, not the snapshot, while the process still has one', async () => {
+      const { config } = await storedConfig();
+      const first = await runSettled(config, {
+        script: 'return await agent("work")',
+        dispatch: async () => 'live',
+      });
+      // A stale snapshot must not overrule the entry the process still holds.
+      readWorkflowSnapshotMock.mockResolvedValue({
+        runId: first.runId,
+        sourceRef: { id: 'definition-7', revision: 'rev-3' },
+      });
+
+      const resumed = await resumeRun(config, first.runId, {
+        dispatch: async () => 'live',
+      });
+
+      await expect(resumed.completion).resolves.toMatchObject({ ok: true });
+      expect(readWorkflowSnapshotMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the run checkpoint', () => {
+    it('is on disk while the run is live, and gone once it settles', async () => {
+      const { config, root } = await storedConfig();
+      const held = heldDispatch();
+      const handle = await startRun(config, {
+        script:
+          'export const meta = { name: "audit", description: "Audit" };\nreturn await agent("work")',
+        args: { files: ['a.csv'] },
+        dispatch: held.dispatch,
+      });
+      const file = path.join(root, handle.runId, 'checkpoint.json');
+
+      await vi.waitFor(async () =>
+        expect(JSON.parse(await fs.readFile(file, 'utf8'))).toMatchObject({
+          runId: handle.runId,
+          pid: process.pid,
+          meta: { name: 'audit', description: 'Audit' },
+          description: 'audit',
+          args: { files: ['a.csv'] },
+        }),
+      );
+      // This process still has the run, whatever the pid check would say.
+      await expect(
+        claimInterruptedWorkflowRuns(config, { isProcessRunning: () => false }),
+      ).resolves.toEqual([]);
+
+      await vi.waitFor(() => expect(held.resolve).toBeDefined());
+      held.resolve!('done');
+      await expect(handle.completion).resolves.toMatchObject({ ok: true });
+      await expect(fs.access(file)).rejects.toThrow();
+    });
+
+    // The write is not awaited at start; settlement must wait for it, or a run
+    // that ends before the write lands removes nothing and leaves the file.
+    it('does not outlive a run that settles before its write lands', async () => {
+      const { config, root } = await storedConfig();
+      await wrapNextCheckpointWrite(async (write) => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return write();
+      });
+
+      const handle = await runSettled(config, {
+        script: 'return "done"',
+        dispatch: unused,
+      });
+
+      expect(writeWorkflowCheckpointMock).toHaveBeenCalledTimes(1);
+      await expect(
+        fs.access(path.join(root, handle.runId, 'checkpoint.json')),
+      ).rejects.toThrow();
+    });
+
+    // A history retry reads a surviving checkpoint as a process that has not
+    // been seen to exit, and refuses. So a resume that registers before its
+    // own checkpoint lands leaves another process free to start a second
+    // runner on the same journal -- the one thing the refusal exists to stop.
+    describe('a resume waits for its own', () => {
+      const settledRun = async (config: Config) => {
+        const first = await runSettled(config, {
+          script: 'return await agent("work")',
+          dispatch: async () => 'live',
+        });
+        writeWorkflowCheckpointMock.mockClear();
+        return first;
+      };
+
+      it('does not register until the checkpoint is on disk', async () => {
+        const { config, registry } = await storedConfig();
+        const first = await settledRun(config);
+        let release: (() => void) | undefined;
+        await wrapNextCheckpointWrite(async (write) => {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return write();
+        });
+
+        const resume = resumeRun(config, first.runId, {
+          dispatch: async () => 'live',
+        });
+        await vi.waitFor(() => expect(release).toBeDefined());
+
+        // Still the settled run, not this one: nothing has replaced it.
+        expect(registry.get(first.runId)?.status).toBe('completed');
+        expect(registry.get(first.runId)?.startMode).toBeUndefined();
+
+        release!();
+        await expect((await resume).completion).resolves.toMatchObject({
+          ok: true,
+        });
+        expect(registry.get(first.runId)?.startMode).toBe('retry');
+      });
+
+      it('refuses the start when the checkpoint cannot be written', async () => {
+        const { config, registry } = await storedConfig();
+        const first = await settledRun(config);
+        const settled = registry.get(first.runId);
+        const journal = await fs.readFile(first.journalPath!, 'utf8');
+        const dispatch = vi.fn(async () => 'live');
+        writeWorkflowCheckpointMock.mockResolvedValueOnce('failed');
+
+        await expect(
+          resumeRun(config, first.runId, { dispatch }),
+        ).rejects.toThrow(
+          `Could not record that workflow run ${first.runId} is running again, so another process could start it a second time. Nothing was started; try again.`,
+        );
+
+        expect(dispatch).not.toHaveBeenCalled();
+        // The very entry the settled run left, not a replacement: the run is
+        // exactly as resumable as it was before this start was attempted.
+        expect(registry.get(first.runId)).toBe(settled);
+        expect(registry.get(first.runId)?.status).toBe('completed');
+        await expect(fs.readFile(first.journalPath!, 'utf8')).resolves.toBe(
+          journal,
+        );
+        await expect(fs.readFile(first.scriptPath!, 'utf8')).resolves.toBe(
+          'return await agent("work")',
+        );
+      });
+
+      it('starts when there is nowhere to keep a checkpoint', async () => {
+        const { config } = await storedConfig();
+        const first = await settledRun(config);
+        writeWorkflowCheckpointMock.mockResolvedValueOnce('unavailable');
+
+        const handle = await resumeRun(config, first.runId, {
+          dispatch: async () => 'live',
+        });
+
+        await expect(handle.completion).resolves.toMatchObject({ ok: true });
+      });
+
+      // The write is the only await between the last cancellation check and
+      // `register`, and `register` does not read the controller. Without a
+      // second check the run registers anyway and settles `failed`, under a
+      // caller that was handed `{cancelled: true}`.
+      it('reports a cancellation that lands while the checkpoint is being written', async () => {
+        const { config, registry, root } = await storedConfig();
+        const first = await settledRun(config);
+        const settled = registry.get(first.runId);
+        let wrote = false;
+        await wrapNextCheckpointWrite(async (write) => {
+          const outcome = await write();
+          // The file is on disk; the cancel arrives before `register`.
+          expect(registry.cancelStarting(first.runId)).toBe(true);
+          wrote = true;
+          return outcome;
+        });
+        const dispatch = vi.fn(async () => 'live');
+
+        await expect(
+          resumeRun(config, first.runId, { runInBackground: true, dispatch }),
+        ).rejects.toBeInstanceOf(WorkflowStartCancelledError);
+
+        expect(wrote).toBe(true);
+        expect(dispatch).not.toHaveBeenCalled();
+        // Not replaced by a run that never started, and no record left
+        // claiming a process still has it.
+        expect(registry.get(first.runId)).toBe(settled);
+        expect(registry.get(first.runId)?.status).toBe('completed');
+        await expect(
+          fs.access(path.join(root, first.runId, 'checkpoint.json')),
+        ).rejects.toThrow();
+      });
+
+      it('takes back the checkpoint when the start it recorded then fails', async () => {
+        const { config, registry, root } = await storedConfig();
+        const first = await settledRun(config);
+        const file = path.join(root, first.runId, 'checkpoint.json');
+        vi.spyOn(registry, 'register').mockImplementationOnce(() => {
+          throw new Error('registry said no');
+        });
+
+        await expect(
+          resumeRun(config, first.runId, { dispatch: async () => 'live' }),
+        ).rejects.toThrow('registry said no');
+
+        // Left behind, it would read as a live run in another process and
+        // refuse every later retry until that pid is gone.
+        await expect(fs.access(file)).rejects.toThrow();
+      });
+
+      it('does not hold a fresh start for a write nothing depends on', async () => {
+        const { config } = await storedConfig();
+        let release: (() => void) | undefined;
+        let landed = false;
+        await wrapNextCheckpointWrite(async (write) => {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          landed = true;
+          return write();
+        });
+
+        const handle = await startRun(config, {
+          script: 'return "done"',
+          dispatch: unused,
+        });
+
+        // A fresh run has no history entry for anyone to retry, so its
+        // checkpoint only matters if this process dies first.
+        expect(landed).toBe(false);
+        release!();
+        await expect(handle.completion).resolves.toMatchObject({ ok: true });
+      });
+
+      it('starts a fresh run whose checkpoint could not be written', async () => {
+        const { config } = await storedConfig();
+        writeWorkflowCheckpointMock.mockResolvedValueOnce('failed');
+
+        await runOk(config, {
+          script: 'return "done"',
+          dispatch: unused,
+        });
+      });
+    });
+  });
+
   it('rejects a concurrent resume while the original run is active', async () => {
     const { config, registry } = configWithRegistry();
     const runId = 'wf_1234abcd';
-    let resolveDispatch: ((value: string) => void) | undefined;
-    const original = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const { held, handle: original } = await startHeld(config, {
       script: 'return await agent("original")',
-      args: undefined,
       resumeFromRunId: runId,
       runInBackground: true,
-      dispatch: () =>
-        new Promise<string>((resolve) => {
-          resolveDispatch = resolve;
-        }),
     });
-    await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
     const replacementCaller = new AbortController();
     const replacementDispatch = vi.fn(async () => 'replacement');
 
     try {
       await expect(
-        WorkflowRunner.start({
-          config,
+        startRun(config, {
           signal: replacementCaller.signal,
           script: 'return await agent("replacement")',
-          args: undefined,
           resumeFromRunId: runId,
           dispatch: replacementDispatch,
         }),
-      ).rejects.toThrow(/already active/);
+      ).rejects.toThrow(/is still running/);
       expect(registry.getHandle(runId)).toBe(original);
       expect(replacementDispatch).not.toHaveBeenCalled();
       expect(getEventListeners(replacementCaller.signal, 'abort')).toHaveLength(
         0,
       );
     } finally {
-      resolveDispatch?.('original');
+      held.resolve?.('original');
       await original.completion;
     }
 
@@ -1239,38 +2074,26 @@ describe('WorkflowRunner', () => {
   it('ignores late dispatch callbacks from a prior retry entry', async () => {
     const { config, registry } = configWithRegistry();
     const runId = 'wf_1234abcd';
-    let rejectOriginal: ((error: Error) => void) | undefined;
-    const original = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const originalDispatch = heldDispatch();
+    const original = await startRun(config, {
       script: 'agent("original"); throw new Error("original failed")',
-      args: undefined,
       resumeFromRunId: runId,
       runInBackground: true,
-      dispatch: () =>
-        new Promise<string>((_resolve, reject) => {
-          rejectOriginal = reject;
-        }),
+      dispatch: originalDispatch.dispatch,
     });
     await expect(original.completion).resolves.toMatchObject({ ok: false });
 
-    let resolveRetry: ((value: string) => void) | undefined;
-    const retry = await WorkflowRunner.start({
-      config,
-      signal: new AbortController().signal,
+    const retryDispatch = heldDispatch();
+    const retry = await startRun(config, {
       script: 'return await agent("retry")',
-      args: undefined,
       resumeFromRunId: runId,
       runInBackground: true,
-      dispatch: () =>
-        new Promise<string>((resolve) => {
-          resolveRetry = resolve;
-        }),
+      dispatch: retryDispatch.dispatch,
     });
-    await vi.waitFor(() => expect(resolveRetry).toBeDefined());
+    await vi.waitFor(() => expect(retryDispatch.resolve).toBeDefined());
 
-    rejectOriginal?.(new Error('aborted by old controller'));
-    resolveRetry?.('done');
+    originalDispatch.reject?.(new Error('aborted by old controller'));
+    retryDispatch.resolve?.('done');
     await expect(retry.completion).resolves.toMatchObject({ ok: true });
 
     expect(registry.get(runId)?.dispatches).toEqual([
@@ -1286,28 +2109,22 @@ describe('WorkflowRunner', () => {
     );
   });
 
-  it('classifies a background failure after caller abort as failed', async () => {
+  it('settles a background agent failure to null after caller abort', async () => {
     const { config, registry } = configWithRegistry();
     const caller = new AbortController();
-    let rejectDispatch: ((error: Error) => void) | undefined;
-    const handle = await WorkflowRunner.start({
-      config,
+    const { held, handle } = await startHeld(config, {
       signal: caller.signal,
-      script: 'return await agent("work")',
-      args: undefined,
       runInBackground: true,
-      dispatch: () =>
-        new Promise<string>((_resolve, reject) => {
-          rejectDispatch = reject;
-        }),
     });
-    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
 
     caller.abort();
-    rejectDispatch?.(new Error('background boom'));
+    held.reject?.(new Error('background boom'));
 
-    await expect(handle.completion).resolves.toMatchObject({ ok: false });
-    expect(registry.get(handle.runId)?.status).toBe('failed');
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: null },
+    });
+    expect(registry.get(handle.runId)?.status).toBe('completed');
   });
 
   it('routes registry cancellation through each live handle', async () => {
@@ -1325,20 +2142,14 @@ describe('WorkflowRunner', () => {
     for (const { cancel } of cancelCases) {
       const { config, registry } = configWithRegistry();
       const observed = observeSettlement(registry);
-      let rejectDispatch: ((error: Error) => void) | undefined;
-      const handle = await WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
+      const held = heldDispatch();
+      const handle = await startRun(config, {
         script: 'return await agent("work")',
-        args: undefined,
         runInBackground: true,
-        dispatch: () =>
-          new Promise<string>((_resolve, reject) => {
-            rejectDispatch = reject;
-          }),
+        dispatch: held.dispatch,
       });
       const abortSpy = vi.spyOn(handle, 'abort');
-      await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+      await vi.waitFor(() => expect(held.reject).toBeDefined());
 
       cancel(registry, handle.runId);
 
@@ -1347,7 +2158,7 @@ describe('WorkflowRunner', () => {
       expect(registry.get(handle.runId)?.status).toBe('cancelled');
       expect(registry.getHandle(handle.runId)).toBe(handle);
 
-      rejectDispatch?.(new Error('aborted'));
+      held.reject?.(new Error('aborted'));
       const result = await handle.completion;
       expect(result.ok).toBe(false);
       expect(registry.get(handle.runId)?.status).toBe('cancelled');
@@ -1358,42 +2169,45 @@ describe('WorkflowRunner', () => {
     expect(logWorkflowRunMock).toHaveBeenCalledTimes(2);
   });
 
+  it('does not journal a failed agent when the run handle aborts it', async () => {
+    const { config } = await storedConfig();
+    const { held, handle } = await startHeld(config, {
+      script: `return await agent('work');`,
+    });
+
+    handle.abort();
+    held.reject?.(new Error('cancelled by run handle'));
+    await handle.completion;
+
+    const journalEntries = writeLineMock.mock.calls.map(
+      (call) => call[1] as { type: string },
+    );
+    expect(journalEntries.some((entry) => entry.type === 'started')).toBe(true);
+    expect(journalEntries.some((entry) => entry.type === 'failed')).toBe(false);
+  });
+
   it('classifies the internal wall-clock timeout as failed', async () => {
     vi.useFakeTimers();
-    const originalTimeout = process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'];
-    process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'] = '1';
-    try {
-      const timedOut = configWithRegistry();
-      const observed = observeSettlement(timedOut.registry);
-      const handle = await WorkflowRunner.start({
-        config: timedOut.config,
-        signal: new AbortController().signal,
-        script: 'await new Promise(() => {})',
-        args: undefined,
-        runInBackground: true,
-        dispatch: async () => 'unused',
-      });
+    vi.stubEnv('QWEN_CODE_MAX_WORKFLOW_SECONDS', '1');
+    const timedOut = configWithRegistry();
+    const observed = observeSettlement(timedOut.registry);
+    const handle = await startRun(timedOut.config, {
+      script: 'await new Promise(() => {})',
+      runInBackground: true,
+      dispatch: unused,
+    });
 
-      await vi.advanceTimersByTimeAsync(1_000);
-      const result = await handle.completion;
-      expect(result.ok).toBe(false);
-      expect(timedOut.registry.get(handle.runId)?.status).toBe('failed');
-      expect(observed.terminalStatuses).toEqual(['failed']);
-      expect(observed.abortCount()).toBe(1);
-      expect(writeWorkflowSnapshotMock).toHaveBeenCalledOnce();
-      expect(logWorkflowRunMock).toHaveBeenCalledOnce();
-    } finally {
-      vi.useRealTimers();
-      if (originalTimeout === undefined) {
-        delete process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'];
-      } else {
-        process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'] = originalTimeout;
-      }
-    }
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await handle.completion;
+    expect(result.ok).toBe(false);
+    expect(timedOut.registry.get(handle.runId)?.status).toBe('failed');
+    expect(observed.terminalStatuses).toEqual(['failed']);
+    expect(observed.abortCount()).toBe(1);
+    expect(writeWorkflowSnapshotMock).toHaveBeenCalledOnce();
+    expect(logWorkflowRunMock).toHaveBeenCalledOnce();
   });
 
   // ── Pre-launch compile gate ──────────────────────────────────────────
-  //
   // `start()` used to mint a runId, open a journal and register the run
   // before a byte was parsed, so one TypeScript annotation produced a
   // registered, failed run: a phantom row in `/workflows`, a snapshot on
@@ -1403,14 +2217,9 @@ describe('WorkflowRunner', () => {
 
     it('refuses a script that cannot compile', async () => {
       const { config } = configWithRegistry();
-      await expect(
-        WorkflowRunner.start({
-          config,
-          signal: new AbortController().signal,
-          script: TS_ANNOTATION,
-          args: undefined,
-        }),
-      ).rejects.toThrow(/was not launched/);
+      await expect(startRun(config, { script: TS_ANNOTATION })).rejects.toThrow(
+        /was not launched/,
+      );
     });
 
     // The point of the gate is not the message, it is that nothing survives
@@ -1423,12 +2232,7 @@ describe('WorkflowRunner', () => {
       writeLineMock.mockClear();
 
       await expect(
-        WorkflowRunner.start({
-          config,
-          signal: new AbortController().signal,
-          script: TS_ANNOTATION,
-          args: undefined,
-        }),
+        startRun(config, { script: TS_ANNOTATION }),
       ).rejects.toThrow();
 
       expect(registry.list()).toHaveLength(0);
@@ -1439,11 +2243,8 @@ describe('WorkflowRunner', () => {
 
     it('names the offending line and explains the usual cause', async () => {
       const { config } = configWithRegistry();
-      const error = await WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
+      const error = await startRun(config, {
         script: `await agent('one');\n${TS_ANNOTATION}`,
-        args: undefined,
       }).then(
         () => {
           throw new Error('expected the script to be refused');
@@ -1466,11 +2267,8 @@ describe('WorkflowRunner', () => {
       'attributes the author line with %s separators',
       async (_name, separator) => {
         const { config } = configWithRegistry();
-        const error = await WorkflowRunner.start({
-          config,
-          signal: new AbortController().signal,
+        const error = await startRun(config, {
           script: `await agent('one');${separator}const x: string = 1;`,
-          args: undefined,
         }).catch((caught: unknown) => caught);
 
         expect(error).toBeInstanceOf(WorkflowScriptNotLaunchedError);
@@ -1478,6 +2276,33 @@ describe('WorkflowRunner', () => {
         expect((error as Error).message).toContain('const x: string = 1;');
       },
     );
+
+    // A dynamic import() fails only when V8 reaches it, after the agents
+    // before it have been spent. Refused here with its own cause instead.
+    it('refuses a dynamic import before any agent runs, without the syntax hint', async () => {
+      const { config, registry, root } = await storedConfig();
+      const dispatch = vi.fn(async () => 'ok');
+
+      const start = startRun(config, {
+        script: "await agent('must-not-run');\nimport('node:fs');\nreturn 1;",
+        dispatch,
+      });
+      await expect(start).rejects.toBeInstanceOf(
+        WorkflowScriptNotLaunchedError,
+      );
+      await expect(start).rejects.toThrow(
+        /line 2: dynamic import\(\) is not supported in workflow scripts/,
+      );
+      await expect(start).rejects.toThrow(/inside an agent\(\) call/);
+      await expect(start).rejects.not.toThrow(/TypeScript syntax/);
+
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(registry.list()).toHaveLength(0);
+      expect(writeWorkflowSnapshotMock).not.toHaveBeenCalled();
+      expect(logWorkflowRunMock).not.toHaveBeenCalled();
+      expect(writeLineMock).not.toHaveBeenCalled();
+      await expect(fs.readdir(root)).resolves.toEqual([]);
+    });
 
     // A malformed `export const meta` cannot start a run either, and it
     // reaches the same refusal rather than becoming a registered failure.
@@ -1491,12 +2316,9 @@ describe('WorkflowRunner', () => {
       'refuses a malformed meta literal without leaking internal names',
       async (script, internalName) => {
         const { config, registry } = configWithRegistry();
-        const error = await WorkflowRunner.start({
-          config,
-          signal: new AbortController().signal,
-          script,
-          args: undefined,
-        }).catch((caught: unknown) => caught);
+        const error = await startRun(config, { script }).catch(
+          (caught: unknown) => caught,
+        );
         expect(error).toBeInstanceOf(WorkflowScriptNotLaunchedError);
         expect((error as Error).message).toMatch(
           /invalid meta object literal|unbalanced braces/,
@@ -1520,6 +2342,8 @@ describe('WorkflowRunner', () => {
         TS_ANNOTATION,
         'await agent(',
         'export const meta = { name: someIdentifier }',
+        "await agent('a');\nawait import('node:fs');",
+        'const s = "import(\'node:fs\')";\nawait agent(s);',
       ];
 
       for (const source of fixtures) {
@@ -1531,11 +2355,8 @@ describe('WorkflowRunner', () => {
         }
 
         const { config } = configWithRegistry();
-        const started = await WorkflowRunner.start({
-          config,
-          signal: new AbortController().signal,
+        const started = await startRun(config, {
           script: source,
-          args: undefined,
           dispatch: async () => 'ok',
         }).then(
           (handle) => {
@@ -1553,7 +2374,6 @@ describe('WorkflowRunner', () => {
     });
   });
   // ── Persisted inline script ─────────────────────────────────────────
-  //
   // An inline script used to exist only in memory and in the terminal
   // snapshot: a model that wanted to resume had to re-send the whole source,
   // and a user had no file to read. The runner now writes it under the
@@ -1561,26 +2381,12 @@ describe('WorkflowRunner', () => {
   // path it hands back is one the loader will take back.
   describe('persisted inline script', () => {
     it('writes the inline script under the generated root and hands back both paths', async () => {
-      const { config, registry } = configWithRegistry();
-      const root = await makeStorageRoot();
-      stubStorage(config, root);
+      const { config, registry, root } = await storedConfig();
       const script = 'return "done"';
 
-      const handle = await WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
-        script,
-        args: undefined,
-        dispatch: async () => 'unused',
-      });
-      await expect(handle.completion).resolves.toMatchObject({ ok: true });
+      const handle = await runOk(config, { script, dispatch: unused });
 
-      const expected = path.join(
-        root,
-        'generated',
-        'inline',
-        `${handle.runId}.js`,
-      );
+      const expected = path.join(inlineDir(root), `${handle.runId}.js`);
       expect(handle.scriptPath).toBe(expected);
       expect(handle.journalPath).toBe(
         path.join(root, handle.runId, 'journal.jsonl'),
@@ -1598,69 +2404,43 @@ describe('WorkflowRunner', () => {
     });
 
     it('writes nothing for a scriptPath launch and reports the loaded path', async () => {
-      const { config } = configWithRegistry();
-      const root = await makeStorageRoot();
-      stubStorage(config, root);
-      resolveSavedWorkflowScriptMock.mockResolvedValueOnce({
-        name: 'review',
-        savedWorkflowName: 'review',
-        scriptPath: '/tmp/review.js',
-        script: 'return "loaded"',
-      });
+      const { config, root } = await storedConfig();
+      resolveSavedWorkflowScriptMock.mockResolvedValueOnce(
+        savedWorkflow('review', '/tmp/review.js', 'return "loaded"'),
+      );
 
-      const handle = await WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
+      const handle = await runOk(config, {
         scriptPath: '/tmp/review.js',
-        args: undefined,
-        dispatch: async () => 'unused',
+        dispatch: unused,
       });
-      await expect(handle.completion).resolves.toMatchObject({ ok: true });
 
       expect(handle.scriptPath).toBe('/tmp/review.js');
-      await expect(
-        fs.readdir(path.join(root, 'generated', 'inline')),
-      ).rejects.toThrow();
+      await expect(fs.readdir(inlineDir(root))).rejects.toThrow();
     });
 
     it('does not replace an existing script path with a generated copy', async () => {
-      const { config } = configWithRegistry();
-      const root = await makeStorageRoot();
-      stubStorage(config, root);
+      const { config, root } = await storedConfig();
 
-      const handle = await WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
+      const handle = await runOk(config, {
         script: 'return "loaded"',
         scriptPath: '/tmp/review.js',
-        args: undefined,
-        dispatch: async () => 'unused',
+        dispatch: unused,
       });
-      await expect(handle.completion).resolves.toMatchObject({ ok: true });
 
       expect(handle.scriptPath).toBe('/tmp/review.js');
-      await expect(
-        fs.readdir(path.join(root, 'generated', 'inline')),
-      ).rejects.toThrow();
+      await expect(fs.readdir(inlineDir(root))).rejects.toThrow();
     });
 
     it('leaves no file behind when the script does not compile', async () => {
-      const { config } = configWithRegistry();
-      const root = await makeStorageRoot();
-      stubStorage(config, root);
+      const { config, root } = await storedConfig();
 
       await expect(
-        WorkflowRunner.start({
-          config,
-          signal: new AbortController().signal,
+        startRun(config, {
           script: "const target: string = 'x';\nawait agent(target);",
-          args: undefined,
         }),
       ).rejects.toThrow(/was not launched/);
 
-      await expect(
-        fs.readdir(path.join(root, 'generated', 'inline')),
-      ).rejects.toThrow();
+      await expect(fs.readdir(inlineDir(root))).rejects.toThrow();
     });
 
     // A symlinked generated root is refused by the loader, so writing through
@@ -1668,21 +2448,15 @@ describe('WorkflowRunner', () => {
     // planted link would use to place model-authored source outside the
     // runtime dir. Degrade, never fail the run over it.
     it('refuses a symlinked generated root without failing the run', async () => {
-      const { config } = configWithRegistry();
-      const root = await makeStorageRoot();
-      stubStorage(config, root);
+      const { config, root } = await storedConfig();
       const outside = path.join(root, 'outside');
       await fs.mkdir(outside, { recursive: true });
       await fs.symlink(outside, path.join(root, 'generated'), 'dir');
 
-      const handle = await WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
+      const handle = await runOk(config, {
         script: 'return "done"',
-        args: undefined,
-        dispatch: async () => 'unused',
+        dispatch: unused,
       });
-      await expect(handle.completion).resolves.toMatchObject({ ok: true });
 
       expect(handle.scriptPath).toBeUndefined();
       await expect(fs.readdir(outside)).resolves.toEqual([]);
@@ -1692,36 +2466,149 @@ describe('WorkflowRunner', () => {
     // path back. The second run must land on the same file rather than
     // accumulating a copy per attempt.
     it('overwrites the same file when an inline run is resumed', async () => {
-      const { config } = configWithRegistry();
-      const root = await makeStorageRoot();
-      stubStorage(config, root);
+      const { config, root } = await storedConfig();
 
-      const first = await WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
+      const first = await runOk(config, {
         script: 'return "first"',
-        args: undefined,
-        dispatch: async () => 'unused',
+        dispatch: unused,
       });
-      await expect(first.completion).resolves.toMatchObject({ ok: true });
 
-      const second = await WorkflowRunner.start({
-        config,
-        signal: new AbortController().signal,
+      const second = await runOk(config, {
         script: 'return "second"',
-        args: undefined,
         resumeFromRunId: first.runId,
-        dispatch: async () => 'unused',
+        dispatch: unused,
       });
-      await expect(second.completion).resolves.toMatchObject({ ok: true });
 
       expect(second.scriptPath).toBe(first.scriptPath);
       await expect(fs.readFile(first.scriptPath!, 'utf8')).resolves.toBe(
         'return "second"',
       );
-      await expect(
-        fs.readdir(path.join(root, 'generated', 'inline')),
-      ).resolves.toEqual([`${first.runId}.js`]);
+      await expect(fs.readdir(inlineDir(root))).resolves.toEqual([
+        `${first.runId}.js`,
+      ]);
     });
+  });
+  // A `+250k` turn target belongs to the turn, not to this run: the run's
+  // budget measures the turn, while the registry — what `/workflows` and the
+  // snapshot show — keeps this run's own figures and records no cap for it.
+  it('builds a directive budget from the turn and registers no per-run cap', async () => {
+    const { config, registry } = configWithRegistry();
+    const turns = new TurnBudget();
+    turns.beginTurn({
+      promptId: 'turn',
+      sessionId: 'runner-turn',
+      budget: 250_000,
+      directiveText: '+250k',
+      outputTokensAtTurnStart: 0,
+    });
+    Object.assign(config, {
+      getSessionId: () => 'runner-turn',
+      getTurnBudget: () => turns,
+    });
+
+    const handle = await startRun(config, {
+      script: 'return budget.total',
+      dispatch: unused,
+    });
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: 250_000 },
+    });
+    expect(handle.budget.source).toBe('directive');
+    expect(handle.budget.total).toBe(250_000);
+    expect(registry.get(handle.runId)?.tokenBudgetTotal).toBeNull();
+  });
+});
+
+// ── Workflow size ─────────────────────────────────────────────────────
+// The runner is the one place a run's size is evaluated: it reads the
+// guideline once, checks on every scheduled agent and every spend update, and
+// hands the first warning to the registry. The thresholds themselves are
+// covered in workflow-size.test.ts; these pin the wiring.
+describe('WorkflowRunner — workflow size', () => {
+  beforeEach(() => {
+    logWorkflowSizeWarningMock.mockClear();
+  });
+
+  function fanOut(count: number): string {
+    return `return await parallel(Array.from({ length: ${count} }, (_, i) => () => agent('item ' + i)))`;
+  }
+
+  it('flags a run that schedules more agents than the default guideline, once', async () => {
+    const { config, registry } = configWithRegistry();
+    const handle = await runOk(config, {
+      script: fanOut(WORKFLOW_SIZE_GUIDELINE_AGENTS.medium + 5),
+      dispatch: async () => 'ok',
+    });
+
+    expect(registry.get(handle.runId)?.sizeWarning).toMatchObject({
+      axis: 'agents',
+      scheduledAgents: WORKFLOW_SIZE_GUIDELINE_AGENTS.medium + 1,
+      agentCap: WORKFLOW_SIZE_GUIDELINE_AGENTS.medium,
+      capFromGuideline: true,
+    });
+    expect(logWorkflowSizeWarningMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes the agent threshold from a configured guideline', async () => {
+    const { config, registry } = configWithRegistry();
+    Object.assign(config, {
+      getWorkflowSizeGuideline: () => ({ size: 'small', isDefault: false }),
+    });
+    const handle = await runSettled(config, {
+      script: fanOut(WORKFLOW_SIZE_GUIDELINE_AGENTS.small + 1),
+      dispatch: async () => 'ok',
+    });
+
+    expect(registry.get(handle.runId)?.sizeWarning).toMatchObject({
+      axis: 'agents',
+      agentCap: WORKFLOW_SIZE_GUIDELINE_AGENTS.small,
+    });
+  });
+
+  it('stays quiet within bounds, and lets the env raise the threshold', async () => {
+    vi.stubEnv(WORKFLOW_SIZE_WARNING_AGENTS_ENV, '100');
+    try {
+      const { config, registry } = configWithRegistry();
+      const handle = await runSettled(config, {
+        // Past the default guideline, under the env threshold, and under the
+        // token projection (20 × 70k < 1.5M).
+        script: fanOut(20),
+        dispatch: async () => 'ok',
+      });
+
+      expect(registry.get(handle.runId)?.sizeWarning).toBeUndefined();
+      expect(logWorkflowSizeWarningMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  // A resume replays agents by call sequence; a clock or a random draw changes
+  // the sequence. Refused before launch, with its own cause rather than the
+  // syntax hint a compile failure carries.
+  it('refuses a script that reads the clock before any agent runs', async () => {
+    const { config } = configWithRegistry();
+    const dispatch = vi.fn(async () => 'ok');
+    const start = startRun(config, {
+      script: "await agent('first')\nreturn await agent('stamp ' + Date.now())",
+      dispatch,
+    });
+
+    await expect(start).rejects.toBeInstanceOf(WorkflowScriptNotLaunchedError);
+    await expect(start).rejects.toThrow(/Date\.now\(\) on line 2/);
+    await expect(start).rejects.not.toThrow(/TypeScript syntax/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('keeps the syntax hint on a compile failure', async () => {
+    const { config } = configWithRegistry();
+    await expect(
+      startRun(config, {
+        script: "const target: string = 'x'\nawait agent(target)",
+        dispatch: async () => 'ok',
+      }),
+    ).rejects.toThrow(/TypeScript syntax/);
   });
 });

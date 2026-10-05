@@ -15,11 +15,20 @@ describe('main CI failure issue workflow', () => {
   );
   const yml = parse(workflow);
   const jobs = yml.jobs;
+  // Collapse line continuations first so pins read like the shell they pin
+  // rather than like this file's indentation.
+  const oneLine = (script) =>
+    script.replace(/\\\n/g, '\n').replace(/\s+/g, ' ');
 
   it('opens an autofix-ready issue only for failed main CI runs', () => {
     expect(workflow).toContain('workflow_run:');
+    // 'SDK Java' joined for its post-merge push run: its path filter watches
+    // the SDK's embedding surfaces too, so it fires on roughly half of recent
+    // merges to main — and a red push run is the only signal for a merge
+    // result neither PR could fail: the duplicate-V16 Flyway collision of
+    // #12940 sat unnoticed for two hours without it.
     expect(workflow).toContain(
-      "workflows: ['E2E Tests', 'SDK Python', 'Qwen Code CI']",
+      "workflows: ['E2E Tests', 'SDK Java', 'SDK Python', 'Qwen Code CI']",
     );
     expect(workflow).toContain("types: ['completed']");
     // 'Qwen Code CI' joined the list when the macOS and Windows lanes got a
@@ -53,6 +62,17 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).not.toContain(
       "github.event.workflow_run.event == 'pull_request'",
     );
+  });
+
+  it('pins the watched name to the name key of sdk-java.yml', () => {
+    // `workflow_run.workflows` matches the watched workflow's `name:` key, not
+    // its filename — renaming sdk-java.yml's name must fail here instead of
+    // silently stopping the SDK Java failure issues.
+    const sdkJava = parse(
+      readFileSync('.github/workflows/sdk-java.yml', 'utf8'),
+    );
+    expect(sdkJava.name).toBe('SDK Java');
+    expect(yml.on.workflow_run.workflows).toContain(sdkJava.name);
   });
 
   it('creates an issue that the existing autofix worker can pick up', () => {
@@ -102,8 +122,6 @@ describe('main CI failure issue workflow', () => {
     // and every fragment of it stays green on its own when the wiring between
     // them is cut. Collapsing the line continuations first keeps the pins
     // reading like the shell they pin rather than like this file's indentation.
-    const oneLine = (script) =>
-      script.replace(/\\\n/g, '\n').replace(/\s+/g, ' ');
     const steps = jobs.analyze.steps;
     const download = oneLine(
       steps.find((step) => step.name === 'Download failed job logs').run,
@@ -149,6 +167,29 @@ describe('main CI failure issue workflow', () => {
     )?.[0];
     expect(analyzeInvocation, 'the analyze invocation').toContain(
       '--jobs "${RUNNER_TEMP}/failed-jobs.tsv"',
+    );
+  });
+
+  it('passes --allow-escape-sequences so gh does not refuse the colourised logs', () => {
+    // gh >= 2.97.0 (GHSA-3m3g-3wcr-px46) refuses to print a raw response
+    // carrying terminal escape sequences unless the flag opts out, and the
+    // colourised vitest/pytest logs always carry them: without the flag
+    // every download fails deterministically — a retry would hit the
+    // identical refusal — and the plan falls back to a per-commit issue
+    // naming no failing test. The analyzer strips ANSI before matching, so
+    // the escapes never reach an issue body.
+    const download = oneLine(
+      jobs.analyze.steps.find(
+        (step) => step.name === 'Download failed job logs',
+      ).run,
+    );
+    expect(download).toContain(
+      'if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" --allow-escape-sequences > "${log_dir}/${job_id}.log"; then',
+    );
+    // The warn-and-drop fallback is unchanged: a log that still fails only
+    // costs precision, never the issue.
+    expect(download).toContain(
+      'echo "::warning::Could not download the log of job ${job_id}" rm -f "${log_dir}/${job_id}.log"',
     );
   });
 

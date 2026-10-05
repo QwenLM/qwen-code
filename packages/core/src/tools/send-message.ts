@@ -135,6 +135,9 @@ class SendMessageInvocation extends BaseToolInvocation<
       // Addresses this tool would keep in-process must never be handed
       // back to the model as a peer address, bare.
       isReserved: (address) => isInProcessRecipient(address, teamFile),
+      // Which of this process's records is the sender. Matters only for a
+      // process hosting several sessions; the default covers the rest.
+      slot: this.config.getSessionRegistrySlot(),
     });
 
     switch (outcome.kind) {
@@ -293,14 +296,24 @@ class SendMessageInvocation extends BaseToolInvocation<
       // compatible runtime is not retained across session restore, so the
       // persisted transcript remains the cold fallback for resumable agents.
       if (entry.status === 'completed') {
-        const continued = registry.continueResidentAgent(
+        const continuation = registry.continueResidentAgent(
           this.params.task_id,
           this.params.message,
         );
-        if (continued) {
+        if (continuation === 'continued') {
           return {
             llmContent: `Background task "${this.params.task_id}" continued on its existing runtime with your message as the next instruction.`,
             returnDisplay: `Continued ${entry.description}`,
+          };
+        }
+        if (continuation === 'capacity_wait') {
+          return {
+            llmContent: `Error: Background task "${this.params.task_id}" is waiting for background-agent capacity.`,
+            returnDisplay: 'Task is waiting for capacity.',
+            error: {
+              message: `Background-agent capacity unavailable: ${this.params.task_id}`,
+              type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING,
+            },
           };
         }
 
@@ -452,7 +465,7 @@ class SendMessageInvocation extends BaseToolInvocation<
 
     if (!teamManager) {
       const msg = this.peerMessagingOff
-        ? `No active team and no task_id, and cross-session messaging is not enabled in this session (agents.crossSessionMessaging), so "${to}" cannot be another session. ` +
+        ? `No active team and no task_id, and cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so "${to}" cannot be another session. ` +
           'Create a team, or pass `task_id` to message a background task.'
         : `No active team, no task_id, and no reachable session named "${to}". ` +
           'Create a team, pass `task_id` to message a background task, or use ' +
@@ -483,7 +496,7 @@ class SendMessageInvocation extends BaseToolInvocation<
         // that the name it wants could belong to a session this setting
         // is hiding.
         errMsg += this.peerMessagingOff
-          ? ` Cross-session messaging is not enabled in this session (agents.crossSessionMessaging), so another session could not have taken that name either.`
+          ? ` Cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so another session could not have taken that name either.`
           : ` No reachable session has that name either; use list_agents to see who is reachable.`;
       }
       return {

@@ -186,6 +186,8 @@ async function main() {
   );
   const repoRoot = path.resolve(packageRoot, '../..');
   const outDir = process.env.EXTENSION_OUT_DIR || 'dist/extension';
+  // A store build stages its own directory and archive, so both move together.
+  const archive = process.env.EXTENSION_ZIP || 'chrome-extension.zip';
   const roots = process.argv.slice(2);
   let positionalMode = false;
   let optionalRoots;
@@ -207,7 +209,7 @@ async function main() {
       ),
     ];
     optionalMetafilePaths = [path.join(repoRoot, 'dist/esbuild.json')];
-    zipPath = path.join(packageRoot, 'chrome-extension.zip');
+    zipPath = path.resolve(packageRoot, archive);
   } else {
     console.warn(
       'artifact-scan: positional roots provided; skipping required-file, esbuild metafile, and zip scans',

@@ -1,3 +1,4 @@
+import { getSourcesByTurn } from './sources/sourceEntries';
 import {
   forwardRef,
   memo,
@@ -43,12 +44,20 @@ import {
 import { CompactModeContext } from '../WebShellContexts';
 import {
   useWebShellCustomization,
+  type WebShellAssistantFeedbackRating,
   type WebShellAssistantTurnFooterRenderInfo,
+  type WebShellSource,
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
+import { useAssistantFeedback } from '../hooks/useAssistantFeedback';
+import {
+  feedbackUserMessageOf,
+  notifyAssistantFeedback,
+  shouldOfferAssistantFeedback,
+} from '../utils/assistantFeedback';
 import { MessageItem } from './MessageItem';
 import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
@@ -61,15 +70,22 @@ import {
 } from './artifacts/TurnOutputs';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
+import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import {
   isActiveToolStatus,
+  isCompletedAskUserQuestion,
+  isAskUserQuestionToolName,
   toolContainsCallId,
 } from './messages/toolFormatting';
+import { McpAppSessionContext } from '../mcpAppHostContext';
 import { getMcpAppDisplay } from './messages/McpApp';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
-import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
+import {
+  SESSION_TIMELINE_MIN_VISIBLE_ENTRIES,
+  WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS,
+} from '../constants/sessions';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 
 const noopTurnOutputAction = () => undefined;
@@ -92,7 +108,16 @@ export interface MessageListProps {
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
   onInsightReportOpen?: (path: string) => void;
-  onEditUserMessage?: (targetTurnIndex: number, content: string) => void;
+  /** Open the in-place editor; return true when a host owns the lifecycle. */
+  onEditUserMessage?: (
+    targetTurnIndex: number,
+    content: string,
+  ) => boolean | void;
+  /** Send the text confirmed in the in-place editor. `false` keeps it open. */
+  onSubmitUserMessageEdit?: (
+    targetTurnIndex: number,
+    content: string,
+  ) => boolean | void | Promise<boolean | void>;
   loadingTranscript?: boolean;
   catchingUp?: boolean;
   hasOlderHistory?: boolean;
@@ -104,7 +129,8 @@ export interface MessageListProps {
    * Identity of the session whose transcript `messages` show. Block ids are
    * per-session ordinals, so changing it resets every session-scoped UI state
    * (collapse overrides, pagination keep-open, pending page snapshots, the
-   * scroll anchor) — a direct session switch never renders empty messages.
+   * scroll anchor, the settled-stale-message latch) — a direct session switch
+   * never renders empty messages.
    */
   sessionKey?: string;
   transcriptBlockCount?: number;
@@ -119,7 +145,11 @@ export interface MessageListProps {
   transcriptReloadPaused?: boolean;
   /**
    * True while the agent is still answering. The newest turn then stays
-   * expanded and un-collapsible so streaming output is never hidden.
+   * expanded and un-collapsible so streaming output is never hidden. When
+   * false, stale assistant/thinking/tool-group-thought streaming flags left
+   * by a restored replay are settled before render — and stay settled when
+   * the session responds again, for as long as their content is unchanged —
+   * which is what hosts observe through MarkdownRenderContext.isStreaming.
    */
   isResponding?: boolean;
   welcomeHeader?: ReactNode;
@@ -142,6 +172,7 @@ export interface MessageListProps {
    */
   bottomOverlayInset?: number;
   hideSessionTimeline?: boolean;
+  timelineAction?: ReactNode;
   hideFirstUserMessage?: boolean;
   firstTurnMetrics?: {
     durationMs?: number;
@@ -158,6 +189,10 @@ export interface MessageListProps {
   onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
   turnArtifacts?: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
+  sourceEntries?: readonly WebShellSource[];
+  sourceSessionId?: string;
+  mcpAppSessionId?: string;
+  onSourceOpen?: (source: WebShellSource) => void;
   turnScheduledTasks?: ReadonlyMap<string, readonly TurnOutputScheduledTask[]>;
   onReviewChanges?: (
     changes: readonly TurnOutputFileChange[],
@@ -166,6 +201,7 @@ export interface MessageListProps {
   onOpenArtifact?: (artifactId: string, previewContent?: string) => void;
   onOpenScheduledTask?: (task: TurnOutputScheduledTask) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onToolResultOpen?: (itemId: string) => void;
   onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
 }
@@ -306,7 +342,11 @@ function isForceExpandGroup(
   return false;
 }
 
-function splitMcpAppToolGroups(messages: Message[]): Message[] {
+function isStandaloneTool(tool: ACPToolCall): boolean {
+  return isCompletedAskUserQuestion(tool) || !!getMcpAppDisplay(tool.rawOutput);
+}
+
+function splitStandaloneToolGroups(messages: Message[]): Message[] {
   const result: Message[] = [];
   let changed = false;
 
@@ -314,7 +354,7 @@ function splitMcpAppToolGroups(messages: Message[]): Message[] {
     if (
       message.role !== 'tool_group' ||
       message.tools.length < 2 ||
-      !message.tools.some((tool) => getMcpAppDisplay(tool.rawOutput))
+      !message.tools.some(isStandaloneTool)
     ) {
       result.push(message);
       continue;
@@ -336,7 +376,7 @@ function splitMcpAppToolGroups(messages: Message[]): Message[] {
     };
 
     for (const tool of message.tools) {
-      if (getMcpAppDisplay(tool.rawOutput)) {
+      if (isStandaloneTool(tool)) {
         pushSegment(segment);
         segment = [];
         pushSegment([tool]);
@@ -360,7 +400,7 @@ function mergeCompactToolGroups(
   const isMergedToolGroup = (m: Message): boolean =>
     m.role === 'tool_group' &&
     !isForceExpandGroup(m, pendingApproval) &&
-    !m.tools.some((tool) => getMcpAppDisplay(tool.rawOutput));
+    !m.tools.some(isStandaloneTool);
 
   while (i < messages.length) {
     const msg = messages[i];
@@ -477,6 +517,61 @@ function updateCompactStreamingThinkingTail(
   return result;
 }
 
+function settleStaleStreamingMessage(message: Message): Message {
+  if (message.role === 'assistant' || message.role === 'thinking') {
+    return message.isStreaming ? { ...message, isStreaming: false } : message;
+  }
+  if (message.role !== 'tool_group' || !message.thoughts?.length)
+    return message;
+  let changed = false;
+  const thoughts = message.thoughts.map((thought) => {
+    if (!thought.isStreaming) return thought;
+    changed = true;
+    return { ...thought, isStreaming: false };
+  });
+  return changed ? { ...message, thoughts } : message;
+}
+
+/**
+ * The content a settleable message carries, ignoring streaming flags. The
+ * idle-settle latch records it so a responding render can tell a stale replay
+ * row (content never changes) from a genuinely live row that reused the id
+ * (content grows every tick).
+ */
+function staleStreamingContentSignature(message: Message): string | undefined {
+  if (message.role === 'assistant' || message.role === 'thinking') {
+    return message.content;
+  }
+  if (message.role === 'tool_group' && message.thoughts?.length) {
+    return JSON.stringify(message.thoughts.map((thought) => thought.content));
+  }
+  return undefined;
+}
+
+/** Settled copies are pure in the source message; reuse them per source
+ * object instead of recloning the same latched rows every streaming frame. */
+function settleStaleStreamingMessageCached(
+  cache: WeakMap<Message, Message>,
+  message: Message,
+): Message {
+  const cached = cache.get(message);
+  if (cached !== undefined) return cached;
+  const next = settleStaleStreamingMessage(message);
+  cache.set(message, next);
+  return next;
+}
+
+/**
+ * Ids an idle render settled, mapped to the content they held at settle time.
+ * Reads ignore latches recorded for another `sessionKey`: block ids are
+ * per-projection ordinals, so a different session's latch can never be
+ * trusted to denote the rows on screen.
+ */
+interface SettledStaleMessages {
+  sessionKey: string | undefined;
+  ids: ReadonlyMap<string, string>;
+}
+
 export function groupParallelAgents(sourceMessages: Message[]): DisplayItem[] {
   return groupParallelAgentsBase(
     normalizeTerminalBackgroundAgentTools(sourceMessages),
@@ -525,7 +620,17 @@ export function attachTurnOutputs(
     ) {
       return;
     }
-    result.push({
+    // The card closes the turn's own content, so it belongs above a local recap
+    // that trails the turn rather than after it. Status rows are not turn
+    // content, and the walk stops at the turn's own last row, so the card can
+    // never land inside the turn.
+    let insertAt = result.length;
+    for (let index = result.length - 1; index >= 0; index -= 1) {
+      const item = result[index];
+      if (item.type !== 'message' || item.message.role !== 'system') break;
+      if (item.message.source === 'recap') insertAt = index;
+    }
+    result.splice(insertAt, 0, {
       type: 'turn_outputs',
       key: turnId,
       turnId,
@@ -655,15 +760,21 @@ function findFinalAnswerIndex(
   end: number,
   includeBackgroundNotifications = true,
 ): number {
-  let lastWorkStepIndex = start;
+  let hasLaterWork = false;
   for (let i = end; i > start; i--) {
-    if (isExecutionWorkStep(items[i]!)) {
-      lastWorkStepIndex = i;
-      break;
-    }
-  }
-  for (let i = end; i > lastWorkStepIndex; i--) {
-    if (isFinalContentCandidate(items[i]!, includeBackgroundNotifications)) {
+    const item = items[i]!;
+    if (
+      item.type === 'message' &&
+      item.message.role === 'system' &&
+      item.message.source === 'background_notification_turn_started'
+    ) {
+      hasLaterWork = false;
+    } else if (isExecutionWorkStep(item)) {
+      hasLaterWork = true;
+    } else if (
+      !hasLaterWork &&
+      isFinalContentCandidate(item, includeBackgroundNotifications)
+    ) {
       return i;
     }
   }
@@ -736,6 +847,7 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   if (item.type === 'turn_collapse') return false;
   switch (item.message.role) {
     case 'tool_group':
+      return !item.message.tools.some(isCompletedAskUserQuestion);
     case 'plan':
       return true;
     case 'assistant':
@@ -1363,7 +1475,11 @@ function itemToolCallCount(item: DisplayItem): number {
   if (item.type === 'parallel_agents') return item.agents.length;
   if (item.type === 'turn_outputs') return 0;
   if (item.type === 'turn_collapse') return 0;
-  return item.message.role === 'tool_group' ? item.message.tools.length : 0;
+  return item.message.role === 'tool_group'
+    ? item.message.tools.filter(
+        (tool) => !isAskUserQuestionToolName(tool.toolName),
+      ).length
+    : 0;
 }
 
 /**
@@ -1537,8 +1653,21 @@ function completedBackgroundShellTaskIds(
   const taskIds = new Set(terminalTaskIds);
   for (const item of items) {
     if (item.type !== 'message' || item.message.role !== 'system') continue;
-    if (item.message.source !== 'background_notification') continue;
-    const data = item.message.data;
+    if (
+      item.message.source !== 'background_notification' &&
+      item.message.source !== 'background_task_completed' &&
+      item.message.source !== 'background_notification_turn_started'
+    )
+      continue;
+    let data = item.message.data;
+    if (
+      item.message.source === 'background_notification_turn_started' &&
+      data &&
+      typeof data === 'object' &&
+      'backgroundTask' in data
+    ) {
+      data = data.backgroundTask ?? data;
+    }
     if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
     if (!('kind' in data) || data.kind !== 'shell') continue;
     // Shell background notifications are terminal-only.
@@ -1623,7 +1752,9 @@ function backgroundAgentCompletionForMessage(message: Message): {
 } | null {
   if (
     message.role !== 'system' ||
-    message.source !== 'background_notification'
+    (message.source !== 'background_notification' &&
+      message.source !== 'background_task_completed' &&
+      message.source !== 'background_notification_turn_started')
   ) {
     return null;
   }
@@ -1632,7 +1763,15 @@ function backgroundAgentCompletionForMessage(message: Message): {
       ?.trimStart()
       .toLowerCase()
       .startsWith('background agent ') === true;
-  const data = message.data;
+  let data = message.data;
+  if (
+    message.source === 'background_notification_turn_started' &&
+    data &&
+    typeof data === 'object' &&
+    'backgroundTask' in data
+  ) {
+    data = data.backgroundTask ?? data;
+  }
   if (typeof data !== 'object' || data === null || Array.isArray(data)) {
     return identifiesAgent
       ? {
@@ -1924,8 +2063,30 @@ export function applyTurnCollapse(
     );
 
     const answerIdx = findFinalAnswerIndex(items, start, end);
+    let answerStartIdx = answerIdx;
+    // A passive completion can split one streamed answer into several rows.
+    // Keep those segments, but stop at work or an automatic execution marker.
+    if (answerIdx >= 0 && isFinalContentCandidate(items[answerIdx]!, false)) {
+      let crossedCompletion = false;
+      for (let i = answerIdx - 1; i > start; i--) {
+        const item = items[i]!;
+        if (item.type !== 'message') break;
+        if (
+          item.message.role === 'system' &&
+          item.message.source === 'background_task_completed'
+        ) {
+          crossedCompletion = true;
+        } else if (crossedCompletion && item.message.role === 'assistant') {
+          answerStartIdx = i;
+          crossedCompletion = false;
+        } else {
+          break;
+        }
+      }
+    }
     let hiddenCount = 0;
     let terminalTs: number | undefined;
+    let cancelledElapsedMs: number | undefined;
     let assistantTs: number | undefined;
     let inputTokens = 0;
     let outputTokens = 0;
@@ -1937,7 +2098,10 @@ export function applyTurnCollapse(
     let hasTurnError = false;
     for (let i = start + 1; i <= end; i++) {
       const item = items[i]!;
-      const isStep = isHideableStep(item, i === answerIdx);
+      const isStep = isHideableStep(
+        item,
+        i >= answerStartIdx && i <= answerIdx,
+      );
       if (isStep) {
         hiddenCount++;
       }
@@ -1954,6 +2118,24 @@ export function applyTurnCollapse(
       ) {
         // Compact mode folds thinking into tool summaries; count it too.
         thinkingCount += item.message.thoughts.length;
+      }
+      if (
+        item.type === 'message' &&
+        item.message.role === 'system' &&
+        item.message.source === 'prompt_cancelled'
+      ) {
+        const data = item.message.data;
+        const elapsed =
+          data && typeof data === 'object' && 'elapsedMs' in data
+            ? data.elapsedMs
+            : undefined;
+        if (
+          typeof elapsed === 'number' &&
+          Number.isFinite(elapsed) &&
+          elapsed >= 0
+        ) {
+          cancelledElapsedMs = elapsed;
+        }
       }
       const terminalTimestamp = terminalTurnTimestamp(item);
       if (terminalTimestamp !== undefined) {
@@ -1994,11 +2176,12 @@ export function applyTurnCollapse(
         : undefined;
     const lastStepTs = terminalTs ?? assistantTs;
     const elapsedMs =
-      promptTs !== undefined &&
+      cancelledElapsedMs ??
+      (promptTs !== undefined &&
       lastStepTs !== undefined &&
       lastStepTs >= promptTs
         ? lastStepTs - promptTs
-        : undefined;
+        : undefined);
     const hasMetrics =
       hasUsage || elapsedMs !== undefined || liveStartedAt !== undefined;
 
@@ -2097,7 +2280,8 @@ export function applyTurnCollapse(
         });
         continue;
       }
-      if (!isHideableStep(item, i === answerIdx)) result.push(item);
+      if (!isHideableStep(item, i >= answerStartIdx && i <= answerIdx))
+        result.push(item);
     }
   }
 
@@ -2193,6 +2377,11 @@ export interface MessageListHandle {
    * highlight it. Returns false when the message is not in the list.
    */
   scrollToMessage: (messageId: string, callId?: string) => boolean;
+  /** 定位持久化历史搜索结果；调用方可取消仍在加载的选择。 */
+  scrollToSearchHit?: (
+    hit: import('../daemon/session/turn-navigation-store').ConversationSearchHit,
+    isCurrent?: () => boolean,
+  ) => Promise<boolean | 'cancelled'>;
   /** Resume bottom-follow mode and scroll to the latest output. */
   scrollToBottom: (behavior?: ScrollBehavior) => void;
 }
@@ -2206,7 +2395,6 @@ const FOLLOW_BOTTOM_THRESHOLD_PX = 30;
 const LOAD_OLDER_HISTORY_THRESHOLD_PX = 160;
 const OLDER_HISTORY_ANCHOR_WAIT_FRAMES = 30;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
-const SESSION_TIMELINE_MIN_VISIBLE_ENTRIES = 4;
 
 export function shouldUseVirtualScroll(
   totalCount: number,
@@ -2236,7 +2424,7 @@ type Translate = (
 ) => string;
 
 function durationMetricText(elapsedMs: number | undefined): string {
-  return elapsedMs !== undefined && elapsedMs > 0
+  return elapsedMs !== undefined && elapsedMs >= 0
     ? formatDuration(elapsedMs)
     : '';
 }
@@ -2457,7 +2645,9 @@ const SessionTimeline = memo(function SessionTimeline({
   currentRange,
   hidden,
   onSelect,
+  action,
 }: {
+  action?: ReactNode;
   entries: readonly SessionTimelineEntry[];
   currentTurnId: string | null;
   currentRange: SessionTimelineRange | null;
@@ -2727,6 +2917,7 @@ const SessionTimeline = memo(function SessionTimeline({
             })}
           </ol>
         </div>
+        {action}
         {tooltip &&
           typeof document !== 'undefined' &&
           createPortal(
@@ -2826,6 +3017,7 @@ export const MessageList = memo(
       onAttachmentPreview,
       onInsightReportOpen,
       onEditUserMessage,
+      onSubmitUserMessageEdit,
       loadingTranscript,
       catchingUp,
       hasOlderHistory = false,
@@ -2848,6 +3040,7 @@ export const MessageList = memo(
       autoScrollTailIntoView = false,
       bottomOverlayInset = 0,
       hideSessionTimeline = false,
+      timelineAction,
       hideFirstUserMessage = false,
       firstTurnMetrics,
       includeSubagentToolUsageInMetrics = true,
@@ -2859,11 +3052,16 @@ export const MessageList = memo(
       onCanScrollToBottomChange,
       turnFileChanges,
       turnArtifacts,
+      sourceEntries,
+      sourceSessionId,
+      mcpAppSessionId = sourceSessionId,
+      onSourceOpen,
       turnScheduledTasks,
       onReviewChanges,
       onOpenArtifact,
       onOpenScheduledTask,
       onTurnOutputOpen,
+      onToolResultOpen,
       onError,
       generateContent,
     },
@@ -2913,6 +3111,21 @@ export const MessageList = memo(
         }
       | undefined
     >(undefined);
+    // Rows an idle render found still carrying a streaming flag stay settled
+    // when the session responds again, but only while their content matches
+    // the recorded signature — a stale replay row never grows, so growth
+    // releases the id and lets a genuinely live row that reused it stream
+    // again. Advanced only post-commit — render-phase writes go to the
+    // pending ref.
+    const settledStaleMessagesRef = useRef<SettledStaleMessages | undefined>(
+      undefined,
+    );
+    const pendingSettledMessagesRef = useRef<SettledStaleMessages | undefined>(
+      undefined,
+    );
+    const settledStaleCopiesRef = useRef<WeakMap<Message, Message> | undefined>(
+      undefined,
+    );
     const mergedMessages = useMemo(() => {
       const cached = mergedMessagesCache.current;
       const tail = messages[messages.length - 1];
@@ -2932,14 +3145,14 @@ export const MessageList = memo(
         } else if (tail?.role === 'thinking') {
           value = compactMode
             ? updateCompactStreamingThinkingTail(cached.value, tail)
-            : splitMcpAppToolGroups(messages);
+            : splitStandaloneToolGroups(messages);
         }
       }
       if (!value) {
-        const standaloneMcpApps = splitMcpAppToolGroups(messages);
+        const standaloneTools = splitStandaloneToolGroups(messages);
         value = compactMode
-          ? mergeCompactToolGroups(standaloneMcpApps, pendingApproval)
-          : standaloneMcpApps;
+          ? mergeCompactToolGroups(standaloneTools, pendingApproval)
+          : standaloneTools;
       }
       mergedMessagesCache.current = {
         sourceMessages: messages,
@@ -2947,8 +3160,119 @@ export const MessageList = memo(
         pendingApproval,
         value,
       };
-      return value;
-    }, [compactMode, messages, pendingApproval, streamingTailContentOnly]);
+      // A restored replay can retain streaming flags on assistant/thinking
+      // text after the daemon has already reported the whole session idle,
+      // and nothing repairs them at the source. Idle renders settle those
+      // flags for display — stale tool statuses are not covered — and record
+      // the settled ids so responding renders keep them settled instead of
+      // reviving them until the next idle render. The cache keeps the
+      // unsettled array so the compact thinking-tail patcher can still find
+      // the streaming flag it patches on.
+      const settleCopyCache = (settledStaleCopiesRef.current ??= new WeakMap());
+      const committedLatch = settledStaleMessagesRef.current;
+      const settledIds =
+        committedLatch !== undefined && committedLatch.sessionKey === sessionKey
+          ? committedLatch.ids
+          : undefined;
+      if (isResponding) {
+        // Only the branch that produced a pending latch may promote it; a
+        // discarded idle render's write must not leak into this commit.
+        pendingSettledMessagesRef.current = undefined;
+        if (!settledIds?.size) return value;
+        let surviving: Map<string, string> | undefined;
+        let changed = false;
+        const settled = value.map((message) => {
+          // A latched aggregated group also latches its first member's id so
+          // the row stays settled when a pending approval force-expands the
+          // run; keep that entry alive while the group is present.
+          const memberId = summaryRunFirstMemberId(message.id);
+          if (memberId !== undefined) {
+            const memberSignature = settledIds.get(memberId);
+            if (memberSignature !== undefined) {
+              (surviving ??= new Map()).set(memberId, memberSignature);
+            }
+          }
+          // The standalone first member of a latched group re-aggregates once
+          // the pending approval resolves; keep the group entry alive too.
+          const groupSignature = settledIds.get(summaryRunId(message.id));
+          if (groupSignature !== undefined) {
+            (surviving ??= new Map()).set(
+              summaryRunId(message.id),
+              groupSignature,
+            );
+          }
+          const signature = settledIds.get(message.id);
+          if (signature === undefined) return message;
+          if (staleStreamingContentSignature(message) !== signature) {
+            // The content moved past the settle point: this row is genuinely
+            // live, not stale — release the id and let it stream.
+            return message;
+          }
+          (surviving ??= new Map()).set(message.id, signature);
+          changed = true;
+          return settleStaleStreamingMessageCached(settleCopyCache, message);
+        });
+        // Release and prune post-commit: rows no longer present and rows
+        // whose content changed drop out of the latch.
+        if ((surviving?.size ?? 0) !== settledIds.size) {
+          pendingSettledMessagesRef.current = {
+            sessionKey,
+            ids: surviving ?? new Map(),
+          };
+        }
+        return changed ? settled : value;
+      }
+      let stale: Map<string, string> | undefined;
+      const settled = value.map((message) => {
+        const next = settleStaleStreamingMessageCached(
+          settleCopyCache,
+          message,
+        );
+        if (next !== message) {
+          const signature = staleStreamingContentSignature(message);
+          if (signature !== undefined) {
+            (stale ??= new Map()).set(message.id, signature);
+            // The aggregated group's synthetic id dissolves when a pending
+            // approval force-expands the run; latch the first member's id too
+            // so its standalone re-emission stays settled.
+            const memberId = summaryRunFirstMemberId(message.id);
+            const firstThought =
+              message.role === 'tool_group'
+                ? message.thoughts?.[0]?.content
+                : undefined;
+            if (memberId !== undefined && firstThought !== undefined) {
+              stale.set(memberId, firstThought);
+            }
+            if (message.role === 'thinking') {
+              stale.set(
+                summaryRunId(message.id),
+                JSON.stringify([message.content]),
+              );
+            }
+          }
+        }
+        return next;
+      });
+      if (!stale) return value;
+      pendingSettledMessagesRef.current = {
+        sessionKey,
+        ids: new Map([...(settledIds ?? []), ...stale]),
+      };
+      return settled;
+    }, [
+      compactMode,
+      isResponding,
+      messages,
+      pendingApproval,
+      sessionKey,
+      streamingTailContentOnly,
+    ]);
+    useLayoutEffect(() => {
+      const pending = pendingSettledMessagesRef.current;
+      if (!pending) return;
+      settledStaleMessagesRef.current = pending;
+      pendingSettledMessagesRef.current = undefined;
+    }, [mergedMessages]);
     const displayItemsCache = useRef<
       | {
           sourceMessages: readonly Message[];
@@ -3266,8 +3590,11 @@ export const MessageList = memo(
       }
       return { key: null };
     }, [backgroundSummaryGraceActive, displayItems]);
-    const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
-      useState(false);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const isSessionTimelineVisible = useChatNavigationVisible(
+      containerRef,
+      !hideSessionTimeline,
+    );
     const [automaticallyExpandedAgentKeys, setAutomaticallyExpandedAgentKeys] =
       useState<ReadonlySet<string>>(() => new Set());
     const handleAutomaticAgentExpansionChange = useCallback(
@@ -3287,8 +3614,7 @@ export const MessageList = memo(
       t: typeof t;
       entries: SessionTimelineEntry[];
     } | null>(null);
-    // Signature + entries are O(transcript text); only pay for them while the
-    // rail can actually show (container >= 1160px — never on mobile).
+    // Signature + entries are O(transcript text); only pay while the rail can show.
     const sessionTimelineEntries = useMemo(() => {
       if (!isSessionTimelineVisible) return EMPTY_SESSION_TIMELINE_ENTRIES;
       const signature = getSessionTimelineSignature(mergedMessages);
@@ -3375,7 +3701,114 @@ export const MessageList = memo(
     // (collapsed once complete). `displayItems` stays the full, pre-collapse
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
-    const { collapseCompletedTurns } = useWebShellCustomization();
+    const { collapseCompletedTurns, sourceReferences, assistantFeedback } =
+      useWebShellCustomization();
+    // `sourceSessionId` is the transcript's own session, which is what a mark
+    // belongs to.
+    const {
+      ratings: assistantFeedbackRatings,
+      rate: rateAssistantFeedback,
+      ratingForTurn: assistantFeedbackRatingForTurn,
+    } = useAssistantFeedback(sourceSessionId);
+    // A turn's mark is keyed by the daemon-stamped prompt id, which a replay
+    // only carries on the prompt's own (turn-head) block — see
+    // `shouldOfferAssistantFeedback` and the adapter's prompt-id pass.
+    const assistantFeedbackHeadById = useMemo(() => {
+      const heads = new Map<string, Message>();
+      for (const message of messages) {
+        if (isTurnStartMessage(message)) heads.set(message.id, message);
+      }
+      return heads;
+    }, [messages]);
+    const assistantFeedbackEnabled = shouldOfferAssistantFeedback({
+      renderMode: transcriptRenderMode,
+      sessionId: sourceSessionId,
+      options: assistantFeedback,
+    });
+    // Kept in a ref so a host passing the options object inline does not
+    // invalidate the handler (and therefore every rendered message) per render.
+    const assistantFeedbackOptionsRef = useRef(assistantFeedback);
+    assistantFeedbackOptionsRef.current = assistantFeedback;
+    const messagesRef = useRef(messages);
+    messagesRef.current = messages;
+    const handleAssistantFeedbackRate = useCallback(
+      (
+        promptId: string,
+        turnId: string,
+        rating: WebShellAssistantFeedbackRating | null,
+      ) => {
+        const previousRating = assistantFeedbackRatingForTurn(promptId);
+        rateAssistantFeedback(promptId, rating);
+        const onRate = assistantFeedbackOptionsRef.current?.onRate;
+        if (!onRate) return;
+        notifyAssistantFeedback(onRate, {
+          rating,
+          previousRating,
+          sessionId: sourceSessionId,
+          promptId,
+          userMessage: feedbackUserMessageOf(messagesRef.current, turnId),
+        });
+      },
+      [assistantFeedbackRatingForTurn, rateAssistantFeedback, sourceSessionId],
+    );
+    const sourcesByTurnCache = useRef<
+      | {
+          sourceMessages: readonly Message[];
+          dependencies: readonly unknown[];
+          value: ReadonlyMap<string, readonly WebShellSource[]>;
+        }
+      | undefined
+    >(undefined);
+    const sourcesByTurn = useMemo(() => {
+      const dependencies = [
+        sourceEntries,
+        workspaceCwd,
+        sourceSessionId,
+        sourceReferences,
+      ] as const;
+      const cached = sourcesByTurnCache.current;
+      return streamingTailContentOnly &&
+        isResponding &&
+        cached &&
+        cached.sourceMessages === previousMessagesRef.current &&
+        sameIdentities(cached.dependencies, dependencies)
+        ? cached.value
+        : getSourcesByTurn(
+            messages,
+            sourceEntries ?? [],
+            workspaceCwd,
+            sourceSessionId,
+            sourceReferences,
+          );
+    }, [
+      messages,
+      sourceEntries,
+      workspaceCwd,
+      sourceSessionId,
+      sourceReferences,
+      streamingTailContentOnly,
+      isResponding,
+    ]);
+    useLayoutEffect(() => {
+      // Keep StrictMode replays and abandoned renders out of the cache.
+      sourcesByTurnCache.current = {
+        sourceMessages: messages,
+        dependencies: [
+          sourceEntries,
+          workspaceCwd,
+          sourceSessionId,
+          sourceReferences,
+        ],
+        value: sourcesByTurn,
+      };
+    }, [
+      messages,
+      sourceEntries,
+      workspaceCwd,
+      sourceSessionId,
+      sourceReferences,
+      sourcesByTurn,
+    ]);
     const collapseEnabled = collapseCompletedTurns ?? true;
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>
@@ -3433,7 +3866,6 @@ export const MessageList = memo(
     const pendingFollowRecheckFrame = useRef<number | undefined>(undefined);
     const pendingOverflowFrame = useRef<number | undefined>(undefined);
     catchingUpRef.current = catchingUp;
-    const containerRef = useRef<HTMLDivElement>(null);
     const olderHistoryRetryBlocked = useRef(false);
     const olderHistoryAnchorFrame = useRef<number | undefined>(undefined);
     const olderHistoryAnchorWaitFrame = useRef<number | undefined>(undefined);
@@ -3755,30 +4187,6 @@ export const MessageList = memo(
 
     const hasEnoughSessionTimelineEntries =
       sessionTimelineEntries.length >= SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
-
-    useLayoutEffect(() => {
-      if (hideSessionTimeline) {
-        setIsSessionTimelineVisible((prev) => (prev ? false : prev));
-        return;
-      }
-
-      const el = containerRef.current;
-      if (!el) return;
-
-      const updateVisibility = () => {
-        const width = el.getBoundingClientRect().width;
-        const nextVisible = width >= 1160;
-        setIsSessionTimelineVisible((prev) =>
-          prev === nextVisible ? prev : nextVisible,
-        );
-      };
-
-      updateVisibility();
-      if (typeof ResizeObserver === 'undefined') return;
-      const observer = new ResizeObserver(updateVisibility);
-      observer.observe(el);
-      return () => observer.disconnect();
-    }, [hideSessionTimeline]);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
     //
@@ -4118,7 +4526,7 @@ export const MessageList = memo(
       (event: ReactMouseEvent<HTMLDivElement>) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
-        if (!target.closest('[aria-expanded]')) return;
+        if (!target.closest('[aria-expanded], summary')) return;
         followPausedByUserRef.current = true;
         setShouldFollow(false);
         scheduleFollowRecheck();
@@ -5166,6 +5574,8 @@ export const MessageList = memo(
         // pre-clear snapshot survives into the next session and can mislabel
         // a complete turn as keep-open (block ids are per-session ordinals).
         pendingPaginationTurnCompares.current.clear();
+        settledStaleMessagesRef.current = undefined;
+        pendingSettledMessagesRef.current = undefined;
         setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
         setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
       }
@@ -5408,6 +5818,7 @@ export const MessageList = memo(
                 changes={displayItem.changes}
                 turnId={displayItem.turnId}
                 artifacts={displayItem.artifacts}
+                sourceSessionId={sourceSessionId}
                 scheduledTasks={displayItem.scheduledTasks}
                 workspaceCwd={workspaceCwd}
                 onOpenRequest={onTurnOutputOpen}
@@ -5452,6 +5863,13 @@ export const MessageList = memo(
               },
             };
           }
+          const feedbackHead = finalAssistantTurnId
+            ? assistantFeedbackHeadById.get(finalAssistantTurnId)
+            : undefined;
+          // A live turn stamps the answer's own block while a replayed turn
+          // only stamps the prompt's; both carry the same value.
+          const feedbackPromptId =
+            displayItem.message.promptId ?? feedbackHead?.promptId;
           const branchRecordId =
             displayItem.message.role === 'assistant'
               ? displayItem.message.branchRecordId
@@ -5460,29 +5878,61 @@ export const MessageList = memo(
             displayItem.message.role === 'user'
               ? displayItem.message.content
               : undefined;
+          // Only the newest user turn can be edited, and only while the
+          // transcript still holds the turn the rewind would target.
+          const userMessageEditTarget =
+            editableUserContent !== undefined &&
+            displayItem.message.id === editableUserTurn.lastId &&
+            !isResponding &&
+            !hasOlderHistory &&
+            !historyCapacityReached
+              ? {
+                  turnIndex:
+                    editableUserTurn.turnIndexById.get(
+                      displayItem.message.id,
+                    ) ?? 0,
+                  content: editableUserContent,
+                }
+              : undefined;
 
           return (
             <MessageItem
               message={displayItem.message}
+              onLocateBackgroundSource={
+                displayItem.message.role === 'system' &&
+                displayItem.message.source ===
+                  'background_notification_turn_started' &&
+                displayItem.message.backgroundTurn?.toolUseId &&
+                findDisplayItemIndex(
+                  displayItems,
+                  '',
+                  displayItem.message.backgroundTurn.toolUseId,
+                ) >= 0
+                  ? scrollToMessage
+                  : undefined
+              }
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
+              onTurnOutputOpen={onTurnOutputOpen}
+              onToolResultOpen={onToolResultOpen}
               onInsightReportOpen={onInsightReportOpen}
               onEditUserMessage={
-                onEditUserMessage &&
-                !isResponding &&
-                !hasOlderHistory &&
-                !historyCapacityReached &&
-                displayItem.message.role === 'user' &&
-                editableUserContent !== undefined &&
-                displayItem.message.id === editableUserTurn.lastId
+                onEditUserMessage && userMessageEditTarget
                   ? () =>
                       onEditUserMessage(
-                        editableUserTurn.turnIndexById.get(
-                          displayItem.message.id,
-                        ) ?? 0,
-                        editableUserContent,
+                        userMessageEditTarget.turnIndex,
+                        userMessageEditTarget.content,
+                      )
+                  : undefined
+              }
+              onSubmitUserMessageEdit={
+                onSubmitUserMessageEdit && userMessageEditTarget
+                  ? (content) =>
+                      onSubmitUserMessageEdit(
+                        userMessageEditTarget.turnIndex,
+                        content,
                       )
                   : undefined
               }
@@ -5505,11 +5955,29 @@ export const MessageList = memo(
                 !isResponding &&
                 branchRecordId !== undefined
               }
+              assistantFeedbackTurnId={
+                assistantFeedbackEnabled ? finalAssistantTurnId : undefined
+              }
+              assistantFeedbackPromptId={
+                assistantFeedbackEnabled ? feedbackPromptId : undefined
+              }
+              assistantFeedbackRating={
+                assistantFeedbackEnabled && feedbackPromptId
+                  ? assistantFeedbackRatings[feedbackPromptId]
+                  : undefined
+              }
+              onAssistantFeedbackRate={handleAssistantFeedbackRate}
               isLocateFlashing={displayItemMatchesLocateTarget(
                 displayItem,
                 flashTarget,
               )}
               assistantTurnFooterInfo={assistantTurnFooterInfo}
+              turnSources={
+                finalAssistantTurnId
+                  ? sourcesByTurn.get(finalAssistantTurnId)
+                  : undefined
+              }
+              onSourceOpen={onSourceOpen}
               generateContent={generateContent}
             />
           );
@@ -5544,10 +6012,13 @@ export const MessageList = memo(
         transcriptRenderMode,
         handleAutomaticAgentExpansionChange,
         onShowContextDetail,
+        displayItems,
+        scrollToMessage,
         onImagePreview,
         onAttachmentPreview,
         onInsightReportOpen,
         onEditUserMessage,
+        onSubmitUserMessageEdit,
         editableUserTurn,
         hasOlderHistory,
         historyCapacityReached,
@@ -5556,6 +6027,10 @@ export const MessageList = memo(
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
+        assistantFeedbackEnabled,
+        assistantFeedbackHeadById,
+        assistantFeedbackRatings,
+        handleAssistantFeedbackRate,
         frozenViewport,
         workspaceCwd,
         showRetryHint,
@@ -5564,10 +6039,14 @@ export const MessageList = memo(
         onRetryFailedPrompt,
         onBranchSession,
         handleToggleCollapse,
+        sourceSessionId,
         onOpenArtifact,
         onOpenScheduledTask,
         onReviewChanges,
         onTurnOutputOpen,
+        onToolResultOpen,
+        sourcesByTurn,
+        onSourceOpen,
         onError,
       ],
     );
@@ -5628,107 +6107,112 @@ export const MessageList = memo(
     }, [autoScrollContentSignal, scheduleScrollOverflowReport, totalCount]);
 
     return (
-      <div
-        ref={containerRef}
-        className={joinClassNames(
-          styles.list,
-          hasHeader && centerWelcomeHeader
-            ? styles.listWithWelcomeHeader
-            : undefined,
-        )}
-        data-web-shell-message-list
-        onClickCapture={handleDisclosureClickCapture}
-      >
-        {showLoadingSkeleton && (
-          <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
-        )}
-        {loadingOlderHistory &&
-          !showLoadingSkeleton &&
-          !suppressOlderHistoryLoadingStatus && (
+      <McpAppSessionContext.Provider value={mcpAppSessionId}>
+        <div
+          ref={containerRef}
+          className={joinClassNames(
+            styles.list,
+            hasHeader && centerWelcomeHeader
+              ? styles.listWithWelcomeHeader
+              : undefined,
+          )}
+          data-web-shell-message-list
+          onClickCapture={handleDisclosureClickCapture}
+        >
+          {showLoadingSkeleton && (
+            <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+          )}
+          {loadingOlderHistory &&
+            !showLoadingSkeleton &&
+            !suppressOlderHistoryLoadingStatus && (
+              <div className={styles.historyStatus} role="status">
+                {t('history.loadingEarlier')}
+              </div>
+            )}
+          {historyCapacityReached && !showLoadingSkeleton && (
             <div className={styles.historyStatus} role="status">
-              {t('history.loadingEarlier')}
+              {t('history.capacityReached')}
             </div>
           )}
-        {historyCapacityReached && !showLoadingSkeleton && (
-          <div className={styles.historyStatus} role="status">
-            {t('history.capacityReached')}
-          </div>
-        )}
-        {historyPaginationError &&
-          !showLoadingSkeleton &&
-          !historyCapacityReached && (
-            <div className={styles.historyStatus}>
-              <span role="status">{t('history.paginationError')}</span>
-              {onLoadOlderHistory && (
-                <button
-                  type="button"
-                  className={styles.historyRetryButton}
-                  onClick={retryOlderHistory}
-                >
-                  {t('history.retry')}
-                </button>
-              )}
-            </div>
-          )}
-        <SessionTimeline
-          entries={sessionTimelineEntries}
-          currentTurnId={currentTimelineTurnId}
-          currentRange={sessionTimelineRange}
-          hidden={!isSessionTimelineVisible || !hasEnoughSessionTimelineEntries}
-          onSelect={scrollToMessage}
-        />
-        {useVirtualScroll ? (
-          <div ref={virtualizer.containerRef} className={styles.virtualSizer}>
-            {virtualItems.map((virtualRow) => (
-              <div
-                key={virtualRow.key}
-                data-index={virtualRow.index}
-                ref={measureVirtualRow}
-                className={joinClassNames(
-                  styles.virtualRow,
-                  getRowClassName(
+          {historyPaginationError &&
+            !showLoadingSkeleton &&
+            !historyCapacityReached && (
+              <div className={styles.historyStatus}>
+                <span role="status">{t('history.paginationError')}</span>
+                {onLoadOlderHistory && (
+                  <button
+                    type="button"
+                    className={styles.historyRetryButton}
+                    onClick={retryOlderHistory}
+                  >
+                    {t('history.retry')}
+                  </button>
+                )}
+              </div>
+            )}
+          <SessionTimeline
+            action={timelineAction}
+            entries={sessionTimelineEntries}
+            currentTurnId={currentTimelineTurnId}
+            currentRange={sessionTimelineRange}
+            hidden={
+              !isSessionTimelineVisible || !hasEnoughSessionTimelineEntries
+            }
+            onSelect={scrollToMessage}
+          />
+          {useVirtualScroll ? (
+            <div ref={virtualizer.containerRef} className={styles.virtualSizer}>
+              {virtualItems.map((virtualRow) => (
+                <div
+                  key={virtualRow.key}
+                  data-index={virtualRow.index}
+                  ref={measureVirtualRow}
+                  className={joinClassNames(
+                    styles.virtualRow,
+                    getRowClassName(
+                      visibleItems[virtualRow.index - headerOffset],
+                    ),
+                  )}
+                  data-message-row-key={String(getItemKey(virtualRow.index))}
+                  data-source-block-ids={displayItemSourceBlockIds(
                     visibleItems[virtualRow.index - headerOffset],
-                  ),
-                )}
-                data-message-row-key={String(getItemKey(virtualRow.index))}
-                data-source-block-ids={displayItemSourceBlockIds(
-                  visibleItems[virtualRow.index - headerOffset],
-                  messages,
-                )}
-                data-web-shell-message-row
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                }}
-              >
-                {renderVirtualItem(virtualRow.index)}
-              </div>
-            ))}
-          </div>
-        ) : (
-          Array.from({ length: totalCount }, (_, index) => {
-            const key = getItemKey(index);
-            const item = visibleItems[index - headerOffset];
-            return (
-              <div
-                key={key}
-                data-index={index}
-                className={getRowClassName(item)}
-                data-message-row-key={String(key)}
-                data-source-block-ids={displayItemSourceBlockIds(
-                  item,
-                  messages,
-                )}
-                data-web-shell-message-row
-              >
-                {renderVirtualItem(index)}
-              </div>
-            );
-          })
-        )}
-      </div>
+                    messages,
+                  )}
+                  data-web-shell-message-row
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                  }}
+                >
+                  {renderVirtualItem(virtualRow.index)}
+                </div>
+              ))}
+            </div>
+          ) : (
+            Array.from({ length: totalCount }, (_, index) => {
+              const key = getItemKey(index);
+              const item = visibleItems[index - headerOffset];
+              return (
+                <div
+                  key={key}
+                  data-index={index}
+                  className={getRowClassName(item)}
+                  data-message-row-key={String(key)}
+                  data-source-block-ids={displayItemSourceBlockIds(
+                    item,
+                    messages,
+                  )}
+                  data-web-shell-message-row
+                >
+                  {renderVirtualItem(index)}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </McpAppSessionContext.Provider>
     );
   }),
 );

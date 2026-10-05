@@ -19,6 +19,7 @@ import {
   type Translator,
 } from '../adapters/localizedMessages';
 import type { Message } from '../adapters/types';
+import type { ConversationSearchHit } from '../daemon/session/turn-navigation-store';
 
 export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
   const store = useDaemonHistoryNavigationStore();
@@ -44,7 +45,9 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
   const selecting = useRef(false);
   const boundaryLoading = useRef(false);
   const retryAction = useRef<
-    { ordinal: number } | { direction: 'older' | 'newer' } | undefined
+    | { ordinal: number; hit?: ConversationSearchHit }
+    | { direction: 'older' | 'newer' }
+    | undefined
   >(undefined);
   const [target, setTarget] = useState<{ blockId: string; token: number }>();
   const pinnedPage = useRef<string | undefined>(undefined);
@@ -77,11 +80,7 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
     [range?.pageIds, state.pages],
   );
   const messages = useMemo(
-    () =>
-      transcriptBlocksToLocalizedMessages(blocks, t).map((message) => {
-        if ('isStreaming' in message) return { ...message, isStreaming: false };
-        return message;
-      }),
+    () => transcriptBlocksToLocalizedMessages(blocks, t),
     [blocks, t],
   );
   const toolSources = useMemo(() => {
@@ -115,14 +114,19 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
   }, [store, viewportId]);
 
   const selectOrdinal = useCallback(
-    async (ordinal: number) => {
-      retryAction.current = { ordinal };
+    async (
+      ordinal: number,
+      hit?: ConversationSearchHit,
+      isCurrent?: () => boolean,
+    ) => {
+      retryAction.current = { ordinal, ...(hit ? { hit } : {}) };
       const token = ++intent.current;
       boundaryLoading.current = false;
       const revision = state.revision;
       const request = {
         isCurrent: () =>
           intent.current === token &&
+          (isCurrent?.() ?? true) &&
           store.getViewportSnapshot().revision === revision,
       };
       selecting.current = true;
@@ -132,12 +136,16 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
       try {
         const provisional =
           navigation.provisionalTurns[ordinal - navigation.totalTurns];
-        const location = provisional?.blockId
-          ? { blockId: provisional.blockId, view: 'live' as const }
-          : await store.locateViewportOrdinal(ordinal, request, () =>
+        const location = hit
+          ? await store.locateViewportSearchHit(hit, request, () =>
               store.setViewportAnchor(viewportId),
-            );
-        if (!request.isCurrent()) return;
+            )
+          : provisional?.blockId
+            ? { blockId: provisional.blockId, view: 'live' as const }
+            : await store.locateViewportOrdinal(ordinal, request, () =>
+                store.setViewportAnchor(viewportId),
+              );
+        if (!request.isCurrent()) return 'cancelled' as const;
         if (location.view === 'historical') {
           if (
             !location.rangeId ||
@@ -155,13 +163,19 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
           setView(undefined);
         }
         setTarget({ blockId: location.blockId, token });
+        return true;
       } catch {
-        if (request.isCurrent()) {
-          store.setViewportAnchor(viewportId, pinnedPage.current);
-          setError(true);
-        }
+        if (!request.isCurrent()) return 'cancelled' as const;
+        store.setViewportAnchor(viewportId, pinnedPage.current);
+        if (store.getViewportSnapshot().connected) setError(true);
+        return false;
       } finally {
-        if (request.isCurrent()) {
+        if (
+          intent.current === token &&
+          store.getViewportSnapshot().revision === revision
+        ) {
+          if (!request.isCurrent())
+            store.setViewportAnchor(viewportId, pinnedPage.current);
           selecting.current = false;
           setLoading(false);
         }
@@ -185,7 +199,7 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
   );
 
   const load = useCallback(
-    async (direction: 'older' | 'newer') => {
+    async (direction: 'older' | 'newer', beforeAdmit?: () => void) => {
       if (loading || boundaryLoading.current || selecting.current || !range)
         return;
       boundaryLoading.current = true;
@@ -203,7 +217,13 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
         let rangeId = range.id;
         const edge = range[direction];
         if (edge.kind === 'cached') rangeId = edge.rangeId;
-        else await store.loadViewportBoundary(range.id, direction, request);
+        else
+          await store.loadViewportBoundary(
+            range.id,
+            direction,
+            request,
+            beforeAdmit,
+          );
         if (!request.isCurrent()) throw new Error('History view changed');
         const admitted = store
           .getViewportSnapshot()
@@ -243,9 +263,12 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
     store,
     target,
     selectOrdinal,
+    selectSearchHit: (hit: ConversationSearchHit, isCurrent?: () => boolean) =>
+      selectOrdinal(hit.turnOrdinal, hit, isCurrent),
     cancelSelection,
     continueLive,
     messages: range ? messages : liveMessages,
+    blocks: range ? blocks : undefined,
     toolSources,
     historical: !!range,
     viewKey: range
@@ -261,12 +284,12 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
       !!liveBoundary.beforeRecordId &&
       (store.hasLiveOverlap(range.id) ||
         liveBoundary.beforeRecordId === view?.liveBoundary),
-    retry: () => {
+    retry: (beforeAdmit?: () => void) => {
       const action = retryAction.current;
       if (action)
         void ('ordinal' in action
-          ? selectOrdinal(action.ordinal)
-          : load(action.direction));
+          ? selectOrdinal(action.ordinal, action.hit)
+          : load(action.direction, beforeAdmit));
     },
     pin,
     load,

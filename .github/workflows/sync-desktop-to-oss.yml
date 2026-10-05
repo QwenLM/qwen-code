@@ -9,6 +9,13 @@ on:
       source:
         required: true
         type: 'string'
+      # Deliberately not required. This workflow is also a reusable callee, so
+      # github.event_name here is always workflow_call and can never observe the
+      # release that triggered the chain; the caller states it instead. Omitting
+      # the input means "not following a release", the safe default.
+      follows_release:
+        default: false
+        type: 'boolean'
     secrets:
       ALIYUN_OSS_ACCESS_KEY_ID:
         required: true
@@ -35,7 +42,7 @@ concurrency:
 jobs:
   sync:
     name: 'Mirror Qwen Code Desktop to Aliyun OSS'
-    if: "${{ github.repository == 'QwenLM/qwen-code' && github.ref == 'refs/heads/main' }}"
+    if: "${{ github.repository == 'QwenLM/qwen-code' && (github.ref == 'refs/heads/main' || inputs.follows_release) }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 90
     environment:
@@ -93,6 +100,7 @@ jobs:
         env:
           ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
           VERSION: '${{ steps.release.outputs.version }}'
+          SOURCE: '${{ steps.release.outputs.source }}'
         run: |
           set -euo pipefail
           cd dist/desktop
@@ -109,13 +117,23 @@ jobs:
           find . -maxdepth 1 -name '*.deb' -print -quit | grep -q . \
             || { echo "::error::Missing Desktop installer matching *.deb"; exit 1; }
           rm -f desktop-latest.json SHA256SUMS.txt
+          # Mirroring an existing GitHub release has to be able to reproduce the
+          # feed that release actually shipped, so a platform added later (arm64
+          # Linux, #12806) is tolerated as absent here. The artifact path is a
+          # fresh build and stays strict: a leg that failed to upload must fail
+          # the mirror, not be published as missing.
+          manifest_args=()
+          if [ "$SOURCE" = 'release' ]; then
+            manifest_args=(--allow-missing-platform linux-aarch64)
+          fi
           node ../../.github/scripts/create-desktop-update-manifest.mjs \
             --assets . \
             --repository "$GITHUB_REPOSITORY" \
             --tag "desktop-v${VERSION}" \
             --version "$VERSION" \
             --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/desktop/v${VERSION}" \
-            --output desktop-latest.json
+            --output desktop-latest.json \
+            "${manifest_args[@]}"
           sha256sum -- * > SHA256SUMS.txt
 
       - name: 'Install ossutil'

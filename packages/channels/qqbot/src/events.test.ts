@@ -1,11 +1,25 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  afterAll,
+} from 'vitest';
 
-const { mockSendQQMessage, mockFetchAccessToken, mockHandleInbound } =
-  vi.hoisted(() => ({
-    mockSendQQMessage: vi.fn(),
-    mockFetchAccessToken: vi.fn(),
-    mockHandleInbound: vi.fn(),
-  }));
+const {
+  mockSendQQMessage,
+  mockFetchAccessToken,
+  mockHandleInbound,
+  pendingDispatches,
+} = vi.hoisted(() => ({
+  mockSendQQMessage: vi.fn(),
+  mockFetchAccessToken: vi.fn(),
+  mockHandleInbound: vi.fn(),
+  pendingDispatches: [] as Array<Promise<unknown>>,
+}));
 
 const { MockWebSocket } = vi.hoisted(() => {
   class MockWebSocket {
@@ -31,13 +45,16 @@ vi.mock('ws', () => ({
   default: MockWebSocket,
 }));
 
-vi.mock('node:fs', () => ({
-  mkdirSync: vi.fn(),
-  readFileSync: vi.fn(),
-  writeFileSync: vi.fn(),
-  existsSync: vi.fn(() => false),
-  renameSync: vi.fn(),
-}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    existsSync: vi.fn(() => false),
+    renameSync: vi.fn(),
+  };
+});
 
 vi.mock('./api.js', () => ({
   sendQQMessage: mockSendQQMessage,
@@ -77,12 +94,16 @@ vi.mock('@qwen-code/channel-base', () => ({
       mockHandleInbound(env);
       return Promise.resolve();
     }
-    // QQChannel reads this to decide `isSlash` from the payload after the
-    // configured prefix. Mirrors the real accessor, which reads the same
-    // config key.
-    protected configuredMessagePrefix(): string | undefined {
-      const value = this.config['messagePrefix'];
-      return typeof value === 'string' && value ? value : undefined;
+    protected prepareThenHandleInbound(
+      env: unknown,
+      prepare: () => Promise<boolean | void>,
+    ): Promise<void> {
+      const dispatch = (async () => {
+        await prepare();
+        return this.handleInbound(env);
+      })();
+      pendingDispatches.push(dispatch);
+      return dispatch;
     }
     protected onSessionDied(_sessionId: string): void {
       // no-op in mock
@@ -120,38 +141,10 @@ vi.mock('@qwen-code/channel-base', () => ({
     const cp = Array.from(str);
     return cp.length > max ? cp.slice(0, max).join('') : str;
   },
-  // QQChannel decides `isSlash` from the payload *after* the configured
-  // prefix, so it imports the real helper. This mirrors the shared
-  // implementation rather than stubbing it away: a fake that answered
-  // `undefined` for every prefixed text would make `isSlash` read the
-  // raw content and quietly invert the behaviour under test.
-  stripMessagePrefix: (text: string, prefix: string | undefined) => {
-    if (!prefix) return text;
-    let candidate = text.trim();
-    while (
-      !candidate.startsWith(prefix) &&
-      (candidate.startsWith('@') || candidate.startsWith('<@'))
-    ) {
-      const mention = candidate.match(/^(?:@[^@\s]+|<@[^>]{1,64}>)\s+/u)?.[0];
-      if (!mention) return undefined;
-      candidate = candidate.slice(mention.length);
-    }
-    if (!candidate.startsWith(prefix)) return undefined;
-    const suffix = candidate.slice(prefix.length);
-    if (!/^\s+\S[\s\S]*$/u.test(suffix)) return undefined;
-    return suffix.trim();
-  },
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
-// The real filter, not the bare-factory mock above: this file needs to
-// run a produced envelope through the base's actual prefix rewrite.
-// Reached by path rather than through the package: the barrel does not
-// re-export it, and the package alias resolves to the barrel.
 type Envelope = import('@qwen-code/channel-base').Envelope;
-const { applyMessagePrefix } = (await vi.importActual(
-  '../../base/src/message-prefix.js',
-)) as { applyMessagePrefix: (e: Envelope, p?: string) => boolean };
 import type {
   QQMessageEvent,
   QQGroupMessageEvent,
@@ -160,6 +153,25 @@ import type {
   GroupMsgToggleEvent,
 } from './types.js';
 import { Intent } from './types.js';
+import { QQ_IMAGE_MAX_BYTES } from './media.js';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const suiteTmpDir = await mkdtemp(join(tmpdir(), 'qwen-qqbot-media-'));
+
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const MP4_BYTES = Buffer.from([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]);
+
+function stubFetchBytes(bytes: Buffer, contentType = 'image/jpeg'): void {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      async () =>
+        new Response(bytes, { headers: { 'content-type': contentType } }),
+    ),
+  );
+}
 
 function makeChannel(
   configOverrides?: Record<string, unknown>,
@@ -233,14 +245,40 @@ function makeGroupAllEvent(
   };
 }
 
+/**
+ * Await every dispatch started through the mocked base so a late continuation
+ * can never land in the next test (or after an assertion).
+ */
+async function settleDispatches(): Promise<void> {
+  const pending = pendingDispatches.splice(0);
+  if (pending.length === 0) return;
+  await Promise.allSettled(pending);
+  // dispatchInbound's finally runs just after the tracked promise resolves.
+  await Promise.resolve();
+}
+
 beforeEach(() => {
+  pendingDispatches.length = 0;
   vi.clearAllMocks();
   mockHandleInbound.mockClear();
   vi.useFakeTimers();
 });
 
-afterEach(() => {
+beforeAll(() => {
+  vi.stubEnv('TMPDIR', suiteTmpDir);
+  vi.stubEnv('TMP', suiteTmpDir);
+  vi.stubEnv('TEMP', suiteTmpDir);
+});
+
+afterEach(async () => {
+  await settleDispatches();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+afterAll(async () => {
+  vi.unstubAllEnvs();
+  await rm(suiteTmpDir, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -326,7 +364,6 @@ describe('handleC2C', () => {
     expect(env['senderId']).toBe('user-openid-1');
     expect(env['chatId']).toBe('user-openid-1');
     expect(env['text']).toBe('[atMention=true] [Alice]: 你好，帮我查一下天气');
-    expect(env['displayText']).toBe('你好，帮我查一下天气');
   });
 
   it('斜杠命令不包装 atMention', async () => {
@@ -380,33 +417,15 @@ describe('handleC2C', () => {
     expect(mockHandleInbound).not.toHaveBeenCalled();
   });
 
-  it('keeps the sender wrapper on a prefixed C2C message', async () => {
-    // `isSlash` reads the payload after the prefix. Deciding it from the
-    // raw content instead would classify `/review hello` as a command and
-    // drop the `[atMention=true] [sender]:` wrapper.
-    const ch = makeChannel({ messagePrefix: '/review' });
+  it('runs a C2C slash command without the wrapper', async () => {
+    const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt['handleC2C'](makeC2CEvent({ content: '/review hello' }));
+    pvt['handleC2C'](makeC2CEvent({ content: '/status' }));
     await vi.advanceTimersByTimeAsync(600);
 
     const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
-    expect(env.text).toBe('[atMention=true] [Alice]: /review hello');
-    expect(env.alreadyPrefixed).toBe(true);
-    expect(applyMessagePrefix(env, '/review')).toBe(true);
-    expect(env.text).toBe('[atMention=true] [Alice]: hello');
-  });
-
-  it('runs a prefixed C2C slash command without the wrapper', async () => {
-    const ch = makeChannel({ messagePrefix: '/review' });
-    const pvt = ch as unknown as QQChannelRaw;
-    pvt['handleC2C'](makeC2CEvent({ content: '/review /status' }));
-    await vi.advanceTimersByTimeAsync(600);
-
-    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
-    expect(env.text).toBe('/review /status');
-    expect(env.alreadyPrefixed).toBeUndefined();
-    expect(applyMessagePrefix(env, '/review')).toBe(true);
     expect(env.text).toBe('/status');
+    expect(env.alreadyPrefixed).toBeUndefined();
   });
 
   it('drops bot C2C messages', async () => {
@@ -480,7 +499,6 @@ describe('handleGroup', () => {
     expect(env['text']).toBe(
       '[atMention=true] [Bob(ABCDEF0123456789ABCDEF0123456789)]: 你好',
     );
-    expect(env['displayText']).toBe('你好');
   });
 
   it('可见文本只移除机器人 mention', async () => {
@@ -498,7 +516,7 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
 
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env['displayText']).toBe('ask <@OPENID_ALICE> now');
+    expect(env['text']).toContain(']: ask <@OPENID_ALICE> now');
   });
 
   it('allowMention=false 时清理 <@OPENID> 标签', async () => {
@@ -589,30 +607,16 @@ describe('handleGroup', () => {
     expect(env['text']).toBe('/status');
   });
 
-  it('keeps the sender wrapper when the prefix filter rewrites the body', async () => {
-    // The three fields have to agree or the base filter cannot find the
-    // user segment inside `text` and falls back to replacing the whole
-    // message with the stripped payload -- losing the
-    // `[atMention=…] [sender]:` wrapper and the OPENID suffix, with
-    // `alreadyPrefixed` stopping the base from re-attributing it.
-    //
-    // A member mentioned before the bot is the natural ordering that
-    // exposed it: the bot's token sat between the two, so `displayText`
-    // was not a substring of `text`.
-    //
-    // The bot OPENID is well-formed so it reaches the prompt as a suffix,
-    // and the sender nick repeats the body: `text` no longer ends with
-    // `displayText` and the body occurs twice, so only the adapter-supplied
-    // `displayTextOffset` can locate the segment.
-    const ch = makeChannel({ messagePrefix: '/review' });
+  it('keeps the sender wrapper and member mentions when the body repeats the name', async () => {
+    const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleGroup'](
       makeGroupEvent({
-        content: '<@OPENID_OTHER> <@OPENID_BOT> /review hello',
+        content: '<@OPENID_OTHER> <@OPENID_BOT> please review hello',
         author: {
           member_openid: 'ABCDEF0123456789ABCDEF0123456789',
           user_openid: 'ABCDEF0123456789ABCDEF0123456789',
-          username: '<@OPENID_OTHER>  /review hello',
+          username: '<@OPENID_OTHER>  please review hello',
         },
         mentions: [
           { member_openid: 'other-openid', is_you: false },
@@ -623,12 +627,11 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
 
     const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
-    expect(env.displayTextOffset).toBeGreaterThan(0);
-    expect(env.displayText).toBe('<@OPENID_OTHER>  /review hello');
-    expect(env.text.split(env.displayText!)).toHaveLength(3);
-    expect(applyMessagePrefix(env, '/review')).toBe(true);
+    expect(env.text.split('<@OPENID_OTHER>  please review hello')).toHaveLength(
+      3,
+    );
     expect(env.text).toContain('[atMention=');
-    expect(env.text).toContain('[<@OPENID_OTHER>  /review hello(');
+    expect(env.text).toContain('[<@OPENID_OTHER>  please review hello(');
     expect(env.text).toContain(
       '机器人 OPENID: 0123456789ABCDEF0123456789ABCDEF',
     );
@@ -639,15 +642,12 @@ describe('handleGroup', () => {
     ).toBe(true);
   });
 
-  it('keeps a mention the user typed after the prefix', async () => {
-    // Matching runs on the display text, where only the bot's own token is
-    // removed, so another member's `<@...>` in the payload survives into
-    // the dispatched prompt exactly as it does with no prefix configured.
-    const ch = makeChannel({ messagePrefix: '/review' });
+  it('keeps a member mention in the message body', async () => {
+    const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleGroup'](
       makeGroupEvent({
-        content: '<@OPENID_BOT> /review ask <@OPENID_OTHER> about the deploy',
+        content: '<@OPENID_BOT> ask <@OPENID_OTHER> about the deploy',
         mentions: [
           { member_openid: '0123456789ABCDEF0123456789ABCDEF', is_you: true },
           { member_openid: 'other-openid', is_you: false },
@@ -657,9 +657,7 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
 
     const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
-    expect(applyMessagePrefix(env, '/review')).toBe(true);
     expect(env.text).toContain('ask <@OPENID_OTHER> about the deploy');
-    expect(env.text).not.toContain('/review');
   });
 
   it('其他成员 mention 后的斜杠命令仍被识别', async () => {
@@ -677,7 +675,6 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env['text']).toBe('/schedule list');
-    expect(env['displayText']).toBe('<@OPENID_ALICE> /schedule list');
   });
 
   it('重复消息不触发', async () => {
@@ -1244,7 +1241,7 @@ describe('handleGroupAll', () => {
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env['isGroup']).toBe(true);
     expect(env['text']).toContain('[atMention=false]');
-    expect(env['displayText']).toBe('hello world');
+    expect(env['text']).toContain(']: hello world');
   });
 
   it('policy=keyword 时只有匹配关键词才触发', async () => {
@@ -2311,5 +2308,470 @@ describe('extractBotOpenId', () => {
       expect(chp['tryResume']).toBe(false);
       expect(chp['coldStart']).toBe(true);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inbound media (images and videos)
+// ---------------------------------------------------------------------------
+describe('inbound media', () => {
+  const IMAGE_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=image';
+  const VIDEO_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=video';
+
+  function imageAttachment(filename = 'photo.png') {
+    return { url: IMAGE_URL, content_type: 'image/jpeg', filename };
+  }
+
+  function videoAttachment(filename = 'clip.mp4') {
+    return { url: VIDEO_URL, content_type: 'video/mp4', filename };
+  }
+
+  function lastEnvelope(): Envelope {
+    return mockHandleInbound.mock.calls[0][0] as Envelope;
+  }
+
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('runs a turn for an image-only C2C message', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [imageAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+    const attachments = env.attachments ?? [];
+    expect(attachments).toHaveLength(2);
+    const inline = attachments[0];
+    expect(inline?.type).toBe('image');
+    expect(inline?.mimeType).toBe('image/png');
+    expect(inline?.fileName).toBe('photo.png');
+    expect(inline?.data).toBe(PNG_BYTES.toString('base64'));
+    expect(inline?.filePath).toBeUndefined();
+    const onDisk = attachments[1];
+    expect(onDisk?.type).toBe('file');
+    expect(onDisk?.mimeType).toBe('image/png');
+    expect(onDisk?.fileName).toBe('photo.png');
+    expect(onDisk?.data).toBeUndefined();
+    expect(onDisk?.filePath).toContain(join(suiteTmpDir, 'channel-files'));
+    expect(onDisk?.filePath?.endsWith('photo.png')).toBe(true);
+    await expect(readFile(onDisk!.filePath!)).resolves.toEqual(PNG_BYTES);
+    const stats = await stat(onDisk!.filePath!);
+    expect(stats.mode & 0o777).toBe(0o600);
+
+    pvt['onPromptEnd'](env.chatId, 'session-1', env.messageId);
+
+    await expect(readFile(onDisk!.filePath!)).resolves.toEqual(PNG_BYTES);
+  });
+
+  it('runs a turn for an image-only group @ message', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT>',
+        attachments: [imageAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments).toHaveLength(2);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(env.attachments?.[0]?.data).toBe(PNG_BYTES.toString('base64'));
+    expect(env.attachments?.[0]?.filePath).toBeUndefined();
+    expect(env.attachments?.[1]?.type).toBe('file');
+    expect(env.attachments?.[1]?.filePath).toBeDefined();
+  });
+
+  it('runs a turn for an image-only group all-messages message', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: '',
+        attachments: [imageAttachment()],
+        mentions: [{ is_you: true }],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.isMentioned).toBe(true);
+    expect(env.attachments).toHaveLength(2);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(env.attachments?.[0]?.filePath).toBeUndefined();
+    expect(env.attachments?.[1]?.type).toBe('file');
+    expect(env.attachments?.[1]?.filePath).toBeDefined();
+  });
+
+  it('keeps the caption as user text when an image is attached', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '看看这张图', attachments: [imageAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('[atMention=true] [Alice]: 看看这张图');
+    expect(env.syntheticText).toBeUndefined();
+    expect(env.attachments).toHaveLength(2);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(env.attachments?.[0]?.data).toBe(PNG_BYTES.toString('base64'));
+    expect(env.attachments?.[1]?.type).toBe('file');
+  });
+
+  it('writes a video to a temp path and attaches it by path', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [videoAttachment('../clip.mp4')],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(video)');
+    expect(env.syntheticText).toBe(true);
+    const attachment = env.attachments?.[0];
+    expect(attachment?.type).toBe('video');
+    expect(attachment?.mimeType).toBe('video/mp4');
+    expect(attachment?.fileName).toBe('clip.mp4');
+    expect(attachment?.data).toBeUndefined();
+    expect(attachment?.filePath).toContain(join(suiteTmpDir, 'channel-files'));
+    expect(attachment?.filePath?.endsWith(attachment!.fileName!)).toBe(true);
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(MP4_BYTES);
+    const stats = await stat(attachment!.filePath!);
+    expect(stats.mode & 0o777).toBe(0o600);
+  });
+
+  it('ignores unsupported attachments and keeps the text', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: 'hello',
+        attachments: [
+          { url: IMAGE_URL, content_type: 'voice' },
+          { url: IMAGE_URL, content_type: 'file' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('[atMention=true] [Alice]: hello');
+    expect(env.attachments).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('drops a message with no text and only unsupported attachments', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '   ',
+        attachments: [{ url: IMAGE_URL, content_type: 'voice' }],
+      }),
+    );
+
+    await settleDispatches();
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
+
+  it('skips an over-limit attachment with one stderr line', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(PNG_BYTES, {
+            headers: { 'content-length': String(QQ_IMAGE_MAX_BYTES + 1) },
+          }),
+      ),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [imageAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('[QQ:test-bot] skipping image attachment:'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('runs the turn with a failure placeholder when the download fails', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('nope', { status: 403 })),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [imageAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(User sent media but download failed)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('skipping image attachment: HTTP 403'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('keeps the other attachments when one download fails', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let call = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        call += 1;
+        return call === 1
+          ? new Response('nope', { status: 500 })
+          : new Response(PNG_BYTES, {
+              headers: { 'content-type': 'image/png' },
+            });
+      }),
+    );
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [imageAttachment('a.png'), imageAttachment('b.png')],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.attachments).toHaveLength(2);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(env.attachments?.[0]?.fileName).toBe('b.png');
+    expect(env.attachments?.[1]?.type).toBe('file');
+    expect(env.attachments?.[1]?.fileName).toBe('b.png');
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('skipping image attachment: HTTP 500'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('handles at most five attachments per message and logs the excess once', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: Array.from({ length: 6 }, (_, index) =>
+          imageAttachment(`photo-${index}.png`),
+        ),
+      }),
+    );
+
+    await settleDispatches();
+    // Five images, each contributing an inline entry and an on-disk file entry.
+    expect(lastEnvelope().attachments).toHaveLength(10);
+    const capLines = stderr.mock.calls.filter(([chunk]) =>
+      String(chunk).includes('over the per-message limit of 5'),
+    );
+    expect(capLines).toHaveLength(1);
+    expect(String(capLines[0]?.[0])).toContain('skipping 1 attachment(s)');
+    stderr.mockRestore();
+  });
+
+  it('names the on-disk video file from the resolved MIME', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [
+          { url: VIDEO_URL, content_type: 'video/mp4' },
+          {
+            url: VIDEO_URL,
+            content_type: 'video/mp4',
+            filename: 'clip.txt',
+          },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const attachments = env.attachments ?? [];
+    expect(attachments).toHaveLength(2);
+    expect(attachments[0]?.fileName).toBe('qq_video.mp4');
+    expect(attachments[1]?.fileName).toBe('clip.mp4');
+    await expect(readFile(attachments[0]!.filePath!)).resolves.toEqual(
+      MP4_BYTES,
+    );
+    await expect(readFile(attachments[1]!.filePath!)).resolves.toEqual(
+      MP4_BYTES,
+    );
+  });
+
+  it('uses the sanitized body to detect a media-only group message', async () => {
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '[bot]',
+        attachments: [imageAttachment()],
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true, scope: 'single' },
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+  });
+
+  it('keeps the video file after the prompt ends', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({ content: '', attachments: [videoAttachment()] }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    const filePath = env.attachments?.[0]?.filePath;
+    expect(filePath).toBeDefined();
+    await expect(readFile(filePath!)).resolves.toEqual(MP4_BYTES);
+
+    pvt['onPromptEnd'](env.chatId, 'session-1', env.messageId);
+
+    await expect(readFile(filePath!)).resolves.toEqual(MP4_BYTES);
+  });
+
+  it('handles a C2C media event with no content field', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    stubFetchBytes(PNG_BYTES);
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    const event = makeC2CEvent({ attachments: [imageAttachment()] });
+    delete (event as { content?: string }).content;
+
+    pvt['handleC2C'](event);
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(image)');
+    expect(env.syntheticText).toBe(true);
+    expect(env.attachments?.[0]?.type).toBe('image');
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('Malformed gateway message'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('caps the on-disk video name by bytes, not code points', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [videoAttachment('图'.repeat(200))],
+      }),
+    );
+
+    await settleDispatches();
+    const attachment = lastEnvelope().attachments?.[0];
+    expect(attachment?.fileName).toBeDefined();
+    expect(Buffer.byteLength(attachment!.fileName!)).toBeLessThanOrEqual(204);
+    await expect(readFile(attachment!.filePath!)).resolves.toEqual(MP4_BYTES);
+  });
+
+  it('uses the capped list for the media placeholder', async () => {
+    stubFetchBytes(MP4_BYTES, 'video/mp4');
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+
+    pvt['handleC2C'](
+      makeC2CEvent({
+        content: '',
+        attachments: [
+          ...Array.from({ length: 5 }, (_, index) =>
+            videoAttachment(`clip-${index}.mp4`),
+          ),
+          imageAttachment(),
+        ],
+      }),
+    );
+
+    await settleDispatches();
+    const env = lastEnvelope();
+    expect(env.text).toBe('(video)');
+    expect(env.attachments).toHaveLength(5);
+    expect(env.attachments?.every((entry) => entry.type === 'video')).toBe(
+      true,
+    );
   });
 });
