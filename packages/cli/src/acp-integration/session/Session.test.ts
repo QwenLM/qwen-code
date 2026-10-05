@@ -5761,6 +5761,34 @@ describe('Session', () => {
       });
     });
 
+    it('records retry ownership when the retry is cancelled before its first send', async () => {
+      const original: Content = { role: 'user', parts: [{ text: 'retry me' }] };
+      markApiHistoryPrompt(original, 'client-1');
+      // Cancel from inside the prompt-assembly path, so the abort lands before
+      // the send loop's entry check rather than during the model request.
+      vi.mocked(mockChat.getHistoryShallow).mockImplementation(() => {
+        void session.cancelPendingPrompt().catch(() => {});
+        return [original];
+      });
+      const request = {
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text' as const, text: 'retry me' }],
+        retry: true,
+      };
+      await expect(
+        session.prompt(request, {
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'daemon-2',
+        }),
+      ).resolves.toMatchObject({ stopReason: 'cancelled' });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordTurnAttempt).toHaveBeenCalledWith(
+        'client-1',
+        'daemon-2',
+      );
+    });
+
     it('does not send a retry when its durable attempt write fails', async () => {
       const original: Content = { role: 'user', parts: [{ text: 'retry me' }] };
       markApiHistoryPrompt(original, 'client-1');

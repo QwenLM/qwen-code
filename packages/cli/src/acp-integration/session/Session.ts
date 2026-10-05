@@ -6898,6 +6898,22 @@ export class Session implements SessionContext {
 
               while (nextMessage !== null) {
                 turnCount++;
+                // The ownership link has to be as unconditional as the
+                // terminal it owns: `#settleTurnRecording` writes a
+                // `turn_result` for this lap whether or not the model is ever
+                // called, so a lap aborted below would otherwise leave the
+                // terminal owner-less and the next restore would read the
+                // ORIGINAL attempt's outcome instead of this cancellation.
+                if (
+                  continuesCurrentWorkChain &&
+                  daemonPromptId &&
+                  !reattemptRecorded
+                ) {
+                  await this.config
+                    .getChatRecordingService()
+                    ?.recordTurnAttempt(continuedPromptId, daemonPromptId);
+                  reattemptRecorded = true;
+                }
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
                   this.#getCurrentChat().addHistory(nextMessage);
@@ -6927,16 +6943,6 @@ export class Session implements SessionContext {
                 let requestRouteKey = '';
 
                 try {
-                  if (
-                    continuesCurrentWorkChain &&
-                    daemonPromptId &&
-                    !reattemptRecorded
-                  ) {
-                    await this.config
-                      .getChatRecordingService()
-                      ?.recordTurnAttempt(continuedPromptId, daemonPromptId);
-                    reattemptRecorded = true;
-                  }
                   // Set where the model request is actually issued, not at
                   // the top of the turn. `modelStarted` is what
                   // `#settleGoalTurn` reads to decide between `releaseTurn`
