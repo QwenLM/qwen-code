@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.29.0",
-    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 adds deployment-opted-in creation with an initial Workspace file-tool Turn (G0) on the public and WebShell surfaces; the fixed server-owned profile does not enable later Workspace operations. v1.23 settles the planned task event and cancel semantics: a durable retention floor, committed-prefix publication, stable cursors, Artifact visibility before expiry, bounded backlog under archival failure, ordered idempotent cancellation and command outcomes. Clients tolerate unknown optional event fields across minor versions. Task events and cancel remain planned. v1.24 serves the read-only Session MCP catalog as partial (Stage H1), projecting display metadata and schemas from committed records without Runtime identities, credentials or production profile enablement. v1.25 implements permission Actions (Stage D6b) on both surfaces: list, get and respond, projected from the Session's action.changed records; a WebShell permission Action carries inputRevision, policyRevision, functionCallId, toolName and expiresAt, its option ids allow and deny are stable, a Turn has at most one requested approval at a time, and a response is a durable command operation carrying requestId. v1.26 declares the tenant filter's 403 actor_scope_mismatch on every covered public and WebShell route, including planned routes, and pins the refusal code in contract traffic. v1.27 adds O3 durable tool-result projection, artifact metadata, immutable range/streaming content and WebShell result reads. Artifact capability requires a configured O3 reader and a Workspace-bound Session; execution admission remains independent. v1.28 admits later Turns of a Workspace-bound Session for the Session's creator under the deployment's Workspace files opt-in, including cancel and rename; WebShell Session capabilities advertise the per-caller workspaceTurns flag. v1.29 implements the AgentDefinition routes (Stage D8a): create, get and update store tenant-scoped, immutable revisions with a content digest, and an unchanged update adds no revision. Sessions still pin qwen-code and the configured revision, and no definition field changes execution yet."
+    "version": "1.30.0",
+    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 adds deployment-opted-in creation with an initial Workspace file-tool Turn (G0) on the public and WebShell surfaces; the fixed server-owned profile does not enable later Workspace operations. v1.23 settles the planned task event and cancel semantics: a durable retention floor, committed-prefix publication, stable cursors, Artifact visibility before expiry, bounded backlog under archival failure, ordered idempotent cancellation and command outcomes. Clients tolerate unknown optional event fields across minor versions. Task events and cancel remain planned. v1.24 serves the read-only Session MCP catalog as partial (Stage H1), projecting display metadata and schemas from committed records without Runtime identities, credentials or production profile enablement. v1.25 implements permission Actions (Stage D6b) on both surfaces: list, get and respond, projected from the Session's action.changed records; a WebShell permission Action carries inputRevision, policyRevision, functionCallId, toolName and expiresAt, its option ids allow and deny are stable, a Turn has at most one requested approval at a time, and a response is a durable command operation carrying requestId. v1.26 declares the tenant filter's 403 actor_scope_mismatch on every covered public and WebShell route, including planned routes, and pins the refusal code in contract traffic. v1.27 adds O3 durable tool-result projection, artifact metadata, immutable range/streaming content and WebShell result reads. Artifact capability requires a configured O3 reader and a Workspace-bound Session; execution admission remains independent. v1.28 admits later Turns of a Workspace-bound Session for the Session's creator under the deployment's Workspace files opt-in, including cancel and rename; WebShell Session capabilities advertise the per-caller workspaceTurns flag. v1.29 implements the AgentDefinition routes (Stage D8a): create, get and update store tenant-scoped, immutable revisions with a content digest, and an unchanged update adds no revision. Sessions still pin qwen-code and the configured revision, and no definition field changes execution yet. v1.30 adds the qwenSignature security scheme for gateway-free deployments: in signed authentication mode the broker authenticates the X-Qwen-Tenant-Id and X-Qwen-Actor-Id header pair itself with an HMAC signature over method, path, query, tenant, actor, timestamp, body digest and Idempotency-Key, carried in X-Qwen-Signature and X-Qwen-Signature-Timestamp, and answers 401 authentication_required or invalid_signature, 400 invalid_request on a repeated Idempotency-Key header, and 413 payload_too_large beyond the signed-body limit; a Session now records its creator so approval responses are owned without a Workspace creation record; a Session with no recorded creator and no recorded create command answers approvals to any caller in its tenant."
   },
   "servers": [
     {
@@ -14,6 +14,11 @@
     {
       "trustedTenant": [],
       "trustedActor": []
+    },
+    {
+      "trustedTenant": [],
+      "trustedActor": [],
+      "qwenSignature": []
     }
   ],
   "tags": [
@@ -68,11 +73,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       }
@@ -119,6 +130,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -167,6 +181,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -175,6 +192,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       }
@@ -231,6 +251,9 @@
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -271,6 +294,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "403": {
             "$ref": "#/components/responses/Forbidden"
           }
@@ -300,6 +326,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
@@ -348,6 +377,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -356,6 +388,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       },
@@ -382,6 +417,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -434,6 +472,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -442,6 +483,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       },
@@ -499,6 +543,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -544,6 +591,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
@@ -580,6 +630,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
@@ -628,6 +681,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -998,8 +1054,14 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       }
@@ -1033,11 +1095,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       }
@@ -1071,11 +1139,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         },
         "description": "Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta, item.tool_call.updated and item.tool_result.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events."
@@ -1115,11 +1189,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       }
@@ -1171,6 +1251,9 @@
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -1211,6 +1294,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -1219,6 +1305,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       }
@@ -1257,6 +1346,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -1265,6 +1357,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       }
@@ -1311,6 +1406,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -1350,6 +1448,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -1400,6 +1501,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -1408,6 +1512,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       }
@@ -1446,6 +1553,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -1489,11 +1599,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       }
@@ -1527,6 +1643,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -1535,6 +1654,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       }
@@ -1568,6 +1690,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -1576,6 +1701,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       }
@@ -1604,6 +1732,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound",
             "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
@@ -1612,8 +1743,7 @@
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden)."
+            "$ref": "#/components/responses/Forbidden"
           }
         },
         "parameters": [
@@ -1624,7 +1754,7 @@
             "$ref": "#/components/parameters/ListLimit"
           }
         ],
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/actions/{actionId}": {
@@ -1654,6 +1784,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound",
             "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
@@ -1662,11 +1795,10 @@
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden)."
+            "$ref": "#/components/responses/Forbidden"
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/actions/{actionId}/responses": {
@@ -1696,6 +1828,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound",
             "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
@@ -1706,7 +1841,10 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden)."
+            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or a Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL. The tenant filter's 403 actor_scope_mismatch also applies on this route."
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         },
         "parameters": [
@@ -1724,7 +1862,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/close": {
@@ -1751,6 +1889,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -1793,6 +1934,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -1846,6 +1990,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -1877,6 +2024,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound",
             "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
@@ -1885,8 +2035,10 @@
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden)."
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         },
         "requestBody": {
@@ -1899,7 +2051,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/actions/get": {
@@ -1921,6 +2073,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound",
             "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
@@ -1929,8 +2084,10 @@
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden)."
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         },
         "requestBody": {
@@ -1943,7 +2100,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/actions/respond": {
@@ -1965,6 +2122,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound",
             "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
@@ -1975,7 +2135,10 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden",
-            "description": "Responding requires the Session creator (action_forbidden)."
+            "description": "Responding requires the Session creator (action_forbidden). A Session with no recorded creator and no recorded create command (anonymous open-mode creation, or a Session created before the V40 migration that also has no Workspace creation record) answers to any caller in its tenant, matching its read ACL. The tenant filter's 403 actor_scope_mismatch also applies on this route."
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         },
         "requestBody": {
@@ -1988,7 +2151,7 @@
             }
           }
         },
-        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond (a Session with no recorded creator and no recorded create command answers to any caller in its tenant). Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/sessions/close": {
@@ -2010,6 +2173,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -2018,6 +2184,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         },
         "requestBody": {
@@ -2052,6 +2221,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -2060,6 +2232,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         },
         "requestBody": {
@@ -2094,6 +2269,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -2102,6 +2280,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         },
         "requestBody": {
@@ -2147,11 +2328,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         }
       }
@@ -2179,6 +2366,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
@@ -2224,6 +2414,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
@@ -2259,6 +2452,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
@@ -2307,6 +2503,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -2343,11 +2542,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         },
         "requestBody": {
@@ -2381,11 +2586,17 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         },
         "requestBody": {
@@ -2419,6 +2630,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
@@ -2427,6 +2641,9 @@
           },
           "409": {
             "$ref": "#/components/responses/TaskCursorExpired"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         },
         "requestBody": {
@@ -2460,6 +2677,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -2468,6 +2688,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         },
         "requestBody": {
@@ -2506,6 +2729,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -2535,6 +2761,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -2695,6 +2924,9 @@
               }
             }
           },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
           "503": {
             "description": "Resource temporarily unavailable.",
             "content": {
@@ -2775,6 +3007,9 @@
               }
             }
           },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
           "503": {
             "description": "Resource temporarily unavailable.",
             "content": {
@@ -2854,6 +3089,9 @@
                 }
               }
             }
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           },
           "503": {
             "description": "Resource temporarily unavailable.",
@@ -3065,6 +3303,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
@@ -3073,6 +3314,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
           }
         },
         "requestBody": {
@@ -3095,14 +3339,21 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-Qwen-Tenant-Id",
-        "description": "Injected by the trusted authenticated gateway, never trusted from browser input."
+        "description": "The tenant scope of the request. In the gateway topology it is injected by the trusted authenticated gateway and never trusted from browser input; in signed mode (qwenSignature) the broker authenticates it as part of the signed header set."
       },
       "trustedActor": {
         "type": "apiKey",
         "in": "header",
         "name": "X-Qwen-Actor-Id",
         "x-qwen-implementation-status": "planned",
-        "description": "Verified actor injected by the authenticated gateway together with tenant; browser-supplied headers are stripped. Resource ACLs and Action responder eligibility are mandatory. This header is not a browser credential."
+        "description": "Verified actor identity. In the gateway topology it is injected by the authenticated gateway together with tenant and browser-supplied headers are stripped. In signed mode (qwenSignature) the broker authenticates it as part of the signed header set. Resource ACLs are mandatory in either mode; Action responder eligibility resolves to the recorded Session creator and falls back to the tenant scope when neither a creator nor a create command was recorded. This header is not a browser credential."
+      },
+      "qwenSignature": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Qwen-Signature",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Gateway-free authentication. The caller sends X-Qwen-Tenant-Id, X-Qwen-Actor-Id, X-Qwen-Signature-Timestamp (epoch seconds, within the server drift window) and X-Qwen-Signature: v1=<lowercase hex HMAC-SHA256> over \"qwen-broker-auth-v1\\n\" + METHOD + \"\\n\" + request path (undecoded, without the query string) + \"\\n\" + raw query string (empty when absent) + \"\\n\" + tenant + \"\\n\" + actor + \"\\n\" + timestamp + \"\\n\" + lowercase hex SHA-256 of the raw request body + \"\\n\" + the Idempotency-Key header value (empty when absent), keyed by the server signing key. A missing actor, signature or timestamp header answers 401 authentication_required (a missing tenant header answers 400 invalid_tenant from the tenant filter); a stale timestamp or wrong signature answers 401 invalid_signature. Applies to every covered public and WebShell route, including the bare POST /v1/agents collection route and normalized path spellings. X-Qwen-Tenant-Id, X-Qwen-Actor-Id and X-Qwen-Signature-Timestamp are all mandatory alongside X-Qwen-Signature; an apiKey scheme names a single header by specification, so the other three are declared here in prose rather than as separate schemes."
       }
     },
     "parameters": {
@@ -3246,7 +3497,17 @@
         }
       },
       "Unauthorized": {
-        "description": "A trusted actor is required for this request but none was supplied.",
+        "description": "A trusted actor is required for this request but none was supplied (actor_required). In signed authentication mode (qwenSignature) every covered public and WebShell route additionally answers 401 authentication_required when the signature, timestamp or actor headers are missing, and 401 invalid_signature when the signature is wrong or stale.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "In signed authentication mode (qwenSignature) a request body beyond the configured signed-body limit (qwen.managed-agent.auth.max-signed-body-bytes, default 10 MiB) answers 413 payload_too_large before the signature is compared.",
         "content": {
           "application/json": {
             "schema": {
@@ -7104,7 +7365,7 @@
           "recovery_blocked"
         ],
         "x-qwen-implementation-status": "partial",
-        "description": "Logical run state. completed, failed and cancelled are terminal and are set only after the physical execution has settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically."
+        "description": "Logical run state. completed is terminal and is set when the run's own line ends settled, with or without a physical execution; failed and cancelled are terminal too, and they also cover a run that ended before its execution started (cancelled before dispatch, or failed with no provable start), when no physical execution ever settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically."
       },
       "TaskRuntimeState": {
         "type": "string",

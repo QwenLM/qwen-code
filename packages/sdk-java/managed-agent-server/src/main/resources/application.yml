@@ -34,11 +34,21 @@ qwen:
   managed-agent:
     agent-revision: '${QWEN_MANAGED_AGENT_REVISION:1}'
     trusted-actor-header: '${QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER:}'
+    auth:
+      mode: '${QWEN_MANAGED_AGENT_AUTH_MODE:auto}'
+      signing-key: '${QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY:}'
+      allowed-drift: '${QWEN_MANAGED_AGENT_AUTH_ALLOWED_DRIFT:5m}'
+      allow-insecure-bind: '${QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND:false}'
+    internal-server:
+      port: '${QWEN_MANAGED_AGENT_INTERNAL_SERVER_PORT:0}'
+      address: '${QWEN_MANAGED_AGENT_INTERNAL_SERVER_ADDRESS:127.0.0.1}'
     session-store:
       enabled: '${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:false}'
       base-url: '${QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL:}'
       workspace-id: '${QWEN_MANAGED_AGENT_WORKSPACE_ID:}'
       writer-lease-duration: '${QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION:60s}'
+      binding-key: '${QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY:}'
+      allow-insecure-http: '${QWEN_MANAGED_AGENT_SESSION_STORE_ALLOW_INSECURE_HTTP:false}'
     tool-publication:
       enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ENABLED:false}'
       gc-enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_GC_ENABLED:false}'

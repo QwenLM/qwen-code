@@ -18,11 +18,21 @@ public class ManagedAgentProperties {
     private final Dispatch dispatch = new Dispatch();
     private final Events events = new Events();
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
+    private final Auth auth = new Auth();
+    private final InternalServer internalServer = new InternalServer();
     private String agentRevision = "1";
     private String trustedActorHeader = "";
 
     public Harness getHarness() {
         return harness;
+    }
+
+    public Auth getAuth() {
+        return auth;
+    }
+
+    public InternalServer getInternalServer() {
+        return internalServer;
     }
 
     public SessionStore getSessionStore() {
@@ -203,6 +213,8 @@ public class ManagedAgentProperties {
         private String baseUrl = "";
         private String workspaceId = "";
         private Duration writerLeaseDuration = Duration.ofSeconds(60);
+        private String bindingKey = "";
+        private boolean allowInsecureHttp;
 
         public boolean isEnabled() {
             return enabled;
@@ -234,6 +246,94 @@ public class ManagedAgentProperties {
 
         public void setWriterLeaseDuration(Duration writerLeaseDuration) {
             this.writerLeaseDuration = writerLeaseDuration;
+        }
+
+        public String getBindingKey() {
+            return bindingKey;
+        }
+
+        public void setBindingKey(String bindingKey) {
+            this.bindingKey = bindingKey;
+        }
+
+        public boolean isAllowInsecureHttp() {
+            return allowInsecureHttp;
+        }
+
+        public void setAllowInsecureHttp(boolean allowInsecureHttp) {
+            this.allowInsecureHttp = allowInsecureHttp;
+        }
+    }
+
+    public static class Auth {
+        private String mode = "auto";
+        private String signingKey = "";
+        private Duration allowedDrift = Duration.ofMinutes(5);
+        private boolean allowInsecureBind;
+        private long maxSignedBodyBytes = 10 * 1024 * 1024;
+
+        public String getMode() {
+            return mode;
+        }
+
+        public void setMode(String mode) {
+            this.mode = mode;
+        }
+
+        public String getSigningKey() {
+            return signingKey;
+        }
+
+        public void setSigningKey(String signingKey) {
+            this.signingKey = signingKey;
+        }
+
+        public long getMaxSignedBodyBytes() {
+            return maxSignedBodyBytes;
+        }
+
+        public void setMaxSignedBodyBytes(long maxSignedBodyBytes) {
+            this.maxSignedBodyBytes = maxSignedBodyBytes;
+        }
+
+        public Duration getAllowedDrift() {
+            return allowedDrift;
+        }
+
+        public void setAllowedDrift(Duration allowedDrift) {
+            this.allowedDrift = allowedDrift;
+        }
+
+        public boolean isAllowInsecureBind() {
+            return allowInsecureBind;
+        }
+
+        public void setAllowInsecureBind(boolean allowInsecureBind) {
+            this.allowInsecureBind = allowInsecureBind;
+        }
+    }
+
+    public static class InternalServer {
+        private int port;
+        private String address = "127.0.0.1";
+
+        public int getPort() {
+            return port;
+        }
+
+        public void setPort(int port) {
+            this.port = port;
+        }
+
+        // A blank value comes from an unset template variable; both the
+        // startup guard and the connector must read it as the default.
+        public String getAddress() {
+            return address == null || address.isBlank() ? "127.0.0.1"
+                    : address;
+        }
+
+        public void setAddress(String address) {
+            this.address = address;
         }
     }
 
