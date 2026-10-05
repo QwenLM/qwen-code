@@ -126,6 +126,16 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'hook_execution',
   ];
 
+/**
+ * The enabled domains whose records commit through the envelope path
+ * (`commitDomainRecord`), so they have no Stage H body. A slice that
+ * defines a body for one of them must move that domain's commits to
+ * `commitExtensionRecord` in the same change and remove its name from this
+ * list; the bodies module refuses to load over a name left here.
+ */
+export const MANAGED_SESSION_ENVELOPE_DOMAINS: readonly ManagedSessionDomain[] =
+  ['goal_state', 'session_metadata', 'file_history', 'session_source'];
+
 export function assertManagedSessionDomainEnabled(
   domain: ManagedSessionDomain,
 ): void {
@@ -272,11 +282,21 @@ function object(
   return value as Record<string, ManagedSessionJsonValue>;
 }
 
+interface JsonShape {
+  /** Object levels from this object down; a primitive leaf adds none. */
+  readonly height: number;
+  /** A lower bound on the serialized size of the expanded subtree. */
+  readonly bytes: number;
+  /** Whether some object below is reached through more than one path. */
+  readonly shared: boolean;
+}
+
 function assertJsonValue(
   value: unknown,
   label: string,
   ancestors = new Set<object>(),
   depth = 1,
+  shapes = new Map<object, JsonShape>(),
 ): asserts value is ManagedSessionJsonValue {
   if (
     value === null ||
@@ -298,12 +318,48 @@ function assertJsonValue(
     );
   }
   if (ancestors.has(value)) fail(`${label} must not contain cycles.`);
+  // Sharing references is legal, but the ancestors set is path-scoped, so a
+  // shared DAG would be walked once per path — exponentially. Memo the
+  // subtree height so each distinct object is walked once per call while
+  // the depth bound still accounts for the visiting path.
+  const seen = shapes.get(value);
+  if (seen !== undefined) {
+    if (depth + seen.height - 1 > MANAGED_SESSION_LIMITS.maxJsonDepth) {
+      fail(
+        `${label} exceeds the maximum JSON depth of ${MANAGED_SESSION_LIMITS.maxJsonDepth}.`,
+      );
+    }
+    return;
+  }
 
   ancestors.add(value);
   try {
     const descriptors = Object.getOwnPropertyDescriptors(value);
     const keys = Reflect.ownKeys(descriptors);
     const prototype = Object.getPrototypeOf(value) as object | null;
+    let height = 1;
+    let bytes = 2;
+    let shared = false;
+    // JSON.stringify expands every path of a shared graph, so the expanded
+    // size is what serialization will cost. A tree never reaches this bound
+    // through sharing (its size is its own), so only shared subgraphs are
+    // held to the largest budget any caller serializes into.
+    const visit = (child: unknown, childLabel: string, keyBytes: number) => {
+      const isObject = typeof child === 'object' && child !== null;
+      const reached = isObject && shapes.has(child);
+      assertJsonValue(child, childLabel, ancestors, depth + 1, shapes);
+      const shape = isObject ? shapes.get(child) : undefined;
+      height = Math.max(height, (shape?.height ?? 0) + 1);
+      bytes +=
+        keyBytes +
+        (shape?.bytes ?? (typeof child === 'string' ? child.length + 2 : 1));
+      shared = shared || reached || shape?.shared === true;
+      if (shared && bytes > MANAGED_SESSION_LIMITS.maxTransactionBytes) {
+        fail(
+          `${label} expands past ${MANAGED_SESSION_LIMITS.maxTransactionBytes} bytes through shared references.`,
+        );
+      }
+    };
     if (Array.isArray(value)) {
       if (prototype !== Array.prototype) {
         fail(`${label} must be a plain JSON array.`);
@@ -323,13 +379,9 @@ function assertJsonValue(
         fail(`${label} must be a dense JSON array.`);
       }
       for (let index = 0; index < value.length; index++) {
-        assertJsonValue(
-          descriptors[String(index)].value,
-          `${label}[${index}]`,
-          ancestors,
-          depth + 1,
-        );
+        visit(descriptors[String(index)].value, `${label}[${index}]`, 0);
       }
+      shapes.set(value, { height, bytes, shared });
       return;
     }
 
@@ -345,8 +397,9 @@ function assertJsonValue(
       if (!descriptor.enumerable || !('value' in descriptor)) {
         fail(`${keyLabel} must be an enumerable data property.`);
       }
-      assertJsonValue(descriptor.value, keyLabel, ancestors, depth + 1);
+      visit(descriptor.value, keyLabel, key.length + 3);
     }
+    shapes.set(value, { height, bytes, shared });
   } finally {
     ancestors.delete(value);
   }
@@ -364,7 +417,7 @@ function assertNoUnknownKeys(
   }
 }
 
-function boundedString(
+export function boundedString(
   value: ManagedSessionJsonValue | undefined,
   label: string,
   maxBytes: number,
@@ -375,8 +428,9 @@ function boundedString(
   if (Buffer.byteLength(value, 'utf8') > maxBytes) {
     fail(`${label} exceeds ${maxBytes} UTF-8 bytes.`);
   }
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) {
+  // Shared rule from textUtils: every stripped sequence holds a control
+  // character, so a changed result means control content was present.
+  if (stripAnsiAndControl(value) !== value) {
     fail(`${label} must not contain control characters.`);
   }
   return value;
@@ -567,6 +621,44 @@ function assertSubject(
     };
   }
   return fail(`${label}.type must be activation, turn or hook_operation.`);
+}
+
+function subjectsEqual(
+  left: ManagedSessionSubject,
+  right: ManagedSessionSubject,
+): boolean {
+  if (left.type !== right.type) return false;
+  switch (left.type) {
+    case 'activation': {
+      const other = right as Extract<
+        ManagedSessionSubject,
+        { type: 'activation' }
+      >;
+      return (
+        left.scopeId === other.scopeId &&
+        left.activationId === other.activationId &&
+        left.epoch === other.epoch
+      );
+    }
+    case 'turn': {
+      const other = right as Extract<ManagedSessionSubject, { type: 'turn' }>;
+      return left.turnId === other.turnId;
+    }
+    case 'hook_operation': {
+      const other = right as Extract<
+        ManagedSessionSubject,
+        { type: 'hook_operation' }
+      >;
+      return (
+        left.operationId === other.operationId &&
+        left.occurrenceId === other.occurrenceId
+      );
+    }
+    default: {
+      const exhaustive: never = left;
+      return exhaustive;
+    }
+  }
 }
 
 type FieldKind =
@@ -810,7 +902,7 @@ function assertField(
   name: string,
   kind: FieldKind,
   label: string,
-): void {
+): ManagedSessionSubject | undefined {
   const value = payload[name];
   const at = `${label}.${name}`;
   switch (kind) {
@@ -870,8 +962,7 @@ function assertField(
       }
       return;
     case 'subject':
-      assertSubject(value, at);
-      return;
+      return assertSubject(value, at);
     case 'json':
       assertJsonValue(value, at);
       return;
@@ -906,6 +997,23 @@ function assertPayloadRules(
       return;
     }
     case 'activation.changed': {
+      const subject = payload['subject'] as Record<
+        string,
+        ManagedSessionJsonValue
+      >;
+      // hook_operation is the hosted Hook caller's legal subject; a turn
+      // identifies nothing here, and a mismatched activation contradicts
+      // the record it rides on.
+      if (subject['type'] === 'turn') {
+        fail(`${at}.subject must identify the activation it changes.`);
+      }
+      if (
+        subject['type'] === 'activation' &&
+        (subject['activationId'] !== payload['activationId'] ||
+          subject['epoch'] !== payload['epoch'])
+      ) {
+        fail(`${at}.subject must identify the activation it changes.`);
+      }
       const phase = assertEnum(
         payload['phase'],
         ['installing', 'active', 'released', 'revoked'] as const,
@@ -996,6 +1104,31 @@ function assertPayloadRules(
       if ((payload['coveredSequence'] as number) < 1) {
         fail(`${at}.coveredSequence must start at 1.`);
       }
+      if (
+        payload['previousCheckpointId'] !== null &&
+        payload['previousCheckpointId'] === payload['checkpointId']
+      ) {
+        fail(`${at}.previousCheckpointId must not name itself.`);
+      }
+      return;
+    }
+    case 'message.committed': {
+      if (
+        payload['parentMessageId'] !== null &&
+        payload['parentMessageId'] === payload['messageId']
+      ) {
+        fail(`${at}.parentMessageId must not name itself.`);
+      }
+      return;
+    }
+    case 'config.bound': {
+      if (
+        payload['previousRevision'] !== null &&
+        (payload['previousRevision'] as number) >=
+          (payload['revision'] as number)
+      ) {
+        fail(`${at}.previousRevision must precede ${at}.revision.`);
+      }
       return;
     }
     case 'domain.committed': {
@@ -1021,14 +1154,12 @@ function assertPayloadRules(
       return;
     }
     case 'input.accepted':
-    case 'message.committed':
     case 'tool.intent':
     case 'message.delta':
     case 'message.retracted':
     case 'tool.receipt':
     case 'cancel.requested':
     case 'turn.settled':
-    case 'config.bound':
       return;
     default: {
       const exhaustive: never = kind;
@@ -1072,14 +1203,24 @@ export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
   const names = Object.keys(schema.fields);
   assertNoUnknownKeys(payload, names, 'payload');
   const optional = schema.optional ?? [];
+  // Only a field declared with the 'subject' kind yields a value; kinds
+  // carrying another field named subject skip the cross-check entirely.
+  let payloadSubject: ManagedSessionSubject | undefined;
   for (const name of names) {
     if (!(name in payload)) {
       if (optional.includes(name)) continue;
       fail(`payload.${name} is required for ${kind}.`);
     }
-    assertField(payload, name, schema.fields[name], 'payload');
+    const parsed = assertField(payload, name, schema.fields[name], 'payload');
+    if (parsed !== undefined) payloadSubject = parsed;
   }
   assertPayloadRules(kind, payload);
+  if (
+    kind === 'wake.requested' &&
+    payload['sourceEventId'] === record['eventId']
+  ) {
+    fail('payload.sourceEventId must not name itself.');
+  }
 
   const subject =
     record['subject'] === undefined
@@ -1087,6 +1228,13 @@ export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
       : assertSubject(record['subject'], 'event.subject');
   if (ACTIVATION_SUBJECT_KINDS[kind] && subject?.type !== 'activation') {
     fail(`${kind} requires an activation subject.`);
+  }
+  if (
+    subject !== undefined &&
+    payloadSubject !== undefined &&
+    !subjectsEqual(subject, payloadSubject)
+  ) {
+    fail(`${kind} requires event.subject to match payload.subject.`);
   }
 
   return {
