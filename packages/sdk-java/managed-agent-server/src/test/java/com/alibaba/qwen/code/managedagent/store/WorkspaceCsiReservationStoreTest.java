@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -191,6 +193,55 @@ class WorkspaceCsiReservationStoreTest {
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease"
                 + " WHERE csi_phase = 'RESERVED'", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void lostLocalBindingWithoutAHolderCanRetireAfterItsAliasIsRegisteredAsCsi() {
+        var registration = registration("tenant", "storage", "backend", "handle", 1);
+        var context = new ContextBinding("tenant", "workspace", 1, "storage", ".",
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        var local = new WorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(source));
+        var session = localSession(context);
+        var original = bindings.findById(session.getBindingId());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease", Long.class)).isZero();
+        store.register(registration);
+        var other = registration("other", "other-storage", "backend", "handle", 1);
+        store.register(other);
+        var csiBinding = binding(other, "other-workspace", "other-session");
+        store.reserve(other, bindings, csiBinding, UUID.randomUUID().toString());
+        var registrationRows = jdbc.queryForList("SELECT * FROM managed_workspace_csi_registration ORDER BY alias_key");
+        var csiOwner = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        assertThat(csiOwner.get("csi_phase")).isEqualTo("RESERVED");
+        var seed = original.getProvisionSeed();
+        var loss = new RuntimeRecoveryEvidence(UUID.randomUUID().toString(),
+                RuntimeRecoveryEvidence.Fact.JOURNAL_LOST,
+                "registered-process-exit", Instant.now(), "host", seed.getProvisionRequestId(),
+                seed.getProvisionalRuntimeId(), seed.getGatewayIncarnation(), seed.getLeaseId(),
+                seed.getEpoch(), original.getResourceHandle());
+        var stop = new RuntimeRecoveryEvidence(UUID.randomUUID().toString(),
+                RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED,
+                "registered-process-exit", Instant.now(), "host", seed.getProvisionRequestId(),
+                seed.getProvisionalRuntimeId(), seed.getGatewayIncarnation(), seed.getLeaseId(),
+                seed.getEpoch(), original.getResourceHandle());
+        var lost = bindings.compareAndSet(original, original.withRecoveryEvidence(loss, null, Instant.now()));
+        assertThat(lost).isNotNull();
+        assertThatThrownBy(() -> local.releaseLost(lost)).isInstanceOf(RuntimeBrokerException.class);
+        var stopped = bindings.compareAndSet(lost, lost.withRecoveryEvidence(loss, stop, Instant.now()));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
+        var drained = bindings.recoverLost(sessions, executions, stopped);
+        assertThat(drained.getState()).isEqualTo(RuntimeBindingRecord.State.LOST);
+        local.releaseLost(drained);
+        var released = bindings.finishLostRecovery(sessions, executions, drained);
+        assertThat(released.getState()).isEqualTo(RuntimeBindingRecord.State.RELEASED);
+        assertThat(bindings.findById(original.getBindingId()).getState()).isEqualTo(RuntimeBindingRecord.State.RELEASED);
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(csiOwner);
+        assertThat(jdbc.queryForList("SELECT * FROM managed_workspace_csi_registration ORDER BY alias_key"))
+                .isEqualTo(registrationRows);
+        assertThatThrownBy(() -> local.claim(context, session)).isInstanceOfSatisfying(RuntimeBrokerException.class,
+                error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+        assertThatThrownBy(() -> local.isHeld(context, session)).isInstanceOf(RuntimeBrokerException.class);
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(csiOwner);
     }
 
     @Test

@@ -217,8 +217,6 @@ public class WorkspaceExecutionStore {
         }
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, saved.getRequest().getScope().getTenantId());
-            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, saved.getRequest().getScope().getTenantId(),
-                    saved.getRequest().getStorageId());
             List<Boolean> exact = jdbc.query("SELECT binding_id, runtime_generation, binding_state, tenant_id,"
                     + " workspace_id, storage_id, record_version, operation_owner, operation_generation,"
                     + " operation_lease_until, loss_evidence_json, stop_evidence_json, UNIX_TIMESTAMP() AS db_seconds,"
