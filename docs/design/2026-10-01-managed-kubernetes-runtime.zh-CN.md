@@ -105,8 +105,9 @@ Kubernetes API 客户端使用 HTTPS、配置的 CA 信任、每次请求重读 
 物理停止或输出交付。K1 因而不自动回收 idle 资源，运维须考虑保留资源的容量。
 保留证据的删除需要后续显式 retirement 操作，携带原 UID、结算屏障及 UID 条件删除。
 
-K1 Pod 丢失后，LOST binding 会使同一 tenant 的所有新 K1 Session 被不可重试的
-`runtime_placement_recovery_required` 拒绝；已有健康 Session 和其他 tenant 不受影响。
+K1 Pod 丢失后，LOST binding 会使同一 tenant 的新 placement 被不可重试的
+`runtime_placement_recovery_required` 拒绝。共享 repository 时，新 local-process
+和其他 provisioner kind 也会被拦截；已有健康 binding 和其他 tenant 不受影响。
 K1 不返回带停止 writer 证据的 NOT_FOUND，因而重复 recovery、外部删除 Pod 或重启
 进程都不能清除这个持久拦截。运维必须停止受影响 tenant 的新准入，保留原 binding、
 seed、资源 UID 和 execution 清单，并升级处理以获得保留证据的恢复方案或经过明确

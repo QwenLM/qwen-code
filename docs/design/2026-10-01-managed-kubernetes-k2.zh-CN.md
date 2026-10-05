@@ -436,7 +436,9 @@ K2a 没有 activate、release、超时接管或公开 selector。私有创建前
 完整物理退役仍未实现。
 
 私有 CSI Pod 校验拒绝未知的 spec、container 和 security-context 字段，同时允许
-明确支持的 API 默认字段省略。特别是 container 不能覆盖 Pod 的 non-root 用户策略。
+明确支持的 API 默认字段省略。内置 ServiceAccount 和 Priority 准入可以添加
+`imagePullSecrets` 和 `priorityClassName`，创建及原 Pod 恢复均接受这两个字段；
+其他未支持的准入变更仍被拒绝。特别是 container 不能覆盖 Pod 的 non-root 用户策略。
 操作失败仅失效与原 request、seed 和 handle 匹配的缓存 placement；其他 seed 或伪造
 handle 不能撤销存活原 worker。ConfigMap GET 的响应预算独立设为一 MiB 加 64 KiB，
 为最大一 MiB 的 base64 chunk 提供 JSON envelope 空间。原生 CSI 日志仍保持严格的

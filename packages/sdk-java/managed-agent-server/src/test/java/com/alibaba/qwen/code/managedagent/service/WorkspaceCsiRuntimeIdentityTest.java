@@ -46,6 +46,8 @@ import java.util.function.Consumer;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -408,6 +410,39 @@ class WorkspaceCsiRuntimeIdentityTest {
             var handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
             assertThat(handle).isNotNull();
             assertThat(attestations).hasValue(2);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,false", "false,true", "true,true"})
+    void acceptsBuiltinServiceAccountAndPriorityAdmissionFields(boolean pullSecrets, boolean priorityClass) {
+        var fields = new LinkedHashMap<String, Object>();
+        if (pullSecrets) {
+            fields.put("imagePullSecrets", List.of(Map.of("name", "registry-pull-secret")));
+        }
+        if (priorityClass) {
+            fields.put("priorityClassName", "default-priority");
+        }
+        api.changeCreatedPod = pod -> nested(pod, "spec").putAll(fields);
+        RuntimeResourceHandle handle;
+        RuntimeLease lease;
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(nested(api.objects.get("pods"), "spec")).containsAllEntriesOf(fields);
+            assertThat(attestations).hasValue(2);
+            original = bindings.compareAndSet(original, original.withResourceHandle(handle, Instant.now()));
+            lease = join(provider.provision(original.getRequest(), original.getProvisionSeed()));
+            original = bindings.compareAndSet(original, original.withAttestation(lease, handle, Instant.now(), Instant.now()));
+        }
+        var reloaded = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]))
+                .findById(original.getBindingId());
+        try (var restarted = provider()) {
+            assertThat(join(restarted.ensureResource(reloaded.getRequest(), reloaded.getProvisionSeed(), reloaded.getResourceHandle())))
+                    .isEqualTo(handle);
+            assertThat(join(restarted.reconcile(reloaded.getRequest(), reloaded.getProvisionSeed(), reloaded.getResourceHandle(), lease)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.READY);
+            assertThat(api.creates).isEqualTo(2);
         }
     }
 

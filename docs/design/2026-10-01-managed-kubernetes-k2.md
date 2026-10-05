@@ -566,9 +566,12 @@ PVC/PV, Pod/node/container/image and mount checks as described in the durable AC
 design. Full physical retirement remains unimplemented.
 
 Private CSI Pod verification rejects unknown spec, container and security-context
-keys while permitting the explicitly supported API defaults to be omitted. In
-particular a container cannot override the Pod's non-root user policy. A failed
-operation invalidates only a cached placement matching its original request,
+keys while permitting the explicitly supported API defaults to be omitted.
+Built-in ServiceAccount and Priority admission may add `imagePullSecrets` and
+`priorityClassName`; both are accepted during creation and original-Pod recovery.
+Other unsupported admission mutations remain refused. In particular a container
+cannot override the Pod's non-root user policy. A failed operation invalidates
+only a cached placement matching its original request,
 seed and handle; a foreign seed or forged handle cannot revoke a live original
 worker. ConfigMap GET has a separate one-MiB-plus-64-KiB response budget for the
 JSON envelope around a base64 chunk bounded to one MiB. Native CSI logs retain

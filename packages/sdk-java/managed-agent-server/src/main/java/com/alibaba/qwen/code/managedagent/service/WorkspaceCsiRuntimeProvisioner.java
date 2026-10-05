@@ -500,7 +500,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                     "securityContext", "containers", "volumes", "nodeName", "serviceAccountName", "serviceAccount",
                     "schedulerName", "priority", "preemptionPolicy", "dnsPolicy", "terminationGracePeriodSeconds",
                     "tolerations", "hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace",
-                    "initContainers", "ephemeralContainers").containsAll(spec.keySet()));
+                    "initContainers", "ephemeralContainers", "imagePullSecrets", "priorityClassName").containsAll(spec.keySet()));
             require(map(map(expected.get("spec")).get("securityContext")).keySet()
                     .containsAll(map(spec.get("securityContext")).keySet()));
             require(empty(spec.get("initContainers")) && empty(spec.get("ephemeralContainers"))

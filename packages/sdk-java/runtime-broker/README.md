@@ -145,10 +145,11 @@ and `close` never delete Kubernetes objects; neither is authorization to stop a
 worker another Broker may use. Budget retained Pods and Secrets: K1 provides no
 automatic garbage collection, persistent Workspace storage or volume handoff.
 
-A lost K1 scratch Pod leaves its binding LOST and blocks every new K1 Session in
-that tenant with non-retryable `runtime_placement_recovery_required`. Existing
-healthy Sessions and other tenants remain usable. K1 never emits the stopped-writer
-proof required by `recoverBinding`, so retries, Pod deletion and Broker restart do
+A lost K1 scratch Pod leaves its binding LOST and blocks new placement in that
+tenant with non-retryable `runtime_placement_recovery_required`. When sharing the
+repository, new local-process and other provisioner kinds are also blocked.
+Existing healthy bindings and other tenants remain usable. K1 never emits the
+stopped-writer proof required by `recoverBinding`, so retries, Pod deletion and Broker restart do
 not recover this tenant. Operators must stop new admission for the affected tenant,
 retain the original binding/seed/UIDs and execution inventory, and escalate for an
 evidence-preserving recovery or placement-policy change. There is no supported

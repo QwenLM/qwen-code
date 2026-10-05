@@ -138,10 +138,11 @@ K1 therefore has no automatic idle collection; operators must budget retained
 resources. Evidence-preserving deletion needs a later explicit retirement
 operation with the saved UIDs, settlement barriers and UID delete preconditions.
 
-A lost K1 Pod leaves a LOST binding that blocks all new K1 Sessions in the same
-tenant with non-retryable `runtime_placement_recovery_required`. Existing healthy
-Sessions and other tenants are unaffected. K1 does not emit NOT_FOUND with the
-stopped-writer evidence needed by Broker recovery, so repeated recovery, external
+A lost K1 Pod leaves a LOST binding that blocks new placement in the same tenant
+with non-retryable `runtime_placement_recovery_required`. When the repository is
+shared, this also blocks new local-process and other provisioner kinds. Existing
+healthy bindings and other tenants are unaffected. K1 does not emit NOT_FOUND
+with the stopped-writer evidence needed by Broker recovery, so repeated recovery, external
 Pod deletion and process restart cannot clear this durable block. The operator
 must stop new admission for the affected tenant, preserve its original binding,
 seed, resource UIDs and execution inventory, and escalate for evidence-preserving
