@@ -9,8 +9,8 @@ import type { LoopType } from '../../telemetry/types.js';
 
 /**
  * Human-readable wording for a terminate mode. CANCELLED and SHUTDOWN have
- * no wording of their own: the UI suppresses them and every caller that
- * throws on them already carries its own cancellation text. Undefined for
+ * no wording of their own: the UI suppresses them, and a caller that throws
+ * on them is expected to supply its own cancellation text. Undefined for
  * anything else, so callers keep whatever text they were given.
  */
 export function describeAgentTerminateReason(
@@ -49,8 +49,9 @@ export function terminateReasonMessage(
 ): string {
   const described = describeAgentTerminateReason(reason);
   if (described) return described;
-  // Every AgentTerminateMode member is keyed by its own value, so the
-  // enum object doubles as the lookup for "is this an internal token".
-  if (!reason || reason in AgentTerminateMode) return fallback;
+  // Every AgentTerminateMode member is keyed by its own value, so the enum
+  // object doubles as the lookup for "is this an internal token". `hasOwn`
+  // rather than `in`, which would also match `toString` and friends.
+  if (!reason || Object.hasOwn(AgentTerminateMode, reason)) return fallback;
   return reason;
 }

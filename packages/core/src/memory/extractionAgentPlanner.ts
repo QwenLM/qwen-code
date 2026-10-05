@@ -353,7 +353,9 @@ export async function runAutoMemoryExtractionByAgent(
     throw new Error(
       terminateReasonMessage(
         result.terminateReason,
-        'Extraction agent did not complete successfully',
+        result.status === 'cancelled'
+          ? 'Extraction agent cancelled before completion'
+          : 'Extraction agent did not complete successfully',
       ),
     );
   }

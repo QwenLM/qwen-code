@@ -513,7 +513,9 @@ async function generateMemoryMetadataWithAgent(
     throw new Error(
       terminateReasonMessage(
         result.terminateReason,
-        'Metadata migration agent failed',
+        result.status === 'cancelled'
+          ? 'Metadata migration agent cancelled before completion'
+          : 'Metadata migration agent failed',
       ),
     );
   }

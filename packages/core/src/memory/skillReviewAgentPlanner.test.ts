@@ -449,6 +449,18 @@ describe('runSkillReviewByAgent limit wiring', () => {
     const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
     expect(call?.tools).toEqual([READ_FILE, WRITE_FILE, EDIT]);
   });
+
+  it('reports a cancelled run as cancelled, not as a failure', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'cancelled',
+      terminateReason: 'CANCELLED',
+      filesTouched: [],
+    });
+
+    await expect(review()).rejects.toThrow(
+      'Skill review agent cancelled before completion',
+    );
+  });
 });
 
 describe('skill-scoped shim registration-gate delegation (#10075)', () => {

@@ -515,6 +515,15 @@ export class AgentInteractive {
   }
 }
 
+const TERMINATE_MODE_LEVEL: Partial<
+  Record<AgentTerminateMode, 'warning' | 'error'>
+> = {
+  [AgentTerminateMode.MAX_TURNS]: 'warning',
+  [AgentTerminateMode.TIMEOUT]: 'warning',
+  [AgentTerminateMode.ERROR]: 'error',
+  [AgentTerminateMode.LOOP_DETECTED]: 'error',
+};
+
 /**
  * Map a non-GOAL terminate mode to a visible status message for the UI,
  * or return null to suppress the message entirely. The wording is shared
@@ -529,10 +538,9 @@ function terminateModeMessage(
   loopType?: LoopType | null,
 ): { text: string; level: 'info' | 'warning' | 'error' } | null {
   const text = describeAgentTerminateReason(mode, loopType);
-  if (!text) return null;
-  const level =
-    mode === AgentTerminateMode.MAX_TURNS || mode === AgentTerminateMode.TIMEOUT
-      ? 'warning'
-      : 'error';
+  const level = TERMINATE_MODE_LEVEL[mode];
+  // A mode that gains wording in the shared helper but no entry here is a
+  // deliberate decision someone still has to make, not a silent 'error'.
+  if (!text || !level) return null;
   return { text, level };
 }

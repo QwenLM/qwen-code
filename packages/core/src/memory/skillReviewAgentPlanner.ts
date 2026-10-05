@@ -470,7 +470,9 @@ export async function runSkillReviewByAgent(params: {
     throw new Error(
       terminateReasonMessage(
         result.terminateReason,
-        'Skill review agent did not complete successfully',
+        result.status === 'cancelled'
+          ? 'Skill review agent cancelled before completion'
+          : 'Skill review agent did not complete successfully',
       ),
     );
   }

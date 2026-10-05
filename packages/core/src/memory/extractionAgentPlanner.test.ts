@@ -624,6 +624,18 @@ describe('runAutoMemoryExtractionByAgent', () => {
     ).rejects.toThrow('timeout');
   });
 
+  it('reports a cancelled run as cancelled, not as a failure', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'cancelled',
+      terminateReason: 'CANCELLED',
+      filesTouched: [],
+    });
+
+    await expect(
+      runAutoMemoryExtractionByAgent(mockConfig, '/tmp/project'),
+    ).rejects.toThrow('Extraction agent cancelled before completion');
+  });
+
   it('ignores non-memory file paths in filesTouched', async () => {
     const result = await extract([
       '/tmp/auto-memory/project/arch.md',
