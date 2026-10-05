@@ -296,8 +296,11 @@ acknowledged; that does not let Java skip the final authority checks.
 
 ## Migration and immutable idempotency (ACK-2)
 
-ACK-1 did not create an ACK table or schema stub. ACK-2 adds `workspace_csi_worker_ack` in V43 after the October 4 renumbering; reconfirm the next unused number before landing. Do not rewrite the retirement identity (V41 here, V29 in the earlier snapshot), other applied
-migrations, or existing rows. Add one table, `managed_workspace_csi_worker_ack`:
+ACK-1 did not create an ACK table or schema stub. ACK-2 adds
+`workspace_csi_worker_ack` in V44 after the October 5 main integration (V43 in the
+October 4 integration); reconfirm the next unused number before landing. Do not
+rewrite the retirement identity (V42 here, V41 in the October 4 integration, V29
+in the earlier snapshot), other applied migrations, or existing rows. Add one table, `managed_workspace_csi_worker_ack`:
 
 | Column                     | Meaning                                                           |
 | -------------------------- | ----------------------------------------------------------------- |

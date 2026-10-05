@@ -315,10 +315,11 @@ handle 缺失表示未记录 scheduler 身份，绝不能证明从未挂载。�
 和 Session release 仍可使用。事务失败同时回滚 journal 与 seal。私有离线命令不新增
 listener 或云操作。
 
-整合主线时逐字保留上游 V27–V39，包括 Java V29 Hook backfill 及 main 的 V35 Session tool profile 及 V36–V39 查询优化。未合入的 CSI
-reservation 顺延为 V40、retirement journal 为 V41、dispatch authorization 为 V42、
-持久 worker ACK 为 V43。此前 CSI V26→V27 和 V27→V28/V29 的检查仅为旧快照历史证据；
-新整合须另验真实 V39→V43 升级，不能重写已应用数据库的 Flyway 历史。
+10 月 5 日整合主线时逐字保留上游 V27–V40，包括 Java V29 Hook backfill、V35
+Session tool profile、V36–V39 查询优化及 V40 Session creator。未合入的 CSI
+reservation 顺延为 V41、retirement journal 为 V42、dispatch authorization 为 V43、
+持久 worker ACK 为 V44。此前 CSI V26→V27 和 V27→V28/V29 的检查仅为旧快照历史证据；
+新整合须另验真实 V40→V44 升级，不能重写已应用数据库的 Flyway 历史。
 验证覆盖 V27 数据保留、独立 MySQL JVM 派发竞争、重启精确重试、alias 冲突、损坏、
 回滚与 LOCAL 回归。本片不授权 ACTIVE、worker drain、物理 stop/unpublish、RELEASED
 或持久 CREATE/selector。
@@ -409,7 +410,7 @@ tenant placement guard 串行，并要求新事务；拒绝外层事务，防止
 消费者拒绝 CSI alias，并将所有权读写限定为 `LOCAL`。K2a 不支持转换存储 profile。
 
 实现已对齐上游 `a7deb01bc`。上游 V26 用于公开工具结果 projection，未提交的 CSI
-migration 当时为 V27（此次整合为 V40，见上文）。新的独立 MySQL 8.4.11 验证确认 V26 升级 V27 后，原 LOCAL holder、
+migration 当时为 V27（此次整合为 V41，见上文）。新的独立 MySQL 8.4.11 验证确认 V26 升级 V27 后，原 LOCAL holder、
 binding/session、projection 样本、表与索引均保持不变，并通过当前 CSI 竞争与派发回归。
 此前 V25 升级 CSI V26 的测试记录继续作为历史证据；对已应用的 migration 改名不能证明
 升级有效。交付前须再次核对下一个可用版本号。

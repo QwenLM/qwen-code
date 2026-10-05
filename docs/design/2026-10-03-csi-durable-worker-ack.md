@@ -161,4 +161,4 @@ No manual node deletion or final billing-reclamation claim is made. Maintainer
 integration review remains required; aggregate
 drain/release/NodeUnpublish remains outside this operation.
 
-The October 4 main integration moves the four unmerged CSI migrations to V40–V43 because main now owns V35–V39. The V34-to-V38 MySQL result above belongs to the prior numbering and commit; it does not validate the new V39-to-V43 upgrade. Applied private histories require explicit reconciliation or a fresh database, with no automatic Flyway repair.
+The October 4 main integration moved the four unmerged CSI migrations to V40–V43 because main owned V35–V39. The October 5 integration preserves main’s new V40 Session creator migration and moves the unchanged CSI chain to V41–V44. The V34-to-V38 MySQL result above and any earlier V39-to-V43 results belong to their prior numbering and commits; they do not validate the current V40-to-V44 upgrade. Applied private histories require explicit reconciliation or a fresh database, with no automatic Flyway repair.

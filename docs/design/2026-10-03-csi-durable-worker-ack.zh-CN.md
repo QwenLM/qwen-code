@@ -129,4 +129,4 @@ Ready 状态。16:45:29 UTC 自动扩容节点仍存在；17:02:41 UTC 的另一
 maintainer 整合审查；聚合 drain/release/NodeUnpublish
 保持在本操作范围之外。
 
-10 月 4 日主线整合因 main 已占用 V35–V39，将四个未合入 CSI migration 顺延为 V40–V43。上述 V34→V38 MySQL 结果属于原编号和提交，不能作为新 V39→V43 升级的验证。已应用的私有历史须显式核对或使用新数据库，不自动执行 Flyway repair。
+10 月 4 日主线整合因 main 已占用 V35–V39，将四个未合入 CSI migration 顺延为 V40–V43。10 月 5 日整合保留 main 新增的 V40 Session creator migration，将 SQL 内容不变的 CSI 链顺延为 V41–V44。上述 V34→V38 MySQL 结果及此前任何 V39→V43 结果均属于原编号和提交，不能作为当前 V40→V44 升级的验证。已应用的私有历史须显式核对或使用新数据库，不自动执行 Flyway repair。

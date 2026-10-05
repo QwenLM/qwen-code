@@ -238,7 +238,9 @@ receipt 重试。Worker 内存可能已经确认，但 Java 不能因此跳过�
 
 ## Migration 与不可变幂等（ACK-2）
 
-ACK-1 未创建 ACK table 或 schema 占位。ACK-2 在 10 月 4 日顺延编号后的 V43 加入 `workspace_csi_worker_ack`；合入前仍须确认下一个未占用编号。不重写 retirement migration（此次为 V41，旧快照为 V29）的
+ACK-1 未创建 ACK table 或 schema 占位。ACK-2 在 10 月 5 日主线整合后的 V44
+加入 `workspace_csi_worker_ack`（10 月 4 日整合时为 V43）；合入前仍须确认下一个未占用编号。
+不重写 retirement migration（此次为 V42，10 月 4 日整合时为 V41，旧快照为 V29）的
 retirement identity、其他已应用 migration 或历史 row。新增一张
 `managed_workspace_csi_worker_ack` 表：
 
