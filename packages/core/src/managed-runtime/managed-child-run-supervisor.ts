@@ -20,6 +20,7 @@ import {
 // docs/design/2026-10-03-managed-shell-monitor-runtime.md.
 
 export { HookCommandIsolationUnavailableError };
+export type { HookCommandIsolationUnavailableReason } from '../hooks/hook-command-cgroup.js';
 
 export interface ChildRunExitEvidence {
   readonly exitCode: number | null;
@@ -132,7 +133,7 @@ export class ManagedChildRunSupervisor {
 
   static create(options: { cgroupRoot: string | undefined }) {
     if (options.cgroupRoot === undefined)
-      throw new HookCommandIsolationUnavailableError();
+      throw new HookCommandIsolationUnavailableError('root_missing');
     return new ManagedChildRunSupervisor(options.cgroupRoot);
   }
 
@@ -210,7 +211,7 @@ export class ManagedChildRunSupervisor {
     if (!(await prove(child, unit))) {
       child.kill('SIGKILL');
       unit.remove();
-      throw new HookCommandIsolationUnavailableError();
+      throw new HookCommandIsolationUnavailableError('membership_unproven');
     }
     const process_ = new ManagedChildRunProcess(spec.unitName, unit, child);
     this.processes.set(spec.unitName, process_);

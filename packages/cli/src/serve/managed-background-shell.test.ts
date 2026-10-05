@@ -606,11 +606,44 @@ describe('managed v3 background Shell', () => {
         error: {
           message:
             'Background Shell requires a delegated Linux cgroup v2 root on this Runtime.',
+          type: 'managed_isolation_root_missing',
         },
       },
     });
     expect(ctx.publisher.prepares).toBe(0);
     expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+  });
+
+  it('records a distinct cause discriminator for a pre-existing non-empty unit', async () => {
+    // One message and no code cannot tell a name collision from a broken
+    // deployment: the recorded refusal carries the discriminator, so the
+    // model and the task surface branch on what actually failed.
+    const ctx = rig();
+    ctx.supervisor.start.mockImplementation(() => {
+      throw new HookCommandIsolationUnavailableError('unit_not_empty');
+    });
+    const view = await execute(ctx);
+    expect(view).toMatchObject({
+      state: 'settled',
+      result: {
+        executionStatus: 'not_started',
+        capture: null,
+        error: {
+          message:
+            'Background Shell requires a delegated Linux cgroup v2 directory: another unit still holds processes under that name on this Runtime.',
+          type: 'managed_isolation_unit_not_empty',
+        },
+      },
+    });
+    expect(ctx.publisher.prepares).toBe(1);
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+    const missing = rig({ withSupervisor: false });
+    const missingView = await execute(missing);
+    expect(missingView).toMatchObject({
+      result: {
+        error: { type: 'managed_isolation_root_missing' },
+      },
+    });
   });
 
   it('records an admission refusal for a directory outside the workspace', async () => {

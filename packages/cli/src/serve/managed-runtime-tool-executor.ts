@@ -46,6 +46,7 @@ import {
 } from './managed-mcp-runtime.js';
 import {
   HookCommandIsolationUnavailableError,
+  type HookCommandIsolationUnavailableReason,
   type ManagedChildRunProcess,
   type ManagedChildRunSupervisor,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
@@ -54,6 +55,41 @@ import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
 import { ManagedMonitorWatcher } from './managed-monitor-watcher.js';
 
 export class ManagedMcpToolUnknownError extends Error {}
+
+const ISOLATION_REFUSAL_CLAUSES: Record<
+  HookCommandIsolationUnavailableReason,
+  string
+> = {
+  platform: 'this Runtime does not run Linux with cgroup v2',
+  root_missing: 'no delegated cgroup v2 root is configured on this Runtime',
+  root_shape:
+    'the delegated root on this Runtime is not a cgroup v2 domain directory',
+  root_unreadable:
+    'the delegated cgroup v2 root on this Runtime is missing or unreadable',
+  unit_name_invalid: 'its cgroup unit name is not valid on this Runtime',
+  unit_name_taken:
+    'a cgroup unit with the same name already exists on this Runtime',
+  unit_not_empty:
+    'another unit still holds processes under that name on this Runtime',
+  membership_unproven:
+    'the process never proved its cgroup membership on this Runtime',
+};
+
+/** The recorded refusal carries the discriminator; the message names it. */
+function isolationRefusal(
+  tool: 'Background Shell' | 'Monitor watch',
+  cause: HookCommandIsolationUnavailableError,
+): { message: string; type?: string } {
+  const { reason } = cause;
+  if (reason === undefined)
+    return {
+      message: `${tool} requires a delegated Linux cgroup v2 directory on this Runtime.`,
+    };
+  return {
+    message: `${tool} requires a delegated Linux cgroup v2 directory: ${ISOLATION_REFUSAL_CLAUSES[reason]}.`,
+    type: `managed_isolation_${reason}`,
+  };
+}
 
 export interface ManagedToolReference {
   readonly sessionId: string;
@@ -681,6 +717,7 @@ export class ManagedToolExecutor {
         error: {
           message:
             'Background Shell requires a delegated Linux cgroup v2 root on this Runtime.',
+          type: 'managed_isolation_root_missing',
         },
       });
     }
@@ -822,12 +859,12 @@ export class ManagedToolExecutor {
         executionStatus: 'not_started',
         responseParts: [],
         capture: null,
-        error: {
-          message:
-            cause instanceof HookCommandIsolationUnavailableError
-              ? 'Background Shell requires a delegated Linux cgroup v2 directory on this Runtime.'
-              : `Background Shell could not start: ${cause instanceof Error ? cause.message : String(cause)}`,
-        },
+        error:
+          cause instanceof HookCommandIsolationUnavailableError
+            ? isolationRefusal('Background Shell', cause)
+            : {
+                message: `Background Shell could not start: ${cause instanceof Error ? cause.message : String(cause)}`,
+              },
       });
     }
     sink.setStarted(process.child.pid ?? 0);
@@ -905,6 +942,7 @@ export class ManagedToolExecutor {
         error: {
           message:
             'Monitor watch requires a delegated Linux cgroup v2 root on this Runtime.',
+          type: 'managed_isolation_root_missing',
         },
       });
     }
@@ -1033,9 +1071,12 @@ export class ManagedToolExecutor {
         executionStatus: 'not_started',
         responseParts: [],
         capture: null,
-        error: {
-          message: `Monitor watch could not start: ${cause instanceof Error ? cause.message : String(cause)}`,
-        },
+        error:
+          cause instanceof HookCommandIsolationUnavailableError
+            ? isolationRefusal('Monitor watch', cause)
+            : {
+                message: `Monitor watch could not start: ${cause instanceof Error ? cause.message : String(cause)}`,
+              },
       });
     }
     const watchProcess = watchHandle.process;
