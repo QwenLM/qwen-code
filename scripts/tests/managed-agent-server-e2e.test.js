@@ -31,6 +31,13 @@ const namedScripts = (text) => [
   ),
 ];
 
+// Fenced shell blocks of a markdown text, bodies only; language-less fences
+// are invisible to this scan.
+const fencedShellBlocks = (text) =>
+  [
+    ...text.matchAll(/```[ \t]*(?:bash|sh|shell|console|zsh)\n([\s\S]*?)```/g),
+  ].map((match) => match[1]);
+
 describe('managed-agent-server e2e runner', () => {
   it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
     const source = createSourceFile(
@@ -253,11 +260,7 @@ describe('managed-agent-server e2e runner', () => {
     // from the production constants so renaming one reddens this pin instead
     // of stranding the README's spelling.
     const readme = read('packages/sdk-java/managed-agent-server/README.md');
-    const fencedBlocks = [
-      ...readme.matchAll(
-        /```[ \t]*(?:bash|sh|shell|console|zsh)\n([\s\S]*?)```/g,
-      ),
-    ].map((match) => match[1]);
+    const fencedBlocks = fencedShellBlocks(readme);
     const command =
       'qwen serve --profile hosted-harness --port 4171 --hostname 127.0.0.1 --no-web';
     const launchBlocks = fencedBlocks.filter((block) =>
@@ -274,12 +277,20 @@ describe('managed-agent-server e2e runner', () => {
         command,
       ].join('\n') + '\n',
     );
-    // A `$VAR` reference defers to a name the reader was told to export; a
-    // renamed or dropped Prerequisites export expands to empty in the
-    // reader's shell and the launch dies at startup, so every name the
-    // launch block references must be assigned in a fenced README block.
+    // A `$VAR` reference defers to a name the reader was told to export in
+    // the Prerequisites section; a renamed or dropped export there expands
+    // to empty in the reader's shell and the launch dies at startup, so
+    // every name the launch block references must be assigned inside that
+    // section — an assignment in a fence anywhere else in the README never
+    // reaches the reader's shell.
+    const prereqStart = readme.indexOf('## Prerequisites');
+    const prereqEnd = readme.indexOf('## Public Session lifecycle');
+    expect(prereqStart).toBeGreaterThan(-1);
+    expect(prereqEnd).toBeGreaterThan(prereqStart);
     const assigned = new Set();
-    for (const fenced of fencedBlocks) {
+    for (const fenced of fencedShellBlocks(
+      readme.slice(prereqStart, prereqEnd),
+    )) {
       for (const match of fenced.matchAll(
         /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=/gm,
       )) {
@@ -291,21 +302,24 @@ describe('managed-agent-server e2e runner', () => {
     )) {
       expect(
         assigned.has(match[1]),
-        `the launch block references $${match[1]}, which no fenced README block assigns`,
+        `the launch block references $${match[1]}, which the Prerequisites section does not assign`,
       ).toBe(true);
     }
-    // The configuration the documented launch resolves to: mode is always
-    // http-bridge, --no-web flips serveWebShell, and the deferred `$VAR`
-    // credentials stand in as conforming values so the validator judges the
-    // launch's shape rather than the placeholder spelling.
+    // The validator's input is parsed from the pinned block so the fixture
+    // cannot drift from the documented launch: an edit that drops --no-web
+    // or widens --hostname must redden this oracle, not only the exact-text
+    // pin above. mode stays the constant serve.ts hardcodes — the launch
+    // carries no flag for it — and the deferred `$VAR` credentials stand in
+    // as conforming values so the validator judges the launch's shape rather
+    // than the placeholder spelling.
     expect(() =>
       validateHostedHarnessProfile({
         profile: 'hosted-harness',
-        hostname: '127.0.0.1',
-        port: 4171,
+        hostname: /--hostname\s+(\S+)/.exec(launchBlocks[0])[1],
+        port: Number(/--port\s+(\d+)/.exec(launchBlocks[0])[1]),
         mode: 'http-bridge',
         token: 'documented-value',
-        serveWebShell: false,
+        serveWebShell: !launchBlocks[0].includes('--no-web'),
         hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
       }),
     ).not.toThrow();
@@ -324,8 +338,23 @@ describe('managed-agent-server e2e runner', () => {
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const slice = readme.slice(start, end);
-    expect(slice).toContain(
-      "QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4171'",
+    // The export must point at the port the documented launch binds, not at
+    // a second copy of the number: a launch-block port bump mirrored into
+    // the launch pin above would otherwise leave this assertion green while
+    // Spring keeps calling the old port and every Managed Turn fails.
+    const launchBlocks = fencedShellBlocks(readme).filter((fenced) =>
+      fenced.includes('qwen serve --profile hosted-harness'),
+    );
+    expect(
+      launchBlocks,
+      'the README must fence exactly one hosted-harness launch block',
+    ).toHaveLength(1);
+    const port = /--port\s+(\d+)/.exec(launchBlocks[0])[1];
+    expect(
+      slice,
+      'the Spring base URL must point at the port the launch block binds',
+    ).toContain(
+      `QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:${port}'`,
     );
     // The caveat sentence is hard-wrapped in the README, so match across the
     // line break; the fallback is the restart clause, not the bare word
@@ -337,7 +366,11 @@ describe('managed-agent-server e2e runner', () => {
 
   it('pins the attach-time generation fence in the Harness attachment contract', () => {
     // The attachment paragraph publishes which identities an attach does NOT
-    // compare. The Harness writer generation is the one identity that IS
+    // compare. The Harness keys its in-memory Session by sessionId alone and
+    // compares no tenant on attach, so the paragraph must say exactly that —
+    // an integrator who reads a tenant-keyed coalescing claim leaves tenant
+    // scoping out of their own gateway on the recovery redrive, which is not
+    // fenced. The Harness writer generation is the one identity that IS
     // enforced — the contract middleware answers a stale boot id with 409
     // hosted_harness_generation_mismatch and the attach handler rejects a
     // store descriptor whose writerId differs before any coalescing — so the
@@ -345,13 +378,13 @@ describe('managed-agent-server e2e runner', () => {
     // rejected" for the generation omits the 409 path and every attach fails
     // after a Harness restart with no documented way out.
     const readme = read('packages/sdk-java/managed-agent-server/README.md');
-    const anchor = readme.indexOf('An in-memory Hosted attachment coalesces');
+    const anchor = readme.indexOf('The Java connector caches an attachment');
     expect(anchor).toBeGreaterThan(-1);
     const end = readme.indexOf('\n\n', anchor);
     expect(end).toBeGreaterThan(anchor);
     const paragraph = readme.slice(anchor, end).replace(/\s+/g, ' ');
     expect(paragraph).toContain(
-      'coalesces on `(tenantId, sessionId)`, so another tenant cannot reuse',
+      'keys its in-memory Session by `sessionId` alone',
     );
     expect(paragraph).toContain('409 hosted_harness_generation_mismatch');
     expect(paragraph).toContain('managed_session_store_conflict');

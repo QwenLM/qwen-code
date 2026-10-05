@@ -225,10 +225,12 @@ Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
 authority and never initializes one. The Java connector attempts strict create for a new binding and loads on
 conflict or uncertain creation outcome. A known existing binding only loads.
-An in-memory Hosted attachment coalesces on `(tenantId, sessionId)`, so another
-tenant cannot reuse the in-memory Session; this slice does not additionally
-compare a normalized Store endpoint or workspace on attach, and an attach or
-cold-load race carrying a different such identity is not rejected. A presented
+The Java connector caches an attachment per `(tenantId, sessionId)`,
+so one tenant's cached reference is never handed to another by the connector.
+The Harness itself keys its in-memory Session by `sessionId` alone and does
+not compare the presented tenant, Store endpoint or workspace on attach; the
+only attach-time identity fence is the Harness writer generation, so tenant
+isolation on attach is the caller's responsibility in this slice. A presented
 Harness writer generation _is_ checked: an attach whose `writerId` is not this
 process's boot ID fails closed with `409 hosted_harness_generation_mismatch` —
 the restart-generation failure described above. That
