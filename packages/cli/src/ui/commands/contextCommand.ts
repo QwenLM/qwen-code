@@ -634,6 +634,19 @@ export async function collectContextData(
     0,
     allToolsTokens - skillToolDefinitionTokens - clampedMcpTools,
   );
+  // The MCP detail rows sit under the mcp row, so they carry its deficit too.
+  const mcpDetailShare =
+    mcpToolsTotalTokens > 0 ? clampedMcpTools / mcpToolsTotalTokens : 1;
+  const scaleTokens = <T extends { tokens: number }>(
+    items: T[],
+    factor: number,
+  ): T[] =>
+    factor < 1
+      ? items.map((item) => ({
+          ...item,
+          tokens: Math.round(item.tokens * factor),
+        }))
+      : items;
 
   if (!hasTokenCount) {
     totalTokens = 0;
@@ -650,7 +663,7 @@ export async function collectContextData(
     messagesTokens = conversationTokens;
     freeSpace = Math.max(0, contextWindowSize - rawContent - autocompactBuffer);
     detailBuiltinTools = builtinTools;
-    detailMcpTools = mcpTools;
+    detailMcpTools = scaleTokens(mcpTools, mcpDetailShare);
     detailMemoryFiles = memoryFiles;
     detailSkills = skills;
   } else {
@@ -717,17 +730,9 @@ export async function collectContextData(
       contextWindowSize - totalTokens - autocompactBuffer,
     );
 
-    const scaleDetail = <T extends { tokens: number }>(items: T[]): T[] =>
-      scale < 1
-        ? items.map((item) => ({
-            ...item,
-            tokens: Math.round(item.tokens * scale),
-          }))
-        : items;
-
-    detailBuiltinTools = scaleDetail(builtinTools);
-    detailMcpTools = scaleDetail(mcpTools);
-    detailMemoryFiles = scaleDetail(memoryFiles);
+    detailBuiltinTools = scaleTokens(builtinTools, scale);
+    detailMcpTools = scaleTokens(mcpTools, scale * mcpDetailShare);
+    detailMemoryFiles = scaleTokens(memoryFiles, scale);
     detailSkills =
       scale < 1
         ? skills.map((item) => ({

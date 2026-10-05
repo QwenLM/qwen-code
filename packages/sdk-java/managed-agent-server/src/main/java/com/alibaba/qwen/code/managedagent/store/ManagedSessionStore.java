@@ -64,6 +64,7 @@ public class ManagedSessionStore {
     private final JdbcTemplate jdbc;
     private ToolPublicationObjectStore publicationObjects;
     private ManagedToolResultStore toolResults;
+    private WriterCredentialPolicy credentials = WriterCredentialPolicy.unbound();
     private final ManagedExtensionRecordStore extensionRecords;
     private final ManagedActionStore actions;
     private final ToolPublicationRetentionStore outputRetention;
@@ -139,6 +140,20 @@ public class ManagedSessionStore {
         this.toolResults = toolResults;
     }
 
+    // The policy bean is unconditional, so required injection fails closed
+    // in a Spring context; direct constructor use keeps the unbound default.
+    @Autowired
+    public void setCredentials(WriterCredentialPolicy credentials) {
+        this.credentials = credentials;
+    }
+
+    // A bound credential is checked before any state lookup so a foreign
+    // token never learns whether a Session exists.
+    private void requireCredential(String tenantId, String workspaceId,
+            String sessionId, String writerToken) {
+        credentials.require(tenantId, workspaceId, sessionId, writerToken);
+    }
+
     record PublicationWriter(long now, long leaseUntil, long journalRevision,
             long committedSequence, long activationEpoch, String checkpointId, String recoveryStatus,
             String activationId, String activationPhase, Long activationEventEpoch,
@@ -148,6 +163,7 @@ public class ManagedSessionStore {
     PublicationWriter lockPublicationWriter(String tenant, String workspace,
             String session, String writer, long generation, String token) {
         validateScope(tenant, workspace, session);
+        requireCredential(tenant, workspace, session, token);
         HeadRow head = requireHeadForUpdate(tenant, session);
         requireHeadScope(head, tenant, workspace, session);
         Timestamp now = databaseNow();
@@ -163,6 +179,8 @@ public class ManagedSessionStore {
     public WriterGrant acquireWriter(String tenantId, String sessionId,
             String writerToken, AcquireWriterRequest request) {
         validateScope(tenantId, request.workspaceId(), sessionId);
+        requireCredential(tenantId, request.workspaceId(), sessionId,
+                writerToken);
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
         ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
@@ -255,6 +273,8 @@ public class ManagedSessionStore {
     public WriterGrant renewWriter(String tenantId, String sessionId,
             String writerToken, RenewWriterRequest request) {
         validateScope(tenantId, request.workspaceId(), sessionId);
+        requireCredential(tenantId, request.workspaceId(), sessionId,
+                writerToken);
         validateStableId(request.writerId(), "writerId");
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
         validateLeaseMillis(request.leaseMillis());
@@ -279,6 +299,8 @@ public class ManagedSessionStore {
     public SealReceipt sealWriter(String tenantId, String sessionId,
             String writerToken, SealWriterRequest request) {
         validateScope(tenantId, request.workspaceId(), sessionId);
+        requireCredential(tenantId, request.workspaceId(), sessionId,
+                writerToken);
         validateStableId(request.writerId(), "writerId");
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
@@ -305,6 +327,8 @@ public class ManagedSessionStore {
             String sessionId, String writerToken,
             BlockRecoveryRequest request) {
         validateScope(tenantId, request.workspaceId(), sessionId);
+        requireCredential(tenantId, request.workspaceId(), sessionId,
+                writerToken);
         validateStableId(request.writerId(), "writerId");
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
         if (!RECOVERY_STATES.contains(request.recoveryStatus())
@@ -345,6 +369,8 @@ public class ManagedSessionStore {
     public CommitReceipt commit(String tenantId, String sessionId,
             String writerToken, CommitTransactionRequest request) {
         validateScope(tenantId, request.workspaceId(), sessionId);
+        requireCredential(tenantId, request.workspaceId(), sessionId,
+                writerToken);
         validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
@@ -472,6 +498,7 @@ public class ManagedSessionStore {
     public RestoreHead restore(String tenantId, String workspaceId,
             String sessionId, String writerToken) {
         validateScope(tenantId, workspaceId, sessionId);
+        requireCredential(tenantId, workspaceId, sessionId, writerToken);
         HeadRow head = requireHead(tenantId, sessionId);
         requireHeadScope(head, tenantId, workspaceId, sessionId);
         requireReadGrant(head, writerToken);
@@ -488,6 +515,7 @@ public class ManagedSessionStore {
             String sessionId, String writerToken, long afterRevision,
             int limit) {
         validateScope(tenantId, workspaceId, sessionId);
+        requireCredential(tenantId, workspaceId, sessionId, writerToken);
         if (afterRevision < 0
                 || afterRevision > ManagedSessionStoreModels.MAX_SAFE_COUNTER
                 || limit < 1 || limit > 100) {
@@ -569,6 +597,7 @@ public class ManagedSessionStore {
     public StoredResource readResource(String tenantId, String workspaceId,
             String sessionId, String resourceId, String writerToken) {
         validateScope(tenantId, workspaceId, sessionId);
+        requireCredential(tenantId, workspaceId, sessionId, writerToken);
         validateStableId(resourceId, "resourceId");
         HeadRow head = requireHead(tenantId, sessionId);
         requireHeadScope(head, tenantId, workspaceId, sessionId);
@@ -602,6 +631,8 @@ public class ManagedSessionStore {
     public ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
             String writerToken, PublishToolResultRequest request) {
         validateScope(tenantId, request.workspaceId(), sessionId);
+        requireCredential(tenantId, request.workspaceId(), sessionId,
+                writerToken);
         validateStableId(request.writerId(), "writerId");
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
         validateStableId(request.resourceId(), "resourceId");
