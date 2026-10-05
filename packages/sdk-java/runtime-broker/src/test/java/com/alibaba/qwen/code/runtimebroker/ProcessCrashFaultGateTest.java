@@ -72,7 +72,9 @@ class ProcessCrashFaultGateTest {
                 execution));
         assertEquals(RuntimeBindingRecord.State.LOST,
                 rig.bindings.findById(bindingId).getState());
-        assertEquals("runtime_broker_runtime_lost", broker.warm(HARNESS).code());
+        BrokerProcess.Reply warm = broker.warm(HARNESS);
+        assertEquals("runtime_broker_runtime_lost", warm.code(),
+                () -> warm.message() + rig.logs());
         assertEquals(bindingId, rig.activeBinding().getBindingId());
         assertEquals("ABANDONED", broker.reconcile(HARNESS, SESSION,
                 execution).object().getString("outcome"));
@@ -234,13 +236,19 @@ class ProcessCrashFaultGateTest {
         BrokerProcess second = rig.broker("second", secondProxy,
                 FaultGateRig.Provisioner.RECOVERABLE);
 
-        BrokerProcess.Reply acquire = second.acquire(HARNESS, SESSION);
+        BrokerProcess.Reply acquire = FaultGateRig.await(
+                () -> second.acquire(HARNESS, SESSION),
+                reply -> !"runtime_provision_fenced".equals(reply.code())
+                        && !"runtime_broker_reconcile_timeout".equals(reply.code()),
+                "original Runtime loss after recovery fencing");
         assertFalse(acquire.ok());
-        assertEquals("runtime_broker_runtime_lost", acquire.code());
+        assertEquals("runtime_broker_runtime_lost", acquire.code(),
+                () -> acquire.message() + rig.logs());
         assertEquals(RuntimeBindingRecord.State.LOST,
                 rig.activeBinding().getState());
-        assertEquals("runtime_broker_runtime_lost",
-                second.warm(HARNESS).code());
+        BrokerProcess.Reply warm = second.warm(HARNESS);
+        assertEquals("runtime_broker_runtime_lost", warm.code(),
+                () -> warm.message() + rig.logs());
         assertEquals("runtime_reconciliation_required",
                 second.release(HARNESS, SESSION).code());
         assertEquals("ABANDONED", second.reconcile(HARNESS, SESSION,

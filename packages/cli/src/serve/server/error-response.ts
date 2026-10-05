@@ -5,6 +5,7 @@
  */
 
 import { isSessionStartupConfigError } from '@qwen-code/acp-bridge/sessionStartupConfig';
+import { SessionAttachmentUploadError } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   emitDaemonLog,
   InvalidSessionTranscriptCursorError,
@@ -277,6 +278,21 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof SessionAttachmentUploadError) {
+    if (err.status >= 500) {
+      reportBridgeError(err.cause ?? err, ctx, daemonLog);
+    } else {
+      recordExpectedBridgeError(err, ctx, daemonLog);
+    }
+    res.status(err.status).json({
+      error: err.message,
+      code: err.code,
+      ...(err.code === 'attachment_upload_store_busy'
+        ? { retryable: true }
+        : {}),
+    });
+    return;
+  }
   const sourceErrorKind =
     err instanceof SessionSourceError
       ? err.code
@@ -1177,6 +1193,15 @@ export function sendBridgeError(
           error: errorMessage(err),
           code: 'directory_not_trusted',
           path: d.path,
+        });
+        return;
+      }
+      // An operation this session does not offer, such as a directory change
+      // in an SSH workspace or a Managed session.
+      if (kind === 'unsupported_operation') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'unsupported_operation',
         });
         return;
       }

@@ -38,7 +38,10 @@ The source is wrapped as an async IIFE, so top-level `await` and a top-level
 `return` are both legal — and a trailing expression is _not_ a return value.
 End every successful path with an explicit `return`.
 
-It is plain JavaScript, not TypeScript, and it cannot `import` anything.
+It is plain JavaScript, not TypeScript, and it cannot `import` anything. A
+script with a dynamic `import()` anywhere in it — even in a branch that never
+runs — is refused before it starts, so none of its agents runs first; do file,
+network, and package work inside an agent instead.
 
 The script may start with a literal `export const meta = {...}` declaration
 with `name`, `description`, and optionally `whenToUse` and
@@ -74,6 +77,22 @@ not `parallel([agent(...)])`. The eager form is refused outright: a
 non-function element rejects the whole batch, and by then every `agent()` in it
 has already been admitted, counted against the caps, and spent — with its
 result discarded.
+
+Each list a single call takes — the thunks of `parallel()`, and the items and
+the stages of `pipeline()` — holds at most 4096 entries. A longer list rejects
+the whole call before any of its thunks or stages runs; it is never truncated.
+Like any invalid argument, that rejection can be caught, and inside an outer
+`parallel()`/`pipeline()` it becomes that slot's `null`. The limit is per call,
+not per run: split a larger input into batches of thunks and await each in
+turn. Batching does not lift the agent cap or the token budget.
+
+```js
+const thunks = files.map((file) => () => agent(`Summarize ${file}`));
+let summaries = [];
+for (let i = 0; i < thunks.length; i += 4096) {
+  summaries = summaries.concat(await parallel(thunks.slice(i, i + 4096)));
+}
+```
 
 A script must be deterministic so a resume replays the same call sequence.
 `Math.random()` throws, and so does all of `Date` — `Date()`, `new Date()`,
@@ -225,6 +244,8 @@ at its index.
   (clamped to 64).
 - 1000 `agent()` calls per run, override via `QWEN_CODE_MAX_WORKFLOW_AGENTS`
   (clamped to 10000). The call past the cap throws.
+- 4096 entries in each list of one `parallel()` or `pipeline()` call, with no
+  override.
 - 30-minute wall-clock cap per run, override via
   `QWEN_CODE_MAX_WORKFLOW_SECONDS` (applied as given). A fan-out near the agent
   cap will not fit inside the default cap.

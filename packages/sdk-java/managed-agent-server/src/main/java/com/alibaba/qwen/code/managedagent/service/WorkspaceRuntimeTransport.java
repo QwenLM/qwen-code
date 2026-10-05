@@ -2,6 +2,9 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
+import com.alibaba.qwen.code.runtimebroker.ManagedMcpProtocol;
+import com.alibaba.qwen.code.runtimebroker.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
@@ -9,6 +12,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
+import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
@@ -129,6 +133,98 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<Void> installPublication(RuntimeLease lease,
+            RuntimeSession session, RuntimePublicationGrant grant) {
+        requireOwnedWorkspace(lease, session);
+        return delegate.installPublication(lease, session, grant);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> payload, Map<String, Object> capture) {
+        try {
+            requireOwnedWorkspace(lease, session);
+        } catch (RuntimeException error) {
+            String code = error instanceof RuntimeBrokerException refusal
+                    ? refusal.getCode() : "workspace_unavailable";
+            Map<String, Object> result = new LinkedHashMap<>(Map.of("executionStatus", "not_started",
+                    "responseParts", List.of(), "error", Map.of("type", code,
+                            "message", "Workspace execution was refused before dispatch.")));
+            result.put("capture", null);
+            return CompletableFuture.completedFuture(Map.of("state", "settled", "result", result));
+        }
+        return delegate.executeV3(lease, session, reference, payload, capture);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            long afterSequence) {
+        requireOriginalRuntime(lease, session);
+        return delegate.statusV3(lease, session, reference, afterSequence);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> cancelV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference) {
+        requireOriginalRuntime(lease, session);
+        return delegate.cancelV3(lease, session, reference);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> acknowledgeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> receipt) {
+        requireOriginalRuntime(lease, session);
+        return delegate.acknowledgeV3(lease, session, reference, receipt);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
+            Map<String, Object> expectedCaptureIdentity) {
+        if (!managed(session)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Context context = context(lease, session, false, true);
+        var runtime = context.runtime();
+        if (!"kubernetes-workspace".equals(runtime.getRequest().getProvisionerKind())
+                || runtime.getState() != RuntimeBindingRecord.State.DRAINING || !runtime.isDrainRequested()
+                || runtime.getProvisionSeed() == null || runtime.getAttestationGeneration() <= 0
+                || context.session().getState() != RuntimeSessionRecord.State.READY
+                || !context.session().getSession().getScope().equals(session.getScope())
+                || !Long.toString(runtime.getGeneration()).equals(expectedCaptureIdentity.get("bindingGeneration"))) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        try {
+            @SuppressWarnings("unchecked")
+            var storage = (Map<String, Object>) boot.get("storage");
+            var originalBoot = ManagedCsiProtocol.boot(runtime.getRequest(), runtime.getProvisionSeed(), storage);
+            ManagedCsiProtocol.validateAcknowledgementRequest(request, originalBoot, expectedPod);
+            ManagedCsiProtocol.validateAcknowledgementIdentity(lease, session, boot, request, expectedCaptureIdentity);
+        } catch (RuntimeException failure) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        return delegate.acknowledgeCsi(lease, session, boot, expectedPod, request, expectedCaptureIdentity);
+    }
+
+    private void requireOwnedWorkspace(RuntimeLease lease, RuntimeSession session) {
+        if (!managed(session)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Context context = context(lease, session, true);
+        ownership.assertHeld(context.binding(), context.session());
+    }
+
+    private void requireOriginalRuntime(RuntimeLease lease, RuntimeSession session) {
+        if (!managed(session)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        context(lease, session, false);
+    }
+
+    @Override
     public CompletionStage<Void> installPublisher(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> publisher) {
         if (!managed(session)) {
@@ -212,7 +308,30 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> operation) {
-        if (managed(session) && !"history".equals(operation.get("kind"))) {
+        if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)) {
+            if (!managed(session)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            if (ManagedHookProtocol.isOperation(operation)) {
+                ManagedHookProtocol.validateSession(session, operation);
+            } else {
+                ManagedMcpProtocol.validateSession(session, operation);
+            }
+            boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation);
+            Context context = context(lease, session, !recovery);
+            if (context.runtime().getState() != RuntimeBindingRecord.State.READY
+                    && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            if (recovery) {
+                if (!ownership.isHeld(context.binding(), context.session())) {
+                    throw new RuntimeBrokerException(409, "workspace_busy",
+                            "Workspace storage is held by another tool turn.", true);
+                }
+            } else {
+                ownership.assertHeld(context.binding(), context.session());
+            }
+        } else if (managed(session) && !"history".equals(operation.get("kind"))) {
             Context context = context(lease, session, true);
             ownership.assertHeld(context.binding(), context.session());
         }
@@ -225,6 +344,12 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             return delegate.release(lease, session);
         }
         Context context = context(lease, session, false);
+        // RELEASING fences later claims; an absent holder needs no physical release.
+        if (context.session().getState() == RuntimeSessionRecord.State.RELEASING
+                && !context.runtime().isDrainRequested()
+                && !ownership.isHeld(context.binding(), context.session())) {
+            return CompletableFuture.completedFuture(true);
+        }
         return delegate.release(lease, session).thenCompose(released -> {
             if (!Boolean.TRUE.equals(released)) {
                 throw WorkspaceExecutionStore.unavailable();
@@ -238,6 +363,10 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize) {
+        return context(lease, session, authorize, false);
+    }
+
+    private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize, boolean originalCsi) {
         ContextBinding binding;
         if (authorize) {
             var resolved = resolver.resolve(session.getHarnessSessionId());
@@ -255,7 +384,9 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 || !session.getTurnKind().equals(record.getSession().getTurnKind())
                 || record.getRuntimeGeneration() != runtime.getGeneration()
                 || !runtime.getRequest().getScope().equals(session.getScope())
-                || !session.getHarnessSessionId().equals(runtime.getRequest().getIsolationKey())
+                || (originalCsi
+                        ? !"workspace".equals(session.getScope().getIsolationClass()) || runtime.getRequest().getIsolationKey() != null
+                        : !session.getHarnessSessionId().equals(runtime.getRequest().getIsolationKey()))
                 || !binding.getStorageId().equals(runtime.getRequest().getStorageId())
                 || !binding.getTenantId().equals(session.getScope().getTenantId())
                 || !binding.getWorkspaceId().equals(session.getScope().getWorkspaceId())

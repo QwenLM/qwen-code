@@ -22,6 +22,8 @@ import {
 import {
   createWorkflowSandbox,
   debugLogger,
+  describeOversizedBatch,
+  WORKFLOW_BATCH_LIMIT,
   type WorkflowSandbox,
 } from './workflow-sandbox.js';
 import type {
@@ -847,7 +849,9 @@ async function runSingleDispatch(
       // establishes the ALS frame that isSubagentLikeExecutionContext() reads,
       // so plan lifecycle tools remain blocked if tool filtering changes.
       await runWithAgentContext(workflowAgentId, () =>
-        subagent.execute(ctx, attemptSignal),
+        subagent.execute(ctx, attemptSignal, {
+          enforceTimeLimitDuringRetryWait: true,
+        }),
       );
     } finally {
       reportTokens(subagent, opts, onTokens);
@@ -1435,7 +1439,9 @@ async function runOverridePath(
         // establishes the ALS frame that isSubagentLikeExecutionContext() reads,
         // so plan lifecycle tools remain blocked if tool filtering changes.
         await runWithAgentContext(workflowAgentId, () =>
-          subagent.execute(ctx, dispatchSignal),
+          subagent.execute(ctx, dispatchSignal, {
+            enforceTimeLimitDuringRetryWait: true,
+          }),
         );
       } finally {
         reportTokens(subagent, opts, onTokens);
@@ -2753,8 +2759,9 @@ async function settleToNullArray(
  * function whose agent() calls throttle through the per-run concurrency window
  * at the dispatch layer. A thunk that rejects, or resolves to a non-JSON-
  * serializable value, becomes `null` at its index (errors-as-data). `parallel()`
- * itself rejects when given invalid arguments (non-array / non-function
- * element), when the run is aborted, or when a token/agent-cap or container
+ * itself rejects when given invalid arguments (non-array, more than
+ * `WORKFLOW_BATCH_LIMIT` thunks, non-function element) before any thunk
+ * runs, when the run is aborted, or when a token/agent-cap or container
  * policy gate refuses a dispatch. The sandbox wrapper revives the result array
  * into the vm realm (per-element JSON round-trip) — this host array never
  * reaches the script directly.
@@ -2771,8 +2778,14 @@ function makeParallelImpl(
         ),
       );
     }
-    for (const t of thunks) {
-      if (typeof t !== 'function') {
+    let batch: unknown[];
+    try {
+      batch = snapshotBatch('parallel() thunks', thunks);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    for (let i = 0; i < batch.length; i++) {
+      if (typeof batch[i] !== 'function') {
         return Promise.reject(
           new Error(
             'parallel() expects an array of functions, not values — wrap each ' +
@@ -2783,7 +2796,7 @@ function makeParallelImpl(
     }
     const parent = dependencyContext.getStore();
     const inheritedTails = parent?.tails ?? [];
-    const branches = thunks.map((thunk) => {
+    const branches = (batch as Array<() => Promise<unknown>>).map((thunk) => {
       const store = { tails: [...inheritedTails] };
       return {
         store,
@@ -2815,8 +2828,10 @@ function makeParallelImpl(
  * stage's `prev` is the item itself. An ordinary stage error, a `null`, or a
  * non-JSON-serializable value drops that item to `null` and skips its remaining
  * stages, leaving other items unaffected. A token/agent-cap refusal rejects
- * the batch. Concurrency is bounded at the dispatch layer, and the result array
- * shares parallel()'s per-element vm-realm revival.
+ * the batch. Items and stages are each bounded by `WORKFLOW_BATCH_LIMIT`; a
+ * longer list rejects the call before any stage runs. Concurrency is bounded
+ * at the dispatch layer, and the result array shares parallel()'s
+ * per-element vm-realm revival.
  */
 function makePipelineImpl(
   signal: AbortSignal | undefined,
@@ -2835,6 +2850,13 @@ function makePipelineImpl(
         ),
       );
     }
+    let batch: unknown[];
+    try {
+      batch = snapshotBatch('pipeline() items', items);
+      snapshotBatch('pipeline() stages', stages);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     for (const s of stages) {
       if (typeof s !== 'function') {
         return Promise.reject(
@@ -2847,7 +2869,7 @@ function makePipelineImpl(
     }
     const parent = dependencyContext.getStore();
     const inheritedTails = parent?.tails ?? [];
-    const branches = items.map((item, idx) => {
+    const branches = batch.map((item, idx) => {
       const store = { tails: [...inheritedTails] };
       return {
         store,
@@ -2871,6 +2893,37 @@ function makePipelineImpl(
       return result;
     });
   };
+}
+
+/**
+ * Copy one `parallel()` / `pipeline()` list into a host array after checking
+ * its length against the batch limit. The length is read once and every later
+ * loop runs over the copy, so a Proxy whose length changes, or a custom
+ * iterator or `map`, cannot stretch the batch past the check. Holes stay
+ * holes: the copy is shallow and keeps the input's sparse positions.
+ */
+function snapshotBatch(list: string, input: ArrayLike<unknown>): unknown[] {
+  let length: unknown;
+  try {
+    length = input.length;
+  } catch {
+    length = undefined;
+  }
+  if (
+    typeof length !== 'number' ||
+    !Number.isSafeInteger(length) ||
+    length < 0
+  ) {
+    throw new Error(`${list} must be an array with a readable length.`);
+  }
+  if (length > WORKFLOW_BATCH_LIMIT) {
+    throw new Error(describeOversizedBatch(list, length));
+  }
+  const batch: unknown[] = new Array(length);
+  for (let i = 0; i < length; i++) {
+    if (i in input) batch[i] = input[i];
+  }
+  return batch;
 }
 
 function mergeFanoutTails(

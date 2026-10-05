@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +23,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.regex.Pattern;
@@ -33,7 +35,8 @@ import java.util.regex.Pattern;
 public final class LocalProcessRuntimeProvisioner
         implements RuntimeProvisioner {
     static final String KIND = "local-process";
-    private static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
+    public static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration GRACE_BEFORE_FORCE = Duration.ofSeconds(5);
     private static final int READY_RECORD_LIMIT = 32 * 1024;
     private static final Pattern CAPABILITY_DIGEST =
             Pattern.compile("sha256:[0-9a-f]{64}");
@@ -55,6 +58,18 @@ public final class LocalProcessRuntimeProvisioner
     private final ConcurrentMap<List<Object>, OwnedProcess> owned =
             new ConcurrentHashMap<>();
     private final Set<List<Object>> issued = ConcurrentHashMap.newKeySet();
+    // Workers the exit hook and close() must see that `owned` does not
+    // cover: one still in its ready handshake (spawned, not yet issued —
+    // that can take READY_TIMEOUT), and one already released but inside its
+    // grace window (no longer owned, its escalation running on a daemon
+    // thread that dies with the JVM).
+    private final Set<OwnedProcess> starting = ConcurrentHashMap.newKeySet();
+    // Serialize spawn-and-register, and the release-side move out of
+    // `owned`, against the exit snapshot, so a worker can never exist unseen
+    // by terminateAll.
+    private final Object lifecycle = new Object();
+    private volatile boolean terminated;
+    private final Thread exitHook;
 
     public LocalProcessRuntimeProvisioner(List<String> command,
             Path workingDirectory, HttpRuntimeTransport transport) {
@@ -98,6 +113,31 @@ public final class LocalProcessRuntimeProvisioner
         this.storageResolver = storageResolver;
         this.store = store;
         this.trustedRebootRecovery = trustedRebootRecovery;
+        // Non-durable workers have no recovery path, so a Broker exit must
+        // not strand them.
+        exitHook = store == null ? registerExitHook() : null;
+    }
+
+    private Thread registerExitHook() {
+        Thread hook = new Thread(this::terminateAll, "runtime-provisioner-exit");
+        Runtime.getRuntime().addShutdownHook(hook);
+        return hook;
+    }
+
+    private void terminateAll() {
+        List<Process> all;
+        synchronized (lifecycle) {
+            terminated = true;
+            all = new ArrayList<>(starting.size() + owned.size());
+            for (OwnedProcess process : starting) {
+                all.add(process.process);
+            }
+            for (OwnedProcess process : owned.values()) {
+                all.add(process.process);
+            }
+        }
+        all.forEach(Process::destroy);
+        forceAllAfterGrace(all);
     }
 
     @Override
@@ -161,6 +201,58 @@ public final class LocalProcessRuntimeProvisioner
         return store != null && LocalRuntimeStore.supported(handle);
     }
 
+    /** Local operator attestation requires the exact registered worker to be gone. */
+    public RuntimeObservation attestOperatorStop(RuntimeBindingRecord binding, String recoveryId) {
+        if (store == null || binding == null || !binding.getRequest().isManagedContext()
+                || !LocalRuntimeStore.supported(binding.getResourceHandle())
+                || binding.getProvisionSeed() == null || binding.getLease() == null
+                || recoveryId == null || !recoveryId.matches("[0-9a-f-]{36}")) {
+            throw LocalRuntimeStore.blocked();
+        }
+        return store.locked(binding.getRequest(), binding.getProvisionSeed(),
+                binding.getResourceHandle(), false, (resource, registration) -> {
+                    boolean sameBoot = store.sameBoot(registration);
+                    if ((!sameBoot && !store.rebooted(registration))
+                            || (registration.state() != LocalRuntimeStore.State.READY
+                                    && registration.state() != LocalRuntimeStore.State.RETIRED)
+                            || (sameBoot && !registration.processAbsent())) {
+                        throw LocalRuntimeStore.blocked();
+                    }
+                    if (registration.state() != LocalRuntimeStore.State.RETIRED) {
+                        resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+                    }
+                    RuntimeProvisionSeed seed = binding.getProvisionSeed();
+                    RuntimeResourceHandle handle = binding.getResourceHandle();
+                    return RuntimeObservation.notFound(
+                            binding.getLossEvidence() == null
+                                    ? localEvidence(seed, handle,
+                                            RuntimeRecoveryEvidence.Fact.JOURNAL_LOST,
+                                            "registered-process-exit")
+                                    : binding.getLossEvidence(),
+                            localEvidence(seed, handle,
+                                    RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED,
+                                    "operator-attested:" + recoveryId));
+                });
+    }
+
+    /** Read-only preflight of the original durable registration. */
+    public void verifyOperatorRegistration(RuntimeBindingRecord binding) {
+        if (store == null || binding == null || !binding.getRequest().isManagedContext()
+                || !LocalRuntimeStore.supported(binding.getResourceHandle())
+                || binding.getProvisionSeed() == null || binding.getLease() == null) {
+            throw LocalRuntimeStore.blocked();
+        }
+        store.locked(binding.getRequest(), binding.getProvisionSeed(),
+                binding.getResourceHandle(), false, (resource, registration) -> {
+                    if ((!store.sameBoot(registration) && !store.rebooted(registration))
+                            || (registration.state() != LocalRuntimeStore.State.READY
+                                    && registration.state() != LocalRuntimeStore.State.RETIRED)) {
+                        throw LocalRuntimeStore.blocked();
+                    }
+                    return null;
+                });
+    }
+
     @Override
     public CompletionStage<RuntimeObservation> reconcile(
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
@@ -191,27 +283,166 @@ public final class LocalProcessRuntimeProvisioner
     }
 
     @Override
+    public boolean supportsDrainedStop() {
+        return store != null;
+    }
+
+    @Override
+    public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
+        if (store == null || !binding.isDrainRequested() || !binding.getRequest().isManagedContext()
+                || !"session".equals(binding.getRequest().getScope().getIsolationClass())
+                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(binding.getRequest().getScope().getCapabilityDigest())
+                || binding.getProvisionSeed() == null) {
+            return RuntimeProvisioner.super.stopDrained(binding);
+        }
+        // The Broker commits the handle before launch; its drain claim fences late startup.
+        boolean createIntent = binding.getResourceHandle() == null && binding.getLease() == null
+                && binding.getAttestationGeneration() == 0;
+        return CompletableFuture.supplyAsync(() -> store.locked(binding.getRequest(),
+                binding.getProvisionSeed(), binding.getResourceHandle(), createIntent, (resource, registration) -> {
+                boolean originalBootStopped = trustedRebootRecovery && store.rebooted(registration);
+                if (!originalBootStopped && (!store.sameBoot(registration)
+                        || registration.state() == LocalRuntimeStore.State.LAUNCHING
+                        || registration.pid() == 0 && registration.state() != LocalRuntimeStore.State.INTENT
+                                && registration.state() != LocalRuntimeStore.State.RETIRED)) {
+                    throw LocalRuntimeStore.blocked();
+                }
+                boolean neverStarted = registration.pid() == 0;
+                var worker = originalBootStopped ? null : registration.process();
+                if (!originalBootStopped && !neverStarted && worker == null && !registration.processAbsent()) {
+                    throw LocalRuntimeStore.blocked();
+                }
+                resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+                if (worker != null) {
+                    worker.destroy();
+                    waitForStop(registration, 5);
+                    worker = registration.process();
+                    if (worker != null) {
+                        worker.destroyForcibly();
+                        waitForStop(registration, 5);
+                    }
+                }
+                if (!originalBootStopped && !neverStarted && !registration.processAbsent()) {
+                    throw new RuntimeBrokerException(503, "workspace_close_stop_unconfirmed",
+                            "Original worker has not stopped.", true);
+                }
+                return new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
+                        binding.getProvisionSeed().getProvisionRequestId(), registration.handle(), Instant.now());
+            }), executor);
+    }
+
+    private static void waitForStop(LocalRuntimeStore.Registration registration, int seconds) {
+        long until = System.nanoTime() + Duration.ofSeconds(seconds).toNanos();
+        while (!registration.processAbsent() && System.nanoTime() < until) {
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeBrokerException(503, "workspace_close_stop_unconfirmed",
+                        "Worker stop was interrupted.", true, error);
+            }
+        }
+    }
+
+    @Override
     public boolean isUsable(RuntimeLease lease) {
         OwnedProcess process = owned.get(ownershipKey(lease));
         return process != null && process.alive();
     }
 
     void stop(RuntimeLease lease) {
-        OwnedProcess process = owned.remove(ownershipKey(lease));
+        OwnedProcess process;
+        synchronized (lifecycle) {
+            // Move the worker from owned to starting under the same lock
+            // terminateAll() snapshots with, so an exit can never find it in
+            // neither set. Once terminated, that snapshot already covered it.
+            // Like spawn-and-register in start(), this is structural: the
+            // window it closes is inside the lock, so no test can reach the
+            // interleaving from outside it.
+            process = owned.remove(ownershipKey(lease));
+            if (process != null && !terminated) {
+                starting.add(process);
+            }
+        }
         if (process != null) {
             process.process.destroy();
+            // A worker that ignores SIGTERM must not outlive its release;
+            // escalate after the grace window without blocking the caller.
+            // That escalation runs on a daemon thread which dies with the
+            // JVM, so the worker stays in `starting` until it finishes.
+            try {
+                executor.execute(() -> {
+                    try {
+                        forceAfterGrace(process.process);
+                    } finally {
+                        starting.remove(process);
+                    }
+                });
+            } catch (RejectedExecutionException closing) {
+                starting.remove(process);
+                process.process.destroyForcibly();
+            }
+        }
+    }
+
+    private static void forceAfterGrace(Process process) {
+        try {
+            if (!process.waitFor(GRACE_BEFORE_FORCE.toMillis(),
+                    TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly();
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            process.destroyForcibly();
+        }
+    }
+
+    /**
+     * All destroys are already sent; the grace windows overlap, so the total
+     * wait is one bounded window — and zero when nothing ignores it.
+     */
+    private static void forceAllAfterGrace(Iterable<Process> processes) {
+        long deadline = System.nanoTime() + GRACE_BEFORE_FORCE.toNanos();
+        boolean interrupted = false;
+        for (Process process : processes) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                break;
+            }
+            try {
+                process.waitFor(remaining, TimeUnit.NANOSECONDS);
+            } catch (InterruptedException interruption) {
+                interrupted = true;
+                break;
+            }
+        }
+        for (Process process : processes) {
+            if (process.isAlive()) {
+                process.destroyForcibly();
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 
     @Override
     public void close() {
         if (store == null) {
-            for (OwnedProcess process : owned.values()) {
-                process.process.destroy();
-            }
+            terminateAll();
         }
         owned.clear();
         executor.shutdownNow();
+        // A queued escalation does not run after that shutdown, and its
+        // finally block was the only thing removing the entry it tracked.
+        starting.clear();
+        if (exitHook != null) {
+            try {
+                Runtime.getRuntime().removeShutdownHook(exitHook);
+            } catch (IllegalStateException ignored) {
+                // The VM is already shutting down and the hook is running.
+            }
+        }
     }
 
     private RuntimeLease start(RuntimeProvisionRequest request,
@@ -225,16 +456,26 @@ public final class LocalProcessRuntimeProvisioner
         }
         OwnedProcess ownedProcess = null;
         boolean adopted = false;
+        RuntimeBrokerException closedRefusal = null;
         try {
             RuntimeProvisionSeed seed = provided != null
                     ? provided : newSeed();
             Map<String, Object> document = boot(request, seed);
             byte[] encoded = JsonCodec.encode(document);
-            Process process = new ProcessBuilder(command)
-                    .directory(workingDirectory.toFile())
-                    .redirectError(ProcessBuilder.Redirect.DISCARD)
-                    .start();
-            ownedProcess = new OwnedProcess(process, null, seed);
+            Process process;
+            synchronized (lifecycle) {
+                if (terminated) {
+                    closedRefusal = failed(
+                            "Managed Runtime provisioner is closed.");
+                    throw closedRefusal;
+                }
+                process = new ProcessBuilder(command)
+                        .directory(workingDirectory.toFile())
+                        .redirectError(ProcessBuilder.Redirect.DISCARD)
+                        .start();
+                ownedProcess = new OwnedProcess(process, null, seed);
+                starting.add(ownedProcess);
+            }
             process.getOutputStream().write(encoded);
             process.getOutputStream().close();
             String readyLine = readReadyLine(process);
@@ -251,9 +492,19 @@ public final class LocalProcessRuntimeProvisioner
                         false);
             }
             owned.put(key, ownedProcess);
+            starting.remove(ownedProcess);
             adopted = true;
             return lease;
         } catch (IOException | RuntimeException exception) {
+            if (exception == closedRefusal) {
+                // A closed provisioner is not a managed-context startup
+                // failure, and recovery is not blocked by it: keep the
+                // refusal's own message and retryable flag for callers that
+                // provision directly. Through RuntimeBrokerService a
+                // managed-context provision failure blocks recovery either
+                // way, so this changes the surfaced error, not that outcome.
+                throw closedRefusal;
+            }
             if (request.isManagedContext()) {
                 throw new RuntimeBrokerException(503, "runtime_provision_failed",
                         "Managed context startup failed; recovery is blocked.",
@@ -265,6 +516,7 @@ public final class LocalProcessRuntimeProvisioner
             throw failed("Managed Runtime worker failed to start.", exception);
         } finally {
             if (!adopted && ownedProcess != null) {
+                starting.remove(ownedProcess);
                 ownedProcess.process.destroyForcibly();
             }
         }

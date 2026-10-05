@@ -275,6 +275,13 @@ export interface SendMessageOptions {
   }) => string;
   /** Peeks a queued real-user key immediately before a Goal true Stop. */
   getQueuedGoalTurnKey?: () => string | undefined;
+  /**
+   * The consumer retracts already-delivered output when a retry restarts
+   * (the Hosted Harness, whose streamed text is published durably). Forwarded
+   * to `LlmChat` so a post-delivery cut replays instead of continuing
+   * (#13319).
+   */
+  retractDeliveredOutputOnRetry?: boolean;
 }
 
 export interface SteerInput {
@@ -423,6 +430,7 @@ export function getMainSessionBaseSystemPrompt(
             config.getShellExecutionSandbox?.()?.filesystem,
           executionSandboxBackend:
             config.getShellExecutionSandbox?.()?.effectiveBackend,
+          executionSandboxNetwork: config.getShellExecutionSandbox?.()?.network,
         },
       );
 }
@@ -1246,7 +1254,10 @@ export class LlmClient {
     }
     const deferredTools = this.resolveDeferredToolsForReminder(deferredSummary);
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
-    const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
+    // Some providers reject an empty tool list; offer none instead.
+    const tools: Tool[] = toolDeclarations.length
+      ? [{ functionDeclarations: toolDeclarations }]
+      : [];
     this.getChat().setTools(tools);
     this.queueAddedMcpToolsReminder(deferredTools ?? []);
     this.queueMcpServerInstructionsReminder(
@@ -1289,7 +1300,7 @@ export class LlmClient {
     if (handle.terminalLogged) return undefined;
     handle.terminalLogged = true;
     const event = new MemoryRecallDeliveryEvent({
-      phase: 'refined',
+      phase: result.selectorSkipped ? 'fast' : 'refined',
       delivery_point: deliveryPoint,
       discard_reason: discardReason,
       strategy: result.strategy,
@@ -1547,8 +1558,12 @@ export class LlmClient {
     // scorer matches anything, the fast result wins — the selector's speed is
     // irrelevant. `onFastResult` is published before recall even issues the
     // selector request, so `settledAt` is necessarily null when the wait ends
-    // on it. The settled-recall branch is reached at this point only when no
-    // fast result exists at all: no `Config`, or nothing matched
+    // on it — unless the #13003 skip-selector knob is on: a skipped selector
+    // settles the recall promise within microtasks, so the wait can meet a
+    // settled handle still carrying an undelivered fast result (the
+    // `selectorSkippedFast` term below exists for exactly that state). With
+    // the knob off, the settled-recall branch is reached at this point only
+    // when no fast result exists at all: no `Config`, or nothing matched
     // lexically. That is deliberate, not incidental — a model side query does
     // not complete inside this ceiling, so arbitrating between them would
     // cost every turn the remainder of the budget to win a race that does not
@@ -1591,7 +1606,14 @@ export class LlmClient {
     // deterministic result now rather than gambling on a later tool call:
     // a turn that makes none has no safe delivery point at all. The handle
     // stays pending so the model-selected result can still land later.
-    if (handle.settledAt === null) {
+    // A recall that skipped the selector (#13003) settles almost at once, but
+    // its result is the fast result, so the initial turn still delivers it as
+    // the fast phase; later consume points dedup it as already delivered.
+    const selectorSkippedFast =
+      handle.result?.selectorSkipped === true &&
+      deliveryPoint === 'initial' &&
+      !handle.fastDelivered;
+    if (handle.settledAt === null || selectorSkippedFast) {
       if (deliveryPoint !== 'initial' || handle.fastDelivered) {
         return null;
       }
@@ -1879,6 +1901,9 @@ export class LlmClient {
     // compression should keep session-setup reveals so the declaration list
     // does not change mid-session.
     this.config.getToolRegistry().clearRevealedDeferredTools();
+    // tool_search results leave with the history, so tool_call must not
+    // run a hidden tool on a review the new session never saw (#12569).
+    this.config.getToolRegistry().clearReviewedDeclarations?.();
     await runWithHookExecutionOwner(hookOwner, () =>
       this.startChat(undefined, SessionStartSource.Clear),
     );
@@ -2658,6 +2683,7 @@ export class LlmClient {
       // calling us.
       const toolRegistry = this.config.getToolRegistry();
       await profiler.time('tool_registry_warm', () => toolRegistry.warmAll());
+      toolRegistry.syncReviewedDeclarations?.(extraHistory ?? []);
       const codeModeOnly =
         this.config.getToolMode?.() === ToolMode.CodeModeOnly;
       const deferredSummary = toolRegistry.getDeferredToolSummary();
@@ -3387,7 +3413,8 @@ export class LlmClient {
     if (!turnBudget) return;
     const sessionId = this.config.getSessionId();
     if (
-      messageType === SendMessageType.Retry &&
+      (messageType === SendMessageType.Retry ||
+        messageType === SendMessageType.UserQuery) &&
       turnBudget.current(sessionId)?.promptId === promptId
     ) {
       return;
@@ -4029,6 +4056,17 @@ export class LlmClient {
       // is the model-bound payload, so a resumed session restores the
       // same info item. Without this they were the one top-level
       // interaction missing from chat recording entirely.
+      //
+      // `deliveredTurn: true` because this record IS the turn's user entry,
+      // written once the send path has admitted the turn: that is what
+      // separates it from a cold notification record the daemon persisted
+      // before any turn ran, which no other persisted field can tell apart
+      // (`backgroundTurn` vanishes on the `channelTask` admission branch).
+      // The stamp does not claim the model accepted a request — the pre-send
+      // refusal gates below all return after this write — and it cannot move
+      // under them without losing the resumed info item this record exists to
+      // restore. See `ChatRecord.deliveredTurn` for that accepted imprecision
+      // and the test pinning it.
       this.config
         .getChatRecordingService()
         ?.recordNotification(
@@ -4036,6 +4074,7 @@ export class LlmClient {
           options?.notificationDisplayText,
           undefined,
           goalPermit,
+          /* deliveredTurn */ true,
         );
     }
 
@@ -4436,6 +4475,7 @@ export class LlmClient {
         // Only a first-party user prompt opens a rewindable identity. Re-entry
         // stays unmarked, so a replaced identified turn fails closed.
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
+        options?.retractDeliveredOutputOnRetry,
       );
 
       // Assemble the outgoing request. IDE context is merged into the

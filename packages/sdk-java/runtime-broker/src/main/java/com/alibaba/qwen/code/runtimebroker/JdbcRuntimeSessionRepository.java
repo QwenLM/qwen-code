@@ -25,8 +25,17 @@ public final class JdbcRuntimeSessionRepository
         this.dataSource = JdbcRepositorySupport.requireDataSource(dataSource);
     }
 
-    boolean usesDataSource(DataSource source) {
+    public boolean usesDataSource(DataSource source) {
         return dataSource == source;
+    }
+
+    public RuntimeSessionRecord findByIdForUpdate(Connection connection,
+            RuntimeScope scope, String runtimeSessionId) throws SQLException {
+        if (connection == null || connection.getAutoCommit() || scope == null) {
+            throw new IllegalArgumentException("An active transaction and scope are required");
+        }
+        return selectSession(connection, scope,
+                BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"), true, 10);
     }
 
     static List<RuntimeSessionRecord> lockActiveSessions(Connection connection,
@@ -179,6 +188,31 @@ public final class JdbcRuntimeSessionRepository
     }
 
     @Override
+    public List<RuntimeSessionRecord> findByBinding(String bindingId, long generation,
+            String afterSessionId, int limit) {
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Drain batch must contain 1-100 Sessions");
+        }
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            List<RuntimeSessionRecord> result = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement("SELECT " + SESSION_COLUMNS
+                    + " FROM qwen_runtime_session WHERE binding_id = ? AND runtime_generation = ?"
+                    + " AND runtime_session_id > ? ORDER BY runtime_session_id LIMIT ?")) {
+                statement.setString(1, bindingId);
+                statement.setLong(2, generation);
+                statement.setString(3, afterSessionId == null ? "" : afterSessionId);
+                statement.setInt(4, limit);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        result.add(mapSession(rows));
+                    }
+                }
+            }
+            return List.copyOf(result);
+        });
+    }
+
+    @Override
     public long countActiveByBinding(String bindingId,
             long runtimeGeneration) {
         String id = BrokerValues.requireId(bindingId, "bindingId");
@@ -210,11 +244,20 @@ public final class JdbcRuntimeSessionRepository
     static RuntimeSessionRecord selectSession(Connection connection,
             RuntimeScope scope, String runtimeSessionId, boolean forUpdate)
             throws SQLException {
+        return selectSession(connection, scope, runtimeSessionId, forUpdate, 0);
+    }
+
+    private static RuntimeSessionRecord selectSession(Connection connection,
+            RuntimeScope scope, String runtimeSessionId, boolean forUpdate,
+            int queryTimeout) throws SQLException {
         String sql = "SELECT " + SESSION_COLUMNS
                 + " FROM qwen_runtime_session WHERE scope_key = ? "
                 + "AND runtime_session_id = ?"
                 + (forUpdate ? " FOR UPDATE" : "");
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            if (queryTimeout > 0) {
+                statement.setQueryTimeout(queryTimeout);
+            }
             statement.setString(1, JdbcRepositorySupport.scopeKey(scope));
             statement.setString(2, runtimeSessionId);
             try (ResultSet result = statement.executeQuery()) {

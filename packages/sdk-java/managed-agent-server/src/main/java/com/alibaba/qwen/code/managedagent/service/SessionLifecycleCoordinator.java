@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import java.time.Clock;
 import java.time.Duration;
@@ -40,6 +41,18 @@ public class SessionLifecycleCoordinator {
     private final Duration retryInitialDelay;
     private final Duration retryMaxDelay;
     private final String owner = UUID.randomUUID().toString();
+    private final java.util.concurrent.ScheduledExecutorService renewals =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(task -> {
+                Thread thread = new Thread(task, "session-lifecycle-renewal");
+                thread.setDaemon(true);
+                return thread;
+            });
+
+    @jakarta.annotation.PreDestroy
+    void stopRenewals() {
+        renewals.shutdownNow();
+    }
+
     private final Set<String> active = ConcurrentHashMap.newKeySet();
 
     public SessionLifecycleCoordinator(AgentStateStore store,
@@ -90,8 +103,23 @@ public class SessionLifecycleCoordinator {
         if (claimed == null) {
             return;
         }
+        var valid = new java.util.concurrent.atomic.AtomicBoolean(true);
+        long period = Math.max(1, leaseDuration.toMillis() / 3);
+        var renewal = renewals.scheduleWithFixedDelay(() -> {
+            try {
+                if (!store.renewLifecycleOperation(tenantId, sessionId, operationId, owner,
+                        claimed.claimGeneration(), leaseDuration)) {
+                    valid.set(false);
+                }
+            } catch (RuntimeException error) {
+                valid.set(false);
+            }
+        }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
         try {
             boolean harnessConfirmed = settle(claimed);
+            if (!valid.get()) {
+                return;
+            }
             if (!store.completeOperation(tenantId, sessionId, operationId,
                     owner, claimed.claimGeneration(), harnessConfirmed)) {
                 LOG.warn("Managed Session operation was claimed by another"
@@ -101,15 +129,34 @@ public class SessionLifecycleCoordinator {
         } catch (RuntimeException error) {
             long delay = HarnessCoordinator.retryDelay(retryInitialDelay,
                     retryMaxDelay, claimed.attemptCount());
-            store.retryOperation(tenantId, sessionId, operationId, owner,
-                    claimed.claimGeneration(),
-                    Math.addExact(clock.millis(), delay));
+            Throwable cause = error;
+            while (cause.getCause() != null && cause instanceof java.util.concurrent.CompletionException) {
+                cause = cause.getCause();
+            }
+            String blocked = null;
+            if (cause instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException brokerError) {
+                if ("workspace_close_execution_unsettled".equals(brokerError.getCode())) {
+                    blocked = brokerError.getCode();
+                } else if ("workspace_close_identity_unverified".equals(brokerError.getCode())
+                        || "runtime_broker_recovery_blocked".equals(brokerError.getCode())) {
+                    blocked = "workspace_close_identity_unverified";
+                }
+            }
+            if (valid.get() && blocked != null) {
+                store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,
+                        claimed.claimGeneration(), blocked, Math.addExact(clock.millis(), delay));
+            } else if (valid.get()) {
+                store.retryOperation(tenantId, sessionId, operationId, owner,
+                        claimed.claimGeneration(), Math.addExact(clock.millis(), delay));
+            }
             LOG.warn("Managed Session operation will retry tenant={}"
                             + " session={} operation={} retry={} delayMs={}"
                             + " failure={} {}",
                     tenantId, sessionId, operationId,
                     claimed.attemptCount() + 1, delay,
                     error.getClass().getSimpleName(), error.getMessage());
+        } finally {
+            renewal.cancel(false);
         }
     }
 
@@ -118,6 +165,18 @@ public class SessionLifecycleCoordinator {
     // answers too, but its answer confirms nothing about the Session.
     private boolean settle(OperationRecord operation) {
         boolean harnessConfirmed = false;
+        boolean bound = store.requireSession(operation.tenantId(), operation.sessionId()).workspace() != null;
+        if (bound && operation.kind() == OperationKind.DELETE
+                && ("CLOSED".equals(operation.sessionStatusBefore()) || "ARCHIVED".equals(operation.sessionStatusBefore()))) {
+            return false;
+        }
+        if (bound) {
+            if (!runtimeWarmer.supportsWorkspaceClose()) {
+                throw new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(409,
+                        "workspace_close_identity_unverified", "This instance cannot verify the original worker stop", false);
+            }
+            runtimeWarmer.requestWorkspaceClose(operation.tenantId(), operation.sessionId());
+        }
         if ("ACTIVE".equals(operation.sessionStatusBefore())) {
             String holder = store.requireSession(operation.tenantId(),
                     operation.sessionId()).harnessBootId();
@@ -125,7 +184,7 @@ public class SessionLifecycleCoordinator {
                 String answered = harness.closeSession(operation.tenantId(),
                         operation.sessionId());
                 harnessConfirmed = holder != null && holder.equals(answered);
-            } else if (holder != null) {
+            } else if (holder != null && !bound) {
                 throw new IllegalStateException(
                         "The Hosted Harness is required to close the Session");
             }
@@ -138,8 +197,11 @@ public class SessionLifecycleCoordinator {
                         "A Harness still holds the Session's journal writer");
             }
         }
-        runtimeWarmer.drain(operation.sessionId()).toCompletableFuture()
-                .join();
+        if (bound) {
+            runtimeWarmer.closeWorkspace(operation.tenantId(), operation.sessionId()).toCompletableFuture().join();
+        } else {
+            runtimeWarmer.drain(operation.sessionId()).toCompletableFuture().join();
+        }
         return harnessConfirmed;
     }
 }

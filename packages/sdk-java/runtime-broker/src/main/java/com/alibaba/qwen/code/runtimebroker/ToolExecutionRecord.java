@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import java.time.Instant;
 import java.util.Map;
-import java.util.LinkedHashMap;
 import java.util.Objects;
 import java.util.Set;
 
@@ -22,14 +21,11 @@ public final class ToolExecutionRecord {
     }
 
     Map<String, Object> cancellationBeforeDispatch() {
-        if (!Integer.valueOf(3).equals(reference.get("runtimeProtocol"))) {
+        if (!Integer.valueOf(3).equals(reference.get("runtimeProtocol"))
+                && !"deferred_v3".equals(reference.get("dispatchMode"))) {
             return Map.of("executionStatus", "cancelled");
         }
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("executionStatus", "not_started");
-        result.put("responseParts", java.util.List.of());
-        result.put("capture", null);
-        return result;
+        return cancelledBeforeV3Start();
     }
 
     public enum State {
@@ -64,6 +60,8 @@ public final class ToolExecutionRecord {
     private final Instant settledAt;
     private final Instant abandonedAt;
     private final String lossEvidenceId;
+    private final Long authorizedDispatchGeneration;
+    private final Long authorizedBindingVersion;
 
     ToolExecutionRecord(String executionCallId, String idempotencyKey,
             String bindingId, long runtimeGeneration,
@@ -89,6 +87,23 @@ public final class ToolExecutionRecord {
             long lastSequence, boolean cancelRequested, String dispatchOwner,
             Instant dispatchLeaseUntil, long dispatchGeneration, long version,
             Instant settledAt, Instant abandonedAt, String lossEvidenceId) {
+        this(executionCallId, idempotencyKey, bindingId, runtimeGeneration,
+                harnessSessionId, runtimeSessionId, turnId, toolCallId,
+                requestDigest, reference, state, executionStatus, result,
+                lastSequence, cancelRequested, dispatchOwner, dispatchLeaseUntil,
+                dispatchGeneration, version, settledAt, abandonedAt, lossEvidenceId,
+                null, null);
+    }
+
+    ToolExecutionRecord(String executionCallId, String idempotencyKey,
+            String bindingId, long runtimeGeneration,
+            String harnessSessionId, String runtimeSessionId, String turnId,
+            String toolCallId, String requestDigest, Map<String, Object> reference,
+            State state, String executionStatus, Map<String, Object> result,
+            long lastSequence, boolean cancelRequested, String dispatchOwner,
+            Instant dispatchLeaseUntil, long dispatchGeneration, long version,
+            Instant settledAt, Instant abandonedAt, String lossEvidenceId,
+            Long authorizedDispatchGeneration, Long authorizedBindingVersion) {
         this.executionCallId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
         this.idempotencyKey = BrokerValues.requireId(idempotencyKey,
@@ -113,7 +128,8 @@ public final class ToolExecutionRecord {
         if (!runtimeSessionId.equals(reference.get("sessionId"))
                 || !turnId.equals(reference.get("promptId"))
                 || !toolCallId.equals(reference.get("callId"))
-                || !requestDigest.equals(reference.get("argsDigest"))) {
+                || !requestDigest.equals("deferred_v3".equals(reference.get("dispatchMode"))
+                        ? reference.get("payloadDigest") : reference.get("argsDigest"))) {
             throw new IllegalArgumentException(
                     "reference identity does not match execution identity");
         }
@@ -180,6 +196,17 @@ public final class ToolExecutionRecord {
         }
         this.abandonedAt = abandonedAt;
         this.lossEvidenceId = lossEvidenceId;
+        if ((authorizedDispatchGeneration == null) != (authorizedBindingVersion == null)
+                || authorizedDispatchGeneration != null
+                        && (authorizedDispatchGeneration <= 0
+                                || authorizedDispatchGeneration != dispatchGeneration
+                                || authorizedBindingVersion < 0
+                                || dispatchOwner == null
+                                || state == State.PREPARED || state == State.DISPATCHING)) {
+            throw new IllegalArgumentException("Dispatch authorization evidence is invalid");
+        }
+        this.authorizedDispatchGeneration = authorizedDispatchGeneration;
+        this.authorizedBindingVersion = authorizedBindingVersion;
     }
 
     public static ToolExecutionRecord prepared(String executionCallId,
@@ -314,11 +341,45 @@ public final class ToolExecutionRecord {
                 turnId, toolCallId, requestDigest, reference, State.ABANDONED,
                 null, null, lastSequence, cancelRequested, dispatchOwner,
                 dispatchLeaseUntil, dispatchGeneration, version, null,
-                time, binding.getLossEvidence().evidenceId());
+                time, binding.getLossEvidence().evidenceId(),
+                authorizedDispatchGeneration, authorizedBindingVersion);
     }
 
     public boolean isSettled() {
         return state == State.SETTLED;
+    }
+
+    public Long getAuthorizedDispatchGeneration() {
+        return authorizedDispatchGeneration;
+    }
+
+    public Long getAuthorizedBindingVersion() {
+        return authorizedBindingVersion;
+    }
+
+    public boolean wasDispatchAuthorizedBefore(long sealedBindingVersion) {
+        return authorizedDispatchGeneration != null
+                && authorizedDispatchGeneration == dispatchGeneration
+                && authorizedBindingVersion < sealedBindingVersion;
+    }
+
+    ToolExecutionRecord authorizeDispatch(long bindingVersion) {
+        if (state != State.DISPATCHING || cancelRequested || dispatchOwner == null
+                || authorizedDispatchGeneration != null) {
+            throw new IllegalArgumentException("Dispatch authorization requires an unmarked claim");
+        }
+        return new ToolExecutionRecord(executionCallId, idempotencyKey,
+                bindingId, runtimeGeneration, harnessSessionId, runtimeSessionId,
+                turnId, toolCallId, requestDigest, reference, State.EXECUTING,
+                null, null, lastSequence, false, dispatchOwner, dispatchLeaseUntil,
+                dispatchGeneration, version, null, null, null,
+                dispatchGeneration, bindingVersion);
+    }
+
+    boolean sameAuthorization(ToolExecutionRecord other) {
+        return other != null
+                && Objects.equals(authorizedDispatchGeneration, other.authorizedDispatchGeneration)
+                && Objects.equals(authorizedBindingVersion, other.authorizedBindingVersion);
     }
 
     public ToolExecutionRecord withState(State nextState,
@@ -345,6 +406,14 @@ public final class ToolExecutionRecord {
         return copy(State.SETTLED, (String) status, nextResult, sequence,
                 cancelRequested, dispatchOwner, dispatchLeaseUntil,
                 dispatchGeneration, version, completionTime);
+    }
+
+    static Map<String, Object> cancelledBeforeV3Start() {
+        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        result.put("executionStatus", "not_started");
+        result.put("responseParts", java.util.List.of());
+        result.put("capture", null);
+        return result;
     }
 
     public ToolExecutionRecord withUnknown() {
@@ -444,6 +513,7 @@ public final class ToolExecutionRecord {
                 runtimeSessionId, turnId, toolCallId, requestDigest,
                 reference, nextState, nextStatus, nextResult, sequence,
                 requested, owner, leaseUntil, nextDispatchGeneration,
-                nextVersion, completionTime, abandonedAt, lossEvidenceId);
+                nextVersion, completionTime, abandonedAt, lossEvidenceId,
+                authorizedDispatchGeneration, authorizedBindingVersion);
     }
 }

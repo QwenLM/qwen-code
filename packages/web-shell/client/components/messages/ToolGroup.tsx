@@ -89,6 +89,7 @@ import styles from './tools/ToolChrome.module.css';
 import { getMcpAppDisplay, McpApp } from './McpApp';
 import type { TurnOutputOpenRequest } from '../artifacts/TurnOutputs';
 import { ToolFilePreviewButton } from './ToolFilePreviewButton';
+import { ManagedToolResultSummary } from '../managed/ManagedToolResultSummary';
 
 interface ToolGroupProps {
   tools: ACPToolCall[];
@@ -106,6 +107,7 @@ interface ToolGroupProps {
   pendingApproval?: PermissionRequest | null;
   workspaceCwd?: string;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onToolResultOpen?: (itemId: string) => void;
   isLocateFlashing?: boolean;
   /** Powers the translate action on completed thinking rows (zh-CN). */
   generateContent?: SessionContentGenerator;
@@ -370,6 +372,7 @@ interface ToolLineProps {
   approval?: PermissionRequest | null;
   workspaceCwd?: string;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onToolResultOpen?: (itemId: string) => void;
   summaryOnly?: boolean;
   forceExpanded?: boolean;
   detailsVisible?: boolean;
@@ -986,6 +989,7 @@ function areToolLinePropsEqual(
   if (prev.approval?.id !== next.approval?.id) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.onTurnOutputOpen !== next.onTurnOutputOpen) return false;
+  if (prev.onToolResultOpen !== next.onToolResultOpen) return false;
   if (prev.summaryOnly !== next.summaryOnly) return false;
   if (prev.forceExpanded !== next.forceExpanded) return false;
   if (prev.detailsVisible !== next.detailsVisible) return false;
@@ -1002,6 +1006,8 @@ function areToolLinePropsEqual(
     a.endTime === b.endTime &&
     a.subContent === b.subContent &&
     a.rawOutput === b.rawOutput &&
+    a.toolResult === b.toolResult &&
+    a.wasCancelled === b.wasCancelled &&
     a.args === b.args &&
     a.content === b.content &&
     a.locations === b.locations &&
@@ -1027,6 +1033,8 @@ function areSubToolsEqual(
       a.subagentSessionReady !== b.subagentSessionReady ||
       a.endTime !== b.endTime ||
       a.rawOutput !== b.rawOutput ||
+      a.toolResult !== b.toolResult ||
+      a.wasCancelled !== b.wasCancelled ||
       a.args !== b.args ||
       a.subContent !== b.subContent ||
       a.title !== b.title
@@ -1090,6 +1098,7 @@ export const ToolLine = memo(function ToolLine({
   approval,
   workspaceCwd,
   onTurnOutputOpen,
+  onToolResultOpen,
   summaryOnly = false,
   forceExpanded = false,
   detailsVisible = true,
@@ -1609,6 +1618,12 @@ export const ToolLine = memo(function ToolLine({
             )}
           </div>
         )}
+      {tool.toolResult && (
+        <ManagedToolResultSummary
+          result={tool.toolResult}
+          onOpen={onToolResultOpen}
+        />
+      )}
     </div>
   );
 }, areToolLinePropsEqual);
@@ -1742,6 +1757,7 @@ export const ToolGroup = memo(function ToolGroup({
   pendingApproval,
   workspaceCwd,
   onTurnOutputOpen,
+  onToolResultOpen,
   isLocateFlashing = false,
   generateContent,
 }: ToolGroupProps) {
@@ -2010,6 +2026,7 @@ export const ToolGroup = memo(function ToolGroup({
                           approval={pendingApproval}
                           workspaceCwd={workspaceCwd}
                           onTurnOutputOpen={onTurnOutputOpen}
+                          onToolResultOpen={onToolResultOpen}
                           summaryOnly={!singleTool || compactToolLines}
                           forceExpanded={
                             documentMode || (!!singleTool && !compactToolLines)
@@ -2052,6 +2069,7 @@ export const ToolGroup = memo(function ToolGroup({
           approval={pendingApproval}
           workspaceCwd={workspaceCwd}
           onTurnOutputOpen={onTurnOutputOpen}
+          onToolResultOpen={onToolResultOpen}
           forceExpanded={documentMode}
         />
       ))}

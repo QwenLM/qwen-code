@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-api-contract.md) | [简体中文](2026-09-27-managed-agent-api-contract.zh-CN.md)
 
-Status: D1 implemented; D2 implemented in [Session query](2026-09-27-managed-agent-session-query.md); D3 implemented in [Event replay](2026-09-27-managed-agent-event-replay.md); the lifecycle work implemented as D4 of [#12867](https://github.com/QwenLM/qwen-code/issues/12867) in [Durable lifecycle](2026-09-28-managed-agent-durable-lifecycle.md); D5 implemented in [Turn queries](2026-09-28-managed-agent-turn-queries.md)
+Status: D1 implemented; D2 implemented in [Session query](2026-09-27-managed-agent-session-query.md); D3 implemented in [Event replay](2026-09-27-managed-agent-event-replay.md); the lifecycle work implemented as D4 of [#12867](https://github.com/QwenLM/qwen-code/issues/12867) in [Durable lifecycle](2026-09-28-managed-agent-durable-lifecycle.md); D5 implemented in [Turn queries](2026-09-28-managed-agent-turn-queries.md); D6 designed in [Actions](2026-09-30-managed-agent-actions.md), with its Hosted Harness part (D6a) implemented
 Date: 2026-09-27
 Issue: [#12793](https://github.com/QwenLM/qwen-code/issues/12793), part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 
@@ -90,9 +90,11 @@ so v1.13 records all four as `partial`:
 
 ### 4.4 `agent_revision` before AgentDefinition
 
-`PublicSession.agent_revision` is required, but `/v1/agents` is still
-`planned`. Until AgentDefinition lands, D2 returns a fixed revision taken from
-the server's agent configuration. D1 only records the missing field.
+`PublicSession.agent_revision` is required. D2 returns a fixed revision taken
+from the server's agent configuration, and D1 only records the missing field.
+D8a (v1.29) implements the `/v1/agents` routes as stored, immutable revisions;
+Sessions keep the configured revision until D8b pins a stored one. See
+[AgentDefinition revisions](2026-10-01-managed-agent-definitions.md).
 
 ### 4.5 W0d discovery and empty-session binding
 

@@ -1,4 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
@@ -83,4 +85,73 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
     },
   );
+});
+
+// #12940: the duplicate-version guard is the fast lane for a collision two
+// green PRs can only produce in the merge result, so it runs on every
+// trigger — no job-level condition, no Java, no database. #13245 moved its
+// trusted runs onto the ECS pool (a seconds-long scan sat 26 minutes in the
+// hosted queue); untrusted fork PRs stay hosted.
+describe('SDK Java Flyway migration version guard', () => {
+  it('runs the uniqueness check as an unconditional job', () => {
+    const block = job('flyway-migrations');
+    const parsed = parse(workflow).jobs['flyway-migrations'];
+    expect(parsed.if).toBeUndefined();
+    for (const fragment of [
+      "github.event_name != ''pull_request''",
+      'github.event.pull_request.head.repo.full_name == github.repository',
+      "vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true''",
+      'fromJSON(\'\'["self-hosted", "linux", "x64", "ecs-qwen"]\'\')',
+      "fromJSON(''[\"ubuntu-latest\"]'')",
+    ]) {
+      expect(block).toContain(fragment);
+    }
+    // The merge result is the point: keep the default merge-ref checkout on
+    // the pool too, never the refs/pull/N/head the build lanes use.
+    expect(block).toContain('actions/checkout@');
+    expect(block).not.toContain('refs/pull/');
+    const steps = parsed.steps.map((s) => s.name);
+    expect(steps.indexOf('Restore workspace ownership')).toBeLessThan(
+      steps.indexOf('Checkout'),
+    );
+    expect(block).toContain(
+      "run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'",
+    );
+  });
+
+  it('scans every sdk-java module that owns a db/migration directory', () => {
+    // The guard's premise is the shared classpath:db/migration namespace —
+    // managed-agent-server depends on runtime-broker, so one invocation must
+    // name every module that owns a migration sequence. Derive the
+    // expectation from the tree: a module that grows a db/migration without
+    // joining the invocation turns this red.
+    const owners = new Set();
+    for (const entry of readdirSync('packages/sdk-java', {
+      withFileTypes: true,
+    })) {
+      if (!entry.isDirectory()) continue;
+      for (const location of [
+        'src/main/resources/db/migration',
+        'src/main/java/db/migration',
+      ]) {
+        if (existsSync(join('packages/sdk-java', entry.name, location))) {
+          owners.add(`packages/sdk-java/${entry.name}`);
+        }
+      }
+    }
+    expect(owners.size).toBeGreaterThan(0);
+    const block = job('flyway-migrations');
+    for (const owner of owners) {
+      expect(block).toContain(owner);
+    }
+  });
+
+  it('triggers the workflow when the guard script itself changes', () => {
+    const yml = parse(workflow);
+    for (const event of ['pull_request', 'push']) {
+      expect(yml.on[event].paths).toContain(
+        'scripts/check-flyway-migrations.js',
+      );
+    }
+  });
 });

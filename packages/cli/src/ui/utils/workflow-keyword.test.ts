@@ -57,6 +57,7 @@ function stubConfig(options: StubOptions = {}): Config {
   return {
     isWorkflowNameOnly: () => nameOnlyNow,
     getToolMode: () => toolMode,
+    getCodeModeOnly: () => toolMode === ToolMode.CodeModeOnly,
     getSkillManager: () => ({}),
     getDisabledSkillLevels: () => new Set(),
     isSkillEnabled: () => skillEnabledNow,

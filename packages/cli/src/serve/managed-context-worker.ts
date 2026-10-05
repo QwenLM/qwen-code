@@ -30,6 +30,7 @@ import {
   ManagedToolExecutor,
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
+import { RemoteShellResultPublisher } from './remote-shell-result-publication.js';
 import type { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
@@ -44,6 +45,22 @@ import {
   WORKSPACE_CAPABILITY_DIGEST,
   WORKSPACE_CONTEXT_CONFIG_REF,
 } from './managed-workspace-activation.js';
+import {
+  ManagedHookRuntime,
+  loadManagedHookManifest,
+} from './managed-hook-runtime.js';
+import {
+  MANAGED_HOOK_WORKER_ROUTE,
+  registerManagedHookRoutes,
+} from './managed-hook-routes.js';
+import {
+  ManagedMcpRuntime,
+  loadManagedMcpManifest,
+} from './managed-mcp-runtime.js';
+import {
+  MANAGED_MCP_WORKER_ROUTE,
+  registerManagedMcpRoutes,
+} from './managed-mcp-routes.js';
 
 /**
  * The routes of a worker booted with v2. Attestation v2 is not among them,
@@ -52,6 +69,8 @@ import {
 export const MANAGED_CONTEXT_WORKER_ROUTES = Object.freeze([
   ...MANAGED_CONTEXT_ROUTES,
   WORKSPACE_ACTIVATION_ROUTE,
+  MANAGED_MCP_WORKER_ROUTE,
+  MANAGED_HOOK_WORKER_ROUTE,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   ...OWNED_MANAGED_RUNTIME_ROUTES.filter((route) => route.key !== 'attest'),
 ]);
@@ -78,6 +97,10 @@ export class ManagedContextMount {
 
   constructor(mountRoot: string) {
     this.#mountRoot = mountRoot;
+  }
+
+  get isAvailable(): boolean {
+    return true;
   }
 
   /**
@@ -136,13 +159,46 @@ export function registerManagedContextRoutes(
   bootDocument: ManagedContextBoot,
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
+  mount = new ManagedContextMount(bootDocument.mountRoot),
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
   const installations = new ManagedContextInstallations(boot);
-  const mount = new ManagedContextMount(boot.mountRoot);
   const activations = new WorkspaceActivations();
   const requiresActivation =
     boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST;
+  const admissionOpen = (): boolean => executor.isAdmissionOpen;
+  const remotePublisher =
+    !capturePublisher && requiresActivation
+      ? new RemoteShellResultPublisher()
+      : undefined;
+  const publisher: ManagedShellCapturePublisher | undefined =
+    capturePublisher ??
+    (remotePublishers && remotePublisher
+      ? {
+          get hasInstalledPublication() {
+            return (
+              remotePublishers.hasInstalledPublication ||
+              remotePublisher.hasInstalledPublication
+            );
+          },
+          async prepare(request) {
+            const local = remotePublishers.hasSession(
+              request.reference.sessionId,
+            );
+            const remote = remotePublisher.hasExecution(
+              request.capture.executionCallId,
+            );
+            if (local && remote)
+              throw new Error('Shell publication modes conflict.');
+            const selected = local ? remotePublishers : remotePublisher;
+            return {
+              ...(await selected.prepare(request)),
+              publisher: selected,
+            };
+          },
+        }
+      : (remotePublishers ?? remotePublisher));
+  remotePublisher?.registerInstallRoute(app, boot, admissionOpen);
   const [attestRoute, contextRoute] = MANAGED_CONTEXT_ROUTES;
 
   app.post(
@@ -167,41 +223,91 @@ export function registerManagedContextRoutes(
           req.body,
           async (binding) =>
             (await mount.resolve(binding.cwdRelative)) !== undefined,
+          admissionOpen,
         ),
       );
     },
     handleManagedRuntimeJsonError,
   );
 
-  const executor = new ManagedToolExecutor(async (reference) => {
-    const isActive = () =>
-      !requiresActivation || activations.isActive(reference.sessionId);
-    if (!isActive()) {
-      return undefined;
-    }
-    const binding = installations.installed(reference.sessionId);
-    const directory = binding && (await mount.resolve(binding.cwdRelative));
-    if (directory === undefined) {
-      return undefined;
-    }
-    // Built for each call, so the tools see the directory just verified. Built
-    // in the Session's context, so core does not hold the configuration as
-    // the process's debug log session.
-    const sessionId = runtimeSessionKey(
-      boot.runtimeInstanceId,
-      reference.sessionId,
-    );
-    return {
-      ...sessionIdContext.run(sessionId, () =>
-        createManagedToolSet(
-          directory,
-          sessionId,
-          requiresActivation ? boot.mountRoot : directory,
+  const mcp = new ManagedMcpRuntime(
+    boot,
+    async (runtimeSessionId) => {
+      if (
+        !admissionOpen() ||
+        !mount.isAvailable ||
+        !requiresActivation ||
+        !activations.isActive(runtimeSessionId)
+      )
+        return undefined;
+      const binding = installations.installed(runtimeSessionId);
+      const directory = binding && (await mount.resolve(binding.cwdRelative));
+      return admissionOpen() &&
+        mount.isAvailable &&
+        activations.isActive(runtimeSessionId)
+        ? directory
+        : undefined;
+    },
+    loadManagedMcpManifest(process.env['QWEN_MANAGED_MCP_CONFIG']),
+  );
+  registerManagedMcpRoutes(app, boot, mcp);
+  const hooks = new ManagedHookRuntime(
+    boot,
+    async (runtimeSessionId) => {
+      if (
+        !admissionOpen() ||
+        !mount.isAvailable ||
+        !requiresActivation ||
+        !activations.isActive(runtimeSessionId)
+      )
+        return undefined;
+      const binding = installations.installed(runtimeSessionId);
+      const directory = binding && (await mount.resolve(binding.cwdRelative));
+      return admissionOpen() &&
+        mount.isAvailable &&
+        activations.isActive(runtimeSessionId)
+        ? directory
+        : undefined;
+    },
+    loadManagedHookManifest(process.env['QWEN_MANAGED_HOOK_CONFIG']),
+  );
+  registerManagedHookRoutes(app, boot, hooks);
+  const executor: ManagedToolExecutor = new ManagedToolExecutor(
+    async (reference) => {
+      const isActive = () =>
+        admissionOpen() &&
+        mount.isAvailable &&
+        (!requiresActivation || activations.isActive(reference.sessionId));
+      if (!isActive()) {
+        return undefined;
+      }
+      const binding = installations.installed(reference.sessionId);
+      const directory = binding && (await mount.resolve(binding.cwdRelative));
+      if (directory === undefined) {
+        return undefined;
+      }
+      // Built for each call, so the tools see the directory just verified. Built
+      // in the Session's context, so core does not hold the configuration as
+      // the process's debug log session.
+      const sessionId = runtimeSessionKey(
+        boot.runtimeInstanceId,
+        reference.sessionId,
+      );
+      return {
+        ...sessionIdContext.run(sessionId, () =>
+          createManagedToolSet(
+            directory,
+            sessionId,
+            requiresActivation ? boot.mountRoot : directory,
+          ),
         ),
-      ),
-      isActive,
-    };
-  }, capturePublisher ?? remotePublishers);
+        isActive,
+      };
+    },
+    publisher,
+    mcp,
+    hooks,
+  );
   registerManagedRuntimeProviderRoute(
     app,
     boot,
@@ -219,7 +325,10 @@ export function registerManagedContextRoutes(
           'managed_runtime_provider_unsupported',
         );
       }
-      const isActive = () => activations.isActive(sessionId);
+      const isActive = () =>
+        !executor.isAdmissionSealed &&
+        mount.isAvailable &&
+        activations.isActive(sessionId);
       if (!isActive()) return undefined;
       const directory = binding && (await mount.resolve(binding.cwdRelative));
       return directory === undefined
@@ -234,13 +343,15 @@ export function registerManagedContextRoutes(
   );
   activations.register(app, boot, installations, executor);
   registerManagedRuntimeToolRoutes(app, boot, executor);
-  if (capturePublisher || remotePublishers) {
+  if (publisher) {
     registerManagedRuntimeToolV3Routes(app, boot, executor);
   }
   remotePublishers?.register(
     app,
     boot,
     (sessionId) =>
+      admissionOpen() &&
+      mount.isAvailable &&
       requiresActivation &&
       activations.isActive(sessionId) &&
       installations.installed(sessionId) !== undefined,

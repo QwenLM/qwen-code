@@ -17,7 +17,8 @@ public final class StoreModels {
             String status, String harnessBootId, String harnessEventEpoch,
             long harnessLastEventId, long lastSequence,
             long replayFloorSequence, long createdAt, long updatedAt,
-            Long deletedAt, long version, ContextBinding workspace) {
+            Long deletedAt, long version, ContextBinding workspace,
+            String approvalMode, String toolProfile) {
         public SessionRecord(String tenantId, String sessionId,
                 String agentId, String title, String status,
                 String harnessBootId, String harnessEventEpoch,
@@ -26,7 +27,7 @@ public final class StoreModels {
             this(tenantId, sessionId, agentId, null, title, status,
                     harnessBootId, harnessEventEpoch, harnessLastEventId,
                     lastSequence, 0, createdAt, updatedAt, deletedAt, version,
-                    null);
+                    null, "yolo", null);
         }
     }
 
@@ -81,10 +82,14 @@ public final class StoreModels {
             boolean replayed) {
     }
 
+    public record SessionMutation(SessionRecord session, boolean replayed) {
+    }
+
     public enum OperationKind {
         CLOSE,
         ARCHIVE,
-        DELETE
+        DELETE,
+        ACTION_RESPONSE
     }
 
     /**
@@ -96,7 +101,13 @@ public final class StoreModels {
             String operationId, OperationKind kind, String requestDigest,
             String state, String admissionStage, String deliveryState,
             String sessionStatusBefore, String receiptId, String leaseOwner,
-            long claimGeneration, int attemptCount) {
+            long claimGeneration, int attemptCount, String failureCode) {
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState,
+                String sessionStatusBefore, String receiptId, String leaseOwner, long claimGeneration, int attemptCount) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null);
+        }
     }
 
     public record OperationAdmission(OperationRecord operation,

@@ -29,7 +29,8 @@ import java.util.concurrent.TimeUnit;
  * <p>Attestation plus the tool operations execute, status, and cancel, keyed
  * by the original call reference. Status and cancel answers are projected to
  * the Broker's closed state and result. Prepared provider invocations use
- * their separate Session control protocol.
+ * their separate Session control protocol. MCP controls have their own
+ * bounded envelope.
  */
 public final class HttpRuntimeTransport implements RuntimeTransport {
     static final int BODY_LIMIT_BYTES = 16 * 1024;
@@ -43,7 +44,8 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     static final String V3_STATUS_PATH = "/internal/managed-runtime/v3/status";
     static final String V3_CANCEL_PATH = "/internal/managed-runtime/v3/cancel";
     static final String V3_ACKNOWLEDGE_PATH = "/internal/managed-runtime/v3/acknowledge";
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
+    static final String PUBLICATION_INSTALL_PATH = "/internal/managed-runtime/v3/publications:install";
+    public static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
     private static final Set<String> RESPONSE_FIELDS = Set.of(
             "protocolVersion", "runtimeInstanceId", "runtimeIncarnation",
             "leaseId", "epoch", "provisionRequestId", "tenantId",
@@ -57,7 +59,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             "not_started", "success", "error", "cancelled");
     private static final Set<String> CALLER_REFERENCE_FIELDS = Set.of(
             "sessionId", "promptId", "callId", "argsDigest", "toolName",
-            "input");
+            "input", "payloadDigest", "publicationId");
     private static final Set<String> RESULT_FIELDS = Set.of(
             "executionStatus", "responseParts", "error");
     private static final Set<String> ERROR_FIELDS = Set.of("message", "type");
@@ -103,6 +105,56 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         this.requestTimeout = requestTimeout;
     }
 
+    @Override
+    public CompletionStage<Map<String, Object>> attestCsi(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            Map<String, Object> storage, Map<String, Object> pod) {
+        if (lease == null || seed == null || !seed.matches(lease)
+                || client.followRedirects() != HttpClient.Redirect.NEVER) {
+            throw new IllegalArgumentException("CSI seed must bind the lease.");
+        }
+        var boot = ManagedCsiProtocol.boot(request, seed, storage);
+        var expectedPod = BrokerValues.immutableMap(pod);
+        ManagedCsiProtocol.validatePodIdentity(expectedPod, (String) storage.get("namespace"));
+        return post(lease, ManagedCsiProtocol.ATTEST_PATH,
+                encodeToolRequest(ManagedCsiProtocol.attestationRequest(boot), BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+                .thenApply(bytes -> {
+                    try {
+                        return ManagedCsiProtocol.verifyAttestation(ManagedContextProtocol.parse(bytes), boot, expectedPod);
+                    } catch (RuntimeException failure) {
+                        throw new RuntimeBrokerException(409, "workspace_csi_identity_conflict",
+                                "Workspace CSI attestation conflicts.", false);
+                    }
+                });
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
+            Map<String, Object> expectedCaptureIdentity) {
+        if (client.followRedirects() != HttpClient.Redirect.NEVER) {
+            throw new IllegalArgumentException("CSI acknowledgement requires redirects disabled.");
+        }
+        var originalBoot = BrokerValues.immutableMap(boot);
+        var pod = BrokerValues.immutableMap(expectedPod);
+        var body = BrokerValues.immutableMap(request);
+        var capture = BrokerValues.immutableMap(expectedCaptureIdentity);
+        ManagedCsiProtocol.validateAcknowledgementRequest(body, originalBoot, pod);
+        ManagedCsiProtocol.validateAcknowledgementIdentity(lease, session, originalBoot, body, capture);
+        byte[] encoded = encodeToolRequest(body, BODY_LIMIT_BYTES);
+        ManagedCsiProtocol.parseAcknowledgement(encoded);
+        return post(lease, ManagedCsiProtocol.ACKNOWLEDGE_PATH, encoded, BODY_LIMIT_BYTES).thenApply(bytes -> {
+            try {
+                return ManagedCsiProtocol.verifyAcknowledgement(ManagedCsiProtocol.parseAcknowledgement(bytes),
+                        body, originalBoot, pod, capture);
+            } catch (RuntimeException failure) {
+                throw new RuntimeBrokerException(409, "workspace_csi_identity_conflict",
+                        "Workspace CSI acknowledgement conflicts.", false);
+            }
+        });
+    }
+
+    @Override
     public CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         if (lease == null || request == null || seed == null) {
@@ -404,6 +456,46 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 .thenApply(bytes -> parseV3Response(bytes, "execute"));
     }
 
+    @Override
+    public CompletionStage<Void> installPublication(RuntimeLease lease,
+            RuntimeSession session, RuntimePublicationGrant grant) {
+        requireV3Context(lease, session);
+        Map<String, Object> body = Map.of("protocolVersion", 3,
+                "publication", "managed-tool-publication/1",
+                "publicationId", grant.publicationId(),
+                "publicationToken", grant.token(),
+                "serviceBaseUrl", grant.serviceBaseUrl(),
+                "binding", grant.binding());
+        return post(lease, PUBLICATION_INSTALL_PATH,
+                encodeToolRequest(body, 64 * 1024), BODY_LIMIT_BYTES)
+                .thenApply(bytes -> {
+                    Map<String, Object> response = JsonCodec.parseObject(bytes,
+                            "publication installation response");
+                    if (!Integer.valueOf(3).equals(response.get("protocolVersion"))
+                            || !"managed-tool-publication/1".equals(response.get("publication"))
+                            || !Boolean.TRUE.equals(response.get("installed"))) {
+                        throw protocol("Publication installation was not confirmed.");
+                    }
+                    return null;
+                });
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> payload, Map<String, Object> capture) {
+        requireV3Context(lease, session);
+        requireClosed(capture, V3_CAPTURE_REQUEST_FIELDS, "capture");
+        Map<String, Object> body = v3Body(reference);
+        body.put("toolName", payload.get("toolName"));
+        body.put("input", payload.get("input"));
+        body.put("capture", capture);
+        return post(lease, V3_EXECUTE_PATH,
+                encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES),
+                TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(bytes -> parseV3Response(bytes, "execute"));
+    }
+
     /** Read-only Tool v3 lookup by the original invocation reference. */
     public CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
@@ -608,8 +700,36 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             throw new IllegalArgumentException("lease and session are required");
         }
         Map<String, Object> immutable = BrokerValues.immutableMap(operation);
+        if (ManagedMcpProtocol.isOperation(immutable)) {
+            ManagedMcpProtocol.validateSession(session, immutable);
+            Map<String, Object> body = Map.of("protocolVersion", 1,
+                    "runtimeSessionId", session.getRuntimeSessionId(), "operation", immutable);
+            byte[] encoded;
+            try {
+                encoded = encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES);
+            } catch (IllegalArgumentException tooLarge) {
+                throw new RuntimeBrokerException(413, "runtime_control_operation_too_large",
+                        "Runtime MCP operation exceeds its size limit.", false);
+            }
+            return post(lease, ManagedMcpProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
+                    .thenApply(bytes -> ManagedMcpProtocol.response(bytes, session, immutable));
+        }
+        if (ManagedHookProtocol.isOperation(immutable)) {
+            ManagedHookProtocol.validateSession(session, immutable);
+            Map<String, Object> body = Map.of("protocolVersion", 1,
+                    "runtimeSessionId", session.getRuntimeSessionId(), "operation", immutable);
+            byte[] encoded;
+            try {
+                encoded = encodeToolRequest(body, 8 * 1024 * 1024);
+            } catch (IllegalArgumentException tooLarge) {
+                throw new RuntimeBrokerException(413, "runtime_control_operation_too_large",
+                        "Runtime Hook operation exceeds its size limit.", false);
+            }
+            return post(lease, ManagedHookProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
+                    .thenApply(bytes -> ManagedHookProtocol.response(bytes, session, immutable));
+        }
         ProviderRuntimeProtocol.control(immutable, session.getHarnessSessionId(), session.getRuntimeSessionId());
-        if ("history".equals(immutable.get("kind"))) {
+        if ("history".equals(immutable.get("kind")) || "raw-file-history".equals(immutable.get("kind"))) {
             return provider(lease, session, immutable);
         }
         return provider(lease, session, Map.of("kind", "acquire"))
@@ -1017,6 +1137,11 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static RuntimeBrokerException contextFailure(
             HttpResponse<BoundedBody> response, BoundedBody body, String path) {
+        if (response.statusCode() == 501
+                && (V3_EXECUTE_PATH.equals(path) || V3_STATUS_PATH.equals(path))) {
+            return error(501, "runtime_tool_v3_unsupported",
+                    "Managed Runtime does not support Tool v3.", false);
+        }
         if (response.statusCode() == 409 && !body.overflow()
                 && !path.endsWith("/attest")
                 && "no-store".equals(response.headers()

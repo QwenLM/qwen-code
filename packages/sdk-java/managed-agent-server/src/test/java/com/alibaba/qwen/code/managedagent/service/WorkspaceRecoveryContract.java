@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceOperatorRecoveryStore;
 import com.alibaba.qwen.code.runtimebroker.*;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -23,6 +24,163 @@ import org.springframework.jdbc.core.JdbcTemplate;
 /** Same physical-holder assertions run on Spring/H2 and the MySQL integration channel. */
 public final class WorkspaceRecoveryContract {
     private WorkspaceRecoveryContract() { }
+
+    public static void verifyOperatorPrepare(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store,
+            WorkspaceExecutionStore authority) throws Exception {
+        var fixture = new Fixture(source, jdbc, store);
+        var original = fixture.runtime("operator");
+        authority.claim(fixture.session.workspace(), original.session());
+        String callId = UUID.randomUUID().toString();
+        var prepared = fixture.executions.findOrCreate(ToolExecutionRecord.prepared(callId,
+                UUID.randomUUID().toString(), original.binding().getBindingId(),
+                original.binding().getGeneration(), fixture.session.sessionId(),
+                original.session().getRuntimeSessionId(), "turn", "call", "digest",
+                Map.of("sessionId", original.session().getRuntimeSessionId(), "promptId", "turn",
+                        "callId", "call", "argsDigest", "digest", "runtimeProtocol", 3,
+                        "inputDigest", "digest", "dispatchMode", "deferred")));
+        var dispatched = fixture.executions.claimDispatch(prepared.getExecutionCallId(),
+                "dispatcher", Duration.ofMinutes(1));
+        assertThat(dispatched).isNotNull();
+        assertThat(fixture.executions.compareAndSet(dispatched,
+                dispatched.withResult(Map.of("executionStatus", "success", "responseParts", List.of(),
+                        "capture", Map.of("captureStatus", "partial", "captureReason", "producer_lost")),
+                        1, Instant.now()), "dispatcher", dispatched.getDispatchGeneration())).isNotNull();
+        var recovery = new WorkspaceOperatorRecoveryStore(jdbc,
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source),
+                fixture.bindings, new com.fasterxml.jackson.databind.ObjectMapper());
+        var inspection = recovery.inspect(original.binding().getBindingId(), original.binding().getGeneration());
+        assertThat(inspection.captureReason()).isEqualTo("producer_lost");
+        assertThat(inspection.eligibleForPrepare()).isTrue();
+        Instant beforePrepare = Instant.now();
+        String recoveryId;
+        try (var pool = Executors.newSingleThreadExecutor(); var connection = source.getConnection()) {
+            connection.setAutoCommit(false);
+            try (var lock = connection.prepareStatement("SELECT tenant_id FROM qwen_runtime_placement_guard"
+                    + " WHERE tenant_id = ? FOR UPDATE")) {
+                lock.setString(1, fixture.tenant);
+                try (var rows = lock.executeQuery()) { assertThat(rows.next()).isTrue(); }
+            }
+            var started = new CountDownLatch(1);
+            var pending = pool.submit(() -> {
+                started.countDown();
+                return recovery.prepare(original.binding().getBindingId(),
+                        original.binding().getGeneration(), inspection.holderKey(), "operator", "incident");
+            });
+            try {
+                assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+                assertThatThrownBy(() -> pending.get(100, TimeUnit.MILLISECONDS))
+                        .isInstanceOf(java.util.concurrent.TimeoutException.class);
+            } finally {
+                connection.commit();
+            }
+            recoveryId = pending.get(5, TimeUnit.SECONDS);
+        }
+        assertThat(recovery.operation(recoveryId).preparedAt())
+                .isBetween(beforePrepare.minusSeconds(1), Instant.now());
+        assertThat(recovery.prepare(original.binding().getBindingId(),
+                original.binding().getGeneration(), inspection.holderKey(), "operator", "incident"))
+                .isEqualTo(recoveryId);
+        var fenced = fixture.bindings.findById(original.binding().getBindingId());
+        assertThat(fenced.getState()).isEqualTo(RuntimeBindingRecord.State.OPERATOR_RECOVERY);
+        var claimed = fixture.bindings.claimOperation(fenced.getBindingId(),
+                "fence-test", Duration.ofSeconds(10));
+        assertThat(claimed).isNotNull();
+        assertThatThrownBy(() -> fixture.bindings.compareAndSet(claimed,
+                claimed.withState(RuntimeBindingRecord.State.READY, claimed.getLease(), Instant.now())))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> fixture.bindings.compareAndSet(claimed,
+                claimed.withRecoveryEvidence(
+                        evidence(claimed, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST),
+                        null, Instant.now())))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("stopped-writer");
+        fixture.bindings.releaseOperation(claimed.getBindingId(), "fence-test",
+                claimed.getOperationGeneration());
+        var scope = original.binding().getRequest().getScope();
+        var renamedWorkspace = new RuntimeScope(scope.getTenantId(), "renamed-workspace",
+                scope.getWorkspaceGeneration(), scope.getCanonicalCwd(),
+                scope.getCapabilityDigest(), scope.getIsolationClass());
+        assertThatThrownBy(() -> fixture.bindings.findOrCreate(new RuntimeProvisionRequest(
+                renamedWorkspace, "other-session", "local-process", "other-storage")))
+                .isInstanceOf(RuntimeBrokerException.class);
+        var renamedDirectory = new RuntimeScope(scope.getTenantId(), "renamed-workspace",
+                scope.getWorkspaceGeneration(), "/other-directory",
+                scope.getCapabilityDigest(), scope.getIsolationClass());
+        assertThatThrownBy(() -> fixture.bindings.findOrCreate(new RuntimeProvisionRequest(
+                renamedDirectory, "other-session", "local-process",
+                original.binding().getRequest().getStorageId())))
+                .isInstanceOf(RuntimeBrokerException.class);
+        assertThat(fixture.bindings.findRecoveryCandidates("local-process", null, 100))
+                .noneMatch(candidate -> candidate.getBindingId().equals(fenced.getBindingId()));
+        assertThatThrownBy(() -> authority.release(fixture.session.workspace(), original.session()))
+                .isInstanceOf(RuntimeBrokerException.class);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_operator_recovery"
+                + " WHERE binding_id = ?", Long.class, original.binding().getBindingId())).isEqualTo(1);
+        var lostClaim = fixture.bindings.claimOperation(fenced.getBindingId(),
+                "loss-test", Duration.ofSeconds(10));
+        var lost = fixture.bindings.compareAndSet(lostClaim,
+                lostClaim.withRecoveryEvidence(
+                        evidence(lostClaim, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST),
+                        evidence(lostClaim, RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED),
+                        Instant.now()));
+        fixture.bindings.releaseOperation(lost.getBindingId(), "loss-test",
+                lost.getOperationGeneration());
+        assertThat(fixture.bindings.findRecoveryCandidates("local-process", null, 100))
+                .noneMatch(candidate -> candidate.getBindingId().equals(lost.getBindingId()));
+        jdbc.update("DELETE FROM managed_workspace_operator_recovery WHERE recovery_id = ?", recoveryId);
+        assertThat(fixture.bindings.findRecoveryCandidates("local-process", null, 100))
+                .anyMatch(candidate -> candidate.getBindingId().equals(lost.getBindingId()));
+
+        var blockedFixture = new Fixture(source, jdbc, store);
+        var blocked = blockedFixture.runtime("blocked").binding();
+        assertThat(blockedFixture.bindings.compareAndSet(blocked,
+                blocked.withState(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                        blocked.getLease(), Instant.now()))).isNotNull();
+        var blockedScope = blocked.getRequest().getScope();
+        var otherWorkspace = new RuntimeScope(blockedScope.getTenantId(), "renamed-workspace",
+                blockedScope.getWorkspaceGeneration(), "/other-directory",
+                blockedScope.getCapabilityDigest(), blockedScope.getIsolationClass());
+        assertThatThrownBy(() -> blockedFixture.bindings.findOrCreate(new RuntimeProvisionRequest(
+                otherWorkspace, "other-session", "local-process",
+                blocked.getRequest().getStorageId())))
+                .isInstanceOf(RuntimeBrokerException.class);
+
+        for (var state : List.of(RuntimeBindingRecord.State.DRAINING,
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED)) {
+            var stateFixture = new Fixture(source, jdbc, store);
+            var stateRuntime = stateFixture.runtime(state.name());
+            authority.claim(stateFixture.session.workspace(), stateRuntime.session());
+            var stateExecution = stateFixture.executions.findOrCreate(ToolExecutionRecord.prepared(
+                    UUID.randomUUID().toString(), UUID.randomUUID().toString(),
+                    stateRuntime.binding().getBindingId(), stateRuntime.binding().getGeneration(),
+                    stateFixture.session.sessionId(), stateRuntime.session().getRuntimeSessionId(),
+                    "turn", "call", "digest", Map.of(
+                            "sessionId", stateRuntime.session().getRuntimeSessionId(),
+                            "promptId", "turn", "callId", "call", "argsDigest", "digest",
+                            "toolName", "run_shell_command")));
+            var dispatch = stateFixture.executions.claimDispatch(stateExecution.getExecutionCallId(),
+                    "dispatcher", Duration.ofMinutes(1));
+            assertThat(stateFixture.executions.compareAndSet(dispatch,
+                    dispatch.withResult(Map.of("executionStatus", "success", "responseParts", List.of(),
+                            "capture", Map.of("captureStatus", "partial",
+                                    "captureReason", "producer_lost")), 1, Instant.now()),
+                    "dispatcher", dispatch.getDispatchGeneration())).isNotNull();
+            assertThat(stateFixture.bindings.compareAndSet(stateRuntime.binding(),
+                    stateRuntime.binding().withState(state, stateRuntime.binding().getLease(),
+                            Instant.now()))).isNotNull();
+            var stateRecovery = new WorkspaceOperatorRecoveryStore(jdbc,
+                    new org.springframework.jdbc.datasource.DataSourceTransactionManager(source),
+                    stateFixture.bindings, new com.fasterxml.jackson.databind.ObjectMapper());
+            var stateInspection = stateRecovery.inspect(stateRuntime.binding().getBindingId(),
+                    stateRuntime.binding().getGeneration());
+            assertThat(stateInspection.eligibleForPrepare()).isTrue();
+            stateRecovery.prepare(stateRuntime.binding().getBindingId(),
+                    stateRuntime.binding().getGeneration(), stateInspection.holderKey(),
+                    "operator", "incident");
+            assertThat(stateFixture.bindings.findById(stateRuntime.binding().getBindingId()).getState())
+                    .isEqualTo(RuntimeBindingRecord.State.OPERATOR_RECOVERY);
+        }
+    }
 
     public static void verify(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store,
             WorkspaceExecutionStore authority) throws Exception {

@@ -1,4 +1,6 @@
 .panel {
+  container-type: inline-size;
+  container-name: trajectory;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -96,6 +98,7 @@
 
 .context {
   height: 42px;
+  line-height: 13px;
   flex: none;
   box-sizing: border-box;
   display: flex;
@@ -109,6 +112,8 @@
 }
 
 .contextNotice {
+  height: 13px;
+  flex: none;
   color: var(--muted-foreground);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -116,6 +121,8 @@
 }
 
 .selectedLine {
+  height: 20px;
+  flex: none;
   display: flex;
   min-width: 0;
   align-items: center;
@@ -155,7 +162,7 @@
   white-space: nowrap;
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 2px 6px;
+  padding: 1px 6px;
   background: var(--background);
   color: var(--muted-foreground);
   font-family: var(--font-mono, ui-monospace, monospace);
@@ -169,7 +176,8 @@
   gap: 3px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 4px 7px;
+  padding: 2px 7px;
+  line-height: 14px;
   background: var(--background);
   color: var(--foreground);
   font-size: 10px;
@@ -408,7 +416,7 @@
 
 .text {
   flex: 1;
-  min-width: 96px;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -441,4 +449,89 @@
 
 .toneMuted {
   opacity: 0.6;
+}
+
+.foldButton,
+.foldSpacer {
+  width: 18px;
+  flex: 0 0 18px;
+}
+.foldButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.foldButton:hover {
+  background: var(--background);
+  color: var(--foreground);
+}
+.turnPrompt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+}
+.foldCount,
+.parentNotice {
+  flex: none;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+.record[data-grouped='true'] {
+  padding-left: 18px;
+}
+.rowMetrics {
+  max-width: 35%;
+}
+.waterfallSlot {
+  display: none;
+}
+@container trajectory (min-width: 760px) {
+  .waterfallSlot {
+    display: flex;
+    flex: 0 0 36%;
+    height: 34px;
+  }
+  .rowMetrics {
+    flex: 0 0 110px;
+  }
+  .record[data-grouped='true'],
+  .record[data-depth='1'] {
+    padding-left: 6px;
+  }
+  .record[data-grouped='true'] .badge {
+    padding-left: 12px;
+    box-sizing: border-box;
+  }
+  .nestMarker {
+    display: none;
+  }
+}
+@container trajectory (max-width: 479px) {
+  .turnSummary {
+    display: none;
+  }
+  .parentNotice,
+  .foldCount {
+    max-width: 75px;
+  }
+  .record {
+    gap: 4px;
+  }
+  .badge {
+    min-width: 38px;
+    max-width: 65px;
+  }
 }
