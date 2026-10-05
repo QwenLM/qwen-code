@@ -401,6 +401,66 @@ public final class JdbcToolExecutionRepository
     }
 
     @Override
+    public List<ToolExecutionRecord> findBackgroundProcesses(
+            RuntimeSessionRecord session, String afterExecutionCallId, int limit) {
+        if (session == null || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("session and limit in [1, 100] are required");
+        }
+        String after = afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            List<ToolExecutionRecord> matches = new ArrayList<>();
+            String cursor = after;
+            // The dispatch mode lives in the reference payload, so SQL
+            // pages the ownership-and-state window and the filter runs row
+            // by row; the scan stops as soon as a page of matches is full
+            // or the window is exhausted, keeping "short page means done".
+            for (;;) {
+                String sql = "SELECT " + EXECUTION_COLUMNS + " FROM qwen_tool_execution "
+                        + "WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_key = ? "
+                        + "AND harness_session_id = ? AND execution_call_id_hash > ? "
+                        + "AND execution_state NOT IN ('SETTLED', 'ABANDONED') "
+                        + "ORDER BY execution_call_id_hash LIMIT ?";
+                List<ToolExecutionRecord> batch = new ArrayList<>();
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    statement.setString(1, session.getBindingId());
+                    statement.setLong(2, session.getRuntimeGeneration());
+                    statement.setString(3, JdbcRepositorySupport.valueKey(session.getRuntimeSessionId()));
+                    statement.setString(4, session.getSession().getHarnessSessionId());
+                    statement.setString(5, cursor);
+                    statement.setInt(6, limit);
+                    try (ResultSet result = statement.executeQuery()) {
+                        while (result.next()) {
+                            ToolExecutionRecord record = mapExecution(result);
+                            if (!record.belongsTo(session)) {
+                                throw new IllegalStateException("Execution scan ownership differs");
+                            }
+                            batch.add(record);
+                        }
+                    }
+                }
+                if (batch.isEmpty()) {
+                    return List.copyOf(matches);
+                }
+                for (ToolExecutionRecord record : batch) {
+                    if ("background_v3_process".equals(
+                            record.getReference().get("dispatchMode"))) {
+                        matches.add(record);
+                        if (matches.size() == limit) {
+                            return List.copyOf(matches);
+                        }
+                    }
+                }
+                if (batch.size() < limit) {
+                    return List.copyOf(matches);
+                }
+                cursor = JdbcRepositorySupport.valueKey(
+                        batch.get(batch.size() - 1).getExecutionCallId());
+            }
+        });
+    }
+
+    @Override
     public boolean hasActiveByBinding(String bindingId,
             long runtimeGeneration) {
         String id = BrokerValues.requireId(bindingId, "bindingId");

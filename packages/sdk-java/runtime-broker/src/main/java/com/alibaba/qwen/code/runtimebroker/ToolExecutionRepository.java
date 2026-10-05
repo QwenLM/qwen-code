@@ -68,6 +68,17 @@ public interface ToolExecutionRepository {
     List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
             String afterExecutionCallId, int limit);
 
+    /** Non-terminal background-process ledger rows belonging to this exact
+     * Session and binding generation, ordered by execution ID hash — the
+     * same ownership fence as {@link #findUnsettled}, but found by dispatch
+     * mode and non-terminal state instead of a dispatch state, because the
+     * background {@code :process} row stays PREPARED between admission and
+     * the process's physical end. At most 100 rows per page, and a short
+     * page means the scan is exhausted; the exclusive cursor is an
+     * execution ID, including one already settled. */
+    List<ToolExecutionRecord> findBackgroundProcesses(RuntimeSessionRecord session,
+            String afterExecutionCallId, int limit);
+
     boolean hasActiveByRuntimeSession(String runtimeSessionId);
 
     boolean hasActiveByRuntimeSession(String bindingId, long runtimeGeneration,

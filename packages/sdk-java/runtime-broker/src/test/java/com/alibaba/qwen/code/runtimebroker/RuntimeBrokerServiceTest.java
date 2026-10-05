@@ -1583,6 +1583,56 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void releaseSweepsADurableOnlyBackgroundRow() throws Exception {
+        // A Broker restart before the release leaves a `:process` row the
+        // fresh SessionContext never had in memory: the sweep must rebuild
+        // its work list from the repository, not from the in-memory index,
+        // or the row answers busy forever (R3-56).
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            String harness = "harness";
+            String digest = "sha256:" + "a".repeat(64);
+            Map<String, Object> invocationReference = Map.of("sessionId",
+                    "runtime", "promptId", "prompt", "callId", "call-b",
+                    "argsDigest", digest);
+            ToolExecutionRecord invocation = ToolExecutionRecord.prepared(
+                    "call-b", "key-b", session.getBindingId(),
+                    session.getRuntimeGeneration(), harness, "runtime",
+                    "prompt", "call-b", digest, invocationReference);
+            ToolExecutionRecord admitted = fixture.bindingRepository
+                    .admitExecution(fixture.sessionRepository,
+                            fixture.executionRepository, invocation);
+            Map<String, Object> detached = new LinkedHashMap<>();
+            detached.put("state", "exited");
+            detached.put("executionStatus", "success");
+            fixture.executionRepository.settlePrepared(admitted, detached,
+                    java.time.Instant.now());
+            Map<String, Object> processReference = Map.of("dispatchMode",
+                    "background_v3_process", "processOf", "call-b",
+                    "sessionId", "runtime", "promptId", "prompt", "callId",
+                    "call-b", "argsDigest", digest);
+            ToolExecutionRecord process = ToolExecutionRecord.prepared(
+                    "call-b:process", "call-b:process", session.getBindingId(),
+                    session.getRuntimeGeneration(), harness, "runtime",
+                    "prompt", "call-b", digest, processReference);
+            fixture.bindingRepository.admitExecution(fixture.sessionRepository,
+                    fixture.executionRepository, process);
+
+            Map<String, Object> exited = new LinkedHashMap<>();
+            exited.put("operationId", "call-b");
+            exited.put("state", "exited");
+            exited.put("evidence", Map.of("exitCode", 0));
+            fixture.transport.controlResult = CompletableFuture.completedFuture(exited);
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+            ToolExecutionRecord settled = fixture.executionRepository
+                    .findByExecutionCallId("call-b:process");
+            assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
+            assertEquals("exited", settled.getResult().get("state"));
+        }
+    }
+
+    @Test
     void releaseSettlesARunningBackgroundShellOnceTheStopProvesIt() throws Exception {
         String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"tail -f\",\"is_background\":true}}";
         String digest = "sha256:" + HexFormat.of().formatHex(
@@ -5657,6 +5707,14 @@ class RuntimeBrokerServiceTest {
         }
 
         @Override
+        public List<ToolExecutionRecord> findBackgroundProcesses(
+                RuntimeSessionRecord session, String afterExecutionCallId,
+                int limit) {
+            return delegate.findBackgroundProcesses(session,
+                    afterExecutionCallId, limit);
+        }
+
+        @Override
         public boolean hasActiveByBinding(String bindingId,
                 long runtimeGeneration) {
             return delegate.hasActiveByBinding(bindingId,
@@ -5801,6 +5859,14 @@ class RuntimeBrokerServiceTest {
         public List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
                 String afterExecutionCallId, int limit) {
             return delegate.findUnsettled(session, afterExecutionCallId, limit);
+        }
+
+        @Override
+        public List<ToolExecutionRecord> findBackgroundProcesses(
+                RuntimeSessionRecord session, String afterExecutionCallId,
+                int limit) {
+            return delegate.findBackgroundProcesses(session,
+                    afterExecutionCallId, limit);
         }
 
         @Override

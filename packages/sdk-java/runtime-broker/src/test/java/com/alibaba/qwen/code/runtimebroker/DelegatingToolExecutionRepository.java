@@ -88,6 +88,14 @@ abstract class DelegatingToolExecutionRepository
     }
 
     @Override
+    public List<ToolExecutionRecord> findBackgroundProcesses(
+            RuntimeSessionRecord session, String afterExecutionCallId,
+            int limit) {
+        return delegate.findBackgroundProcesses(session, afterExecutionCallId,
+                limit);
+    }
+
+    @Override
     public boolean hasActiveByRuntimeSession(String runtimeSessionId) {
         return delegate.hasActiveByRuntimeSession(runtimeSessionId);
     }

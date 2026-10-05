@@ -1664,8 +1664,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
             SessionContext context) {
         CompletionStage<Void> chain = CompletableFuture.completedFuture(null);
         List<String> processIds;
+        List<ToolExecutionRecord> durable = durableBackgroundProcessRows(
+                context);
         context.lock();
         try {
+            for (ToolExecutionRecord row : durable) {
+                context.backgroundProcesses().add(row.getExecutionCallId());
+            }
             processIds = new ArrayList<>(context.backgroundProcesses());
         } finally {
             context.unlock();
@@ -1715,6 +1720,40 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     .exceptionally(failure -> null));
         }
         return chain;
+    }
+
+    /**
+     * The durable ledger knows every background process this Session was
+     * ever admitted for; the in-memory index only knows the ones this
+     * Broker process admitted itself. Without the backfill a fresh context
+     * — every release path after a Broker restart — sweeps nothing, and
+     * the non-terminal `:process` row answers busy forever. The scan stays
+     * inside the repository's Session-and-generation fence, so a stale
+     * cross-generation row never enters the sweep or the busy-check
+     * exclusion set.
+     */
+    private List<ToolExecutionRecord> durableBackgroundProcessRows(
+            SessionContext context) {
+        RuntimeSessionRecord session = sessionRepository.findById(
+                context.session().getScope(),
+                context.session().getRuntimeSessionId());
+        if (session == null) {
+            return List.of();
+        }
+        List<ToolExecutionRecord> rows = new ArrayList<>();
+        String after = null;
+        for (;;) {
+            List<ToolExecutionRecord> batch = executionRepository
+                    .findBackgroundProcesses(session, after, 100);
+            if (batch.isEmpty()) {
+                return rows;
+            }
+            rows.addAll(batch);
+            if (batch.size() < 100) {
+                return rows;
+            }
+            after = batch.get(batch.size() - 1).getExecutionCallId();
+        }
     }
 
     /**

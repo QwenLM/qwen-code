@@ -288,6 +288,31 @@ public final class InMemoryToolExecutionRepository
     }
 
     @Override
+    public synchronized List<ToolExecutionRecord> findBackgroundProcesses(
+            RuntimeSessionRecord session, String afterExecutionCallId, int limit) {
+        if (session == null || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("session and limit in [1, 100] are required");
+        }
+        String after = afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        TreeMap<String, ToolExecutionRecord> batch = new TreeMap<>();
+        for (ToolExecutionRecord record : recordsById.values()) {
+            if (record.belongsTo(session) && !record.isTerminal()
+                    && "background_v3_process".equals(
+                            record.getReference().get("dispatchMode"))) {
+                String key = JdbcRepositorySupport.valueKey(record.getExecutionCallId());
+                if (key.compareTo(after) > 0) {
+                    batch.put(key, record);
+                    if (batch.size() > limit) {
+                        batch.pollLastEntry();
+                    }
+                }
+            }
+        }
+        return List.copyOf(batch.values());
+    }
+
+    @Override
     public synchronized boolean hasActiveByRuntimeSession(
             String runtimeSessionId) {
         String id = BrokerValues.requireId(runtimeSessionId,
