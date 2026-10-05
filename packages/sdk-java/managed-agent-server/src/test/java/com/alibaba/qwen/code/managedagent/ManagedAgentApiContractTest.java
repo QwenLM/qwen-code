@@ -1066,6 +1066,25 @@ class ManagedAgentApiContractTest {
                 webLongKeyBody);
         assertThat(json(webLong).at("/error/code").asText())
                 .isEqualTo("invalid_request");
+        // A blank (whitespace-only) key diverges the same way: the public
+        // header answers invalid_idempotency_key, the WebShell body field
+        // refuses at bean validation with invalid_request.
+        String publicBlank = exchange(drift, "changeSessionCwd", 400,
+                post("/v1/agents/sessions/{id}/cwd", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, " "), cwdBody);
+        assertThat(json(publicBlank).at("/error/code").asText())
+                .isEqualTo("invalid_idempotency_key");
+        String webBlankKeyBody = "{\"sessionId\":\"" + webBoundId
+                + "\",\"idempotencyKey\":\" \","
+                + " \"cwdRelative\":\"services/api\","
+                + "\"expectedContextRevision\":1}";
+        String webBlank = exchange(drift, "webShellChangeCwd", 400,
+                post(WEB_SHELL + "/sessions/cwd/change")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                webBlankKeyBody);
+        assertThat(json(webBlank).at("/error/code").asText())
+                .isEqualTo("invalid_request");
         exchange(drift, "webShellChangeCwd", 409,
                 post(WEB_SHELL + "/sessions/cwd/change")
                         .header(TENANT, workspaceTenant).principal(actor),

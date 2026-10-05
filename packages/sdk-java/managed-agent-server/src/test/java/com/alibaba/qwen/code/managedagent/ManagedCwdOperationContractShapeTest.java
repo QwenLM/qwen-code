@@ -53,6 +53,16 @@ class ManagedCwdOperationContractShapeTest {
         assertThat(CONTRACT.validate(
                 "/components/schemas/WebShellCwdOperation",
                 MAPPER.valueToTree(webFailed))).isEmpty();
+
+        // ... and against the oneOf unions the GET routes actually serve.
+        assertThat(CONTRACT.validate("/components/schemas/PublicOperation",
+                MAPPER.valueToTree(completed))).isEmpty();
+        assertThat(CONTRACT.validate("/components/schemas/PublicOperation",
+                MAPPER.valueToTree(failed))).isEmpty();
+        assertThat(CONTRACT.validate("/components/schemas/WebShellOperation",
+                MAPPER.valueToTree(webCompleted))).isEmpty();
+        assertThat(CONTRACT.validate("/components/schemas/WebShellOperation",
+                MAPPER.valueToTree(webFailed))).isEmpty();
     }
 
     @Test

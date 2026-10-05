@@ -809,8 +809,19 @@ class ManagedCwdChangeOperationTest {
     @Test
     void aRequestedActionBlocksAdmissionAndSettlement() {
         Fixture fixture = fixture(true);
-        String sessionId = fixture.createBoundSession(TENANT, WS);
+        // First the conjunct alone: a requested Action with no op and no
+        // Turn refuses admission all by itself.
+        String isolated = fixture.createBoundSession(TENANT, WS);
         long future = System.currentTimeMillis() + 86_400_000L;
+        fixture.insertAction(isolated, "approval-iso", future);
+        assertThatThrownBy(() -> begin(fixture, isolated, "key-iso",
+                "digest-iso", "services/b", 1))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.CONFLICT,
+                                "session_context_busy"));
+        fixture.jdbc.update("DELETE FROM managed_agent_action WHERE"
+                + " action_id = 'approval-iso'");
+        String sessionId = fixture.createBoundSession(TENANT, WS);
         begin(fixture, sessionId, "key", "digest", "services/b", 1);
         fixture.insertAction(sessionId, "approval-1", future);
         assertThatThrownBy(() -> begin(fixture, sessionId, "key-2",
@@ -891,6 +902,31 @@ class ManagedCwdChangeOperationTest {
         assertThat(settle(fixture, sessionId, operationId, "owner",
                 claimed.claimGeneration()).failureCode())
                 .isEqualTo("session_context_busy");
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getContextRevision()).isEqualTo(1);
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative()).isEqualTo("services/api");
+    }
+
+    // A Session that stopped being ACTIVE between claim and commit fails
+    // terminally and never moves: the status re-check is the first line of
+    // the commit transaction's fact verification.
+    @Test
+    void settlementRefusesAnInactiveSession() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        String operationId = begin(fixture, sessionId, "key", "digest",
+                "services/b", 1).operation().operationId();
+        OperationRecord claimed = claim(fixture, sessionId, operationId,
+                "owner");
+        fixture.jdbc.update("UPDATE managed_agent_session SET status ="
+                + " 'CLOSED' WHERE tenant_id = ? AND session_id = ?",
+                TENANT, sessionId);
+        assertThat(settle(fixture, sessionId, operationId, "owner",
+                claimed.claimGeneration()).failureCode())
+                .isEqualTo("workspace_unavailable");
+        assertFailed(fixture, sessionId, operationId,
+                "workspace_unavailable");
         assertThat(fixture.store.requireSession(TENANT, sessionId)
                 .workspace().getContextRevision()).isEqualTo(1);
         assertThat(fixture.store.requireSession(TENANT, sessionId)

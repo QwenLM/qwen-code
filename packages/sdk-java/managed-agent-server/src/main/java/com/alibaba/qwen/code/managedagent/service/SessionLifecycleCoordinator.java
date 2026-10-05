@@ -29,8 +29,10 @@ import org.springframework.stereotype.Component;
  * attempt is retried with the dispatch backoff until it succeeds, so one of
  * those operations never completes before these steps. A cwd change is
  * settled without Harness or worker involvement — a read-only mount probe
- * and one revision-CAS commit — and a probe refusal or a moved fact is a
- * terminal failure that is never retried.
+ * and one revision-CAS commit. A structural probe refusal or a moved fact
+ * is a terminal failure that is never retried; a momentary probe failure
+ * retries through the same dispatch backoff (unbounded in count, capped in
+ * delay) instead of certifying a never-happened verification.
  */
 @Component
 public class SessionLifecycleCoordinator {
@@ -186,8 +188,9 @@ public class SessionLifecycleCoordinator {
                     operation.targetCwdRelative());
         } catch (RuntimeBrokerException error) {
             // A transient probe failure is not the verdict the terminal
-            // refusal promises: hand it to the delivery machine's bounded
-            // retry instead of writing a permanent failure.
+            // refusal promises: hand it to the delivery machine's retry
+            // (unbounded in count, capped in delay) instead of writing a
+            // permanent failure.
             if (error.isRetryable()) {
                 LOG.info("Managed Session cwd change probe deferred"
                                 + " tenant={} session={} operation={}"

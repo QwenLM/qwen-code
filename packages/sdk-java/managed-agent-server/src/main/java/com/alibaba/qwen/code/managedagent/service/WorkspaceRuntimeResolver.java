@@ -114,6 +114,10 @@ final class WorkspaceRuntimeResolver {
                             mount.root(), BasicFileAttributes.class).fileKey())) {
                 throw WorkspaceExecutionStore.unavailable();
             }
+        // The mount root itself being gone is a permanent configuration
+        // fact, not a momentary blip — only a genuine I/O hiccup retries.
+        } catch (java.nio.file.NoSuchFileException error) {
+            throw WorkspaceExecutionStore.unavailable();
         } catch (IOException error) {
             throw WorkspaceExecutionStore.unavailableTransient(error);
         }
@@ -131,6 +135,11 @@ final class WorkspaceRuntimeResolver {
                     || !Files.isReadable(directory) || !Files.isExecutable(directory)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
+        // A vanished target (or a segment of it) is the structural verdict
+        // a terminal failure_code exists to name — only opaque I/O blips
+        // retry.
+        } catch (java.nio.file.NoSuchFileException error) {
+            throw WorkspaceExecutionStore.unavailable();
         } catch (IOException error) {
             throw WorkspaceExecutionStore.unavailableTransient(error);
         }

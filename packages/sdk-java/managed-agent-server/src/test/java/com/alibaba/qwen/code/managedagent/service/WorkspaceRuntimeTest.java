@@ -458,6 +458,11 @@ class WorkspaceRuntimeTest {
                     fixture.lease(), fixture.record().getSession()));
             verify(fixture.http(), never()).installContext(any(), any(),
                     any(), any());
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                            + " managed_workspace_execution_lease WHERE"
+                            + " tenant_id = ? AND storage_id = ? AND"
+                            + " holder_key IS NOT NULL", Integer.class,
+                    "tenant", "storage")).isZero();
         } finally {
             java.nio.file.Files.setPosixFilePermissions(sealed,
                     java.nio.file.attribute.PosixFilePermissions
