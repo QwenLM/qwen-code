@@ -52,6 +52,24 @@ if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
     fi
   fi
   docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
+  # Image pruning does not reclaim BuildKit's intermediate install/build
+  # layers. The daily host sweep (ecs-runner/qwen-docker-cleanup) bounds them
+  # at 30 GB, but this lane builds at the end of the pool's day, hours after
+  # that sweep.
+  docker builder prune --all --force --filter 'until=24h' || echo "::warning::docker build cache cleanup failed on ${RUNNER_NAME:-this runner}"
+  # The job-start disk floor gate predates this build: run 37374675168 passed
+  # it and the runner still died on ENOSPC 24 minutes into this step (#13479).
+  # Gate the build's own filesystem — the docker data root — at a build-sized
+  # floor, so a saturated host fails fast with a legible error and a re-run
+  # lands on an instance with headroom instead of the runner worker crashing
+  # mid-build. 8 GiB covers a cold builder stage (monorepo install + bundle
+  # layers) plus the final image with margin.
+  if [ -f .github/scripts/check-disk-floor.sh ]; then
+    docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+    if [ -n "$docker_root" ] && [ -d "$docker_root" ]; then
+      DISK_FLOOR_MIN_FREE_KB="${DISK_FLOOR_MIN_FREE_KB:-8388608}" bash .github/scripts/check-disk-floor.sh "$docker_root"
+    fi
+  fi
   # See e2e.yml: closing the lock descriptors in the child keeps a descendant
   # that outlives this job from holding the lock.
   npm run build:sandbox -- -s --no-prune -i "$sandbox_image" 7>&- 8>&- 9>&-

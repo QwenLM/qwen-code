@@ -2140,6 +2140,163 @@ describe('release workflow', () => {
     );
   });
 
+  it('prunes BuildKit cache and gates the docker data root before the image build', () => {
+    // #13479: run 37374675168 passed the job-start disk floor gate and the
+    // runner still died on ENOSPC 24 minutes into the docker test step. The
+    // lane now also prunes BuildKit cache — image pruning cannot reclaim it —
+    // and re-gates the docker data root at a build-sized floor immediately
+    // before the build, so a saturated host fails fast with a legible error
+    // instead of the runner worker crashing mid-build.
+    const imagePrune = dockerIntegrationScript.indexOf(
+      "docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h'",
+    );
+    const cachePrune = dockerIntegrationScript.indexOf(
+      "docker builder prune --all --force --filter 'until=24h'",
+    );
+    const floorGate = dockerIntegrationScript.indexOf(
+      'bash .github/scripts/check-disk-floor.sh "$docker_root"',
+    );
+    const build = dockerIntegrationScript.indexOf(
+      'npm run build:sandbox -- -s --no-prune -i "$sandbox_image"',
+    );
+    expect(imagePrune).toBeGreaterThanOrEqual(0);
+    expect(cachePrune).toBeGreaterThan(imagePrune);
+    expect(floorGate).toBeGreaterThan(cachePrune);
+    expect(build).toBeGreaterThan(floorGate);
+    expect(dockerIntegrationScript).toContain(
+      'DISK_FLOOR_MIN_FREE_KB:-8388608',
+    );
+  });
+
+  const dockerIntegrationScriptAbsolutePath = join(
+    process.cwd(),
+    '.github/scripts/run-release-docker-integration.sh',
+  );
+
+  // Drives the extracted script against stub docker/npm/npx/git/node
+  // binaries so the reclaim-and-gate contract is pinned by execution, not
+  // just text. The hosted-runner path skips the flock protocol entirely.
+  const runDockerIntegrationScript = ({
+    gateExit = '0',
+    imagePresent = false,
+  } = {}) => {
+    const directory = mkdtempSync(
+      join(tmpdir(), 'release-docker-integration-'),
+    );
+    const bin = join(directory, 'bin');
+    const dockerRoot = join(directory, 'docker-root');
+    const callsLog = join(directory, 'calls.log');
+    mkdirSync(bin);
+    mkdirSync(dockerRoot);
+    mkdirSync(join(directory, '.github', 'scripts'), { recursive: true });
+    writeFileSync(callsLog, '');
+    const stub = (name, body) =>
+      writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    stub('git', 'echo 0123456789abcdef0123456789abcdef01234567');
+    stub('node', 'echo ghcr.io/qwenlm/qwen-code:0.0.0-test');
+    stub(
+      'docker',
+      `printf 'docker %s\\n' "$*" >> "$CALLS_LOG"
+if [ "$1" = 'image' ] && [ "$2" = 'inspect' ]; then
+  if [ "$3" = '--format' ]; then
+    echo sha256:fakeimageid
+    exit 0
+  fi
+  if [ "$IMAGE_PRESENT" = '1' ]; then
+    exit 0
+  fi
+  exit 1
+fi
+if [ "$1" = 'info' ]; then
+  echo "$DOCKER_ROOT_DIR"
+  exit 0
+fi
+exit 0`,
+    );
+    stub('npm', `printf 'npm %s\\n' "$*" >> "$CALLS_LOG"`);
+    stub('npx', `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"`);
+    writeFileSync(
+      join(directory, '.github', 'scripts', 'check-disk-floor.sh'),
+      '#!/bin/sh\n' +
+        'printf \'disk-floor %s floor=%s\\n\' "$*" "${DISK_FLOOR_MIN_FREE_KB:-unset}" >> "$CALLS_LOG"\n' +
+        'exit "${GATE_EXIT:-0}"\n',
+      { mode: 0o755 },
+    );
+    try {
+      const result = spawnSync('bash', [dockerIntegrationScriptAbsolutePath], {
+        cwd: directory,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          HOME: directory,
+          RUNNER_ENVIRONMENT: 'github-hosted',
+          RELEASE_CONTAINER_OWNER: 'test-owner',
+          CALLS_LOG: callsLog,
+          DOCKER_ROOT_DIR: dockerRoot,
+          IMAGE_PRESENT: imagePresent ? '1' : '0',
+          GATE_EXIT: gateExit,
+        },
+      });
+      return { result, calls: readFileSync(callsLog, 'utf8'), dockerRoot };
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  };
+
+  it.skipIf(process.platform === 'win32')(
+    'builds the image only after the cache prune and the pre-build disk gate pass',
+    () => {
+      const { result, calls, dockerRoot } = runDockerIntegrationScript();
+      expect(result.status, result.stderr).toBe(0);
+      const lines = calls.trim().split('\n');
+      const imagePrune = lines.findIndex((line) =>
+        line.startsWith('docker image prune'),
+      );
+      const cachePrune = lines.findIndex((line) =>
+        line.startsWith('docker builder prune'),
+      );
+      const gate = lines.findIndex((line) => line.startsWith('disk-floor'));
+      const build = lines.findIndex((line) =>
+        line.startsWith('npm run build:sandbox'),
+      );
+      expect(imagePrune).toBeGreaterThanOrEqual(0);
+      expect(cachePrune).toBeGreaterThan(imagePrune);
+      expect(gate).toBeGreaterThan(cachePrune);
+      expect(build).toBeGreaterThan(gate);
+      expect(lines[gate]).toBe(`disk-floor ${dockerRoot} floor=8388608`);
+      expect(
+        lines.filter((line) => line.startsWith('npx vitest')),
+      ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'fails before the image build when the pre-build disk gate trips',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({ gateExit: '1' });
+      expect(result.status).not.toBe(0);
+      expect(calls).toContain('disk-floor');
+      expect(calls).not.toContain('npm run build:sandbox');
+      expect(calls).not.toContain('npx vitest');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'skips the reclaim and the gate when the image already exists',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        imagePresent: true,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(calls).not.toContain('docker image prune');
+      expect(calls).not.toContain('docker builder prune');
+      expect(calls).not.toContain('disk-floor');
+      expect(calls).not.toContain('npm run build:sandbox');
+      expect(calls).toContain('npx vitest run --root ./integration-tests cli');
+    },
+  );
+
   it('reaps only the Docker integration containers owned by its job', () => {
     const owner = '${{ github.run_id }}-${{ github.run_attempt }}-release';
     const steps = releaseYaml.jobs.integration_docker.steps;
