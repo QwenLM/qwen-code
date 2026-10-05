@@ -353,3 +353,18 @@ it('answers a busy store on result as retryable 503', async () => {
   expect(response.body).toEqual({ error: 'Agent Host store busy.' });
   expect(JSON.stringify(response.body)).not.toContain('/private');
 });
+
+it('directs a valid replacement token to enrollment instead of consuming it as a heartbeat', async () => {
+  heartbeat.mockRejectedValue(
+    new Error('Agent Host replacement requires enrollment.'),
+  );
+  const response = await setup().beat({
+    workspaceCwd: '/remote',
+    providers: ['Qwen Code ACP'],
+    enrollmentToken: 'replacement-token',
+  });
+  expect(response.status).toBe(409);
+  expect(response.body).toEqual({
+    error: 'Agent Host replacement requires enrollment.',
+  });
+});
