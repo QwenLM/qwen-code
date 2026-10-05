@@ -535,4 +535,70 @@ describe('mcp add command', () => {
       );
     });
   });
+
+  describe('tool filters', () => {
+    it.each(['include-tools', 'exclude-tools'] as const)(
+      'splits a comma-separated --%s list',
+      async (flag) => {
+        const key = flag === 'include-tools' ? 'includeTools' : 'excludeTools';
+
+        await parser.parseAsync(
+          `add my-server /path/to/server --${flag} "write_file, edit_file"`,
+        );
+
+        expect(mockSetValue).toHaveBeenCalledWith(
+          SettingScope.User,
+          'mcpServers',
+          expect.objectContaining({
+            'my-server': expect.objectContaining({
+              [key]: ['write_file', 'edit_file'],
+            }),
+          }),
+        );
+      },
+    );
+
+    it('still accepts a repeated flag', async () => {
+      await parser.parseAsync(
+        'add my-server /path/to/server ' +
+          '--exclude-tools write_file --exclude-tools edit_file',
+      );
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        expect.objectContaining({
+          'my-server': expect.objectContaining({
+            excludeTools: ['write_file', 'edit_file'],
+          }),
+        }),
+      );
+    });
+
+    it('leaves an all-empty list unset rather than allowlisting nothing', async () => {
+      await parser.parseAsync(
+        'add my-server /path/to/server --include-tools ,',
+      );
+
+      const saved = mockSetValue.mock.calls[0][2]['my-server'];
+      expect(saved.includeTools).toBeUndefined();
+    });
+
+    it('applies the same splitting to a remote server', async () => {
+      await parser.parseAsync(
+        'add http-server https://example.com/mcp --include-tools "a, b"',
+      );
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        expect.objectContaining({
+          'http-server': expect.objectContaining({
+            httpUrl: 'https://example.com/mcp',
+            includeTools: ['a', 'b'],
+          }),
+        }),
+      );
+    });
+  });
 });

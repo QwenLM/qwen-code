@@ -13,6 +13,18 @@ import type {
   MCPOAuthConfig,
 } from '@qwen-code/qwen-code-core';
 
+// `--include-tools a,b` and repeated `--include-tools a --include-tools b`
+// are both documented as a comma-separated list, so accept either and let
+// an all-empty list fall through as unset rather than as an allowlist that
+// matches nothing.
+function splitCommaSeparated(values?: string[]): string[] | undefined {
+  const items = values
+    ?.flatMap((value) => value.split(','))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return items?.length ? items : undefined;
+}
+
 async function addMcpServer(
   name: string,
   commandOrUrl: string,
@@ -68,10 +80,9 @@ async function addMcpServer(
 
   let newServer: Partial<MCPServerConfig> = {};
 
-  const scopes = oauthScopes
-    ?.flatMap((s) => s.split(','))
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const scopes = splitCommaSeparated(oauthScopes);
+  const includedTools = splitCommaSeparated(includeTools);
+  const excludedTools = splitCommaSeparated(excludeTools);
 
   const hasOAuth = Boolean(
     oauthClientId ||
@@ -125,8 +136,8 @@ async function addMcpServer(
         timeout,
         trust,
         description,
-        includeTools,
-        excludeTools,
+        includeTools: includedTools,
+        excludeTools: excludedTools,
         oauth: oauthConfig,
       };
       break;
@@ -137,8 +148,8 @@ async function addMcpServer(
         timeout,
         trust,
         description,
-        includeTools,
-        excludeTools,
+        includeTools: includedTools,
+        excludeTools: excludedTools,
         oauth: oauthConfig,
       };
       break;
@@ -165,8 +176,8 @@ async function addMcpServer(
         timeout,
         trust,
         description,
-        includeTools,
-        excludeTools,
+        includeTools: includedTools,
+        excludeTools: excludedTools,
       };
       break;
   }
