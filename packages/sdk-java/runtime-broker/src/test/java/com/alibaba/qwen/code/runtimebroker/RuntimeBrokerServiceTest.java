@@ -1215,6 +1215,60 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void reconcileOfAnUnansweredBackgroundSettlesTheProcessRowWithTheSameProof() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+            // The dispatch went dark before its execute ever flew: the
+            // :process row is admitted, the invocation is UNKNOWN.
+            fixture.transport.executeV3Result = CompletableFuture.failedFuture(
+                    new IllegalStateException("connection lost"));
+            join(fixture.service.startExecution("harness", "runtime",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+            awaitExecution(fixture.executionRepository,
+                    prepared.getExecutionCallId(), ToolExecutionRecord.State.UNKNOWN);
+
+            // The Runtime's own terminal answer later proves the start never
+            // happened. The resume that settles the invocation must carry
+            // that proof onto the sibling row too, or every release from
+            // here on is a permanent runtime_session_busy.
+            Map<String, Object> notStarted = new LinkedHashMap<>();
+            notStarted.put("executionStatus", "not_started");
+            notStarted.put("responseParts", java.util.List.of());
+            notStarted.put("capture", null);
+            notStarted.put("error", Map.of("message",
+                    "Background Shell requires a delegated Linux cgroup v2 root on this Runtime."));
+            fixture.transport.statusResult = CompletableFuture.completedFuture(
+                    Map.of("state", "settled", "result", notStarted));
+            join(fixture.service.reconcileExecution("harness", "runtime",
+                    prepared.getExecutionCallId()));
+            ToolExecutionRecord process = fixture.executionRepository
+                    .findByExecutionCallId(prepared.getExecutionCallId() + ":process");
+            assertEquals(ToolExecutionRecord.State.SETTLED, process.getState(),
+                    "the reconcile resume must propagate the never-started proof");
+            assertEquals("not_started", process.getResult().get("state"));
+            assertEquals("not_started", process.getExecutionStatus());
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+        }
+    }
+
+    @Test
     void backgroundStartAdmitsTheProcessRowBesideTheSettledHandle() throws Exception {
         String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
         String digest = "sha256:" + HexFormat.of().formatHex(

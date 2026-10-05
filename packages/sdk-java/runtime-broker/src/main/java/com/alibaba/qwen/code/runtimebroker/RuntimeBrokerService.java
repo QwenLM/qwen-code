@@ -1716,6 +1716,27 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return chain;
     }
 
+    /**
+     * The Runtime proved no process ever started: without this sibling
+     * settle the `:process` row would count as alive forever, and no
+     * shell release could ever pass busy again (round 6). Every arm that
+     * settles the invocation with that proof — the dispatch poll, and the
+     * reconcile resume — calls it, so no path back to SETTLED keeps the
+     * sibling PREPARED.
+     */
+    private void settleUnstartedBackgroundSiblings(String executionCallId,
+            Map<String, Object> result) {
+        if (!"not_started".equals(result.get("executionStatus"))) {
+            return;
+        }
+        ToolExecutionRecord process = executionRepository
+                .findByExecutionCallId(executionCallId + ":process");
+        if (process == null || process.isTerminal()) {
+            return;
+        }
+        settleUnstartedBackgroundProcess(process, result);
+    }
+
     private void settleUnstartedBackgroundProcess(ToolExecutionRecord process,
             Map<String, Object> result) {
         Map<String, Object> settled = new LinkedHashMap<>();
@@ -3306,20 +3327,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     try {
                         settleExecution(executing.getExecutionCallId(),
                                 executing.getDispatchGeneration(), result);
-                        if ("not_started".equals(result.get("executionStatus"))) {
-                            // The Runtime proved no process ever started:
-                            // without this sibling settle the :process row
-                            // would count as alive forever, and no shell
-                            // release could ever pass busy again (round 6).
-                            ToolExecutionRecord process = executionRepository
-                                    .findByExecutionCallId(
-                                            executing.getExecutionCallId()
-                                                    + ":process");
-                            if (process != null && !process.isTerminal()) {
-                                settleUnstartedBackgroundProcess(process,
-                                        result);
-                            }
-                        }
+                        settleUnstartedBackgroundSiblings(
+                                executing.getExecutionCallId(), result);
                     } catch (RuntimeException exception) {
                         markUnknown(executing.getExecutionCallId(),
                                 executing.getDispatchGeneration());
@@ -3776,6 +3785,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     ? executionRepository.resolveUnsettled(current, result, clock.instant())
                     : executionRepository.resolveUnknown(current, result, clock.instant());
             if (resolved != null) {
+                settleUnstartedBackgroundSiblings(
+                        unknown.getExecutionCallId(), result);
                 return new ExecutionReconciliation(resolved,
                         ExecutionReconciliation.Outcome.RESOLVED,
                         runtimeState);
