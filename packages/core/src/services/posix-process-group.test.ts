@@ -41,6 +41,7 @@ const members = new Map<number, FixtureMember>();
 const owners: OwnedPosixProcessGroup[] = [];
 let kill: MockInstance<typeof process.kill>;
 let signalAction: (signal: string | number | undefined) => void;
+let mountInfo: string;
 
 function errno(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(code), { code });
@@ -89,11 +90,13 @@ beforeEach(() => {
   members.clear();
   member(PGID);
   member(PGID + 1);
+  mountInfo = '86 85 0:30 / /proc ro,nosuid master:2 - proc proc rw\n';
   boot.mockReturnValue('00000000-0000-0000-0000-000000000000');
   list.mockImplementation(() =>
     [...members.keys()].map(String).concat('self', 'sys'),
   );
   read.mockImplementation((file: unknown) => {
+    if (file === '/proc/self/mountinfo') return mountInfo;
     const pid = Number(/^\/proc\/(\d+)\/stat$/.exec(String(file))?.[1]);
     const fixture = members.get(pid);
     if (!fixture) throw errno('ENOENT');
@@ -245,6 +248,105 @@ describe('OwnedPosixProcessGroup', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(await completion).toBeNull();
     expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
+  });
+
+  it.each([false, true])(
+    'refuses a modeled hidepid=2 view with a zombie witness and an unrecorded hidden survivor (EPERM probe: %s)',
+    async (permissionError) => {
+      mountInfo = mountInfo.replace('proc rw', 'proc rw,hidepid=2');
+      members.get(PGID)!.state = 'Z';
+      list.mockReturnValue([String(PGID)]);
+      signalAction = (signal) => {
+        if (signal === 0 && permissionError) throw errno('EPERM');
+      };
+      const error = await own().cancel();
+      expect(error).toBeInstanceOf(Error);
+      expect(error?.message).toContain('Unsupported /proc visibility');
+      expect(members.get(PGID + 1)!.state).toBe('S');
+      expect(signals()).toEqual([]);
+    },
+  );
+
+  it.each(['1', '4', 'invisible', 'ptraceable', 'unknown'])(
+    'refuses modeled hidepid=%s even with a gid exemption',
+    async (mode) => {
+      mountInfo = mountInfo.replace(
+        'proc rw',
+        `proc rw,hidepid=${mode},gid=500`,
+      );
+      const owner = own();
+      const completion = owner.cancel();
+      expect((await completion)?.message).toContain(
+        'Unsupported /proc visibility',
+      );
+      owner.force();
+      expect(owner.cancel()).toBe(completion);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(signals()).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each(['0', 'off'])(
+    'accepts the modeled unrestricted hidepid=%s view',
+    async (mode) => {
+      mountInfo = mountInfo.replace('proc rw', `proc rw,hidepid=${mode}`);
+      const completion = own().cancel();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(await completion).toBeNull();
+      expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
+    },
+  );
+
+  it.each([
+    '',
+    '86 85 0:30 /4100 /proc rw - proc proc rw\n',
+    '86 85 0:30 / /proc rw - tmpfs tmpfs rw\n',
+    '86 85 0:30 / /proc rw\n',
+    '86 85 0:30 / /proc rw - proc proc rw\n87 86 0:31 / /proc rw - proc proc rw\n',
+  ])('refuses an unsupported modeled /proc mount view: %s', async (view) => {
+    mountInfo = view;
+    expect((await own().cancel())?.message).toContain(
+      'Unsupported /proc visibility',
+    );
+    expect(signals()).toEqual([]);
+  });
+
+  it('reports unreadable mount metadata without signaling', async () => {
+    const readStat = read.getMockImplementation()!;
+    read.mockImplementation((file: unknown) => {
+      if (file === '/proc/self/mountinfo') throw errno('EACCES');
+      return readStat(file);
+    });
+    const error = await own().cancel();
+    expect((error?.cause as NodeJS.ErrnoException).code).toBe('EACCES');
+    expect(signals()).toEqual([]);
+  });
+
+  it('rechecks a modeled visibility change after TERM rather than confirming an omitted survivor', async () => {
+    list.mockReturnValue([String(PGID)]);
+    signalAction = (signal) => {
+      if (signal === 'SIGTERM') {
+        members.get(PGID)!.state = 'Z';
+        mountInfo = mountInfo.replace('proc rw', 'proc rw,hidepid=2');
+      }
+    };
+    const error = await own().cancel();
+    expect(error?.message).toContain('Unsupported /proc visibility');
+    expect(members.get(PGID + 1)!.state).toBe('S');
+    expect(signals()).toEqual(['SIGTERM']);
+  });
+
+  it('accepts terminal ESRCH without relying on a restricted view', async () => {
+    mountInfo = mountInfo.replace('proc rw', 'proc rw,hidepid=2');
+    signalAction = () => {
+      throw errno('ESRCH');
+    };
+    expect(await own().cancel()).toBeNull();
+    expect(
+      read.mock.calls.some(([file]) => file === '/proc/self/mountinfo'),
+    ).toBe(false);
+    expect(signals()).toEqual([]);
   });
 
   it.each(['SIGTERM', 0, 'SIGKILL'] as const)(

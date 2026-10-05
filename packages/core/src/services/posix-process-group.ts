@@ -18,6 +18,29 @@ interface MemberIdentity {
 const POLL_MS = 25;
 const CONFIRM_MS = 200;
 
+function requireSupportedProcView(): void {
+  const mounts = readFileSync('/proc/self/mountinfo', 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => line.split(' - ').map((part) => part.split(/\s+/)))
+    .filter(([mount]) => mount[4] === '/proc');
+  const [mount, filesystem] = mounts[0] ?? [];
+  if (
+    mounts.length !== 1 ||
+    mount?.[3] !== '/' ||
+    !mount?.[5] ||
+    filesystem?.[0] !== 'proc' ||
+    !filesystem?.[2] ||
+    `${mount[5]},${filesystem[2]}`
+      .split(',')
+      .some(
+        (option) =>
+          option.startsWith('hidepid=') && !/^hidepid=(0|off)$/.test(option),
+      )
+  )
+    throw new Error('Unsupported /proc visibility for process-group cleanup');
+}
+
 function readMember(pid: number): MemberIdentity | null {
   const boot = readLocalBootId();
   if (!boot) throw new Error('Linux process-start identity is unavailable');
@@ -225,6 +248,8 @@ export class OwnedPosixProcessGroup {
         }
         if (code !== 'EPERM') throw error;
       }
+      // hidepid can silently omit live members; successful reads do not prove a complete view.
+      requireSupportedProcView();
       const witnesses = [...this.members.values()].filter((member) =>
         sameMember(member, readMember(member.pid)),
       );

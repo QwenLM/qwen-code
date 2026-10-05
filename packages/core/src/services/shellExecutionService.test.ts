@@ -92,6 +92,9 @@ vi.mock('node:fs', async (importOriginal) => {
       if (file === '/proc/sys/kernel/random/boot_id') {
         return '00000000-0000-0000-0000-000000000001\n';
       }
+      if (file === '/proc/self/mountinfo') {
+        return '86 85 0:30 / /proc rw - proc proc rw\n';
+      }
       const match =
         typeof file === 'string' && /^\/proc\/(\d+)\/stat$/.exec(file);
       if (!match) return actual.readFileSync(file, options);
