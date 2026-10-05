@@ -283,24 +283,24 @@ public final class RuntimeBrokerService implements AutoCloseable {
         var renewal = new BindingRenewal(draining);
         renewal.start();
         CompletionStage<Void> result = safeStage(() ->
-            // The sessions release — and their sweep of provably ended
-            // background exits — run BEFORE the unsettled gate: a row the
-            // sweep can prove never blocks the close on a stale active.
-            drainSessions(draining, null).thenCompose(ignored -> {
-                if (sessionRepository.countActiveByBinding(draining.getBindingId(), draining.getGeneration()) != 0
-                        || executionRepository.hasActiveByBinding(draining.getBindingId(), draining.getGeneration())) {
-                    throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
-                }
-                return draining.getDrainReceipt() == null ? provisioner.stopDrained(draining)
-                        : CompletableFuture.completedFuture(draining.getDrainReceipt());
-            }).thenAccept(receipt -> {
-                var current = renewal.stopAndGet();
-                if (current == null || bindingRepository.compareAndSet(current, current.withDrainReceipt(receipt)
-                        .withState(RuntimeBindingRecord.State.RELEASED, current.getLease(), clock.instant())) == null) {
-                    throw unavailable("runtime_close_claim_pending", "Drain completion was fenced");
-                }
-                liveBindings.remove(draining.getBindingId());
-            }));
+                // The sessions release — and their sweep of provably ended
+                // background exits — run BEFORE the unsettled gate: a row the
+                // sweep can prove never blocks the close on a stale active.
+                drainSessions(draining, null).thenCompose(ignored -> {
+                    if (sessionRepository.countActiveByBinding(draining.getBindingId(), draining.getGeneration()) != 0
+                            || executionRepository.hasActiveByBinding(draining.getBindingId(), draining.getGeneration())) {
+                        throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
+                    }
+                    return draining.getDrainReceipt() == null ? provisioner.stopDrained(draining)
+                            : CompletableFuture.completedFuture(draining.getDrainReceipt());
+                }).thenAccept(receipt -> {
+                    var current = renewal.stopAndGet();
+                    if (current == null || bindingRepository.compareAndSet(current, current.withDrainReceipt(receipt)
+                            .withState(RuntimeBindingRecord.State.RELEASED, current.getLease(), clock.instant())) == null) {
+                        throw unavailable("runtime_close_claim_pending", "Drain completion was fenced");
+                    }
+                    liveBindings.remove(draining.getBindingId());
+                }));
         return result.toCompletableFuture().orTimeout(operationDeadlineMillis(), TimeUnit.MILLISECONDS)
                 .whenComplete((ignored, error) -> {
                     renewal.close();
@@ -1634,10 +1634,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 referenceString(invocation.getReference(), "callId"));
         context.beginControl();
         return mapFailure(safeStage(() -> {
-                requireUsableLease(context);
-                return transport.control(context.lease(), context.session(),
-                        operation);
-            }), "runtime_shell_status_failed", "Shell status lookup failed")
+            requireUsableLease(context);
+            return transport.control(context.lease(), context.session(),
+                    operation);
+        }), "runtime_shell_status_failed", "Shell status lookup failed")
             .thenApply(view -> {
                 if (!(view instanceof Map<?, ?> answer)
                         || !"exited".equals(answer.get("state"))) {
