@@ -58,6 +58,7 @@ import {
   HOSTED_TOOL_APPROVAL_POLICY,
   HostedApprovalWaiters,
 } from './hosted-tool-approval.js';
+import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import * as stdio from '../utils/stdioHelpers.js';
 import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type {
@@ -3405,18 +3406,47 @@ describe('Hosted Harness no-tool session', () => {
       ref,
     ) {
       return ref.kind === 'managed-tool-outcome'
-        ? Promise.reject(new Error('missing settled tool outcome'))
+        ? Promise.reject(
+            new Error(
+              'missing settled tool outcome\nqwen serve: forged\x1b[2J',
+            ),
+          )
         : original.call(this, ref);
     });
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     const refused = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({ managedSessionStore: store(), toolProfile: body.toolProfile });
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    // The cause is Store-influenced text: the single-line tag must strip
+    // newlines and control sequences rather than replay them to stderr.
+    const verifyLine = `qwen serve: Hosted Session ${SESSION_ID} load refused (workspace_verify): Error: missing settled tool outcomeqwen serve: forged`;
+    expect(log.mock.calls.map(([line]) => line)).toContain(verifyLine);
+    expect(
+      log.mock.calls
+        .map(([line]) => line)
+        .every((line) => line === stripAnsiAndControl(line)),
+    ).toBe(true);
     expect(
       damaged.mock.calls.some(([ref]) => ref.kind === 'managed-tool-outcome'),
     ).toBe(true);
     expect(state.model).toHaveBeenCalledTimes(1);
+    // The Store fault that fails the gate can take the seal down with it;
+    // the tag must already be on record before close() runs.
+    log.mockClear();
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'close',
+    ).mockRejectedValueOnce(new Error('seal lost'));
+    const unsealed = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store(), toolProfile: body.toolProfile });
+    expect(unsealed.status).toBe(503);
+    expect(unsealed.body.code).toBe('managed_session_open_failed');
+    expect(log.mock.calls.map(([line]) => line)).toContain(verifyLine);
     damaged.mockRestore();
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
@@ -3759,11 +3789,19 @@ describe('Hosted Harness no-tool session', () => {
       created.body.clientId as string,
     );
     state.assertWritable.mockRejectedValueOnce(new Error('writer lost'));
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     const refused = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({ managedSessionStore: store() });
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    // A write-probe failure during restore validation is a writer-lease
+    // refusal, not a verification one.
+    expect(log.mock.calls.map(([line]) => line)).toContain(
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (workspace_writable): Error: writer lost`,
+    );
     expect(state.model).not.toHaveBeenCalled();
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
@@ -3773,6 +3811,159 @@ describe('Hosted Harness no-tool session', () => {
       'X-Qwen-Client-Id',
       loaded.body.clientId as string,
     );
+  });
+
+  // Parks a plain Session with its Turn unsettled: the settlement's durable
+  // write is refused, so the input stays accepted-but-unsettled.
+  async function parkUnsettledPlainTurn(server: Server): Promise<void> {
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    const clientId = created.body.clientId as string;
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const publish = LocalManagedSessionResourceStore.prototype.publish;
+    vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'publish',
+    ).mockImplementation(function (
+      this: LocalManagedSessionResourceStore,
+      kind,
+      bytes,
+    ) {
+      return kind === 'managed-turn-result'
+        ? Promise.reject(new Error('store lost the settlement'))
+        : publish.call(this, kind, bytes);
+    });
+    const prompt = [{ type: 'text', text: 'park me' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(true);
+    });
+    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', clientId)
+      .expect(204);
+    log.mockRestore();
+  }
+
+  it('marks the publication flag not-applicable on a profile-less cold refusal', async () => {
+    const server = await app(true);
+    await parkUnsettledPlainTurn(server);
+    const parked = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+    );
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const refused = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    // The load's own open installs one activation record; the guard decides
+    // at that boundary, before close() appends its release record after it.
+    expect(log.mock.calls.map(([line]) => line)).toContain(
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (unsettled_input): {"incompletePublication":null,"unsettled":["${PROMPT_ID}"],"resume":null,"settle":null,"through":${parked.events.at(-1)!.sequence + 1}}`,
+    );
+  });
+
+  it('names the broker posture when a takeover load has no Runtime to take over', async () => {
+    const server = await app(true);
+    await parkUnsettledPlainTurn(server);
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const takeover = {
+      managedSessionStore: store(),
+      passiveManagedRuntimeRecovery: true,
+    };
+    const refused = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send(takeover);
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(log.mock.calls.map(([line]) => line)).toContain(
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (takeover_unavailable): profile=none broker=ready`,
+    );
+    const plain = await app();
+    const refusedPlain = await headers(
+      supertest(plain).post(`/session/${SESSION_ID}/load`),
+    ).send(takeover);
+    expect(refusedPlain.status).toBe(409);
+    expect(refusedPlain.body.code).toBe('hosted_turn_recovery_required');
+    expect(log.mock.calls.map(([line]) => line)).toContain(
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (takeover_unavailable): profile=none broker=none`,
+    );
+  });
+
+  it('names the blocked authorization reason a refused restore discarded', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'blocked',
+      reason: 'identity_mismatch',
+      message: 'checkpoint names another session',
+    });
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const refused = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(
+      log.mock.calls
+        .map(([line]) => line)
+        .some(
+          (line) =>
+            line.includes('load refused (restore_blocked): basis=checkpoint') &&
+            line.includes('reason=identity_mismatch') &&
+            line.includes('message=checkpoint names another session'),
+        ),
+    ).toBe(true);
   });
 
   it('allows only one concurrent attachment for a session ID', async () => {
@@ -5925,7 +6116,9 @@ describe('Hosted Harness tool approvals', () => {
   });
 
   it('retains the turn recovery error on cold load of a pending file edit', async () => {
-    vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     const { server, clientId, answer, status } = await waitingSession();
     vi.mocked(HostedWorkspaceBroker.prototype.execute).mockRejectedValueOnce(
       new Error('lost execution reply'),
@@ -5954,6 +6147,9 @@ describe('Hosted Harness tool approvals', () => {
     ).send({ managedSessionStore: store(), toolProfile: files });
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(log.mock.calls.map(([line]) => line)).toContain(
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (file_history_pending): {"pendingTurn":"${PROMPT_ID}","pendingUndo":null,"unsettled":"${PROMPT_ID}","takeover":false}`,
+    );
     expect(HostedWorkspaceBroker.prototype.acquire).not.toHaveBeenCalled();
     expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
     expect(HostedWorkspaceBroker.prototype.fileHistory).not.toHaveBeenCalled();
@@ -6999,6 +7195,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
   it('keeps a bare cold load of a parked Turn inert', async () => {
     await parkToolTurn();
     const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     const server = replacementApp();
     const loaded = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/load`),
@@ -7008,6 +7207,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(log.mock.calls.map(([line]) => line)).toContain(
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (file_history_pending): {"pendingTurn":"${PROMPT_ID}","pendingUndo":null,"unsettled":"${PROMPT_ID}","takeover":false}`,
+    );
     expect(execute).not.toHaveBeenCalled();
     expect(acquireSpy).not.toHaveBeenCalled();
   });
@@ -7629,6 +7831,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const { server, loaded } = await loadReplacement(true);
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(stderr.mock.calls.map(([line]) => line)).toContain(
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (workspace_writable): Error: writer lost`,
+    );
     expect(acquireSpy).toHaveBeenCalled();
     // The refusal invited a retried takeover load: the adopted lease must
     // stay owed — but never silently, since a Session closed before
@@ -7688,6 +7893,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
     const { server, loaded } = await loadReplacement(true);
     expect(loaded.status).toBe(409);
+    expect(stderr.mock.calls.map(([line]) => line)).toContain(
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (workspace_writable): Error: writer lost`,
+    );
     const second = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({
