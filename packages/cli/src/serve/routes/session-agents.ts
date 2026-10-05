@@ -84,10 +84,10 @@ export interface RegisterSessionAgentRoutesDeps {
    * a program's `session_send` MCP child reaches the binding's send route.
    * Absent (or not loopback) means local turns (qwen, Claude, Codex) get no
    * `session_send` tool.
-   * TODO(multi-agent): server.ts (Host agent) must pass
-   * `() => "http://127.0.0.1:" + getPort()` — and confirm the daemon is
-   * reachable there (a bind to one LAN address is not) and that
-   * `hostAllowlist` accepts `Host: 127.0.0.1:<port>`.
+   * server.ts passes `relayBaseUrl(...)`, which is undefined for a bind to
+   * one non-loopback address or under TLS.
+   * TODO(multi-agent): confirm on a live daemon that `hostAllowlist` accepts
+   * `Host: 127.0.0.1:<port>` for a wildcard or `localhost` bind.
    */
   daemonLoopbackBaseUrl?: () => string | undefined;
 }
