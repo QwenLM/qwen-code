@@ -154,7 +154,7 @@ export function parseQwenAgentMessageMeta(
         if (typeof s['id'] !== 'string' || typeof s['title'] !== 'string') {
           return [];
         }
-        const stepStatus =
+        const stepStatus: SessionAgentStep['status'] =
           s['status'] === 'running' ||
           s['status'] === 'completed' ||
           s['status'] === 'failed'
