@@ -2288,14 +2288,18 @@ describe('Managed Workspace execution activation', () => {
     expect(
       fs.readFileSync(path.join(root, 'child/proof.txt'), 'utf8').trim(),
     ).toBe('activated');
-    const readRoot = {
-      ...shell(request.sessionId, 'read-root', ''),
+    // An absolute path is admitted too, as long as it stays inside the
+    // Session directory — that directory is the file-tool boundary, and
+    // reading shared mount locations is #13426.
+    const readOwn = {
+      ...shell(request.sessionId, 'read-own', ''),
       toolName: 'read_file',
-      input: { file_path: path.join(realDirectory(root, '.'), 'root.txt') },
+      input: {
+        file_path: path.join(realDirectory(root, 'child'), 'proof.txt'),
+      },
     };
-    fs.writeFileSync(path.join(root, 'root.txt'), 'root-readable');
     expect(
-      (await (await post(origin, EXECUTE, readRoot)).json()).result
+      (await (await post(origin, EXECUTE, readOwn)).json()).result
         .executionStatus,
     ).toBe('success');
     for (let attempt = 0; attempt < 2; attempt++) {
