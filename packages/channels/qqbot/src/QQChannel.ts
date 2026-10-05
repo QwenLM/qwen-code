@@ -2562,6 +2562,18 @@ export class QQChannel extends ChannelBase {
                 current.retryCount > 1
                   ? QQChannel.IDLE_FLUSH_BACKOFF_MS
                   : QQChannel.IDLE_FLUSH_MS;
+              // onPromptEnd parks BEFORE it clears the entry's timer, so a
+              // chunk that arrived while this send was in flight can still
+              // hold a live idle handle here. Overwriting it without clearing
+              // would orphan that timer: it fires at IDLE_FLUSH_MS, ahead of
+              // the IDLE_FLUSH_BACKOFF_MS retry armed below, collapsing the
+              // backoff tier and burning maxFlushRetries faster — and no
+              // teardown path can reach the orphan because state.timer now
+              // holds the new handle.
+              if (current.timer) {
+                clearTimeout(current.timer);
+                current.timer = null;
+              }
               current.timer = setTimeout(() => {
                 this.idleFlush(sessionId, reconnectId);
               }, delay);

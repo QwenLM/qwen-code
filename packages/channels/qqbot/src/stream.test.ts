@@ -3466,6 +3466,80 @@ describe('cancel/flush coordination', () => {
     expect(seqMap.has('msg-A')).toBe(true);
   });
 
+  it('clears a parked idle handle before the backoff retry re-arms it', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const st = streamState(ch);
+
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 'sess-1', 'msg-A');
+
+    // The head flush stays in flight.
+    let rejectHead!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_r, rej) => {
+        rejectHead = rej;
+      }),
+    );
+    onResponseChunk(ch, 'test-chat', 'part1 ', 'sess-1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+
+    // The first transient failure re-buffers the payload and arms retry #1 at
+    // the idle cadence (retryCount 1).
+    rejectHead(new Error('send failed'));
+    await drain();
+    const state = st.get('sess-1')!;
+    const retryState = state as unknown as { retryCount: number };
+    expect(retryState.retryCount).toBe(1);
+
+    // Retry #1 is in flight when a tail arrives: the chunk arms the entry's
+    // idle handle. The cancel then parks the session before onPromptEnd's
+    // clearTimeout, so that handle is deliberately left live.
+    let rejectRetry!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_r, rej) => {
+        rejectRetry = rej;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    onResponseChunk(ch, 'test-chat', 'tail', 'sess-1');
+    onPromptEnd(ch, 'test-chat', 'sess-1');
+    expect(pendingStreamDelete.has('sess-1')).toBe(true);
+    expect(state.timer).not.toBeNull();
+
+    // The second transient failure pushes retryCount to 2, so the retry arm
+    // selects IDLE_FLUSH_BACKOFF_MS (4000). It must clear the live parked
+    // handle instead of orphaning it.
+    rejectRetry(new Error('send failed'));
+    await drain();
+    expect(retryState.retryCount).toBe(2);
+    // The failed send's own bookkeeping armed the channel's debounced
+    // persistence handle; drop it so the count below covers stream timers
+    // only.
+    const saveTimer = chp['saveTimer'] as ReturnType<typeof setTimeout> | null;
+    if (saveTimer) clearTimeout(saveTimer);
+    // Exactly one handle survives — the 4s backoff retry. The parked idle
+    // handle was cleared before the re-arm, not orphaned.
+    expect(vi.getTimerCount()).toBe(1);
+    expect(state.timer).not.toBeNull();
+
+    // The idle cadence must not fire anything: the lone handle is the backoff
+    // retry and the orphaned IDLE_FLUSH_MS handle is gone.
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+
+    // The backoff retry still fires on schedule and delivers the tail.
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(3);
+  });
+
   it("keeps a cancelled turn's deferred residual when a new turn's chunk arrives", async () => {
     const ch = makeChannel();
     let resolveSend: (v: MockResponse) => void;
