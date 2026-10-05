@@ -101,6 +101,11 @@ class BrokerRenewalPinningTest {
             bindings.open();
             for (Thread caller : callers) {
                 caller.join(30_000);
+                // The latch is carrier-sized, so it opens without the last
+                // two callers; a caller wedged before the guarded call
+                // fails no other assertion.
+                assertTrue(!caller.isAlive(),
+                        "a caller never finished after the latch opened");
             }
         }
     }

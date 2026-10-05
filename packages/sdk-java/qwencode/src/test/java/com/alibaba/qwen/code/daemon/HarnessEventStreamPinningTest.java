@@ -217,14 +217,15 @@ class HarnessEventStreamPinningTest {
     static int carrierCount() {
         String configured =
                 System.getProperty("jdk.virtualThreadScheduler.parallelism");
-        if (configured != null) {
-            try {
-                return Math.max(1, Integer.parseInt(configured.trim()));
-            } catch (NumberFormatException ignored) {
-                // Fall through to the processor-count default.
-            }
+        if (configured == null) {
+            return Runtime.getRuntime().availableProcessors();
         }
-        return Math.max(1, Runtime.getRuntime().availableProcessors());
+        // The JDK's own read is a bare Integer.parseInt, once, in
+        // VirtualThread.createDefaultScheduler: no trim, no catch, no
+        // clamp. A malformed value kills scheduler init there before any
+        // witness can run, so leniency here would only mis-size fleets in
+        // a JVM that cannot start a virtual thread at all.
+        return Integer.parseInt(configured);
     }
 
     private static void marker(String message) {

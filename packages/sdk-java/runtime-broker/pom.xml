@@ -91,6 +91,33 @@
                     <failIfNoTests>true</failIfNoTests>
                     <excludedGroups>fault-gate</excludedGroups>
                 </configuration>
+                <executions>
+                    <!-- Re-run the pinning witnesses with a scheduler
+                         parallelism that differs from the processor count:
+                         no other lane sets the property, so the
+                         carrier-sized arrival latches are otherwise
+                         unobservable. The property is read once in
+                         VirtualThread.<clinit>, so it must arrive on the
+                         fork's argLine; @{argLine} keeps the JaCoCo agent
+                         prepare-agent sets. combine.self=override keeps
+                         the fault-gates profile's groups filter from
+                         emptying this execution. -->
+                    <execution>
+                        <id>pinning-witnesses-pinned-scheduler</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration combine.self="override">
+                            <failIfNoTests>true</failIfNoTests>
+                            <argLine>@{argLine} -Djdk.virtualThreadScheduler.parallelism=4</argLine>
+                            <includes>
+                                <include>**/BrokerVirtualThreadPinningTest.java</include>
+                                <include>**/BrokerRenewalPinningTest.java</include>
+                            </includes>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
