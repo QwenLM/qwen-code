@@ -172,14 +172,26 @@ export async function searchGlobDirectory(
       hitLimit = true;
       break;
     }
+    let outputBase = requestedSearchDir;
+    let canonicalBase = searchDir;
+    // A climbing hit must be anchored at the Session root: a link's lexical
+    // depth need not match the depth of the directory it points to.
+    if (
+      root !== undefined &&
+      containmentRoot !== undefined &&
+      !isPathWithinRoot(entry.fullpath(), searchDir)
+    ) {
+      outputBase = containmentRoot;
+      canonicalBase = root;
+    }
     entries.push(
       searchDir === requestedSearchDir
         ? entry
         : {
             fullpath: () =>
               path.join(
-                requestedSearchDir,
-                path.relative(searchDir, entry.fullpath()),
+                outputBase,
+                path.relative(canonicalBase, entry.fullpath()),
               ),
             mtimeMs: entry.mtimeMs,
           },

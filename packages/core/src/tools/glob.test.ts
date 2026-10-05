@@ -823,6 +823,53 @@ describe('GlobTool', () => {
       },
     );
 
+    it.each([false, true])(
+      'reports the matched files when climbing an inward link (linked root: %s)',
+      async (linkedRoot) => {
+        await mkdirp('session/deep/real');
+        await put('session/deep/x.ts', 'matched');
+        await put('session/x.ts', 'decoy');
+        await put('session/b.md', 'two-level match');
+        await put('session/deep/real/inside.ts', 'descendant');
+        await fs.symlink(
+          path.join(session, 'deep/real'),
+          path.join(session, 'link'),
+          'junction',
+        );
+        const realSession = await fs.realpath(session);
+        const root = linkedRoot
+          ? path.join(tempRootDir, 'session-alias')
+          : session;
+        if (linkedRoot) await fs.symlink(realSession, root, 'junction');
+        const tool = new GlobTool(
+          {
+            ...mockConfig,
+            getTargetDir: () => root,
+            getWorkspaceContext: () => createMockWorkspaceContext(realSession),
+            getFileService: () => new FileDiscoveryService(root),
+          } as unknown as Config,
+          { containmentRoot: root },
+        );
+        for (const [pattern, relative, content] of [
+          ['[.][.]/*.ts', 'deep/x.ts', 'matched'],
+          ['[.][.]/[.][.]/b.md', 'b.md', 'two-level match'],
+          ['*.ts', 'link/inside.ts', 'descendant'],
+        ]) {
+          const result = await run(
+            { pattern, path: path.join(root, 'link') },
+            tool,
+          );
+          const expected = path.join(root, relative);
+          expect(result.error).toBeUndefined();
+          expect(result.collectedFilePaths).toEqual([expected]);
+          expect(result.llmContent).toContain(expected);
+          expect(await fs.readFile(result.collectedFilePaths![0], 'utf8')).toBe(
+            content,
+          );
+        }
+      },
+    );
+
     it('searches when the containment root is a symlink to the search dir', async () => {
       // `createManagedToolSet` passes the raw target directory as the
       // containment root while the search directories are canonicalized, so
