@@ -5,7 +5,7 @@
  */
 
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, utimesSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -30,6 +30,37 @@ import {
   type ManagedRuntimeWorkerLaunch,
   type ManagedSessionRuntimeWorkerOptions,
 } from './managed-runtime-session-worker.js';
+
+/**
+ * Records the witness each ledger sweep runs with, so a test can tell the
+ * arming sweep — run at the witnessed exit — from the reaper's retries,
+ * which must not carry it. Transparent: every call passes through.
+ */
+const sweepWitnesses = vi.hoisted(() => ({
+  records: [] as Array<{
+    workFile: string;
+    exitWitnessed: boolean | undefined;
+    at: number;
+  }>,
+}));
+vi.mock('./managed-runtime-ledger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./managed-runtime-ledger.js')>();
+  return {
+    ...actual,
+    sweepWorkerLedger: (
+      workFile: string,
+      options?: Parameters<typeof actual.sweepWorkerLedger>[1],
+    ) => {
+      sweepWitnesses.records.push({
+        workFile,
+        exitWitnessed: options?.exitWitnessed,
+        at: Date.now(),
+      });
+      return actual.sweepWorkerLedger(workFile, options);
+    },
+  };
+});
 
 // A worker that speaks boot v1 and the tool v2 routes, scripted per test.
 const FAKE_WORKER = String.raw`
@@ -819,9 +850,12 @@ describe.skipIf(process.platform === 'win32')(
         expect(reason).toBeInstanceOf(LedgerSweepUnprovenError);
         expect(quarantine.lift).not.toHaveBeenCalled();
 
-        // The truth heals: a valid ledger whose groups are all already gone
-        // lets the reaper prove the stop and lift the quarantine it raised.
+        // The truth heals: a valid ledger whose group the reaper's own
+        // sweep proves gone — it SIGKILLs the survivor itself — lets the
+        // reaper lift the quarantine it raised, with the same reason object
+        // it reported (the host keys the quarantine on reason identity).
         const healerIncarnation = await incarnation();
+        const survivorPid = spawnSleeper();
         testInternals.writeLedgerDocument(
           workFile,
           {
@@ -830,7 +864,7 @@ describe.skipIf(process.platform === 'win32')(
             incarnation: healerIncarnation,
             startedAt: Date.now(),
           },
-          [],
+          [{ pgid: survivorPid, callId: 'call-1', startedAt: Date.now() }],
         );
         const deadline = Date.now() + 10_000;
         while (quarantine.lift.mock.calls.length === 0) {
@@ -840,7 +874,9 @@ describe.skipIf(process.platform === 'win32')(
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
         expect(quarantine.lift).toHaveBeenCalledWith(reason);
+        expect(processGroupLiveness(survivorPid)).toBe('gone');
         expect(existsSync(workFile)).toBe(false);
+        sleeperChildren.length = 0;
       });
 
       it('leaves a ledger its reaper already owns to the reaper at close', async () => {
@@ -869,6 +905,97 @@ describe.skipIf(process.platform === 'win32')(
         // again, reports nothing again, and does not reject.
         await expect(created.close()).resolves.toBeUndefined();
         expect(quarantine.report).toHaveBeenCalledTimes(1);
+      });
+
+      it('a deleted unreadable ledger is no proof: the reaper never lifts', async () => {
+        // The unreadable ledger named no groups; deleting the file leaves
+        // nothing to re-probe, and an empty probe is not a proof — the
+        // quarantine stands until the child restarts.
+        const ledgerDir = path.join(root, 'ledgers');
+        const quarantine = { report: vi.fn(), lift: vi.fn() };
+        const created = ledgerWorker('ok', { ledgerDir, quarantine });
+        await created.execute('read_file', { file_path: 'a.txt' }, signal);
+        const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
+        await writeFile(workFile, 'not a ledger at all', 'utf8');
+
+        await created.close().catch(() => undefined);
+        expect(quarantine.report).toHaveBeenCalledTimes(1);
+        expect(quarantine.lift).not.toHaveBeenCalled();
+
+        await rm(workFile);
+        // Past two reaper intervals: no lift ever came.
+        await new Promise((resolve) => setTimeout(resolve, 2_500));
+        expect(quarantine.lift).not.toHaveBeenCalled();
+      });
+
+      it('reports and holds an aged ledger set aside unreadable at close', async () => {
+        // A ledger nobody can read, old enough to be debris: the sweep sets
+        // it aside and REJECTS — nothing it named can ever be proven, so the
+        // quarantine is reported and held, never silently closed over.
+        const ledgerDir = path.join(root, 'ledgers');
+        const quarantine = { report: vi.fn(), lift: vi.fn() };
+        const created = ledgerWorker('ok', { ledgerDir, quarantine });
+        await created.execute('read_file', { file_path: 'a.txt' }, signal);
+        const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
+        await writeFile(workFile, 'not a ledger at all', 'utf8');
+        const past = new Date(Date.now() - 120_000);
+        utimesSync(workFile, past, past);
+
+        // close() itself sweeps or defers to the exit hook's reaper —
+        // whichever reports first; either way the retirement is reported
+        // once, with the ledger named, and never lifted.
+        await created.close().catch(() => undefined);
+        expect(quarantine.report).toHaveBeenCalledTimes(1);
+        const reason = quarantine.report.mock.calls[0]![0] as Error;
+        expect(reason.message).toContain(workFile);
+        expect(
+          existsSync(path.join(ledgerDir, `${await incarnation()}.unreadable`)),
+        ).toBe(true);
+        // Two reaper intervals past the retirement: no lift ever came.
+        await new Promise((resolve) => setTimeout(resolve, 2_500));
+        expect(quarantine.lift).not.toHaveBeenCalled();
+      });
+
+      it('the reaper retries without the exit witness the first sweep spent', async () => {
+        // The witness is fresh only at the exit the host saw: a retry that
+        // carried it forever would SIGKILL whatever process group later
+        // answers on a recycled id, on the strength of a witness about a
+        // different moment. The arming sweep carries it; no retry may.
+        const ledgerDir = path.join(root, 'ledgers');
+        const quarantine = { report: vi.fn(), lift: vi.fn() };
+        const created = ledgerWorker('ok', { ledgerDir, quarantine });
+        await created.execute('read_file', { file_path: 'a.txt' }, signal);
+        const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
+        // Unreadable and too young to retire: every sweep throws the same
+        // way, so the reaper keeps retrying it for the child's lifetime.
+        await writeFile(workFile, 'not a ledger at all', 'utf8');
+
+        sweepWitnesses.records.length = 0;
+        await created.close().catch(() => undefined);
+        expect(quarantine.report).toHaveBeenCalledTimes(1);
+        const own = () =>
+          sweepWitnesses.records.filter(
+            (record) => record.workFile === workFile,
+          );
+        // The arming sweep — close to the witnessed exit — carries it.
+        expect(own().length).toBeGreaterThan(0);
+        expect(own()[0]!.exitWitnessed).toBe(true);
+        // The reaper's first retry lands no earlier than its 1 s interval;
+        // anything this much later than the arming sweep is a retry.
+        const armedAt = own()[0]!.at;
+        await vi.waitFor(
+          () => {
+            expect(own().some((record) => record.at - armedAt > 900)).toBe(
+              true,
+            );
+          },
+          { timeout: 15_000 },
+        );
+        for (const retry of own()) {
+          if (retry.at - armedAt > 900) {
+            expect(retry.exitWitnessed).not.toBe(true);
+          }
+        }
       });
     });
   },
@@ -1248,6 +1375,367 @@ describe.skipIf(process.platform === 'win32')(
         expect(clearSpy).toHaveBeenCalledTimes(1);
       }
     });
+
+    it(
+      'lifts the quarantine when the retry sweep itself proves the ledger clean',
+      // The reaper's ticks are seconds apart.
+      { timeout: 30_000 },
+      async () => {
+        // The startup reaper must accept its own sweep's proof: a retry
+        // that judges the recorded group recycled — the id outlived its
+        // group — deletes the ledger and resolves 'proven', and that
+        // verdict, not the liveness of the ids the first failure named,
+        // lifts the quarantine.
+        {
+          const sweeperConfig = new Config({
+            sessionId: '11111111-2222-3333-4444-555555555555',
+            targetDir: root,
+            cwd: root,
+            debugMode: false,
+            model: 'test-model',
+            usageStatisticsEnabled: false,
+            telemetry: { enabled: false },
+            deferTelemetryInitialization: true,
+          });
+          const reportSpy = vi.spyOn(
+            sweeperConfig,
+            'reportManagedEngineQuarantine',
+          );
+          const clearSpy = vi.spyOn(
+            sweeperConfig,
+            'clearManagedEngineQuarantine',
+          );
+          const ledgerDir = path.join(
+            sweeperConfig.storage.getProjectTempDir(),
+            'managed-runtime',
+          );
+          await mkdir(ledgerDir, { recursive: true });
+          // Phase 1: an undatable group — a leaderless survivor younger
+          // than its record — arms the quarantine and stays alive.
+          const leader = spawn('bash', ['-c', 'sleep 300 & exit 0'], {
+            detached: true,
+            stdio: 'ignore',
+          });
+          leader.unref();
+          leader.on('exit', () => undefined);
+          if (leader.pid === undefined) throw new Error('spawn failed');
+          const groupId = leader.pid;
+          try {
+            const memberDeadline = Date.now() + 10_000;
+            for (;;) {
+              const rows = [...queryProcessTable().values()].filter(
+                (row) => row.pgid === groupId,
+              );
+              const leaderGone = !rows.some((row) => row.pid === groupId);
+              const memberAlive = rows.some((row) => row.pid !== groupId);
+              if (
+                processGroupLiveness(groupId) === 'alive' &&
+                leaderGone &&
+                memberAlive
+              ) {
+                break;
+              }
+              if (Date.now() > memberDeadline) {
+                throw new Error('the leaderless member never appeared');
+              }
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+            const workFile = path.join(ledgerDir, 'undatable.json');
+            testInternals.writeLedgerDocument(
+              workFile,
+              {
+                pid: 42424243,
+                pgid: 42424243,
+                incarnation: 'incarnation-undatable',
+                startedAt: Date.now(),
+              },
+              [
+                {
+                  pgid: groupId,
+                  callId: 'call-1',
+                  startedAt: Date.now() - 60_000,
+                },
+              ],
+            );
+            environment = createManagedRuntimeEnvironment(
+              sweeperConfig,
+              () => ({
+                command: process.execPath,
+                args: [script],
+                env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
+              }),
+            );
+            const deadline = Date.now() + 15_000;
+            while (reportSpy.mock.calls.length === 0) {
+              if (Date.now() > deadline) throw new Error('never quarantined');
+              await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            expect(clearSpy).not.toHaveBeenCalled();
+
+            // Phase 2: the ledger now names a live young leader with an
+            // hour-old record — the id provably outlived its group. The
+            // retry resolves it recycled, deletes the file and returns
+            // 'proven', which lifts — even though the id the first failure
+            // named still runs.
+            const young = spawn('sleep', ['300'], {
+              detached: true,
+              stdio: 'ignore',
+            });
+            young.unref();
+            young.on('exit', () => undefined);
+            if (young.pid === undefined) throw new Error('spawn failed');
+            const youngPid = young.pid;
+            try {
+              const settleDeadline = Date.now() + 10_000;
+              for (;;) {
+                const rows = [...queryProcessTable().values()].filter(
+                  (row) => row.pgid === youngPid,
+                );
+                if (rows.length === 1 && rows[0]!.pid === youngPid) break;
+                if (Date.now() > settleDeadline) {
+                  throw new Error('the young group never settled');
+                }
+                await new Promise((resolve) => setTimeout(resolve, 25));
+              }
+              testInternals.writeLedgerDocument(
+                workFile,
+                {
+                  pid: 42424243,
+                  pgid: 42424243,
+                  incarnation: 'incarnation-undatable',
+                  startedAt: Date.now() - 3_600_000,
+                },
+                [
+                  {
+                    pgid: youngPid,
+                    callId: 'call-2',
+                    startedAt: Date.now() - 3_600_000,
+                  },
+                ],
+              );
+              await vi.waitFor(
+                () => {
+                  expect(clearSpy).toHaveBeenCalled();
+                },
+                { timeout: 15_000 },
+              );
+              // The proof deleted the ledger; the unrelated group the first
+              // failure named is still running, untouched.
+              expect(existsSync(workFile)).toBe(false);
+              expect(processGroupLiveness(groupId)).toBe('alive');
+              expect(processGroupLiveness(youngPid)).toBe('alive');
+            } finally {
+              try {
+                process.kill(-youngPid, 'SIGKILL');
+              } catch {
+                // gone already
+              }
+            }
+          } finally {
+            try {
+              process.kill(-groupId, 'SIGKILL');
+            } catch {
+              // gone already
+            }
+          }
+        }
+      },
+    );
+
+    it(
+      'stops retrying for good when a retry ages the unreadable ledger out',
+      // The reaper's ticks are seconds apart.
+      { timeout: 30_000 },
+      async () => {
+        // A fresh unreadable ledger arms the quarantine as unproven; once it
+        // outlives the debris age BETWEEN retries, the retry sweep sets it
+        // aside and rejects with the retirement — and only the closure's
+        // reading of that rejection keeps a later 'absent' pass from lifting.
+        {
+          const sweeperConfig = new Config({
+            sessionId: '11111111-2222-3333-4444-555555555555',
+            targetDir: root,
+            cwd: root,
+            debugMode: false,
+            model: 'test-model',
+            usageStatisticsEnabled: false,
+            telemetry: { enabled: false },
+            deferTelemetryInitialization: true,
+          });
+          const reportSpy = vi.spyOn(
+            sweeperConfig,
+            'reportManagedEngineQuarantine',
+          );
+          const clearSpy = vi.spyOn(
+            sweeperConfig,
+            'clearManagedEngineQuarantine',
+          );
+          const ledgerDir = path.join(
+            sweeperConfig.storage.getProjectTempDir(),
+            'managed-runtime',
+          );
+          await mkdir(ledgerDir, { recursive: true });
+          const ghost = path.join(ledgerDir, 'ghost.json');
+          await writeFile(ghost, '{not a ledger', 'utf8');
+          // Just inside the debris age: the arming sweep still reads it as
+          // unproven; the first retry, a second later, retires it.
+          const almostAged = new Date(Date.now() - 59_250);
+          utimesSync(ghost, almostAged, almostAged);
+
+          environment = createManagedRuntimeEnvironment(sweeperConfig, () => ({
+            command: process.execPath,
+            args: [script],
+            env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
+          }));
+          await vi.waitFor(
+            () => {
+              expect(reportSpy).toHaveBeenCalled();
+            },
+            { timeout: 15_000 },
+          );
+          expect(clearSpy).not.toHaveBeenCalled();
+
+          // The retry sets the ledger aside, reads its own rejection as
+          // terminal, and stops: over the next intervals there is no lift.
+          await vi.waitFor(
+            () => {
+              expect(existsSync(path.join(ledgerDir, 'ghost.unreadable'))).toBe(
+                true,
+              );
+            },
+            { timeout: 15_000 },
+          );
+          await new Promise((resolve) => setTimeout(resolve, 3_500));
+          expect(clearSpy).not.toHaveBeenCalled();
+          expect(reportSpy).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
+
+    it(
+      'holds the quarantine for good once a ledger is set aside unreadable',
+      // The reaper's ticks are seconds apart.
+      { timeout: 30_000 },
+      async () => {
+        // A retirement rides the sweep's rejection: the file set aside is
+        // judged by no later pass, so the terminal fact must arrive with
+        // the failure that armed the reaper — after it, no later clean pass
+        // may read as a proof, not even once everything else has died.
+        {
+          const sweeperConfig = new Config({
+            sessionId: '11111111-2222-3333-4444-555555555555',
+            targetDir: root,
+            cwd: root,
+            debugMode: false,
+            model: 'test-model',
+            usageStatisticsEnabled: false,
+            telemetry: { enabled: false },
+            deferTelemetryInitialization: true,
+          });
+          const reportSpy = vi.spyOn(
+            sweeperConfig,
+            'reportManagedEngineQuarantine',
+          );
+          const clearSpy = vi.spyOn(
+            sweeperConfig,
+            'clearManagedEngineQuarantine',
+          );
+          const ledgerDir = path.join(
+            sweeperConfig.storage.getProjectTempDir(),
+            'managed-runtime',
+          );
+          await mkdir(ledgerDir, { recursive: true });
+          // An AGED unreadable ledger: the first sweep sets it aside.
+          const ghost = path.join(ledgerDir, 'ghost.json');
+          await writeFile(ghost, '{not a ledger', 'utf8');
+          const past = new Date(Date.now() - 120_000);
+          utimesSync(ghost, past, past);
+          // …and a stale ledger whose group the sweep cannot date, so the
+          // same rejection also names groups.
+          const leader = spawn('bash', ['-c', 'sleep 300 & exit 0'], {
+            detached: true,
+            stdio: 'ignore',
+          });
+          leader.unref();
+          leader.on('exit', () => undefined);
+          if (leader.pid === undefined) throw new Error('spawn failed');
+          const groupId = leader.pid;
+          try {
+            const memberDeadline = Date.now() + 10_000;
+            for (;;) {
+              const rows = [...queryProcessTable().values()].filter(
+                (row) => row.pgid === groupId,
+              );
+              const leaderGone = !rows.some((row) => row.pid === groupId);
+              const memberAlive = rows.some((row) => row.pid !== groupId);
+              if (
+                processGroupLiveness(groupId) === 'alive' &&
+                leaderGone &&
+                memberAlive
+              ) {
+                break;
+              }
+              if (Date.now() > memberDeadline) {
+                throw new Error('the leaderless member never appeared');
+              }
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+            const staleFile = path.join(ledgerDir, 'stale.json');
+            testInternals.writeLedgerDocument(
+              staleFile,
+              {
+                pid: 42424244,
+                pgid: 42424244,
+                incarnation: 'incarnation-stale',
+                startedAt: Date.now(),
+              },
+              [
+                {
+                  pgid: groupId,
+                  callId: 'call-1',
+                  startedAt: Date.now() - 60_000,
+                },
+              ],
+            );
+            environment = createManagedRuntimeEnvironment(
+              sweeperConfig,
+              () => ({
+                command: process.execPath,
+                args: [script],
+                env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
+              }),
+            );
+            await vi.waitFor(
+              () => {
+                expect(reportSpy).toHaveBeenCalled();
+              },
+              { timeout: 15_000 },
+            );
+            expect(existsSync(path.join(ledgerDir, 'ghost.unreadable'))).toBe(
+              true,
+            );
+            expect(clearSpy).not.toHaveBeenCalled();
+
+            // The group the rejection named dies: the lift must still never
+            // come — the retired ledger's groups can never be proven.
+            try {
+              process.kill(-groupId, 'SIGKILL');
+            } catch {
+              // gone already
+            }
+            await new Promise((resolve) => setTimeout(resolve, 3_500));
+            expect(clearSpy).not.toHaveBeenCalled();
+            expect(reportSpy).toHaveBeenCalledTimes(1);
+          } finally {
+            try {
+              process.kill(-groupId, 'SIGKILL');
+            } catch {
+              // gone already
+            }
+          }
+        }
+      },
+    );
 
     it(
       'holds the quarantine while a group named by a deleted ledger still runs',

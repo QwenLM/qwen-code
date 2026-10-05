@@ -37,6 +37,7 @@ import type {
   ManagedRuntimeWorkerReady,
 } from './managed-runtime-attestation-worker.js';
 import {
+  LedgerSweepRetiredError,
   LedgerSweepUnprovenError,
   MANAGED_RUNTIME_LEDGER_ENV,
   processGroupLiveness,
@@ -462,27 +463,33 @@ export class ManagedSessionRuntimeWorker {
     if (this.unprovenLedgerPaths.has(ledgerPath)) return;
     this.unprovenLedgerPaths.add(ledgerPath);
     this.options.quarantine?.report(reason);
-    // The groups the last failure named: a sweep that finds the file gone or
-    // handed to a live sibling has proven nothing about them, so the lift
-    // waits for their own deaths; a retired ledger can never be proven.
+    // The groups the last failure named: a sweep that finds the file gone
+    // has proven nothing about them, so the lift waits for their own
+    // deaths; a retired ledger can never be proven.
     let lastNamed = unprovenGroupsOf(reason);
     startLedgerReaper(
       async (): Promise<LedgerReaperVerdict> => {
         let verdict: LedgerSweepVerdict;
         try {
-          verdict = await sweepWorkerLedger(ledgerPath, {
-            exitWitnessed: true,
-          });
+          // No exitWitnessed here: the witness is fresh only at the exit it
+          // names, and a retry minutes later must judge by the live table
+          // alone — or signal nothing where no table can be read — rather
+          // than SIGKILL whatever now answers on a recycled id.
+          verdict = await sweepWorkerLedger(ledgerPath);
         } catch (error) {
           lastNamed = unprovenGroupsOf(error);
           throw error;
         }
         if (verdict === 'proven') return 'proven';
-        if (verdict === 'retired') return 'terminal';
         const alive = lastNamed.filter(
           (pgid) => processGroupLiveness(pgid) !== 'gone',
         );
-        if (alive.length === 0) return 'proven';
+        if (alive.length === 0) {
+          // Nothing was ever named — the file itself was unreadable, or set
+          // aside — so an empty probe over a vanished file is no proof: the
+          // stop stays unprovable and the quarantine stands.
+          return lastNamed.length === 0 ? 'terminal' : 'proven';
+        }
         lastNamed = alive;
         return 'unproven';
       },
@@ -975,18 +982,26 @@ function sweepStaleRuntimeLedgers(
     quarantine.report(reason);
     // Same rule as a single ledger's reaper: the lift needs the sweep's own
     // proof — or, with the file itself gone, the deaths of the groups the
-    // last failure named. A retired ledger can never be proven.
+    // last failure named. A retired ledger can never be proven — and the
+    // retirement rides the rejection, since the file it set aside is judged
+    // by no later sweep.
     let lastNamed = unprovenGroupsOf(error);
+    const retired = sweepRetiredLedger(error);
     startLedgerReaper(
       async (): Promise<LedgerReaperVerdict> => {
+        if (retired) return 'terminal';
         let verdict: LedgerSweepVerdict;
         try {
           verdict = await sweepStaleLedgers(ledgerDir, options);
         } catch (retryError) {
+          if (sweepRetiredLedger(retryError)) return 'terminal';
           lastNamed = unprovenGroupsOf(retryError);
           throw retryError;
         }
-        if (verdict === 'retired') return 'terminal';
+        // The sweep's own proof lifts — a pass that judged a ledger clean.
+        // 'absent' judges nothing: the groups the last failure named get
+        // re-probed by liveness instead.
+        if (verdict === 'proven') return 'proven';
         const alive = lastNamed.filter(
           (pgid) => processGroupLiveness(pgid) !== 'gone',
         );
@@ -1014,6 +1029,12 @@ function unprovenGroupsOf(error: unknown): number[] {
       ),
     ),
   ];
+}
+
+/** Whether a sweep rejection set a ledger aside unprovable. */
+function sweepRetiredLedger(error: unknown): boolean {
+  const failures = error instanceof AggregateError ? error.errors : [error];
+  return failures.some((failure) => failure instanceof LedgerSweepRetiredError);
 }
 
 /**

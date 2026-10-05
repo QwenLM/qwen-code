@@ -11,6 +11,7 @@ import os, { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  LedgerSweepRetiredError,
   LedgerSweepUnprovenError,
   MANAGED_RUNTIME_LEDGER_ENV,
   ManagedRuntimeLedger,
@@ -24,6 +25,31 @@ import {
   sweepWorkerLedger,
   testInternals,
 } from './managed-runtime-ledger.js';
+
+/**
+ * A controllable rmSync for the unlink-failure paths: enrolled paths throw
+ * EACCES, everything else passes through. A read-only directory would be
+ * the alternative, but root ignores the mode bits and some runners are
+ * root.
+ */
+const rmSyncControl = vi.hoisted(() => ({ failing: new Set<string>() }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    rmSync: (
+      target: Parameters<typeof actual.rmSync>[0],
+      options?: Parameters<typeof actual.rmSync>[1],
+    ) => {
+      if (typeof target === 'string' && rmSyncControl.failing.has(target)) {
+        throw Object.assign(new Error(`EACCES: cannot remove ${target}`), {
+          code: 'EACCES',
+        });
+      }
+      return actual.rmSync(target, options);
+    },
+  };
+});
 
 const POSIX = process.platform !== 'win32';
 
@@ -475,6 +501,40 @@ describe('Managed Runtime ledger', () => {
         expect(row).toBeDefined();
         expect(row!.args.length).toBeGreaterThan(0);
         expect(row!.runningMs).toBeGreaterThanOrEqual(0);
+      },
+    );
+
+    it.skipIf(!POSIX)(
+      'reads full command lines however narrow the inherited COLUMNS is',
+      async () => {
+        // procps truncates every row to COLUMNS even into a pipe, and the
+        // identity markers are matched at the END of the args column: a
+        // narrow inherited width would cut the marker off a live row and
+        // read the process as someone else's.
+        const marker = `managed-runtime-worker-${'x'.repeat(200)}-end`;
+        const child = spawn(
+          process.execPath,
+          ['-e', 'setTimeout(() => {}, 10_000)', marker],
+          { detached: true, stdio: 'ignore' },
+        );
+        child.unref();
+        child.on('exit', () => undefined);
+        if (!child.pid) throw new Error('spawn failed');
+        strays.add(child);
+        const previous = process.env['COLUMNS'];
+        process.env['COLUMNS'] = '40';
+        try {
+          const row = await waitFor(() => queryProcessTable().get(child.pid!));
+          expect(row.args).toContain(marker);
+        } finally {
+          if (previous === undefined) {
+            delete process.env['COLUMNS'];
+          } else {
+            process.env['COLUMNS'] = previous;
+          }
+          killGroup(child.pid);
+          strays.delete(child);
+        }
       },
     );
   });
@@ -1186,6 +1246,144 @@ describe('Managed Runtime ledger', () => {
       expect(existsSync(workFile)).toBe(false);
     });
 
+    it('reads a young marker-bearing process on the worker pid as a recycled id', async () => {
+      // The record is an hour old; the process answering on its pid carries
+      // the worker marker but is seconds old — a fresh worker on a recycled
+      // id. Only the record-age check keeps the sweep from SIGKILLing it:
+      // the recorded worker is gone and is resolved without a signal.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 101, startedAt: Date.now() - 3_600_000 });
+      const signal = vi.fn(() => 'sent' as const);
+      const verdict = await sweepWorkerLedger(workFile, {
+        proofTimeoutMs: 100,
+        sys: {
+          platform: 'linux',
+          liveness: (id) => (id === 101 ? 'alive' : 'gone'),
+          signal,
+          table: () =>
+            new Map([
+              [
+                101,
+                {
+                  pid: 101,
+                  pgid: 101,
+                  runningMs: 5_000,
+                  args: 'node dist/cli.js managed-runtime-worker',
+                },
+              ],
+            ]),
+        },
+      });
+      expect(verdict).toBe('proven');
+      expect(signal).not.toHaveBeenCalled();
+      expect(existsSync(workFile)).toBe(false);
+    });
+
+    it('pays for one table read when no proof wait aged the first', async () => {
+      // The worker's pid answers for nobody and no proof wait intervenes:
+      // the group judgement reuses the snapshot the sweep already bought
+      // instead of forking a second blocking ps microseconds later.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 101 }, [
+        { pgid: 202, startedAt: Date.now() - 60_000 },
+      ]);
+      let reads = 0;
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 100,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 101 || id === 202 ? 'alive' : 'gone'),
+            signal: () => 'sent',
+            table: () => {
+              reads += 1;
+              return new Map([
+                [
+                  // A survivor too young to date the group by, and no leader.
+                  999,
+                  { pid: 999, pgid: 202, runningMs: 5_000, args: 'xterm' },
+                ],
+              ]);
+            },
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [101, 202] });
+      expect(reads).toBe(1);
+    });
+
+    it('judges groups from the paid-for snapshot when its re-read fails', async () => {
+      // The first table was read before the worker's proof wait; the
+      // re-read after it fails transiently. The sweep must judge identity
+      // from the snapshot it has, not fold the failed re-read into the
+      // no-identity branch that holds everything.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 101 }, [
+        { pgid: 202, startedAt: Date.now() },
+        { pgid: 303, startedAt: Date.now() },
+      ]);
+      let reads = 0;
+      let workerProbes = 0;
+      const verdict = await sweepWorkerLedger(workFile, {
+        proofTimeoutMs: 100,
+        sys: {
+          platform: 'linux',
+          liveness: (id) => {
+            if (id === 101) {
+              workerProbes += 1;
+              return workerProbes === 1 ? 'alive' : 'gone';
+            }
+            return 'alive';
+          },
+          signal: () => 'sent',
+          table: () => {
+            reads += 1;
+            return reads === 1
+              ? new Map([
+                  [
+                    101,
+                    {
+                      pid: 101,
+                      pgid: 101,
+                      runningMs: 3_600_000,
+                      args: 'node dist/cli.js managed-runtime-worker',
+                    },
+                  ],
+                ])
+              : undefined;
+          },
+        },
+      });
+      expect(verdict).toBe('proven');
+      expect(reads).toBe(2);
+      expect(existsSync(workFile)).toBe(false);
+    });
+
+    it('resolves proven when the unlink of a proven ledger fails', async () => {
+      // The stop was proven — the bookkeeping unlink is not what proves it:
+      // a failed one is logged, and the file that lingers is re-proved by
+      // the next sweep rather than escalated into an unprovable stop.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 42424250 }, [
+        { pgid: 202, startedAt: Date.now() },
+      ]);
+      rmSyncControl.failing.add(workFile);
+      try {
+        await expect(
+          sweepWorkerLedger(workFile, {
+            sys: {
+              platform: 'linux',
+              liveness: () => 'gone',
+              signal: () => 'gone',
+              table: () => undefined,
+            },
+          }),
+        ).resolves.toBe('proven');
+        expect(existsSync(workFile)).toBe(true);
+      } finally {
+        rmSyncControl.failing.delete(workFile);
+      }
+    });
+
     it('signals nothing when no process table can judge a stale sweep', async () => {
       // POSIX, identity-owed, no table: the sweep cannot tell a stale group
       // from a recycled id, so it holds everything and keeps the truth.
@@ -1415,12 +1613,184 @@ describe('Managed Runtime ledger', () => {
       // The hold does not apply: the orphan is signalled.
       expect(signal).toHaveBeenCalledWith(101, 'SIGKILL');
     });
+
+    it('holds a live worker whose host is pid 1 carrying the ACP marker', async () => {
+      // A container without an init has the ACP host itself as pid 1: the
+      // record carries hostPid 1, and the hold tells it from init by the
+      // table's argv — a sibling sweep must leave the worker to its host.
+      const workFile = path.join(root, 'ledger.json');
+      testInternals.writeLedgerDocument(
+        workFile,
+        {
+          pid: 101,
+          pgid: 101,
+          hostPid: 1,
+          incarnation: 'i',
+          startedAt: Date.now(),
+        },
+        [{ pgid: 105, callId: 'c1', startedAt: Date.now() }],
+      );
+      const signal = vi.fn(() => 'sent' as const);
+      const verdict = await sweepWorkerLedger(workFile, {
+        sys: {
+          platform: 'linux',
+          liveness: () => 'alive',
+          alive: () => true,
+          signal,
+          table: () =>
+            new Map([
+              [
+                1,
+                {
+                  pid: 1,
+                  pgid: 1,
+                  runningMs: 3_600_000,
+                  args: 'node /app/dist/cli.js --experimental-acp',
+                },
+              ],
+            ]),
+        },
+      });
+      expect(verdict).toBe('held');
+      expect(signal).not.toHaveBeenCalled();
+      expect(existsSync(workFile)).toBe(true);
+    });
+
+    it('sweeps an orphan whose pid-1 parent is init, not an ACP host', async () => {
+      // A reparented orphan reads the same on paper — hostPid 1 — but pid 1
+      // carries no ACP marker: init is not the ledger's owner and holds
+      // nothing, so the orphaned worker belongs to the sweep.
+      const workFile = path.join(root, 'ledger.json');
+      testInternals.writeLedgerDocument(
+        workFile,
+        {
+          pid: 101,
+          pgid: 101,
+          hostPid: 1,
+          incarnation: 'i',
+          startedAt: Date.now(),
+        },
+        [],
+      );
+      let workerAlive = true;
+      const signal = vi.fn(() => {
+        workerAlive = false;
+        return 'sent' as const;
+      });
+      const verdict = await sweepWorkerLedger(workFile, {
+        proofTimeoutMs: 100,
+        sys: {
+          platform: 'linux',
+          liveness: (id) => (id === 101 && workerAlive ? 'alive' : 'gone'),
+          alive: () => true,
+          signal,
+          table: () =>
+            new Map([
+              [
+                1,
+                { pid: 1, pgid: 1, runningMs: 3_600_000, args: '/sbin/init' },
+              ],
+              [
+                101,
+                {
+                  pid: 101,
+                  pgid: 101,
+                  runningMs: 3_600_000,
+                  args: 'node dist/cli.js managed-runtime-worker',
+                },
+              ],
+            ]),
+        },
+      });
+      expect(verdict).toBe('proven');
+      expect(signal).toHaveBeenCalledWith(101, 'SIGKILL');
+      expect(existsSync(workFile)).toBe(false);
+    });
+
+    it('does not hold a pid-1 host on liveness alone, without a table', async () => {
+      // Pid 1 is always alive, host or init: with no table to read its
+      // argv, the id carries no information and the ledger is judged, not
+      // held — the no-identity rule signals nothing either way.
+      const workFile = path.join(root, 'ledger.json');
+      testInternals.writeLedgerDocument(
+        workFile,
+        {
+          pid: 101,
+          pgid: 101,
+          hostPid: 1,
+          incarnation: 'i',
+          startedAt: Date.now(),
+        },
+        [{ pgid: 202, callId: 'c1', startedAt: Date.now() }],
+      );
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 100,
+          sys: {
+            platform: 'linux',
+            liveness: () => 'alive' as const,
+            alive: () => true,
+            signal,
+            table: () => undefined,
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [101, 202] });
+      expect(signal).not.toHaveBeenCalled();
+      expect(existsSync(workFile)).toBe(true);
+    });
+
+    it('never holds a ledger this process itself parented', async () => {
+      // The hold stops a sibling's sweep: this process's own reaper retries
+      // a ledger its own pid is recorded as hosting, and must not read
+      // itself as the live sibling that owns the truth.
+      const workFile = path.join(root, 'ledger.json');
+      testInternals.writeLedgerDocument(
+        workFile,
+        {
+          pid: 101,
+          pgid: 101,
+          hostPid: process.pid,
+          incarnation: 'i',
+          startedAt: Date.now(),
+        },
+        [{ pgid: 202, callId: 'c1', startedAt: Date.now() }],
+      );
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 100,
+          sys: {
+            platform: 'linux',
+            liveness: () => 'alive' as const,
+            alive: () => true,
+            signal,
+            table: () =>
+              new Map([
+                [
+                  process.pid,
+                  {
+                    pid: process.pid,
+                    pgid: process.pid,
+                    runningMs: 3_600_000,
+                    args: 'node dist/cli.js --experimental-acp',
+                  },
+                ],
+              ]),
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [101] });
+      expect(signal).not.toHaveBeenCalled();
+      expect(existsSync(workFile)).toBe(true);
+    });
   });
 
   describe('sweepStaleLedgers', () => {
-    it('resolves quietly when the directory never existed', async () => {
+    it('answers absent, having judged nothing, when the directory never existed', async () => {
+      // 'proven' would tell a reaper the groups its failure named are gone;
+      // a directory that was never there judged none of them.
       await expect(sweepStaleLedgers(path.join(root, 'nowhere'))).resolves.toBe(
-        'proven',
+        'absent',
       );
     });
 
@@ -1510,9 +1880,11 @@ describe('Managed Runtime ledger', () => {
       },
     );
 
-    it('retires an aged unreadable ledger aside and reports the retirement', async () => {
-      // The debris-aged unreadable file is set aside, named in the verdict
-      // rather than thrown over; a later sweep finds the directory clean.
+    it('retires an aged unreadable ledger aside and rejects with the retirement', async () => {
+      // The debris-aged unreadable file is set aside, and the retirement
+      // rides the rejection: a resolved verdict is read by every production
+      // caller as a clean stop, so the terminal fact must travel in the
+      // throw. A later sweep no longer judges the aside.
       const directory = path.join(root, 'managed-runtime');
       await mkdir(directory, { recursive: true });
       const corrupt = path.join(directory, 'broken-corrupt.json');
@@ -1522,12 +1894,93 @@ describe('Managed Runtime ledger', () => {
         new Date(Date.now() - 120_000),
         new Date(Date.now() - 120_000),
       );
-      await expect(sweepStaleLedgers(directory)).resolves.toBe('retired');
+      const error = await sweepStaleLedgers(directory).catch(
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(
+        (error as AggregateError).errors.some(
+          (member) =>
+            member instanceof LedgerSweepRetiredError &&
+            member.workFile === corrupt,
+        ),
+      ).toBe(true);
       expect(existsSync(corrupt)).toBe(false);
       expect(
         existsSync(path.join(directory, 'broken-corrupt.unreadable')),
       ).toBe(true);
-      await expect(sweepStaleLedgers(directory)).resolves.toBe('proven');
+      await expect(sweepStaleLedgers(directory)).resolves.toBe('absent');
+    });
+
+    it('carries the retirement through the rejection when a sibling file fails too', async () => {
+      // The retirement is one-shot — the aside is judged by no later pass —
+      // so it must reach the caller inside the same rejection that reports
+      // the sibling's unproven groups, or a later clean pass reads as proof
+      // over groups that can never be proven.
+      const directory = path.join(root, 'managed-runtime');
+      await mkdir(directory, { recursive: true });
+      const retiredFile = path.join(directory, 'a.json');
+      await writeFile(retiredFile, '{not a ledger', 'utf8');
+      utimesSync(
+        retiredFile,
+        new Date(Date.now() - 120_000),
+        new Date(Date.now() - 120_000),
+      );
+      const staleFile = path.join(directory, 'b.json');
+      makeLedgerFile(staleFile, { pid: 42424249 }, [
+        { pgid: 202, startedAt: Date.now() },
+      ]);
+      const error = await sweepStaleLedgers(directory, {
+        proofTimeoutMs: 100,
+        sys: {
+          platform: 'linux',
+          liveness: () => 'alive',
+          signal: () => 'failed',
+          table: () => undefined,
+        },
+      }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(AggregateError);
+      const members = (error as AggregateError).errors;
+      expect(
+        members.some(
+          (member) =>
+            member instanceof LedgerSweepRetiredError &&
+            member.workFile === retiredFile,
+        ),
+      ).toBe(true);
+      expect(
+        members.some(
+          (member) =>
+            member instanceof LedgerSweepUnprovenError &&
+            member.workFile === staleFile,
+        ),
+      ).toBe(true);
+      expect(existsSync(path.join(directory, 'a.unreadable'))).toBe(true);
+      expect(existsSync(staleFile)).toBe(true);
+    });
+
+    it('never reads undeletable debris as an unproven stop', async () => {
+      // Aged debris whose unlink fails — root-owned in a bind mount, an
+      // EROFS mount, an open handle on Windows — names no process group:
+      // the sweep logs it and moves on instead of quarantining the engine
+      // over bookkeeping.
+      const directory = path.join(root, 'managed-runtime');
+      await mkdir(directory, { recursive: true });
+      const debris = path.join(directory, 'debris.tmp');
+      await writeFile(debris, 'x', 'utf8');
+      utimesSync(
+        debris,
+        new Date(Date.now() - 120_000),
+        new Date(Date.now() - 120_000),
+      );
+      rmSyncControl.failing.add(debris);
+      try {
+        await expect(sweepStaleLedgers(directory)).resolves.toBe('absent');
+        // Left where it is for an operator, not thrown over.
+        expect(existsSync(debris)).toBe(true);
+      } finally {
+        rmSyncControl.failing.delete(debris);
+      }
     });
 
     it('names the unreadable ledgers in the aggregate rejection', async () => {
@@ -1597,7 +2050,9 @@ describe('Managed Runtime ledger', () => {
     it('never lifts over a ledger retired unreadable', async () => {
       // A ledger nobody can read is set aside once it outlives the debris
       // age — but nothing it named was proven, so the reaper stops without
-      // firing onProven: the quarantine stands.
+      // firing onProven: the quarantine stands. The mapping is the
+      // production one: only the sweep's own proof lifts, and a retirement
+      // — which arrives as a rejection — stops the reaper without one.
       const workFile = path.join(root, 'corrupt.json');
       await writeFile(workFile, '{not a ledger', 'utf8');
       utimesSync(
@@ -1605,22 +2060,36 @@ describe('Managed Runtime ledger', () => {
         new Date(Date.now() - 120_000),
         new Date(Date.now() - 120_000),
       );
+      let sweeps = 0;
       const onProven = vi.fn();
       const reaper = startLedgerReaper(
-        async () =>
-          (await sweepWorkerLedger(workFile, { exitWitnessed: true })) ===
-          'proven'
-            ? ('proven' as const)
-            : ('terminal' as const),
+        async () => {
+          sweeps += 1;
+          try {
+            return (await sweepWorkerLedger(workFile, {
+              exitWitnessed: true,
+            })) === 'proven'
+              ? ('proven' as const)
+              : ('unproven' as const);
+          } catch (error) {
+            return error instanceof LedgerSweepRetiredError
+              ? ('terminal' as const)
+              : ('unproven' as const);
+          }
+        },
         onProven,
         10,
       );
       await waitFor(() =>
         existsSync(path.join(root, 'corrupt.unreadable')) ? true : undefined,
       );
-      // Several ticks past the retirement: no lift ever came.
+      const settledSweeps = sweeps;
+      // Several tick-intervals past the retirement: no lift ever came, and
+      // the reaper stopped — a 'terminal' verdict ends the retries, it does
+      // not just withhold the lift.
       await new Promise((resolve) => setTimeout(resolve, 100));
       expect(onProven).not.toHaveBeenCalled();
+      expect(sweeps).toBe(settledSweeps);
       reaper.stop();
     });
 
@@ -1656,7 +2125,6 @@ describe('Managed Runtime ledger', () => {
             sys: { liveness, signal: () => 'failed', table: () => undefined },
           });
           if (verdict === 'proven') return 'proven' as const;
-          if (verdict === 'retired') return 'terminal' as const;
           return lastNamed.every((pgid) => liveness(pgid) === 'gone')
             ? ('proven' as const)
             : ('unproven' as const);
@@ -1690,6 +2158,42 @@ describe('Managed Runtime ledger', () => {
         );
         // The cadence: 10, +20, +40, then clamped at 40 — the attempts land
         // at 10, 30, 70, 110, 150, each read off the fake clock by count.
+        await vi.advanceTimersByTimeAsync(10);
+        expect(attempts).toBe(1);
+        await vi.advanceTimersByTimeAsync(19);
+        expect(attempts).toBe(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(attempts).toBe(2);
+        await vi.advanceTimersByTimeAsync(39);
+        expect(attempts).toBe(2);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(attempts).toBe(3);
+        await vi.advanceTimersByTimeAsync(80);
+        expect(attempts).toBe(5);
+        reaper.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('backs off the same way when the sweep resolves unproven', async () => {
+      // A sweep that RESOLVES 'unproven' — a remainder that keeps answering
+      // the same way — must back off exactly like a thrown one, or it costs
+      // a process-table read and signals every second for the quarantine's
+      // lifetime.
+      vi.useFakeTimers();
+      try {
+        let attempts = 0;
+        const reaper = startLedgerReaper(
+          async () => {
+            attempts += 1;
+            return 'unproven' as const;
+          },
+          () => undefined,
+          10,
+          40,
+        );
+        // The same cadence as a throwing sweep: 10, +20, +40, clamped at 40.
         await vi.advanceTimersByTimeAsync(10);
         expect(attempts).toBe(1);
         await vi.advanceTimersByTimeAsync(19);
@@ -1772,10 +2276,10 @@ describe('Managed Runtime ledger', () => {
       }
     });
 
-    it("omits the host from an orphaned worker's record, keeping the ledger readable", async () => {
-      // init re-parents an orphaned worker to pid 1, which the reader's
-      // validation refuses: written down, the ledger would be unreadable
-      // forever — a permanent quarantine from one reparenting.
+    it('records a pid-1 host as itself, keeping the ledger readable', async () => {
+      // A container without an init has the ACP host itself as pid 1: the
+      // record must still name it — a dropped hostPid is what let a
+      // sibling's sweep SIGKILL a live PID-1-hosted worker.
       const previous = process.env[MANAGED_RUNTIME_LEDGER_ENV];
       const descriptor = Object.getOwnPropertyDescriptor(process, 'ppid');
       Object.defineProperty(process, 'ppid', {
@@ -1790,7 +2294,7 @@ describe('Managed Runtime ledger', () => {
         const written = JSON.parse(await readFile(workFile, 'utf8')) as {
           worker: { pid: number; hostPid?: number };
         };
-        expect(written.worker.hostPid).toBeUndefined();
+        expect(written.worker.hostPid).toBe(1);
         // The record reads back, and a witnessed sweep can close it out.
         expect(testInternals.readLedgerDocument(workFile)).toBeDefined();
         await expect(

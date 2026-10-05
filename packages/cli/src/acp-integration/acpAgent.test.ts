@@ -4937,6 +4937,60 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         await agentPromise;
       }
     });
+
+    it('summarizes an aggregated quarantine reason, skipping entries it cannot read', async () => {
+      await setupSessionMocks('managed-host-quarantine-summary-aggregate');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        // The startup sweep aggregates one failure per ledger; an entry
+        // without a `remaining` list — a retired ledger's — is skipped.
+        // The summary names each identified ledger by basename and never
+        // leaks an absolute path or a pgid.
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          new AggregateError(
+            [
+              Object.assign(new Error('unproven a'), {
+                workFile: '/tmp/x/managed-runtime/a.json',
+                remaining: [4123],
+              }),
+              Object.assign(new Error('unproven b'), {
+                workFile: '/tmp/x/managed-runtime/b.json',
+                remaining: [4124, 4125],
+              }),
+              Object.assign(new Error('retired c'), {
+                workFile: '/tmp/x/managed-runtime/c.json',
+              }),
+            ],
+            'The Managed Runtime ledgers could not be fully swept',
+          ),
+        );
+        const refused = await agent
+          .newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          })
+          .catch((error: unknown) => error);
+        expect((refused as Error).message).toContain(
+          'a.json: 1 process group(s)',
+        );
+        expect((refused as Error).message).toContain(
+          'b.json: 2 process group(s)',
+        );
+        expect((refused as Error).message).not.toContain('/tmp/x');
+        expect((refused as Error).message).not.toContain('4123');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
   });
 
   it.each([false, true])(
