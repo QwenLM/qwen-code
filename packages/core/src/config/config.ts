@@ -5068,7 +5068,19 @@ export class Config {
         // A committed receipt outlives its crash: settle what it proves
         // before the gate reads, so a settled-but-unsettled crash window does
         // not block on a call whose outcome the log already carries.
+        const sequenceBeforeRepair =
+          this.managedSession.authority.committedSequence;
         await this.getManagedRuntimeOutcomes()?.recoverCommittedReceipts();
+        // The repair writes records the projection read above lacks: give
+        // this open the history the log now holds.
+        if (
+          this.sessionRestoreProjectionSource &&
+          this.managedSession.authority.committedSequence !==
+            sequenceBeforeRepair
+        ) {
+          projection = await this.sessionRestoreProjectionSource();
+          this.setSessionRestoreProjection(projection);
+        }
         // A reopened log answers for itself: Runtime dispatches that never
         // settled block the session again, as the in-memory block already
         // does for the live process. The outcome cannot be learned from a

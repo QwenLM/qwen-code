@@ -1466,6 +1466,81 @@ describe('Managed Session log recording', () => {
     expect(restored.getManagedSessionBlock()).toBeUndefined();
     await restored.closeSessionWriter();
   });
+
+  it('hands the reopen the history its own repair writes', async () => {
+    const created = await start(managedConfig());
+    const outcomes = created.getManagedRuntimeOutcomes()!;
+    const harness = (
+      outcomes as unknown as {
+        harness: {
+          resolveAwaitRuntime: (id: string, ref: never) => Promise<unknown>;
+        };
+      }
+    ).harness;
+    let sabotaged = false;
+    const settling = harness.resolveAwaitRuntime.bind(harness);
+    harness.resolveAwaitRuntime = async (id, ref) => {
+      if (!sabotaged) {
+        sabotaged = true;
+        throw new Error('crashed between the receipt and the settlement');
+      }
+      return settling(id, ref);
+    };
+    recordUser(created, 'read the file');
+    // The model's call is on the log; its result never lands — the crash
+    // window the restore repair exists for.
+    created.getChatRecordingService()!.recordAssistantTurn({
+      model: 'test-model',
+      message: [
+        {
+          functionCall: {
+            id: 'call-a',
+            name: 'read_file',
+            args: { file_path: path.join(projectDir, 'a.txt') },
+          },
+        },
+      ],
+    });
+    await created.getChatRecordingService()!.flush();
+    await outcomes.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await expect(
+      outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: {
+          executionStatus: 'success',
+          responseParts: [{ type: 'text', text: 'the recovered answer' }],
+        },
+      }),
+    ).rejects.toThrow('crashed between');
+    await created.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    expect(restored.getManagedSessionBlock()).toBeUndefined();
+    // The repair re-records the settled result, and the projection this open
+    // seeds the chat from must carry it: otherwise the first request after a
+    // crash hands the model a functionCall that nothing answers.
+    const apiHistory = restored.getSessionRestoreRuntime()?.apiHistory ?? [];
+    const functionResponses = apiHistory
+      .flatMap((content) => content.parts ?? [])
+      .map((part) => part?.functionResponse)
+      .filter((response) => response !== undefined);
+    expect(functionResponses).toContainEqual(
+      expect.objectContaining({
+        id: 'call-a',
+        name: 'read_file',
+        response: { output: 'the recovered answer' },
+      }),
+    );
+    await restored.closeSessionWriter();
+  });
 });
 
 describe('Managed host tools', () => {

@@ -373,6 +373,13 @@ export class LocalManagedRuntimeOutcomes {
 
   private async restoreRecordedResults(): Promise<void> {
     const { session } = this;
+    const checkpoint = await this.latestCheckpoint();
+    const settled = (checkpoint?.tools?.items ?? []).filter(
+      (item) => item.state === 'settled' && item.outcomeRef !== null,
+    );
+    // Nothing settled means nothing to re-record: return before the recorded
+    // scan below reads a single recorded body.
+    if (settled.length === 0) return;
     const events = session.authority.eventsInSequenceRange(
       1,
       session.authority.committedSequence,
@@ -442,10 +449,6 @@ export class LocalManagedRuntimeOutcomes {
         recorded.add(uuid.slice('recovered-tool-result:'.length));
       }
     }
-    const checkpoint = await this.latestCheckpoint();
-    const settled = (checkpoint?.tools?.items ?? []).filter(
-      (item) => item.state === 'settled' && item.outcomeRef !== null,
-    );
     const envelope = session.authority.recordEnvelope;
     // Read for a record this restore writes, never for the check itself:
     // the lookup blocks on a `git rev-parse`, and a restore with nothing to
@@ -617,13 +620,8 @@ export async function unresolvedRuntimeWorkReason(
   }
   const checkpoint = parsed.checkpoint;
   if (checkpoint.continuation.phase !== 'await_runtime') return undefined;
-  const pending =
-    checkpoint.tools?.items.some((item) => item.state === 'in_progress') ===
-      true ||
-    checkpoint.runtime?.bindings.some(
-      (binding) => binding.state === 'dispatch',
-    ) === true;
-  return pending
-    ? 'it recorded Runtime dispatches that never settled'
-    : 'it recorded an unresolved Runtime wait';
+  // The parser's phase shape already proved the disjunction a check here
+  // would recompute: an await_runtime checkpoint it admits always carries an
+  // in-progress item with its dispatch binding.
+  return 'it recorded Runtime dispatches that never settled';
 }

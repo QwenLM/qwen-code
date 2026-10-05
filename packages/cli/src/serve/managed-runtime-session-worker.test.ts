@@ -10,6 +10,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import { promptIdContext } from '@qwen-code/qwen-code-core/utils/promptIdContext.js';
 import type { LocalManagedRuntimeOutcomes } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-outcomes.js';
 import { processBootLoaderEnv } from '../config/shared-env-keys.js';
 import { createServer } from 'node:http';
@@ -792,7 +793,11 @@ describe.skipIf(process.platform === 'win32')(
       );
       expect(prepared.locations).toEqual([{ path: file }]);
       expect(await env.permission('write', signal)).toBe('ask');
-      const result = await env.execute('write', signal);
+      // The turn's prompt id rides the async context into the admission: the
+      // durable batch is keyed by it.
+      const result = await promptIdContext.run('prompt-1', () =>
+        env.execute('write', signal),
+      );
       expect(result.llmContent).toEqual([
         { text: `ran ${JSON.stringify({ file_path: file, content: 'x' })}` },
       ]);
@@ -816,6 +821,7 @@ describe.skipIf(process.platform === 'win32')(
         expect.objectContaining({
           functionCallId: 'write',
           toolName: 'write_file',
+          promptId: 'prompt-1',
           params: { file_path: file, content: 'x' },
           workerIncarnation: entries.find((entry) => entry.boot)?.boot,
           toolDefinition: {
@@ -1207,6 +1213,9 @@ describe.skipIf(process.platform === 'win32')(
       ]);
       // The worker heard nothing: the admission stands, the cancelled
       // settlement closes it.
+      expect(admissions).toEqual([
+        expect.objectContaining({ functionCallId: 'write' }),
+      ]);
       expect(await readFile(logFile, 'utf8')).not.toContain('"execute"');
     });
 

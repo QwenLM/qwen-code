@@ -990,15 +990,17 @@ alone says which call took effect.
   the continuation closed, and a later open finds a session whose history
   holds the same results.
 - **The block is durable.** The in-memory block M5a added still holds for the
-  live process, and no deleted or new write moves the open `await_runtime`
-  item. Any later open of the log — a restore after a clean close, or an open
-  after the child crashed — checks the newest checkpoint: an unresolved
-  Runtime state blocks the session again with
-  `managed_runtime_outcome_unknown` before any model request, and the reason
-  says it comes from the log. A log whose latest Runtime state is
-  `results_ready` restores normally: every outcome is committed, the restore
-  re-records a settled result whose record never landed, and nothing replays
-  the Runtime. The session's next admission closes a leftover from an
+  live process, and no write in the turn moves the open `await_runtime` item.
+  Any later open of the log — a restore after a clean close, or an open after
+  the child crashed — first repairs what the log already proves: every pending
+  item whose `tool.receipt` committed settles from that receipt, a settled
+  result whose record never landed is re-recorded, and the open's restore
+  projection is re-read so the chat starts from the repaired history. Only
+  then does the open check the newest checkpoint: an unresolved Runtime state
+  blocks the session again with `managed_runtime_outcome_unknown` before any
+  model request, and the reason says it comes from the log. A log whose latest
+  Runtime state is `results_ready` restores normally: every outcome is
+  committed, and nothing replays the Runtime. The session's next admission closes a leftover from an
   earlier turn — consumed and settled, since its outcomes are committed;
   that is not replaying — while the live turn's own `results_ready` closes
   only at the batch end, after its records are flushed, so a sealed log
@@ -1006,8 +1008,7 @@ alone says which call took effect.
   under an earlier prompt ends with its own boundary, so the new prompt's
   batch and attempt are its own. A fresh open's dispatch gate is empty, and
   a blocked session admits no prompt, so the gate cannot claim a re-dispatch
-  of the original call. Recovery of a settled but unconsumed turn, and of a
-  blocked session, stays with M6.
+  of the original call. Recovery of a blocked session stays with M6.
 - **The worker forgets what is committed.** The host acknowledges each call
   once its commit has landed, over an `acknowledge` route added to the same
   tool v2 protocol; the worker then drops the call's parameters and result

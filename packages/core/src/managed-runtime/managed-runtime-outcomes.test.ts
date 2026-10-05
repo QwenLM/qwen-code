@@ -610,6 +610,8 @@ describe('restored runtime block', () => {
 
     const { session: restored } = await openSession(root, 'session-unrecorded');
     try {
+      vi.mocked(gitUtils.getCachedGitBranch).mockClear();
+      vi.mocked(gitUtils.getCachedGitBranch).mockReturnValueOnce('test-branch');
       // Nothing is pending, yet the restore repair still runs: the settled
       // outcome becomes the tool_result the session history needs.
       await new LocalManagedRuntimeOutcomes(
@@ -629,11 +631,16 @@ describe('restored runtime block', () => {
       const record = JSON.parse(body.toString()) as {
         provenance?: string;
         parentUuid?: string | null;
+        gitBranch?: string;
         message?: { role?: string; parts?: Array<Record<string, unknown>> };
         toolCallResult?: { callId?: string; status?: string };
       };
       expect(record.provenance).toBe('tool_result');
       expect(record.parentUuid).toBe('user-before-crash');
+      // The branch annotation is read through the cached lookup, for the
+      // session's recorded cwd, only because a record was actually written.
+      expect(record.gitBranch).toBe('test-branch');
+      expect(gitUtils.getCachedGitBranch).toHaveBeenCalledWith(root);
       expect(record.message?.parts?.[0]?.['functionResponse']).toMatchObject({
         id: 'call-a',
         name: 'read_file',
@@ -1070,6 +1077,34 @@ describe('restored runtime block', () => {
     roots.add(root);
     {
       const { session, seal } = await openSession(root, 'session-unsettled');
+      // A recorded result from an earlier call: a repair that scans recorded
+      // bodies before checking whether anything settled would read it even
+      // though there is nothing to re-record.
+      await session.sink.write({
+        ...session.authority.recordEnvelope,
+        uuid: 'recorded-result:call-z',
+        parentUuid: null,
+        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-z',
+                name: 'read_file',
+                response: { output: 'already recorded' },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: 'call-z',
+          status: 'success',
+          responseParts: [{ text: 'already recorded' }],
+        },
+      } as never);
       const outcomes = new LocalManagedRuntimeOutcomes(session);
       await outcomes.admit(admission('call-a'));
       await seal();
@@ -1077,6 +1112,18 @@ describe('restored runtime block', () => {
 
     const { session: restored } = await openSession(root, 'session-unsettled');
     try {
+      const messageReads: unknown[] = [];
+      const reading = restored.resources.read.bind(restored.resources);
+      vi.spyOn(restored.resources, 'read').mockImplementation((ref) => {
+        if (ref.kind === 'managed-message') messageReads.push(ref);
+        return reading(ref);
+      });
+      // Nothing settled, so nothing can be re-recorded: the repair must not
+      // read a recorded body to learn that.
+      await new LocalManagedRuntimeOutcomes(
+        restored,
+      ).recoverCommittedReceipts();
+      expect(messageReads).toEqual([]);
       await expect(
         unresolvedRuntimeWorkReason(restored.authority),
       ).resolves.toContain('never settled');

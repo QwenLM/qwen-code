@@ -212,9 +212,9 @@ export function managedToolDigest(
 
 /**
  * The model parts a worker's response parts map to: the worker marks text
- * parts with a `type` that model parts do not have. The mapping throws on a
- * part that is not an object — the live result path reports that as an
- * ordinary tool error — so a restore that must tolerate one filters first.
+ * parts with a `type` that model parts do not have. Only a null or undefined
+ * part throws here — the live result path reports that as an ordinary tool
+ * error — so a restore that must tolerate one filters first.
  */
 export function managedToolResponseParts(parts: readonly unknown[]): Part[] {
   return parts.map((part): Part => {
