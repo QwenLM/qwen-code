@@ -177,7 +177,7 @@ const EN: Messages = {
   'managed.workspaceCreate': 'Create session',
   'managed.workspaceBound': 'Bound Workspace',
   'managed.workspaceExecutionUnavailable':
-    'Workspace is bound. Message execution is not available in this service yet.',
+    'Workspace is bound. You cannot send messages in this Session.',
   'managed.workspaceSharedFiles':
     'Sessions in the same Workspace share files. Directory availability is checked before execution.',
   'managed.workspaceEmpty': 'No readable Workspaces are available.',
@@ -3887,6 +3887,9 @@ const EN: Messages = {
   'workspacesOverview.dirty': (v) => `${v?.count ?? 0} changed`,
   'workspacesOverview.mcpFailed': (v) => `${v?.count ?? 0} failed`,
   'workspacesOverview.newTask': 'New task',
+  'workspacesOverview.trust': 'Trust',
+  'workspacesOverview.trusting': 'Trusting…',
+  'workspacesOverview.trustFailed': 'Could not trust the workspace',
   'workspacesOverview.remove': 'Remove workspace',
   'workspacesOverview.back': 'Back',
   'splitView.title': 'Split View',
@@ -4387,7 +4390,7 @@ const ZH: Messages = {
   'managed.workspaceCreate': '创建会话',
   'managed.workspaceBound': '已绑定工作区',
   'managed.workspaceExecutionUnavailable':
-    '工作区已绑定；当前服务暂未开放消息执行。',
+    '工作区已绑定；你不能在此会话中发送消息。',
   'managed.workspaceSharedFiles':
     '同一工作区的会话共享文件；目录可用性将在执行前验证。',
   'managed.workspaceEmpty': '没有可读取的工作区。',
@@ -7902,6 +7905,9 @@ const ZH: Messages = {
   'workspacesOverview.dirty': (v) => `${v?.count ?? 0} 处改动`,
   'workspacesOverview.mcpFailed': (v) => `${v?.count ?? 0} 个失败`,
   'workspacesOverview.newTask': '新建任务',
+  'workspacesOverview.trust': '信任',
+  'workspacesOverview.trusting': '正在信任…',
+  'workspacesOverview.trustFailed': '无法信任该工作区',
   'workspacesOverview.remove': '移除工作区',
   'workspacesOverview.back': '返回',
   'splitView.title': '分屏',

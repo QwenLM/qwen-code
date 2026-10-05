@@ -30,6 +30,26 @@ public interface RuntimeBindingRepository {
     RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
             RuntimeSessionRecord expected);
 
+    /**
+     * Moves the Session to RELEASING in one decision with the no-active-
+     * execution check, under the same Session row lock admission takes, so
+     * two Broker processes cannot interleave an admission into the gap.
+     * Returns null when the row no longer matches {@code expected}, the
+     * current record when it is already RELEASING or RELEASED, throws
+     * {@code runtime_session_busy} when an execution is still active, and
+     * throws {@code runtime_session_not_ready} when the Session is in any
+     * other state.
+     */
+    RuntimeSessionRecord beginSessionRelease(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeSessionRecord expected);
+
+    void requestHarnessDrain(String tenantId, String harnessSessionId);
+
+    boolean isHarnessDraining(String tenantId, String harnessSessionId);
+
+    List<RuntimeBindingRecord> findByHarnessSession(String tenantId, String harnessSessionId,
+            String afterBindingId, int limit);
+
     RuntimeBindingRecord findOrCreate(RuntimeProvisionRequest request);
 
     RuntimeBindingRecord findActive(RuntimeProvisionRequest request);

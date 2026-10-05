@@ -9,7 +9,10 @@ import type { Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import type { HarnessToolItem } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
-import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  assertManagedSessionStableId,
+  type ManagedSessionDurableRef,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import {
   convertToFunctionErrorResponse,
@@ -48,6 +51,70 @@ export interface HostedRecoveryTurn {
   /** Whether the recovery acquired the Runtime Session, which a later
    * continue/cancel must release. */
   acquiredRuntime: boolean;
+}
+
+async function originalRuntimeBroker(
+  session: ManagedSession,
+  promptId: string,
+  items: readonly HarnessToolItem[],
+  options: HostedWorkspaceBrokerOptions,
+): Promise<HostedWorkspaceBroker> {
+  const owners = new Set<string>();
+  const intents = new Map(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.intent')
+      .map((event) => [
+        event.payload['executionCallId'],
+        event.payload['argsRef'],
+      ]),
+  );
+  for (const item of items) {
+    if (item.outcomeSource !== 'runtime') continue;
+    const ref = intents.get(item.executionCallId) as
+      | ManagedSessionDurableRef
+      | undefined;
+    if (!ref) throw new RecoveryDeclined();
+    if (
+      ref.kind === 'managed-tool-args' &&
+      item.toolName === 'run_shell_command'
+    ) {
+      const definition = JSON.parse(
+        (
+          await session.resources.read(
+            session.authority.sessionHeader.definitionRef,
+          )
+        ).toString('utf8'),
+      ) as { hookCatalog?: unknown; mcpServers?: unknown };
+      if (definition.hookCatalog || definition.mcpServers)
+        throw new RecoveryDeclined();
+      owners.add(promptId);
+      continue;
+    }
+    if (ref.kind !== 'managed-tool-input') throw new RecoveryDeclined();
+    const route = JSON.parse(
+      (await session.resources.read(ref)).toString('utf8'),
+    ) as { harnessSessionId?: unknown; runtimeSessionId?: unknown };
+    if (
+      route.harnessSessionId !==
+        session.authority.sessionHeader.sessionKey.sessionId ||
+      typeof route.runtimeSessionId !== 'string'
+    )
+      throw new RecoveryDeclined();
+    owners.add(
+      assertManagedSessionStableId(
+        route.runtimeSessionId,
+        'recovered Runtime owner',
+      ),
+    );
+  }
+  const [runtimeSessionId] = owners;
+  if (owners.size !== 1 || !runtimeSessionId) throw new RecoveryDeclined();
+  return new HostedWorkspaceBroker(
+    options,
+    session.authority.sessionHeader.sessionKey,
+    runtimeSessionId,
+  );
 }
 
 function toolResultParts(
@@ -174,23 +241,32 @@ export async function stopParkedRuntimeExecutions(input: {
   session: ManagedSession;
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
-}): Promise<void> {
+}): Promise<HostedWorkspaceBroker> {
   const authorization = await input.session.authority.harnessRunAuthorization();
-  if (authorization.status !== 'runnable') return;
-  const broker = new HostedWorkspaceBroker(
-    input.brokerOptions,
-    input.session.authority.sessionHeader.sessionKey,
+  if (
+    authorization.status !== 'runnable' ||
+    authorization.checkpoint.identity.turnId !== input.promptId
+  )
+    throw new RecoveryDeclined();
+  const broker = await originalRuntimeBroker(
+    input.session,
     input.promptId,
+    authorization.checkpoint.tools?.items ?? [],
+    input.brokerOptions,
   );
   for (const item of authorization.checkpoint.tools?.items ?? []) {
     if (item.state !== 'in_progress' || item.outcomeSource !== 'runtime')
       continue;
     const before = await broker.status(item.executionCallId);
+    if (before?.state === 'unknown')
+      throw new Error('Runtime execution outcome is unknown.');
     if (before === undefined || before.state === 'settled') continue;
     await broker.cancel(item.executionCallId).catch(() => undefined);
     const deadline = Date.now() + 30_000;
     for (;;) {
       const status = await broker.status(item.executionCallId);
+      if (status?.state === 'unknown')
+        throw new Error('Runtime execution outcome is unknown.');
       if (status === undefined || status.state === 'settled') break;
       if (Date.now() >= deadline) {
         throw new Error(
@@ -200,6 +276,7 @@ export async function stopParkedRuntimeExecutions(input: {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
+  return broker;
 }
 
 /**
@@ -207,8 +284,9 @@ export async function stopParkedRuntimeExecutions(input: {
  * load (`passive: false`) re-dispatches every in-progress execution under its
  * original `executionCallId` — the Broker's durable record keeps that
  * exactly-once — commits the tool results and lets the checkpoint reach
- * `results_ready` before the caller answers. A passive load only reads
- * execution states for the cancellation path and never dispatches.
+ * `results_ready` before the caller answers. A passive load adopts the
+ * dead owner's Runtime Session and reads execution states for the
+ * cancellation path; it never dispatches.
  *
  * Returns undefined when this is not a Runtime wait the session can take over;
  * the caller then keeps its plain refusal.
@@ -220,6 +298,13 @@ export async function recoverHostedRuntimeTurn(input: {
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
   passive: boolean;
+  /** Set when the calling Session already holds the Runtime lease from an
+   * earlier recovery of the same parked Turn (a re-answered load whose first
+   * reply was lost): a failed re-acquire then says nothing about the held
+   * lease, so the failure exits below must not release it — a release
+   * persists RELEASED and wedges every later redrive on
+   * runtime_session_not_acquirable. */
+  leaseAlreadyHeld?: boolean;
 }): Promise<HostedRecoveryTurn | undefined> {
   const { session, promptId, passive } = input;
   const authorization = await session.authority.harnessRunAuthorization();
@@ -235,21 +320,46 @@ export async function recoverHostedRuntimeTurn(input: {
   const items = (checkpoint.tools?.items ?? []).filter(
     (item) => item.outcomeSource === 'runtime',
   );
-  const broker = new HostedWorkspaceBroker(
-    input.brokerOptions,
-    session.authority.sessionHeader.sessionKey,
-    promptId,
-  );
+  let broker: HostedWorkspaceBroker;
+  try {
+    broker = await originalRuntimeBroker(
+      session,
+      promptId,
+      items,
+      input.brokerOptions,
+    );
+  } catch (cause) {
+    if (cause instanceof RecoveryDeclined) return undefined;
+    throw cause;
+  }
   const pending = items.filter((item) => item.state === 'in_progress');
   const states = new Map<string, { state: string } | undefined>();
   let acquiredRuntime = false;
+  if (passive && items.length > 0) {
+    // A replacement Broker answers status, cancel and release only for a
+    // Runtime Session it has adopted, so the cancellation path re-attaches
+    // to the dead owner's one first. Acquiring dispatches nothing.
+    //
+    // The passive path never compensation-releases: a release persists the
+    // record as RELEASED, every retried acquire of the same identity then
+    // conflicts with 409 runtime_session_not_acquirable, and a load that
+    // throws leaves no harness-side record a route could hand back. The
+    // adoption instead stays owed to the retried takeover, which re-acquires
+    // a READY session under the same identity idempotently server-side; a
+    // load that reports successfully hands the lease to the cancel route.
+    // The continuation takeover keeps its #13083 handback discipline for
+    // now — whether the same wedge reasoning applies there is a recorded
+    // follow-up, not settled by this change.
+    await broker.acquire();
+    acquiredRuntime = true;
+  }
   if (pending.length > 0) {
     if (passive) {
       for (const item of pending) {
         const status = await broker.status(item.executionCallId);
         states.set(
           item.executionCallId,
-          status === undefined ? undefined : { state: status.state },
+          status?.state === 'unknown' ? undefined : status,
         );
       }
     } else {
@@ -357,13 +467,16 @@ export async function recoverHostedRuntimeTurn(input: {
         }
       } catch (cause) {
         // The caller only learns about the lease from a returned report, so
-        // every failure exit here must give it back first.
-        await broker.release().catch((releaseCause) => {
-          writeStderrLineSafe(
-            `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
-          );
-        });
-        acquiredRuntime = false;
+        // every failure exit here must give it back first — unless the
+        // Session already held it before this call (see leaseAlreadyHeld).
+        if (!input.leaseAlreadyHeld) {
+          await broker.release().catch((releaseCause) => {
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
+            );
+          });
+          acquiredRuntime = false;
+        }
         if (cause instanceof RecoveryDeclined) return undefined;
         throw cause;
       }
@@ -377,12 +490,15 @@ export async function recoverHostedRuntimeTurn(input: {
       acquiredRuntime = true;
     } catch (cause) {
       // A lost acquire reply leaves the lease uncertain: hand back whatever
-      // may exist rather than stranding it.
-      await broker.release().catch((releaseCause) => {
-        writeStderrLineSafe(
-          `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
-        );
-      });
+      // may exist rather than stranding it — unless the Session already holds
+      // the lease (leaseAlreadyHeld), where nothing is uncertain and the
+      // release would only persist RELEASED against every later redrive.
+      if (!input.leaseAlreadyHeld)
+        await broker.release().catch((releaseCause) => {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
+          );
+        });
       throw cause;
     }
   }
@@ -390,9 +506,12 @@ export async function recoverHostedRuntimeTurn(input: {
   try {
     finalAuthorization = await session.authority.harnessRunAuthorization();
   } catch (cause) {
-    // The caller only learns about the lease from a returned report, so a
-    // rejection here must hand it back first.
-    if (acquiredRuntime) {
+    // A failed continuation hands the lease back — but a passive load must
+    // not (see the adoption comment above): its retried takeover re-acquires
+    // the READY identity idempotently, while a release would wedge it. A
+    // lease the Session already held before this call stays held for the
+    // same reason (leaseAlreadyHeld).
+    if (acquiredRuntime && !passive && !input.leaseAlreadyHeld) {
       await broker.release().catch((releaseCause) => {
         writeStderrLineSafe(
           `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
@@ -403,7 +522,9 @@ export async function recoverHostedRuntimeTurn(input: {
     throw cause;
   }
   if (finalAuthorization.status !== 'runnable') {
-    if (acquiredRuntime) {
+    // Same split as the catch above: only the continuation path hands its
+    // lease back here; a passive load leaves the adoption owed.
+    if (acquiredRuntime && !passive && !input.leaseAlreadyHeld) {
       await broker.release().catch((releaseCause) => {
         writeStderrLineSafe(
           `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
@@ -419,7 +540,7 @@ export async function recoverHostedRuntimeTurn(input: {
       functionCallId: item.functionCallId,
       toolName: item.toolName,
       executionCallId: item.executionCallId,
-      runtimeSessionId: promptId,
+      runtimeSessionId: broker.runtimeSessionId,
       outcome:
         item.state === 'settled' || state !== undefined ? 'known' : 'unknown',
       ...(item.state === 'settled'

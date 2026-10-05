@@ -173,6 +173,8 @@ One row per Session:
 
 The primary key is `(tenant_id, session_id)`. Every mutating transaction locks this exact row through its unique key. InnoDB locking reads provide the row serialization needed for the head CAS. [MySQL InnoDB locking](https://dev.mysql.com/doc/refman/8.0/en/innodb-best-practices.html)
 
+Writer API `leaseUntil` and publication/activation expiry values are Unix epoch milliseconds, not the epoch of a JDBC-decoded database-local `DATETIME`. Keep internal lease arithmetic and persisted `DATETIME` values unchanged; convert at scalar epoch boundaries through the database. Bind whole seconds and add the original fraction separately to preserve MariaDB precision. Check producer writer liveness in the locked SQL query rather than converting `LocalDateTime` with the JVM timezone. Validate acquire, repeated acquire, renew and takeover against the persisted SQL Unix epoch under differing JDBC/JVM/database timezones, and reject an expired activation even when its phase remains active. This correction adds no timezone setting or schema migration. Mixed-version rolling upgrade is not a safe path for it: while a previous-version instance still writes shifted expiry values, an already-corrected instance reclaims them, so in-flight tool publications are lost rather than drained. Stop every previous-version instance first, the boundary [Durable lifecycle](2026-09-28-managed-agent-durable-lifecycle.md) states for its own migration.
+
 ### 6.2 `qwen_managed_session_journal_tx`
 
 One row per committed Managed transaction:

@@ -35,6 +35,7 @@ const SETUP_ENV_KEYS = [
   'TEST_CLI_PATH',
   'VERBOSE',
   'KEEP_OUTPUT',
+  'QWEN_CODE_MODELS_DEV_REFRESH',
 ] as const;
 
 describe('globalSetup memory-file save/restore', () => {
@@ -116,6 +117,7 @@ describe('globalSetup hermetic qwen home', () => {
     // it lands in the OS temp dir — redirect that so the case owns what the
     // module picks. Both are read at import time, so they must be set first.
     delete process.env['QWEN_HOME'];
+    process.env['QWEN_CODE_MODELS_DEV_REFRESH'] = 'on';
     process.env['TMPDIR'] = tmpRoot;
     process.env['KEEP_OUTPUT'] = 'false';
   });
@@ -143,6 +145,7 @@ describe('globalSetup hermetic qwen home', () => {
 
     const home = process.env['QWEN_HOME'];
     expect(home?.startsWith(tmpRoot)).toBe(true);
+    expect(process.env['QWEN_CODE_MODELS_DEV_REFRESH']).toBe('off');
 
     await expect(teardown()).resolves.toBeUndefined();
     expect(existsSync(home!)).toBe(false);

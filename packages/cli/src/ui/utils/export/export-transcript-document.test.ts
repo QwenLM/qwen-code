@@ -53,6 +53,95 @@ const sessionData = {
 };
 
 describe('ExportTranscriptDocumentV1', () => {
+  it('exports a complete outer transcript while retaining raw internal evidence', () => {
+    const results = [
+      {
+        id: 'nested-write',
+        name: 'write_file',
+        output: CANARY,
+        provenance: 'tool_result',
+        subtype: 'code_mode_tool_result',
+      },
+      {
+        id: 'nested-goal',
+        name: 'get_goal',
+        output: CANARY,
+        provenance: 'goal_runtime',
+        subtype: 'code_mode_tool_result',
+      },
+      {
+        id: 'outer',
+        name: 'exec',
+        output: 'script finished',
+        provenance: 'execution_output',
+      },
+      {
+        id: 'direct-goal',
+        name: 'get_goal',
+        output: 'direct goal result',
+        provenance: 'goal_runtime',
+      },
+    ];
+    const records = [
+      record('calls', null, {
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'outer',
+                name: 'exec',
+                args: { source: 'await tools.write_file({})' },
+              },
+            },
+            { functionCall: { id: 'direct-goal', name: 'get_goal', args: {} } },
+          ],
+        },
+      }),
+      ...results.map(({ id, name, output, ...options }, index) =>
+        record(id, index === 0 ? 'calls' : results[index - 1].id, {
+          type: 'tool_result',
+          ...options,
+          message: {
+            role: 'user',
+            parts: [{ functionResponse: { id, name, response: { output } } }],
+          },
+          toolCallResult: {
+            callId: id,
+            status: 'success',
+            resultDisplay:
+              id === 'nested-write'
+                ? {
+                    fileName: 'internal.txt',
+                    fileDiff: `@@ -0,0 +1 @@\n+${output}`,
+                    originalContent: null,
+                    newContent: output,
+                  }
+                : output,
+          },
+        }),
+      ),
+    ];
+    const original = JSON.stringify(records);
+    const document = createExportTranscriptDocumentV1(
+      records,
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    expect(document.metadata).toMatchObject({
+      complete: true,
+      truncated: false,
+    });
+    expect(document.diagnostics).toEqual([]);
+    expect(
+      document.blocks
+        .filter((block) => block.kind === 'tool')
+        .map((block) => block.toolName),
+    ).toEqual(['exec', 'get_goal']);
+    expect(JSON.stringify(document)).not.toContain(CANARY);
+    expect(JSON.stringify(records)).toBe(original);
+  });
   it('projects records through an explicit allowlist without raw leakage', () => {
     const records = [
       record('user-1', null, {

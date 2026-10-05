@@ -12,6 +12,7 @@ import {
 import type { SessionSourceService } from '../services/session-sources.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
+import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   captureReasoningSnapshot,
   validateReasoningCapabilities,
@@ -79,7 +80,10 @@ import type {
   ExecutionEnvironment,
   ExecutionEnvironmentFactory,
 } from '../services/execution-environment.js';
-import { ExecutionCleanupError } from '../services/execution-environment.js';
+import {
+  ExecutionCleanupError,
+  MANAGED_RUNTIME_TOOL_NAMES,
+} from '../services/execution-environment.js';
 import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
 import {
   DashScopeOpenAICompatibleProvider,
@@ -209,6 +213,7 @@ import {
   createInstructionsLoadedCallback,
 } from '../hooks/index.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
+import type { ManagedHookDispatcher } from '../hooks/hookEventHandler.js';
 import {
   MessageBusType,
   type HookExecutionRequest,
@@ -245,7 +250,10 @@ import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
-import { createAgentToolInvocationGuard } from '../agents/workspace-agents/capability.js';
+import {
+  createAgentHostToolInvocationGuard,
+  createAgentToolInvocationGuard,
+} from '../agents/workspace-agents/capability.js';
 import type {
   ExecutionSandboxPolicy,
   ResolvedExecutionSandboxPolicy,
@@ -1089,6 +1097,13 @@ export interface ConfigParameters {
    * prove it, before hooks, MCP or tools start.
    */
   sessionExecutionEngine?: SessionExecutionEngine;
+  /**
+   * Builds the environment of a Managed session's Runtime-backed tools: each
+   * call is prepared and permission-checked in this process and executed in
+   * the session's Runtime worker. Ignored for any other engine. Without it a
+   * Managed session has no tools.
+   */
+  managedRuntimeEnvironment?: (config: Config) => ExecutionEnvironment;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -1184,6 +1199,8 @@ export interface ConfigParameters {
   eagerTools?: string[];
   /** Replace ordinary model-facing tools with the isolated exec bridge. */
   codeModeOnly?: boolean;
+  /** Use Responses Custom Tool text input for exec in Code Mode Only. */
+  freeform?: boolean;
   /**
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
@@ -2218,6 +2235,7 @@ export interface ConfigInitializeOptions {
    * helpers use this to avoid loading or subscribing user/workspace hooks.
    */
   skipHooks?: boolean;
+  managedHookDispatcher?: ManagedHookDispatcher;
   /**
    * Skip SkillManager creation and file watching. Read-only replay helpers do
    * not need skill discovery and must not start long-lived watchers.
@@ -2714,6 +2732,12 @@ export class Config {
     SessionRestoreProjection | undefined
   >;
   private readonly sessionExecutionEngine?: SessionExecutionEngine;
+  private readonly managedRuntimeEnvironmentFactory?: (
+    config: Config,
+  ) => ExecutionEnvironment;
+  private managedRuntimeEnvironment?: ExecutionEnvironment;
+  private managedRuntimeClosing?: Promise<void>;
+  private managedSessionBlock?: Error;
   private restoredFileHistory = false;
   private goalRestoreActivation?: () => Promise<void>;
   private rejectGoalRestoreActivation?: (reason?: unknown) => void;
@@ -2851,6 +2875,7 @@ export class Config {
   private readonly eagerTools: readonly string[] | undefined;
   private readonly toolSearchThreshold: number;
   private readonly toolMode: ToolModeValue;
+  private readonly freeform: boolean;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -3271,6 +3296,10 @@ export class Config {
     this.sessionData = params.sessionData;
     this.sessionRestoreProjectionSource = params.sessionRestoreProjectionSource;
     this.sessionExecutionEngine = params.sessionExecutionEngine;
+    this.managedRuntimeEnvironmentFactory =
+      params.sessionExecutionEngine === 'managed'
+        ? params.managedRuntimeEnvironment
+        : undefined;
     this.setSessionRestoreProjection(params.sessionRestoreProjection);
     // Daemon Configs use sessionIdContext and must not replace the
     // single-session CLI fallback with whichever session was created last.
@@ -3399,7 +3428,11 @@ export class Config {
       email: 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
-    this.fileReadCacheDisabled = params.fileReadCacheDisabled ?? false;
+    // A Managed session reads in its Runtime worker, so this process could
+    // neither elide a repeated read nor prove the read an edit requires.
+    this.fileReadCacheDisabled =
+      params.sessionExecutionEngine === 'managed' ||
+      (params.fileReadCacheDisabled ?? false);
     this.outputLanguageFilePath = params.outputLanguageFilePath;
 
     this.fileFiltering = {
@@ -3555,6 +3588,8 @@ export class Config {
       params.codeModeOnly && !this.bareMode && !this.safeMode
         ? ToolMode.CodeModeOnly
         : ToolMode.Direct;
+    this.freeform =
+      this.toolMode === ToolMode.CodeModeOnly && params.freeform === true;
     if (this.safeMode) {
       this.debugLogger.info(
         'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
@@ -4038,6 +4073,7 @@ export class Config {
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
+    void refreshModelCatalog();
     options?.signal?.throwIfAborted();
     // Omni multimodal support declares ffmpeg/ffprobe as hard runtime
     // prerequisites: fail fast at startup with an actionable message
@@ -4100,8 +4136,12 @@ export class Config {
 
     // Bare mode and read-only replay helpers skip all hook loading and execution.
     recordStartupEvent('config_initialize_hooks_start');
-    if (!options?.skipHooks && !this.getDisableAllHooks()) {
-      this.hookSystem = new HookSystem(this);
+    if (
+      !this.shellExecutionSandbox &&
+      (options?.managedHookDispatcher ||
+        (!options?.skipHooks && !this.getDisableAllHooks()))
+    ) {
+      this.hookSystem = new HookSystem(this, options?.managedHookDispatcher);
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
 
@@ -4675,6 +4715,7 @@ export class Config {
     if (
       !this.shellExecutionSandbox &&
       !this.getBareMode() &&
+      this.sessionSourceType !== 'agent-host' &&
       !this.provisionalWorkspace
     ) {
       void (async () => {
@@ -5849,6 +5890,60 @@ export class Config {
 
   getSessionExecutionEngine(): SessionExecutionEngine | undefined {
     return this.sessionExecutionEngine;
+  }
+
+  /**
+   * The environment this Managed session's Runtime-backed tools execute in,
+   * built on first use. A derived Config has none: its tools would need an
+   * execution scope of their own.
+   */
+  getManagedRuntimeEnvironment(): ExecutionEnvironment | undefined {
+    if (isDerivedConfig(this)) return undefined;
+    if (
+      !this.managedRuntimeEnvironment &&
+      !this.shutdownRequested &&
+      !this.managedRuntimeClosing
+    ) {
+      this.managedRuntimeEnvironment =
+        this.managedRuntimeEnvironmentFactory?.(this);
+    }
+    return this.managedRuntimeEnvironment;
+  }
+
+  /**
+   * Stops this Managed session's Runtime worker, once. It runs before the
+   * session's log is finished, so no call the worker runs outlives the log.
+   * Afterwards the session has no environment: none is handed out or built,
+   * so a registry made later has no Runtime-backed tools.
+   */
+  closeManagedRuntime(): Promise<void> {
+    if (isDerivedConfig(this)) {
+      return (Object.getPrototypeOf(this) as Config).closeManagedRuntime();
+    }
+    if (!this.managedRuntimeClosing) {
+      const environment = this.managedRuntimeEnvironment;
+      this.managedRuntimeEnvironment = undefined;
+      this.managedRuntimeClosing = Promise.resolve(environment?.dispose());
+    }
+    return this.managedRuntimeClosing;
+  }
+
+  /**
+   * Blocks this Managed session after a Runtime tool call ended without a
+   * known outcome. The model is not asked again: it could repeat a call that
+   * already took effect. The first reason is kept.
+   */
+  blockManagedSession(reason: Error): void {
+    if (isDerivedConfig(this)) {
+      (Object.getPrototypeOf(this) as Config).blockManagedSession(reason);
+      return;
+    }
+    this.managedSessionBlock ??= reason;
+  }
+
+  /** Why this Managed session is blocked, or undefined while it is not. */
+  getManagedSessionBlock(): Error | undefined {
+    return this.managedSessionBlock;
   }
 
   getSessionRestoreRuntime(): SessionRuntimeResumeState | undefined {
@@ -7524,6 +7619,10 @@ export class Config {
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot relocate working directories');
     }
+    if (this.sessionExecutionEngine === 'managed') {
+      // Its Runtime worker is bound to the directory it was admitted in.
+      throw new Error('A Managed session cannot change its directory.');
+    }
     if (
       !opts?.skipArtifactMigration &&
       this.chatRecordingService?.hasWriteOwnership()
@@ -7682,6 +7781,20 @@ export class Config {
     this.shutdownRequested = true;
     void this.shutdownExecutionEnvironments().catch(() => undefined);
     this.settingsWatcher?.stopWatching();
+    // Only a Config with a Runtime waits for it, so others close their
+    // writer as soon as they did.
+    if (this.managedRuntimeEnvironment || this.managedRuntimeClosing) {
+      try {
+        await this.closeManagedRuntime();
+      } catch (error) {
+        // A stop the registry cannot prove is reported, not fatal: M5c
+        // keeps the engine quarantined on it.
+        this.debugLogger.error(
+          'Failed to stop the Managed Runtime worker:',
+          error,
+        );
+      }
+    }
     const closeWriter = () =>
       this.closeSessionWriter().catch((error) => {
         this.debugLogger.error(
@@ -8124,6 +8237,10 @@ export class Config {
 
   getCodeModeOnly(): boolean {
     return this.toolMode === ToolMode.CodeModeOnly;
+  }
+
+  getFreeform(): boolean {
+    return this.freeform;
   }
 
   getToolMode(): ToolModeValue {
@@ -10625,6 +10742,7 @@ export class Config {
    */
   getDisableAllHooks(): boolean {
     if (this.shellExecutionSandbox) return true;
+    if (this.hookSystem?.isManaged()) return false;
     return this.disableAllHooks || this.getBareMode() || this.isSafeMode();
   }
 
@@ -11937,9 +12055,8 @@ export class Config {
   }
 
   /**
-   * Whether this session runs as a workspace agent, inside the read-only
-   * capability boundary. The one source of truth for the tool registry, the
-   * invocation guard and skill side effects.
+   * Whether this session carries a workspace-agent persona. This is the source
+   * of truth for collaboration tools and skill side effects.
    */
   isWorkspaceAgentSession(): boolean {
     return (
@@ -11948,6 +12065,15 @@ export class Config {
   }
 
   getToolInvocationGuard(): ToolInvocationGuard | undefined {
+    // A persisted Host session stays read-only even after collaboration is off.
+    if (this.sessionSourceType === 'agent-host') {
+      return createAgentHostToolInvocationGuard(
+        this.toolInvocationGuard,
+        this.getTargetDir(),
+        (candidate) =>
+          this.getWorkspaceContext().isPathWithinWorkspace(candidate),
+      );
+    }
     return this.isWorkspaceAgentSession()
       ? createAgentToolInvocationGuard(
           this.toolInvocationGuard,
@@ -12014,6 +12140,49 @@ export class Config {
       registry.registerPermissionDeferredFactory(toolName, factory);
     } else if (status === 'registered') {
       registry.registerFactory(toolName, factory);
+    }
+  }
+
+  /**
+   * Registers a Managed session's tools: the first-phase tools, prepared and
+   * permission-checked here and executed in the session's Runtime worker. The
+   * permission manager decides their registration as it does for Legacy.
+   */
+  private async registerManagedRuntimeTools(
+    registry: ToolRegistry,
+  ): Promise<void> {
+    const environment = this.getManagedRuntimeEnvironment();
+    if (!environment) return;
+    const [{ createExecutionTools }, { wrapExecutionTool }] = await Promise.all(
+      [
+        import('../services/local-execution-environment.js'),
+        import('../tools/execution-tool.js'),
+      ],
+    );
+    const tools = createExecutionTools(this);
+    for (const name of MANAGED_RUNTIME_TOOL_NAMES) {
+      const tool = tools.get(name);
+      if (!tool) continue;
+      let status: ToolRegistrationStatus;
+      try {
+        status =
+          (await this.getPermissionManager()?.getToolRegistrationStatus(
+            name as ToolName,
+          )) ?? 'registered';
+      } catch (error) {
+        this.debugLogger.warn(
+          `Failed to check permissions for tool "${name}", skipping registration:`,
+          error,
+        );
+        continue;
+      }
+      if (status === 'disabled') continue;
+      registry.registerRuntimeBackedFactory(
+        name,
+        async () => wrapExecutionTool(tool, environment, this),
+        environment,
+        status === 'deferred',
+      );
     }
   }
 
@@ -12135,10 +12304,11 @@ export class Config {
       this.eventEmitter,
       sendSdkMcpMessage,
     );
-    // The registry refuses every tool of a Managed session, but its manager
-    // still connects a runtime-added server.
+    // The registry refuses every other tool of a Managed session, but its
+    // manager still connects a runtime-added server.
     if (this.sessionExecutionEngine === 'managed') {
       this.applyPendingMcpBudgetCallback(registry);
+      await this.registerManagedRuntimeTools(registry);
       return registry;
     }
 

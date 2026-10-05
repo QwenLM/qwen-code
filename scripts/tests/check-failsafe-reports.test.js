@@ -40,7 +40,7 @@ function module(name, sources, reports = {}, properties = '') {
   for (const [className, [ran, skipped]] of Object.entries(reports)) {
     const cases = [
       ...Array(ran).fill(
-        '<testcase name="passes"><system-out><![CDATA[log: <skipped/>]]></system-out></testcase>',
+        '<testcase name="passes"><system-out><![CDATA[log: <skipped/><failure/><error/>]]></system-out></testcase>',
       ),
       ...Array(skipped).fill(
         '<testcase name="skips"><skipped message="disabled"/></testcase>',
@@ -62,6 +62,62 @@ function check(...args) {
 }
 
 describe('check-failsafe-reports', () => {
+  it.each([
+    ['o4-mysql', 'O4MySqlGate', 'failure'],
+    ['o4-mysql', 'O4MySqlGate', 'error'],
+    ['o4-oss', 'O4OssGate', 'failure'],
+    ['o4-oss', 'O4OssGate', 'error'],
+  ])('rejects %s %s %s even with Maven failure-ignore', (family, gate, tag) => {
+    const className = `com.example.${gate}`;
+    const dir = module('failed', [className]);
+    writeFileSync(
+      join(dir, 'target', 'failsafe-reports', `TEST-${className}.xml`),
+      `<testsuite name="${className}" tests="1" failures="${tag === 'failure' ? 1 : 0}" errors="${tag === 'error' ? 1 : 0}" skipped="0"><properties><property name="maven.test.failure.ignore" value="true"/></properties><testcase name="fails"><${tag} message="failed"/></testcase></testsuite>`,
+    );
+    const result = check(family, dir);
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('skipped or failed gate case');
+  });
+
+  it.each([
+    ['o4-mysql', 'O4MySqlGate'],
+    ['o4-oss', 'O4OssGate'],
+  ])(
+    'requires complete opt-in %s evidence without changing the ordinary family',
+    (family, gate) => {
+      const sources = [
+        'com.example.OrdersIT',
+        'com.example.O4MySqlGate',
+        'com.example.O4OssGate',
+      ];
+      const complete = module('complete', sources, {
+        [`com.example.${gate}`]: [3, 0],
+      });
+      expect(check(family, complete).status).toBe(0);
+      const ordinary = module('ordinary', sources, {
+        'com.example.OrdersIT': [1, 0],
+      });
+      expect(check('non-hosted', ordinary).status).toBe(0);
+      expect(check(family, ordinary).status).toBe(1);
+      const skipped = module('skipped', sources, {
+        [`com.example.${gate}`]: [2, 1],
+      });
+      expect(check(family, skipped).output).toContain(
+        'skipped or failed gate case',
+      );
+      expect(check(family, skipped).status).toBe(1);
+      const narrowed = module(
+        'narrowed',
+        sources,
+        { [`com.example.${gate}`]: [1, 0] },
+        `<property name="it.test" value="${gate}#one"/>`,
+      );
+      expect(check(family, narrowed).status).toBe(1);
+      const absent = module('absent', ['com.example.OrdersIT']);
+      expect(check(family, absent).status).toBe(1);
+    },
+  );
+
   it('passes when every integration test of the family ran, whatever the other family did', () => {
     const sources = [
       'com.example.OrdersIT',
@@ -202,6 +258,7 @@ describe('check-failsafe-reports', () => {
 
   it('refuses an unknown family or a missing module', () => {
     expect(check('mariadb', root).status).toBe(2);
+    expect(check('constructor', root).status).toBe(2);
     expect(check('hosted').status).toBe(2);
     expect(check('hosted', join(root, 'absent')).status).not.toBe(0);
   });

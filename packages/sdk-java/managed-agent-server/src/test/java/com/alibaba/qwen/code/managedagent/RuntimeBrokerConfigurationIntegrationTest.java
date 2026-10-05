@@ -34,6 +34,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
         "qwen.managed-agent.runtime-broker.credential-key="
                 + "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
         "qwen.managed-agent.runtime-broker.provisioner=static",
+        "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
         "qwen.managed-agent.runtime-broker.workspace-id=workspace",
         "qwen.managed-agent.runtime-broker.workspace-cwd=workspace",
         "qwen.managed-agent.runtime-broker.isolation-class=workspace",
@@ -53,6 +54,18 @@ class RuntimeBrokerConfigurationIntegrationTest {
     private SecretProtector secretProtector;
     @Autowired
     private JdbcTemplate jdbcTemplate;
+    @Autowired
+    private org.springframework.context.ApplicationContext context;
+
+    @Test
+    void recoveryTickRunsOnADedicatedScheduler() throws Exception {
+        assertThat(context.containsBean("runtimeRecoveryScheduler")).isTrue();
+        assertThat(context.getBean("runtimeRecoveryScheduler"))
+                .isNotSameAs(context.getBean("taskScheduler"));
+        var scheduled = EmbeddedRuntimeBroker.class.getMethod("recoverSavedRuntimes")
+                .getAnnotation(org.springframework.scheduling.annotation.Scheduled.class);
+        assertThat(scheduled.scheduler()).isEqualTo("runtimeRecoveryScheduler");
+    }
 
     @Test
     void selectsTheEmbeddedBrokerAsTheRuntimeWarmer() {

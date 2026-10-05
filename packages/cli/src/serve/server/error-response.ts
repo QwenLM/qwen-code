@@ -1196,6 +1196,15 @@ export function sendBridgeError(
         });
         return;
       }
+      // An operation this session does not offer, such as a directory change
+      // in an SSH workspace or a Managed session.
+      if (kind === 'unsupported_operation') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'unsupported_operation',
+        });
+        return;
+      }
       if (kind === 'invalid_transcript_cursor') {
         res.status(400).json({
           error: errorMessage(err),
