@@ -21,6 +21,11 @@ import {
   wakeHasPriorAttempt,
   type HostedMonitorWakeTurn,
 } from './hosted-monitor-wake.js';
+import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import {
+  createMonitorWakeRunTurn,
+  type MonitorWakeTurnSession,
+} from './hosted-monitor-wake-turn.js';
 
 // monitor_run is enabled by the H3 enablement slice; the close-side settle
 // rig commits a notification input ahead of it, like the funnel suite does.
@@ -272,6 +277,141 @@ describe('wakeHasPriorAttempt', () => {
     expect(wakeHasPriorAttempt([{ daemonPromptId: 'm:1' }], 'm:1')).toBe(true);
     expect(wakeHasPriorAttempt([{ daemonPromptId: 'm:1' }], 'm:2')).toBe(false);
     expect(wakeHasPriorAttempt([], 'm:1')).toBe(false);
+  });
+});
+
+describe('createMonitorWakeRunTurn', () => {
+  const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+  const sessionKey = {
+    tenantId: 'tenant-1',
+    workspaceId: 'workspace-1',
+    sessionId,
+  };
+  const temporaryDirectories = new Set<string>();
+
+  afterEach(async () => {
+    for (const directory of temporaryDirectories) {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+    temporaryDirectories.clear();
+  });
+
+  async function openWakeSession() {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-monitor-wake-turn-'),
+    );
+    temporaryDirectories.add(root);
+    const runtimeBaseDir = path.join(root, 'runtime');
+    const transcriptPath = path.join(root, 'chats', `${sessionId}.jsonl`);
+    await fs.mkdir(runtimeBaseDir, { recursive: true });
+    await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+    const lease = await SessionWriterLease.acquire({
+      runtimeBaseDir,
+      sessionId,
+      transcriptPath,
+    });
+    const resourceStore = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir,
+      sessionKey,
+    });
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId,
+      transcriptPath,
+      sessionKey,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'worker-test',
+      activationLeaseDurationMs: 60_000,
+      lease,
+      resourceStore,
+      create: {
+        definitionRef: await resourceStore.publish(
+          'managed-definition',
+          Buffer.from('{}', 'utf8'),
+        ),
+        rootSnapshotRef: await resourceStore.publish(
+          'managed-root',
+          Buffer.from('{}', 'utf8'),
+        ),
+        createdBy: 'test',
+      },
+    });
+    return { session, lease };
+  }
+
+  it('queues instead of clearing a prompt claim that lands mid-read', async () => {
+    const { session, lease } = await openWakeSession();
+    try {
+      const access: MonitorWakeTurnSession['session'] = {
+        active: undefined,
+        blocked: false,
+        managed: { sink: session.sink },
+      };
+      let openGate: () => void = () => undefined;
+      const gate = new Promise<ReadonlyArray<{ daemonPromptId?: string }>>(
+        (resolve) => {
+          openGate = () => resolve([]);
+        },
+      );
+      const project = vi
+        .spyOn(session.sink, 'project')
+        .mockImplementation(() => gate as Promise<ChatRecord[]>);
+      let reachedModel = false;
+      const runTurn = createMonitorWakeRunTurn({
+        session: access,
+        sessionId,
+        cwd: '/workspace',
+        executeHostedTurn: async () => {
+          reachedModel = true;
+        },
+        busy: () => access.active !== undefined,
+        writeStderr: () => undefined,
+      });
+      const pending = runTurn({ turnId: 'm:1', text: 'wake' });
+      // The prompt route's own admission lands while the journal read
+      // is still open: the wake turn must queue, never trade claims.
+      const user = {
+        promptId: 'user-1',
+        digest: '',
+        abort: new AbortController(),
+      } as const;
+      access.active = user;
+      openGate();
+      expect(await pending).toBe('busy');
+      expect(access.active).toBe(user);
+      expect(reachedModel).toBe(false);
+      expect(project).toHaveBeenCalledTimes(1);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  it('runs the turn and returns active to its idle claim after settle', async () => {
+    const { session, lease } = await openWakeSession();
+    try {
+      const access: MonitorWakeTurnSession['session'] = {
+        active: undefined,
+        blocked: false,
+        managed: { sink: session.sink },
+      };
+      let ran: string | undefined;
+      const runTurn = createMonitorWakeRunTurn({
+        session: access,
+        sessionId,
+        cwd: '/workspace',
+        executeHostedTurn: async (promptId) => {
+          ran = promptId;
+        },
+        busy: () => access.active !== undefined,
+        writeStderr: () => undefined,
+      });
+      expect(await runTurn({ turnId: 'm:1', text: 'wake' })).toBe('settled');
+      expect(ran).toBe('m:1');
+      expect(access.active).toBeUndefined();
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
   });
 });
 

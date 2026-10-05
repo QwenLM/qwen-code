@@ -68,8 +68,8 @@ import { HostedMonitorSession } from './hosted-monitor-session.js';
 import {
   HostedMonitorWakeScheduler,
   settlePendingMonitorInputs,
-  wakeHasPriorAttempt,
 } from './hosted-monitor-wake.js';
+import { createMonitorWakeRunTurn } from './hosted-monitor-wake-turn.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
@@ -876,24 +876,28 @@ async function verifyWorkspaceRestore(
   return incomplete;
 }
 
-async function recoverShellReceipts(
-  session: HostedSession,
-  options: HostedWorkspaceBrokerOptions,
-  throughSequence: number,
-): Promise<string | null> {
-  const authority = session.managed.authority;
-  const events = authority.eventsInSequenceRange(1, throughSequence);
+/**
+ * Attributes each durable Shell receipt to the prompt whose turn ran the tool.
+ *
+ * Attribution never follows a monitor notification: a wake may only claim the
+ * session while idle, so a receipt that follows a queued notification still
+ * belongs to the occupied foreground turn. Receipts after every non-monitor
+ * input settled attribute to nothing and stay unrecovered by the caller.
+ */
+export function attributeShellReceipts(
+  events: readonly ManagedSessionEvent[],
+): {
+  promptId: string | null;
+  receipts: Array<{ promptId: string; event: ManagedSessionEvent }>;
+} {
   const pending = new Set<string>();
   const receipts: Array<{ promptId: string; event: ManagedSessionEvent }> = [];
   let currentPrompt: string | null = null;
   for (const event of events) {
     if (event.kind === 'input.accepted') {
       const turnId = event.payload['turnId'];
-      if (typeof turnId === 'string') {
-        // A wake turn's receipts belong to its own turnId like any
-        // prompt's, even though the pending set deliberately never sees a
-        // monitor notification as a parked Turn.
-        if (!isMonitorInput(event)) pending.add(turnId);
+      if (typeof turnId === 'string' && !isMonitorInput(event)) {
+        pending.add(turnId);
         currentPrompt = turnId;
       }
     }
@@ -908,7 +912,20 @@ async function recoverShellReceipts(
       }
     }
   }
-  const promptId = pending.size === 1 ? [...pending][0] : null;
+  return {
+    promptId: pending.size === 1 ? [...pending][0] : null,
+    receipts,
+  };
+}
+
+async function recoverShellReceipts(
+  session: HostedSession,
+  options: HostedWorkspaceBrokerOptions,
+  throughSequence: number,
+): Promise<string | null> {
+  const authority = session.managed.authority;
+  const events = authority.eventsInSequenceRange(1, throughSequence);
+  const { promptId, receipts } = attributeShellReceipts(events);
   const harness = createManagedHarnessHandle(session.managed);
   const projected = receipts.length
     ? await session.managed.sink.project(throughSequence)
@@ -1750,81 +1767,23 @@ export function registerHostedHarnessSessionRoutes(
           },
           state: () =>
             wakeBlocked() ? 'blocked' : wakeBusy() ? 'busy' : 'idle',
-          runTurn: async (turn) => {
-            if (wakeBusy() || session.blocked) return 'busy';
-            if (
-              wakeHasPriorAttempt(
-                await session.managed.sink.project(),
-                turn.turnId,
-              )
-            ) {
-              // The notification ran and died inside the turn it started.
-              // Re-driving it text-only would mint a second user record and
-              // an unanswered first call in the model's history, so it is
-              // for the recovery fleet, never for the pump.
-              session.blocked = true;
-              writeStderrLineSafe(
-                'qwen serve: Monitor wake turn ' +
-                  turn.turnId +
-                  ' needs recovery, not a re-drive.',
-              );
-              return 'settled';
-            }
-            const abort = new AbortController();
-            session.active = { promptId: turn.turnId, digest: '', abort };
-            try {
-              await executeHostedTurn(
+          runTurn: createMonitorWakeRunTurn({
+            session,
+            sessionId,
+            cwd,
+            executeHostedTurn: (promptId, text, abort) =>
+              executeHostedTurn(
                 session,
                 sessionId,
                 cwd,
-                turn.turnId,
-                turn.text,
+                promptId,
+                text,
                 abort,
                 brokerOptions,
-              );
-            } catch (cause) {
-              if (
-                cause instanceof HostedToolRecoveryRequiredError ||
-                cause instanceof HostedMcpRecoveryRequiredError ||
-                cause instanceof HostedHookRecoveryRequiredError
-              ) {
-                // Something parked mid-turn: a later settle or takeover
-                // consumes the input, exactly like a parked prompt.
-                session.blocked = true;
-                writeStderrLineSafe(
-                  'qwen serve: Monitor wake turn ' +
-                    turn.turnId +
-                    ' is recovery blocked: ' +
-                    String(cause),
-                );
-                return 'settled';
-              }
-              try {
-                await session.managed.sink.write(
-                  record(session, sessionId, 'system', null, {
-                    subtype: 'turn_result',
-                    systemPayload: {
-                      promptId: turn.turnId,
-                      state: 'error',
-                      stopReason: 'error',
-                      endedAt: Date.now(),
-                    },
-                  }),
-                );
-              } catch (settleCause) {
-                session.blocked = true;
-                writeStderrLineSafe(
-                  'qwen serve: Monitor wake turn ' +
-                    turn.turnId +
-                    ' could not settle: ' +
-                    String(settleCause),
-                );
-              }
-            } finally {
-              session.active = undefined;
-            }
-            return 'settled';
-          },
+              ),
+            busy: wakeBusy,
+            writeStderr: writeStderrLineSafe,
+          }),
           failed: (cause) => {
             session.blocked = true;
             writeStderrLineSafe(

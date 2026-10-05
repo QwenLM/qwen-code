@@ -37,7 +37,10 @@ import {
   createHostedHarnessContract,
   installHostedHarnessContractMiddleware,
 } from './hosted-harness-contract.js';
-import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import {
+  attributeShellReceipts,
+  registerHostedHarnessSessionRoutes,
+} from './hosted-harness-session.js';
 import {
   HostedHookRecoveryRequiredError,
   HostedHookSession,
@@ -340,6 +343,43 @@ async function hookApp() {
     headers(request).set('X-Qwen-Client-Id', created.body.clientId);
   return { server, authorize, definition, catalog, requests, release };
 }
+
+describe('attributeShellReceipts', () => {
+  const input = (turnId: string, source = 'hosted-harness') =>
+    ({
+      kind: 'input.accepted',
+      payload: { turnId, source },
+    }) as unknown as ManagedSessionEvent;
+  const receipt = () =>
+    ({
+      kind: 'tool.receipt',
+      payload: { executionCallId: 'call' },
+    }) as unknown as ManagedSessionEvent;
+
+  it('attributes a receipt behind a queued monitor notification to the foreground prompt', () => {
+    const { promptId, receipts } = attributeShellReceipts([
+      input('prompt'),
+      input('monitor:1:notify:1', 'monitor'),
+      receipt(),
+    ]);
+    expect(promptId).toBe('prompt');
+    expect(receipts.map((item) => item.promptId)).toEqual(['prompt']);
+  });
+
+  it('attributes a receipt behind a settled turn to no prompt at all', () => {
+    const { promptId, receipts } = attributeShellReceipts([
+      input('prompt'),
+      receipt(),
+      {
+        kind: 'turn.settled',
+        payload: { turnId: 'prompt' },
+      } as unknown as ManagedSessionEvent,
+      receipt(),
+    ]);
+    expect(promptId).toBeNull();
+    expect(receipts.map((item) => item.promptId)).toEqual(['prompt']);
+  });
+});
 
 describe('Hosted Harness no-tool session', () => {
   beforeEach(async () => {
