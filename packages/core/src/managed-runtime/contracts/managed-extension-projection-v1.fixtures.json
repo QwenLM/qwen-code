@@ -24,6 +24,14 @@
     "sending",
     "unknown"
   ],
+  "runtimeStates": ["draining", "lost", "provisioning", "ready", "unbound"],
+  "taskKinds": [
+    "automation_run",
+    "background_shell",
+    "child_agent",
+    "monitor",
+    "workflow"
+  ],
   "taskIdCases": [
     {
       "id": "monitor",
@@ -3848,12 +3856,36 @@
         "settledAt": null
       },
       "deliveryPending": false
+    },
+    {
+      "id": "attached-but-unbound",
+      "occurredAt": 1000,
+      "run": {
+        "state": "running",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "running_attached",
+        "runtime": null,
+        "delivery": null
+      },
+      "view": {
+        "state": "running",
+        "runtimeState": "unbound",
+        "definitionRevision": null,
+        "createdAt": 1000,
+        "startedAt": 1000,
+        "settledAt": null
+      },
+      "deliveryPending": false
     }
   ],
   "historyCases": [
     {
       "id": "monitor-watch-settles",
-      "kind": "monitor",
       "revisions": [
         {
           "occurredAt": 1000,
@@ -3991,7 +4023,6 @@
     },
     {
       "id": "monitor-runtime-lost-then-rebuilt",
-      "kind": "monitor",
       "revisions": [
         {
           "occurredAt": 1000,
@@ -4156,7 +4187,6 @@
     },
     {
       "id": "fails-on-quota-before-start",
-      "kind": "monitor",
       "revisions": [
         {
           "occurredAt": 1000,
@@ -4210,7 +4240,6 @@
     },
     {
       "id": "cancelled-before-dispatch",
-      "kind": "monitor",
       "revisions": [
         {
           "occurredAt": 1000,
@@ -4264,7 +4293,6 @@
     },
     {
       "id": "unknown-outcome-proven-later",
-      "kind": "monitor",
       "revisions": [
         {
           "occurredAt": 1000,
@@ -4375,7 +4403,6 @@
     },
     {
       "id": "corrupt-stays-blocked",
-      "kind": "monitor",
       "revisions": [
         {
           "occurredAt": 1000,
@@ -4486,7 +4513,6 @@
     },
     {
       "id": "pinned-channel-delivery-drains-the-outbox",
-      "kind": "automation_run",
       "revisions": [
         {
           "occurredAt": 1000,
@@ -4678,7 +4704,6 @@
     },
     {
       "id": "child-result-accepted-then-consumed",
-      "kind": "child_agent",
       "revisions": [
         {
           "occurredAt": 1000,
@@ -4900,7 +4925,6 @@
     },
     {
       "id": "runtime-lost-while-dispatching",
-      "kind": "monitor",
       "revisions": [
         {
           "occurredAt": 1000,
@@ -4984,7 +5008,6 @@
     },
     {
       "id": "proven-never-started",
-      "kind": "monitor",
       "revisions": [
         {
           "occurredAt": 1000,
@@ -5062,7 +5085,6 @@
     },
     {
       "id": "writer-clock-runs-behind",
-      "kind": "automation_run",
       "revisions": [
         {
           "occurredAt": 5000,
@@ -5131,6 +5153,113 @@
             "runtimeState": null,
             "definitionRevision": null,
             "createdAt": 5000,
+            "startedAt": 5000,
+            "settledAt": 5000
+          },
+          "deliveryPending": false
+        }
+      ]
+    },
+    {
+      "id": "settled-clock-behind-start",
+      "revisions": [
+        {
+          "occurredAt": 1000,
+          "run": {
+            "state": "reserved",
+            "reason": null,
+            "definition": null,
+            "executionCallId": null,
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": null,
+            "runtime": null,
+            "delivery": null
+          },
+          "view": {
+            "state": "pending",
+            "runtimeState": null,
+            "definitionRevision": null,
+            "createdAt": 1000,
+            "startedAt": null,
+            "settledAt": null
+          },
+          "deliveryPending": false
+        },
+        {
+          "occurredAt": 2000,
+          "run": {
+            "state": "admitted",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "intent",
+            "runtime": null,
+            "delivery": null
+          },
+          "view": {
+            "state": "pending",
+            "runtimeState": "unbound",
+            "definitionRevision": null,
+            "createdAt": 1000,
+            "startedAt": null,
+            "settledAt": null
+          },
+          "deliveryPending": false
+        },
+        {
+          "occurredAt": 5000,
+          "run": {
+            "state": "running",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "dispatch_started",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "1"
+            },
+            "delivery": null
+          },
+          "view": {
+            "state": "running",
+            "runtimeState": "provisioning",
+            "definitionRevision": null,
+            "createdAt": 1000,
+            "startedAt": 5000,
+            "settledAt": null
+          },
+          "deliveryPending": false
+        },
+        {
+          "occurredAt": 3000,
+          "run": {
+            "state": "settled",
+            "reason": null,
+            "definition": null,
+            "executionCallId": "call-1",
+            "effectId": null,
+            "dispatchId": null,
+            "deliveryId": null,
+            "execution": "settled",
+            "runtime": {
+              "runtimeBindingId": "binding-1",
+              "generation": "1"
+            },
+            "delivery": null
+          },
+          "view": {
+            "state": "completed",
+            "runtimeState": null,
+            "definitionRevision": null,
+            "createdAt": 1000,
             "startedAt": 5000,
             "settledAt": 5000
           },
@@ -6912,7 +7041,7 @@
         },
         "maxEvents": 100,
         "idleTimeoutMs": 60000,
-        "debounceMs": 0,
+        "debounceMs": 1000,
         "startReceiptRef": {
           "resourceId": "receipt-2",
           "kind": "managed-runtime-receipt",
@@ -6931,11 +7060,11 @@
         "notifiedThrough": 1,
         "stopReason": "stop_requested",
         "outputRef": {
-          "resourceId": "output-manifest-1",
+          "resourceId": "output-manifest-2",
           "kind": "managed-tool-result-manifest",
           "schemaVersion": 1,
           "byteLength": 2048,
-          "digest": "8c8d256872adf1e2d71cee1bf8c90b006ec2a311e03044c683893a02dec80938"
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         },
         "run": {
           "state": "cancelled",
@@ -7806,97 +7935,6 @@
         "outcome": "unknown"
       },
       "harnessExecution": "outcome_unknown"
-    }
-  ],
-  "inspectionExecutionCases": [
-    {
-      "id": "prepared",
-      "inspection": {
-        "outcome": "known",
-        "status": {
-          "state": "prepared"
-        }
-      },
-      "execution": "intent"
-    },
-    {
-      "id": "executing",
-      "inspection": {
-        "outcome": "known",
-        "status": {
-          "state": "executing"
-        }
-      },
-      "execution": "dispatch_started"
-    },
-    {
-      "id": "cancel-requested",
-      "inspection": {
-        "outcome": "known",
-        "status": {
-          "state": "cancel_requested"
-        }
-      },
-      "execution": "dispatch_started"
-    },
-    {
-      "id": "settled-not-started",
-      "inspection": {
-        "outcome": "known",
-        "status": {
-          "state": "settled",
-          "result": {
-            "executionStatus": "not_started"
-          }
-        }
-      },
-      "execution": "not_started_proven"
-    },
-    {
-      "id": "settled-success",
-      "inspection": {
-        "outcome": "known",
-        "status": {
-          "state": "settled",
-          "result": {
-            "executionStatus": "success"
-          }
-        }
-      },
-      "execution": "settled"
-    },
-    {
-      "id": "settled-error",
-      "inspection": {
-        "outcome": "known",
-        "status": {
-          "state": "settled",
-          "result": {
-            "executionStatus": "error"
-          }
-        }
-      },
-      "execution": "settled"
-    },
-    {
-      "id": "settled-cancelled",
-      "inspection": {
-        "outcome": "known",
-        "status": {
-          "state": "settled",
-          "result": {
-            "executionStatus": "cancelled"
-          }
-        }
-      },
-      "execution": "settled"
-    },
-    {
-      "id": "unknown",
-      "inspection": {
-        "outcome": "unknown"
-      },
-      "execution": "outcome_unknown"
     }
   ]
 }

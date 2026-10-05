@@ -49,6 +49,14 @@ public class ManagedExtensionRecordStore {
             ManagedExtensionRecordStore.class);
     public static final String ERROR_REJECTED =
             "managed_session_extension_record_rejected";
+    /**
+     * The opening-command check of a first revision, verbatim the statement
+     * ManagedAgentMySqlIT explains, so the plan it probes is the plan the
+     * store gets.
+     */
+    public static final String OPENING_COMMAND_QUERY = "SELECT COUNT(*) FROM"
+            + " qwen_managed_session_extension_record WHERE"
+            + " session_scope_key = ? AND operation_hash = ?";
     private static final String EVENT_SUBTYPE = "managed_session_event_v1";
     private static final String COMMIT_SUBTYPE = "managed_session_commit_v1";
     private static final Set<String> EVENT_FIELDS = Set.of("v", "sequence",
@@ -503,9 +511,7 @@ public class ManagedExtensionRecordStore {
                     + domain + " record " + recordId + " must open its run.");
             // The command that opens a record becomes the operation of its
             // grants, so it opens no other record.
-            Integer opened = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                            + " qwen_managed_session_extension_record WHERE"
-                            + " session_scope_key = ? AND operation_hash = ?",
+            Integer opened = jdbc.queryForObject(OPENING_COMMAND_QUERY,
                     Integer.class, scopeKey, operationHash);
             require(opened != null && opened == 0, "Command " + operationId
                     + " already opened another Stage H record.");

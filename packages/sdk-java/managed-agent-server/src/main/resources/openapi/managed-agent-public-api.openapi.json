@@ -2168,7 +2168,7 @@
         "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
-            "description": "Tasks of this Session, newest first (created_at descending, then id descending), merged from child agent, workflow, background shell, Monitor and automation runs. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart. A task.updated Session event, with data.taskId and data.state, announces each change of a task's view. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
+            "description": "Tasks of this Session, newest first (created_at descending, then id descending), merged from the record domains the server projects — Monitor runs today, the others arrive with their stages. Settled tasks stay listed. The projection is rebuilt from durable domain records, so task IDs and order survive a restart. A task.updated Session event, with data.taskId and data.state, announces each change of a task's view.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2212,7 +2212,7 @@
         "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
-            "description": "Current task view, including settled tasks. 404 task_not_found covers tasks outside the caller scope. 400 unsupported_feature when the Session does not serve tasks (capabilities.tasks is false).",
+            "description": "Current task view, including settled tasks. 404 task_not_found covers tasks outside the caller scope.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4637,7 +4637,8 @@
           "status",
           "createdAt",
           "updatedAt",
-          "lastSequence"
+          "lastSequence",
+          "capabilities"
         ],
         "properties": {
           "creationOperationId": {
@@ -7103,7 +7104,7 @@
           "recovery_blocked"
         ],
         "x-qwen-implementation-status": "partial",
-        "description": "Logical run state. completed, failed and cancelled are terminal and are set only after the physical execution has settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically."
+        "description": "Logical run state. completed is terminal and is set when the run's own line ends settled, with or without a physical execution; failed and cancelled are terminal too, and they also cover a run that ended before its execution started (cancelled before dispatch, or failed with no provable start), when no physical execution ever settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically."
       },
       "TaskRuntimeState": {
         "type": "string",
