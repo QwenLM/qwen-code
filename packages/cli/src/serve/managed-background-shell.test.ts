@@ -13,6 +13,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChildProcess } from 'node:child_process';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
+import {
+  registerSessionProjectDir,
+  sessionIdContext,
+  unregisterSessionProjectDir,
+} from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import type {
@@ -572,6 +577,46 @@ describe('managed v3 background Shell', () => {
     ]);
     expect(ctx.publisher.finished).toHaveLength(1);
     expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+  });
+
+  it('spawns the background child with this Session’s own shell context', async () => {
+    registerSessionProjectDir('rs-1', '/proj/rs-1');
+    try {
+      const ctx = rig();
+      await execute(ctx);
+      // No session context ever runs on the v3 path, so the spawn must
+      // resolve the shell context for the call's own session — never the
+      // worker process's first-session global slot (which holds nothing
+      // in production).
+      const env = (
+        ctx.supervisor.start.mock.calls[0]![0] as unknown as {
+          env: NodeJS.ProcessEnv;
+        }
+      ).env;
+      expect(env['QWEN_CODE_SESSION_ID']).toBe('rs-1');
+      expect(env['QWEN_CODE_PROJECT_DIR']).toBe('/proj/rs-1');
+    } finally {
+      unregisterSessionProjectDir('rs-1');
+    }
+  });
+
+  it('prefers the call’s own session over an ambient context for the environment', async () => {
+    registerSessionProjectDir('rs-1', '/proj/rs-1');
+    registerSessionProjectDir('rs-ambient', '/proj/rs-ambient');
+    try {
+      const ctx = rig();
+      await sessionIdContext.run('rs-ambient', () => execute(ctx));
+      const env = (
+        ctx.supervisor.start.mock.calls[0]![0] as unknown as {
+          env: NodeJS.ProcessEnv;
+        }
+      ).env;
+      expect(env['QWEN_CODE_SESSION_ID']).toBe('rs-1');
+      expect(env['QWEN_CODE_PROJECT_DIR']).toBe('/proj/rs-1');
+    } finally {
+      unregisterSessionProjectDir('rs-1');
+      unregisterSessionProjectDir('rs-ambient');
+    }
   });
 
   it('records an admission refusal when isolation is unavailable', async () => {
