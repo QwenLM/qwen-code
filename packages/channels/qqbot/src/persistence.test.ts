@@ -46,9 +46,9 @@ vi.mock('./login.js', () => ({
 
 // The pure channel-base helpers stay the shipped implementations rather than
 // hand-written mirrors, so a test that drives one cannot diverge from what
-// production imports. `truncateUtf16Units` is imported by QQChannel; the test
-// double suite at the bottom of this file pins it and `sanitizeLogText` to the
-// real module.
+// production imports. Every helper QQChannel imports from
+// `@qwen-code/channel-base` is aliased here and pinned to the real module by
+// the test double suite at the bottom of this file.
 const realChannelBase = await vi.importActual<
   typeof import('@qwen-code/channel-base')
 >('@qwen-code/channel-base');
@@ -80,8 +80,13 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
+  sanitizeSenderName: realChannelBase.sanitizeSenderName,
+  sanitizePromptText: realChannelBase.sanitizePromptText,
   sanitizeLogText: realChannelBase.sanitizeLogText,
+  singleScopeRoutingKey: realChannelBase.singleScopeRoutingKey,
+  truncateCodePoints: realChannelBase.truncateCodePoints,
   truncateUtf16Units: realChannelBase.truncateUtf16Units,
+  unwrapMessageRoutingKey: realChannelBase.unwrapMessageRoutingKey,
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
@@ -611,14 +616,20 @@ describe('fixRestoredSessions', () => {
 // Pin the mock's pure channel-base helpers to the shipped module: dropping an
 // export from the factory (as happened to `truncateUtf16Units`) reddens here
 // instead of leaving a latent "No export is defined on the mock" error for the
-// next test that drives QQChannel's call sites.
+// next test that drives QQChannel's call sites. This covers every helper
+// QQChannel imports from `@qwen-code/channel-base`.
 describe('channel-base test double', () => {
   it('exposes the shipped channel-base helpers by identity', async () => {
     const actual = await vi.importActual<
       typeof import('@qwen-code/channel-base')
     >('@qwen-code/channel-base');
     const mocked = await import('@qwen-code/channel-base');
-    expect(mocked.truncateUtf16Units).toBe(actual.truncateUtf16Units);
+    expect(mocked.sanitizeSenderName).toBe(actual.sanitizeSenderName);
+    expect(mocked.sanitizePromptText).toBe(actual.sanitizePromptText);
     expect(mocked.sanitizeLogText).toBe(actual.sanitizeLogText);
+    expect(mocked.singleScopeRoutingKey).toBe(actual.singleScopeRoutingKey);
+    expect(mocked.truncateCodePoints).toBe(actual.truncateCodePoints);
+    expect(mocked.truncateUtf16Units).toBe(actual.truncateUtf16Units);
+    expect(mocked.unwrapMessageRoutingKey).toBe(actual.unwrapMessageRoutingKey);
   });
 });
