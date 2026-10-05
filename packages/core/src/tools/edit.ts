@@ -384,11 +384,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     // Scan the full resulting content, not just new_string, so a secret split
     // across multiple edits (each fragment alone undetectable) is still caught.
     if (!error) {
-      const teamMemoryError = checkTeamMemorySecrets(
-        params.file_path,
-        newContent,
-        this.config.getProjectRoot(),
-      );
+      const projectRoot = this.config.getProjectRoot();
+      const teamMemoryError =
+        checkTeamMemorySecrets(params.file_path, newContent, projectRoot) ??
+        checkTeamMemorySecrets(params.file_path, contentForWrite, projectRoot);
       if (teamMemoryError) {
         // If the secret is already in the on-disk file, this edit can't clear it
         // — tell the user to remove the committed secret, not just retry.

@@ -307,6 +307,20 @@ describe('EditTool', () => {
       );
     });
 
+    it('blocks a secret formed by the line-ending-preserving write result', async () => {
+      const githubPrefix = ['gh', 'p_', '\r'].join('');
+      const original = `old${'a'.repeat(36)}\r\nkeep`;
+      const file = writeTeamFile(original);
+
+      const result = await run(edit(file, 'old', githubPrefix));
+
+      expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+      expect(JSON.stringify(result)).toMatch(
+        /shared with all repository collaborators/i,
+      );
+      expect(readText(file)).toBe(original);
+    });
+
     it('reports the pre-existing-secret message and leaves the file untouched', async () => {
       // Seed the on-disk file with a FULL detectable token so currentContent
       // itself trips the scanner — exercises the preExisting branch.
