@@ -1157,6 +1157,45 @@ describe('cleanOrphanedFunctionCalls', () => {
     expect(items).toEqual([]);
   });
 
+  it('drops the reasoning heading an orphaned custom_tool_call group', () => {
+    // Same unit rule as the function_call twin: the group scan must not stop
+    // at the custom_tool_call boundary, or the head leaks onto the wire with
+    // no following item (#13233).
+    const items = cleanOrphanedFunctionCalls([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      {
+        type: 'custom_tool_call',
+        call_id: 'x1',
+        name: 'exec',
+        input: 'ls',
+      },
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  it('keeps the reasoning when its custom_tool_call group survives', () => {
+    const items = cleanOrphanedFunctionCalls([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      {
+        type: 'custom_tool_call',
+        call_id: 'x1',
+        name: 'exec',
+        input: 'ls',
+      },
+      { type: 'custom_tool_call_output', call_id: 'x1', output: 'ok' },
+    ]);
+    expect(items).toEqual([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      {
+        type: 'custom_tool_call',
+        call_id: 'x1',
+        name: 'exec',
+        input: 'ls',
+      },
+      { type: 'custom_tool_call_output', call_id: 'x1', output: 'ok' },
+    ]);
+  });
+
   it('keeps the reasoning when a sibling call in its group survives', () => {
     // One reasoning item heads a parallel call group; dropping the orphaned
     // member must not take the reasoning the surviving member needs.

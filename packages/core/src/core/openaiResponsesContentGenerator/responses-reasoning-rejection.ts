@@ -6,7 +6,6 @@
 
 import type {
   ResponsesApiFunctionCallItem,
-  ResponsesApiFunctionCallOutputItem,
   ResponsesApiInputItem,
   ResponsesApiReasoningItem,
 } from './types.js';
@@ -39,28 +38,35 @@ function isToolMediaFollowUp(item: ResponsesApiInputItem | undefined): boolean {
 }
 
 /**
- * The call_ids of the maximal run of `function_call` items immediately
- * following `index`. The endpoint pairs a replayed reasoning item with the
- * call group that follows it, so the reasoning and that run stand or fall
- * as one unit (#11665).
+ * The call group immediately following `index`: the maximal run of
+ * `function_call` / `custom_tool_call` items, each with its type so callers
+ * can match the right output type. The endpoint pairs a replayed reasoning
+ * item with the call group that follows it, so the reasoning and that run
+ * stand or fall as one unit (#11665).
  */
-export function followingFunctionCallIds(
+export function followingCallGroup(
   items: ResponsesApiInputItem[],
   index: number,
-): string[] {
-  const callIds: string[] = [];
+): Array<{ type: 'function_call' | 'custom_tool_call'; callId: string }> {
+  const calls: Array<{
+    type: 'function_call' | 'custom_tool_call';
+    callId: string;
+  }> = [];
   for (let i = index + 1; i < items.length; i++) {
     const item = items[i];
     if (
       typeof item !== 'object' ||
       item === null ||
-      item.type !== 'function_call'
+      (item.type !== 'function_call' && item.type !== 'custom_tool_call')
     ) {
       break;
     }
-    callIds.push((item as ResponsesApiFunctionCallItem).call_id);
+    calls.push({
+      type: item.type,
+      callId: (item as ResponsesApiFunctionCallItem).call_id,
+    });
   }
-  return callIds;
+  return calls;
 }
 
 /**
@@ -245,9 +251,9 @@ export function downgradeRejectedReasoningItems(
 
   const rewritten: ResponsesApiInputItem[] = [];
   let changed = false;
-  // call_ids of function_calls removed together with their dropped or
-  // downgraded reasoning; their outputs must follow or the retry leaves an
-  // orphan output (#11665).
+  // call ids of calls removed together with their dropped or downgraded
+  // reasoning; their outputs must follow or the retry leaves an orphan
+  // output (#11665). Keys carry the output item type: `<type>_output:<id>`.
   const droppedCallIds = new Set<string>();
   // Originals a unit drop actually removed: the rejected reasoning (when no
   // representation of it survives) and its calls. The bare-episode sweep
@@ -262,9 +268,10 @@ export function downgradeRejectedReasoningItems(
     if (
       typeof item === 'object' &&
       item !== null &&
-      item.type === 'function_call_output' &&
+      (item.type === 'function_call_output' ||
+        item.type === 'custom_tool_call_output') &&
       'call_id' in item &&
-      droppedCallIds.has((item as ResponsesApiFunctionCallOutputItem).call_id)
+      droppedCallIds.has(`${item.type}:${item.call_id}`)
     ) {
       changed = true;
       continue;
@@ -284,27 +291,26 @@ export function downgradeRejectedReasoningItems(
     }
     changed = true;
     const summary = readSummaryTexts(item);
-    // The endpoint pairs the reasoning item with the function_call group
-    // that follows it, so removing the reasoning removes the whole group and
-    // its outputs. Keeping any member would retry into function_call without
-    // its required reasoning item, and every later send would repeat the
-    // failure (#11665).
-    const unitCallIds = followingFunctionCallIds(items, i);
-    if (unitCallIds.length > 0) {
-      for (const callId of unitCallIds) {
-        droppedCallIds.add(callId);
+    // The endpoint pairs the reasoning item with the call group that follows
+    // it, so removing the reasoning removes the whole group and its outputs.
+    // Keeping any member would retry into a call without its required
+    // reasoning item, and every later send would repeat the failure (#11665).
+    const unitCalls = followingCallGroup(items, i);
+    if (unitCalls.length > 0) {
+      for (const call of unitCalls) {
+        droppedCallIds.add(`${call.type}_output:${call.callId}`);
       }
-      for (let k = 1; k <= unitCallIds.length; k++) {
+      for (let k = 1; k <= unitCalls.length; k++) {
         unitDroppedOriginals.add(items[i + k]);
       }
-      i += unitCallIds.length;
+      i += unitCalls.length;
       droppedUnits++;
       justDroppedUnit = true;
     }
     // A signature-only item has nothing human-readable to preserve; keeping
     // it as an empty assistant message would add a blank turn.
     if (summary.length === 0) {
-      if (unitCallIds.length > 0) {
+      if (unitCalls.length > 0) {
         unitDroppedOriginals.add(item);
       }
       continue;

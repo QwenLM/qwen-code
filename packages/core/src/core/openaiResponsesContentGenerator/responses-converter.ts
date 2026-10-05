@@ -35,7 +35,7 @@ import {
   type ResponsesMessageMetadata,
   type ResponsesTextPart,
 } from '../../utils/responses-message.js';
-import { followingFunctionCallIds } from './responses-reasoning-rejection.js';
+import { followingCallGroup } from './responses-reasoning-rejection.js';
 
 const debugLogger = createDebugLogger('RESPONSES_CONVERTER');
 
@@ -828,7 +828,8 @@ export function convertGeminiContentsToResponsesInput(
  * the wire request is always structurally valid regardless of upstream
  * trimming bugs.
  *
- * A reasoning item heads the function_call group that follows it, so the
+ * A reasoning item heads the call group (`function_call` or
+ * `custom_tool_call`) that follows it, so the
  * reasoning and that group are one unit (#11665): the reasoning stays iff at
  * least one call in its group survives the pair cleanup, and goes with the
  * group when none do. Dropping every orphaned call while keeping the group's
@@ -880,11 +881,11 @@ export function cleanOrphanedFunctionCalls(
       continue;
     }
     if (item.type === 'reasoning') {
-      const unitCallIds = followingFunctionCallIds(items, i);
+      const unitCalls = followingCallGroup(items, i);
       if (
-        unitCallIds.length > 0 &&
-        !unitCallIds.some((callId) =>
-          outputCallIds.has(`function_call_output:${callId}`),
+        unitCalls.length > 0 &&
+        !unitCalls.some((call) =>
+          outputCallIds.has(`${call.type}_output:${call.callId}`),
         )
       ) {
         // The group is gone, so its whole head goes: the maximal run of

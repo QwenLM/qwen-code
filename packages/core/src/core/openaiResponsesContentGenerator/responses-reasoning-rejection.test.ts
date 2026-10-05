@@ -553,6 +553,33 @@ describe('downgradeRejectedReasoningItems', () => {
     ).toEqual([keep, after]);
   });
 
+  it('drops the custom_tool_call unit whose signature-only reasoning is dropped', () => {
+    // The group scan covers custom_tool_call too, so the over-length head
+    // takes its calls and their outputs; keeping them would orphan the calls
+    // on the retry wire (#13233).
+    const keep = userItem('hi');
+    const after = userItem('bye');
+    const items = Object.freeze([
+      keep,
+      reasoningItem(LONG, []),
+      Object.freeze({
+        type: 'custom_tool_call',
+        call_id: 'x1',
+        name: 'exec',
+        input: 'ls',
+      }),
+      Object.freeze({
+        type: 'custom_tool_call_output',
+        call_id: 'x1',
+        output: 'ok',
+      }),
+      after,
+    ]) as ResponsesApiInputItem[];
+    expect(
+      downgradeRejectedReasoningItems(items, { namedIndex: 1, maxLength: 64 }),
+    ).toEqual([keep, after]);
+  });
+
   it('drops the call group when the reasoning downgrades to a message', () => {
     // The endpoint's pairing error names the reasoning item specifically, so
     // an assistant message in its place does not satisfy a following
