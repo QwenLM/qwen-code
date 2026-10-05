@@ -131,6 +131,14 @@ public class ManagedAgentService {
             String idempotencyKey, String agentId, String agentRevision,
             String title, Map<String, Object> metadata,
             List<InputBlock> blocks) {
+        return createSession(tenantId, null, idempotencyKey, agentId,
+                agentRevision, title, metadata, blocks);
+    }
+
+    public CommandAdmission createSession(String tenantId, String actorId,
+            String idempotencyKey, String agentId, String agentRevision,
+            String title, Map<String, Object> metadata,
+            List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
         List<Map<String, Object>> input = input(blocks, false);
         if (!input.isEmpty()) {
@@ -155,7 +163,7 @@ public class ManagedAgentService {
                 : SubmitHarnessTurn.computePayloadDigest(input);
         Admission admission;
         try {
-            admission = store.insertSessionCommand(tenantId, CREATE,
+            admission = store.insertSessionCommand(tenantId, actorId, CREATE,
                     idempotencyKey, requestDigest, agentId, agentRevision,
                     effectiveTitle, input, payloadDigest);
         } catch (DuplicateKeyException error) {
