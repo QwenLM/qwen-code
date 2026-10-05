@@ -252,10 +252,13 @@ describe('GlobTool', () => {
 
     it('should allow path outside workspace (external path support)', async () => {
       // Shared /tmp made this walk time out on loaded runners — keep this
-      // dir dedicated and empty.
+      // dir dedicated. Seed a real file: with an EMPTY dir the assertions
+      // below were vacuous — any outcome, including "found nothing at
+      // all", passed them.
       const outside = await fs.mkdtemp(
         path.join(os.tmpdir(), 'glob-external-'),
       );
+      await fs.writeFile(path.join(outside, 'external.txt'), 'x');
       try {
         // External path is now allowed - it should not return a workspace error
         const result = await run({ pattern: '*.txt', path: outside });
@@ -263,6 +266,12 @@ describe('GlobTool', () => {
         expect(result.returnDisplay).not.toContain(
           'Path is not within workspace',
         );
+        // The glob really walked the external path: the seeded file comes
+        // back (a regression to "nothing found" now fails, not passes).
+        // Count AND identity: a walk redirected to any OTHER single *.txt
+        // satisfies the count alone.
+        expect(result.llmContent).toContain('Found 1 file(s)');
+        expect(result.llmContent).toContain(path.join(outside, 'external.txt'));
       } finally {
         await fs.rm(outside, { recursive: true, force: true });
       }

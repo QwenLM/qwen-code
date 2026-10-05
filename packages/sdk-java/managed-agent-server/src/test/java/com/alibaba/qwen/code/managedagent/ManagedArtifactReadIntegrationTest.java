@@ -162,6 +162,9 @@ class ManagedArtifactReadIntegrationTest {
                         return calls.incrementAndGet() < 3;
                     }
                 };
+        // A zero revalidation window re-verifies access on every chunk.
+        fixture.properties().getArtifacts()
+                .setReadRevalidationInterval(java.time.Duration.ZERO);
         var mvc =
                 mvc(
                         new ManagedArtifactService(
@@ -185,6 +188,40 @@ class ManagedArtifactReadIntegrationTest {
         assertThat(response.getHeader("Content-Range")).isNull();
     }
 
+    @Test
+    void revocationInsideTheShippedWindowStillShipsARange() throws Exception {
+        var source = new ManagedArtifactApiIntegrationTest();
+        source.setup();
+        var fixture = source.fixture;
+        var sessions = source.sessions;
+        var stdout = source.stdout;
+        AtomicInteger calls = new AtomicInteger();
+        var policy = readingPolicy(fixture, () -> calls.incrementAndGet() < 3);
+        // The shipped 5s default is left in place: a Range read is a single
+        // write inside the armed window, so a revocation landing after
+        // admission does not stop the body — the accepted in-window
+        // exposure, pinned so the default's behavior is asserted somewhere.
+        var mvc =
+                mvc(
+                        new ManagedArtifactService(
+                                sessions,
+                                fixture.results(),
+                                fixture.reader(),
+                                policy,
+                                fixture.properties()));
+        var route =
+                ROOT
+                        + "/artifacts/"
+                        + stdout.path("id").asText()
+                        + "/content?revision="
+                        + stdout.path("revision").asText();
+        mvc.perform(asReader(get(route)).header("Range", "bytes=0-2"))
+                .andExpect(status().isPartialContent())
+                .andExpect(content().string("abc"));
+        // Admission plus the first guard; the window covered the rest.
+        assertThat(calls.get()).isEqualTo(2);
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void midstreamRevocationOrDeletionStopsAfterTheFirstByte(boolean deleteSession)
@@ -195,55 +232,21 @@ class ManagedArtifactReadIntegrationTest {
         var sessions = source.sessions;
         var stdout = source.stdout;
         var permission = new java.util.concurrent.atomic.AtomicBoolean(true);
-        ManagedArtifactPolicy policy =
-                new ManagedArtifactPolicy() {
-                    public String version() {
-                        return fixture.policy().version();
-                    }
-
-                    public boolean publishOriginal(String t, String w, String s) {
-                        return true;
-                    }
-
-                    public boolean publishPreview(String t, String w, String s) {
-                        return true;
-                    }
-
-                    public boolean readOriginal(String t, String a, String w, String s) {
-                        return permission.get();
-                    }
-                };
-        var reader = spy(fixture.reader());
-        doAnswer(
-                        invocation -> {
-                            var input = (java.io.InputStream) invocation.callRealMethod();
-                            return new java.io.FilterInputStream(input) {
-                                public int read(byte[] bytes, int offset, int length)
-                                        throws java.io.IOException {
-                                    return super.read(bytes, offset, Math.min(1, length));
-                                }
-                            };
-                        })
-                .when(reader)
-                .open(any(), any(com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore.ReadLease.class), any(Runnable.class));
-        var response = spy(new org.springframework.mock.web.MockHttpServletResponse());
-        var output = spy(response.getOutputStream());
-        org.mockito.Mockito.doReturn(output).when(response).getOutputStream();
-        doAnswer(
-                        invocation -> {
-                            invocation.callRealMethod();
-                            if (deleteSession) {
-                                fixture.jdbc()
-                                        .update(
-                                                "UPDATE managed_agent_session SET status ="
-                                                    + " 'DELETING'");
-                            } else {
-                                permission.set(false);
-                            }
-                            return null;
-                        })
-                .when(output)
-                .write(any(byte[].class), anyInt(), anyInt());
+        var policy = readingPolicy(fixture, permission::get);
+        var reader = oneBytePerReadReader(fixture, 0);
+        var response = flippingResponse(() -> {
+            if (deleteSession) {
+                fixture.jdbc()
+                        .update(
+                                "UPDATE managed_agent_session SET status ="
+                                    + " 'DELETING'");
+            } else {
+                permission.set(false);
+            }
+        });
+        // A zero revalidation window re-verifies access on every chunk.
+        fixture.properties().getArtifacts()
+                .setReadRevalidationInterval(java.time.Duration.ZERO);
         var service =
                 new ManagedArtifactService(
                         sessions, fixture.results(), reader, policy, fixture.properties());
@@ -260,6 +263,143 @@ class ManagedArtifactReadIntegrationTest {
                                         null,
                                         response));
         assertThat(response.getContentAsByteArray()).isEqualTo(new byte[] {'a'});
+        assertThat(response.isCommitted()).isTrue();
+        assertThat(failure)
+                .isInstanceOf(java.io.IOException.class)
+                .hasMessage("Artifact stream interrupted");
+        // The flipping stub really fired its state change.
+        if (deleteSession) {
+            assertThat(fixture.jdbc().queryForObject(
+                    "SELECT status FROM managed_agent_session"
+                            + " WHERE session_id = 'session-1'",
+                    String.class)).isEqualTo("DELETING");
+        } else {
+            assertThat(permission).isFalse();
+        }
+    }
+
+    @org.junit.jupiter.api.Test
+    void midstreamDeletionIsDeferredToTheRevalidationWindow()
+            throws Exception {
+        var source = new ManagedArtifactApiIntegrationTest();
+        source.setup();
+        var fixture = source.fixture;
+        var sessions = source.sessions;
+        var stdout = source.stdout;
+        var policy = readingPolicy(fixture, () -> true);
+        var reader = oneBytePerReadReader(fixture, 0);
+        var response = flippingResponse(() -> fixture.jdbc()
+                .update("UPDATE managed_agent_session SET status ="
+                        + " 'DELETING'"));
+        // A 60s window: the DELETING lifecycle gate is evaluated by the
+        // throttled access check, so a stage-1 deletion lands only when the
+        // window lapses - here, after the stream has completed.
+        fixture.properties().getArtifacts()
+                .setReadRevalidationInterval(java.time.Duration.ofSeconds(60));
+        var service =
+                new ManagedArtifactService(
+                        sessions, fixture.results(), reader, policy, fixture.properties());
+        Throwable failure =
+                org.assertj.core.api.Assertions.catchThrowable(
+                        () ->
+                                service.content(
+                                        new TenantContext("tenant-1", "reader"),
+                                        "session-1",
+                                        stdout.path("id").asText(),
+                                        stdout.path("revision").asText(),
+                                        null,
+                                        null,
+                                        null,
+                                        response));
+        assertThat(response.getContentAsByteArray())
+                .isEqualTo(new byte[] {'a', 'b', 'c'});
+        assertThat(failure).isNull();
+        // The deferral is real: the stage-1 transition really happened
+        // mid-stream, and the window is what let the stream complete.
+        assertThat(fixture.jdbc().queryForObject(
+                "SELECT status FROM managed_agent_session"
+                        + " WHERE session_id = 'session-1'",
+                String.class)).isEqualTo("DELETING");
+    }
+
+    @org.junit.jupiter.api.Test
+    void midstreamRevocationIsToleratedWithinTheRevalidationWindow()
+            throws Exception {
+        var source = new ManagedArtifactApiIntegrationTest();
+        source.setup();
+        var fixture = source.fixture;
+        var sessions = source.sessions;
+        var stdout = source.stdout;
+        var calls = new AtomicInteger();
+        // Revoked once the window has armed; a third call would fail, and
+        // the window must not make it.
+        var policy = readingPolicy(fixture, () -> calls.incrementAndGet() <= 2);
+        var reader = oneBytePerReadReader(fixture, 0);
+        var response = new org.springframework.mock.web.MockHttpServletResponse();
+        fixture.properties().getArtifacts()
+                .setReadRevalidationInterval(java.time.Duration.ofSeconds(60));
+        var service =
+                new ManagedArtifactService(
+                        sessions, fixture.results(), reader, policy, fixture.properties());
+        service.content(
+                new TenantContext("tenant-1", "reader"),
+                "session-1",
+                stdout.path("id").asText(),
+                stdout.path("revision").asText(),
+                null,
+                null,
+                null,
+                response);
+        // The whole content arrives although any access check after the
+        // first chunk's revalidation would be denied: the window defers it,
+        // so the stream is not re-verified per chunk.
+        assertThat(response.getContentAsByteArray())
+                .isEqualTo("abc".getBytes(StandardCharsets.UTF_8));
+        // Admission plus the first chunk's revalidation; the window covers
+        // the remaining chunk reads.
+        assertThat(calls.get()).isEqualTo(2);
+    }
+
+    @org.junit.jupiter.api.Test
+    void midstreamRevocationInterruptsTheStreamOnceTheWindowExpires()
+            throws Exception {
+        var source = new ManagedArtifactApiIntegrationTest();
+        source.setup();
+        var fixture = source.fixture;
+        var sessions = source.sessions;
+        var stdout = source.stdout;
+        var permission = new java.util.concurrent.atomic.AtomicBoolean(true);
+        var policy = readingPolicy(fixture, permission::get);
+        var reader = oneBytePerReadReader(fixture, 1000);
+        var response = flippingResponse(() -> permission.set(false));
+        // A 3s window armed at open: reads take ~1s each, so the two
+        // in-window chunks ship (guards at ~1s and ~2s pass) and the third
+        // read ends past the window (>= 3s >= the deadline), where the
+        // recheck observes the revocation. The 1000ms margins absorb
+        // scheduler stalls; the deny side cannot undershoot because sleeps
+        // never finish early.
+        fixture.properties().getArtifacts()
+                .setReadRevalidationInterval(java.time.Duration.ofMillis(3000));
+        var service =
+                new ManagedArtifactService(
+                        sessions, fixture.results(), reader, policy, fixture.properties());
+        Throwable failure =
+                org.assertj.core.api.Assertions.catchThrowable(
+                        () ->
+                                service.content(
+                                        new TenantContext("tenant-1", "reader"),
+                                        "session-1",
+                                        stdout.path("id").asText(),
+                                        stdout.path("revision").asText(),
+                                        null,
+                                        null,
+                                        null,
+                                        response));
+        // Both in-window chunks ship; the stream never completes because
+        // the recheck at the window's end denies. Per-chunk
+        // re-verification (no window) would ship only the first.
+        byte[] delivered = response.getContentAsByteArray();
+        assertThat(delivered).isEqualTo(new byte[] {'a', 'b'});
         assertThat(response.isCommitted()).isTrue();
         assertThat(failure)
                 .isInstanceOf(java.io.IOException.class)
@@ -455,6 +595,69 @@ class ManagedArtifactReadIntegrationTest {
             logger.detachAppender(appender);
             appender.stop();
         }
+    }
+
+    private static ManagedArtifactPolicy readingPolicy(
+            ToolPublicationStoreTest.ApiFixture fixture,
+            java.util.function.BooleanSupplier allowed) {
+        return new ManagedArtifactPolicy() {
+            public String version() {
+                return fixture.policy().version();
+            }
+
+            public boolean publishOriginal(String t, String w, String s) {
+                return true;
+            }
+
+            public boolean publishPreview(String t, String w, String s) {
+                return true;
+            }
+
+            public boolean readOriginal(String t, String a, String w, String s) {
+                return allowed.getAsBoolean();
+            }
+        };
+    }
+
+    private static ManagedArtifactReader oneBytePerReadReader(
+            ToolPublicationStoreTest.ApiFixture fixture, long perReadDelayMillis) {
+        var reader = spy(fixture.reader());
+        doAnswer(
+                        invocation -> {
+                            var input = (java.io.InputStream) invocation.callRealMethod();
+                            return new java.io.FilterInputStream(input) {
+                                public int read(byte[] bytes, int offset, int length)
+                                        throws java.io.IOException {
+                                    if (perReadDelayMillis > 0) {
+                                        try {
+                                            Thread.sleep(perReadDelayMillis);
+                                        } catch (InterruptedException error) {
+                                            Thread.currentThread().interrupt();
+                                        }
+                                    }
+                                    return super.read(bytes, offset, Math.min(1, length));
+                                }
+                            };
+                        })
+                .when(reader)
+                .open(any(), any(), any(Runnable.class));
+        return reader;
+    }
+
+    private static org.springframework.mock.web.MockHttpServletResponse flippingResponse(
+            Runnable onWrite) throws java.io.IOException {
+        var response = spy(new org.springframework.mock.web.MockHttpServletResponse());
+        var output = spy(response.getOutputStream());
+        org.mockito.Mockito.doReturn(output).when(response).getOutputStream();
+        doAnswer(
+                        invocation -> {
+                            invocation.callRealMethod();
+                            onWrite.run();
+                            return null;
+                        })
+                .when(output)
+                .write(any(byte[].class), anyInt(), anyInt());
+        return response;
     }
 
     private static MockMvc mvc(ManagedArtifactService service) {
