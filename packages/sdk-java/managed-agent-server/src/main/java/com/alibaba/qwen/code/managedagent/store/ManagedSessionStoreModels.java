@@ -37,6 +37,8 @@ public final class ManagedSessionStoreModels {
             "managed_session_resource_missing";
     public static final String ERROR_RESOURCE_NOT_FOUND =
             "managed_session_resource_not_found";
+    public static final String ERROR_WRITER_CREDENTIAL_INVALID =
+            "writer_credential_invalid";
     public static final String ERROR_OSS_DISABLED =
             "managed_session_oss_disabled";
     public static final String ERROR_INVALID_REQUEST =
