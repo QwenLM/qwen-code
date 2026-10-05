@@ -42,6 +42,8 @@ class WorkspaceRuntimeInstallProbeTest {
                 root.resolve("services"));
         Files.createSymbolicLink(root.resolve("leaf-link"),
                 root.resolve("services/api"));
+        Files.createSymbolicLink(root.resolve("loop-a"),
+                root.resolve("loop-a"));
         WorkspaceRuntimeResolver resolver = resolver(root);
 
         assertThatCode(() -> resolver.verifyInstallable(
@@ -53,6 +55,11 @@ class WorkspaceRuntimeInstallProbeTest {
                 .doesNotThrowAnyException();
         assertProbeRefused(resolver, "services/missing");
         assertProbeRefused(resolver, "plain-file");
+        // ENOTDIR / ELOOP are the structural verdict too — on some JDKs
+        // they surface as a bare FileSystemException, so the classifier
+        // walks the ancestor chain rather than keying on the class.
+        assertProbeRefused(resolver, "plain-file/lib");
+        assertProbeRefused(resolver, "loop-a/lib");
         assertProbeRefused(resolver, "alias");
         assertProbeRefused(resolver, "alias/api");
         assertProbeRefused(resolver, "leaf-link");

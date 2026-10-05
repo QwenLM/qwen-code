@@ -483,6 +483,23 @@ class WorkspaceRuntimeTest {
         }
     }
 
+    // The ENOTDIR shape on the acquire path: a persisted cwd under a plain
+    // file is structural data, and the Turn must fail immediately with the
+    // accurate terminal code — never 31 seconds of retries recorded as
+    // hosted_harness_unavailable, nor a RECOVERY_BLOCKED park. assertUnavailable
+    // pins both the code and isRetryable()==false, so folding the anomaly
+    // into the probe's transient arm here reddens this test.
+    @Test
+    void refusesAPlainFileDescendantCwdTerminallyBeforeClaimingStorage() throws Exception {
+        Files.writeString(temp.resolve("plain-file"), "nothing inside");
+        SessionRecord session = createSession("storage", "plain-file/sub");
+        var fixture = transport(session);
+        assertUnavailable(() -> fixture.transport().acquire(
+                fixture.lease(), fixture.record().getSession()));
+        verify(fixture.http(), never()).installContext(any(), any(), any(), any());
+        authority.claim(session.workspace(), holder(session, "rival"));
+    }
+
     @Test
     void routesCapturedShellAndOriginalCleanupThroughV3AfterRevocation() throws Exception {
         SessionRecord session = createSession("storage", ".");

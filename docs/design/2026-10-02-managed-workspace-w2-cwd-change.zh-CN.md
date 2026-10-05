@@ -28,7 +28,7 @@
 
 一个 PR,四个部分:
 
-1. **契约 v1.30.0。** 把两条路由与五个 planned schema 翻转为 `implemented`;在冲突词汇固定处补上 `session_context_busy`;在自由形态的 `PublicEvent.data` 上记录 `session.context.changed` 事件类型;版本号递增。(#13112 在此期间合入并在上游头信息中把后续 Turn 记为 v1.28,因此本切片发布 v1.30.0。)
+1. **契约 v1.31.0。** 把两条路由与五个 planned schema 翻转为 `implemented`;在冲突词汇固定处补上 `session_context_busy`;在自由形态的 `PublicEvent.data` 上记录 `session.context.changed` 事件类型;版本号递增。(#13112 在此期间合入并在上游头信息中把后续 Turn 记为 v1.28,随后 #13210 以网关免鉴权签名认证占用 v1.30.0;本切片发布 v1.31.0。)
 2. **存储层。** `V45__managed_cwd_operation.sql` 为 `managed_agent_operation` 增加可空列 `target_cwd_relative VARCHAR(2048)`、`expected_context_revision BIGINT`、`result_context_revision BIGINT`(调研基线为 V30;其间 V31–V33 先后合入——W1b 恢复包(#13138)、绑定 close(#13135,经 #13223 重编号)与 agent 定义(#13142);#13090 随后占用 V34,V35\_\_managed_session_tool_profile 又占用 V35,会话 journal 链占用 V36–V39,会话创建者记录与 CSI 链又占 V40–V44,因此本切片发布 V45。V15/V29 以 Java 迁移形式存在于 `src/main/java/db/migration`)。新增 `OperationKind.CWD_CHANGE` 及其专属准入、结算与失败方法;不改动生命周期状态机与 `ACTION_RESPONSE`。
 3. **服务/协调器/路由。** 两个 API 面的准入服务、`SessionLifecycleCoordinator.deliver` 的 kind 分支、结算方法、两个路由处理器,以及按 kind 的 operation 读取(`ACTION_RESPONSE` 分支是先例)。
 4. **测试与文档。** store/coordinator/controller/contract 测试、设计文档双语版、README 说明。
@@ -83,7 +83,7 @@
 2. **确定性结算探针**。新增 `WorkspaceRuntimeResolver.verifyInstallable(binding, targetCwdRelative)`:
    - 经管理员挂载表按 `(tenant, storageId)` 解析挂载,映射缺失即拒绝;
    - 复核挂载的规范路径与 `fileKey`,并在已启用验证恢复时对**候选**绑定(目标目录)执行存储守卫的挂载校验——与 `resolve()` 对该目标的真实获取所做的完全一致;
-   - 执行 `acquire()` 同样的目录规则(`requireDirectory`:拼接、归一化、包含性,活性探测一律用会抛异常的调用——`NOFOLLOW_LINKS` 的 `readAttributes`、`toRealPath` 恒等,以及取代 `Files.is*` 谓词的 `checkAccess(READ, EXECUTE)`——只有 catch 分支负责区分一时故障与永久事实)。
+   - 以探测专用的孪生形态执行目录规则:acquire 路径保持长期以来的谓词式 `requireDirectory`(任何 I/O 异常皆为终态——ENOTDIR 形态的 cwd 立即以准确错误码使 Turn 失败,绝不误报为可重试错误),探测孪生 `requireDirectoryForProbe` 一律用会抛异常的调用——`NOFOLLOW_LINKS` 的 `readAttributes`、`toRealPath` 恒等,以及取代 `Files.is*` 谓词的 `checkAccess(READ, EXECUTE)`——由 catch 分支按判定分类:目标消失、权限拒绝与 ENOTDIR/ELOOP 结构性形态均为终态(后两者在某些 JDK 上只现身为裸 `FileSystemException`,因此残余分支改为上溯祖先链——链上出现普通文件或悬空/成环符号链接即为结构性),只有不透明抖动(`ESTALE`/`EIO`、`ENAMETOOLONG`)经预算重试。
    - 结构性失败对该 operation 是终态:`failCwdChangeOperation` 记录 `failure_code=workspace_unavailable`,会话保持原 revision。探针运行在**与 worker 相同的主机与挂载快照**之上:其守卫经**探测专用入口**校验**候选**绑定(共享的 acquire 路径保持原有的终态语义;离开一个已被摧毁的当前目录仍可达——这正是本特性存在的理由),共享目录规则还带上 worker 自己的 `access(R_OK|X_OK)` 检查,probe 不会放过任何 worker 随后才以无类型化楔死呈现的目标。结构性探针拒绝折入类型化终态判定(调用方可重发),拒绝日志带 broker 错误码、异常类、消息与保留的异常因;一时的 I/O 失败保留异常因,经交付机械退避重试,而不是把一次从未发生的校验判定成终态——**以 8 次尝试为界**的封顶退避,用尽后以类型化终态结算:已接纳的 operation 必然以类型化状态终止,行离开可投递集合,两道准入屏障重新放行,会话不变且可执行。
 3. **提交**,单事务:锁会话行;复核 `ACTIVE`、期望 revision、无活动 Turn、无其他未关闭 operation,以及与绑定匹配的 Registry 事实加上创建者仍存的授权(`hasCwdChangeRegistryFacts`——即 passive-attachment 的子集;含冻结 profile 引用的完整执行期集合仍由下一轮的 acquire 准入把关);随后更新 `cwd_relative` 与 `context_revision = expected + 1` 并常规递增 `version`,把 operation 标记为 COMPLETED 并写入 `result_context_revision = expected + 1` 与 `receipt_id`,追加 `session.context.changed`(`data: {sessionId, operationId, workspaceId, cwdRelative, contextRevision}`,按 store 事件 data 的 camelCase 惯例,source 为 `operation:<id>:completed`)。committed-event publisher 在提交后经现有 SSE hub 推送。
    - 若复核事实不再成立——revision 已变动为 `context_revision_conflict`、出现 Turn 或其他 operation 为 `session_context_busy`、授权/Registry 事实变化为 `workspace_unavailable`——operation 以对应 `failure_code` 进入 `failed`;由于该事务之前没有任何写入,会话行可证明地保持原上下文。
@@ -120,7 +120,7 @@ WebShell 请求体携带 `sessionId`、`idempotencyKey`、`cwdRelative`、`expec
 ## 涉及文件
 
 - `…/db/migration/V45__managed_cwd_operation.sql`(新增)。
-- `…/openapi/managed-agent-public-api.openapi.json`(状态翻转、`session_context_busy`、事件说明、版本 1.30.0)。
+- `…/openapi/managed-agent-public-api.openapi.json`(状态翻转、`session_context_busy`、事件说明、版本 1.31.0)。
 - `store/StoreModels.java`(kind、新列的 record 字段)、`store/ManagedAgentStore.java`(准入/结算/失败方法、事件常量、`insertTurnCommand` 的绑定会话后续 Turn 繁忙屏障、对增量列宽容的 operation 读取)、`store/AgentStateStore.java`(接口)、`store/WorkspaceExecutionStore.java`(`verifyMount`)与 `service/WorkspaceRuntimeResolver.java`(`verifyInstallable`、共享的 `requireDirectory`)。
 - `service/SessionLifecycleService.java`(公开/WebShell 准入与读取分支)、`service/SessionLifecycleCoordinator.java`(kind 分支及其限定化的类契约)、`service/RuntimeWarmer.java`(探针接口及其抛出默认实现)、`service/EmbeddedRuntimeBroker.java`(委托 resolver 的探针 override)、`service/WorkspaceRuntimeTransport.java`(`requireDirectory` 上移至 resolver)。
 - `api/PublicAgentController.java`、`api/WebShellAgentController.java`、`api/ApiModels.java`(路由与 DTO record)。

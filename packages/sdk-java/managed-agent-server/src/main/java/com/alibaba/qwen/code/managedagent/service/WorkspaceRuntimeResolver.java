@@ -91,8 +91,8 @@ final class WorkspaceRuntimeResolver {
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        verifyMountIntact(mount);
-        requireDirectory(mount.root().toString(), targetCwdRelative);
+        verifyMountIntactForProbe(mount);
+        requireDirectoryForProbe(mount.root().toString(), targetCwdRelative);
         try {
             authority.verifyMountForProbe(new ContextBinding(
                     binding.getTenantId(),
@@ -108,7 +108,22 @@ final class WorkspaceRuntimeResolver {
         }
     }
 
+    // The acquire-path mount check: every I/O anomaly is the terminal
+    // verdict it has always been — only the settlement probe below is
+    // allowed to classify a momentary fault as retryable.
     private static void verifyMountIntact(Mount mount) {
+        try {
+            if (!mount.root().equals(mount.root().toRealPath())
+                    || !Objects.equals(mount.fileKey(), Files.readAttributes(
+                            mount.root(), BasicFileAttributes.class).fileKey())) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    private static void verifyMountIntactForProbe(Mount mount) {
         try {
             if (!mount.root().equals(mount.root().toRealPath())
                     || !Objects.equals(mount.fileKey(), Files.readAttributes(
@@ -124,17 +139,45 @@ final class WorkspaceRuntimeResolver {
         }
     }
 
+    // The acquire-path directory rule: the shape the tool-turn path has
+    // always had — refusal predicates, every I/O anomaly terminal. The
+    // remarketing of a momentary fault as retryable exists only for the
+    // settlement probe, whose caller is prepared to re-arm a budgeted
+    // retry; the acquire path fails the Turn immediately with the
+    // accurate code instead (an ENOTDIR-shaped cwd must not surface as
+    // hosted_harness_unavailable or park the binding RECOVERY_BLOCKED).
     static void requireDirectory(String root, String cwdRelative) {
         try {
             Path base = Path.of(root);
             Path directory = base.resolve(cwdRelative).normalize();
-            // The worker's install runs fs.access(R_OK|X_OK); the shared
-            // rule must not pass anything it would refuse later, after the
-            // storage claim, as an untyped wedge. The liveness calls must
-            // throw, not answer false like the Files.is* predicates — only
-            // the catch arms may classify momentary-vs-permanent, and a
-            // predicate that answers false would fold a momentary fault
-            // into the terminal verdict.
+            if (!directory.startsWith(base)
+                    || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
+                    || !directory.toRealPath().equals(directory)
+                    || !Files.isReadable(directory)
+                    || !Files.isExecutable(directory)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+        // The missing-directory shape (NoSuchFileException) and every
+        // other I/O anomaly share the terminal verdict.
+        } catch (IOException | IllegalArgumentException
+                | SecurityException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    // The probe twin: throwing calls (not the false-on-error predicates),
+    // so each failure shape reaches the catch arms, whose classifier works
+    // by the verdict: a vanished target, a permission denial, and ENOTDIR
+    // or ELOOP structural shapes are terminal, only opaque blips retry.
+    // ENOTDIR/ELOOP surface as bare FileSystemException on some JDKs — no
+    // subclass to catch — so the residual arm walks the ancestor chain
+    // instead: a regular file or a dangling/looping symlink in the chain
+    // is structural, whatever is left (ESTALE/EIO, ENAMETOOLONG) is
+    // momentary and retries through the budget.
+    static void requireDirectoryForProbe(String root, String cwdRelative) {
+        Path base = Path.of(root);
+        Path directory = base.resolve(cwdRelative).normalize();
+        try {
             if (!directory.startsWith(base)
                     || !Files.readAttributes(directory,
                             BasicFileAttributes.class,
@@ -145,16 +188,32 @@ final class WorkspaceRuntimeResolver {
             directory.getFileSystem().provider().checkAccess(directory,
                     java.nio.file.AccessMode.READ,
                     java.nio.file.AccessMode.EXECUTE);
-        // A vanished target (or a segment of it), a permission denial or a
-        // security refusal is the structural verdict a terminal failure_code
-        // exists to name — only opaque I/O blips retry.
         } catch (java.nio.file.NoSuchFileException
                 | java.nio.file.AccessDeniedException | SecurityException
                 | IllegalArgumentException error) {
             throw WorkspaceExecutionStore.unavailable();
         } catch (IOException error) {
-            throw WorkspaceExecutionStore.unavailableTransient(error);
+            throw hasStructuralAncestor(base, directory)
+                    ? WorkspaceExecutionStore.unavailable()
+                    : WorkspaceExecutionStore.unavailableTransient(error);
         }
+    }
+
+    private static boolean hasStructuralAncestor(Path base, Path directory) {
+        for (Path cursor = directory; cursor != null && !cursor.equals(base);
+                cursor = cursor.getParent()) {
+            if (Files.isRegularFile(cursor, LinkOption.NOFOLLOW_LINKS)) {
+                return true;
+            }
+            if (Files.isSymbolicLink(cursor)) {
+                try {
+                    cursor.toRealPath();
+                } catch (IOException | RuntimeException error) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     ContextBinding savedBinding(String sessionId) {
