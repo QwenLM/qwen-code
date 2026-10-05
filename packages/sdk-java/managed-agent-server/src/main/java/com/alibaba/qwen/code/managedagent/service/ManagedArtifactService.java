@@ -230,12 +230,23 @@ public class ManagedArtifactService {
             outcome = "interrupted";
             long started = System.nanoTime();
             long timeout = settings.getReadTimeout().toNanos();
+            long revalidation = settings.getReadRevalidationInterval()
+                    .toNanos();
             try (var lease = reader.lease(artifact)) {
+                // Access was verified before streaming; re-verify at most once
+                // per revalidation window instead of on every chunk. MIN_VALUE,
+                // not 0: nanoTime may be negative, and the first guard call must
+                // always re-verify.
+                long[] nextAccessCheck = {Long.MIN_VALUE};
                 Runnable guard = () -> {
-                    if (System.nanoTime() - started > timeout) {
+                    long now = System.nanoTime();
+                    if (now - started > timeout) {
                         throw unavailable();
                     }
-                    requireContentAccess(tenant, artifact);
+                    if (now >= nextAccessCheck[0]) {
+                        requireContentAccess(tenant, artifact);
+                        nextAccessCheck[0] = now + revalidation;
+                    }
                 };
                 if (selection.partial()) {
                     byte[] bytes = reader.readRange(artifact, selection.offset(), (int) selection.length(), lease, guard);

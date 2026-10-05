@@ -7,9 +7,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   MANAGED_EXTENSION_DELIVERY_TARGETS,
+  MANAGED_EXTENSION_STATE_LINES,
   isExtensionRunStart,
   isExtensionRunSuccessor,
   isMonitorRunStart,
@@ -17,6 +18,8 @@ import {
 } from './managed-extension-record.js';
 import {
   MANAGED_EXTENSION_RECORD_BODIES,
+  MANAGED_TASK_KINDS,
+  MANAGED_TASK_RUNTIME_STATES,
   MANAGED_TASK_STATES,
   extensionExecutionOf,
   isExtensionDeliveryPending,
@@ -26,7 +29,11 @@ import {
   type ManagedRuntimeExecutionView,
   type ManagedTaskProjection,
 } from './managed-extension-projection.js';
-import type { ManagedSessionDomain } from './managed-session-records.js';
+import {
+  MANAGED_SESSION_ENABLED_DOMAINS,
+  MANAGED_SESSION_ENVELOPE_DOMAINS,
+  type ManagedSessionDomain,
+} from './managed-session-records.js';
 
 interface Revision {
   readonly occurredAt: number;
@@ -40,6 +47,8 @@ interface FixtureSuite {
   readonly recordBodies: Record<string, string | null>;
   readonly taskStates: readonly string[];
   readonly pendingDeliveryStates: readonly string[];
+  readonly runtimeStates: readonly string[];
+  readonly taskKinds: readonly string[];
   readonly taskIdCases: ReadonlyArray<{
     readonly id: string;
     readonly sessionId: string;
@@ -65,7 +74,6 @@ interface FixtureSuite {
   >;
   readonly historyCases: ReadonlyArray<{
     readonly id: string;
-    readonly kind: string;
     readonly revisions: readonly Revision[];
   }>;
   readonly brokerExecutionCases: ReadonlyArray<{
@@ -73,11 +81,6 @@ interface FixtureSuite {
     readonly execution: string;
     readonly inspection: ManagedRuntimeExecutionView;
     readonly harnessExecution: string;
-  }>;
-  readonly inspectionExecutionCases: ReadonlyArray<{
-    readonly id: string;
-    readonly inspection: ManagedRuntimeExecutionView;
-    readonly execution: string;
   }>;
 }
 
@@ -103,6 +106,10 @@ describe('managed-extension-projection/1 fixtures', () => {
       ),
     ).toEqual(fixtures.recordBodies);
     expect([...MANAGED_TASK_STATES]).toEqual(fixtures.taskStates);
+    expect([...MANAGED_TASK_RUNTIME_STATES].sort()).toEqual(
+      fixtures.runtimeStates,
+    );
+    expect([...MANAGED_TASK_KINDS].sort()).toEqual(fixtures.taskKinds);
     const pending = new Set<string>();
     for (const [target, states] of Object.entries(
       MANAGED_EXTENSION_DELIVERY_TARGETS,
@@ -126,15 +133,65 @@ describe('managed-extension-projection/1 fixtures', () => {
     expect([...pending].sort()).toEqual(fixtures.pendingDeliveryStates);
   });
 
+  it('partitions the enabled domains between the bodies and the envelope list', () => {
+    // Every enabled domain commits either through the envelope path (the
+    // list) or through a Stage H body. monitor_run's body is registered
+    // while its domain stays disabled, so the partition is over the
+    // enabled names only.
+    const bodied = new Set(Object.keys(MANAGED_EXTENSION_RECORD_BODIES));
+    expect(
+      MANAGED_SESSION_ENABLED_DOMAINS.filter((domain) => !bodied.has(domain)),
+    ).toEqual(MANAGED_SESSION_ENVELOPE_DOMAINS);
+  });
+
+  it('refuses to load over a body registered for an envelope domain', async () => {
+    // The tripwire runs once, at module load, over the real registry, so
+    // the test rebuilds the module graph around a registry whose envelope
+    // list names a body-bearing domain.
+    vi.resetModules();
+    vi.doMock('./managed-session-records.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./managed-session-records.js')
+      >('./managed-session-records.js');
+      return {
+        ...actual,
+        MANAGED_SESSION_ENVELOPE_DOMAINS: [
+          ...actual.MANAGED_SESSION_ENVELOPE_DOMAINS,
+          'monitor_run',
+        ],
+      };
+    });
+    try {
+      await expect(import('./managed-extension-projection.js')).rejects.toThrow(
+        /stay out of the envelope/,
+      );
+    } finally {
+      vi.doUnmock('./managed-session-records.js');
+      vi.resetModules();
+    }
+  });
+
   it('keeps every case id unique', () => {
     const lists = Object.entries(fixtures).filter(([name]) =>
       name.endsWith('Cases'),
     );
-    expect(lists).toHaveLength(9);
+    // The name set pins the lists the fixture must carry, so deleting one
+    // or adding another is loud, and no replayed list may be empty (an
+    // it.each over an empty list registers zero tests).
+    expect(lists.map(([name]) => name).sort()).toEqual([
+      'brokerExecutionCases',
+      'historyCases',
+      'monitorChainCases',
+      'monitorChainRejectCases',
+      'monitorRunStartCases',
+      'runStartCases',
+      'taskIdCases',
+      'viewCases',
+    ]);
     for (const [, list] of lists) {
-      const ids = (list as ReadonlyArray<{ readonly id: string }>).map(
-        (each) => each.id,
-      );
+      const cases = list as ReadonlyArray<{ readonly id: string }>;
+      expect(cases.length).toBeGreaterThan(0);
+      const ids = cases.map((each) => each.id);
       expect(new Set(ids).size).toBe(ids.length);
     }
   });
@@ -169,9 +226,46 @@ describe('managed-extension-projection/1 fixtures', () => {
     expect(isExtensionDeliveryPending(run)).toBe(each.deliveryPending);
   });
 
+  it('settles and unbinds every run state whose line ends', () => {
+    // The projection's terminal set is the run line's own: a run state
+    // whose successors are empty must stamp `settledAt` and no runtime.
+    // The execution proven to have ended carries the state, so only the
+    // terminality of the line itself can force the runtime out — without
+    // it the assertion short-circuits on `execution === null`.
+    for (const [state, successors] of Object.entries(
+      MANAGED_EXTENSION_STATE_LINES.run.transitions,
+    )) {
+      if (successors.length > 0) continue;
+      const run = parseExtensionRun({
+        state,
+        reason: null,
+        definition: null,
+        executionCallId: 'call-1',
+        effectId: null,
+        dispatchId: null,
+        deliveryId: null,
+        execution: 'settled',
+        runtime: null,
+        delivery: null,
+      });
+      const view = projectManagedTask(null, run, 1_000);
+      expect(view.settledAt).not.toBeNull();
+      expect(view.runtimeState).toBeNull();
+    }
+  });
+
   it.each(fixtures.historyCases)('projects a history: $id', (each) => {
     const [first, ...later] = each.revisions;
     expect(isExtensionRunStart(first.run)).toBe(true);
+    // The projection adds or drops no field: its own record components.
+    const VIEW_KEYS = [
+      'createdAt',
+      'definitionRevision',
+      'runtimeState',
+      'settledAt',
+      'startedAt',
+      'state',
+    ] as const;
     let previous: ManagedTaskProjection | null = null;
     let previousRun: unknown = null;
     for (const revision of [first, ...later]) {
@@ -179,6 +273,7 @@ describe('managed-extension-projection/1 fixtures', () => {
         expect(isExtensionRunSuccessor(previousRun, revision.run)).toBe(true);
       }
       const run = parseExtensionRun(revision.run);
+      expect(Object.keys(revision.view).sort()).toEqual([...VIEW_KEYS]);
       const view = projectManagedTask(previous, run, revision.occurredAt);
       expect(view).toEqual(revision.view);
       expect(isExtensionDeliveryPending(run)).toBe(revision.deliveryPending);
@@ -186,13 +281,6 @@ describe('managed-extension-projection/1 fixtures', () => {
       previousRun = revision.run;
     }
   });
-
-  it.each(fixtures.inspectionExecutionCases)(
-    'reads a Broker report: $id',
-    (each) => {
-      expect(extensionExecutionOf(each.inspection)).toBe(each.execution);
-    },
-  );
 
   // Java maps the Broker state; the Harness sees only what the Broker's HTTP
   // API reports for it, which the Broker's own contract test pins to these

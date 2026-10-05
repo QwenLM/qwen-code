@@ -23,7 +23,6 @@ const mocks = vi.hoisted(() => ({
     submitPrompt: vi.fn(),
     cancel: vi.fn(),
   },
-  features: ['managed_sessions', 'managed_session_cancel'],
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
@@ -131,12 +130,6 @@ describe('ManagedSessionsPage', () => {
       ...mocks.client,
     };
     sessionStorage.clear();
-    mocks.features = ['managed_sessions', 'managed_session_cancel'];
-    mocks.useWorkspace.mockImplementation(() => ({
-      client: mocks.client,
-      baseUrl: 'http://managed-test',
-      capabilities: { features: mocks.features },
-    }));
     mocks.client.listSessions.mockResolvedValue({
       sessions: [summary()],
     });
@@ -772,7 +765,6 @@ describe('ManagedSessionsPage', () => {
   });
 
   it('uses an explicit Java provider without daemon Managed capabilities', async () => {
-    mocks.features = [];
     const listSessions = vi.fn().mockResolvedValue({
       sessions: [summary('java-session')],
     });
@@ -1076,9 +1068,10 @@ describe('ManagedSessionsPage', () => {
     expect(container.querySelector('textarea')?.disabled).toBe(false);
   });
 
-  it('does not fetch Managed endpoints when the feature is unavailable', async () => {
+  it('renders the unavailable fallback and no fetching when no provider is supplied', async () => {
     await render('s1', 'en', null);
     expect(container.textContent).toContain('unavailable');
+    expect(mocks.useWorkspace).not.toHaveBeenCalled();
     expect(mocks.client.getSession).not.toHaveBeenCalled();
     expect(mocks.client.listSessions).not.toHaveBeenCalled();
   });
@@ -1355,9 +1348,13 @@ describe('ManagedSessionsPage', () => {
       await vi.advanceTimersByTimeAsync(1);
       await flush();
     });
-    expect(
-      container.querySelector('[data-testid="messages"]')?.textContent,
-    ).toContain('First second restored');
+    const rendered =
+      container.querySelector('[data-testid="messages"]')?.textContent ?? '';
+    expect(rendered).toContain('First second restored');
+    // Count/sensitive: an append-instead-of-replace snapshot yields
+    // `First secondFirst second restored` and still satisfies a plain
+    // toContain — so does a replayed prefix with the gap guard removed.
+    expect(rendered.split('First second').length - 1).toBe(1);
     expect(container.textContent).not.toContain('FirstFirst');
     expect(mocks.client.getTranscript).toHaveBeenCalledTimes(2);
     for (const [, options] of mocks.client.getTranscript.mock.calls) {

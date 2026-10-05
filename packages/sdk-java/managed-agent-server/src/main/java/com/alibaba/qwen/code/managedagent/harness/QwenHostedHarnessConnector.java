@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
@@ -25,6 +26,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
@@ -36,13 +38,22 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final WorkspaceExecutionStore workspaceExecution;
     private final DaemonApprovalMode approvalMode;
     private final ManagedActionStore actions;
+    private final WriterCredentialPolicy credentials;
     private volatile HostedHarnessClient client;
     private volatile boolean closed;
+    private final ReentrantLock clientLock = new ReentrantLock();
     // Sessions whose takeover load reported parked Runtime work that no
     // continue/cancel has been admitted for yet.
     private final Set<AttachmentKey> pendingRecovery =
             ConcurrentHashMap.newKeySet();
     private final Map<AttachmentKey, HarnessSessionRef> attachments =
+            new ConcurrentHashMap<>();
+    // Single flight for the first attachment of a Session. computeIfAbsent
+    // would run the blocking Harness call under the map bin monitor, which
+    // pins the caller virtual thread to its carrier on JDK 21. Entries are
+    // reference-counted and dropped when their last caller leaves, so the
+    // map drains with each burst instead of growing with Session churn.
+    private final Map<AttachmentKey, AttachmentLock> attachmentLocks =
             new ConcurrentHashMap<>();
 
     public QwenHostedHarnessConnector(ManagedAgentProperties properties,
@@ -61,6 +72,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         this.sessions = sessions;
         this.actions = actions;
         this.workspaceExecution = workspaceExecution;
+        this.credentials = new WriterCredentialPolicy(properties);
         if (this.properties.getToken() == null
                 || this.properties.getToken().isBlank()
                 || this.properties.getCapabilityDigest() == null
@@ -141,21 +153,28 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
         }
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
-        HarnessSessionRef attached;
-        if (passiveManagedRuntimeRecovery) {
-            attached = load(session, true);
-        } else {
-            attached = attachments.get(key);
-            if (attached == null) {
-                // Fetch outside the map: a blocking HTTP call inside
-                // computeIfAbsent stalls every attachment hashing to the
-                // same bin. A lost putIfAbsent race is safe — create falls
-                // back to load on 409 and load is a read.
-                HarnessSessionRef resolved = loadExisting
-                        ? load(session, false) : create(session);
-                HarnessSessionRef raced = attachments.putIfAbsent(key,
-                        resolved);
-                attached = raced == null ? resolved : raced;
+        HarnessSessionRef attached = passiveManagedRuntimeRecovery
+                ? load(session, true) : attachments.get(key);
+        if (attached == null) {
+            AttachmentLock slot = attachmentLocks.compute(key,
+                    (ignored, held) -> {
+                        AttachmentLock next = held == null
+                                ? new AttachmentLock() : held;
+                        next.holders++;
+                        return next;
+                    });
+            slot.lock.lock();
+            try {
+                attached = attachments.get(key);
+                if (attached == null) {
+                    attached = loadExisting ? load(session, false)
+                            : create(session);
+                    attachments.put(key, attached);
+                }
+            } finally {
+                slot.lock.unlock();
+                attachmentLocks.compute(key, (ignored, held) ->
+                        --held.holders == 0 ? null : held);
             }
         }
         if (session.workspace() != null
@@ -279,13 +298,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public void close() {
-        synchronized (this) {
+        clientLock.lock();
+        try {
             closed = true;
             HostedHarnessClient current = client;
             if (current != null) {
                 current.close();
             }
             client = null;
+        } finally {
+            clientLock.unlock();
         }
         attachments.clear();
         pendingRecovery.clear();
@@ -426,14 +448,23 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (!sessionStore.isEnabled()) {
             return null;
         }
-        return ManagedSessionStoreConnection.builder()
-                .baseUri(URI.create(sessionStore.getBaseUrl()))
-                .tenantId(session.tenantId())
-                .workspaceId(session.workspace() == null ? workspaceId
-                        : session.workspace().getWorkspaceId())
-                .writerId(client().capabilities().getBootId())
-                .leaseDuration(sessionStore.getWriterLeaseDuration())
-                .build();
+        String workspace = session.workspace() == null ? workspaceId
+                : session.workspace().getWorkspaceId();
+        ManagedSessionStoreConnection.Builder builder =
+                ManagedSessionStoreConnection.builder()
+                        .baseUri(URI.create(sessionStore.getBaseUrl()))
+                        .tenantId(session.tenantId())
+                        .workspaceId(workspace)
+                        .writerId(client().capabilities().getBootId())
+                        .leaseDuration(
+                                sessionStore.getWriterLeaseDuration())
+                        .allowInsecureHttp(
+                                sessionStore.isAllowInsecureHttp());
+        if (credentials.isBound()) {
+            builder.writerToken(credentials.issue(session.tenantId(),
+                    workspace, session.sessionId()));
+        }
+        return builder.build();
     }
 
     private HostedHarnessClient client() {
@@ -441,10 +472,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (current != null) {
             return current;
         }
-        synchronized (this) {
-            // Failing before construction matters: building here starts
-            // executors and a heartbeat that nothing would ever close once
-            // close() has run.
+        // A ReentrantLock, not a monitor: the first build blocks on the
+        // capabilities round trip, and callers waiting to enter a monitor
+        // pin their virtual-thread carriers on JDK 21 while AQS waiters
+        // unmount. Failing before construction still matters: building here
+        // starts executors and a heartbeat that nothing would ever close
+        // once close() has run.
+        clientLock.lock();
+        try {
             if (closed) {
                 throw new IllegalStateException(
                         "Hosted Harness connector is closed");
@@ -462,6 +497,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 client = current;
             }
             return current;
+        } finally {
+            clientLock.unlock();
         }
     }
 
@@ -476,6 +513,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             throw new IllegalStateException(
                     "Unsupported Hosted Harness approval mode", error);
         }
+    }
+
+    private static final class AttachmentLock {
+        private final ReentrantLock lock = new ReentrantLock();
+        private int holders;
     }
 
     private record AttachmentKey(String tenantId, String sessionId) {
