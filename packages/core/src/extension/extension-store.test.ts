@@ -118,6 +118,9 @@ describe('ExtensionStore', () => {
     vi.spyOn(KeychainTokenStorage.prototype, 'isAvailable').mockResolvedValue(
       false,
     );
+    vi.spyOn(KeychainTokenStorage.prototype, 'getKeytar').mockResolvedValue(
+      null,
+    );
   });
 
   afterEach(() => {
@@ -2890,6 +2893,70 @@ describe('ExtensionStore', () => {
       );
     },
   );
+
+  it('waits for an asynchronous release guard before changing persisted state', async () => {
+    const store = makeStore();
+    const identity = { id: 'd6'.repeat(32), name: 'demo' };
+    await store.ensureInitialized([identity]);
+    const before = await fsp.readFile(statePath, 'utf8');
+    const writes = vi.spyOn(
+      store as unknown as {
+        writeSnapshotUnlocked: (
+          snapshot: ExtensionStoreSnapshot,
+        ) => Promise<void>;
+      },
+      'writeSnapshotUnlocked',
+    );
+    let finishGuard!: () => void;
+    let enterGuard!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enterGuard = resolve;
+    });
+    const guard = new Promise<void>((resolve) => {
+      finishGuard = resolve;
+    });
+    const onRemoved = vi.fn();
+    const removing = store.removePolicy(identity, {
+      beforeRemove: async () => {
+        enterGuard();
+        await guard;
+      },
+      onRemoved,
+    });
+    await entered;
+    try {
+      expect(writes).not.toHaveBeenCalled();
+      expect(await fsp.readFile(statePath, 'utf8')).toBe(before);
+      expect(onRemoved).not.toHaveBeenCalled();
+    } finally {
+      finishGuard();
+      await removing;
+    }
+    const released = await removing;
+    expect(released.extensions[identity.id]).toBeUndefined();
+    expect(onRemoved).toHaveBeenCalledOnce();
+  });
+
+  it('leaves persisted state untouched when an asynchronous release guard rejects', async () => {
+    const store = makeStore();
+    const identity = { id: 'd6'.repeat(32), name: 'demo' };
+    await store.ensureInitialized([identity]);
+    const before = await fsp.readFile(statePath, 'utf8');
+    const error = new Error('Deployment returned');
+    const onRemoved = vi.fn();
+    await expect(
+      store.removePolicy(identity, {
+        beforeRemove: () => {
+          const rejected = Promise.reject(error);
+          void rejected.catch(() => undefined);
+          return rejected;
+        },
+        onRemoved,
+      }),
+    ).rejects.toBe(error);
+    expect(await fsp.readFile(statePath, 'utf8')).toBe(before);
+    expect(onRemoved).not.toHaveBeenCalled();
+  });
 
   it('captures the actual removed policy after the release is committed', async () => {
     const store = makeStore();

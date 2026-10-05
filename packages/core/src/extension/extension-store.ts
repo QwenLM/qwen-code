@@ -2067,7 +2067,9 @@ export class ExtensionStore {
   async removePolicy(
     identity: ExtensionIdentity,
     options: {
-      beforeRemove?: (policy: Readonly<ExtensionPolicy>) => void;
+      beforeRemove?: (
+        policy: Readonly<ExtensionPolicy>,
+      ) => void | Promise<void>;
       onRemoved?: (policy: ExtensionPolicy) => void;
     } = {},
   ): Promise<ExtensionStoreSnapshot> {
@@ -2077,7 +2079,7 @@ export class ExtensionStore {
         (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
       const policy = snapshot.extensions[identity.id];
       if (!policy || policy.name !== identity.name) return snapshot;
-      options.beforeRemove?.(policy);
+      await options.beforeRemove?.(policy);
       delete snapshot.extensions[identity.id];
       snapshot.generation += 1;
       await this.writeSnapshotUnlocked(snapshot);
