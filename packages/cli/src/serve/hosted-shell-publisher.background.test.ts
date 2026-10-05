@@ -809,6 +809,80 @@ it('re-drives a refused final forward on an attached record without any client a
   );
 });
 
+it('swallows a refused write-arm forward and retries it on the next edging write (M8b)', async () => {
+  // The prepare-time advance left no advance mark: with lastManifest
+  // unset, the write op's own advance runs, its single injected failure
+  // is swallowed with the byte it already landed, and the next edging
+  // write retried the same manifest against the chain-link rule.
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.orchestrator.admit({
+    shellId: 'execution-write',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'execution-write',
+    args: { command: 'echo hi', is_background: true },
+  });
+  await r.orchestrator.dispatchStarted('execution-write', BINDING);
+  await r.orchestrator.attach('execution-write', BINDING, { pid: 7 });
+  const request = backgroundRequest(r.key, '1');
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'execution-write';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-a',
+    request.reference.sessionId,
+  );
+  const failAdvance = () =>
+    vi
+      .spyOn(r.orchestrator, 'advanceOutput')
+      .mockRejectedValueOnce(new Error('transient store 5xx'));
+  failAdvance();
+  await expect(
+    r.registry.prepare(
+      request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+    ),
+  ).rejects.toThrow('Shell publisher refused the request.');
+  const outputRef = () =>
+    parseChildRun(
+      session!.authority.extensionRecord('child_run', 'execution-write')!
+        .record,
+    ).outputRef;
+  expect(outputRef()).toBeNull();
+  let offset = 0;
+  const writeChunk = (text: string) => {
+    const bytes = Buffer.from(text, 'utf8');
+    const body = JSON.stringify({
+      operation: 'write',
+      executionCallId: 'execution-write',
+      stream: 'stdout',
+      offset,
+      bytesBase64: bytes.toString('base64'),
+    });
+    offset += bytes.byteLength;
+    return fetch(r.descriptor.url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${r.descriptor.token}`,
+        'cache-control': 'no-store',
+        'content-type': 'application/json',
+      },
+      body,
+    });
+  };
+  // The write op's own advance arm carries the swallow: the byte stands,
+  // the answer accepts it, and the record is not told about this edge.
+  failAdvance();
+  const first = await writeChunk('one\n');
+  expect(first.status).toBeGreaterThanOrEqual(200);
+  expect(first.status).toBeLessThan(300);
+  expect(outputRef()).toBeNull();
+  // The next edging write retries the same manifest and the record moves.
+  const second = await writeChunk('two\n');
+  expect(second.status).toBeGreaterThanOrEqual(200);
+  expect(second.status).toBeLessThan(300);
+  expect(outputRef()).not.toBeNull();
+});
+
 it('keeps an ownerless tail for the settle that its attach unblocks', async () => {
   const r = await rig();
   const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
