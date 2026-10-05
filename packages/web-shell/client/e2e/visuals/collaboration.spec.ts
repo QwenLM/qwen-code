@@ -66,9 +66,9 @@ const agents = [
   },
 ];
 
-/** The live streams are aborted: without them the page falls back to reads. */
+/** The live run stream is aborted: without it the page falls back to reads. */
 function isAgentStream(path: string): boolean {
-  return path.endsWith('/events') || path.endsWith('/session-events');
+  return path.endsWith('/session-events');
 }
 
 async function setup(page: Page, baseURL: string): Promise<string[]> {
@@ -229,7 +229,7 @@ async function setupRuntimes(page: Page, baseURL: string): Promise<void> {
     const removedHost = /\/hosts\/([^/]+)$/.exec(path)?.[1];
     if (removedHost && method === 'DELETE') {
       runtimes = runtimes.filter((runtime) => runtime.id !== removedHost);
-      return route.fulfill({ json: { agentsMadeLocal: [], runsEnded: 0 } });
+      return route.fulfill({ json: { agentsMadeLocal: [] } });
     }
     if (path.endsWith('/agents') && method === 'GET')
       return route.fulfill({

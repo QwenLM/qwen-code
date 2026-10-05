@@ -192,6 +192,14 @@ export interface SessionAgentRunFrame {
   totalTokens?: number;
   /** Epoch ms of the last activity (for "no activity for N min"). */
   activityAt: number;
+  /**
+   * Set on a terminal frame once its `agent_message` record is in the chat
+   * transcript (it may be deferred while a main-model turn runs). Clients
+   * drop the live card when this is true, not merely when the run ends.
+   */
+  recorded?: boolean;
+  /** uuid of that record, when known. */
+  recordId?: string;
 }
 
 export interface SessionAgentPermissionPrompt {
@@ -353,6 +361,17 @@ export interface HostTurnEventBatch {
   /** Monotonic per (runId, attempt); the coordinator drops replays. */
   sequence: number;
   events: AgentAdapterEvent[];
+}
+
+/**
+ * Per-run answer to a lease renewal in the heartbeat response. `cancelled`
+ * means the person stopped the run on the coordinator: the Host aborts the
+ * turn and does not post a result.
+ */
+export interface HostLeaseStatus {
+  runId: string;
+  ok: boolean;
+  cancelled?: boolean;
 }
 
 /** Returned in heartbeat / pickup responses. */

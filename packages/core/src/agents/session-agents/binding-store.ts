@@ -356,8 +356,8 @@ export interface SessionAgentNativeBinding {
  * Whether `nativeSessionId` is the native (hidden ACP) session a live run in
  * some chat session is driving for `agentId`.
  *
- * The session-agents counterpart of `findAgentSessionBinding`: `sourceType`
- * and `sourceId` on a session request are claims, and what makes one true is
+ * What authorizes an `agent` session: `sourceType` and `sourceId` on a
+ * session request are claims, and what makes one true is
  * that the orchestrator persisted a binding naming this session for this
  * agent AND a run of that agent is executing. The orchestrator writes both
  * before it spawns or resumes the session.

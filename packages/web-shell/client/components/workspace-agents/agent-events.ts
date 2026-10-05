@@ -5,9 +5,9 @@
  */
 
 /**
- * Client for the collaboration streams under `/workspaces/:ws/agent/`
- * (`events` for the roster, `session-events?sessionId=` for a chat session's
- * live agent runs).
+ * Client for the session-agents stream under `/workspaces/:ws/agent/`
+ * (`session-events?sessionId=`: a chat session's live agent runs). The roster
+ * has no stream; the Agents page polls it.
  *
  * `fetch` rather than `EventSource`: the daemon wants a bearer header, which
  * `EventSource` cannot send. Frames are plain `event:` + one `data:` line.

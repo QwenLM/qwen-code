@@ -5,27 +5,17 @@
  */
 
 import type {
-  AgentCapabilitiesView,
   AgentConfigPatch,
   NewWorkspaceAgent,
   WorkspaceAgentRuntimeView,
   WorkspaceAgentSummaryView,
 } from './ThreadsPage';
-import { subscribeAgentStream, type AgentStreamState } from './agent-events';
 import type {
   ConnectExistingInput,
   JoinCoordinatorInput,
   JoinToken,
 } from './add-runtime-dialog';
 import type { AgentShare, AgentShareSummary } from './share-agent-dialog';
-
-/**
- * The Host connection protocol still names its provider on the wire, and the
- * daemon accepts only this one (`routes/agent-host-connection.ts`). Which
- * programs a runtime can run is reported separately, per runtime.
- * TODO(multi-agent): drop once the connect routes stop requiring `provider`.
- */
-const HOST_PROTOCOL_PROVIDER = 'qwen';
 
 /** Agent roster, runtimes, enrollment and sharing for one workspace. */
 export interface ThreadsApi {
@@ -36,7 +26,6 @@ export interface ThreadsApi {
     agents: WorkspaceAgentSummaryView[];
     runtime?: WorkspaceAgentRuntimeView;
     runtimes?: WorkspaceAgentRuntimeView[];
-    capabilities?: AgentCapabilitiesView;
   }>;
   /** A single-use token for `qwen serve --join` on another machine. */
   createJoinToken?(supersedesHostId?: string): Promise<JoinToken>;
@@ -48,14 +37,6 @@ export interface ThreadsApi {
   deleteAgent(id: string): Promise<unknown>;
   setAgentEnabled(id: string, enabled: boolean): Promise<unknown>;
   updateAgent(id: string, patch: AgentConfigPatch): Promise<unknown>;
-  /**
-   * Roster changes (`changed` frames) from the workspace's agent stream;
-   * absent in tests and older daemons, which then poll.
-   */
-  subscribe?(
-    onEvent: (event: { type: string }) => void,
-    onState: (state: AgentStreamState) => void,
-  ): () => void;
 }
 
 export function createThreadsHttpApi(
@@ -88,13 +69,10 @@ export function createThreadsHttpApi(
     request<T>(path, { method: 'POST', body: JSON.stringify(body) });
 
   return {
-    connectRemoteHost: (input) =>
-      post('/hosts/remote-connect', {
-        ...input,
-        provider: HOST_PROTOCOL_PROVIDER,
-      }),
-    joinCoordinator: (input) =>
-      post('/hosts/connect', { ...input, provider: HOST_PROTOCOL_PROVIDER }),
+    // No `provider`: a v2 remote reports which programs it has, and the
+    // coordinator adds an agent per program once it heartbeats.
+    connectRemoteHost: (input) => post('/hosts/remote-connect', input),
+    joinCoordinator: (input) => post('/hosts/connect', input),
     listAgents: () => request('/agents'),
     createJoinToken: (supersedesHostId) =>
       post('/hosts/enrollment', supersedesHostId ? { supersedesHostId } : {}),
@@ -122,10 +100,5 @@ export function createThreadsHttpApi(
         method: 'PATCH',
         body: JSON.stringify(patch),
       }),
-    // TODO(multi-agent): `/events` is the thread-era workspace stream. If it is
-    // removed with the thread subsystem, the stream reports `closed` and the
-    // roster page falls back to polling; move to a roster-scoped stream then.
-    subscribe: (onEvent, onState) =>
-      subscribeAgentStream(`${root}/events`, token, onEvent, onState),
   };
 }

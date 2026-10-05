@@ -83,6 +83,9 @@ export interface SessionAgentRunFrame {
   error?: string;
   totalTokens?: number;
   activityAt: number;
+  /** The terminal `agent_message` record is in the transcript. */
+  recorded?: boolean;
+  recordId?: string;
 }
 
 export interface SessionAgentChangedFrame {

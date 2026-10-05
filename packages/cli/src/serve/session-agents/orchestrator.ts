@@ -152,6 +152,16 @@ export interface SessionAgentRunSummary {
   status: SessionAgentRunStatus;
 }
 
+/** One live run, as {@link SessionAgentOrchestrator.liveRuns} reports it. */
+export interface SessionAgentLiveRunSummary {
+  sessionId: string;
+  runId: string;
+  agentId: string;
+  status: SessionAgentRunStatus;
+  /** The Host executing it, for a run handed to a remote runtime. */
+  hostId?: string;
+}
+
 export interface SessionAgentMentionResult {
   /** uuid of the `agent_mention` record; empty while it is deferred. */
   recordId: string;
@@ -698,6 +708,23 @@ export class SessionAgentOrchestrator {
     return [...this.live.values()]
       .filter((live) => live.sessionId === sessionId)
       .map((live) => this.buildFrame(live, state));
+  }
+
+  /**
+   * Every live (queued or executing) run across all chat sessions. Read-only:
+   * the roster view reports agent status and runtime load from it, and roster
+   * changes that would strand a run (retire, move) refuse on it. Waits for
+   * startup recovery, so a run recovered from disk is never missed.
+   */
+  async liveRuns(): Promise<SessionAgentLiveRunSummary[]> {
+    await this.recovered;
+    return [...this.live.values()].map((live) => ({
+      sessionId: live.sessionId,
+      runId: live.run.id,
+      agentId: live.run.agentId,
+      status: live.run.status,
+      ...(live.remote ? { hostId: live.remote.hostId } : {}),
+    }));
   }
 
   /** Stops every run in every session and the timers. Idempotent. */

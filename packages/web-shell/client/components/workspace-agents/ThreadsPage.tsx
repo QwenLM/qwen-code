@@ -57,19 +57,16 @@ export interface AgentConfigPatch {
   agentType?: string | null;
   maxConcurrentRuns?: number | null;
   execution?:
-    | { mode: 'local' }
+    | {
+        mode: 'local';
+        /** Program on this computer; Qwen Code when absent. */
+        provider?: AgentProgramView;
+      }
     | {
         mode: 'managed-host';
         hostIds: string[];
         provider?: AgentProgramView;
       };
-}
-
-/** What every agent in this workspace may do. A property of the subsystem. */
-export interface AgentCapabilitiesView {
-  readOnly: boolean;
-  allowed: readonly string[];
-  threadTools: readonly string[];
 }
 
 export interface ThreadsPageProps {
@@ -100,7 +97,6 @@ export interface ThreadsPageProps {
     list: (agentId: string) => Promise<AgentShareSummary[]>;
     revoke: (agentId: string, callerId: string) => Promise<unknown>;
   };
-  capabilities?: AgentCapabilitiesView;
   pending?: boolean;
 }
 
@@ -117,21 +113,12 @@ export interface WorkspaceAgentSummaryView {
   maxConcurrentRuns?: number;
   execution?: AgentConfigPatch['execution'];
   enabled: boolean;
-  status: 'offline' | 'idle' | 'working' | 'blocked' | 'error';
+  status: 'offline' | 'idle' | 'working' | 'error';
   /** Absent from a daemon older than runtimes; that agent runs here. */
   runtime?: WorkspaceAgentRuntimeView;
   /** Set once the identity is retired: it keeps its posts and takes no work. */
   retiredAt?: number;
-  /**
-   * Thread-era activity the roster still reports; only its state is shown.
-   * TODO(multi-agent): replace with the agent's live session runs once the
-   * roster reports them.
-   */
-  workingOn?: {
-    id: string;
-    title: string;
-    state: 'working' | 'finishing' | 'stopping';
-  };
+  /** Queued session-agent runs waiting for this agent. */
   waiting: number;
 }
 
@@ -141,14 +128,13 @@ export interface WorkspaceAgentRuntimeView {
   label: string;
   provider: string;
   /**
-   * Program ids (`qwen` | `claude` | `codex`) the runtime reported it can run.
-   * The local daemon sends none: it runs Qwen Code.
+   * Program ids (`qwen` | `claude` | `codex`) the runtime reported it can run,
+   * the local daemon included (from its program probe). None means Qwen Code.
    */
   programs?: readonly string[];
   status: 'online' | 'offline';
   workspaceId?: string;
   workspaceCwd?: string;
-  hostSessionId?: string;
   lastSeenAt?: number;
   agentCount?: number;
   sessionCount?: number;
@@ -172,11 +158,8 @@ const AGENT_STATUSES = new Set([
   'online',
   'idle',
   'working',
-  'blocked',
   'offline',
   'error',
-  'finishing',
-  'stopping',
 ]);
 
 /**
@@ -201,7 +184,6 @@ export function ThreadsPage({
   onJoinCoordinator,
   hostServerUrl,
   shares,
-  capabilities,
   pending,
 }: ThreadsPageProps) {
   const runtimeEntries = runtimes ?? [];
@@ -222,11 +204,7 @@ export function ThreadsPage({
       : entry.label;
   // "Program · Runtime": what the agent runs as, then where.
   const agentPlace = (agent: WorkspaceAgentSummaryView) =>
-    `${programLabel(
-      agent.execution?.mode === 'managed-host'
-        ? agent.execution.provider
-        : undefined,
-    )} · ${hostLabel(agent.runtime)}`;
+    `${programLabel(agent.execution?.provider)} · ${hostLabel(agent.runtime)}`;
 
   const submitConfig =
     (agentId: string) => (event: FormEvent<HTMLFormElement>) => {
@@ -252,6 +230,12 @@ export function ThreadsPage({
       const placementChanged =
         hostIds.length !== currentHostIds.length ||
         hostIds.some((hostId) => !currentHostIds.includes(hostId));
+      // Moving an agent keeps the program it is bound to, wherever the new
+      // place offers it.
+      const currentProgram = current?.execution?.provider;
+      const localRuntime = runtimeEntries.find(
+        (entry) => entry.kind === 'local',
+      );
       onUpdateAgent(agentId, {
         description: field('description'),
         model: field('model'),
@@ -265,13 +249,16 @@ export function ThreadsPage({
                   ? ({
                       mode: 'managed-host',
                       hostIds,
-                      // Moving an agent keeps the program it is bound to.
-                      ...(current?.execution?.mode === 'managed-host' &&
-                      current.execution.provider
-                        ? { provider: current.execution.provider }
-                        : {}),
+                      ...(currentProgram ? { provider: currentProgram } : {}),
                     } as const)
-                  : ({ mode: 'local' } as const),
+                  : ({
+                      mode: 'local',
+                      ...(currentProgram &&
+                      localRuntime &&
+                      runtimePrograms(localRuntime).includes(currentProgram)
+                        ? { provider: currentProgram }
+                        : {}),
+                    } as const),
             }
           : {}),
       });
@@ -378,18 +365,14 @@ export function ThreadsPage({
                         data-status={
                           agent.retiredAt || !agent.enabled
                             ? 'off'
-                            : agent.workingOn
-                              ? 'working'
-                              : agent.status
+                            : agent.status
                         }
                       >
                         {agent.retiredAt
                           ? t('collab.agentStatus.retired')
                           : !agent.enabled
                             ? t('collab.agentStatus.paused')
-                            : agent.workingOn
-                              ? statusLabel(agent.workingOn.state)
-                              : statusLabel(agent.status)}
+                            : statusLabel(agent.status)}
                       </Badge>
                       {agent.waiting ? (
                         <Badge variant="outline" className="text-[10px]">
@@ -466,7 +449,9 @@ export function ThreadsPage({
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
                             variant="destructive"
-                            disabled={Boolean(agent.workingOn || agent.waiting)}
+                            disabled={
+                              agent.status === 'working' || agent.waiting > 0
+                            }
                             onSelect={() => {
                               if (
                                 window.confirm(
@@ -558,9 +543,7 @@ export function ThreadsPage({
                                 disabled={
                                   !configuring.hostIds.includes(entry.id) &&
                                   !runtimePrograms(entry).includes(
-                                    agent.execution?.mode === 'managed-host'
-                                      ? (agent.execution.provider ?? 'qwen')
-                                      : 'qwen',
+                                    agent.execution?.provider ?? 'qwen',
                                   )
                                 }
                                 onChange={(event) => {
@@ -609,26 +592,6 @@ export function ThreadsPage({
               </Card>
             ))
           )}
-          {capabilities ? (
-            <div className={styles.ceiling}>
-              <h3 className={styles.ceilingTitle}>
-                {t('collab.ceiling.title')}
-              </h3>
-              <p className={styles.ceilingText}>
-                {capabilities.readOnly
-                  ? t('collab.ceiling.readOnly')
-                  : t('collab.ceiling.open')}
-              </p>
-              <details>
-                <summary className="cursor-pointer text-xs text-muted-foreground">
-                  {t('collab.ceiling.tools')}
-                </summary>
-                <p className={styles.ceilingTools}>
-                  {capabilities.allowed.join(', ')}
-                </p>
-              </details>
-            </div>
-          ) : null}
         </section>
 
         {view === 'runtime' && runtimeEntries.length > 0 ? (
@@ -723,13 +686,6 @@ export function ThreadsPage({
                   {t('collab.runtime.technical')}
                 </summary>
                 <p>{t('collab.runtime.id', { id: runtimeEntry.id })}</p>
-                {runtimeEntry.hostSessionId && (
-                  <p>
-                    {t('collab.runtime.hostSession', {
-                      id: runtimeEntry.hostSessionId,
-                    })}
-                  </p>
-                )}
                 <p>
                   {t('collab.runtime.sessions', {
                     count: runtimeEntry.sessionCount ?? 0,

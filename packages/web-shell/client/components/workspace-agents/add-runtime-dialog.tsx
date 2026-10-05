@@ -93,18 +93,17 @@ export function parseJoinLink(
 }
 
 /**
- * The terminal equivalent of "Join a coordinator": a separate `qwen serve`
- * that joins with the same link. The token rides in the environment, never in
- * argv.
- * TODO(multi-agent): the plan names this `qwen agents join <link>`; no such
- * subcommand exists yet, so this shows the `qwen serve --join` form that does.
+ * The terminal equivalent of "Join a coordinator": `qwen agents join <link>`
+ * asks the running local `qwen serve` to join with the same link (it calls
+ * that daemon's `/hosts/connect`, exactly as this dialog does). The token
+ * rides in the environment, never in argv.
  */
 export function joinCoordinatorCommand(
   link: string,
   token: string,
   allowHttp: boolean,
 ): string {
-  return `QWEN_AGENT_HOST_ENROLLMENT_TOKEN=${shellQuote(token || '<token>')} qwen serve --no-web --port 0 --join ${shellQuote(link.trim())}${allowHttp ? ' --agent-host-allow-http' : ''}`;
+  return `QWEN_AGENT_HOST_ENROLLMENT_TOKEN=${shellQuote(token || '<token>')} qwen agents join ${shellQuote(link.trim())}${allowHttp ? ' --allow-http' : ''}`;
 }
 
 export function findReplacementRuntime(
@@ -194,7 +193,7 @@ function CommandLine({ text }: { text: string }) {
 
 /**
  * "Add runtime": hand another machine a one-line command, then wait for it to
- * show up. The dialog notices the new runtime through the same live stream
+ * show up. The dialog notices the new runtime through the same roster poll
  * that updates the Runtime tab, so it flips from waiting to connected by
  * itself (the Tailscale/Vercel "add device" pattern).
  */

@@ -12,7 +12,6 @@ import {
 
 import {
   ThreadsPage,
-  type AgentCapabilitiesView,
   type AgentWorkspaceView,
   type WorkspaceAgentRuntimeView,
   type WorkspaceAgentSummaryView,
@@ -22,10 +21,13 @@ import { useI18n } from '../../i18n';
 import { isAgentCollaborationEnabledForWorkspace } from '../../utils/workspace';
 import { createThreadsHttpApi } from './threads-api';
 
-/** Polling cadence while the live stream is down or unsupported. */
-const REFRESH_MS = 1_000;
-/** Bursts of store writes collapse into one refetch. */
-const CHANGE_REFETCH_MS = 150;
+/**
+ * Roster polling cadence. The roster has no live stream (the thread-era
+ * workspace stream went with threads); live run progress is shown in the chat
+ * session from `session-events`, so a couple of seconds is enough here and
+ * still lets the Add runtime dialog notice a newly joined runtime promptly.
+ */
+const REFRESH_MS = 2_000;
 
 export interface AgentsRouteProps {
   /** `new-agent` opens straight into the New agent page. */
@@ -38,7 +40,7 @@ export interface AgentsRouteProps {
 
 /**
  * The Agents page with its data: the workspace's roster and runtimes, kept
- * fresh from the workspace agent stream.
+ * fresh by polling.
  */
 export function AgentsRoute({
   initialView,
@@ -87,7 +89,6 @@ export function AgentsRoute({
       ? 'agents'
       : initialView,
   );
-  const [capabilities, setCapabilities] = useState<AgentCapabilitiesView>();
   const [pending, setPending] = useState(false);
   // Set while the New agent page is open; may name the runtime to preselect.
   const [creatingAgent, setCreatingAgent] = useState<
@@ -115,7 +116,6 @@ export function AgentsRoute({
       appliedRefresh.current = sequence;
       setAgents(next.agents);
       setRuntimes(next.runtimes ?? (next.runtime ? [next.runtime] : []));
-      if (next.capabilities) setCapabilities(next.capabilities);
       setRefreshError(undefined);
     } catch (cause) {
       if (activeClient.current !== client || sequence < appliedRefresh.current)
@@ -130,40 +130,10 @@ export function AgentsRoute({
   useEffect(() => {
     void refresh();
   }, [refresh]);
-  // Refetch on `changed`; poll only while the stream is down.
   useEffect(() => {
     if (!client) return;
-    let poll: ReturnType<typeof setInterval> | undefined;
-    let pendingRefetch: ReturnType<typeof setTimeout> | undefined;
-    const startPolling = () => {
-      poll ??= setInterval(() => void refreshRef.current(), REFRESH_MS);
-    };
-    if (!client.subscribe) {
-      startPolling();
-      return () => clearInterval(poll);
-    }
-    const stop = client.subscribe(
-      (event) => {
-        if (event.type !== 'changed') return;
-        pendingRefetch ??= setTimeout(() => {
-          pendingRefetch = undefined;
-          void refreshRef.current();
-        }, CHANGE_REFETCH_MS);
-      },
-      (state) => {
-        if (state === 'closed') {
-          startPolling();
-          return;
-        }
-        clearInterval(poll);
-        poll = undefined;
-      },
-    );
-    return () => {
-      stop();
-      clearInterval(poll);
-      clearTimeout(pendingRefetch);
-    };
+    const poll = setInterval(() => void refreshRef.current(), REFRESH_MS);
+    return () => clearInterval(poll);
   }, [client]);
 
   const mutate = useCallback(
@@ -188,12 +158,19 @@ export function AgentsRoute({
     return <p role="alert">{t('collab.noWorkspace')}</p>;
   }
 
+  const localRuntimePrograms = runtimes.find(
+    (entry) => entry.kind === 'local',
+  )?.programs;
+
   if (creatingAgent) {
     return (
       <AgentCreatePage
         initialScope="workspace"
         workspaceCwd={workspaceCwd}
         executionHosts={runtimes.filter((entry) => entry.kind === 'external')}
+        {...(localRuntimePrograms
+          ? { localPrograms: localRuntimePrograms }
+          : {})}
         {...(creatingAgent.hostId
           ? { initialHostId: creatingAgent.hostId }
           : {})}
@@ -271,7 +248,6 @@ export function AgentsRoute({
           : {})}
         {...(shares ? { shares } : {})}
         {...(onOpenDefinitions ? { onOpenDefinitions } : {})}
-        {...(capabilities ? { capabilities } : {})}
         hostServerUrl={workspace.baseUrl}
       />
     </>

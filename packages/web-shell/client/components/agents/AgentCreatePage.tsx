@@ -68,6 +68,11 @@ interface AgentCreatePageProps {
   }[];
   /** Preselects the runtime, e.g. right after it joined. */
   initialHostId?: string;
+  /**
+   * Program ids this computer's daemon reported it can run. Absent (an older
+   * daemon) means Qwen Code only.
+   */
+  localPrograms?: readonly string[];
   onSaveWorkspaceAgent?: (input: {
     name: string;
     description?: string;
@@ -76,7 +81,7 @@ interface AgentCreatePageProps {
     model?: string;
     maxConcurrentRuns: number;
     execution?:
-      | { mode: 'local' }
+      | { mode: 'local'; provider?: AgentProgramView }
       | {
           mode: 'managed-host';
           hostIds: string[];
@@ -131,6 +136,7 @@ export function AgentCreatePage({
   executionHosts = [],
   workspaceCwd,
   initialHostId,
+  localPrograms,
   onSaveWorkspaceAgent,
 }: AgentCreatePageProps) {
   const { t } = useI18n();
@@ -176,8 +182,19 @@ export function AgentCreatePage({
     approvalMode === 'bubble' ? [...approvalModes, 'bubble'] : approvalModes;
   const [maxTurns, setMaxTurns] = useState(agent?.maxTurns?.toString() ?? '');
   const [maxConcurrentRuns, setMaxConcurrentRuns] = useState('1');
-  const [executionProvider, setExecutionProvider] =
-    useState<AgentProgramView>('qwen');
+  // What this computer can run; Qwen Code when the daemon reported nothing.
+  const localRuntimePrograms = runtimePrograms({ programs: localPrograms });
+  const [executionProvider, setExecutionProvider] = useState<AgentProgramView>(
+    () => {
+      const initialHost = executionHosts.find(
+        (host) => host.id === initialHostId,
+      );
+      const offered = initialHost
+        ? runtimePrograms(initialHost)
+        : localRuntimePrograms;
+      return offered[0] ?? 'qwen';
+    },
+  );
   const [executionHostIds, setExecutionHostIds] = useState(
     () => new Set<string>(initialHostId ? [initialHostId] : []),
   );
@@ -538,7 +555,15 @@ export function AgentCreatePage({
                   provider: executionProvider,
                 },
               }
-            : {}),
+            : executionProvider !== 'qwen'
+              ? {
+                  // Claude Code or Codex on this computer.
+                  execution: {
+                    mode: 'local' as const,
+                    provider: executionProvider,
+                  },
+                }
+              : {}),
         });
         onCreated(trimmedName);
         return;
@@ -803,7 +828,9 @@ export function AgentCreatePage({
                         checked={executionHostIds.size === 0}
                         onChange={() => {
                           setExecutionHostIds(new Set());
-                          setExecutionProvider('qwen');
+                          setExecutionProvider(
+                            localRuntimePrograms[0] ?? 'qwen',
+                          );
                         }}
                       />
                       <span>
@@ -862,17 +889,17 @@ export function AgentCreatePage({
                   const host = executionHosts.find((entry) =>
                     executionHostIds.has(entry.id),
                   );
-                  // This computer runs Qwen Code only.
-                  // TODO(multi-agent): offer Claude Code / Codex here too once
-                  // the local daemon reports the programs it can run.
+                  // This computer offers what its daemon's probe found; an
+                  // older daemon that reports nothing runs Qwen Code only.
+                  const offered = host
+                    ? runtimePrograms(host)
+                    : localRuntimePrograms;
                   const missing = (provider: AgentProgramView) =>
-                    !host
-                      ? provider === 'qwen'
-                        ? undefined
-                        : t('collab.agent.programLocal')
-                      : runtimePrograms(host).includes(provider)
-                        ? undefined
-                        : t('collab.agent.programMissing');
+                    offered.includes(provider)
+                      ? undefined
+                      : host || localPrograms !== undefined
+                        ? t('collab.agent.programMissing')
+                        : t('collab.agent.programLocal');
                   return (
                     <Field className="lg:col-span-2">
                       <FieldLabel>{t('collab.runtime.program')}</FieldLabel>

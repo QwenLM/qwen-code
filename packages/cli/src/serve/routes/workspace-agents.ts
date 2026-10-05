@@ -5,109 +5,55 @@
  */
 
 /**
- * Read and write surface behind the Web Shell agents-and-threads pages.
+ * The workspace agent roster behind the Web Shell agents pages: agents CRUD,
+ * Agent Host enrollment and removal, and A2A shares.
  *
- * Three properties this layer is responsible for, none of which the client
- * can hold on its own:
- *
- * 1. **The thread's state is decided here.** `resolveThreadStatus` returns the
- *    status *and* the sentence explaining it, and both travel to the client
- *    together. A browser that derived its own status word would give the
- *    product two answers to "why is this blocked", and the one on screen would
- *    win.
- * 2. **Routing is previewed with the real rules.** The composer shows who a
- *    draft will wake before it is sent. That preview runs `parseMentions` and
- *    `decideDispatch` — the same pure functions admission uses — so it is the
- *    true outcome rather than a second implementation that can drift.
- * 3. **Human identity comes from the authenticated surface**, never from the
- *    request body. A post from this route is authored by the person operating
- *    the shell; there is no field they can set to claim otherwise.
+ * Agents answer @-mentions inside chat sessions through the session-agents
+ * orchestrator (`routes/session-agents.ts`); this layer only reads its live
+ * runs to report status and to refuse roster changes that would strand one.
  */
 
 import { randomBytes } from 'node:crypto';
-import { stat } from 'node:fs/promises';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import type {
-  ThreadPriority,
   WorkspaceAgent,
   WorkspaceAgentExecution,
-  Thread,
-  ThreadRun,
 } from '@qwen-code/qwen-code-core';
+import type { SessionAgentProgram } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 import {
-  assignThread,
-  createAssignedThread,
-  postMessage,
-} from '@qwen-code/qwen-code-core/agents/workspace-agents/thread-actions.js';
-import {
-  createThread,
   generateAgentId,
-  generateEventId,
-  getAgentsDir,
   isValidAgentName,
-  listThreads,
   issueAgentHostEnrollment,
   isValidId,
   readAgentHosts,
   readWorkspaceAgents,
-  readAgentWorkspace,
-  readThread,
-  releaseAgentHostSession,
+  removeAgentHost,
   retireWorkspaceAgent,
   isAgentAddressable,
   isAgentLocal,
   maxConcurrentRunsFor,
   updateWorkspaceAgent,
-  threadTokens,
   updateWorkspaceAgents,
-  withAgentStoreTransaction,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
-import { strandLocalRuns } from '@qwen-code/qwen-code-core/agents/workspace-agents/stranded-runs.js';
 import {
-  THREAD_PRIORITY_ORDER,
-  DEFAULT_THREAD_PRIORITY,
   LOCAL_AGENT_RUNTIME_ID,
-  HUMAN_AUTHOR_ID,
-  DEFAULT_THREAD_AUTO_TURN_BUDGET,
-  DEFAULT_THREAD_TOKEN_BUDGET,
   AGENT_PROGRAM_LABELS,
+  hostAvailablePrograms,
   hostOffersProgram,
   isAgentProgram,
-  isThreadTerminal,
-  type AgentProgram,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
-import {
-  decideDispatch,
-  resolveTargets,
-} from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatch-policy.js';
-import {
-  deliverParentReports,
-  queuedAhead,
-} from '@qwen-code/qwen-code-core/agents/workspace-agents/dispatcher.js';
-import {
-  finishRunInTransaction,
-  hasLiveDescendant,
-} from '@qwen-code/qwen-code-core/agents/workspace-agents/run-lifecycle.js';
-import { parseMentions } from '@qwen-code/qwen-code-core/agents/workspace-agents/mentions.js';
-import { removeAgentHost } from '@qwen-code/qwen-code-core/agents/workspace-agents/host-lease.js';
-import {
-  THREAD_TOOL_NAMES,
-  AGENT_TOOL_CLASSIFICATION,
-} from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
-import { resolveThreadStatus } from '@qwen-code/qwen-code-core/agents/workspace-agents/thread-status.js';
 import {
   issueA2AGrant,
   listA2AGrants,
   revokeA2AGrant,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-grants.js';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { AGENT_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
-import { startAgentHostSessionOwner } from '../workspace-agents/agent-host-session.js';
 import {
-  AGENT_HOST_ONLINE_WINDOW_MS,
-  subscribeAgentEvents,
-  type AgentLiveEvent,
-} from '../workspace-agents/agent-events.js';
+  getSessionAgentOrchestrator,
+  type SessionAgentLiveRunSummary,
+} from '../session-agents/orchestrator.js';
+import { probeAgentPrograms } from '../session-agents/program-probe.js';
+import { availablePrograms } from '../agent-host-programs.js';
 import { registerAgentHostRemoteConnectRoute } from './agent-host-connection.js';
 import {
   requireTrustedWorkspaceRuntime,
@@ -124,32 +70,40 @@ export interface RegisterWorkspaceAgentRoutesDeps {
   /**
    * Per-workspace opt-in check, resolved from the same settings merge a
    * hosted session sees (workspace scope wins), with the env var as the
-   * operator's process-wide override. Consulted per request and per recovery
-   * tick, never snapshotted, so a workspace can flip the feature off without
-   * a daemon restart.
+   * operator's process-wide override. Consulted per request, never
+   * snapshotted, so a workspace can flip the feature off without a daemon
+   * restart.
    */
   isAgentCollaborationEnabledFor: (workspaceCwd: string) => boolean;
 }
 
-const LIVE_RUN_STATUSES = new Set([
-  'queued',
-  'running',
-  'finishing',
-  'cancelling',
-]);
-const ACTIVE_RUN_STATUSES = new Set(['running', 'finishing', 'cancelling']);
+/** A runtime counts as online while its last heartbeat is this recent. */
+const AGENT_HOST_ONLINE_WINDOW_MS = 15_000;
 
-function liveRunCount(thread: Thread): number {
-  return thread.runs.filter((run) => LIVE_RUN_STATUSES.has(run.status)).length;
+/** Executing (not queued) session-agent run statuses. */
+const EXECUTING_RUN_STATUSES: ReadonlySet<string> = new Set([
+  'running',
+  'awaiting_approval',
+]);
+
+/** The programs this machine can run agents with, as ids. */
+async function localPrograms(): Promise<SessionAgentProgram[]> {
+  return availablePrograms(await probeAgentPrograms());
 }
 
-function lastActivity(thread: Thread): number {
-  const lastPost = thread.messages.at(-1)?.at ?? thread.createdAt;
-  const lastRun = thread.runs.reduce(
-    (latest, run) => Math.max(latest, run.endedAt ?? run.startedAt ?? 0),
-    0,
-  );
-  return Math.max(lastPost, lastRun);
+/** This workspace's live session-agent runs; none without an orchestrator. */
+async function liveRunsOf(
+  runtime: WorkspaceRuntime,
+): Promise<SessionAgentLiveRunSummary[]> {
+  const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
+  return orchestrator ? orchestrator.liveRuns() : [];
+}
+
+async function hasLiveRuns(
+  runtime: WorkspaceRuntime,
+  agentId: string,
+): Promise<boolean> {
+  return (await liveRunsOf(runtime)).some((run) => run.agentId === agentId);
 }
 
 /**
@@ -160,7 +114,7 @@ function lastActivity(thread: Thread): number {
  * override and returns the agent to what its definition says. A value sets it.
  * Anything else is rejected rather than coerced, because a colour that is not
  * a colour or a concurrency that is not a number would be written to the
- * roster and read back by the dispatcher.
+ * roster and read back by the orchestrator.
  */
 function readAgentConfigPatch(payload: {
   description?: unknown;
@@ -264,7 +218,7 @@ function readAgentExecution(
 }
 
 /**
- * The most threads one agent may be set to work at once.
+ * The most runs one agent may be set to execute at once.
  *
  * A ceiling on the setting, not on the machine: every concurrent run is a
  * prompt in flight against the same session, and a number typed with an extra
@@ -272,93 +226,12 @@ function readAgentExecution(
  */
 const MAX_CONCURRENT_RUNS_CEILING = 8;
 
-/**
- * The tools an agent may actually call, derived from the same table the guard
- * refuses from. Derived rather than listed so the two cannot drift: a tool
- * reclassified in core changes what this reports on the next build.
- */
-const AGENT_ALLOWED_TOOL_NAMES = Object.entries(AGENT_TOOL_CLASSIFICATION)
-  .filter(([, classification]) => classification === 'allow')
-  .map(([name]) => name)
-  .sort();
-
-/** Why a run exists, in the words a reader asks the question in. */
-function triggerText(thread: Thread, run: ThreadRun): string {
-  const first = thread.messages.find((message) =>
-    run.triggerMessageIds.includes(message.id),
-  );
-  if (!first) return 'started by the dispatcher';
-  if (first.triggerKind === 'assignment') return 'assigned to this thread';
-  if (first.triggerKind === 'child_report') return 'a sub-thread reported back';
-  if (first.authorKind === 'human') {
-    return first.mentions.length > 0 ? 'mentioned by you' : 'assigned by you';
-  }
-  return `mentioned by ${first.authorNameSnapshot}`;
-}
-
-function agentName(agents: readonly WorkspaceAgent[], agentId: string): string {
-  return agents.find((agent) => agent.id === agentId)?.name ?? agentId;
-}
-
-function runView(
-  thread: Thread,
-  run: ThreadRun,
-  agents: readonly WorkspaceAgent[],
-  threads: readonly Thread[],
-) {
-  const agent = agents.find((candidate) => candidate.id === run.agentId);
-  const ahead = queuedAhead(threads, thread.id, run.id);
-  return {
-    id: run.id,
-    agentId: run.agentId,
-    agentName: agent?.name ?? run.agentId,
-    ...(agent?.color ? { agentColor: agent.color } : {}),
-    status: run.status,
-    ...(ahead > 0 ? { queueAhead: ahead } : {}),
-    ...(run.progress?.attempt === run.attempts
-      ? { progress: run.progress }
-      : {}),
-    ...(run.closeKind ? { closeKind: run.closeKind } : {}),
-    closeAcknowledged: run.closeAcknowledgedAtSequence !== undefined,
-    ...(run.failureStage ? { failureStage: run.failureStage } : {}),
-    ...(run.error ? { error: run.error } : {}),
-    trigger: triggerText(thread, run),
-    ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
-    ...(run.endedAt !== undefined ? { endedAt: run.endedAt } : {}),
-    // The task-scoped session this run's turn was taken in.
-    ...(run.sessionId !== undefined ? { sessionId: run.sessionId } : {}),
-  };
-}
-
-/**
- * Resolves a thread's status here rather than trusting the stored value.
- *
- * The stored status is written by whichever path last touched the thread; the
- * resolver is the definition. Recomputing on read means a thread whose child
- * finished while the daemon was down still reads correctly the first time
- * someone opens it.
- */
-function resolve(thread: Thread, threads: readonly Thread[]) {
-  return resolveThreadStatus({
-    thread,
-    hasLiveChildDependency: hasLiveDescendant(threads, thread.id),
-  });
-}
-
 export function registerWorkspaceAgentRoutes(
   app: Application,
   deps: RegisterWorkspaceAgentRoutesDeps,
 ): void {
   // /agents/:agentType already belongs to reusable agent definitions.
   const prefix = '/workspaces/:workspace/agent';
-  const owners = new Map<
-    string,
-    {
-      bridge: WorkspaceRuntime['bridge'];
-      generationGuard: WorkspaceRuntime['generationGuard'];
-      owner: ReturnType<typeof startAgentHostSessionOwner>;
-    }
-  >();
 
   const runtimeFor = (
     req: Request,
@@ -386,38 +259,6 @@ export function registerWorkspaceAgentRoutes(
   // pull stays behind it.
   registerAgentHostRemoteConnectRoute(app, prefix, runtimeFor, deps.mutate);
 
-  const dispatch = async (runtime: WorkspaceRuntime): Promise<void> => {
-    runtime.generationGuard?.assertOpen();
-    const previous = owners.get(runtime.workspaceCwd);
-    let current = previous;
-    if (
-      !current ||
-      current.bridge !== runtime.bridge ||
-      current.generationGuard !== runtime.generationGuard
-    ) {
-      const owner = startAgentHostSessionOwner({
-        bridge: runtime.bridge,
-        workspaceCwd: runtime.workspaceCwd,
-        ...(runtime.generationGuard
-          ? { generationGuard: runtime.generationGuard }
-          : {}),
-      });
-      current = {
-        bridge: runtime.bridge,
-        generationGuard: runtime.generationGuard,
-        owner,
-      };
-      // Published before the first await: draining a replaced owner suspends,
-      // and a second dispatch entering during that window must find this entry
-      // rather than build its own. An owner that never reached the map is
-      // invisible to both teardown paths, so nothing can ever stop it and its
-      // keepalive timer runs for the life of the process.
-      owners.set(runtime.workspaceCwd, current);
-      await previous?.owner.stop();
-    }
-    await current.owner.dispatch();
-  };
-
   /**
    * A writer killed while holding the workspace lock wedges writes until the
    * lock goes stale — measured at about ten seconds, since the retry window is
@@ -438,233 +279,37 @@ export function registerWorkspaceAgentRoutes(
     res.status(500).json({ error: message });
   };
 
-  const startBookedRuns = async (
-    runtime: WorkspaceRuntime,
-  ): Promise<string | undefined> => {
-    try {
-      await dispatch(runtime);
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    }
-    // Explicit: a dispatch that threw returns its message above, and one that
-    // did not has no error to report. Falling off the end would say the same
-    // thing while `noImplicitReturns` refuses it.
-    return undefined;
-  };
-
-  let recovering = false;
-  let recoveryStopped = false;
-
-  // Shared by the no-addressable-agents path and the opted-out path: stop the
-  // owner, close its agent sessions, deliver what needs no agent, then release
-  // the claimed host session. Turning the feature off also cancels active turns
-  // before closing them; otherwise their models keep running after the stored
-  // runs have already been marked stranded.
-  const teardownWorkspaceOwner = async (
-    runtime: WorkspaceRuntime,
-    cancelAgentSessions = false,
-  ): Promise<void> => {
-    await owners.get(runtime.workspaceCwd)?.owner.stop();
-    owners.delete(runtime.workspaceCwd);
-    await Promise.all(
-      runtime.bridge
-        .listWorkspaceSessions(runtime.workspaceCwd)
-        .filter((session) => session.sourceType === AGENT_SESSION_SOURCE_TYPE)
-        .map(async (session) => {
-          if (cancelAgentSessions) {
-            await runtime.bridge
-              .cancelSession(session.sessionId)
-              .catch(() => {});
-          }
-          await runtime.bridge.closeSession(session.sessionId).catch(() => {});
-        }),
-    );
-    await deliverParentReports(runtime.workspaceCwd);
-    const workspace = await readAgentWorkspace(runtime.workspaceCwd);
-    if (workspace.hostSessionId) {
-      await releaseAgentHostSession(
-        runtime.workspaceCwd,
-        workspace.hostSessionId,
-      );
-      await runtime.bridge
-        .closeSession(workspace.hostSessionId)
-        .catch(() => {});
-    }
-  };
-
-  const recover = async (): Promise<void> => {
-    if (recovering || recoveryStopped) return;
-    recovering = true;
-    try {
-      for (const runtime of deps.workspaceRegistry.list()) {
-        if (recoveryStopped) return;
-        if (!runtime.trusted || runtime.generationGuard?.closed) continue;
-        try {
-          if (!deps.isAgentCollaborationEnabledFor(runtime.workspaceCwd)) {
-            // The workspace never opted in or flipped the flag off. Recovery
-            // cannot tell "turned off" from "crashed", so strand any live
-            // runs an earlier opt-in left behind — a person decides their
-            // fate — then leave nothing running. A workspace that never had a
-            // store is skipped outright: teardown reads the store, and reading
-            // it creates it.
-            if (
-              !owners.has(runtime.workspaceCwd) &&
-              !(await stat(getAgentsDir(runtime.workspaceCwd)).then(
-                () => true,
-                () => false,
-              ))
-            ) {
-              continue;
-            }
-            await teardownWorkspaceOwner(runtime, true);
-            await strandLocalRuns(runtime.workspaceCwd);
-            continue;
-          }
-          const [agents, { threads }] = await Promise.all([
-            readWorkspaceAgents(runtime.workspaceCwd),
-            listThreads(runtime.workspaceCwd),
-          ]);
-          // "Can anyone take work" is the addressability question the DELETE
-          // teardown asks, not just "is anyone unretired" — a workspace whose
-          // agents are all disabled must not keep a host session heartbeat
-          // alive.
-          const hasRoster = agents.some(isAgentAddressable);
-          const hasLiveRuns = threads.some((thread) =>
-            thread.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)),
-          );
-          const hasPendingReports = threads.some((thread) =>
-            // Only parent reports are still delivered; a leftover event of a
-            // retired kind must not keep waking recovery every five seconds.
-            thread.outbox.some(
-              (event) =>
-                event.status === 'pending' && event.kind === 'parent_report',
-            ),
-          );
-          const hasWork = hasLiveRuns || hasPendingReports;
-          if (!hasRoster && !hasLiveRuns) {
-            // Nobody here can take work anymore. Deliver what needs no agent,
-            // then tear the owner down exactly as the DELETE route does. An
-            // unused workspace has nothing to tear down and must not require a
-            // bridge call merely because recovery observed its empty store.
-            const workspace = await readAgentWorkspace(runtime.workspaceCwd);
-            if (
-              hasPendingReports ||
-              owners.has(runtime.workspaceCwd) ||
-              workspace.hostSessionId
-            ) {
-              await teardownWorkspaceOwner(runtime);
-            }
-            continue;
-          }
-          const owner = owners.get(runtime.workspaceCwd);
-          if (
-            !hasWork &&
-            owner?.bridge === runtime.bridge &&
-            owner.generationGuard === runtime.generationGuard
-          ) {
-            continue;
-          }
-          if (recoveryStopped) return;
-          const error = await startBookedRuns(runtime);
-          if (error)
-            writeStderrLine(
-              `qwen serve: workspace agent recovery failed: ${error}`,
-            );
-        } catch (error) {
-          writeStderrLine(
-            `qwen serve: workspace agent recovery failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      }
-    } finally {
-      recovering = false;
-    }
-  };
-  // Runtimes may become ready after routes are registered, or after replacement.
-  const recoveryTimer = setInterval(() => void recover(), 5_000);
-  recoveryTimer.unref?.();
-  void recover();
-  app.locals['stopWorkspaceAgentRecovery'] = () => {
-    recoveryStopped = true;
-    clearInterval(recoveryTimer);
-    for (const { owner } of owners.values()) void owner.stop();
-  };
-
-  /**
-   * Live collaboration events for one workspace (see agent-events.ts). The
-   * client keeps the REST reads as its source of truth and uses this stream
-   * only to know when to read again, plus the streamed text of running
-   * agents. A reconnecting client therefore just refetches: nothing here is
-   * replayed.
-   */
-  app.get(`${prefix}/events`, async (req: Request, res: Response) => {
-    const runtime = runtimeFor(req, res);
-    if (!runtime) return;
-    res.status(200).set({
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    });
-    res.flushHeaders();
-    let closed = false;
-    let unsubscribe = () => {};
-    const stop = (endResponse = false) => {
-      if (closed) return;
-      closed = true;
-      clearInterval(heartbeat);
-      unsubscribe();
-      if (endResponse && !res.writableEnded) res.end();
-    };
-    // A slow client skips intermediate progress frames rather than queueing
-    // them; the next frame carries the whole text so far anyway.
-    let congested = false;
-    res.on('drain', () => {
-      congested = false;
-    });
-    const send = (event: AgentLiveEvent) => {
-      if (runtime.generationGuard?.closed) {
-        stop(true);
-        return;
-      }
-      if (closed || (congested && event.type === 'progress')) return;
-      congested = !res.write(
-        `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
-      );
-    };
-    const heartbeat = setInterval(() => {
-      if (runtime.generationGuard?.closed) stop(true);
-      else if (!closed) res.write(': ping\n\n');
-    }, 20_000);
-    heartbeat.unref?.();
-    req.on('close', () => stop());
-    unsubscribe = await subscribeAgentEvents(runtime.workspaceCwd, send);
-    if (closed) {
-      unsubscribe();
-      return;
-    }
-    send({ type: 'changed' });
-  });
-
   app.get(`${prefix}/agents`, async (req: Request, res: Response) => {
     const runtime = runtimeFor(req, res);
     if (!runtime) return;
     const root = runtime.workspaceCwd;
     try {
-      const [agents, { threads }, workspace, hosts] = await Promise.all([
+      const [agents, hosts, liveRuns, programs] = await Promise.all([
         readWorkspaceAgents(root),
-        listThreads(root),
-        readAgentWorkspace(root),
         readAgentHosts(root),
+        liveRunsOf(runtime),
+        localPrograms(),
       ]);
       const sessions = runtime.bridge.listWorkspaceSessions(root);
       const agentSessions = sessions.filter(
         (candidate) => candidate.sourceType === AGENT_SESSION_SOURCE_TYPE,
       );
-      const lastSeenAt = workspace.hostSessionId
-        ? runtime.bridge.getHeartbeatState(workspace.hostSessionId)
-            ?.sessionLastSeenAt
-        : undefined;
+      const runsOf = (agentIds: ReadonlySet<string>, hostId?: string) => {
+        const runs = liveRuns.filter(
+          (run) =>
+            agentIds.has(run.agentId) &&
+            (hostId === undefined ? !run.hostId : run.hostId === hostId),
+        );
+        return {
+          runningTaskCount: runs.filter((run) =>
+            EXECUTING_RUN_STATUSES.has(run.status),
+          ).length,
+          // A queued run has no runtime yet; it counts where the agent lives.
+          queuedTaskCount: liveRuns.filter(
+            (run) => agentIds.has(run.agentId) && run.status === 'queued',
+          ).length,
+        };
+      };
       const localAgentIds = new Set(
         agents
           .filter(
@@ -676,32 +321,16 @@ export function registerWorkspaceAgentRoutes(
         id: LOCAL_AGENT_RUNTIME_ID,
         kind: 'local' as const,
         label: 'Local daemon',
-        provider: 'Qwen Code ACP',
+        provider: programs
+          .map((program) => AGENT_PROGRAM_LABELS[program])
+          .join(', '),
+        programs,
         status: 'online' as const,
         workspaceId: runtime.workspaceId,
         workspaceCwd: root,
-        ...(workspace.hostSessionId
-          ? { hostSessionId: workspace.hostSessionId }
-          : {}),
-        ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
         agentCount: localAgentIds.size,
         sessionCount: agentSessions.length,
-        runningTaskCount: threads.filter((thread) =>
-          thread.runs.some(
-            (run) =>
-              localAgentIds.has(run.agentId) &&
-              ACTIVE_RUN_STATUSES.has(run.status),
-          ),
-        ).length,
-        queuedTaskCount: threads.reduce(
-          (count, thread) =>
-            count +
-            thread.runs.filter(
-              (run) =>
-                localAgentIds.has(run.agentId) && run.status === 'queued',
-            ).length,
-          0,
-        ),
+        ...runsOf(localAgentIds),
       };
       const now = Date.now();
       const hostRuntimes = hosts.map((host) => {
@@ -720,9 +349,7 @@ export function registerWorkspaceAgentRoutes(
           kind: 'external' as const,
           label: host.name,
           provider: host.providers.join(', '),
-          programs: (
-            Object.keys(AGENT_PROGRAM_LABELS) as AgentProgram[]
-          ).filter((program) => hostOffersProgram(host, program)),
+          programs: hostAvailablePrograms(host),
           status:
             host.lastSeenAt !== undefined &&
             now - host.lastSeenAt <= AGENT_HOST_ONLINE_WINDOW_MS
@@ -735,44 +362,16 @@ export function registerWorkspaceAgentRoutes(
             : {}),
           agentCount: agentIds.size,
           sessionCount: 0,
-          runningTaskCount: threads.filter((thread) =>
-            thread.runs.some(
-              (run) =>
-                agentIds.has(run.agentId) &&
-                run.lease?.hostId === host.id &&
-                ACTIVE_RUN_STATUSES.has(run.status),
-            ),
-          ).length,
-          queuedTaskCount: threads.reduce(
-            (count, thread) =>
-              count +
-              thread.runs.filter(
-                (run) => agentIds.has(run.agentId) && run.status === 'queued',
-              ).length,
-            0,
-          ),
+          ...runsOf(agentIds, host.id),
         };
       });
       res.json({
         agents: agents.map((agent) => {
-          const active = threads.find((thread) =>
-            thread.runs.some(
-              (run) =>
-                run.agentId === agent.id && ACTIVE_RUN_STATUSES.has(run.status),
-            ),
+          const runs = liveRuns.filter((run) => run.agentId === agent.id);
+          const executing = runs.find((run) =>
+            EXECUTING_RUN_STATUSES.has(run.status),
           );
-          const activeRun = active?.runs.find(
-            (run) =>
-              run.agentId === agent.id && ACTIVE_RUN_STATUSES.has(run.status),
-          );
-          const waiting = threads.reduce(
-            (count, thread) =>
-              count +
-              thread.runs.filter(
-                (run) => run.agentId === agent.id && run.status === 'queued',
-              ).length,
-            0,
-          );
+          const waiting = runs.filter((run) => run.status === 'queued').length;
           const sessionsForAgent = agentSessions.filter(
             (candidate) => candidate.sourceId === agent.id,
           );
@@ -788,7 +387,7 @@ export function registerWorkspaceAgentRoutes(
                 )
               : undefined;
           const selectedHostId =
-            activeRun?.lease?.hostId ??
+            executing?.hostId ??
             availableHost?.id ??
             (execution.mode === 'managed-host'
               ? execution.hostIds[0]
@@ -797,39 +396,20 @@ export function registerWorkspaceAgentRoutes(
             (host) => host.id === selectedHostId,
           );
           const runtimeAvailable =
-            execution.mode === 'local' || availableHost !== undefined;
-          const blocked = threads.some(
-            (thread) =>
-              resolve(thread, threads).status === 'blocked' &&
-              thread.runs.some(
-                (run) =>
-                  run.agentId === agent.id &&
-                  run.closeKind === 'blocked' &&
-                  run.closeAcknowledgedAtSequence === undefined,
-              ),
-          );
-          const failed = threads.some((thread) =>
-            thread.runs.some(
-              (run) =>
-                run.agentId === agent.id &&
-                run.status === 'failed' &&
-                run.closeAcknowledgedAtSequence === undefined,
-            ),
-          );
+            execution.mode === 'local'
+              ? !execution.provider || programs.includes(execution.provider)
+              : availableHost !== undefined;
           const status =
             agent.retiredAt !== undefined ||
             agent.enabled === false ||
             !runtimeAvailable
               ? 'offline'
-              : active ||
+              : executing ||
                   sessionsForAgent.some((entry) => entry.hasActivePrompt)
                 ? 'working'
-                : blocked
-                  ? 'blocked'
-                  : failed ||
-                      sessionsForAgent.some((entry) => entry.hasTurnError)
-                    ? 'error'
-                    : 'idle';
+                : sessionsForAgent.some((entry) => entry.hasTurnError)
+                  ? 'error'
+                  : 'idle';
           return {
             id: agent.id,
             name: agent.name,
@@ -852,41 +432,18 @@ export function registerWorkspaceAgentRoutes(
                     provider: 'Unregistered',
                     status: 'offline' as const,
                   }),
-            // A retired agent is listed, not hidden. Its posts are still on
-            // the threads, and a reader who meets its name needs somewhere to
-            // look it up. `enabled` stays a separate answer: a retired agent
-            // is not merely paused, and the two are not interchangeable.
+            // A retired agent is listed, not hidden. Its messages are still in
+            // the chat sessions, and a reader who meets its name needs
+            // somewhere to look it up. `enabled` stays a separate answer: a
+            // retired agent is not merely paused.
             ...(agent.retiredAt !== undefined
               ? { retiredAt: agent.retiredAt }
-              : {}),
-            ...(active && activeRun
-              ? {
-                  workingOn: {
-                    id: active.id,
-                    title: active.title,
-                    state:
-                      activeRun.status === 'cancelling'
-                        ? 'stopping'
-                        : activeRun.status === 'finishing'
-                          ? 'finishing'
-                          : 'working',
-                  },
-                }
               : {}),
             waiting,
           };
         }),
         runtime: localRuntime,
         runtimes: [localRuntime, ...hostRuntimes],
-        // What every agent may do, sent once rather than per agent because it
-        // is a property of the subsystem and not of an identity. Shown so the
-        // boundary is something a person can read before trusting an agent
-        // with work, instead of something they discover from a refusal.
-        capabilities: {
-          readOnly: true,
-          allowed: AGENT_ALLOWED_TOOL_NAMES,
-          threadTools: [...THREAD_TOOL_NAMES],
-        },
       });
     } catch (error) {
       fail(res, error);
@@ -945,486 +502,9 @@ export function registerWorkspaceAgentRoutes(
           res.status(404).json({ error: 'host_not_found' });
           return;
         }
-        res.json({
-          agentsMadeLocal: result.agentsMadeLocal,
-          runsEnded: result.runsEnded,
-        });
-      } catch (error) {
-        fail(res, error);
-      }
-    },
-  );
-
-  app.get(`${prefix}/threads`, async (req: Request, res: Response) => {
-    const runtime = runtimeFor(req, res);
-    if (!runtime) return;
-    const root = runtime.workspaceCwd;
-    try {
-      const [{ threads, unreadable }, agents] = await Promise.all([
-        listThreads(root),
-        readWorkspaceAgents(root),
-      ]);
-      res.json({
-        threads: threads.map((thread) => {
-          const resolution = resolve(thread, threads);
-          return {
-            id: thread.id,
-            title: thread.title,
-            status: resolution.status,
-            reason: resolution.reason,
-            updatedAt: lastActivity(thread),
-            liveRunCount: liveRunCount(thread),
-            ...(thread.assigneeAgentId
-              ? { assigneeName: agentName(agents, thread.assigneeAgentId) }
-              : {}),
-            ...(thread.parentThreadId
-              ? { parentThreadId: thread.parentThreadId }
-              : {}),
-          };
-        }),
-        // A thread whose file cannot be read is reported, not omitted: an
-        // empty page and a page whose reads all failed look identical
-        // otherwise.
-        unreadable,
-      });
-    } catch (error) {
-      fail(res, error);
-    }
-  });
-
-  app.get(`${prefix}/threads/:id`, async (req: Request, res: Response) => {
-    const runtime = runtimeFor(req, res);
-    if (!runtime) return;
-    const root = runtime.workspaceCwd;
-    try {
-      const [thread, agents, { threads }] = await Promise.all([
-        readThread(root, String(req.params['id'])),
-        readWorkspaceAgents(root),
-        listThreads(root),
-      ]);
-      if (!thread) {
-        res.status(404).json({ error: 'thread_not_found' });
-        return;
-      }
-      const resolution = resolve(thread, threads);
-      const parent = thread.parentThreadId
-        ? threads.find((candidate) => candidate.id === thread.parentThreadId)
-        : undefined;
-      // Admission charges the tree with runs retention dropped (`trimmedTokens`),
-      // so the reported total has to come from the same helper or it reads
-      // smaller than the number the server actually enforces.
-      const treeTokens = threads
-        .filter((candidate) => candidate.rootThreadId === thread.rootThreadId)
-        .reduce((total, candidate) => total + threadTokens(candidate), 0);
-      res.json({
-        id: thread.id,
-        title: thread.title,
-        body: thread.body,
-        ...(thread.acceptanceCriteria
-          ? { acceptanceCriteria: thread.acceptanceCriteria }
-          : {}),
-        priority: thread.priority ?? DEFAULT_THREAD_PRIORITY,
-        ...(thread.parentThreadId
-          ? {
-              parent: {
-                id: thread.parentThreadId,
-                title: parent?.title ?? 'Parent task',
-              },
-            }
-          : {}),
-        ...(thread.assigneeAgentId
-          ? { assigneeName: agentName(agents, thread.assigneeAgentId) }
-          : {}),
-        status: resolution.status,
-        reason: resolution.reason,
-        posts: thread.messages.map((message) => ({
-          id: message.id,
-          sequence: message.sequence,
-          authorKind: message.authorKind,
-          authorName: message.authorNameSnapshot,
-          sourceRunId: message.sourceRunId,
-          authorDeleted:
-            message.authorKind === 'agent' &&
-            !agents.some((agent) => agent.id === message.from),
-          text: message.text,
-          at: message.at,
-          outcomes: message.outcomes.map((outcome) => ({
-            ...outcome,
-            agentName:
-              outcome.targetAgentName ??
-              (outcome.targetAgentId
-                ? agentName(agents, outcome.targetAgentId)
-                : undefined),
-          })),
-        })),
-        runs: thread.runs.map((run) => runView(thread, run, agents, threads)),
-        children: threads
-          .filter((candidate) => candidate.parentThreadId === thread.id)
-          .map((candidate) => {
-            const childResolution = resolve(candidate, threads);
-            return {
-              id: candidate.id,
-              title: candidate.title,
-              status: childResolution.status,
-              reason: childResolution.reason,
-              ...(candidate.assigneeAgentId
-                ? {
-                    assigneeName: agentName(agents, candidate.assigneeAgentId),
-                  }
-                : {}),
-            };
-          }),
-        budget: {
-          turnsUsed: thread.autoTurnsUsed,
-          turnLimit: DEFAULT_THREAD_AUTO_TURN_BUDGET,
-          tokensUsed: treeTokens,
-          tokenLimit: DEFAULT_THREAD_TOKEN_BUDGET,
-        },
-      });
-    } catch (error) {
-      fail(res, error);
-    }
-  });
-
-  app.post(`${prefix}/threads/preview`, async (req, res) => {
-    const runtime = runtimeFor(req, res);
-    if (!runtime) return;
-    try {
-      const assigneeName = String(
-        (req.body as { assignee?: unknown } | undefined)?.assignee ?? '',
-      )
-        .replace(/^@/, '')
-        .trim();
-      if (!assigneeName) {
-        res.json({
-          targets: [
-            {
-              agentName: 'nobody',
-              willWake: false,
-              reason: 'no_target',
-              unknown: false,
-            },
-          ],
-        });
-        return;
-      }
-      const [agents, { threads }] = await Promise.all([
-        readWorkspaceAgents(runtime.workspaceCwd),
-        listThreads(runtime.workspaceCwd),
-      ]);
-      const target = agents.find(
-        (agent) => agent.name.toLowerCase() === assigneeName.toLowerCase(),
-      );
-      const now = Date.now();
-      const thread: Thread = {
-        schemaVersion: 1,
-        id: 'preview',
-        title: 'preview',
-        body: '',
-        status: 'open',
-        ...(target ? { assigneeAgentId: target.id } : {}),
-        createdAt: now,
-        createdBy: HUMAN_AUTHOR_ID,
-        rootThreadId: 'preview',
-        messages: [],
-        runs: [],
-        nextMessageSequence: 1,
-        deliveryByAgent: {},
-        outbox: [],
-        autoTurnsUsed: 0,
-        tokensUsed: 0,
-      };
-      const decision = decideDispatch({
-        thread,
-        message: {
-          id: 'preview',
-          sequence: 1,
-          authorKind: 'human',
-          from: HUMAN_AUTHOR_ID,
-          authorNameSnapshot: HUMAN_AUTHOR_ID,
-          triggerKind: 'assignment',
-          text: `Assigned to @${assigneeName}.`,
-          mentions: target ? [target.id] : [],
-          outcomes: [],
-          at: now,
-        },
-        target,
-        budget: { autoTurnsUsed: 0, tokensUsed: 0 },
-        agentQueuedElsewhere: target
-          ? threads.reduce(
-              (count, candidate) =>
-                count +
-                candidate.runs.filter(
-                  (run) => run.agentId === target.id && run.status === 'queued',
-                ).length,
-              0,
-            )
-          : 0,
-      });
-      res.json({
-        targets: [
-          {
-            agentName: target?.name ?? assigneeName,
-            willWake: decision.kind !== 'skip',
-            kind: decision.kind,
-            ...(decision.kind === 'coalesce' ? { into: decision.into } : {}),
-            ...(decision.kind === 'skip' ? { reason: decision.reason } : {}),
-            unknown: !target,
-          },
-        ],
-      });
-    } catch (error) {
-      fail(res, error);
-    }
-  });
-
-  /**
-   * What a draft reply would do, without doing it.
-   *
-   * Runs the admission rules against the draft so the composer can show the
-   * true outcome. Nothing is written and no budget is spent: a preview that
-   * charged a turn would make looking at the consequences cost the same as
-   * accepting them.
-   */
-  app.post(`${prefix}/threads/:id/preview`, async (req, res) => {
-    const runtime = runtimeFor(req, res);
-    if (!runtime) return;
-    const root = runtime.workspaceCwd;
-    try {
-      const thread = await readThread(root, String(req.params['id']));
-      if (!thread) {
-        res.status(404).json({ error: 'thread_not_found' });
-        return;
-      }
-      const text = String(
-        (req.body as { text?: unknown } | undefined)?.text ?? '',
-      );
-      const agents = await readWorkspaceAgents(root);
-      const { threads } = await listThreads(root);
-      const parsed = parseMentions(text, agents);
-      const hasExplicitMention =
-        parsed.ids.length > 0 || parsed.unknown.length > 0;
-      const draft = {
-        id: 'preview',
-        sequence: thread.nextMessageSequence,
-        authorKind: 'human' as const,
-        from: HUMAN_AUTHOR_ID,
-        authorNameSnapshot: HUMAN_AUTHOR_ID,
-        text,
-        mentions: parsed.ids,
-        outcomes: [],
-        at: Date.now(),
-      };
-      const treeTokens = threads
-        .filter((candidate) => candidate.rootThreadId === thread.rootThreadId)
-        .reduce((total, candidate) => total + threadTokens(candidate), 0);
-      const targets = [
-        // An unknown mention is a target with a fate, not a silent omission.
-        ...parsed.unknown.map((name) => ({
-          agentName: name,
-          willWake: false,
-          reason: 'agent_unknown',
-          unknown: true,
-        })),
-        ...resolveTargets(thread, draft, hasExplicitMention).map((agentId) => {
-          const target = agents.find((candidate) => candidate.id === agentId);
-          const queuedElsewhere = threads.reduce(
-            (count, candidate) =>
-              candidate.id === thread.id
-                ? count
-                : count +
-                  candidate.runs.filter(
-                    (run) => run.agentId === agentId && run.status === 'queued',
-                  ).length,
-            0,
-          );
-          const decision = decideDispatch({
-            thread,
-            message: draft,
-            target,
-            // A human post resets this thread's turn count, so the preview
-            // must gate on 0 rather than on what agents have spent.
-            budget: { autoTurnsUsed: 0, tokensUsed: treeTokens },
-            agentQueuedElsewhere: queuedElsewhere,
-          });
-          return {
-            agentName: target?.name ?? agentId,
-            willWake: decision.kind !== 'skip',
-            kind: decision.kind,
-            ...(decision.kind === 'coalesce' ? { into: decision.into } : {}),
-            ...(decision.kind === 'skip' ? { reason: decision.reason } : {}),
-          };
-        }),
-      ];
-      if (targets.length === 0) {
-        targets.push({
-          agentName: 'nobody',
-          willWake: false,
-          reason: 'no_target',
-          unknown: false,
-        });
-      }
-      res.json({ targets });
-    } catch (error) {
-      fail(res, error);
-    }
-  });
-
-  /**
-   * Creates a thread, and starts it when it names an assignee.
-   *
-   * Assignment is a structured first post through ordinary admission, so it
-   * cannot bypass budgets or the queue limit. `message`, when sent, is that
-   * post, so the assignee starts from the person's own words.
-   */
-  app.post(
-    `${prefix}/threads`,
-    deps.mutate({ strict: true }),
-    async (req, res) => {
-      const runtime = runtimeFor(req, res);
-      if (!runtime) return;
-      const root = runtime.workspaceCwd;
-      try {
-        const payload = (req.body ?? {}) as {
-          title?: unknown;
-          body?: unknown;
-          acceptanceCriteria?: unknown;
-          priority?: unknown;
-          assignee?: unknown;
-          message?: unknown;
-        };
-        const title = String(payload.title ?? '').trim();
-        if (!title) {
-          res.status(400).json({ error: 'title_required' });
-          return;
-        }
-        const agents = await readWorkspaceAgents(root);
-        const assigneeName =
-          typeof payload.assignee === 'string'
-            ? payload.assignee.replace(/^@/, '')
-            : '';
-        const assignee = assigneeName
-          ? agents.find(
-              (agent) =>
-                agent.name.toLowerCase() === assigneeName.toLowerCase(),
-            )
-          : undefined;
-        if (assigneeName && !assignee) {
-          res.status(400).json({ error: 'assignee_unknown' });
-          return;
-        }
-        const body =
-          typeof payload.body === 'string' ? payload.body : undefined;
-        const acceptanceCriteria =
-          typeof payload.acceptanceCriteria === 'string'
-            ? payload.acceptanceCriteria
-            : undefined;
-        // An unrecognised priority is rejected rather than coerced: silently
-        // reading "critical" as normal would file work at an order nobody
-        // chose, and the caller would never learn its word meant nothing.
-        const priority = payload.priority;
-        if (
-          priority !== undefined &&
-          !THREAD_PRIORITY_ORDER.includes(priority as ThreadPriority)
-        ) {
-          res.status(400).json({ error: 'priority_unknown' });
-          return;
-        }
-        const extra = {
-          ...(body !== undefined ? { body } : {}),
-          ...(acceptanceCriteria !== undefined ? { acceptanceCriteria } : {}),
-          ...(priority !== undefined
-            ? { priority: priority as ThreadPriority }
-            : {}),
-        };
-        const created = assignee
-          ? await createAssignedThread(root, {
-              title,
-              ...extra,
-              assignee,
-              ...(typeof payload.message === 'string'
-                ? { message: payload.message }
-                : {}),
-            })
-          : {
-              thread: await createThread(root, {
-                title,
-                ...extra,
-              }),
-            };
-        const thread = created.thread;
-        const booked =
-          'assignment' in created
-            ? created.assignment.outcomes.filter(
-                (outcome) => outcome.decision.kind !== 'skip',
-              ).length
-            : 0;
-        const dispatchError =
-          booked > 0 ? await startBookedRuns(runtime) : undefined;
-        res.json({
-          id: thread.id,
-          booked,
-          ...(dispatchError ? { dispatchError } : {}),
-        });
-      } catch (error) {
-        fail(res, error);
-      }
-    },
-  );
-
-  app.patch(
-    `${prefix}/threads/:id`,
-    deps.mutate({ strict: true }),
-    async (req, res) => {
-      const runtime = runtimeFor(req, res);
-      if (!runtime) return;
-      const rawAssignee = (req.body as { assignee?: unknown } | undefined)
-        ?.assignee;
-      if (rawAssignee !== null && typeof rawAssignee !== 'string') {
-        res.status(400).json({ error: 'assignee_invalid' });
-        return;
-      }
-      const assigneeName =
-        typeof rawAssignee === 'string'
-          ? rawAssignee.replace(/^@/, '').trim()
-          : undefined;
-      try {
-        const result = await assignThread(
-          runtime.workspaceCwd,
-          String(req.params['id']),
-          assigneeName,
-        );
-        // Narrowed by excluding the success kind rather than by ruling out
-        // each failure in turn: the failures share one variant whose `kind` is
-        // a union of literals, and TypeScript does not drop such a variant
-        // even once every literal has been excluded. Same statuses, same
-        // bodies; only the shape of the check changed.
-        if (result.kind !== 'updated') {
-          const [status, error] =
-            result.kind === 'thread_not_found'
-              ? ([404, 'thread_not_found'] as const)
-              : result.kind === 'thread_done'
-                ? ([409, 'thread_done'] as const)
-                : result.kind === 'agent_unknown'
-                  ? ([400, 'assignee_unknown'] as const)
-                  : result.kind === 'agent_retired'
-                    ? ([409, 'assignee_retired'] as const)
-                    : ([409, 'assignee_disabled'] as const);
-          res.status(status).json({ error });
-          return;
-        }
-        const booked =
-          result.assignment?.outcomes.filter(
-            (outcome) => outcome.decision.kind !== 'skip',
-          ).length ?? 0;
-        const dispatchError =
-          booked > 0 ? await startBookedRuns(runtime) : undefined;
-        res.json({
-          id: result.thread.id,
-          assignee: assigneeName ?? null,
-          booked,
-          ...(dispatchError ? { dispatchError } : {}),
-        });
+        // TODO(multi-agent): a run this Host holds is not ended here; it fails
+        // when its lease expires in the session-agents orchestrator.
+        res.json({ agentsMadeLocal: result.agentsMadeLocal });
       } catch (error) {
         fail(res, error);
       }
@@ -1469,6 +549,14 @@ export function registerWorkspaceAgentRoutes(
         const execution = readAgentExecution(payload.execution);
         if (execution === 'invalid') {
           res.status(400).json({ error: 'execution_invalid' });
+          return;
+        }
+        if (
+          execution?.mode === 'local' &&
+          execution.provider !== undefined &&
+          !(await localPrograms()).includes(execution.provider)
+        ) {
+          res.status(400).json({ error: 'program_unavailable' });
           return;
         }
         if (execution?.mode === 'managed-host') {
@@ -1536,11 +624,7 @@ export function registerWorkspaceAgentRoutes(
           });
           return;
         }
-        const dispatchError = await startBookedRuns(runtime);
-        res.json({
-          id: created?.id,
-          ...(dispatchError ? { dispatchError } : {}),
-        });
+        res.json({ id: created?.id });
       } catch (error) {
         fail(res, error);
       }
@@ -1555,6 +639,13 @@ export function registerWorkspaceAgentRoutes(
       if (!runtime) return;
       const agentId = String(req.params['id']);
       try {
+        // An agent cannot be retired out from under a run in flight.
+        // TODO(multi-agent): check-then-retire is not atomic with the
+        // orchestrator; a mention landing in between still starts a run.
+        if (await hasLiveRuns(runtime, agentId)) {
+          res.status(409).json({ error: 'agent_has_live_work' });
+          return;
+        }
         const result = await retireWorkspaceAgent(
           runtime.workspaceCwd,
           agentId,
@@ -1563,46 +654,26 @@ export function registerWorkspaceAgentRoutes(
           res.status(404).json({ error: 'agent_not_found' });
           return;
         }
-        if (result === 'has_live_work') {
-          res.status(409).json({ error: 'agent_has_live_work' });
-          return;
-        }
-        // Retiring keeps the roster entry, so "is anyone left" is a question
-        // about who can still take work, not about how many rows exist.
-        const [agents, { threads }] = await Promise.all([
-          readWorkspaceAgents(runtime.workspaceCwd),
-          listThreads(runtime.workspaceCwd),
-        ]);
-        const remainingAgents = agents.filter(isAgentAddressable);
-        const hasLiveRuns = threads.some((thread) => liveRunCount(thread) > 0);
-        const dispatchError =
-          remainingAgents.length > 0
-            ? await startBookedRuns(runtime)
-            : undefined;
-        if (remainingAgents.length === 0 && !hasLiveRuns) {
-          await teardownWorkspaceOwner(runtime);
-        } else {
-          await Promise.all(
-            runtime.bridge
-              .listWorkspaceSessions(runtime.workspaceCwd)
-              .filter(
-                (session) =>
-                  session.sourceType === AGENT_SESSION_SOURCE_TYPE &&
-                  session.sourceId === agentId,
-              )
-              .map((session) =>
-                runtime.bridge.closeSession(session.sessionId).catch(() => {}),
-              ),
-          );
-        }
+        // A retired agent's hidden sessions are closed: nothing resumes them.
+        await Promise.all(
+          runtime.bridge
+            .listWorkspaceSessions(runtime.workspaceCwd)
+            .filter(
+              (session) =>
+                session.sourceType === AGENT_SESSION_SOURCE_TYPE &&
+                session.sourceId === agentId,
+            )
+            .map((session) =>
+              runtime.bridge.closeSession(session.sessionId).catch(() => {}),
+            ),
+        );
         res.json({
           id: agentId,
-          // The identity is gone from the roster's point of view and its posts
-          // are still readable. `deleted` stays for callers that read it, and
-          // says what actually happened alongside it.
+          // The identity is gone from the roster's point of view and its
+          // messages are still readable. `deleted` stays for callers that read
+          // it, and says what actually happened alongside it.
           deleted: true,
           retired: true,
-          ...(dispatchError ? { dispatchError } : {}),
         });
       } catch (error) {
         fail(res, error);
@@ -1744,6 +815,20 @@ export function registerWorkspaceAgentRoutes(
       }
       try {
         const agentId = String(req.params['id']);
+        // Moving an agent under a live run would leave that run on a runtime
+        // the agent no longer names.
+        if (execution !== undefined && (await hasLiveRuns(runtime, agentId))) {
+          res.status(409).json({ error: 'agent_has_live_work' });
+          return;
+        }
+        if (
+          execution?.mode === 'local' &&
+          execution.provider !== undefined &&
+          !(await localPrograms()).includes(execution.provider)
+        ) {
+          res.status(400).json({ error: 'program_unavailable' });
+          return;
+        }
         const result = await updateWorkspaceAgent(
           runtime.workspaceCwd,
           agentId,
@@ -1763,259 +848,14 @@ export function registerWorkspaceAgentRoutes(
                   ? ([400, 'agent_host_not_found'] as const)
                   : result === 'program_unavailable'
                     ? ([400, 'program_unavailable'] as const)
-                    : result === 'managed_host_persona_unsupported'
-                      ? ([400, 'managed_host_persona_unsupported'] as const)
-                      : ([409, 'agent_has_live_work'] as const);
+                    : ([400, 'managed_host_persona_unsupported'] as const);
           res.status(status).json({ error });
           return;
-        }
-        const [agents, { threads }] = await Promise.all([
-          readWorkspaceAgents(runtime.workspaceCwd),
-          listThreads(runtime.workspaceCwd),
-        ]);
-        const hasAddressableAgent = agents.some(isAgentAddressable);
-        const hasLiveRuns = threads.some((thread) => liveRunCount(thread) > 0);
-        const dispatchError = hasAddressableAgent
-          ? await startBookedRuns(runtime)
-          : undefined;
-        if (!hasAddressableAgent && !hasLiveRuns) {
-          await teardownWorkspaceOwner(runtime);
         }
         res.json({
           id: agentId,
           ...(enabled !== undefined ? { enabled } : {}),
           updated: true,
-          ...(dispatchError ? { dispatchError } : {}),
-        });
-      } catch (error) {
-        fail(res, error);
-      }
-    },
-  );
-
-  app.post(
-    `${prefix}/threads/:id/runs/:runId/cancel`,
-    deps.mutate({ strict: true }),
-    async (req, res) => {
-      const runtime = runtimeFor(req, res);
-      if (!runtime) return;
-      const threadId = String(req.params['id']);
-      const runId = String(req.params['runId']);
-      try {
-        const requested = await withAgentStoreTransaction(
-          runtime.workspaceCwd,
-          async (transaction) => {
-            const thread = await transaction.readThread(threadId);
-            const run = thread?.runs.find(
-              (candidate) => candidate.id === runId,
-            );
-            if (!thread || !run) return 'run_not_found' as const;
-            if (run.status === 'queued') {
-              await finishRunInTransaction(transaction, {
-                threadId,
-                runId,
-                outcome: {
-                  status: 'cancelled',
-                  attempt: run.attempts,
-                },
-              });
-              return 'cancelled' as const;
-            }
-            if (run.status === 'cancelling') return 'cancelling' as const;
-            if (run.status !== 'running' && run.status !== 'finishing') {
-              return 'run_not_cancellable' as const;
-            }
-            await transaction.writeThread({
-              ...thread,
-              runs: thread.runs.map((candidate) =>
-                candidate.id === runId
-                  ? { ...candidate, status: 'cancelling' as const }
-                  : candidate,
-              ),
-            });
-            return 'cancelling' as const;
-          },
-        );
-        if (requested === 'run_not_found') {
-          res.status(404).json({ error: 'run_not_found' });
-          return;
-        }
-        if (requested === 'run_not_cancellable') {
-          res.status(409).json({ error: 'run_not_cancellable' });
-          return;
-        }
-        const dispatchError = await startBookedRuns(runtime);
-        const settled = await readThread(runtime.workspaceCwd, threadId);
-        const status = settled?.runs.find(
-          (candidate) => candidate.id === runId,
-        )?.status;
-        res.json({
-          runId,
-          cancelled: status === 'cancelling' || status === 'cancelled',
-          status: status ?? requested,
-          ...(dispatchError ? { dispatchError } : {}),
-        });
-      } catch (error) {
-        fail(res, error);
-      }
-    },
-  );
-
-  /**
-   * Marks a thread done, refusing while a descendant is still open.
-   *
-   * v1 never cascades: closing a parent silently would end work a person never
-   * looked at. The refusal names the descendants so the reader can go finish
-   * them rather than guessing which one is holding this open.
-   */
-  app.post(
-    `${prefix}/threads/:id/done`,
-    deps.mutate({ strict: true }),
-    async (req, res) => {
-      const runtime = runtimeFor(req, res);
-      if (!runtime) return;
-      const root = runtime.workspaceCwd;
-      try {
-        const threadId = String(req.params['id']);
-        const result = await withAgentStoreTransaction(
-          root,
-          async (transaction) => {
-            const { threads, unreadable } = await transaction.listThreads();
-            if (unreadable.length > 0) {
-              throw new Error(
-                `Cannot close a thread while records are unreadable: ${unreadable.join(', ')}.`,
-              );
-            }
-            const target = threads.find((thread) => thread.id === threadId);
-            if (!target) return { kind: 'thread_not_found' as const };
-            const byId = new Map(threads.map((thread) => [thread.id, thread]));
-            const isDescendant = (candidate: Thread) => {
-              const seen = new Set<string>();
-              let parentId = candidate.parentThreadId;
-              while (parentId && !seen.has(parentId)) {
-                if (parentId === threadId) return true;
-                seen.add(parentId);
-                parentId = byId.get(parentId)?.parentThreadId;
-              }
-              return false;
-            };
-            const openDescendants = threads.filter(
-              (thread) => thread.status !== 'done' && isDescendant(thread),
-            );
-            if (openDescendants.length > 0) {
-              return {
-                kind: 'descendants_not_done' as const,
-                descendants: openDescendants.map((thread) => ({
-                  id: thread.id,
-                  title: thread.title,
-                })),
-              };
-            }
-            const now = Date.now();
-            const parent = target.parentThreadId
-              ? byId.get(target.parentThreadId)
-              : undefined;
-            const parentNeedsDoneReport =
-              parent !== undefined &&
-              parent.status !== 'in_review' &&
-              !isThreadTerminal(parent.status);
-            const updated = await transaction.writeThread({
-              ...target,
-              status: 'done',
-              runs: target.runs.map((run) =>
-                run.status === 'queued'
-                  ? { ...run, status: 'cancelled' as const, endedAt: now }
-                  : run.status === 'running' || run.status === 'finishing'
-                    ? { ...run, status: 'cancelling' as const }
-                    : run,
-              ),
-              outbox:
-                parentNeedsDoneReport &&
-                target.parentThreadId &&
-                !target.outbox.some(
-                  (event) => event.payload['event'] === 'child_done',
-                )
-                  ? [
-                      ...target.outbox,
-                      {
-                        id: generateEventId(),
-                        kind: 'parent_report' as const,
-                        payload: {
-                          event: 'child_done',
-                          threadId: target.id,
-                          parentThreadId: target.parentThreadId,
-                        },
-                        status: 'pending' as const,
-                        attempts: 0,
-                        createdAt: now,
-                      },
-                    ]
-                  : target.outbox,
-            });
-            return { kind: 'updated' as const, thread: updated };
-          },
-        );
-        if (result.kind === 'thread_not_found') {
-          res.status(404).json({ error: 'thread_not_found' });
-          return;
-        }
-        if (result.kind === 'descendants_not_done') {
-          res.status(409).json({
-            error: 'descendants_not_done',
-            descendants: result.descendants,
-          });
-          return;
-        }
-        const dispatchError = await startBookedRuns(runtime);
-        res.json({
-          id: result.thread.id,
-          status: result.thread.status,
-          ...(dispatchError ? { dispatchError } : {}),
-        });
-      } catch (error) {
-        fail(res, error);
-      }
-    },
-  );
-
-  app.post(
-    `${prefix}/threads/:id/posts`,
-    deps.mutate({ strict: true }),
-    async (req, res) => {
-      const runtime = runtimeFor(req, res);
-      if (!runtime) return;
-      const root = runtime.workspaceCwd;
-      try {
-        const text = String(
-          (req.body as { text?: unknown } | undefined)?.text ?? '',
-        ).trim();
-        if (!text) {
-          res.status(400).json({ error: 'text_required' });
-          return;
-        }
-        // Authorship comes from the authenticated surface. There is no field a
-        // caller can set to post as an agent.
-        const result = await postMessage(root, String(req.params['id']), {
-          from: HUMAN_AUTHOR_ID,
-          text,
-        });
-        const dispatchError = result.outcomes.some(
-          (outcome) => outcome.decision.kind !== 'skip',
-        )
-          ? await startBookedRuns(runtime)
-          : undefined;
-        res.json({
-          messageId: result.message.id,
-          sequence: result.message.sequence,
-          outcomes: result.outcomes.map((outcome) => ({
-            agentName: outcome.agentName ?? outcome.agentId,
-            kind: outcome.decision.kind,
-            ...(outcome.decision.kind === 'skip'
-              ? { reason: outcome.decision.reason }
-              : {}),
-          })),
-          unknownMentions: result.unknownMentions,
-          ...(dispatchError ? { dispatchError } : {}),
         });
       } catch (error) {
         fail(res, error);

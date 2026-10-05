@@ -6,14 +6,16 @@
 
 import { createHash } from 'node:crypto';
 
+// TODO(multi-agent): nothing creates `agent-host` sessions since the thread
+// subsystem (and its host-session owner) was removed. Persisted ones are still
+// hidden and kept read-only; drop the source type once none can remain.
 export const AGENT_HOST_SESSION_SOURCE_TYPE = 'agent-host';
 
 /**
  * A top-level task session that belongs to one agent.
  *
  * The bridge's spawn request carries no persona, so an agent session is told
- * who it is the same way the host session is: by its source type, with the
- * agent's id in `sourceId`. The session id also includes the thread. The child
+ * who it is by its source type, with the agent's id in `sourceId`. The child
  * recognises itself at `newSession`, reads
  * the workspace roster, and applies its own definition before it goes live.
  * This identifies the agent; the shared ACP process is not a crash boundary.
@@ -48,19 +50,11 @@ function uuidV5Url(name: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-/** Deterministic per agent and thread, matching Multica's agent × issue scope. */
-export function agentThreadSessionId(
-  agentId: string,
-  threadId: string,
-): string {
-  return uuidV5Url(`qwen-code:workspace-agent:${agentId}:thread:${threadId}`);
-}
-
 /**
  * The hidden Qwen session an agent answers from in one chat session
  * (session multi-agent, plan §3.1). Deterministic per (agent, chat session),
  * so every @-mention of that agent in that session resumes one native
- * session. Its own namespace string, distinct from the thread one.
+ * session.
  */
 export function sessionAgentNativeSessionId(
   agentId: string,

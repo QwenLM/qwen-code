@@ -110,14 +110,14 @@ describe('joinCoordinatorCommand', () => {
       false,
     );
     expect(command).toBe(
-      `QWEN_AGENT_HOST_ENROLLMENT_TOKEN='secret' qwen serve --no-web --port 0 --join 'https://host/join/ws'"'"'x'`,
+      `QWEN_AGENT_HOST_ENROLLMENT_TOKEN='secret' qwen agents join 'https://host/join/ws'"'"'x'`,
     );
   });
 
   it('shows a placeholder without a token and the HTTP opt-in when asked', () => {
     const command = joinCoordinatorCommand('http://h/join/ws', '', true);
     expect(command).toContain("QWEN_AGENT_HOST_ENROLLMENT_TOKEN='<token>'");
-    expect(command.endsWith(' --agent-host-allow-http')).toBe(true);
+    expect(command.endsWith(' --allow-http')).toBe(true);
   });
 });
 
