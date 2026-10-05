@@ -4103,7 +4103,7 @@ it.each([
 
 function backgroundTurnRig(
   outcome: ToolResultEnvelope,
-  options: { attached?: boolean } = {},
+  options: { attached?: boolean; lane?: HostedShellTurnOptions } = {},
 ) {
   enablement.childRun = true;
   const order: string[] = [];
@@ -4202,8 +4202,10 @@ function backgroundTurnRig(
     undefined,
     undefined,
     orchestrator as never,
+    undefined,
+    options.lane,
   );
-  return { order, orchestrator, turn };
+  return { order, orchestrator, turn, lane: options.lane };
 }
 
 function monitorTurnRig(outcome: ToolResultEnvelope) {
@@ -4626,6 +4628,70 @@ it('admits a background Shell through its child_run orchestrator and lands the d
     manifestRef: null,
   });
   expect(savedOutcome['envelope']).toEqual(detached);
+});
+
+it('registers the Session capture lane for a background turn in publication mode', async () => {
+  const { call, parts } = backgroundCall();
+  const detached: ToolResultEnvelope = {
+    executionStatus: 'success',
+    responseParts: [
+      {
+        text: 'Background shell started under unit qwen-bg-rt. It keeps running after this result and holds its Runtime until it exits; read its status and output through the task surface.',
+      },
+    ],
+    capture: {
+      captureStatus: 'detached',
+      captureReason: null,
+      manifest: null,
+      previewTruncated: false,
+      deliveryStatus: 'pending',
+    },
+  };
+  const descriptor = { url: 'http://127.0.0.1:9/lane', token: 'lane-token' };
+  const order2: string[] = [];
+  const lane: HostedShellTurnOptions = {
+    resources: {} as never,
+    assertWritable: async () => undefined,
+    publisher: {
+      start: async () => descriptor,
+      register: vi.fn(),
+      settleAttached: async (id: string) => {
+        order2.push(`settleAttached:${id}`);
+      },
+      close: async () => undefined,
+    } as never,
+  };
+  const rig = backgroundTurnRig(detached, { lane });
+  turn = rig.turn;
+  const result = await turn.execute(
+    [call],
+    parts,
+    'model',
+    new AbortController().signal,
+  );
+  expect(result[0]?.functionResponse?.response).toMatchObject({
+    executionStatus: 'success',
+  });
+  // The production lane owns the detached family's funnel from admission:
+  // installed on the Runtime, fed this call's register, and its
+  // settleAttached is the hook the attach arm drives — it fires right
+  // after the attach, without any client retry anywhere in the turn.
+  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor);
+  expect(broker.registerPublisher).toHaveBeenCalledTimes(1);
+  const register = lane.publisher!.register as ReturnType<typeof vi.fn>;
+  expect(register).toHaveBeenCalledTimes(1);
+  expect(register.mock.calls[0]![0]).toMatchObject({
+    capture: {
+      executionCallId: 'shell-execution',
+      background: true,
+    },
+  });
+  expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
+    'admit',
+    'dispatchStarted',
+    'attach',
+  ]);
+  expect(order2).toEqual(['settleAttached:shell-execution']);
 });
 
 it('answers a retried accept from the journal without minting a rerun', async () => {

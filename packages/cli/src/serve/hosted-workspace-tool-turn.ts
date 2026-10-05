@@ -325,6 +325,7 @@ export class HostedWorkspaceToolTurn {
     private readonly hooks?: HostedHookSession,
     childRuns?: HostedChildRunSession,
     monitors?: HostedMonitorSession,
+    private readonly backgroundLane?: HostedShellTurnOptions,
   ) {
     this.childRuns = childRuns;
     this.monitors = monitors;
@@ -1085,6 +1086,27 @@ export class HostedWorkspaceToolTurn {
         this.bindingGeneration = await this.broker.registerPublisher(
           await this.publisher.start(),
         );
+      } else if (
+        this.publication &&
+        this.backgroundLane &&
+        requests.some((request) => request.background || request.monitoring) &&
+        !this.publisher
+      ) {
+        // Publication mode: the record funnel of the detached family is
+        // this Session's, exactly like without capture bytes — without it
+        // a background exit's settle and tail could never reach the record.
+        this.publisher = this.backgroundLane.publisher ??=
+          new HostedShellPublisher(
+            this.session,
+            this.backgroundLane.resources,
+            this.backgroundLane.assertWritable,
+            this.childRuns,
+            this.monitors,
+            () => this.shell?.monitorWakeKick?.(),
+          );
+        this.bindingGeneration = await this.broker.registerPublisher(
+          await this.publisher.start(),
+        );
       }
       messageId = await this.commit('assistant', parts, model);
       refusals = await this.approve(requests, messageId, inputRefs, signal);
@@ -1418,7 +1440,13 @@ export class HostedWorkspaceToolTurn {
           attemptId: messageId,
           routeRef,
         });
-        if ((request.isShell || request.monitoring) && this.publisher) {
+        if (
+          (request.isShell || request.monitoring) &&
+          this.publisher &&
+          // A publication lane serves only the detached family: foreground
+          // Shell captures stay on the Runtime's publication there.
+          (this.shell !== undefined || request.background || request.monitoring)
+        ) {
           this.publisher!.register(
             {
               reference: {

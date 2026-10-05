@@ -161,6 +161,44 @@ function isHostAbsolute(mountRoot: string): boolean {
 }
 
 /**
+ * Picks the capture funnel of one prepare. A background Shell or Monitor
+ * capture belongs to the record funnel of its owning Session: the detached
+ * handle carries no result manifest, so an unregistered Session funnel is
+ * the one place the record could never settle — admission refuses it
+ * instead of silently parking the capture on the publication. Foreground
+ * captures keep the exclusive-mode rule.
+ */
+export function selectShellCapturePublisher(
+  remotePublishers: ManagedShellPublisherRegistry,
+  remotePublisher: RemoteShellResultPublisher,
+): ManagedShellCapturePublisher {
+  return {
+    async prepare(request) {
+      const local = remotePublishers.hasSession(request.reference.sessionId);
+      if (request.capture.background === true) {
+        if (!local)
+          throw new Error(
+            'Background captures require their Session publisher.',
+          );
+        return {
+          ...(await remotePublishers.prepare(request)),
+          publisher: remotePublishers,
+        };
+      }
+      const remote = remotePublisher.hasExecution(
+        request.capture.executionCallId,
+      );
+      if (local && remote) throw new Error('Shell publication modes conflict.');
+      const selected = local ? remotePublishers : remotePublisher;
+      return {
+        ...(await selected.prepare(request)),
+        publisher: selected,
+      };
+    },
+  };
+}
+
+/**
  * Mounts attestation v3, context installation and the Tool v2 routes for a
  * boot v2 document. A tool call runs only for a Session with an installed
  * context, in its effective directory, verified again for every call.
@@ -184,23 +222,7 @@ export function registerManagedContextRoutes(
   const publisher: ManagedShellCapturePublisher | undefined =
     capturePublisher ??
     (remotePublishers && remotePublisher
-      ? {
-          async prepare(request) {
-            const local = remotePublishers.hasSession(
-              request.reference.sessionId,
-            );
-            const remote = remotePublisher.hasExecution(
-              request.capture.executionCallId,
-            );
-            if (local && remote)
-              throw new Error('Shell publication modes conflict.');
-            const selected = local ? remotePublishers : remotePublisher;
-            return {
-              ...(await selected.prepare(request)),
-              publisher: selected,
-            };
-          },
-        }
+      ? selectShellCapturePublisher(remotePublishers, remotePublisher)
       : (remotePublishers ?? remotePublisher));
   remotePublisher?.registerInstallRoute(app, boot);
   const [attestRoute, contextRoute] = MANAGED_CONTEXT_ROUTES;

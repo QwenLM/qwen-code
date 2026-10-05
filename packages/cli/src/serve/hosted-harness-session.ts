@@ -173,6 +173,11 @@ interface HostedSession {
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;
   publication?: { owner: HttpToolPublicationOwner; captureBytes: number };
   shell?: HostedShellTurnOptions;
+  // The record funnel of a publication-mode turn's background Shells and
+  // Monitors. Captures of the detached family belong to this Session's
+  // record store, never to the Runtime's publication, so the lane exists
+  // in publication mode exactly like `shell` does without capture bytes.
+  backgroundLane?: HostedShellTurnOptions;
   mcp?: HostedMcpSession;
   hooks?: HostedHookSession;
   childRuns?: HostedChildRunSession;
@@ -1282,6 +1287,7 @@ async function executeHostedTurn(
                 session.hooks,
                 session.childRuns,
                 session.monitors,
+                session.backgroundLane,
               )
             : undefined;
         if (resumeFromToolResults) {
@@ -1707,6 +1713,10 @@ export function registerHostedHarnessSessionRoutes(
               publication: {
                 owner: stores.publication,
                 captureBytes: captureBytes as number,
+              },
+              backgroundLane: {
+                resources: stores.toolResultResources,
+                assertWritable: stores.assertWritable,
               },
             }
           : {}),
@@ -3055,6 +3065,7 @@ export function registerHostedHarnessSessionRoutes(
           undefined,
           session.childRuns,
           session.monitors,
+          session.backgroundLane,
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         try {
@@ -3686,6 +3697,7 @@ export function registerHostedHarnessSessionRoutes(
       // The broker release drained the Session's background Shells and
       // their exits settled through this publisher; it closes last.
       await session.shell?.publisher?.close();
+      await session.backgroundLane?.publisher?.close();
       await session.mcp?.close();
       // No monitor notification may park the Session: every pending one
       // settles cancelled here, model-free, before the log closes.
