@@ -1058,10 +1058,10 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
-      allowInsecureHttp: true,
       fetchFn,
     });
     try {
@@ -1096,10 +1096,10 @@ describe('HTTP Managed Session store', () => {
       });
       const stores = createHttpManagedSessionStores({
         baseUrl: 'http://session-store.test',
+        allowInsecureHttp: true,
         sessionKey: SESSION_KEY,
         writerId: 'harness-a',
         writerToken: TOKEN_A,
-        allowInsecureHttp: true,
         fetchFn,
       });
       try {
@@ -1130,10 +1130,10 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
-      allowInsecureHttp: true,
       fetchFn,
     });
     try {
@@ -1167,10 +1167,10 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
-      allowInsecureHttp: true,
       fetchFn,
     });
     try {
@@ -1219,10 +1219,10 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
-      allowInsecureHttp: true,
       fetchFn,
     });
     try {
@@ -1300,10 +1300,10 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
-      allowInsecureHttp: true,
       fetchFn,
     });
     try {
@@ -1333,10 +1333,10 @@ describe('HTTP Managed Session store', () => {
     );
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
-      allowInsecureHttp: true,
       requestTimeoutMs: 60,
       fetchFn,
     });
@@ -1377,10 +1377,10 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
-      allowInsecureHttp: true,
       fetchFn,
     });
     try {
@@ -1416,10 +1416,10 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
-      allowInsecureHttp: true,
       fetchFn,
     });
     try {
