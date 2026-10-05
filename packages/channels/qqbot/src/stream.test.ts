@@ -6095,6 +6095,64 @@ describe('an in-flight flush must not clear a newer seal', () => {
     expect(sentContents().at(-1)).toBe('HEADB');
   });
 
+  it('does not re-seal the carried head when onPromptEnd widened the seal in flight', async () => {
+    const ch = makeChannel({ maxFlushRetries: 2 });
+    const chp = ch as unknown as Record<string, unknown>;
+    const stateMap = chp['streamState'] as Map<
+      string,
+      {
+        buffer: string;
+        sealedPre?: string;
+        boundaryClearedInFlight?: string;
+        sealWidenedInFlight?: boolean;
+      }
+    >;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; pre?: string }
+    >;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    // The live entry buffers 'R' and a boundary fires while NO flush is in
+    // flight: captureBoundaryClear seals the buffer into sealedPre and returns
+    // at its `if (!flushing) return;` before recording any in-flight marker.
+    onResponseChunk(ch, 'test-chat', 'R', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    expect(stateMap.get('s1')!.sealedPre).toBe('R');
+    expect(stateMap.get('s1')!.boundaryClearedInFlight).toBeUndefined();
+
+    // The idle flush sends 'R' carrying that seal and stays pending.
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // While that send is in flight, a diverted/side-buffered turn's stash —
+    // whose head the boundary sealed as 'P' — is merged by onPromptEnd. The
+    // entry's seal becomes 'P' + 'R': it already contains the carried seal 'R'.
+    orphanBuffer.set('s1', { turn: 1, text: 'P', pre: 'P' });
+    onPromptEnd(ch, 'test-chat', 's1');
+    const state = stateMap.get('s1')!;
+    expect(state.sealedPre).toBe('PR');
+    expect(state.sealWidenedInFlight).toBe(true);
+    // The in-flight flush parks the session for its chain to settle.
+    expect(pendingStreamDelete.has('s1')).toBe(true);
+
+    // The send fails transiently and re-buffers its payload. The carried-seal
+    // backstop must stay out of the way: 'PR' already holds the carried head
+    // exactly once, and prepending 'R' again would deliver it twice.
+    mockSendQQMessage.mockRejectedValue(new Error('transient'));
+    rejectSend(new Error('transient'));
+    await drain();
+    expect(state.sealedPre).toBe('PR');
+  });
+
   it('re-seals the whole payload a boundary cleared while a transient send was in flight', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;

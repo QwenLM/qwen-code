@@ -185,6 +185,18 @@ interface QQStreamState {
    * a re-buffer keeps the carried seal. Cleared when a flush chain starts.
    */
   boundaryClearedInFlight?: 'payload' | 'residual';
+  /**
+   * Whether a non-boundary writer widened `sealedPre` while this entry's send
+   * was in flight: onPromptEnd's stash merge prepends the stashed `pre` to
+   * whatever the entry already carries, so the result already *contains* the
+   * `carriedSeal` that send captured. The carried-seal backstop in
+   * resealOnRebuffer must then stay out of the way — prepending again would
+   * seal the carried head twice. A flag, not an `endsWith(carriedSeal)` string
+   * test: the widened seal's text may coincide with the carried seal, and
+   * sealClearedPayload's contract forbids comparing seal text. Cleared when a
+   * flush chain starts, next to boundaryClearedInFlight.
+   */
+  sealWidenedInFlight?: boolean;
 }
 
 /**
@@ -1688,6 +1700,14 @@ export class QQChannel extends ChannelBase {
         // opening is lost. Same merge as onResponseChunk's drain site.
         if (stashed.pre !== undefined) {
           state.sealedPre = stashed.pre + (state.sealedPre ?? '');
+          // The merge widened the entry's seal while its send may still be in
+          // flight, and that send's carriedSeal is already inside the value
+          // above. Record it deterministically (not by comparing seal text) so
+          // the in-flight chain's re-buffer backstop does not prepend the
+          // carried head a second time.
+          if (this.flushingSessions.has(sessionId)) {
+            state.sealWidenedInFlight = true;
+          }
         }
         state.buffer = stashed.text + state.buffer;
       } else {
@@ -2235,6 +2255,7 @@ export class QQChannel extends ChannelBase {
     // the bridge's collection before this send settles. A stale value from an
     // earlier flight would re-seal text this payload never carried.
     state.boundaryClearedInFlight = undefined;
+    state.sealWidenedInFlight = undefined;
     // Terminal release owed by this chain, performed in .finally() after the
     // ownership-keyed marker is cleared: releasing while the marker is still
     // set makes releaseSessionReplyAnchor's in-flight guard return early, and
@@ -3247,8 +3268,11 @@ export class QQChannel extends ChannelBase {
    * owns the live turn may write the seal — a superseded entry's payload is
    * abandoned with its failure and must not be injected into a successor's
    * reply. `carriedSeal` is the backstop for a re-seal whose boundary marker
-   * was missed. Shared by the parked and non-parked re-buffer arms; the two
-   * must stay identical because they encode the same rule.
+   * was missed, but it is skipped when the seal was widened during this flight
+   * (sealWidenedInFlight — onPromptEnd's stash merge already folded the carried
+   * head in, so prepending it again would seal it twice). Shared by the parked
+   * and non-parked re-buffer arms; the two must stay identical because they
+   * encode the same rule.
    */
   private resealOnRebuffer(
     sessionId: string,
@@ -3263,7 +3287,11 @@ export class QQChannel extends ChannelBase {
         payload,
         this.capturedResidual(state),
       );
-    } else if (carriedSeal !== undefined && current.sealedPre !== carriedSeal) {
+    } else if (
+      carriedSeal !== undefined &&
+      !state.sealWidenedInFlight &&
+      current.sealedPre !== carriedSeal
+    ) {
       current.sealedPre = carriedSeal + (current.sealedPre ?? '');
     }
   }
