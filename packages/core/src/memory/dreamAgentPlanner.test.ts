@@ -393,8 +393,11 @@ describe('dreamAgentPlanner', () => {
 
     vi.mocked(runForkedAgent).mockResolvedValue(mockResult);
 
+    // Exact text, not /cancelled/i: the raw CANCELLED token matches that
+    // pattern too, so a loose match would pass even if the conversion to
+    // the shared wording were reverted.
     await expect(
       planManagedAutoMemoryDreamByAgent(config, projectRoot),
-    ).rejects.toThrow(/cancelled/i);
+    ).rejects.toThrow('Dream agent cancelled before completion');
   });
 });
