@@ -36,6 +36,7 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { ToolErrorType } from '../utils/tool-error-type.js';
 import {
   buildOutsideWorkspaceWarning,
   buildShellExecWarnings,
@@ -355,7 +356,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       return {
         llmContent: message,
         returnDisplay: `Monitor rejected: too many concurrent monitors.`,
-        error: { message },
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
 
@@ -413,7 +414,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       return {
         llmContent: message,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
-        error: { message },
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
 
@@ -557,7 +558,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       return {
         llmContent: message,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
-        error: { message },
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
 
@@ -731,10 +732,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
         );
       } catch (error) {
         onError(error instanceof Error ? error : new Error(String(error)));
+        const message = `Monitor failed to start: ${getErrorMessage(error)}`;
         return {
-          llmContent: `Monitor failed to start: ${getErrorMessage(error)}`,
+          llmContent: message,
           returnDisplay: `Monitor failed: ${getErrorMessage(error)}`,
-          error: { message: getErrorMessage(error) },
+          error: { message, type: ToolErrorType.EXECUTION_FAILED },
         };
       }
     }
@@ -745,7 +747,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       return {
         llmContent: message,
         returnDisplay: `Monitor failed: ${getErrorMessage(earlySpawnError)}`,
-        error: { message },
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
 

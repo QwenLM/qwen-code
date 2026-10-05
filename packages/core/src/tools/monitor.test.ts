@@ -10,6 +10,7 @@ import { EventEmitter } from 'node:events';
 import type { Readable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
 import path from 'node:path';
+import { ToolErrorType } from '../utils/tool-error-type.js';
 import * as workspaceContextUtils from '../utils/workspaceContext.js';
 
 const mockOsPlatform = vi.hoisted(() =>
@@ -371,6 +372,8 @@ describe('MonitorTool', () => {
       mockRuntimeShell.mockRejectedValue(new Error('sandbox unavailable'));
       const result = await run('watch command');
       expect(result.llmContent).toContain('sandbox unavailable');
+      expect(result.error?.message).toBe(result.llmContent);
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
       expect(monitorRegistry.getRunning()).toEqual([]);
       expect(mockSpawn).not.toHaveBeenCalled();
     });
@@ -792,6 +795,7 @@ describe('MonitorTool', () => {
 
         expect(result.llmContent).toBe(message);
         expect(result.error?.message).toBe(message);
+        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
         expect(result.returnDisplay).toBe(
           'Monitor rejected: too many concurrent monitors.',
         );
@@ -948,6 +952,7 @@ describe('MonitorTool', () => {
           'Monitor failed to start: limit reached',
         );
         expect(result.error?.message).toBe(result.llmContent);
+        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
         expectTerminated(killSpy);
         expect(() => {
           mockChild._emitError(new Error('late cleanup error'));
@@ -1005,6 +1010,7 @@ describe('MonitorTool', () => {
           'Monitor failed to start: spawn failed',
         );
         expect(result.error?.message).toBe(result.llmContent);
+        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
         expect(registerSpy).not.toHaveBeenCalled();
         expect(registerCallback).not.toHaveBeenCalled();
         expect(monitorRegistry.getAll()).toHaveLength(0);
@@ -1028,6 +1034,7 @@ describe('MonitorTool', () => {
         'Monitor failed to start: spawn ENOENT',
       );
       expect(result.error?.message).toBe(result.llmContent);
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
       const all = monitorRegistry.getAll();
       expect(all).toHaveLength(1);
       expect(all[0].status).toBe('failed');

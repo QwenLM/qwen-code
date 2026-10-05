@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApprovalMode } from '../config/approval-mode.js';
+import type { ShellExecutionSandboxPolicy } from '../config/config.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import { MAX_CONCURRENT_MONITORS } from '../services/monitorRegistry.js';
@@ -16,6 +17,7 @@ import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { ExecTool } from '../tools/exec.js';
 import { MonitorTool } from '../tools/monitor.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolErrorType } from '../utils/tool-error-type.js';
 import {
   CoreToolScheduler,
   type CompletedToolCall,
@@ -30,8 +32,13 @@ const limitMessage =
   `Cannot start monitor: maximum concurrent monitors (${MAX_CONCURRENT_MONITORS}) reached. ` +
   'Stop an existing monitor first.';
 const monitorArgs = { command: 'tail -f /dev/null' };
+const sandboxMessage =
+  'Monitor failed to start: Shell sandbox cwd must remain inside the admitted workspace.';
 
-function setup(codeModeOnly = false) {
+function setup(
+  codeModeOnly = false,
+  failure: 'capacity' | 'sandbox' = 'capacity',
+) {
   const config = makeFakeConfig({
     codeModeOnly,
     approvalMode: ApprovalMode.YOLO,
@@ -39,8 +46,19 @@ function setup(codeModeOnly = false) {
     targetDir: '/tmp',
     cwd: '/tmp',
   });
+  if (failure === 'sandbox') {
+    // Reject at the real runtime policy boundary before any process starts.
+    const policy: ShellExecutionSandboxPolicy = {
+      workspace: '/tmp/qwen-monitor-unadmitted-workspace',
+      installation: '/tmp',
+      state: '/tmp',
+      filesystem: 'workspace-write',
+      network: 'closed',
+    };
+    vi.spyOn(config, 'getShellExecutionSandbox').mockReturnValue(policy);
+  }
   const monitors = config.getMonitorRegistry();
-  for (let i = 0; i < MAX_CONCURRENT_MONITORS; i++) {
+  for (let i = 0; failure === 'capacity' && i < MAX_CONCURRENT_MONITORS; i++) {
     monitors.register({
       monitorId: `occupied-${i}`,
       command: 'controlled running monitor',
@@ -98,14 +116,16 @@ function setup(codeModeOnly = false) {
 function expectMonitorFailure(
   call: CompletedToolCall,
   messageBus: ReturnType<typeof setup>['messageBus'],
+  message = limitMessage,
 ) {
   expect.soft(call.status).toBe('error');
   expect.soft(call.response.executionStatus).toBe('error');
-  expect.soft(call.response.error?.message).toBe(limitMessage);
+  expect.soft(call.response.errorType).toBe(ToolErrorType.EXECUTION_FAILED);
+  expect.soft(call.response.error?.message).toBe(message);
   expect
     .soft(call.response.responseParts[0]?.functionResponse?.response)
-    .toEqual({ error: limitMessage });
-  expect.soft(call.response.resultDisplay).toBe(limitMessage);
+    .toEqual({ error: message });
+  expect.soft(call.response.resultDisplay).toBe(message);
   const telemetry = telemetrySink.mock.calls
     .map(([event]) => event as ToolCallEvent)
     .filter((event) => event.function_name === 'monitor');
@@ -114,7 +134,8 @@ function expectMonitorFailure(
       status: 'error',
       execution_status: 'error',
       success: false,
-      error: limitMessage,
+      error: message,
+      error_type: ToolErrorType.EXECUTION_FAILED,
     }),
   ]);
   expect.soft(messageBus.request).toHaveBeenCalledWith(
@@ -122,7 +143,7 @@ function expectMonitorFailure(
       eventName: 'PostToolUseFailure',
       input: expect.objectContaining({
         tool_name: 'monitor',
-        error: limitMessage,
+        error: message,
         is_interrupt: false,
       }),
     }),
@@ -159,11 +180,27 @@ describe('Monitor startup failure through the scheduler', () => {
     expect(monitors.getRunning()).toHaveLength(MAX_CONCURRENT_MONITORS);
   });
 
-  it('rejects tools.monitor so code-mode try/catch receives the recovery guidance', async () => {
-    const harness = setup(true);
+  it('preserves full sandbox startup context through the real runtime policy and scheduler', async () => {
+    const harness = setup(false, 'sandbox');
     monitors = harness.monitors;
-    const exec = await harness.run('exec', {
-      source: `
+    const call = await harness.run('monitor', { command: 'true' });
+
+    expectMonitorFailure(call, harness.messageBus, sandboxMessage);
+    expect(monitors.getAll()).toHaveLength(1);
+    expect(monitors.getAll()[0].status).toBe('failed');
+    expect(monitors.getAll()[0].pid).toBeUndefined();
+  });
+
+  it.each([
+    ['capacity', limitMessage],
+    ['sandbox', sandboxMessage],
+  ] as const)(
+    'rejects tools.monitor so code-mode try/catch receives the full %s failure',
+    async (failure, message) => {
+      const harness = setup(true, failure);
+      monitors = harness.monitors;
+      const exec = await harness.run('exec', {
+        source: `
         try {
           const result = await tools.monitor(${JSON.stringify(monitorArgs)});
           text("RESOLVED: " + JSON.stringify(result));
@@ -171,19 +208,23 @@ describe('Monitor startup failure through the scheduler', () => {
           text("CAUGHT: " + error.message);
         }
       `,
-    });
+      });
 
-    expect(exec.status).toBe('success');
-    const output = JSON.stringify(exec.response.responseParts);
-    expect.soft(output).toContain(`CAUGHT: ${limitMessage}`);
-    expect.soft(output).not.toContain('RESOLVED:');
-    const nested = harness.updates.find(
-      (call): call is CompletedToolCall =>
-        call.request.name === 'monitor' &&
-        (call.status === 'success' || call.status === 'error'),
-    );
-    expect(nested).toBeDefined();
-    expectMonitorFailure(nested!, harness.messageBus);
-    expect(monitors.getRunning()).toHaveLength(MAX_CONCURRENT_MONITORS);
-  }, 15_000);
+      expect(exec.status).toBe('success');
+      const output = JSON.stringify(exec.response.responseParts);
+      expect.soft(output).toContain(`CAUGHT: ${message}`);
+      expect.soft(output).not.toContain('RESOLVED:');
+      const nested = harness.updates.find(
+        (call): call is CompletedToolCall =>
+          call.request.name === 'monitor' &&
+          (call.status === 'success' || call.status === 'error'),
+      );
+      expect(nested).toBeDefined();
+      expectMonitorFailure(nested!, harness.messageBus, message);
+      expect(monitors.getRunning()).toHaveLength(
+        failure === 'capacity' ? MAX_CONCURRENT_MONITORS : 0,
+      );
+    },
+    15_000,
+  );
 });
