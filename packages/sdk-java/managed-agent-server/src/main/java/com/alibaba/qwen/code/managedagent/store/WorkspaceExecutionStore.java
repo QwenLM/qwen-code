@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -51,7 +52,11 @@ public class WorkspaceExecutionStore {
     }
 
     public void authorizeLifecycle(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        WorkspaceLifecycleStore.requireClaim(jdbc, session.tenantId(), session.sessionId(), authority, false);
+        try {
+            WorkspaceLifecycleStore.requireClaim(jdbc, session.tenantId(), session.sessionId(), authority, false);
+        } catch (ApiException error) {
+            throw new RuntimeBrokerException(error.getStatus().value(), error.getCode(), error.getMessage(), false, error);
+        }
         authorizePassiveAttachment(session, authority);
         if (storageGuard != null) {
             storageGuard.verify(session.workspace());

@@ -138,27 +138,14 @@ public class WorkspaceLifecycleStore {
             JsonNode definition = records.readRecordResource(operation.tenantId(), operation.sessionId(), definitionRef);
             receipt.set("definitionRef", definitionRef);
             if (definition.has("hookCatalog")) {
-                var executions = records.listRecords(operation.tenantId(), operation.sessionId(), "hook_execution");
                 for (String event : events(operation)) {
-                    String id = occurrence(event, operation.operationId());
-                    var refs = jdbc.queryForList("SELECT record_resource_id FROM qwen_managed_session_extension_record"
-                            + " WHERE tenant_id = ? AND session_id = ? AND domain = 'hook_execution' ORDER BY first_sequence",
-                            String.class, operation.tenantId(), operation.sessionId());
-                    JsonNode marker = executions.stream().filter(record -> id.equals(record.path("hookExecutionId").asText()))
-                            .findFirst().orElse(null);
-                    if (marker == null || marker.path("resultRef").isNull() || !marker.has("resultRef")) {
+                    String resource = latestHookExecutionResource(operation, occurrence(event, operation.operationId()));
+                    if (resource == null) {
                         return null;
                     }
-                    JsonNode ref = null;
-                    for (String resourceId : refs) {
-                        JsonNode candidate = resourceRef(operation, resourceId);
-                        if (id.equals(records.readRecordResource(operation.tenantId(), operation.sessionId(), candidate)
-                                .path("hookExecutionId").asText())) {
-                            ref = candidate;
-                            break;
-                        }
-                    }
-                    if (ref == null) {
+                    JsonNode ref = resourceRef(operation, resource);
+                    JsonNode marker = records.readRecordResource(operation.tenantId(), operation.sessionId(), ref);
+                    if (!marker.hasNonNull("resultRef")) {
                         return null;
                     }
                     effects.addObject().put("event", event).set("recordRef", ref);
@@ -260,10 +247,7 @@ public class WorkspaceLifecycleStore {
         for (int index = 0; index < events.size(); index++) {
             String event = events.get(index);
             JsonNode effect = receipt.path("effects").get(index);
-            String latest = jdbc.queryForList("SELECT record_resource_id FROM qwen_managed_session_extension_record WHERE"
-                    + " tenant_id = ? AND session_id = ? AND domain = 'hook_execution' AND record_id = ? FOR UPDATE",
-                    String.class, operation.tenantId(), operation.sessionId(), occurrence(event, operation.operationId()))
-                    .stream().findFirst().orElse(null);
+            String latest = latestHookExecutionResource(operation, occurrence(event, operation.operationId()));
             if (latest == null || !latest.equals(effect.path("recordRef").path("resourceId").asText())) {
                 throw blocked("workspace_lifecycle_receipt_invalid");
             }
@@ -301,11 +285,22 @@ public class WorkspaceLifecycleStore {
                 && records.listRecords(operation.tenantId(), operation.sessionId(), "hook_registration").isEmpty();
     }
 
+    private String latestHookExecutionResource(OperationRecord operation, String occurrence) {
+        return jdbc.queryForList("SELECT record_resource_id FROM qwen_managed_session_extension_record"
+                + " WHERE session_scope_key = ? AND record_key = ? AND tenant_id = ? AND session_id = ?"
+                + " AND domain = 'hook_execution' AND record_id = ? FOR UPDATE", String.class,
+                ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
+                ManagedExtensionProjection.recordKey(operation.sessionId(), "hook_execution", occurrence),
+                operation.tenantId(), operation.sessionId(), occurrence).stream().findFirst().orElse(null);
+    }
+
     private JsonNode resourceRef(OperationRecord operation, String resource) {
-        return jdbc.query("SELECT * FROM qwen_managed_session_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+        return jdbc.query("SELECT kind, schema_version, byte_length, sha256 FROM qwen_managed_session_resource"
+                        + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ?",
                 (row, index) -> json.createObjectNode().put("resourceId", resource).put("kind", row.getString("kind"))
                         .put("schemaVersion", row.getInt("schema_version")).put("byteLength", row.getLong("byte_length"))
-                        .put("digest", row.getString("sha256")), operation.tenantId(), operation.sessionId(), resource).stream()
+                        .put("digest", row.getString("sha256")), ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
+                operation.tenantId(), operation.sessionId(), resource).stream()
                 .findFirst().orElseThrow(() -> blocked("workspace_lifecycle_receipt_invalid"));
     }
 

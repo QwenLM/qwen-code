@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.managedagent.store;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
+import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -11,6 +13,8 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -40,6 +44,174 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 class WorkspaceLifecycleStoreTest {
+    @ParameterizedTest
+    @MethodSource("fencedHookTransitions")
+    void lifecycleHookTransitionsRecheckNewEffectsAndKeepOriginalSettlement(boolean authority, boolean granted,
+            String before, String after, boolean replacement, boolean accepted, boolean batch) throws Exception {
+        var fixture = fixture();
+        var store = new ManagedSessionStore(fixture.jdbc);
+        store.setLifecycleExecution(new WorkspaceExecutionStore(fixture.jdbc,
+                new DataSourceTransactionManager(fixture.jdbc.getDataSource())), fixture.store);
+        var journal = fixture.transactions.execute(ignored -> new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
+        var templates = ManagedHookRecordContractTest.fixtures().get("templates");
+        var data = new ManagedSessionStoreModels.CommitResource("hook-data", "hook-data", 1, 2,
+                HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest("{}".getBytes(StandardCharsets.UTF_8))), "e30=");
+        ObjectNode registration = templates.get("hook_registration").deepCopy();
+        registration.withObject("/catalogRef").put("digest", data.digest());
+        for (String state : List.of("admitted", "running", "settled")) {
+            registration.withObject("/run").put("state", state);
+            var request = journal.requestDomain("register-" + state, "hook_registration", registration, List.of(data), 1000);
+            fixture.transactions.executeWithoutResult(ignored -> journal.commit(request));
+            journal.committed(request);
+        }
+        ObjectNode execution = templates.get("hook_execution").deepCopy();
+        execution.set("planRef", registration.get("catalogRef"));
+        execution.set("inputRef", registration.get("catalogRef"));
+        execution.withObject("/run").put("execution", "intent").putObject("runtime")
+                .put("runtimeBindingId", "original-binding").put("generation", "1");
+        for (String state : "intent".equals(before) ? List.of("intent")
+                : "dispatch_started".equals(before) ? List.of("intent", "dispatch_started")
+                : List.of("intent", "dispatch_started", "outcome_unknown")) {
+            hookState(execution, state, registration.get("catalogRef"));
+            var request = journal.requestDomain("seed-" + state, "hook_execution", execution, List.of(), 1000);
+            fixture.transactions.executeWithoutResult(ignored -> journal.commit(request));
+            journal.committed(request);
+        }
+        var operation = fixture.admit(OperationKind.DELETE);
+        fixture.jdbc.update("UPDATE managed_workspace_access SET can_create = ?", granted);
+        ObjectNode next = execution.deepCopy();
+        hookState(next, after, registration.get("catalogRef"));
+        if (replacement && !batch) next.withObject("/run/runtime").put("generation", "2");
+        assertThat(ManagedHookRecords.isExecutionSuccessor(execution, next)).isTrue();
+        var first = journal.requestDomain("fenced", "hook_execution", next, List.of(), 1000);
+        var request = first;
+        if (batch) {
+            ObjectNode resumed = next.deepCopy();
+            hookState(resumed, "running_attached", registration.get("catalogRef"));
+            if (replacement) resumed.withObject("/run/runtime").put("generation", "2");
+            assertThat(ManagedHookRecords.isExecutionSuccessor(next, resumed)).isTrue();
+            var second = journal.requestDomain("fenced", "hook_execution", resumed, List.of(), 1000);
+            String[] firstLines = new String(Base64.getDecoder().decode(first.recordBytesBase64()), StandardCharsets.UTF_8).split("\n");
+            String[] secondLines = new String(Base64.getDecoder().decode(second.recordBytesBase64()), StandardCharsets.UTF_8).split("\n");
+            var event = (ObjectNode) fixture.json.readTree(secondLines[0]);
+            event.withObject("/managedSession").put("sequence", first.lastSequence() + 1).put("eventId", "resumed-event");
+            byte[] bytes = (firstLines[0] + "\n" + event + "\n" + firstLines[1] + "\n").getBytes(StandardCharsets.UTF_8);
+            var closure = new java.util.ArrayList<>(first.resources());
+            closure.addAll(second.resources());
+            request = new ManagedSessionStoreModels.CommitTransactionRequest(first.workspaceId(), first.writerId(), first.writerGeneration(),
+                    first.expectedJournalRevision(), first.expectedCommittedSequence(), first.transactionId(), first.operation(), first.commandId(),
+                    first.contentDigest(), first.firstSequence(), first.lastSequence() + 1, 2, first.eventsDigest(), first.previousCommitDigest(),
+                    first.commitDigest(), first.activationEpoch(), null, 3, Base64.getEncoder().encodeToString(bytes),
+                    HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)), closure);
+        }
+        var commitRequest = request;
+        long revision = fixture.jdbc.queryForObject("SELECT journal_revision FROM qwen_managed_session_journal_head", Long.class);
+        int resources = fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource", Integer.class);
+        Runnable commit = () -> fixture.transactions.executeWithoutResult(ignored -> store.commit("tenant", fixture.session,
+                "extension-writer-token-0123456789", commitRequest, authority ? WorkspaceLifecycleStore.authority(operation) : null));
+        if (accepted) {
+            commit.run();
+            assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM qwen_managed_session_journal_head", Long.class))
+                    .isEqualTo(revision + 1);
+        } else {
+            assertThatThrownBy(commit::run).isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                assertThat(error.getCode()).isEqualTo(authority && !replacement
+                        ? "workspace_lifecycle_authorization_revoked" : "workspace_lifecycle_admission_closed");
+            });
+            assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM qwen_managed_session_journal_head", Long.class)).isEqualTo(revision);
+            assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource", Integer.class)).isEqualTo(resources);
+        }
+    }
+
+    static Stream<Arguments> fencedHookTransitions() {
+        Stream<Arguments> single = Stream.concat(Stream.of(true, false).flatMap(authority -> Stream.of(
+                Arguments.of(authority, false, "intent", "dispatch_started", false, false),
+                Arguments.of(authority, false, "intent", "outcome_unknown", false, false),
+                Arguments.of(authority, false, "intent", "corrupt", false, false),
+                Arguments.of(authority, false, "intent", "not_started_proven", false, true),
+                Arguments.of(authority, false, "dispatch_started", "outcome_unknown", false, true),
+                Arguments.of(authority, false, "dispatch_started", "settled", false, true),
+                Arguments.of(authority, false, "outcome_unknown", "running_attached", false, true),
+                Arguments.of(authority, true, "outcome_unknown", "running_attached", true, false))),
+                Stream.of(Arguments.of(true, true, "intent", "dispatch_started", false, true),
+                        Arguments.of(true, true, "intent", "outcome_unknown", false, true))).map(arguments -> {
+                            var values = java.util.Arrays.copyOf(arguments.get(), 7);
+                            values[6] = false;
+                            return Arguments.of(values);
+                        });
+        return Stream.concat(single, Stream.of(Arguments.of(true, true, "intent", "outcome_unknown", true, false, true),
+                Arguments.of(true, true, "intent", "outcome_unknown", false, true, true)));
+    }
+
+    private static void hookState(ObjectNode record, String execution, JsonNode result) {
+        var run = record.withObject("/run").put("execution", execution).putNull("reason");
+        if (List.of("outcome_unknown", "corrupt").contains(execution)) {
+            run.put("state", "recovery_blocked").put("reason", "corrupt".equals(execution) ? "execution_corrupt" : execution);
+        } else if ("settled".equals(execution)) {
+            run.put("state", "settled");
+            record.set("resultRef", result);
+        } else if ("not_started_proven".equals(execution)) {
+            run.put("state", "cancelled");
+        } else {
+            run.put("state", "intent".equals(execution) ? "admitted" : "running");
+        }
+    }
+
+    @Test
+    void lifecycleClaimRefusalRemainsANonRetryableBrokerConflict() {
+        var fixture = fixture();
+        var operation = fixture.admit(OperationKind.DELETE);
+        var execution = new WorkspaceExecutionStore(fixture.jdbc, new DataSourceTransactionManager(fixture.jdbc.getDataSource()));
+        var session = fixture.store.requireSession("tenant", fixture.session);
+        execution.authorizeLifecycle(session, WorkspaceLifecycleStore.authority(operation));
+        assertThatThrownBy(() -> execution.authorizeLifecycle(session,
+                new RuntimeLifecycleAuthority(operation.operationId(), operation.claimGeneration() + 1)))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced");
+                    assertThat(error.isRetryable()).isFalse();
+                });
+        fixture.jdbc.update("UPDATE managed_agent_operation SET lease_until = 0");
+        assertThatThrownBy(() -> execution.authorizeLifecycle(session, WorkspaceLifecycleStore.authority(operation)))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced");
+                    assertThat(error.isRetryable()).isFalse();
+                });
+    }
+
+    @Test
+    void brokerAdmissionRejectsAnExpiredMillisecondLifecycleClaim() {
+        var fixture = fixture();
+        var operation = fixture.admit(OperationKind.DELETE);
+        long now = fixture.jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
+                (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
+        fixture.jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_lease_until = ?", now - 1);
+        assertThatThrownBy(() -> fixture.bindings.requireHarnessAdmission(fixture.scope(), fixture.session,
+                WorkspaceLifecycleStore.authority(operation))).isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo("runtime_admission_closed");
+                    assertThat(error.isRetryable()).isFalse();
+                });
+    }
+
+    @Test
+    void deleteReclassifiesACompletedCloseUnderTheSessionLock() {
+        var fixture = fixture();
+        var close = fixture.admit(OperationKind.CLOSE);
+        assertThat(fixture.transactions.<JsonNode>execute(ignored -> fixture.lifecycle.recoverEffects(close))).isNotNull();
+        fixture.transactions.execute(ignored -> fixture.store.completeOperation("tenant", fixture.session, close.operationId(),
+                close.leaseOwner(), close.claimGeneration(), true));
+        assertThat(fixture.store.requireSession("tenant", fixture.session).status()).isEqualTo("CLOSED");
+        var admission = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle("tenant", fixture.session,
+                OperationKind.DELETE, "owner", "a".repeat(64), "stale-active-delete", "digest", true, 1));
+        assertThat(admission.operation().lifecycleProtocolVersion()).isZero();
+        assertThat(admission.operation().sessionStatusBefore()).isEqualTo("CLOSED");
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_harness_drain", Integer.class)).isEqualTo(1);
+        assertThat(fixture.jdbc.queryForObject("SELECT phase FROM qwen_runtime_harness_drain", String.class)).isEqualTo("DRAINING");
+    }
+
     @ParameterizedTest
     @MethodSource("invalidJournalRecords")
     void lifecycleJournalValidationRejectsInvalidRecordsAndRollsBack(String line, String mode) throws Exception {

@@ -269,6 +269,7 @@ public class ManagedExtensionRecordStore {
     boolean hasNewLifecycleDispatch(String tenantId, String sessionId, byte[] bytes,
             Function<String, StoredResource> resources) {
         boolean dispatch = false;
+        var revisions = new java.util.HashMap<String, JsonNode>();
         for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
             JsonNode parsed = parse(line);
             if (parsed == null) {
@@ -294,13 +295,8 @@ public class ManagedExtensionRecordStore {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
             }
             JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
-            if (!"dispatch_started".equals(next.path("run").path("execution").asText())) {
-                continue;
-            }
-            String field = "hook_execution".equals(domain) ? "hookExecutionId" : "registrationId";
-            var previous = listRecords(tenantId, sessionId, domain).stream()
-                    .filter(record -> next.path(field).equals(record.path(field))).findFirst();
-            if (previous.isEmpty() || !"dispatch_started".equals(previous.get().path("run").path("execution").asText())) {
+            JsonNode previous = previousLifecycleRecord(tenantId, sessionId, domain, next, revisions);
+            if (requiresLifecycleDispatch(previous, next)) {
                 dispatch = true;
             }
         }
@@ -309,6 +305,7 @@ public class ManagedExtensionRecordStore {
 
     void requireLifecycleSettlement(String tenantId, String sessionId, byte[] bytes,
             Function<String, StoredResource> resources) {
+        var revisions = new java.util.HashMap<String, JsonNode>();
         for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
             JsonNode parsed = parse(line);
             if (parsed == null) {
@@ -331,17 +328,43 @@ public class ManagedExtensionRecordStore {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
             }
             JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
-            String id = next.path(domain.equals("hook_execution") ? "hookExecutionId"
-                    : "registrationId").asText();
-            JsonNode previous = listRecords(tenantId, sessionId, domain).stream().filter(record ->
-                    id.equals(record.path(domain.equals("hook_execution") ? "hookExecutionId"
-                            : "registrationId").asText()))
-                    .findFirst().orElse(null);
-            if (previous == null || "intent".equals(previous.path("run").path("execution").asText())
-                    && "dispatch_started".equals(next.path("run").path("execution").asText())) {
+            JsonNode previous = previousLifecycleRecord(tenantId, sessionId, domain, next, revisions);
+            if (previous == null || requiresLifecycleDispatch(previous, next)) {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
             }
         }
+    }
+
+    private JsonNode previousLifecycleRecord(String tenantId, String sessionId, String domain, JsonNode next,
+            java.util.Map<String, JsonNode> revisions) {
+        String id = next.path("hook_execution".equals(domain) ? "hookExecutionId" : "registrationId").asText();
+        String key = domain + ":" + id;
+        JsonNode previous = revisions.get(key);
+        if (previous == null) {
+            previous = jdbc.queryForList("SELECT record_resource_id FROM qwen_managed_session_extension_record"
+                + " WHERE session_scope_key = ? AND record_key = ? AND tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
+                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedExtensionProjection.recordKey(sessionId, domain, id), tenantId, sessionId, domain, id).stream().map(resource -> {
+                    JsonNode record = readBody(readResource(tenantId, sessionId, resource));
+                    ManagedExtensionProjection.RECORD_BODIES.get(domain).require().accept(record);
+                    return record;
+                }).findFirst().orElse(null);
+        }
+        revisions.put(key, next);
+        return previous;
+    }
+
+    private boolean requiresLifecycleDispatch(JsonNode previous, JsonNode next) {
+        if (previous == null) {
+            return "dispatch_started".equals(next.path("run").path("execution").asText());
+        }
+        JsonNode before = previous.path("run");
+        JsonNode after = next.path("run");
+        String execution = before.path("execution").asText();
+        if (!List.of("", "intent").contains(execution) && !before.path("runtime").equals(after.path("runtime"))) {
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+        }
+        return "intent".equals(execution) && !List.of("intent", "not_started_proven").contains(after.path("execution").asText());
     }
 
     public TaskPage listTasks(String tenantId, String sessionId,

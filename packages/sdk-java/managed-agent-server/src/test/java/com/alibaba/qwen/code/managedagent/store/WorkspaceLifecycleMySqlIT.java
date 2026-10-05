@@ -61,6 +61,48 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         return new Fixture(source);
     }
 
+    @Test
+    void lifecycleEffectsKeepOtherTenantExtensionRecordsUnlocked() throws Exception {
+        var fixture = fixture();
+        String scope = ManagedSessionStore.sessionScopeKey("neighbor", "other-session");
+        String record = ManagedExtensionProjection.recordKey("other-session", "hook_execution", "other-hook");
+        fixture.jdbc.update("INSERT INTO qwen_managed_session_extension_record (session_scope_key, record_key, tenant_id, workspace_id,"
+                + " session_id, domain, record_id, operation_hash, revision, record_resource_id, created_at, first_sequence)"
+                + " VALUES (?, ?, 'neighbor', 'other-workspace', 'other-session', 'hook_execution', 'other-hook', ?, 1, 'other-resource', 1, 1)",
+                scope, record, "a".repeat(64));
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        try (var workers = Executors.newFixedThreadPool(2)) {
+            var held = workers.submit(() -> fixture.transactions.execute(ignored -> {
+                try {
+                    new WorkspaceLifecycleStoreTest() {
+                        @Override
+                        Fixture fixture() {
+                            return fixture;
+                        }
+                    }.hookReceiptsUseCompactProtocolIdentitiesWithAnIndentedApplicationMapper(OperationKind.DELETE, true);
+                    entered.countDown();
+                    if (!release.await(10, TimeUnit.SECONDS)) throw new AssertionError("Lifecycle hold was not released");
+                    return null;
+                } catch (Exception error) {
+                    throw new IllegalStateException(error);
+                }
+            }));
+            try {
+                assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+                var neighbor = workers.submit(() -> new JdbcTemplate(source).update(
+                        "UPDATE qwen_managed_session_extension_record SET revision = revision + 1 WHERE session_scope_key = ? AND record_key = ?",
+                        scope, record));
+                assertThat(neighbor.get(2, TimeUnit.SECONDS)).isEqualTo(1);
+            } finally {
+                release.countDown();
+            }
+            held.get(10, TimeUnit.SECONDS);
+        }
+        assertThat(fixture.jdbc.queryForObject("SELECT revision FROM qwen_managed_session_extension_record"
+                + " WHERE session_scope_key = ? AND record_key = ?", Long.class, scope, record)).isEqualTo(2);
+    }
+
     @ParameterizedTest
     @MethodSource("legacyCloseClockZones")
     @ResourceLock("java.util.TimeZone")

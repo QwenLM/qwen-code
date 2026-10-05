@@ -783,6 +783,9 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
                     "The Session was not found.");
         }
+        if (kind == OperationKind.DELETE && List.of("CLOSED", "ARCHIVED").contains(session.status())) {
+            protocolVersion = 0;
+        }
         if (session.workspace() != null) {
             if (kind == OperationKind.CLOSE || kind == OperationKind.DELETE && "ACTIVE".equals(session.status()) && protocolVersion == 1) {
                 if (!supported || !workspaceFilesEnabled) {

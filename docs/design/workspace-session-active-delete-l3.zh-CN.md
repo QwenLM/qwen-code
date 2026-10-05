@@ -68,6 +68,10 @@ placement guard 先于 retention、Session 和 journal 锁。仅检查 journal h
 拒绝返回 409；意外 Store、传输或 writer 权限故障返回 503，均不放行执行。
 已接纳 Turn 的认证取消是本地 abort，不要求普通 Store 授权；本地生命周期围栏
 仍禁止取消生命周期操作。protocol-zero close 保留限定的例外。
+普通 attachment mutation 在 Store 授权或 writer 续租前核验 client 身份；
+legacy close 控制路由保留明确的缺失 client 例外。生命周期 claim 使用数据库
+毫秒时钟，其不可重试 409 穿过 Broker 边界后保持不变。DELETE 若在并发 CLOSE
+完成前被分类，仍按加锁后的 Session 状态重新分类，保留 CLOSED/ARCHIVED 的 L2 删除。
 
 先结算此前操作，通用取消不得包含本 operation 的生命周期 occurrence。
 稳定 occurrence ID 由 Session、operation、事件派生，复用 H2 的 catalog、plan、
@@ -86,11 +90,17 @@ Plan 身份使用固定的紧凑 JSON 字节，不受应用 JSON 格式化配置
 plan 和子执行派发前均预检权限，并在 journal 提交事务中重新检查。明确的事务
 授权拒绝不消耗 journal sequence，writer authority 可继续重试。应答丢失，或
 不确定请求后再收到拒绝，仍保留写入失败围栏。
+围栏核验每次 Hook revision，包括同一提交中的连续 revision：intent 转为可能
+已启动的结果须重新授权；not_started_proven 与原已派发工作结果的结算仍可提交。
+生命周期结算不得改变已记录的 Runtime 身份。
 
 核对并保存 effects receipt 后，围栏单向升级到 DRAINING。不运行 Hook 地 detach，
 释放 owner、seal writer，再使用可靠 close 的 drain/stop 协议。接管者在 effects
 receipt 已保存时跳过 Hook，否则从相同 H2 occurrence 恢复进度。Harness 404、
 租约过期或 worker 消失均不能证明完成。
+明确且同 boot 的 detach 404 停止 SDK attachment 心跳；拒绝和不确定应答仍保留。
+receipt 恢复通过既有主键查找精确 occurrence 与 resource，保留原身份和字节校验，
+不扫描其他租户，也不遍历历史候选资源。
 
 receipt 恢复可能完全跳过 Harness lifecycle 请求。因此，即使存活 attachment
 没有本地 lifecycle 状态，detach 也必须向 Session Store 核验 operation 权限。

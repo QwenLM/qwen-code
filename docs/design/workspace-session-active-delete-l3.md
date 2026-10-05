@@ -86,7 +86,12 @@ returns 409. Unexpected Store, transport or writer-authority failures return
 503 and admit no execution. Authenticated cancellation of an admitted Turn is a
 local abort and does not require ordinary Store authorization; the local
 lifecycle fence still excludes cancellation. Protocol-zero close retains its
-scoped exception.
+scoped exception. Ordinary attachment mutations validate client identity before
+Store authorization or writer renewal; the legacy close control route retains
+its explicit missing-client exception. Lifecycle claims use database millisecond
+time and keep their non-retryable 409 through the Broker boundary. A DELETE
+classified before a concurrent CLOSE completes is reclassified under the locked
+Session state, preserving CLOSED/ARCHIVED deletion as L2.
 
 Settle earlier operations, excluding this operation's lifecycle occurrences from
 generic cancellation. Stable occurrence IDs derive from Session, operation and
@@ -110,12 +115,20 @@ Precheck authority before both plan and child dispatch, and recheck inside the
 journal commit transaction. A definite transactional authorization refusal leaves
 the writer authority retryable without consuming journal sequences. A missing
 response, or a refusal after an uncertain request, retains the write failure fence.
+The guard checks every Hook revision, including multiple revisions in one commit:
+leaving intent for a possibly started outcome requires authorization, while
+not_started_proven and original dispatched-result settlement remain available.
+Lifecycle settlement cannot change an already recorded Runtime identity.
 
 After validating and saving the effects receipt, upgrade the fence monotonically
 to DRAINING. Detach without Hooks, release owners, seal the writer, then use the
 reliable-close drain/stop protocol. A successor skips Hooks when the effects
 receipt is saved, otherwise reconstructs progress from the same H2 occurrences.
 Harness 404, lease expiry and worker disappearance cannot establish completion.
+A confirmed same-boot detach 404 stops the SDK attachment heartbeat; refusals and
+ambiguous responses retain it. Receipt recovery selects the exact occurrence and
+resource through their existing primary keys, preserving raw identity and byte
+validation without scanning other tenants or looping over historical candidates.
 
 Receipt recovery may skip the Harness lifecycle request entirely. Detach must
 therefore validate its operation authority against Session Store even when the

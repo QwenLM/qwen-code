@@ -2151,11 +2151,12 @@ export function registerHostedHarnessSessionRoutes(
       !['/lifecycle', '/detach', '/heartbeat', '/cancel'].includes(req.path) &&
       !session.lifecycle
     ) {
+      const legacyClose = req.method === 'DELETE' && req.path === '/';
+      if (!identity(req, sessions, legacyClose))
+        return error(res, 404, 'hosted_session_not_found');
       try {
         await session.stores!.authorizeOrdinary(
-          req.method === 'DELETE' && req.path === '/'
-            ? 'legacy-close'
-            : undefined,
+          legacyClose ? 'legacy-close' : undefined,
         );
       } catch (cause) {
         return ordinaryAuthorizationError(res, cause);

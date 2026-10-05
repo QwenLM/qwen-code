@@ -561,6 +561,31 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
+  it.each(['title', 'prompt'] as const)(
+    'checks attachment identity before ordinary Store authorization for %s',
+    async (route) => {
+      const { server, authorize } = await hookApp();
+      state.authorizeOrdinary.mockClear();
+      for (const clientId of [undefined, 'wrong-client']) {
+        const request = headers(
+          supertest(server).post(`/session/${SESSION_ID}/${route}`),
+        );
+        if (clientId) request.set('X-Qwen-Client-Id', clientId);
+        const rejected = await request.send({ title: 'renamed' });
+        expect(rejected.status).toBe(404);
+        expect(rejected.body.code).toBe('hosted_session_not_found');
+        expect(state.authorizeOrdinary).not.toHaveBeenCalled();
+      }
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/title`))
+        .send({ title: 'renamed' })
+        .expect(200);
+      expect(state.authorizeOrdinary).toHaveBeenCalledOnce();
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .send({})
+        .expect(204);
+    },
+  );
+
   it('uses the legacy close admission for an attached protocol zero Session with Hooks', async () => {
     const { server, authorize, requests } = await hookApp();
     state.authorizeOrdinary.mockImplementation(async (kind) => {

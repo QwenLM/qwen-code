@@ -20,11 +20,16 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import java.util.stream.Stream;
 
 class HostedHarnessClientTest {
     private static final String BOOT_ID =
@@ -67,6 +72,58 @@ class HostedHarnessClientTest {
         if (serverExecutor != null) {
             serverExecutor.shutdownNow();
         }
+    }
+
+    @ParameterizedTest
+    @MethodSource("lifecycleDetachResponses")
+    void lifecycleDetachStopsHeartbeatOnlyAfterConfirmedAbsence(boolean byId, int status, boolean sameBoot) throws Exception {
+        createSessionRoute();
+        AtomicBoolean detached = new AtomicBoolean();
+        CountDownLatch firstHeartbeat = new CountDownLatch(1);
+        CountDownLatch laterHeartbeats = new CountDownLatch(2);
+        server.createContext("/session/" + SESSION_ID + "/heartbeat", exchange -> {
+            firstHeartbeat.countDown();
+            if (detached.get()) laterHeartbeats.countDown();
+            sendSessionJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID
+                    + "\",\"clientId\":\"" + CLIENT_ID + "\",\"lastSeenAt\":123}");
+        });
+        server.createContext("/session/" + SESSION_ID + "/detach", exchange -> {
+            assertPrivateHeaders(exchange, !byId);
+            if (status == 204) {
+                exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                exchange.getResponseHeaders().set("Connection", "close");
+                exchange.sendResponseHeaders(204, -1);
+                exchange.close();
+            } else {
+                exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, sameBoot ? BOOT_ID : OTHER_BOOT_ID);
+                sendJson(exchange, status, "{\"code\":\"session_not_found\"}", false);
+            }
+        });
+        try (HostedHarnessClient client = HostedHarnessClient.builder().baseUri(baseUri).bearerToken("harness-token")
+                .capabilityDigest(DIGEST).heartbeatInterval(Duration.ofMillis(20)).build()) {
+            HarnessSessionRef session = createSession(client);
+            assertTrue(firstHeartbeat.await(2, TimeUnit.SECONDS));
+            var authority = Map.<String, Object>of("operationId", "delete-1", "claimGeneration", 2);
+            Runnable detach = () -> {
+                if (byId) client.detachLifecycle(SESSION_ID, authority);
+                else client.detachLifecycle(session, authority);
+            };
+            boolean confirmed = sameBoot && (status == 204 || status == 404);
+            if (confirmed) detach.run();
+            else {
+                Class<? extends DaemonException> expected = sameBoot ? status == 500 ? MutationOutcomeUnknownException.class
+                        : DaemonHttpException.class : HostedHarnessGenerationException.class;
+                assertThrows(expected, detach::run);
+            }
+            detached.set(true);
+            assertEquals(!confirmed, laterHeartbeats.await(200, TimeUnit.MILLISECONDS));
+        }
+    }
+
+    static Stream<Arguments> lifecycleDetachResponses() {
+        return Stream.of(true, false).flatMap(byId -> Stream.of(Arguments.of(byId, 204, true),
+                Arguments.of(byId, 404, true), Arguments.of(byId, 403, true), Arguments.of(byId, 409, true),
+                Arguments.of(byId, 500, true), Arguments.of(byId, 404, false)));
     }
 
     @Test

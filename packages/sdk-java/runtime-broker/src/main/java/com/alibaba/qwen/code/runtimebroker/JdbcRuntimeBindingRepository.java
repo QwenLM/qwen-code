@@ -395,7 +395,7 @@ public final class JdbcRuntimeBindingRepository
                 if (authority == null || !"LIFECYCLE_ONLY".equals(row.getString("phase"))
                         || !authority.operationId().equals(row.getString("operation_id"))
                         || authority.claimGeneration() != row.getLong("claim_generation")
-                        || row.getLong("claim_lease_until") <= JdbcRepositorySupport.databaseNow(connection).toEpochMilli()) {
+                        || row.getLong("claim_lease_until") <= JdbcRepositorySupport.databaseNowPrecise(connection).toEpochMilli()) {
                     throw admissionClosed();
                 }
             }
