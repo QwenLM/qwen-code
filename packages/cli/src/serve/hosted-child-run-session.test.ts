@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -45,6 +46,48 @@ const sessionKey = {
   workspaceId: 'workspace-1',
   sessionId,
 };
+function manifestBody(over: {
+  revision: number;
+  captureId?: string;
+  executionCallId?: string;
+}): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      toolResult: 'managed-tool-result/1',
+      type: 'manifest',
+      tenantId: sessionKey.tenantId,
+      sessionId,
+      turnId: 'turn-1',
+      executionCallId: 'call-shell-1',
+      callId: 'call-1',
+      invocationDigest: 'sha256:' + 'a'.repeat(64),
+      bindingGeneration: '1',
+      captureId: 'capture-1',
+      captureScope: 'process_pipes',
+      capturePolicy: 'complete_required',
+      captureStatus: 'pending',
+      captureReason: null,
+      upstreamTruncated: false,
+      executionStatus: 'unknown',
+      exitCode: null,
+      signal: null,
+      contents: [
+        {
+          streamId: 'stdout',
+          role: 'stdout',
+          mimeType: 'application/octet-stream',
+          state: 'open',
+          byteLength: 0,
+          digest: createHash('sha256').update(Buffer.alloc(0)).digest('hex'),
+          missingRanges: [],
+          body: { pages: [] },
+        },
+      ],
+      ...over,
+    }),
+    'utf8',
+  );
+}
 const TASK_ID = `task_${managedExtensionRecordKey(sessionId, 'child_run', 'shell-1')}`;
 
 const temporaryDirectories = new Set<string>();
@@ -193,11 +236,11 @@ describe('HostedChildRunSession', () => {
       harness.now = 4_000;
       const manifestA = await harness.store.publish(
         'managed-tool-result-manifest',
-        Buffer.from('{"pages":1,"revision":1}', 'utf8'),
+        manifestBody({ revision: 1 }),
       );
       const manifestB = await harness.store.publish(
         'managed-tool-result-manifest',
-        Buffer.from('{"pages":1,"revision":2}', 'utf8'),
+        manifestBody({ revision: 2 }),
       );
       await orchestrator.advanceOutput('shell-1', manifestA);
       await orchestrator.advanceOutput('shell-1', manifestB);
@@ -206,7 +249,7 @@ describe('HostedChildRunSession', () => {
       expect(advanced.body.outputRef).toEqual(manifestB);
       await expect(
         orchestrator.advanceOutput('shell-1', manifestA),
-      ).rejects.toThrow('may only advance forward');
+      ).rejects.toThrow('lineage');
       expect(committed(authority).body.outputRef).toEqual(manifestB);
       // A replay of the very same reference is not a refusal and commits
       // nothing: a redelivered advance must never wedge the Shell's exit
@@ -261,6 +304,48 @@ describe('HostedChildRunSession', () => {
         state: 'settled',
         execution: 'settled',
       });
+    });
+  });
+
+  it('refuses output outside its capture lineage, higher numbers included', async () => {
+    const harness = await createHarness();
+    await withOrchestrator(harness, async (authority, orchestrator) => {
+      await orchestrator.admit({
+        shellId: 'shell-1',
+        ownerScopeId: 'scope-main',
+        executionCallId: 'call-shell-1',
+        args: ARGS,
+      });
+      await orchestrator.dispatchStarted('shell-1', BINDING);
+      await orchestrator.attach('shell-1', BINDING, { pid: 4242 });
+      const publish = (body: Buffer) =>
+        harness.store.publish('managed-tool-result-manifest', body);
+      const rev1 = await publish(manifestBody({ revision: 1 }));
+      await orchestrator.advanceOutput('shell-1', rev1);
+      // A higher number from another capture is a lineage break, never
+      // progress: it would chain the record's view to bytes this capture
+      // never wrote.
+      const foreign = await publish(
+        manifestBody({ revision: 2, captureId: 'capture-9' }),
+      );
+      await expect(
+        orchestrator.advanceOutput('shell-1', foreign),
+      ).rejects.toThrow('lineage');
+      // A skipped revision loses the pages between them the same way.
+      const gap = await publish(manifestBody({ revision: 3 }));
+      await expect(orchestrator.advanceOutput('shell-1', gap)).rejects.toThrow(
+        'lineage',
+      );
+      const rev2 = await publish(manifestBody({ revision: 2 }));
+      await orchestrator.advanceOutput('shell-1', rev2);
+      expect(committed(authority).body.outputRef).toEqual(rev2);
+      // And no manifest ever anchors another call's capture onto this record.
+      const elsewhere = await publish(
+        manifestBody({ revision: 1, executionCallId: 'call-elsewhere' }),
+      );
+      await expect(
+        orchestrator.advanceOutput('shell-1', elsewhere),
+      ).rejects.toThrow('another call');
     });
   });
 

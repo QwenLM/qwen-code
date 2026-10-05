@@ -806,6 +806,30 @@ function isDescriptorSuccessor(
 }
 
 /**
+ * Whether `next` continues the same capture as `previous`: the same
+ * capture identity and the very next revision. This is the integrity
+ * chain a record's output advance refuses to break — a higher revision
+ * from another capture would chain the record's view to bytes the capture
+ * never wrote, and a skipped revision loses pages. Unlike
+ * `isToolResultManifestSuccessor` this does not demand the earlier
+ * revision still be pending: the funnel legitimately publishes another
+ * revision with the settled physical fields after the streams sealed.
+ */
+export function isToolResultManifestChainLink(
+  previous: unknown,
+  next: unknown,
+): boolean {
+  const before = attempt(() => parseToolResultManifest(previous));
+  const after = attempt(() => parseToolResultManifest(next));
+  return (
+    !!before &&
+    !!after &&
+    after.revision === before.revision + 1 &&
+    FIXED_KEYS.every((key) => before[key] === after[key])
+  );
+}
+
+/**
  * Whether `next` may follow `previous` as the next revision of one capture:
  * only a pending revision has a successor, and a successor may only extend
  * what the earlier revision recorded.

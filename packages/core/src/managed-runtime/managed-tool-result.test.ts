@@ -20,6 +20,7 @@ import {
   MANAGED_TOOL_RESULT_ROUTES,
   ToolResultSegmentLedger,
   isToolResultEnvelopeOf,
+  isToolResultManifestChainLink,
   isToolResultManifestSuccessor,
   isToolResultPageAt,
   isToolResultPageSuccessor,
@@ -388,6 +389,49 @@ describe('Managed tool result contract', () => {
       expect(isToolResultManifestSuccessor(previous, next)).toBe(valid);
     },
   );
+
+  it('links only the same capture identity and the very next revision', () => {
+    const before = { ...fixtures.manifest, revision: 7 } as unknown as {
+      revision: number;
+    };
+    expect(
+      isToolResultManifestChainLink(before, { ...before, revision: 8 }),
+    ).toBe(true);
+    expect(
+      isToolResultManifestChainLink(before, { ...before, revision: 9 }),
+    ).toBe(false);
+    expect(
+      isToolResultManifestChainLink(before, { ...before, revision: 7 }),
+    ).toBe(false);
+    expect(
+      isToolResultManifestChainLink(before, {
+        ...before,
+        revision: 8,
+        captureId: 'other-capture',
+      }),
+    ).toBe(false);
+    expect(
+      isToolResultManifestChainLink(before, {
+        ...before,
+        revision: 8,
+        executionCallId: 'other-call',
+      }),
+    ).toBe(false);
+    // Unlike the successor rule the earlier revision need not stay pending:
+    // the exit leg's next revision carries the settled physical fields.
+    const sealed = {
+      ...fixtures.manifest,
+      revision: 2,
+      executionStatus: 'success',
+      exitCode: 0,
+    };
+    expect(
+      isToolResultManifestChainLink(sealed, { ...sealed, revision: 3 }),
+    ).toBe(true);
+    expect(
+      isToolResultManifestSuccessor(sealed, { ...sealed, revision: 3 }),
+    ).toBe(false);
+  });
 
   it.each(fixtures.pageRevisionCases)(
     'checks the $id page revision',

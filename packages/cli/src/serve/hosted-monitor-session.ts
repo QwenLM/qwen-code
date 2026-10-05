@@ -21,7 +21,10 @@ import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import { manifestRevision } from './managed-output-revision.js';
+import {
+  isToolResultManifestChainLink,
+  parseToolResultManifestBytes,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 
 // H3 of #12827: the hosted orchestrator of a Session's monitor_run records,
 // the mirror of HostedChildRunSession. The managed-runtime worker owns the
@@ -204,31 +207,35 @@ export class HostedMonitorSession {
     );
   }
 
-  /** The output manifest advanced; only ever to a newer revision of it. */
+  /** The output manifest advanced; only ever along this capture's lineage. */
   advanceOutput(
     monitorId: string,
     outputRef: ManagedSessionDurableRef,
   ): Promise<void> {
     return this.reviseAsync(monitorId, async (previous) => {
       // A replay of the very same reference is the no-op the deep-equal
-      // skip already owns; any other reference must be a strictly newer
-      // revision, so a lost or reordered delivery can never walk the
-      // output back.
+      // skip already owns; anything else must continue this capture. A
+      // higher revision from another capture would chain the record's
+      // output to bytes that do not exist there, and a skipped revision
+      // loses pages — both are funnel wiring faults, not delivery noise.
       if (
         previous.outputRef !== null &&
-        !isDeepStrictEqual(previous.outputRef, outputRef)
-      ) {
-        const before = manifestRevision(
+        isDeepStrictEqual(previous.outputRef, outputRef)
+      )
+        return previous;
+      const after = parseToolResultManifestBytes(
+        await this.store.resources.read(outputRef),
+      );
+      if (after.executionCallId !== previous.run.executionCallId) {
+        throw new Error(`Monitor ${monitorId} output names another call.`);
+      }
+      if (previous.outputRef !== null) {
+        const before = parseToolResultManifestBytes(
           await this.store.resources.read(previous.outputRef),
-          'Monitor output manifest',
         );
-        const after = manifestRevision(
-          await this.store.resources.read(outputRef),
-          'Monitor output manifest',
-        );
-        if (after <= before) {
+        if (!isToolResultManifestChainLink(before, after)) {
           throw new Error(
-            `Monitor ${monitorId} output may only advance forward.`,
+            `Monitor ${monitorId} output manifest lineage broke.`,
           );
         }
       }
