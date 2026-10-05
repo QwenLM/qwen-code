@@ -242,8 +242,9 @@ describe('User Dream agent planner', () => {
 
   it.each([
     ['failed', 'Model timed out', 'Model timed out'],
-    ['cancelled', 'CANCELLED', 'Agent stopped: cancelled before completion.'],
     ['failed', 'MAX_TURNS', 'Agent stopped: maximum turns reached.'],
+    ['failed', 'TIMEOUT', 'Agent stopped: time limit reached.'],
+    ['cancelled', 'CANCELLED', 'User Dream agent cancelled before completion'],
   ] as const)(
     'rejects when the agent finishes as %s with reason %s',
     async (status, reason, expected) => {

@@ -517,30 +517,22 @@ export class AgentInteractive {
 
 /**
  * Map a non-GOAL terminate mode to a visible status message for the UI,
- * or return null to suppress the message entirely.
+ * or return null to suppress the message entirely. The wording is shared
+ * with the non-interactive callers; only the severity is decided here.
  *
- * CANCELLED is suppressed here because cancelCurrentRound() already emits
- * its own warning. SHUTDOWN is suppressed as a normal lifecycle end.
+ * CANCELLED and SHUTDOWN have no wording, so they stay suppressed:
+ * cancelCurrentRound() already emits its own warning, and SHUTDOWN is a
+ * normal lifecycle end.
  */
 function terminateModeMessage(
   mode: AgentTerminateMode,
   loopType?: LoopType | null,
 ): { text: string; level: 'info' | 'warning' | 'error' } | null {
-  let level: 'warning' | 'error';
-  switch (mode) {
-    case AgentTerminateMode.MAX_TURNS:
-    case AgentTerminateMode.TIMEOUT:
-      level = 'warning';
-      break;
-    case AgentTerminateMode.ERROR:
-    case AgentTerminateMode.LOOP_DETECTED:
-      level = 'error';
-      break;
-    case AgentTerminateMode.CANCELLED:
-    case AgentTerminateMode.SHUTDOWN:
-    default:
-      return null;
-  }
   const text = describeAgentTerminateReason(mode, loopType);
-  return text ? { text, level } : null;
+  if (!text) return null;
+  const level =
+    mode === AgentTerminateMode.MAX_TURNS || mode === AgentTerminateMode.TIMEOUT
+      ? 'warning'
+      : 'error';
+  return { text, level };
 }

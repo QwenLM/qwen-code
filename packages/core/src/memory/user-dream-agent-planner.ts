@@ -129,7 +129,12 @@ export async function planUserAutoMemoryDreamByAgent(
 
   if (result.status !== 'completed') {
     throw new Error(
-      terminateReasonMessage(result.terminateReason, 'User Dream agent failed'),
+      terminateReasonMessage(
+        result.terminateReason,
+        result.status === 'cancelled'
+          ? 'User Dream agent cancelled before completion'
+          : 'User Dream agent failed',
+      ),
     );
   }
   return result;
