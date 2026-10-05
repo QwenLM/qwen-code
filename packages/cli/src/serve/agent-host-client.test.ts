@@ -341,3 +341,68 @@ it.each(['legacy', 'v2'])(
     }
   },
 );
+
+it.each(['write', 'remove'] as const)(
+  'preserves the saved credential when the %s lock is compromised',
+  async (operation) => {
+    const workspaceCwd = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'host-compromised-lock-'),
+    );
+    const serverUrl = 'http://127.0.0.1:18586';
+    const workspaceId = 'ws-compromised';
+    const key = createHash('sha256')
+      .update(`${serverUrl}\0${workspaceId}\0${workspaceCwd}`)
+      .digest('hex');
+    const directory = path.join(workspaceCwd, 'agent-hosts');
+    await fs.mkdir(directory);
+    const file = path.join(
+      directory,
+      `${key}${operation === 'write' ? '' : '.v2'}.json`,
+    );
+    const credential = JSON.stringify({
+      schemaVersion: 1,
+      serverUrl,
+      workspaceId,
+      hostId: 'saved',
+      secret: 'saved-secret',
+    });
+    await fs.writeFile(file, credential);
+    const compromised = new Error('Credential lock ownership was lost.');
+    const release = vi.fn().mockRejectedValue(new Error('ERELEASED'));
+    const lockSpy = vi
+      .spyOn(lockfile, 'lock')
+      .mockImplementation(async (_file, options) => {
+        options?.onCompromised?.(compromised);
+        return release;
+      });
+    vi.stubEnv('QWEN_HOME', workspaceCwd);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json(
+          { error: 'Invalid Agent Host credential.' },
+          { status: 401 },
+        ),
+      ),
+    );
+    try {
+      await expect(
+        startAgentHostConnection({
+          bridge: {} as AcpSessionBridge,
+          serverUrl,
+          workspaceId,
+          workspaceCwd,
+          ...(operation === 'remove' ? { enrollmentToken: 'token' } : {}),
+        }),
+      ).rejects.toBe(compromised);
+      expect(await fs.readFile(file, 'utf8')).toBe(credential);
+      expect(await fs.readdir(directory)).toEqual([path.basename(file)]);
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      lockSpy.mockRestore();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+      await fs.rm(workspaceCwd, { recursive: true, force: true });
+    }
+  },
+);

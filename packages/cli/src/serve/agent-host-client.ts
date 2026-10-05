@@ -121,10 +121,12 @@ async function writeCredential(
   expected: AgentHostCredential | undefined,
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const release = await lockCredential(filePath);
+  const lock = await lockCredential(filePath);
   const temporary = `${filePath}.${randomUUID()}.tmp`;
+  let completed = false;
   try {
     const current = await readCredential(filePath);
+    lock.assertHeld();
     if (
       current &&
       (current.hostId !== expected?.hostId ||
@@ -140,38 +142,61 @@ async function writeCredential(
       mode: 0o600,
       flag: 'wx',
     });
+    lock.assertHeld();
     await fs.rename(temporary, filePath);
+    lock.assertHeld();
+    completed = true;
   } finally {
-    await fs.rm(temporary, { force: true }).finally(release);
+    const cleanup = fs.rm(temporary, { force: true }).finally(lock.release);
+    if (completed) {
+      await cleanup;
+    } else {
+      await cleanup.catch((error) =>
+        writeStderrLine(
+          `Agent Host credential cleanup failed: ${extractErrorMessage(error)}`,
+        ),
+      );
+    }
   }
 }
 
-function lockCredential(filePath: string) {
-  return lockfile.lock(filePath, {
+async function lockCredential(filePath: string) {
+  let compromised: Error | undefined;
+  const release = await lockfile.lock(filePath, {
     realpath: false,
     retries: { retries: 10, minTimeout: 5, maxTimeout: 100 },
-    onCompromised: (error) =>
+    onCompromised: (error) => {
+      compromised = error;
       writeStderrLine(
         `Agent Host credential lock compromised: ${error.message}`,
-      ),
+      );
+    },
   });
+  return {
+    assertHeld: () => {
+      if (compromised) throw compromised;
+    },
+    release: () => (compromised ? Promise.resolve() : release()),
+  };
 }
 
 async function removeRevokedCredential(
   filePath: string,
   expected: AgentHostCredential,
 ): Promise<void> {
-  const release = await lockCredential(filePath);
+  const lock = await lockCredential(filePath);
   try {
     const current = await readCredential(filePath);
+    lock.assertHeld();
     if (
       current?.hostId === expected.hostId &&
       current.secret === expected.secret
     ) {
       await fs.rm(filePath, { force: true });
+      lock.assertHeld();
     }
   } finally {
-    await release();
+    await lock.release();
   }
 }
 
