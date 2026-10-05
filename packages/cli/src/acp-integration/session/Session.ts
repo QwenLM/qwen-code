@@ -13493,9 +13493,12 @@ export class Session implements SessionContext {
       | undefined;
     let subAgentCleanupFunctions: Array<() => void> = [];
 
-    const cleanupAgentToolResources = () => {
+    const cleanupSubAgentTracking = () => {
       subAgentCleanupFunctions.forEach((cleanup) => cleanup());
       subAgentCleanupFunctions = [];
+    };
+    const cleanupAgentToolResources = () => {
+      cleanupSubAgentTracking();
       removeAgentToolAbortPropagation?.();
       removeAgentToolAbortPropagation = undefined;
     };
@@ -13824,10 +13827,6 @@ export class Session implements SessionContext {
       tool instanceof DiscoveredMCPTool ? tool.serverName : undefined;
     const policyToolName = tool.name;
     guardContext.policyToolName = policyToolName;
-    const originalPolicyRequestArgs =
-      policyToolName === ToolNames.SHELL || policyToolName === ToolNames.MONITOR
-        ? structuredClone(args)
-        : args;
 
     const toolSpan = startToolSpan(
       policyToolName,
@@ -13900,6 +13899,59 @@ export class Session implements SessionContext {
             },
           );
         }
+
+        // ---- PreToolUse: once, before every input-dependent check ----
+        // A replacement input then goes through the same gates, validation,
+        // permission and approval as the model's input; the checks above fix
+        // the tool's identity, which the hook cannot change.
+        const toolUseId = generateToolUseId();
+        const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
+        const messageBusForTool = this.config.getMessageBus?.();
+        if (hooksEnabledForTool && messageBusForTool) {
+          const preHookResult = await firePreToolUseHook(
+            messageBusForTool,
+            policyToolName,
+            args,
+            toolUseId,
+            String(this.config.getApprovalMode()),
+            activeToolAbortSignal,
+            callId,
+            hookOwner,
+          );
+          preToolUseContext = preHookResult.additionalContext;
+          const preHookCancellation = cancelBeforeExecutionIfAborted(toolName);
+          if (preHookCancellation) return preHookCancellation;
+
+          if (!preHookResult.shouldProceed) {
+            // Hook blocked the tool execution - send notification to UI
+            const blockReason =
+              preHookResult.blockReason || 'Blocked by PreToolUse hook';
+            try {
+              await this.messageEmitter.emitAgentMessage(
+                `✗ **PreToolUse blocked**: ${toolName} - ${blockReason}`,
+              );
+            } catch (emitError) {
+              debugLogger.debug(
+                '[Session.runTool] Failed to emit PreToolUse block message',
+                emitError,
+              );
+            }
+            const blockMessageCancellation =
+              cancelBeforeExecutionIfAborted(toolName);
+            if (blockMessageCancellation) return blockMessageCancellation;
+            return earlyErrorResponse(new Error(blockReason), toolName, {
+              status: 'error',
+              errorType: ToolErrorType.EXECUTION_DENIED,
+              executionStatus: 'not_started',
+            });
+          }
+          if (preHookResult.updatedInput) args = preHookResult.updatedInput;
+        }
+        const originalPolicyRequestArgs =
+          policyToolName === ToolNames.SHELL ||
+          policyToolName === ToolNames.MONITOR
+            ? structuredClone(args)
+            : args;
 
         // ---- Media-policy modelAccess gate (mirrors CoreToolScheduler) ----
         // Every ACP-originated call is a model call: there is no in-process
@@ -13979,40 +14031,43 @@ export class Session implements SessionContext {
           }
         }
 
-        // Generate tool_use_id for hook tracking (aligned with core path)
-        const toolUseId = generateToolUseId();
-
         // Get approval mode for hook context (defined outside try for catch block access)
         let approvalMode = this.config.getApprovalMode();
 
         let toolBuildSucceeded = false;
         try {
-          const invocation = appExecution
-            ? appExecution.tool.buildForApp(
-                args,
-                appExecution.onResult,
-                this.config,
-              )
-            : tool.build(args);
-          const callIdAware = invocation as {
-            setCallId?: (id: string) => void;
+          const buildInvocation = (input: Record<string, unknown>) => {
+            const built = appExecution
+              ? appExecution.tool.buildForApp(
+                  input,
+                  appExecution.onResult,
+                  this.config,
+                )
+              : tool.build(input);
+            const callIdAware = built as {
+              setCallId?: (id: string) => void;
+            };
+            callIdAware.setCallId?.(callId);
+            return built;
           };
-          callIdAware.setCallId?.(callId);
+          let invocation = buildInvocation(args);
           toolBuildSucceeded = true;
 
-          // Production AgentTool always initializes `eventEmitter` on its
-          // invocation (`agent.ts:392`). Be defensive about the `undefined`
-          // case too so an incomplete/custom AgentTool invocation degrades
-          // gracefully (no sub-agent event forwarding) instead of throwing
-          // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
-          // key-presence check passed for `{ eventEmitter: undefined }` and
-          // the ensuing `eventEmitter.on(...)` blew up.
-          const taskEventEmitter = (
-            invocation as {
-              eventEmitter?: AgentEventEmitter;
-            }
-          ).eventEmitter;
-          if (isAgentTool && taskEventEmitter) {
+          // Sub-agent tracking belongs to the invocation that can run.
+          const trackAgentInvocation = () => {
+            // Production AgentTool always initializes `eventEmitter` on its
+            // invocation (`agent.ts:392`). Be defensive about the `undefined`
+            // case too so an incomplete/custom AgentTool invocation degrades
+            // gracefully (no sub-agent event forwarding) instead of throwing
+            // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
+            // key-presence check passed for `{ eventEmitter: undefined }` and
+            // the ensuing `eventEmitter.on(...)` blew up.
+            const taskEventEmitter = (
+              invocation as {
+                eventEmitter?: AgentEventEmitter;
+              }
+            ).eventEmitter;
+            if (!isAgentTool || !taskEventEmitter) return;
             // Extract subagent metadata from AgentTool call
             const parentToolCallId = callId;
             const subagentType = (args['subagent_type'] as string) ?? '';
@@ -14039,7 +14094,8 @@ export class Session implements SessionContext {
               taskEventEmitter,
               activeToolAbortSignal,
             );
-          }
+          };
+          trackAgentInvocation();
 
           // L3→L4→L5 Permission Flow (aligned with coreToolScheduler)
           //
@@ -14203,14 +14259,10 @@ export class Session implements SessionContext {
               `Auto mode: L4 allow overridden by protected-write guard for ${policyToolName}`,
             );
           }
-          let autoModeAllowed =
-            finalPermission === 'allow' &&
-            !forceAutoReviewForAllow &&
-            !planShellRequiresConfirmation;
-          if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
+          const recordAutoModeAllow = (params: Record<string, unknown>) => {
             const actionFingerprint = getAutoModeActionFingerprint(
               policyToolName,
-              toolParams,
+              params,
               this.config.getCwd(),
             );
             this.config.setAutoModeDenialState(
@@ -14219,23 +14271,29 @@ export class Session implements SessionContext {
                 actionFingerprint,
               ),
             );
-          }
-          let wasAutoModeManualFallback = false;
-          let autoModeFallback: AutoModeFallbackConfirmation | undefined;
-
+          };
           // ── L5: AUTO mode three-layer filter (duplicated from
           // coreToolScheduler.ts; ACP routes through this Session path).
-          // Returns 'allowed' / 'blocked' / 'fallback'. Blocked early-returns;
-          // allowed skips requestPermission; fallback drops through to the
-          // existing manual-approval flow below.
-          if (
-            !autoModeAllowed &&
-            !requiresUserInteraction &&
-            shouldRunAutoModeForCall(approvalMode, policyToolName)
-          ) {
+          // Returns 'approved' / 'blocked' / 'fallback', or the cancellation
+          // result when the call was cancelled meanwhile.
+          const classifyForAutoMode = async (
+            params: Record<string, unknown>,
+            ctx: typeof pmCtx,
+            forcedAsk: boolean,
+          ): Promise<
+            | {
+                cancelled: NonNullable<
+                  ReturnType<typeof cancelBeforeExecutionIfAborted>
+                >;
+              }
+            | {
+                outcome: ReturnType<typeof applyAutoModeDecision>;
+                denialState: Parameters<typeof applyAutoModeDecision>[2];
+              }
+          > => {
             const actionFingerprint = getAutoModeActionFingerprint(
               policyToolName,
-              toolParams,
+              params,
               this.config.getCwd(),
             );
             const { fallback } = prepareAutoModeFallback(
@@ -14253,9 +14311,9 @@ export class Session implements SessionContext {
             const trustedUserAnswers =
               llmClient?.getTrustedUserAnswers?.() ?? [];
             const decision = await evaluateAutoMode({
-              ctx: pmCtx,
-              pmForcedAsk,
-              toolParams,
+              ctx,
+              pmForcedAsk: forcedAsk,
+              toolParams: params,
               messages,
               trustedUserAnswers,
               config: this.config,
@@ -14266,7 +14324,8 @@ export class Session implements SessionContext {
             });
             const autoModeCancellation =
               cancelBeforeExecutionIfAborted(toolName);
-            if (autoModeCancellation) return autoModeCancellation;
+            if (autoModeCancellation)
+              return { cancelled: autoModeCancellation };
 
             // Apply decision via shared helper — eliminates ~40 lines of
             // line-for-line duplication with coreToolScheduler.ts and makes
@@ -14286,7 +14345,7 @@ export class Session implements SessionContext {
               decision,
               outcome,
               policyToolName,
-              toolParams,
+              params,
               callId,
               abortSignal,
               hookOwner,
@@ -14294,17 +14353,46 @@ export class Session implements SessionContext {
             const permissionDeniedHookCancellation =
               cancelBeforeExecutionIfAborted(toolName);
             if (permissionDeniedHookCancellation) {
-              return permissionDeniedHookCancellation;
+              return { cancelled: permissionDeniedHookCancellation };
             }
+            if (outcome.kind === 'blocked') {
+              debugLogger.warn(
+                `Auto mode blocked (${outcome.reason}): tool=${policyToolName}, ` +
+                  formatDenialStateLog(denialState),
+              );
+            }
+            return { outcome, denialState };
+          };
+
+          let autoModeAllowed =
+            finalPermission === 'allow' &&
+            !forceAutoReviewForAllow &&
+            !planShellRequiresConfirmation;
+          if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
+            recordAutoModeAllow(toolParams);
+          }
+          let wasAutoModeManualFallback = false;
+          let autoModeFallback: AutoModeFallbackConfirmation | undefined;
+
+          // Blocked early-returns; approved skips requestPermission;
+          // fallback drops through to the existing manual-approval flow.
+          if (
+            !autoModeAllowed &&
+            !requiresUserInteraction &&
+            shouldRunAutoModeForCall(approvalMode, policyToolName)
+          ) {
+            const classified = await classifyForAutoMode(
+              toolParams,
+              pmCtx,
+              pmForcedAsk,
+            );
+            if ('cancelled' in classified) return classified.cancelled;
+            const { outcome, denialState } = classified;
             switch (outcome.kind) {
               case 'approved':
                 autoModeAllowed = true;
                 break;
               case 'blocked':
-                debugLogger.warn(
-                  `Auto mode blocked (${outcome.reason}): tool=${policyToolName}, ` +
-                    formatDenialStateLog(denialState),
-                );
                 return earlyErrorResponse(
                   new Error(outcome.errorMessage),
                   toolName,
@@ -14593,9 +14681,146 @@ export class Session implements SessionContext {
                     recordAutoModeFallbackResolution(approval.outcome);
                   } else {
                     if (hookResult.updatedInput) {
-                      args = hookResult.updatedInput;
-                      invocation.params =
-                        hookResult.updatedInput as typeof invocation.params;
+                      // The replacement is checked like the input before it:
+                      // its gates, schema and permission rules. This hook's
+                      // allow then stands in only for an ordinary
+                      // confirmation of it; the original's is dropped.
+                      const reject = (
+                        message: string,
+                        errorType = ToolErrorType.EXECUTION_DENIED,
+                      ) =>
+                        earlyErrorResponse(new Error(message), toolName, {
+                          status: 'error',
+                          errorType,
+                          executionStatus: 'not_started',
+                        });
+                      const replacementGate = evaluateMediaPolicyToolCall({
+                        config: this.config,
+                        tool,
+                        args: hookResult.updatedInput,
+                        executionOrigin: { kind: 'model' },
+                      });
+                      if (replacementGate.outcome === 'reject') {
+                        return reject(
+                          replacementGate.message,
+                          replacementGate.reason === 'invalid_params'
+                            ? ToolErrorType.INVALID_TOOL_PARAMS
+                            : ToolErrorType.EXECUTION_DENIED,
+                        );
+                      }
+                      const replacementArgs = replacementGate.args;
+                      if (
+                        this.requiresManagedConversationBinding &&
+                        isAgentTool &&
+                        (replacementArgs['isolation'] === 'worktree' ||
+                          (typeof replacementArgs['working_dir'] === 'string' &&
+                            replacementArgs['working_dir'].trim().length > 0))
+                      ) {
+                        return reject(STANDALONE_WORKTREE_ACTION_ERROR);
+                      }
+                      let replacement: typeof invocation;
+                      try {
+                        replacement = buildInvocation(replacementArgs);
+                      } catch (error) {
+                        return reject(
+                          error instanceof Error
+                            ? error.message
+                            : String(error),
+                          ToolErrorType.INVALID_TOOL_PARAMS,
+                        );
+                      }
+                      const replacementFlow = await evaluatePermissionFlow(
+                        this.config,
+                        replacement,
+                        policyToolName,
+                        replacement.params as Record<string, unknown>,
+                        activeToolAbortSignal,
+                      );
+                      const replacementFlowCancellation =
+                        cancelBeforeExecutionIfAborted(toolName);
+                      if (replacementFlowCancellation) {
+                        return replacementFlowCancellation;
+                      }
+                      if (replacementFlow.finalPermission === 'deny') {
+                        return reject(
+                          replacementFlow.denyMessage ??
+                            `Tool "${toolName}" is denied.`,
+                        );
+                      }
+                      if (replacementFlow.requiresUserInteraction) {
+                        return reject(
+                          `The PermissionRequest hook's replacement input for "${toolName}" needs a user decision, so it was not run.`,
+                        );
+                      }
+                      const replacementDetails =
+                        await replacement.getConfirmationDetails(
+                          activeToolAbortSignal,
+                        );
+                      const replacementDetailsCancellation =
+                        cancelBeforeExecutionIfAborted(toolName);
+                      if (replacementDetailsCancellation) {
+                        return replacementDetailsCancellation;
+                      }
+                      if (
+                        isPlanModeBlocked(
+                          isPlanMode,
+                          isExitPlanModeTool,
+                          isAskUserQuestionTool,
+                          replacementDetails,
+                          isEnterPlanModeTool,
+                        )
+                      ) {
+                        return reject(
+                          `Plan mode is active. The tool "${toolName}" cannot be executed because it modifies the system. ` +
+                            'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
+                        );
+                      }
+                      // AUTO mode judges the replacement like any input: its
+                      // own allow rule, else the classifier. Only a block
+                      // overrides this hook's one-time allow.
+                      const replacementParams = replacement.params as Record<
+                        string,
+                        unknown
+                      >;
+                      const replacementAllowed =
+                        replacementFlow.finalPermission === 'allow' &&
+                        !(
+                          approvalMode === ApprovalMode.AUTO &&
+                          (shouldForceAutoModeReviewForAllow(
+                            replacementFlow.pmCtx,
+                            this.config.getCwd(),
+                          ) ||
+                            shouldClassifyAllShellForAutoMode(
+                              policyToolName,
+                              this.config,
+                            ))
+                        );
+                      if (
+                        replacementAllowed &&
+                        approvalMode === ApprovalMode.AUTO
+                      ) {
+                        recordAutoModeAllow(replacementParams);
+                      } else if (
+                        !replacementAllowed &&
+                        shouldRunAutoModeForCall(approvalMode, policyToolName)
+                      ) {
+                        const classified = await classifyForAutoMode(
+                          replacementParams,
+                          replacementFlow.pmCtx,
+                          replacementFlow.pmForcedAsk,
+                        );
+                        if ('cancelled' in classified) {
+                          return classified.cancelled;
+                        }
+                        if (classified.outcome.kind === 'blocked') {
+                          return reject(classified.outcome.errorMessage);
+                        }
+                      }
+                      cleanupSubAgentTracking();
+                      invocation = replacement;
+                      args = replacementArgs;
+                      confirmationDetails = replacementDetails;
+                      trackAgentInvocation();
                     }
 
                     await confirmationDetails.onConfirm(
@@ -15032,52 +15257,7 @@ export class Session implements SessionContext {
             if (startEmissionCancellation) return startEmissionCancellation;
           }
 
-          // Fire PreToolUse hook (aligned with core path in coreToolScheduler.ts)
-          const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
-          const messageBusForTool = this.config.getMessageBus?.();
           const permissionMode = String(approvalMode);
-
-          if (hooksEnabledForTool && messageBusForTool) {
-            const preHookResult = await firePreToolUseHook(
-              messageBusForTool,
-              policyToolName,
-              args,
-              toolUseId,
-              permissionMode,
-              activeToolAbortSignal,
-              callId,
-              hookOwner,
-            );
-            preToolUseContext = preHookResult.additionalContext;
-            const preHookCancellation =
-              cancelBeforeExecutionIfAborted(toolName);
-            if (preHookCancellation) return preHookCancellation;
-
-            if (!preHookResult.shouldProceed) {
-              // Hook blocked the tool execution - send notification to UI
-              const blockReason =
-                preHookResult.blockReason || 'Blocked by PreToolUse hook';
-              try {
-                await this.messageEmitter.emitAgentMessage(
-                  `✗ **PreToolUse blocked**: ${toolName} - ${blockReason}`,
-                );
-              } catch (emitError) {
-                debugLogger.debug(
-                  '[Session.runTool] Failed to emit PreToolUse block message',
-                  emitError,
-                );
-              }
-              const blockMessageCancellation =
-                cancelBeforeExecutionIfAborted(toolName);
-              if (blockMessageCancellation) return blockMessageCancellation;
-              return earlyErrorResponse(new Error(blockReason), toolName, {
-                status: 'error',
-                errorType: ToolErrorType.EXECUTION_DENIED,
-                executionStatus: 'not_started',
-              });
-            }
-          }
-
           const toolInvocationGuard = this.config.getToolInvocationGuard?.();
           if (toolInvocationGuard) {
             const invocationContext = getInvocationContext();
@@ -15419,7 +15599,8 @@ export class Session implements SessionContext {
                       !(
                         kind === Kind.Execute &&
                         !this.config.getDisableAllHooks?.() &&
-                        this.config.hasHooksForEvent?.('PermissionRequest')
+                        (this.config.hasHooksForEvent?.('PreToolUse') ||
+                          this.config.hasHooksForEvent?.('PermissionRequest'))
                       );
                     if (!safe) {
                       await Promise.all(executing);

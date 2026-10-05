@@ -619,6 +619,19 @@ async function terminateSurvivingHookProcessGroup(
   });
 }
 
+/**
+ * A function hook receives its input by reference; a PreToolUse hook gets its
+ * own copy so it can change the tool input only through its returned output.
+ */
+function isolatedHookInput(
+  eventName: HookEventName,
+  input: HookInput,
+): HookInput {
+  return eventName === HookEventName.PreToolUse
+    ? structuredClone(input)
+    : input;
+}
+
 function createSurvivingHookInputFile(input: HookInput): string {
   const path = join(
     tmpdir(),
@@ -1022,10 +1035,12 @@ export class HookRunner {
   ): Promise<HookExecutionResult[]> {
     const promises = hookConfigs.map(async (config, index) => {
       onHookStart?.(config, index);
-      const result = await this.executeHook(config, eventName, input, {
-        ...context,
-        signal,
-      });
+      const result = await this.executeHook(
+        config,
+        eventName,
+        isolatedHookInput(eventName, input),
+        { ...context, signal },
+      );
       onHookEnd?.(config, result, index);
       return result;
     });
@@ -1060,10 +1075,12 @@ export class HookRunner {
       }
       const config = hookConfigs[i];
       onHookStart?.(config, i);
-      const result = await this.executeHook(config, eventName, currentInput, {
-        ...context,
-        signal,
-      });
+      const result = await this.executeHook(
+        config,
+        eventName,
+        isolatedHookInput(eventName, currentInput),
+        { ...context, signal },
+      );
       onHookEnd?.(config, result, i);
       results.push(result);
 
