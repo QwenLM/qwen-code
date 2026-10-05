@@ -1025,16 +1025,56 @@ describe('collectContextData (contextCommand)', () => {
           },
         },
       ) as DiscoveredMCPTool;
+      const controlSchema = {
+        name: 'tool_call',
+        parameters: { type: 'OBJECT', properties: {} },
+      };
       const tools = [
         { ...skillToolDouble, getLoadedSkillContentNames: () => new Map() },
         mcpToolDouble,
+        { name: controlSchema.name, schema: controlSchema },
       ];
-      const declared = [skillToolSchema];
+      const declared = [skillToolSchema, controlSchema];
       const history = [prelude, ...conversation];
 
       const unscaled = await collectContextData(
         makeChatConfig({ total: 0, tools, declared, history }),
         false,
+      );
+      // Free space retains its zero floor when the estimate exceeds the window.
+      expect(unscaled.breakdown.freeSpace).toBe(
+        Math.max(
+          0,
+          unscaled.contextWindowSize -
+            sumRows(unscaled.breakdown) -
+            unscaled.breakdown.autocompactBuffer,
+        ),
+      );
+      // The deficit comes out of the mcp row, not the built-in or skills rows.
+      expect(unscaled.breakdown.mcpTools).toBe(
+        estimateContextTextTokens(JSON.stringify(declared)) -
+          estimateContextTextTokens(JSON.stringify(skillToolSchema)),
+      );
+      expect(unscaled.breakdown.mcpTools).toBeGreaterThan(0);
+      expect(unscaled.breakdown.builtinTools).toBe(0);
+      // With nothing declared the mcp row cannot absorb the whole deficit, so
+      // the rest is charged to skills and the window still adds up.
+      const undeclared = await collectContextData(
+        makeChatConfig({ total: 0, tools, declared: [], history }),
+        false,
+      );
+      expect(undeclared.breakdown.mcpTools).toBe(0);
+      expect(undeclared.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder) +
+          estimateContextTextTokens(JSON.stringify([])),
+      );
+      expect(undeclared.breakdown.freeSpace).toBe(
+        Math.max(
+          0,
+          undeclared.contextWindowSize -
+            sumRows(undeclared.breakdown) -
+            undeclared.breakdown.autocompactBuffer,
+        ),
       );
       // The provider-side total: the measured overhead plus the 300-token
       // conversation, so exactly 300 tokens are left for `messages`.
@@ -1057,6 +1097,23 @@ describe('collectContextData (contextCommand)', () => {
       ).toBeGreaterThan(estimateContextTextTokens(JSON.stringify(declared)));
       expect(data.breakdown.messages).toBe(300);
       expect(sumRows(data.breakdown)).toBe(total);
+
+      // `/context detail` lists the MCP tools under the mcp row, so they must
+      // add up to it on both paths.
+      const mcpDetailSum = (
+        item: Awaited<ReturnType<typeof collectContextData>>,
+      ) => item.mcpTools.reduce((sum, tool) => sum + tool.tokens, 0);
+      for (const options of [
+        { total: 0, tools, declared, history },
+        { total: 0, tools, declared: [], history },
+        { total, tools, declared, history },
+      ]) {
+        const detailed = await collectContextData(
+          makeChatConfig(options),
+          true,
+        );
+        expect(mcpDetailSum(detailed)).toBe(detailed.breakdown.mcpTools);
+      }
     });
 
     it('bills a path-activation envelope folded into a tool response as messages (#12235)', async () => {

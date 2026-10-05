@@ -12687,6 +12687,135 @@ describe('applyWorkspaceAgentPersona', () => {
     }
   });
 
+  it('keeps agent-host sessions read-only without collaboration tools', async () => {
+    const config = new Config(baseParams);
+    config.setSessionSource('agent-host', 'host_1');
+    const guard = config.getToolInvocationGuard()!;
+
+    for (const [toolName, args, allowed] of [
+      [ToolNames.READ_FILE, { file_path: path.resolve('package.json') }, true],
+      ['mcp__trusted__write', {}, false],
+      ['unknown_tool', {}, false],
+      [ToolNames.WRITE_FILE, {}, false],
+      [ToolNames.SHELL, {}, false],
+    ] as const) {
+      const result = await guard({
+        callId: 'host-guard-check',
+        toolName,
+        args,
+        signal: new AbortController().signal,
+      });
+      expect(result.allowed).toBe(allowed);
+    }
+
+    const factory = ToolRegistry.prototype.registerFactory as unknown as Mock;
+    factory.mockClear();
+    await config.createToolRegistry(undefined, { skipDiscovery: true });
+    const registered = factory.mock.calls.map(([name]) => name as string);
+    for (const toolName of [
+      'thread_post',
+      'thread_read',
+      'thread_create',
+      'thread_wait',
+      'thread_block',
+      'thread_review',
+    ]) {
+      expect(registered).not.toContain(toolName);
+    }
+  });
+
+  it('confines agent-host reads to the canonical workspace', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'agent-host-guard-'));
+    const workspace = path.join(root, 'workspace');
+    const outside = path.join(root, 'outside');
+    await mkdir(workspace);
+    await mkdir(outside);
+    await writeFile(path.join(workspace, 'inside.txt'), 'inside');
+    await writeFile(path.join(outside, 'secret.txt'), 'secret');
+    const escape = path.join(workspace, 'escape');
+    fs.symlinkSync(
+      outside,
+      escape,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    // The file-wide node:fs mock resolves realpathSync to the identity, so the
+    // symlink is only followed when this test maps it to its real target.
+    vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) => {
+      const resolvedPath = pathToResolve.toString();
+      if (resolvedPath === escape) {
+        return outside;
+      }
+      if (resolvedPath.startsWith(escape + path.sep)) {
+        return path.join(outside, resolvedPath.slice(escape.length + 1));
+      }
+      return resolvedPath;
+    });
+
+    try {
+      const config = new Config({
+        ...baseParams,
+        targetDir: workspace,
+        cwd: workspace,
+      });
+      config.setSessionSource('agent-host', 'host_1');
+      const guard = config.getToolInvocationGuard()!;
+      const check = (toolName: string, args: Record<string, unknown>) =>
+        guard({
+          callId: 'host-path-check',
+          toolName,
+          args,
+          signal: new AbortController().signal,
+          cwd: workspace,
+        });
+
+      await expect(
+        check(ToolNames.READ_FILE, {
+          file_path: path.join(workspace, 'inside.txt'),
+        }),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        check(ToolNames.GREP, { pattern: 'inside' }),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        check(ToolNames.READ_FILE, {
+          file_path: path.join(
+            os.homedir(),
+            '.qwen',
+            'agent-hosts',
+            'host.json',
+          ),
+        }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+      await expect(
+        check(ToolNames.READ_FILE, {
+          file_path: path.join(workspace, 'escape', 'secret.txt'),
+        }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+      await expect(check(ToolNames.LS, { path: outside })).resolves.toEqual(
+        expect.objectContaining({ allowed: false }),
+      );
+      await expect(
+        check(ToolNames.GREP, { pattern: 'secret', glob: '../outside/**' }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+      await expect(
+        check(ToolNames.GLOB, {
+          pattern: '**/*',
+          path: workspace,
+        }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+      await expect(
+        check(ToolNames.ZOOM_IMAGE, {
+          file_path: path.join(workspace, 'inside.txt'),
+        }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+    } finally {
+      vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+        pathToResolve.toString(),
+      );
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('refuses on a session belonging to another source', () => {
     const config = new Config(baseParams);
     config.setSessionSource('agent-host', 'ws_1');

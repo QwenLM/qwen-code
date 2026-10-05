@@ -179,6 +179,8 @@ export interface DaemonWorkspaceCapability {
   ssh?: { host: string; port?: number; directory: string };
   primary: boolean;
   trusted: boolean;
+  /** Whether persistent Agent collaboration is enabled for this workspace. */
+  agentCollaborationEnabled?: boolean;
   /** Whether new sessions in this workspace can use Workflow. */
   workflowsEnabled?: boolean;
   /** Whether this runtime can be removed without restarting the daemon. */
@@ -2621,6 +2623,20 @@ export interface DaemonWorkspaceMemoryFile {
   path: string;
   scope: DaemonContextFileScope;
   bytes: number;
+  /**
+   * Present only for `workspaceMemory({ includeContent: true })` when the
+   * read succeeded and the on-disk bytes are valid BOM-free UTF-8 — only
+   * then may a client treat it as the file's full text for a replace
+   * write. Absent for non-UTF-8/BOM'd files and for reads that raced a
+   * write.
+   */
+  content?: string;
+  /**
+   * True when the served text is not the file's full content: `content`
+   * stopped at the daemon's read cap, or the read raced a concurrent
+   * write (byte count differed from `bytes`; `content` omitted).
+   */
+  truncated?: boolean;
 }
 
 export interface DaemonWorkspaceMemoryStatus {
@@ -5502,6 +5518,16 @@ export interface DaemonWorkspaceExtensionsStatus {
   extensions: DaemonExtensionEntry[];
   errors?: DaemonStatusCell[];
 }
+
+export type DaemonExtensionSummary = Omit<
+  DaemonExtensionEntry,
+  'capabilities' | 'details'
+>;
+
+export type DaemonWorkspaceExtensionSummaries = Omit<
+  DaemonWorkspaceExtensionsStatus,
+  'extensions'
+> & { extensions: DaemonExtensionSummary[] };
 
 export interface ExtensionInstallRequest {
   /** Git, GitHub, npm, or an absolute path on the daemon host. */

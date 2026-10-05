@@ -79,6 +79,18 @@ Hook owner ID 在构造时根据已经持久化的 activation ID 与 epoch 固�
 安装新的 activation，因此不会复用已释放的 Runtime Session ID。即使 acquire 仅用于
 目录请求、尚无首条 Hook execution 记录，恢复也能找到 owner。旧随机 owner ID
 继续从 execution 记录恢复；旧版本若没有留下任何 execution 记录，则需要运维恢复。
+只有 load 的 activation 对应 owner。每次生命周期 Hook 操作会安装一个
+`hook_operation` activation，结束时再安装一个恢复 activation，其 ID 由该操作所
+替换的 activation 的 ID 派生。日志中总有那个 activation，因此即使
+`hook_operation` activation 安装失败，也能识别出恢复。恢复 activation 沿用默认
+subject，因此记录格式不变；日志拒绝安装已存在的 activation ID，因此派生 ID 不会
+重放之前的安装。两者都不会构造 Hook session，因此释放时跳过两者，其开销不随 Hook
+操作次数增长。load 总是安装随机的 activation ID，因此即使它位于失败或未恢复的
+Hook 操作之后，也仍视为 owner。同一 Hook session 中并行的 Hook 执行共享同一次
+acquire，因此它们只执行一遍释放流程。之后的 load 会再次释放更早的 load owner；
+释放是幂等的，重复释放只多一次 Broker 往返。在恢复 ID 改为派生之前记录的恢复
+activation 会像 load 一样被释放，Broker 对这次释放返回 404。因此对本次改动之前
+写入的日志，之后每次 load 仍要为每次更早的 Hook 操作发送一次 release。
 替换后的 Hook owner acquire Workspace 前，会释放所有 Hook 记录已终态的旧 owner，
 包括经 status 完成对账的 owner。工具结果 continuation 复用同一 acquire 入口。
 共享的物理工作仍在运行时，Broker 继续拒绝释放。仅明确的
@@ -89,7 +101,9 @@ owner。已 attach 的空闲 owner 仍像 MCP 一样保留 Workspace 租约；�
 命令复用原生输出、超时和 TERM/KILL 处理。Managed 执行要求 Linux cgroup v2 委派：
 将 `QWEN_MANAGED_HOOK_CGROUP_ROOT` 指向可写且提供 `cgroup.kill` 的 domain。干净的
 launcher 先进入独立 unit，再启动命令。`setsid` 和 detached 子进程不会脱离该 unit；
-只有 `cgroup.events` 确认无剩余进程后才完成。取消先发送 TERM，必要时调用
+只有 `cgroup.events` 确认无剩余进程后才完成。比命令存活更久的后台子进程会让 unit
+保持非空：即使命令已输出结果并退出，也会在 Hook 超时到期时以 `timeout` 结算，
+随后 unit 被终止，输出不会生效。Hook 命令不得遗留后台进程。取消先发送 TERM，必要时调用
 `cgroup.kill`；无法证明排空时保留 owner。这是面向部署方可信 Hook 的生命周期隔离，
 不是防止脚本故意篡改 cgroup 控制面的安全沙箱。
 
@@ -226,7 +240,10 @@ Runtime-only continue/cancel 路由在修改记录或 Runtime owner 前，以
 模型 scope 来结束回合。
 
 私有 Session/client scope 路由提供 `GET /session/:id/hooks`、注册更新、Notification/
-扩展操作和 operation status/cancel。修改操作不能与 turn 或另一控制操作重叠。公开
+扩展操作和 operation status/cancel。修改操作不能与 turn 或另一控制操作重叠。Hook
+操作运行期间被拒的 prompt 返回 409 `hosted_hook_operation_active`。同一 Notification/
+扩展 operation ID 携带不同输入时返回 409 `hosted_hook_operation_conflict`，重试无法
+解决。公开
 tenant/actor scope 的 `GET /v1/agents/sessions/{sessionId}/hook-catalog` 只投影展示
 元数据，不暴露 recipe、凭据、模块路径或 handler 引用。未配置 Hook pin 的 Session
 保持原有行为。

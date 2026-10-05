@@ -38,9 +38,12 @@ import {
   MANAGED_SESSION_LIMITS,
   MANAGED_SESSION_MINIMUM_READER,
   ManagedSessionRecordError,
+  assertManagedSessionDigest,
   assertManagedSessionDomainEnabled,
   assertManagedSessionEventActor,
+  assertManagedSessionStableId,
   assertManagedSessionTransaction,
+  boundedString,
   managedSessionEventsDigest,
   managedSessionKeysEqual,
   parseManagedSessionCommitMarker,
@@ -267,6 +270,15 @@ export class ManagedSessionConflictError extends ManagedSessionRecordError {
     super(message);
     this.name = 'ManagedSessionConflictError';
   }
+}
+
+/** The refusal for an activation ID the log already holds. */
+export function activationAlreadyInstalledError(
+  activationId: string,
+): ManagedSessionConflictError {
+  return new ManagedSessionConflictError(
+    `activation ${activationId} was already installed.`,
+  );
 }
 
 /** The digest-chain head of a log that has no commit marker yet. */
@@ -617,12 +629,6 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
-   * Discards a tail that was appended without a commit marker, after proving
-   * the retained prefix reads cleanly. Repair is explicit: opening a session
-   * reports the tail and refuses to write, because a read-only owner or a
-   * compatibility probe must never rewrite a transcript.
-   */
-  /**
    * Acquires the writer for a Managed session.
    *
    * Managed sessions leave a sealed lock behind on close rather than removing
@@ -669,6 +675,12 @@ export class LocalManagedSessionAuthority {
     await this.journal.seal(this.commitProof);
   }
 
+  /**
+   * Discards a tail that was appended without a commit marker, after proving
+   * the retained prefix reads cleanly. Repair is explicit: opening a session
+   * reports the tail and refuses to write, because a read-only owner or a
+   * compatibility probe must never rewrite a transcript.
+   */
   static async recoverUncommittedTail(options: {
     lease: SessionWriterLease;
     sessionKey: ManagedSessionKey;
@@ -1309,6 +1321,11 @@ export class LocalManagedSessionAuthority {
       );
     }
     return this.runSerial(async () => {
+      assertExtensionActor(actor.class);
+      assertCommandIdentity(command);
+      // Refused before publishing, so a retry loop leaves no body behind.
+      this.assertCommandWritable(command);
+      this.assertExpectedSequence(command);
       const previous = this.domainRecords.get(request.domain);
       const revision = (previous?.revision ?? 0) + 1;
       const recordRef = await store.publish(
@@ -1381,6 +1398,26 @@ export class LocalManagedSessionAuthority {
       // since.
       const replayed = this.replayedExtension(command);
       if (replayed !== undefined) return replayed;
+      // Every refusal the caller decides runs before any body publishes.
+      assertExtensionActor(actor.class);
+      assertCommandIdentity(command);
+      if (request.input !== undefined) {
+        const preflight = inputEvents(
+          command,
+          request.input,
+          this.committed + 2,
+          this.now(),
+        );
+        preflight.forEach((event, index) => {
+          const parsed = parseManagedSessionEvent(event);
+          assertManagedSessionEventActor(parsed, INPUT_ACTORS[index]!.class);
+          if (this.eventIds.has(parsed.eventId)) {
+            throw new ManagedSessionConflictError(
+              `event id ${parsed.eventId} is already committed.`,
+            );
+          }
+        });
+      }
       assertManagedSessionDomainEnabled(request.domain);
       const parsed = body.parse(request.record);
       await this.verifyExtensionResources(request.domain, parsed.record);
@@ -1812,7 +1849,7 @@ export class LocalManagedSessionAuthority {
     }
     // Reading and verifying run a bounded window ahead; the chain checks
     // and the state they build still follow the journal order.
-    const loads: Array<Promise<LoadedExtensionRevision>> = [];
+    const loads: Array<Promise<LoadedExtensionRevision | null>> = [];
     let started = 0;
     try {
       for (const event of events) {
@@ -1823,7 +1860,11 @@ export class LocalManagedSessionAuthority {
           load.catch(() => undefined);
           loads.push(load);
         }
-        const { domain, body, parsed, recordRef } = await loads.shift()!;
+        const loaded = await loads.shift()!;
+        if (loaded === null) {
+          continue;
+        }
+        const { domain, body, parsed, recordRef } = loaded;
         this.assertExtensionRevision(
           domain,
           body,
@@ -1854,19 +1895,24 @@ export class LocalManagedSessionAuthority {
   /** Reads one committed revision and verifies what it references. */
   private async loadExtensionRevision(
     event: ManagedSessionEvent,
-  ): Promise<LoadedExtensionRevision> {
+  ): Promise<LoadedExtensionRevision | null> {
     const domain = event.payload['domain'] as ManagedSessionDomain;
     const body = MANAGED_EXTENSION_RECORD_BODIES[domain]!;
     const recordRef = event.payload[
       'recordRef'
     ] as unknown as ManagedSessionDurableRef;
     const bytes = await this.resources!.read(recordRef);
-    const parsed = body.parse(
-      parseManagedSessionRecordJson(
-        bytes.toString('utf8'),
-        MANAGED_SESSION_LIMITS.maxEventBytes,
-      ),
+    const value = parseManagedSessionRecordJson(
+      bytes.toString('utf8'),
+      MANAGED_SESSION_LIMITS.maxEventBytes,
     );
+    // A record an envelope domain committed before its body was registered
+    // is not a Stage H body; a body that once passed the closed-key rule
+    // cannot parse one, so it is skipped intact.
+    if (isPreRegistrationEnvelope(value)) {
+      return null;
+    }
+    const parsed = body.parse(value);
     await this.verifyExtensionResources(domain, parsed.record, true);
     // The record and what it references are verified; nothing reads it again.
     await this.verifyResource(recordRef, bytes);
@@ -2201,6 +2247,13 @@ export class LocalManagedSessionAuthority {
     readonly leaseDurationMs: number;
     readonly subject?: ManagedSessionSubject;
   }): Promise<{ activationId: string; epoch: number }> {
+    // The install's command identity is its activation ID, so a repeated ID
+    // would replay the earlier receipt without appending, and the epoch below
+    // would name an activation the log never recorded. Refuse it before the
+    // body is published; the replay check covers a concurrent repeat.
+    if (this.hasInstalledActivation(input.activationId)) {
+      throw activationAlreadyInstalledError(input.activationId);
+    }
     const epoch = (this.activation?.epoch ?? 0) + 1;
     const installRef = await this.publishActivationBody(
       'managed-activation-install',
@@ -2213,7 +2266,7 @@ export class LocalManagedSessionAuthority {
         ...(input.subject ? { subject: input.subject } : {}),
       },
     );
-    await this.commitActivation({
+    const receipt = await this.commitActivation({
       activationId: input.activationId,
       epoch,
       workerId: input.workerId,
@@ -2225,7 +2278,17 @@ export class LocalManagedSessionAuthority {
       operation: 'installActivation',
       subject: input.subject,
     });
+    if (receipt.replayed) {
+      throw activationAlreadyInstalledError(input.activationId);
+    }
     return { activationId: input.activationId, epoch };
+  }
+
+  /** Whether the log already holds an install of this activation ID. */
+  hasInstalledActivation(activationId: string): boolean {
+    return this.transactions.has(
+      managedSessionCommandKey('installActivation', `${activationId}:active`),
+    );
   }
 
   /**
@@ -2333,13 +2396,13 @@ export class LocalManagedSessionAuthority {
     readonly operation: string;
     readonly renewalSeq?: number;
     readonly subject?: ManagedSessionSubject;
-  }): Promise<void> {
+  }): Promise<ManagedSessionCommitReceipt> {
     // A renewal repeats the install's phase under the same activation, so it
     // needs its own command and event identity or the log's idempotency and
     // event-id uniqueness would reject it as a duplicate of the install.
     const renewalSuffix =
       input.renewalSeq === undefined ? '' : `:renewal:${input.renewalSeq}`;
-    await this.appendExecutionEvent(
+    return this.appendExecutionEvent(
       {
         operation: input.operation,
         commandId: `${input.activationId}:${input.phase}${renewalSuffix}`,
@@ -2601,6 +2664,33 @@ const INPUT_ACTORS: readonly ManagedSessionActor[] = [
   { class: 'authority' },
 ];
 
+/**
+ * The actor-class rule of a domain record commit, run before the body is
+ * published so a refusal leaves no orphan behind. The commit checks it
+ * again.
+ */
+function assertExtensionActor(actorClass: ManagedSessionActorClass): void {
+  assertManagedSessionEventActor(
+    { kind: 'domain.committed' } as ManagedSessionEvent,
+    actorClass,
+  );
+}
+
+/**
+ * The identity rules the commit marker will apply to the command, run
+ * before the body is published so a malformed command leaves no orphan
+ * behind. The labels name the command because it has no marker yet.
+ */
+function assertCommandIdentity(command: ManagedSessionCommand): void {
+  assertManagedSessionStableId(command.commandId, 'command.commandId');
+  boundedString(
+    command.operation,
+    'command.operation',
+    MANAGED_SESSION_LIMITS.maxTextBytes,
+  );
+  assertManagedSessionDigest(command.contentDigest, 'command.contentDigest');
+}
+
 /** Stage H revisions read ahead of the replay when a log is reopened. */
 const REBUILD_READ_AHEAD = 32;
 
@@ -2609,6 +2699,23 @@ interface LoadedExtensionRevision {
   readonly body: ManagedExtensionRecordBody;
   readonly parsed: ReturnType<ManagedExtensionRecordBody['parse']>;
   readonly recordRef: ManagedSessionDurableRef;
+}
+
+/**
+ * The envelope `commitDomainRecord` publishes: exactly the three keys every
+ * closed Stage H body rejects. A body that carries them is a record of an
+ * envelope domain committed before its body was registered, not a Stage H
+ * body, and replaying an opened log skips it.
+ */
+function isPreRegistrationEnvelope(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    'operationId' in value &&
+    'revision' in value &&
+    'previousRecordRef' in value
+  );
 }
 
 /** Hook catalog pins that must name one digest share this key. */
