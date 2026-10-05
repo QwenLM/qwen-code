@@ -267,7 +267,10 @@ the Hosted prompt ID when a matching Java Turn exists.
   retried request under the same key and digest re-admits the delivery on
   the same operation row (back to `pending`, budget reset, receipt cleared)
   instead of returning the stale failure forever — one row per key keeps a
-  second vote impossible. While the
+  second vote impossible. Once the projection shows the Action `decided`
+  with this response's own decision, the replay instead settles the row in
+  place — `completed`, harness-confirmed, with the decision receipt —
+  because the delivery did land and only Java's record was wrong. While the
   Action stays `requested`, for example on a recovery-blocked Session, the
   operation stays `running` within that budget. The WebShell request gains
   `requestId`.

@@ -902,8 +902,9 @@ describe('EmbeddedHarnessScheduler', () => {
   // The per-activation bound: renewals that keep failing across re-runs
   // spend the activation's transient-failure budget; once spent, the
   // scheduler records the terminal outcome itself instead of re-queuing the
-  // activation forever. The recorded outcome is the handler's own — this
-  // handler returns after honoring the abort, so its outcome is 'completed'.
+  // activation forever. This handler returns only because the scheduler's
+  // abort landed mid-handler, so the record is 'failed' — a
+  // scheduler-induced abort must not certify the work succeeded.
   it('converges to a terminal release when renewals keep failing across re-runs', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let now = 100;
@@ -958,7 +959,7 @@ describe('EmbeddedHarnessScheduler', () => {
     await vi.advanceTimersByTimeAsync(30);
     await advanceTimersUntil(() => store.get(item)?.status === 'released', 30);
     expect(runs).toBe(2);
-    expect(store.get(item)?.outcome).toBe('completed');
+    expect(store.get(item)?.outcome).toBe('failed');
     expect(scheduler.haltedError).toBeUndefined();
   });
 
@@ -1030,9 +1031,9 @@ describe('EmbeddedHarnessScheduler', () => {
 
     // Run 3: the budget (2) plus this run's absorbed failure is spent, so
     // once the handler settles after the abort the scheduler records the
-    // terminal outcome instead of re-queuing again — the handler's own
-    // outcome ('completed': it returns when aborted), written with a fresh
-    // claim because the remembered lease has expired.
+    // terminal outcome instead of re-queuing again — 'failed', because the
+    // handler returned only by honoring the scheduler's mid-handler abort —
+    // written with a fresh claim because the remembered lease has expired.
     now = claimedAt + 30;
     await vi.advanceTimersToNextTimerAsync();
     await waitUntil(() => renewCalls === ++renewals);
@@ -1040,7 +1041,7 @@ describe('EmbeddedHarnessScheduler', () => {
     await vi.advanceTimersToNextTimerAsync();
     await waitUntil(() => renewCalls === ++renewals);
     await advanceTimersUntil(() => store.get(item)?.status === 'released', 30);
-    expect(store.get(item)?.outcome).toBe('completed');
+    expect(store.get(item)?.outcome).toBe('failed');
     expect(runs).toBe(3);
     expect(scheduler.haltedError).toBeUndefined();
   });
@@ -1467,16 +1468,19 @@ describe('EmbeddedHarnessScheduler', () => {
     await advanceTimersUntil(() => store.get(item)?.status === 'released', 100);
 
     // Each stale-ended run costs one budget unit; the third spends it and
-    // the scheduler records the handler's own outcome with a fresh claim.
+    // the scheduler records the terminal outcome with a fresh claim —
+    // 'failed': every run's handler returned only because the scheduler
+    // aborted it, so the record must not claim the work succeeded.
     expect(runs).toBe(3);
-    expect(store.get(item)?.outcome).toBe('completed');
+    expect(store.get(item)?.outcome).toBe('failed');
     expect(scheduler.haltedError).toBeUndefined();
   });
 
-  // A budget-spending abandon while the handler is still in flight must not
-  // record a hardcoded outcome: the terminal write awaits the handler and
-  // records the handler's own — and the Session FIFO fence holds until then.
-  it("records the handler's own outcome when the budget runs out mid-handler", async () => {
+  // The other terminal shape: the budget is spent by release failures after
+  // the handler genuinely settled. Nothing aborted the work, so the
+  // terminal write records the handler's own outcome — and the Session FIFO
+  // fence holds until the record commits.
+  it("records the handler's own outcome when the budget runs out after the handler settled", async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let now = 100;
     const store = await FileManagedActivationStore.open(filePath, {
@@ -1488,9 +1492,16 @@ describe('EmbeddedHarnessScheduler', () => {
     let a2StartedEarly = false;
     const a1 = activation('a1', { sessionId: 'session-a' });
     const a2 = activation('a2', { sessionId: 'session-a' });
-    // Every renewal fails transiently, so each run abandons at the tick
-    // that leaves no headroom for another.
-    vi.spyOn(store, 'renew').mockRejectedValue(new Error('disk busy'));
+    // Run 1's two renewal ticks fail transiently, so it abandons at the
+    // tick that leaves no headroom for another (budget 2); later renewals
+    // reach the real store.
+    const originalRenew = store.renew.bind(store);
+    let renewCalls = 0;
+    vi.spyOn(store, 'renew').mockImplementation(async (...args) => {
+      renewCalls++;
+      if (renewCalls <= 2) throw new Error('disk busy');
+      return originalRenew(...args);
+    });
     const scheduler = new EmbeddedHarnessScheduler({
       store,
       workerId: 'worker-a',
@@ -1502,7 +1513,7 @@ describe('EmbeddedHarnessScheduler', () => {
       handler: async (item, context) => {
         if (item.activationId === 'a2') {
           a2Started = true;
-          a2StartedEarly = !inFlightDone;
+          a2StartedEarly = store.get(a1)?.status !== 'released';
           return;
         }
         runs++;
@@ -1515,19 +1526,7 @@ describe('EmbeddedHarnessScheduler', () => {
           });
           return;
         }
-        // Run 2 keeps working through the abort: it finishes real work a
-        // few turns after the abort fires, so the abandon lands strictly
-        // mid-handler and the terminal write must wait for it.
-        if (!context.signal.aborted) {
-          await new Promise<void>((resolve) => {
-            context.signal.addEventListener('abort', () => resolve(), {
-              once: true,
-            });
-          });
-        }
-        for (let i = 0; i < 3; i++) {
-          await new Promise<void>((resolve) => setImmediate(resolve));
-        }
+        // Run 2 finishes its real work before any store failure lands.
         inFlightDone = true;
       },
     });
@@ -1537,30 +1536,35 @@ describe('EmbeddedHarnessScheduler', () => {
     await scheduler.start();
     await waitUntil(() => runs === 1);
 
-    // Run 1 absorbs two renewal failures and abandons (budget 2); run 2's
-    // two failures spend it (4 >= 3) while run 2's handler is in flight.
     now = 130;
     await vi.advanceTimersByTimeAsync(30);
     now = 160;
     await vi.advanceTimersByTimeAsync(30);
     await waitUntil(() => scheduler.activeSlotCount === 0);
     expect(store.get(a1)?.status).toBe('assigned');
+
+    // Run 2's handler settles, then the release itself keeps failing
+    // transiently: the initial attempt plus all three retries spend the
+    // budget (2 + 4 >= 3) after the handler settled, and the scheduler's
+    // own terminal write commits the handler's outcome.
+    const originalRelease = store.release.bind(store);
+    let releaseCalls = 0;
+    vi.spyOn(store, 'release').mockImplementation(async (...args) => {
+      releaseCalls++;
+      if (releaseCalls <= 4) throw new Error('disk busy');
+      return originalRelease(...args);
+    });
     now = 200;
     await advanceTimersUntil(() => runs === 2, 60);
-    now = 230;
-    await vi.advanceTimersByTimeAsync(30);
-    now = 260;
-    await vi.advanceTimersByTimeAsync(30);
-
-    await advanceTimersUntil(() => store.get(a1)?.status === 'released', 30);
-    // The recorded outcome is the handler's own, recorded only after the
-    // in-flight handler finished.
     expect(inFlightDone).toBe(true);
+
+    await advanceTimersUntil(() => store.get(a1)?.status === 'released', 250);
+    expect(releaseCalls).toBe(5);
     expect(store.get(a1)?.outcome).toBe('completed');
     expect(runs).toBe(2);
 
-    // The FIFO fence held: the same-Session a2 starts only after the
-    // abandoned handler finished and its outcome was recorded.
+    // The FIFO fence held: the same-Session a2 starts only after a1's
+    // terminal outcome was recorded.
     await waitUntil(() => store.get(a2)?.status === 'released');
     expect(a2Started).toBe(true);
     expect(a2StartedEarly).toBe(false);

@@ -660,6 +660,51 @@ class OperationRetryTerminalStateTest {
                 anyLong());
     }
 
+    // A failure after the Harness answered is a Java-side store fault, not
+    // a delivery failure: resolveAction returned 200 and only the
+    // post-answer projection read threw, so the budget must keep retrying
+    // rather than record action_response_delivery_failed for an answer the
+    // Harness received (review round 5, R5-2).
+    @ParameterizedTest(name = "attemptCount = {0}")
+    @ValueSource(ints = {10, 40})
+    void aPostAnswerProjectionFailureNeverTerminatesAsDeliveryFailed(
+            int attemptCount) throws Exception {
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        OperationRecord claimed = actionOperation(attemptCount);
+        JsonNode body = actionBody();
+        when(sessions.claimOperation(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(actions.response("tenant", "session", "op-action")).thenReturn(
+                new ManagedActionStore.Response("action-1", body, null,
+                        null));
+        // The pre-answer projection read shows "requested"; the post-answer
+        // read throws once (a store fault after the 200); the catch's
+        // re-inspection still reads "requested".
+        when(actions.find("tenant", "session", "action-1")).thenReturn(
+                Optional.of(new ManagedActionStore.Action("action-1",
+                        "requested", body, null, null)))
+                .thenThrow(new IllegalStateException("lock wait timeout"))
+                .thenReturn(Optional.of(new ManagedActionStore.Action(
+                        "action-1", "requested", body, null, null)));
+        // harness.resolveAction returns normally: the Harness answered 200.
+
+        ActionResponseCoordinator coordinator = new ActionResponseCoordinator(
+                sessions, actions, harness,
+                CoordinatorTestSupport.directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        coordinator.dispatch("tenant", "session", "op-action");
+
+        verify(harness).resolveAction("tenant", "session", "action-1", body);
+        verify(sessions).retryOperation(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), eq(3L), anyLong());
+        verify(actions, never()).complete(any(), anyString(),
+                eq("action_response_delivery_failed"), any(), anyBoolean(),
+                anyLong());
+    }
+
     @ParameterizedTest(name = "attemptCount = {0}")
     @ValueSource(ints = {1, 9})
     void actionResponseStillRetriesWhileTheBudgetLasts(int attemptCount)

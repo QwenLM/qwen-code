@@ -50,6 +50,7 @@ interface ActiveRun {
   renewal?: Promise<void>;
   finishing: boolean;
   abandoned: boolean;
+  abortedInFlight: boolean;
   transientFailures: number;
 }
 
@@ -305,6 +306,7 @@ export class EmbeddedHarnessScheduler {
       controller: new AbortController(),
       finishing: false,
       abandoned: false,
+      abortedInFlight: false,
       transientFailures: 0,
     };
     this.active.set(activationKey(activation), run);
@@ -392,10 +394,14 @@ export class EmbeddedHarnessScheduler {
 
       // Every abandon path converges here, after the handler settled: with
       // the activation's transient-failure budget spent, the scheduler
-      // records the handler's own outcome as the terminal one instead of
-      // re-queuing the activation forever. The write happens only here so
-      // it never certifies a still-running handler, and settleTerminalOutcome
-      // re-checks liveness so a stopped worker never records one either.
+      // records the terminal outcome instead of re-queuing the activation
+      // forever. A run the scheduler itself aborted mid-handler cannot
+      // certify the handler's success — the handler may have returned only
+      // because the abort landed — so its record is a failure; a run that
+      // settled before the abandon keeps the handler's own outcome. The
+      // write happens only here so it never certifies a still-running
+      // handler, and settleTerminalOutcome re-checks liveness so a stopped
+      // worker never records one either.
       let terminalRecorded = false;
       if (run.abandoned && !this.disposed && !this.fatalError) {
         const key = activationKey(run.activation);
@@ -403,7 +409,10 @@ export class EmbeddedHarnessScheduler {
           (this.activationTransientFailures.get(key) ?? 0) >=
           MAX_ACTIVATION_TRANSIENT_FAILURES
         ) {
-          terminalRecorded = await this.settleTerminalOutcome(run, outcome);
+          terminalRecorded = await this.settleTerminalOutcome(
+            run,
+            run.abortedInFlight ? 'failed' : outcome,
+          );
         }
       }
 
@@ -471,6 +480,9 @@ export class EmbeddedHarnessScheduler {
         // would re-queue and re-execute the activation without bound.
         this.noteAbandonedFailures(run, 1);
         run.abandoned = true;
+        // The handler may have settled while this renewal was in flight:
+        // only a genuinely preempted handler forfeits its own outcome.
+        run.abortedInFlight = !run.finishing;
         run.controller.abort(error);
         return;
       }
@@ -632,6 +644,7 @@ export class EmbeddedHarnessScheduler {
    */
   private abandonAfterTransientFailures(run: ActiveRun, error: unknown): void {
     run.abandoned = true;
+    run.abortedInFlight = !run.finishing;
     run.controller.abort(error);
     this.noteAbandonedFailures(run);
   }
@@ -639,11 +652,13 @@ export class EmbeddedHarnessScheduler {
   /**
    * Records the terminal outcome for an activation whose transient-failure
    * budget is spent. Called only from execute() after the handler settled,
-   * so the recorded outcome is the handler's own and the write never
-   * certifies a still-running handler. A lease that lapsed while the run
-   * was abandoning is re-claimed first: release() fences on the remembered
-   * lease and would reject it as stale, so the terminal write needs the
-   * fresh claim's lease. Returns true once the outcome is durably recorded.
+   * so the write never certifies a still-running handler; the outcome is
+   * the handler's own unless the scheduler itself aborted the run
+   * mid-handler, which is recorded as a failure. A lease that lapsed while
+   * the run was abandoning is re-claimed first: release() fences on the
+   * remembered lease and would reject it as stale, so the terminal write
+   * needs the fresh claim's lease. Returns true once the outcome is
+   * durably recorded.
    */
   private async settleTerminalOutcome(
     run: ActiveRun,

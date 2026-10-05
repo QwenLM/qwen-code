@@ -637,6 +637,31 @@ public class HarnessCoordinator {
         }
     }
 
+    // Best-effort reconciliation for the post-admission budget terminal:
+    // cancelAdmittedTurn's attach-and-cancel sequence without its
+    // CANCELLING precondition — this call site terminates the Turn, so the
+    // cancel must land before fail() clears the dispatch owner.
+    private void cancelAdmittedTurnBeforeTerminalFail(TurnRecord turn) {
+        try {
+            SessionRecord session = store.requireSession(turn.tenantId(),
+                    turn.sessionId());
+            if (session.workspace() != null
+                    && !harness.isWorkspaceFilesAvailable()) {
+                return;
+            }
+            if (session.harnessBootId() != null
+                    && store.bindHarness(turn.tenantId(), turn.sessionId(),
+                            turn.turnId(), owner, session.harnessBootId())) {
+                harness.cancel(session.tenantId(), session.sessionId());
+            }
+        } catch (RuntimeException error) {
+            LOG.warn("Managed Turn post-admission cancel failed tenant={}"
+                            + " session={} turn={} failure={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(),
+                    error.getClass().getSimpleName());
+        }
+    }
+
     private static void requireLease(AtomicBoolean leaseLost) {
         if (leaseLost.get()) {
             throw new IllegalStateException("Turn dispatch lease was lost");
@@ -677,6 +702,12 @@ public class HarnessCoordinator {
             // named load refusal and a Runtime Broker failure each keep
             // their own code — the generic one would name a component that
             // did not fail.
+            // The terminal record makes the admitted Turn unreachable:
+            // failTurn clears the dispatch owner and leaves the active
+            // states, so nothing could later cancel it or re-attach to
+            // journal its output. Reconcile first — best-effort cancel it
+            // through the Session's bound Harness, then record the failure.
+            cancelAdmittedTurnBeforeTerminalFail(turn);
             if (error instanceof HarnessSessionRefusedException refusal) {
                 return fail(turn, refusal.getCode(),
                         "Hosted Harness refused to open the Session after"

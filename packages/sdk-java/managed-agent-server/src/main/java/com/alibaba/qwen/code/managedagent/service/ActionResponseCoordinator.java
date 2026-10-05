@@ -75,6 +75,15 @@ public class ActionResponseCoordinator {
         if (op == null) {
             return;
         }
+        // The budget terminal records "the Harness never answered", so only
+        // a genuinely undelivered answer may reach it. Track the answer
+        // itself rather than the exception type: a 200 from resolveAction
+        // means the decision IS committed (the Harness commits before it
+        // answers) and a 400 is its definitive refusal, so any later failure
+        // of that attempt — Java's own projection read or completion write —
+        // is not a delivery failure; the attempt keeps retrying until the
+        // projection heals or the Action's own end state settles it.
+        boolean harnessAnswered = false;
         try {
             Response response = actions.response(tenant, session, operation);
             if (settled(op, response)) {
@@ -82,11 +91,13 @@ public class ActionResponseCoordinator {
             }
             try {
                 harness.resolveAction(tenant, session, response.actionId(), response.body());
+                harnessAnswered = true;
             } catch (DaemonHttpException error) {
                 if (settled(op, response)) {
                     return;
                 }
                 if (error.getStatusCode() == 400) {
+                    harnessAnswered = true;
                     actions.complete(op, owner, "invalid_action_response", null, true, clock.millis());
                     return;
                 }
@@ -102,15 +113,8 @@ public class ActionResponseCoordinator {
             if (settled(op, actions.response(tenant, session, operation))) {
                 return;
             }
-            // The budget terminal records "the Harness never answered", so
-            // only a genuinely undelivered answer may reach it. A 200 from
-            // resolveAction means the decision IS committed (the Harness
-            // commits before it answers) and only Java's projection lags —
-            // that attempt keeps retrying until the projection heals or the
-            // Action's own end state settles it, and is never recorded as a
-            // delivery failure.
             if (op.attemptCount() >= dispatch.getMaxOperationRetries()
-                    && !(error instanceof DecisionNotYetProjected)) {
+                    && !harnessAnswered) {
                 LOG.error(
                         "Action response exhausted retries tenant={} session={} operation={} attempts={}",
                         tenant,
