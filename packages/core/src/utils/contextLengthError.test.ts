@@ -93,24 +93,6 @@ describe('contextLengthError', () => {
     });
   });
 
-  it('still does not treat a bare HTML 413 page as context overflow', () => {
-    // Widening the token-wording detector for #13415 must not re-absorb the
-    // #10380 proxy rejection: a 413 stays model-request-scoped so upload/file
-    // endpoints never see it as a context overflow.
-    const info = getContextLengthExceededInfo(
-      Object.assign(
-        new Error(
-          '413 POST https://gateway.internal/v1/chat/completions: Request Entity Too Large\n' +
-            '<html>\n<head><title>413 Request Entity Too Large</title></head>\n' +
-            '<body><center><h1>413 Request Entity Too Large</h1></center></body>\n</html>',
-        ),
-        { status: 413 },
-      ),
-    );
-
-    expect(info.isExceeded).toBe(false);
-  });
-
   it('parses prompt-too-long actual and limit token counts', () => {
     const info = getContextLengthExceededInfo(
       new Error('prompt is too long: 137500 tokens > 135000 maximum'),

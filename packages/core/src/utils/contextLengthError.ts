@@ -95,7 +95,8 @@ function parseTokenCounts(text: string): {
   // llama.cpp: "request (279935 tokens) exceeds the available context size
   // (262144 tokens), try increasing it" — the SECOND number is the server's
   // real ceiling (its `-c` / model `n_ctx`), which routinely differs from the
-  // window we inferred from the model id, so parse it out for the retry paths.
+  // window we inferred from the model id. Parsed for parity and telemetry:
+  // the reactive-compaction anchor consumes `actualTokens`, not this.
   const llamaCppMatch = text.match(
     /\(\s*(\d[\d,]*)\s*tokens?\s*\)\s*exceeds the available context size\s*\(\s*(\d[\d,]*)\s*tokens?\s*\)/i,
   );
