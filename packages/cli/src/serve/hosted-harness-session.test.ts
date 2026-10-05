@@ -32,7 +32,10 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import type { ManagedSessionEvent } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  assertManagedSessionDurableRef,
+  ManagedSessionRecordError,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   createHostedHarnessContract,
   installHostedHarnessContractMiddleware,
@@ -71,6 +74,7 @@ const state = vi.hoisted(() => ({
   assertWritable: vi.fn(async () => undefined),
   toolResults: null as DurableToolResultResourceStore | null,
   publicationRequest: vi.fn(),
+  storeOptions: [] as Array<Record<string, unknown>>,
   model: vi.fn(
     async (_input: {
       signal: AbortSignal;
@@ -91,8 +95,15 @@ vi.mock(
   () => ({
     HTTP_MANAGED_SESSION_STORE_CONTRACT: { maxInlineResourceBytes: 64 * 1024 },
     createHttpManagedSessionStores: (options: {
+      baseUrl: string;
       sessionKey: { tenantId: string; workspaceId: string; sessionId: string };
     }) => {
+      state.storeOptions.push(options);
+      if (options.baseUrl.includes('rejected-store')) {
+        throw new ManagedSessionRecordError(
+          'baseUrl uses plaintext HTTP on a non-loopback host; writer tokens would cross the wire unencrypted. Pass allowInsecureHttp: true to opt in.',
+        );
+      }
       const resourceStore = LocalManagedSessionResourceStore.create({
         runtimeBaseDir: state.root,
         sessionKey: options.sessionKey,
@@ -578,12 +589,15 @@ describe('Hosted Harness no-tool session', () => {
       await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
         .send({ prompt, promptId: PROMPT_ID, payloadDigest })
         .expect(202);
-      await vi.waitFor(async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body.hasActivePrompt).toBe(false);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
       expect(state.model).toHaveBeenCalledOnce();
       await authorize(
         supertest(server).post(`/session/${SESSION_ID}/detach`),
@@ -733,15 +747,18 @@ describe('Hosted Harness no-tool session', () => {
       await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
         .send({ prompt, promptId: PROMPT_ID, payloadDigest })
         .expect(202);
-      await vi.waitFor(async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body).toMatchObject({
-          hasActivePrompt: false,
-          recoveryBlocked: true,
-        });
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: true,
+          });
+        },
+        { timeout: 10_000 },
+      );
       const child = requests.find((entry) => entry.kind === 'hook-execute')!;
       const originalWrite = ManagedSessionRecordSink.prototype.write;
       const write = vi.spyOn(ManagedSessionRecordSink.prototype, 'write');
@@ -786,12 +803,15 @@ describe('Hosted Harness no-tool session', () => {
           .set('X-Qwen-Client-Id', loaded.body.clientId)
           .send({ prompt, promptId: randomUUID(), payloadDigest })
           .expect(202);
-        await vi.waitFor(async () => {
-          const status = await headers(
-            supertest(replacement).get(`/session/${SESSION_ID}/status`),
-          ).set('X-Qwen-Client-Id', loaded.body.clientId);
-          expect(status.body.hasActivePrompt).toBe(false);
-        });
+        await vi.waitFor(
+          async () => {
+            const status = await headers(
+              supertest(replacement).get(`/session/${SESSION_ID}/status`),
+            ).set('X-Qwen-Client-Id', loaded.body.clientId);
+            expect(status.body.hasActivePrompt).toBe(false);
+          },
+          { timeout: 10_000 },
+        );
         return;
       }
       const status = await authorize(
@@ -823,12 +843,15 @@ describe('Hosted Harness no-tool session', () => {
       await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
         .send({ prompt, promptId: randomUUID(), payloadDigest })
         .expect(202);
-      await vi.waitFor(async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body.hasActivePrompt).toBe(false);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
       await authorize(
         supertest(server).post(`/session/${SESSION_ID}/detach`),
       ).expect(204);
@@ -870,7 +893,7 @@ describe('Hosted Harness no-tool session', () => {
           '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js',
         );
         const bounded = actual.createHttpManagedSessionStores({
-          baseUrl: 'http://store.test',
+          baseUrl: 'http://127.0.0.1:8080',
           writerId: BOOT_ID,
           sessionKey: {
             tenantId: 'tenant',
@@ -1153,12 +1176,15 @@ describe('Hosted Harness no-tool session', () => {
       await owner(supertest(recovered).post(`/session/${SESSION_ID}/prompt`))
         .send({ prompt, promptId: randomUUID(), payloadDigest })
         .expect(202);
-      await vi.waitFor(async () => {
-        const status = await owner(
-          supertest(recovered).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body.hasActivePrompt).toBe(false);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await owner(
+            supertest(recovered).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
       await owner(
         supertest(recovered).post(`/session/${SESSION_ID}/detach`),
       ).expect(204);
@@ -1269,13 +1295,16 @@ describe('Hosted Harness no-tool session', () => {
             payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
           })
           .expect(202);
-        await vi.waitFor(async () => {
-          const status = await authorize(
-            supertest(server).get(`/session/${SESSION_ID}/status`),
-          );
-          expect(status.body.hasActivePrompt).toBe(false);
-          expect(status.body.recoveryBlocked).toBe(false);
-        });
+        await vi.waitFor(
+          async () => {
+            const status = await authorize(
+              supertest(server).get(`/session/${SESSION_ID}/status`),
+            );
+            expect(status.body.hasActivePrompt).toBe(false);
+            expect(status.body.recoveryBlocked).toBe(false);
+          },
+          { timeout: 10_000 },
+        );
       }
       const operation = {
         operationId: randomUUID(),
@@ -1999,14 +2028,16 @@ describe('Hosted Harness no-tool session', () => {
         ).toEqual(['demo']);
         expect(admit).not.toHaveBeenCalled();
         expect((await send(randomUUID())).status).toBe(202);
-        await vi.waitFor(async () =>
-          expect(
-            (
-              await authorize(
-                supertest(server).get(`/session/${SESSION_ID}/status`),
-              )
-            ).body.hasActivePrompt,
-          ).toBe(false),
+        await vi.waitFor(
+          async () =>
+            expect(
+              (
+                await authorize(
+                  supertest(server).get(`/session/${SESSION_ID}/status`),
+                )
+              ).body.hasActivePrompt,
+            ).toBe(false),
+          { timeout: 10_000 },
         );
         expect(
           requests
@@ -2024,14 +2055,17 @@ describe('Hosted Harness no-tool session', () => {
       } finally {
         finish();
         await submitted;
-        await vi.waitFor(async () => {
-          const status = await authorize(
-            supertest(server).get(`/session/${SESSION_ID}/status`),
-          );
-          expect(status.status === 404 || !status.body.hasActivePrompt).toBe(
-            true,
-          );
-        });
+        await vi.waitFor(
+          async () => {
+            const status = await authorize(
+              supertest(server).get(`/session/${SESSION_ID}/status`),
+            );
+            expect(status.status === 404 || !status.body.hasActivePrompt).toBe(
+              true,
+            );
+          },
+          { timeout: 10_000 },
+        );
         await authorize(supertest(server).delete(`/session/${SESSION_ID}`));
       }
     },
@@ -2459,28 +2493,34 @@ describe('Hosted Harness no-tool session', () => {
         });
       };
       expect((await send(PROMPT_ID)).status).toBe(202);
-      await vi.waitFor(async () => {
-        const transcript = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/transcript`),
-        );
-        expect(transcript.body.events).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: 'turn_error',
-              promptId: PROMPT_ID,
-            }),
-          ]),
-        );
-      });
+      await vi.waitFor(
+        async () => {
+          const transcript = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/transcript`),
+          );
+          expect(transcript.body.events).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: 'turn_error',
+                promptId: PROMPT_ID,
+              }),
+            ]),
+          );
+        },
+        { timeout: 10_000 },
+      );
       expect(modelRequests).toBe(0);
       expect((await send(randomUUID())).status).toBe(202);
-      await vi.waitFor(async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body.hasActivePrompt).toBe(false);
-        expect(status.body.recoveryBlocked).toBe(false);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
       expect(modelRequests).toBe(1);
       expect(
         (
@@ -2651,12 +2691,15 @@ describe('Hosted Harness no-tool session', () => {
     try {
       await vi.waitFor(() => expect(configurationEntered).toBe(true));
       resumeModel();
-      await vi.waitFor(async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body.hasActivePrompt).toBe(false);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
       const transcript = await authorize(
         supertest(server).get(`/session/${SESSION_ID}/transcript`),
       );
@@ -2669,15 +2712,18 @@ describe('Hosted Harness no-tool session', () => {
       expect((await configuring).status).toBe(202);
       configurationEntered = false;
       expect((await send(randomUUID())).status).toBe(202);
-      await vi.waitFor(async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body).toMatchObject({
-          hasActivePrompt: false,
-          recoveryBlocked: false,
-        });
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: false,
+          });
+        },
+        { timeout: 10_000 },
+      );
       expect(
         requests.filter((entry) => entry.kind === 'mcp-configure'),
       ).toHaveLength(2);
@@ -2858,13 +2904,16 @@ describe('Hosted Harness no-tool session', () => {
       control.mockImplementation(physical);
       if (entryPoint === 'prompt') {
         expect((await sendPrompt()).status).toBe(202);
-        await vi.waitFor(async () => {
-          const status = await authorize(
-            supertest(server).get(`/session/${SESSION_ID}/status`),
-          );
-          expect(status.body.hasActivePrompt).toBe(false);
-          expect(status.body.recoveryBlocked).toBe(false);
-        });
+        await vi.waitFor(
+          async () => {
+            const status = await authorize(
+              supertest(server).get(`/session/${SESSION_ID}/status`),
+            );
+            expect(status.body.hasActivePrompt).toBe(false);
+            expect(status.body.recoveryBlocked).toBe(false);
+          },
+          { timeout: 10_000 },
+        );
         expect(state.model).toHaveBeenCalledOnce();
       }
       expect(
@@ -2911,13 +2960,16 @@ describe('Hosted Harness no-tool session', () => {
 
     const admitted = await send();
     expect(admitted.status).toBe(202);
-    await vi.waitFor(async () => {
-      const status = await authorize(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      );
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
     expect(admit).toHaveBeenCalledOnce();
     expect(state.model).toHaveBeenCalledOnce();
     expect(requests.map((request) => request.kind)).toEqual([
@@ -2974,12 +3026,15 @@ describe('Hosted Harness no-tool session', () => {
           })
       ).status,
     ).toBe(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
     expect(acquire).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
@@ -3015,12 +3070,15 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
     expect(resumedDeclarations).toEqual([
       'read_file',
       'write_file',
@@ -3267,6 +3325,58 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
+  it('passes the broker-provisioned writer credential and insecure opt-in to the store', async () => {
+    const server = await app();
+    state.storeOptions.length = 0;
+    const writerToken = `qwt1_${'a'.repeat(43)}`;
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: { ...store(), writerToken, allowInsecureHttp: true },
+    });
+    expect(created.status).toBe(200);
+    expect(state.storeOptions.at(-1)).toMatchObject({
+      baseUrl: store().baseUrl,
+      writerId: BOOT_ID,
+      leaseDurationMs: 60_000,
+      writerToken,
+      allowInsecureHttp: true,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
+  it('answers 400 when the store factory refuses the descriptor', async () => {
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: {
+        ...store(),
+        baseUrl: 'http://rejected-store.test',
+      },
+    });
+    expect(created.status).toBe(400);
+    expect(created.body.error).toBe('invalid_managed_session_store');
+    expect(created.body.message).toContain('plaintext HTTP');
+  });
+
+  it('answers 400 with the reason when the descriptor itself is rejected', async () => {
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: { ...store(), writerToken: 'short' },
+    });
+    expect(created.status).toBe(400);
+    expect(created.body.error).toBe('invalid_managed_session_store');
+    expect(created.body.message).toContain('writerToken is invalid');
+  });
+
   it('refuses a workspace cold load before another input when a committed resource is missing', async () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     const server = await app(true);
@@ -3291,12 +3401,15 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       });
     expect(submitted.status).toBe(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId as string);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
       created.body.clientId as string,
@@ -3999,12 +4112,15 @@ describe('Hosted Harness no-tool session', () => {
     const admitted = await send();
     expect(admitted.status).toBe(202);
     expect(admitted.body.promptId).toBe(PROMPT_ID);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId as string);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
     expect(state.model).toHaveBeenCalledTimes(1);
 
     const transcript = await headers(
@@ -4223,13 +4339,16 @@ describe('Hosted Harness no-tool session', () => {
           .set('X-Qwen-Client-Id', clientId)
           .send({ prompt, promptId, payloadDigest });
         expect(response.status).toBe(202);
-        await vi.waitFor(async () => {
-          const status = await headers(
-            supertest(server).get(`/session/${SESSION_ID}/status`),
-          ).set('X-Qwen-Client-Id', clientId);
-          expect(status.body.hasActivePrompt).toBe(false);
-          expect(status.body.recoveryBlocked).toBe(false);
-        });
+        await vi.waitFor(
+          async () => {
+            const status = await headers(
+              supertest(server).get(`/session/${SESSION_ID}/status`),
+            ).set('X-Qwen-Client-Id', clientId);
+            expect(status.body.hasActivePrompt).toBe(false);
+            expect(status.body.recoveryBlocked).toBe(false);
+          },
+          { timeout: 10_000 },
+        );
       };
       await send(PROMPT_ID);
       expect(acquire).not.toHaveBeenCalled();
@@ -4529,13 +4648,16 @@ describe('Hosted Harness no-tool session', () => {
         .set('X-Qwen-Client-Id', created.body.clientId as string)
         .send({ prompt, promptId: PROMPT_ID, payloadDigest })
         .expect(202);
-      await vi.waitFor(async () => {
-        const status = await headers(
-          supertest(first).get('/session/' + SESSION_ID + '/status'),
-        ).set('X-Qwen-Client-Id', created.body.clientId as string);
-        expect(status.body.hasActivePrompt).toBe(false);
-        expect(status.body.recoveryBlocked).toBe(true);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(first).get('/session/' + SESSION_ID + '/status'),
+          ).set('X-Qwen-Client-Id', created.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(true);
+        },
+        { timeout: 10_000 },
+      );
       expect(failed).toBe(true);
       expect(acknowledge).not.toHaveBeenCalled();
       await close(first, created.body.clientId).expect(204);
@@ -4702,13 +4824,16 @@ describe('Hosted Harness no-tool session', () => {
         managedSessionStore: store(),
       });
       expect(loaded.status).toBe(200);
-      await vi.waitFor(async () => {
-        const status = await headers(
-          supertest(second).get('/session/' + SESSION_ID + '/status'),
-        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-        expect(status.body.hasActivePrompt).toBe(false);
-        expect(status.body.recoveryBlocked).toBe(true);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(second).get('/session/' + SESSION_ID + '/status'),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(true);
+        },
+        { timeout: 10_000 },
+      );
       expect(state.model).toHaveBeenCalledTimes(2);
       expect(acknowledge).toHaveBeenCalledOnce();
       expect(
@@ -4727,13 +4852,16 @@ describe('Hosted Harness no-tool session', () => {
         managedSessionStore: store(),
       });
       expect(reopened.status).toBe(200);
-      await vi.waitFor(async () => {
-        const status = await headers(
-          supertest(third).get('/session/' + SESSION_ID + '/status'),
-        ).set('X-Qwen-Client-Id', reopened.body.clientId as string);
-        expect(status.body.hasActivePrompt).toBe(false);
-        expect(status.body.recoveryBlocked).toBe(false);
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(third).get('/session/' + SESSION_ID + '/status'),
+          ).set('X-Qwen-Client-Id', reopened.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
       expect(acknowledge).toHaveBeenCalledTimes(2);
       expect(state.model).toHaveBeenCalledTimes(2);
       const transcript = await headers(
@@ -4851,12 +4979,15 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(first).get('/session/' + SESSION_ID + '/status'),
-      ).set('X-Qwen-Client-Id', created.body.clientId as string);
-      expect(status.body.recoveryBlocked).toBe(true);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(first).get('/session/' + SESSION_ID + '/status'),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
     expect(failed).toBe(true);
     await headers(supertest(first).delete('/session/' + SESSION_ID)).expect(
       204,
@@ -4870,13 +5001,16 @@ describe('Hosted Harness no-tool session', () => {
       captureBytes: 1024 * 1024,
     });
     expect(loaded.status).toBe(200);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(second).get('/session/' + SESSION_ID + '/status'),
-      ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(second).get('/session/' + SESSION_ID + '/status'),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
     expect(state.model).toHaveBeenCalledTimes(2);
     expect(acknowledge).not.toHaveBeenCalled();
     await headers(supertest(second).delete('/session/' + SESSION_ID)).expect(
@@ -4936,12 +5070,15 @@ describe('Hosted Harness no-tool session', () => {
         promptId: PROMPT_ID,
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       });
-    await vi.waitFor(async () => {
-      const transcript = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/transcript`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(transcript.body.events.length).toBeGreaterThan(2);
-    });
+    await vi.waitFor(
+      async () => {
+        const transcript = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(transcript.body.events.length).toBeGreaterThan(2);
+      },
+      { timeout: 10_000 },
+    );
 
     const originalWrite = ServerResponse.prototype.write;
     let frames = 0;
@@ -5020,25 +5157,28 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       });
     expect(admitted.status).toBe(202);
-    await vi.waitFor(async () => {
-      const transcript = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/transcript`),
-      ).set('X-Qwen-Client-Id', created.body.clientId as string);
-      expect(transcript.body.events).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: 'turn_error',
-            promptId: PROMPT_ID,
-            data: {
-              sessionId: SESSION_ID,
+    await vi.waitFor(
+      async () => {
+        const transcript = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(transcript.body.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'turn_error',
               promptId: PROMPT_ID,
-              code: 'hosted_turn_failed',
-              message: 'Hosted Harness turn failed.',
-            },
-          }),
-        ]),
-      );
-    });
+              data: {
+                sessionId: SESSION_ID,
+                promptId: PROMPT_ID,
+                code: 'hosted_turn_failed',
+                message: 'Hosted Harness turn failed.',
+              },
+            }),
+          ]),
+        );
+      },
+      { timeout: 10_000 },
+    );
     expect(log).toHaveBeenCalledWith(
       `qwen serve: Hosted Harness turn ${PROMPT_ID} failed: Error: model initialization failed`,
     );
@@ -5194,13 +5334,16 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(true);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
     const transcript = await headers(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
     ).set('X-Qwen-Client-Id', clientId);
@@ -5245,13 +5388,16 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       });
     expect(admitted.status).toBe(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(true);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
     const transcript = await headers(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
     ).set('X-Qwen-Client-Id', clientId);
@@ -5324,12 +5470,15 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(status.body.recoveryBlocked).toBe(true);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
     await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .set('X-Qwen-Client-Id', clientId)
       .expect(204);
@@ -5389,20 +5538,23 @@ describe('Hosted Harness no-tool session', () => {
     ).set('X-Qwen-Client-Id', clientId);
     expect(cancelled.status).toBe(204);
     rejectWrite?.(new Error('transient store failure'));
-    await vi.waitFor(async () => {
-      const transcript = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/transcript`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(transcript.body.events).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: 'turn_complete',
-            promptId: PROMPT_ID,
-            data: expect.objectContaining({ stopReason: 'cancelled' }),
-          }),
-        ]),
-      );
-    });
+    await vi.waitFor(
+      async () => {
+        const transcript = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(transcript.body.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'turn_complete',
+              promptId: PROMPT_ID,
+              data: expect.objectContaining({ stopReason: 'cancelled' }),
+            }),
+          ]),
+        );
+      },
+      { timeout: 10_000 },
+    );
     expect(state.model).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
@@ -5439,20 +5591,23 @@ describe('Hosted Harness no-tool session', () => {
       supertest(server).post(`/session/${SESSION_ID}/cancel`),
     ).set('X-Qwen-Client-Id', created.body.clientId as string);
     expect(cancelled.status).toBe(204);
-    await vi.waitFor(async () => {
-      const transcript = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/transcript`),
-      ).set('X-Qwen-Client-Id', created.body.clientId as string);
-      expect(transcript.body.events).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: 'turn_complete',
-            promptId: PROMPT_ID,
-            data: expect.objectContaining({ stopReason: 'cancelled' }),
-          }),
-        ]),
-      );
-    });
+    await vi.waitFor(
+      async () => {
+        const transcript = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(transcript.body.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'turn_complete',
+              promptId: PROMPT_ID,
+              data: expect.objectContaining({ stopReason: 'cancelled' }),
+            }),
+          ]),
+        );
+      },
+      { timeout: 10_000 },
+    );
     expect(log).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });

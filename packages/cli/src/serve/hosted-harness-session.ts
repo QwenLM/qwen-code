@@ -18,6 +18,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { Application, Request, Response } from 'express';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
@@ -128,6 +129,7 @@ const RESTORE_CONTAINER_KINDS = new Set([
   'managed-hook-plan',
   'managed-hook-message-chunks',
 ]);
+const debugLogger = createDebugLogger('HOSTED_HARNESS_SESSION');
 
 /**
  * The prompt deadline timer and the cancel route abort the same controller,
@@ -223,8 +225,19 @@ function object(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function error(res: Response, status: number, code: string): void {
-  res.status(status).json({ error: code, code });
+function error(
+  res: Response,
+  status: number,
+  code: string,
+  message?: string,
+): void {
+  res
+    .status(status)
+    .json(
+      message === undefined
+        ? { error: code, code }
+        : { error: code, code, message },
+    );
 }
 
 function identity(
@@ -1398,8 +1411,14 @@ export function registerHostedHarnessSessionRoutes(
     let store;
     try {
       store = parseBridgeManagedSessionStore(body?.['managedSessionStore']);
-    } catch {
-      error(res, 400, 'invalid_managed_session_store');
+    } catch (cause) {
+      debugLogger.warn('managed session store descriptor rejected:', cause);
+      error(
+        res,
+        400,
+        'invalid_managed_session_store',
+        cause instanceof Error ? cause.message : String(cause),
+      );
       return;
     }
     if (store.writerId !== contract.bootId) {
@@ -1499,12 +1518,30 @@ export function registerHostedHarnessSessionRoutes(
       workspaceId: store.workspaceId,
       sessionId,
     };
-    const stores = createHttpManagedSessionStores({
-      baseUrl: store.baseUrl,
-      sessionKey,
-      writerId: store.writerId,
-      leaseDurationMs: store.leaseDurationMs,
-    });
+    let stores: ReturnType<typeof createHttpManagedSessionStores>;
+    try {
+      stores = createHttpManagedSessionStores({
+        baseUrl: store.baseUrl,
+        sessionKey,
+        writerId: store.writerId,
+        leaseDurationMs: store.leaseDurationMs,
+        ...(store.writerToken === undefined
+          ? {}
+          : { writerToken: store.writerToken }),
+        ...(store.allowInsecureHttp === undefined
+          ? {}
+          : { allowInsecureHttp: store.allowInsecureHttp }),
+      });
+    } catch (cause) {
+      debugLogger.warn('managed session store descriptor refused:', cause);
+      error(
+        res,
+        400,
+        'invalid_managed_session_store',
+        cause instanceof Error ? cause.message : String(cause),
+      );
+      return;
+    }
     opening.add(sessionId);
     let managed: ManagedSession | undefined;
     try {
