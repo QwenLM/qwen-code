@@ -9,6 +9,23 @@ import type { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed
 import { randomUUID } from 'node:crypto';
 import type { HostedMonitorWakeTurn } from './hosted-monitor-wake.js';
 import { wakeHasPriorAttempt } from './hosted-monitor-wake.js';
+import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
+import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
+import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
+
+/**
+ * The Session's one wake-recovery classification, shared by its wiring
+ * and its witnesses — the classes do not set `name`, so matching by name
+ * would silently consume every recovery exception while the wiring stays
+ * green, which is exactly how the round-9 regression shipped.
+ */
+export function monitorWakeNeedsRecovery(cause: unknown): boolean {
+  return (
+    cause instanceof HostedToolRecoveryRequiredError ||
+    cause instanceof HostedMcpRecoveryRequiredError ||
+    cause instanceof HostedHookRecoveryRequiredError
+  );
+}
 
 // H3 of #12827: the wake turn's admission arm, lifted out of the Session
 // builder so the pump's own integrity rule — the busy verdict must be

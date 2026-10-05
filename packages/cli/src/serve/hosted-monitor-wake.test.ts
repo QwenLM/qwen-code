@@ -24,18 +24,12 @@ import {
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import {
   createMonitorWakeRunTurn,
+  monitorWakeNeedsRecovery as needsRecovery,
   type MonitorWakeTurnSession,
 } from './hosted-monitor-wake-turn.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
-
-// The production predicate from the wake scheduler wiring, mirrored
-// verbatim so a classification drift here or there turns a witness red.
-const needsRecovery = (cause: unknown): boolean =>
-  cause instanceof HostedToolRecoveryRequiredError ||
-  cause instanceof HostedMcpRecoveryRequiredError ||
-  cause instanceof HostedHookRecoveryRequiredError;
 
 // monitor_run is enabled by the H3 enablement slice; the close-side settle
 // rig commits a notification input ahead of it, like the funnel suite does.

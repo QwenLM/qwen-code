@@ -420,6 +420,7 @@ describe('settleCancelledHookTurn', () => {
           extensionRecordsInDomain,
         },
         resources: { read: async () => Buffer.from('{}') },
+        sink: { project: async () => [] },
       },
     } as unknown as Parameters<typeof settleCancelledHookTurn>[0];
     await settleCancelledHookTurn(session);
@@ -427,6 +428,40 @@ describe('settleCancelledHookTurn', () => {
     // turn is the prompt itself and the Hook execution scan actually ran
     // — with the notification counted, the early none-of-one exit would
     // leave this hook turn wedged forever.
+    expect(extensionRecordsInDomain).toHaveBeenCalledWith('hook_execution');
+  });
+
+  it('settles a monitor wake that already started and parks', async () => {
+    // A wake that started — the projection holds its records — and then
+    // parked are its own settled owner: the cancelled settle must act.
+    const events = [
+      {
+        kind: 'input.accepted',
+        sequence: 7,
+        payload: { turnId: 'monitor:1:notify:1', source: 'monitor' },
+      } as unknown as ManagedSessionEvent,
+    ];
+    const extensionRecordsInDomain = vi.fn(() => []);
+    const session = {
+      blocked: true,
+      hooks: { hasPendingOperations: false },
+      managed: {
+        authority: {
+          committedSequence: 8,
+          sessionHeader: { sessionKey: { sessionId: 's' } },
+          eventsInSequenceRange: () => events,
+          extensionRecordsInDomain,
+        },
+        resources: { read: async () => Buffer.from('{}') },
+        sink: {
+          project: async () => [{ daemonPromptId: 'monitor:1:notify:1' }],
+        },
+      },
+    } as unknown as Parameters<typeof settleCancelledHookTurn>[0];
+    await settleCancelledHookTurn(session);
+    // Once the wake ran, its turn parks exactly like a prompt's: the
+    // cancelled settle must own it, or the Session stays blocked and every
+    // later prompt answers hosted_turn_recovery_required.
     expect(extensionRecordsInDomain).toHaveBeenCalledWith('hook_execution');
   });
 });

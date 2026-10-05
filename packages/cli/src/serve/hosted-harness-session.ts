@@ -70,8 +70,12 @@ import { HostedMonitorSession } from './hosted-monitor-session.js';
 import {
   HostedMonitorWakeScheduler,
   settlePendingMonitorInputs,
+  wakeHasPriorAttempt,
 } from './hosted-monitor-wake.js';
-import { createMonitorWakeRunTurn } from './hosted-monitor-wake-turn.js';
+import {
+  createMonitorWakeRunTurn,
+  monitorWakeNeedsRecovery,
+} from './hosted-monitor-wake-turn.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
@@ -514,13 +518,23 @@ export async function settleCancelledHookTurn(
       1,
       authority.committedSequence,
     );
+    const projected = await session.managed.sink.project(
+      authority.committedSequence,
+    );
     const pending = new Map<string, number>();
     for (const event of events) {
-      // A monitor notification is never a parked Turn of its own — the
-      // wake pump consumes it — so it must never count toward the one
-      // pending turn the cancelled Hook settlement may close on.
-      if (event.kind === 'input.accepted' && !isMonitorInput(event))
-        pending.set(event.payload['turnId'] as string, event.sequence);
+      // A monitor notification that never ran is nobody's parked turn —
+      // but once the wake actually began, its turn parks exactly like a
+      // user prompt's, and the cancelled settle owns it the same way.
+      if (event.kind === 'input.accepted') {
+        const turnId = event.payload['turnId'];
+        const queuedOnly =
+          isMonitorInput(event) &&
+          (typeof turnId !== 'string' ||
+            !wakeHasPriorAttempt(projected, turnId));
+        if (!queuedOnly && typeof turnId === 'string')
+          pending.set(turnId, event.sequence);
+      }
       if (event.kind === 'turn.settled')
         pending.delete(event.payload['turnId'] as string);
     }
@@ -1843,10 +1857,7 @@ export function registerHostedHarnessSessionRoutes(
                 brokerOptions,
               ),
             busy: wakeBusy,
-            needsRecovery: (cause) =>
-              cause instanceof HostedToolRecoveryRequiredError ||
-              cause instanceof HostedMcpRecoveryRequiredError ||
-              cause instanceof HostedHookRecoveryRequiredError,
+            needsRecovery: monitorWakeNeedsRecovery,
             writeStderr: writeStderrLineSafe,
           }),
           failed: (cause) => {
