@@ -87,8 +87,8 @@ describe('writeWithBackup', () => {
     expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
   });
 
-  it.each(['ENOSYS', 'ENOTSUP'])(
-    'publishes when chmod is unsupported (%s)',
+  it.each(['ENOSYS', 'ENOTSUP', 'EPERM'])(
+    'publishes when chmod is unavailable and staged permissions are no broader (%s)',
     (code) => {
       nativeFs.writeFileSync(targetPath, 'old');
       vi.mocked(fs.chmodSync).mockImplementation(() => {
@@ -168,8 +168,10 @@ describe('writeWithBackup', () => {
     it.each([
       ['ENOSYS', 0o022],
       ['ENOTSUP', 0o022],
+      ['EPERM', 0o022],
       ['ENOSYS', 0o077],
       ['ENOTSUP', 0o077],
+      ['EPERM', 0o077],
     ] as const)(
       'does not widen permissions when chmod returns %s under umask %o',
       (code, mask) => {
@@ -265,7 +267,36 @@ describe('writeWithBackup', () => {
       },
     );
 
-    it.each([undefined, 'EPERM', 'EACCES', 'EIO', 'EROFS'])(
+    it.each(['ENOSYS', 'ENOTSUP', 'EPERM'])(
+      'refuses broader staged permissions when chmod returns %s',
+      (code) => {
+        nativeFs.writeFileSync(targetPath, 'old');
+        nativeFs.chmodSync(targetPath, 0o600);
+        const failure = Object.assign(new Error('chmod failed'), { code });
+        vi.mocked(fs.writeFileSync).mockImplementation((...args) => {
+          nativeFs.writeFileSync(...args);
+          nativeFs.chmodSync(args[0] as string, 0o644);
+        });
+        vi.mocked(fs.chmodSync).mockImplementation(() => {
+          throw failure;
+        });
+
+        let error: unknown;
+        try {
+          writeWithBackupSync(targetPath, 'new');
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBe(failure);
+        expect(fs.readFileSync(targetPath, 'utf8')).toBe('old');
+        expect(fs.statSync(targetPath).mode & 0o777).toBe(0o600);
+        expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+        expect(fs.copyFileSync).not.toHaveBeenCalled();
+        expect(fs.renameSync).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([undefined, 'EACCES', 'EIO', 'EROFS'])(
       'preserves the target when staging chmod fails (%s)',
       (code) => {
         nativeFs.writeFileSync(targetPath, 'old');

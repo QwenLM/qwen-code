@@ -92,11 +92,12 @@ export function writeWithBackupSync(
       try {
         fs.chmodSync(tempPath, mode);
       } catch (error) {
-        // Filesystems without POSIX permissions may not support chmod.
+        // Some filesystems reject chmod; do not publish broader permissions.
+        const code =
+          error instanceof Error && 'code' in error ? error.code : undefined;
         if (
-          !(error instanceof Error) ||
-          !('code' in error) ||
-          (error.code !== 'ENOSYS' && error.code !== 'ENOTSUP')
+          (code !== 'ENOSYS' && code !== 'ENOTSUP' && code !== 'EPERM') ||
+          (fs.statSync(tempPath).mode & 0o777 & ~mode) !== 0
         ) {
           throw error;
         }
