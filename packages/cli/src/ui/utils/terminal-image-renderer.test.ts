@@ -690,6 +690,13 @@ describe('terminalImageRenderer', () => {
     async () => {
       const binDir = path.join(tempDir, 'bin');
       await fs.mkdir(binDir);
+      // Pin the fake chafa to CommonJS: with no package type, Node's module
+      // detection runs this extensionless require(...) script as ESM and the
+      // require call fails.
+      await fs.writeFile(
+        path.join(binDir, 'package.json'),
+        '{"type":"commonjs"}\n',
+      );
       const chafaPath = path.join(binDir, 'chafa');
       await fs.writeFile(
         chafaPath,
