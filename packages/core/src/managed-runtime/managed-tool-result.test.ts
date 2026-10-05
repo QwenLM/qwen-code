@@ -270,7 +270,7 @@ describe('impliedStatus', () => {
     byteLength = 1,
   ): Parameters<typeof impliedStatus>[0][number] => ({
     streamId: 'stdout',
-    role: 'full_log',
+    role: 'stdout',
     mimeType: 'text/plain',
     state,
     byteLength,

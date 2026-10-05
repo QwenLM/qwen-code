@@ -295,7 +295,10 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
           body: { pages: state.pages },
         }))
       : [];
-    const captureStatus = impliedStatus(contents);
+    // An open descriptor cannot be part of this finalize — the envelope's
+    // status set has no 'pending'; the shared rule only differs there.
+    const implied = impliedStatus(contents);
+    const captureStatus = implied === 'pending' ? 'partial' : implied;
     const captureReason =
       captureStatus === 'complete'
         ? null
