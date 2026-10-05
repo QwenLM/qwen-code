@@ -131,6 +131,8 @@ CREATE TABLE IF NOT EXISTS qwen_tool_execution (
     settled_at DATETIME(6),
     abandoned_at DATETIME(6),
     loss_evidence_id VARCHAR(512),
+    authorized_dispatch_generation BIGINT,
+    authorized_binding_version BIGINT,
     CONSTRAINT uq_tool_execution_idempotency
         UNIQUE (idempotency_key_hash),
     INDEX idx_tool_execution_session

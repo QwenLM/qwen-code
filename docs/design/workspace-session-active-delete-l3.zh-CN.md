@@ -143,8 +143,8 @@ L3 返回 `workspace_lifecycle_journal_unverified`。未来 compaction 必须
 
 ## 4. 兼容与启用
 
-在已有 V35 工具配置、V36–V39 journal/查询迁移及 V40 创建者迁移之后新增 V41 生命周期迁移，
-保留这些迁移和 V32。
+在已有 V35 工具配置、V36–V39 journal/查询、V40 创建者及 V41–V44 CSI/派发迁移之后新增 V45 生命周期迁移，
+保留这些迁移和 V32。未合入的生命周期迁移从 V41 顺延为 V45，SQL 内容不变；本次整合不增加 CSI 生命周期支持。
 升级前已接纳的操作沿用原协议与证据，不产生新 Hook 身份。
 仍存活的 protocol-zero close attachment 仅在持久 close claim 有效时保留原 DELETE
 和原 Hook control 路径。普通执行继续被围栏阻止；此例外不能授权 L3 或 MCP 执行。

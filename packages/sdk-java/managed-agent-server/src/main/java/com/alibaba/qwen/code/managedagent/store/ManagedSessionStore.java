@@ -220,6 +220,10 @@ public class ManagedSessionStore {
                 tenantId, sessionId).isEmpty();
     }
 
+    boolean usesDataSource(javax.sql.DataSource source) {
+        return source != null && jdbc.getDataSource() == source;
+    }
+
     @Autowired(required = false)
     public void setPublicationObjects(ToolPublicationObjectStore publicationObjects) {
         this.publicationObjects = publicationObjects;

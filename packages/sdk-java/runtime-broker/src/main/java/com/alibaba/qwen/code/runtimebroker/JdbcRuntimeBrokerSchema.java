@@ -39,6 +39,8 @@ public final class JdbcRuntimeBrokerSchema {
             addColumn(statement, "qwen_runtime_harness_drain", "claim_lease_until", "BIGINT");
             addColumn(statement, "qwen_tool_execution", "abandoned_at", "DATETIME(6)");
             addColumn(statement, "qwen_tool_execution", "loss_evidence_id", "VARCHAR(512)");
+            addColumn(statement, "qwen_tool_execution", "authorized_dispatch_generation", "BIGINT");
+            addColumn(statement, "qwen_tool_execution", "authorized_binding_version", "BIGINT");
         } catch (SQLException exception) {
             throw JdbcRepositorySupport.failure(exception);
         }

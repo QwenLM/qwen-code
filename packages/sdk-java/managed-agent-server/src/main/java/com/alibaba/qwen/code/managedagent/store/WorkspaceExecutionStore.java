@@ -93,6 +93,7 @@ public class WorkspaceExecutionStore {
                         binding.getContextConfigRef())) {
             throw unavailable();
         }
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         List<Boolean> grants = jdbc.query("SELECT s.tenant_id, s.session_id,"
                 + " s.agent_id AS session_agent, s.status AS session_status,"
                 + " s.deleted_at AS session_deleted_at,"
@@ -147,9 +148,12 @@ public class WorkspaceExecutionStore {
     }
 
     public void claim(ContextBinding binding, RuntimeSessionRecord session) {
+        WorkspaceStorageKindGuard.requireFreshTransaction();
         String key = storageKey(binding);
         String holder = holderKey(session);
         transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             List<Boolean> live = jdbc.query("SELECT binding_id, runtime_generation, binding_state, drain_requested,"
                     + " tenant_id, workspace_id, workspace_generation, storage_id FROM qwen_runtime_binding"
                     + " WHERE binding_id = ? FOR UPDATE", (row, index) ->
@@ -177,10 +181,10 @@ public class WorkspaceExecutionStore {
                 throw unavailable();
             }
             jdbc.update("INSERT INTO managed_workspace_execution_lease"
-                    + " (storage_key) VALUES (?) ON DUPLICATE KEY UPDATE"
+                    + " (storage_key, storage_kind) VALUES (?, 'LOCAL') ON DUPLICATE KEY UPDATE"
                     + " storage_key = storage_key", key);
             String current = jdbc.queryForObject("SELECT holder_key FROM"
-                    + " managed_workspace_execution_lease WHERE storage_key = ? FOR UPDATE",
+                    + " managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE",
                     String.class, key);
             if (storageGuard != null) {
                 storageGuard.verifyLocked(binding);
@@ -190,7 +194,7 @@ public class WorkspaceExecutionStore {
             }
             jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = ?,"
                     + " binding_id = ?, runtime_generation = ?, runtime_session_id = ?"
-                    + " WHERE storage_key = ?", holder, session.getBindingId(),
+                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL'", holder, session.getBindingId(),
                     session.getRuntimeGeneration(), session.getRuntimeSessionId(), key);
         });
     }
@@ -205,14 +209,17 @@ public class WorkspaceExecutionStore {
     }
 
     public boolean isHeld(ContextBinding binding, RuntimeSessionRecord session) {
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         List<String> holders = jdbc.queryForList("SELECT holder_key FROM"
-                + " managed_workspace_execution_lease WHERE storage_key = ?",
+                + " managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL'",
                 String.class, storageKey(binding));
         return holders.size() == 1 && holderKey(session).equals(holders.getFirst());
     }
 
     public void release(ContextBinding binding, RuntimeSessionRecord session) {
         transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             List<Boolean> live = jdbc.query("SELECT binding_id, runtime_generation, binding_state"
                     + " FROM qwen_runtime_binding WHERE binding_id = ? FOR UPDATE",
                     (row, index) -> session.getBindingId().equals(row.getString("binding_id"))
@@ -225,7 +232,7 @@ public class WorkspaceExecutionStore {
             }
             jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = NULL,"
                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
-                    + " WHERE storage_key = ? AND holder_key = ?",
+                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND holder_key = ?",
                     storageKey(binding), holderKey(session));
         });
     }
@@ -243,6 +250,7 @@ public class WorkspaceExecutionStore {
             throw unavailable();
         }
         transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, saved.getRequest().getScope().getTenantId());
             List<Boolean> exact = jdbc.query("SELECT binding_id, runtime_generation, binding_state, tenant_id,"
                     + " workspace_id, storage_id, record_version, operation_owner, operation_generation,"
                     + " operation_lease_until, loss_evidence_json, stop_evidence_json, UNIX_TIMESTAMP() AS db_seconds,"
@@ -271,7 +279,7 @@ public class WorkspaceExecutionStore {
             }
             String key = digest(saved.getRequest().getScope().getTenantId() + "\u0000" + saved.getRequest().getStorageId());
             jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
-                    + " FROM managed_workspace_execution_lease WHERE storage_key = ? FOR UPDATE", row -> {
+                    + " FROM managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE", row -> {
                         String holder = row.getString("holder_key");
                         String bindingId = row.getString("binding_id");
                         String sessionId = row.getString("runtime_session_id");
@@ -292,7 +300,7 @@ public class WorkspaceExecutionStore {
                             }
                             int changed = jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = NULL,"
                                     + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
-                                    + " WHERE storage_key = ? AND holder_key = ? AND binding_id = ?"
+                                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND holder_key = ? AND binding_id = ?"
                                     + " AND runtime_generation = ? AND runtime_session_id = ?",
                                     key, holder, bindingId, generation, sessionId);
                             if (changed != 1) {

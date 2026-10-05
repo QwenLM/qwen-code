@@ -187,9 +187,12 @@ accept those Sessions; this PR does not implement compaction recovery.
 
 ## 4. Compatibility and rollout
 
-Add lifecycle migration V41 after the existing V35 tool-profile, V36–V39
-journal/query and V40 creator migrations; preserve those migrations and V32. Historical admitted operations retain their
-original protocol and evidence, without new Hook identities.
+Add lifecycle migration V45 after the existing V35 tool-profile, V36–V39
+journal/query, V40 creator and V41–V44 CSI/dispatch migrations; preserve those
+migrations and V32. The lifecycle SQL is unchanged when its unmerged version
+moves from V41 to V45; this integration does not add CSI lifecycle support.
+Historical admitted operations retain their original protocol and evidence,
+without new Hook identities.
 Live protocol-zero close attachments retain their legacy DELETE and original
 Hook control path only while their persisted close claim is valid. Ordinary
 execution remains fenced; the exception cannot authorize L3 or MCP execution.
