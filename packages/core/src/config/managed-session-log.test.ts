@@ -1417,6 +1417,55 @@ describe('Managed Session log recording', () => {
     expect(restored.getManagedSessionBlock()).toBeUndefined();
     await restored.closeSessionWriter();
   });
+
+  it('proves a call whose settle failed after its receipt committed, on both opens', async () => {
+    const created = await start(managedConfig());
+    const outcomes = created.getManagedRuntimeOutcomes()!;
+    // The crash window: the outcome and the receipt commit, then the
+    // checkpoint's resolve fails.
+    const harness = (
+      outcomes as unknown as {
+        harness: {
+          resolveAwaitRuntime: (id: string, ref: never) => Promise<unknown>;
+        };
+      }
+    ).harness;
+    let sabotaged = false;
+    const settling = harness.resolveAwaitRuntime.bind(harness);
+    harness.resolveAwaitRuntime = async (id, ref) => {
+      if (!sabotaged) {
+        sabotaged = true;
+        throw new Error('crashed between the receipt and the settlement');
+      }
+      return settling(id, ref);
+    };
+    await outcomes.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await expect(
+      outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: { executionStatus: 'success', responseParts: [] },
+      }),
+    ).rejects.toThrow('crashed between');
+    // The receipt the failure left behind is the durable proof the call took
+    // effect — and what proves a call may never block.
+    expect(outcomes.hasCommittedReceipt('call-a')).toBe(true);
+    expect(outcomes.hasCommittedReceipt('call-b')).toBe(false);
+    await created.closeSessionWriter();
+
+    // The same durable bytes open unblocked: the restore repair settles the
+    // item the failed resolve left in progress.
+    const restored = await start(restoringConfig());
+    expect(restored.getManagedSessionBlock()).toBeUndefined();
+    await restored.closeSessionWriter();
+  });
 });
 
 describe('Managed host tools', () => {

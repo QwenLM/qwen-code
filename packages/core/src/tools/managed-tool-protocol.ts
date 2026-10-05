@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { FunctionDeclaration } from '@google/genai';
+import type { FunctionDeclaration, Part } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import type {
@@ -208,6 +208,22 @@ export function managedToolDigest(
   return createHash('sha256')
     .update(canonicalJson(value, maxBytes))
     .digest('hex');
+}
+
+/**
+ * The model parts a worker's response parts map to: the worker marks text
+ * parts with a `type` that model parts do not have. The mapping throws on a
+ * part that is not an object — the live result path reports that as an
+ * ordinary tool error — so a restore that must tolerate one filters first.
+ */
+export function managedToolResponseParts(parts: readonly unknown[]): Part[] {
+  return parts.map((part): Part => {
+    const { type, ...rest } = part as { type?: unknown } & Record<
+      string,
+      unknown
+    >;
+    return (type === 'text' ? rest : part) as Part;
+  });
 }
 
 /**

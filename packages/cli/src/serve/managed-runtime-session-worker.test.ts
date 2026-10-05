@@ -684,6 +684,8 @@ describe.skipIf(process.platform === 'win32')(
     const outcomeSignals: { admit?: () => void; settle?: () => void } = {};
     /** Makes the fake recorder's commits fail, per test. */
     const outcomeFailures: { admit?: Error; settle?: Error } = {};
+    /** The receipts the fake recorder answers as committed, per test. */
+    const outcomeReceipts = new Set<string>();
     const signal = new AbortController().signal;
 
     function recordOutcomes(target: Config) {
@@ -701,6 +703,7 @@ describe.skipIf(process.platform === 'win32')(
           settlements.push(input);
         },
         finalizeBatch: async () => undefined,
+        hasCommittedReceipt: (id: string) => outcomeReceipts.has(id),
       };
       vi.spyOn(target, 'getManagedRuntimeOutcomes').mockReturnValue(
         recorder as unknown as LocalManagedRuntimeOutcomes,
@@ -721,6 +724,7 @@ describe.skipIf(process.platform === 'win32')(
       outcomeSignals.settle = undefined;
       outcomeFailures.admit = undefined;
       outcomeFailures.settle = undefined;
+      outcomeReceipts.clear();
       config = new Config({
         sessionId: SESSION_ID,
         targetDir: root,
@@ -1066,6 +1070,29 @@ describe.skipIf(process.platform === 'win32')(
       expect(settlements).toHaveLength(0);
     });
 
+    it('does not block when the settlement failed after the receipt committed', async () => {
+      const env = create('ok');
+      outcomeFailures.settle = new Error('the checkpoint resolve failed');
+      outcomeReceipts.add('write');
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        signal,
+      );
+      // The receipt committed ahead of the failed step: the outcome is
+      // provable from the log, so the turn continues on it.
+      const result = await env.execute('write', signal);
+      expect(result.llmContent).toEqual([
+        {
+          text: `ran ${JSON.stringify({ file_path: path.join(root, 'written.txt'), content: 'x' })}`,
+        },
+      ]);
+      expect(config.getManagedSessionBlock()).toBeUndefined();
+    });
+
     it('does not block when result shaping fails after the settlement landed', async () => {
       const env = create('null-part');
       await env.prepare(
@@ -1180,6 +1207,43 @@ describe.skipIf(process.platform === 'win32')(
       ]);
       // The worker heard nothing: the admission stands, the cancelled
       // settlement closes it.
+      expect(await readFile(logFile, 'utf8')).not.toContain('"execute"');
+    });
+
+    it('blocks the session when the settlement of a cancelled call fails', async () => {
+      const env = create('ok');
+      let release!: () => void;
+      outcomeWaiters.admit = new Promise((resolve) => {
+        release = resolve;
+      });
+      const controller = new AbortController();
+      await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: path.join(root, 'written.txt'), content: 'x' },
+        },
+        controller.signal,
+      );
+      let entered!: () => void;
+      const admitStarted = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      outcomeSignals.admit = entered;
+      const result = env.execute('write', controller.signal);
+      await admitStarted;
+      controller.abort();
+      outcomeFailures.settle = new Error('the authority stopped writing');
+      release();
+      // The cancelled call's settlement never landing is the same unknown
+      // outcome as a dispatched call's: the session blocks.
+      await expect(result).rejects.toBeInstanceOf(
+        ManagedRuntimeOutcomeUnknownError,
+      );
+      expect(config.getManagedSessionBlock()).toBeInstanceOf(
+        ManagedRuntimeOutcomeUnknownError,
+      );
+      expect(settlements).toHaveLength(0);
       expect(await readFile(logFile, 'utf8')).not.toContain('"execute"');
     });
 

@@ -20,6 +20,19 @@ import {
   unresolvedRuntimeWorkReason,
 } from './managed-runtime-outcomes.js';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
+import * as gitUtils from '../utils/gitUtils.js';
+
+vi.mock('../utils/gitUtils.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../utils/gitUtils.js')>();
+  // Pass every export through under a spy, so a restore's branch reads are
+  // observable without changing what any record carries.
+  return {
+    ...original,
+    getGitBranch: vi.fn(original.getGitBranch),
+    getCachedGitBranch: vi.fn(original.getCachedGitBranch),
+  };
+});
 
 const sessionKeyOf = (id: string) => ({
   tenantId: 'tenant-a',
@@ -647,6 +660,57 @@ describe('restored runtime block', () => {
     }
   });
 
+  it('re-records a settled result whose payload carries a part that is not an object', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    {
+      const { session, seal } = await openSession(root, 'session-null-part');
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await outcomes.admit(admission('call-a'));
+      // A worker may settle a payload whose parts hold a null: the live
+      // result path reports it as an ordinary tool error, but only after the
+      // settlement landed, so the durable body keeps the part.
+      await outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: { executionStatus: 'success', responseParts: [null] },
+      });
+      await seal();
+    }
+
+    const { session: restored } = await openSession(root, 'session-null-part');
+    try {
+      vi.mocked(gitUtils.getCachedGitBranch).mockClear();
+      // The restore reads what the log holds rather than throwing the open
+      // away: the part that is not an object is dropped, and the call still
+      // gets the record its functionCall pairs with.
+      await expect(
+        new LocalManagedRuntimeOutcomes(restored).recoverCommittedReceipts(),
+      ).resolves.toBeUndefined();
+      const resultsRecorded = events(restored, 'message.committed').filter(
+        (event) => event.payload['role'] === 'tool_result',
+      );
+      expect(resultsRecorded).toHaveLength(1);
+      const body = await restored.resources.read(
+        resultsRecorded[0]!.payload['contentRef'] as never,
+      );
+      const record = JSON.parse(body.toString()) as {
+        toolCallResult?: { callId?: string; status?: string };
+      };
+      expect(record.toolCallResult).toMatchObject({
+        callId: 'call-a',
+        status: 'success',
+      });
+      // The write read the branch once — the annotation every record carries.
+      expect(gitUtils.getCachedGitBranch).toHaveBeenCalled();
+      await expect(
+        unresolvedRuntimeWorkReason(restored.authority),
+      ).resolves.toBeUndefined();
+    } finally {
+      await restored.close();
+    }
+  });
+
   it("re-records a call whose id only another record's text quotes", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
     roots.add(root);
@@ -720,7 +784,11 @@ describe('restored runtime block', () => {
                   event.payload['contentRef'] as never,
                 )
               ).toString(),
-            ) as { uuid?: string; toolCallResult?: { callId?: string } },
+            ) as {
+              uuid?: string;
+              message?: { parts?: Array<Record<string, unknown>> };
+              toolCallResult?: { callId?: string };
+            },
         ),
       );
       // call-a's answer is its own recovered record — the quote in call-b's
@@ -731,6 +799,162 @@ describe('restored runtime block', () => {
       expect(
         bodies.filter((record) => record.toolCallResult?.callId === 'call-b'),
       ).toHaveLength(1);
+      // And its payload is its own outcome's: the recovery read the item's
+      // own outcomeRef, not whichever settled outcome came last.
+      const recovered = bodies.find(
+        (record) => record.toolCallResult?.callId === 'call-a',
+      );
+      expect(
+        recovered?.message?.parts?.[0]?.['functionResponse'],
+      ).toMatchObject({
+        id: 'call-a',
+        response: { output: 'answer a' },
+      });
+    } finally {
+      await restored.close();
+    }
+  });
+
+  it('re-records two settled results in one restore, each from its own outcome', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    {
+      const { session, seal } = await openSession(root, 'session-two-lost');
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await outcomes.admit(admission('call-a'));
+      await outcomes.admit(admission('call-b'));
+      await outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: {
+          executionStatus: 'success',
+          responseParts: [{ type: 'text', text: 'answer a' }],
+        },
+      });
+      await outcomes.settle({
+        functionCallId: 'call-b',
+        executionStatus: 'success',
+        payload: {
+          executionStatus: 'success',
+          responseParts: [{ type: 'text', text: 'answer b' }],
+        },
+      });
+      // The process died before either record: both recover in one restore.
+      await seal();
+    }
+
+    const { session: restored } = await openSession(root, 'session-two-lost');
+    try {
+      await new LocalManagedRuntimeOutcomes(
+        restored,
+      ).recoverCommittedReceipts();
+      const resultsRecorded = events(restored, 'message.committed').filter(
+        (event) => event.payload['role'] === 'tool_result',
+      );
+      expect(resultsRecorded).toHaveLength(2);
+      const records = await Promise.all(
+        resultsRecorded.map(
+          async (event) =>
+            JSON.parse(
+              (
+                await restored.resources.read(
+                  event.payload['contentRef'] as never,
+                )
+              ).toString(),
+            ) as {
+              uuid?: string;
+              parentUuid?: string | null;
+              message?: { parts?: Array<Record<string, unknown>> };
+              toolCallResult?: { callId?: string };
+            },
+        ),
+      );
+      const byCall = new Map(
+        records.map((record) => [record.toolCallResult?.callId, record]),
+      );
+      // Each record carries its own call's answer...
+      expect(
+        byCall.get('call-a')?.message?.parts?.[0]?.['functionResponse'],
+      ).toMatchObject({ id: 'call-a', response: { output: 'answer a' } });
+      expect(
+        byCall.get('call-b')?.message?.parts?.[0]?.['functionResponse'],
+      ).toMatchObject({ id: 'call-b', response: { output: 'answer b' } });
+      // ...and the two chain in the checkpoint's order: the second recovered
+      // record follows the first rather than opening a fresh root.
+      expect(byCall.get('call-a')!.parentUuid).toBeNull();
+      expect(byCall.get('call-b')!.parentUuid).toBe(
+        'recovered-tool-result:call-a',
+      );
+    } finally {
+      await restored.close();
+    }
+  });
+
+  it('re-records a settled result whose outcome body no longer reads, as an error', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    const sessionId = 'session-lost-outcome';
+    {
+      const { session, seal } = await openSession(root, sessionId);
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await outcomes.admit(admission('call-a'));
+      await outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: {
+          executionStatus: 'success',
+          responseParts: [{ type: 'text', text: 'the answer' }],
+        },
+      });
+      await seal();
+      // The outcome blob is lost after the close — truncated, rotated away.
+      const outcomesDir = path.join(
+        root,
+        'runtime',
+        'resources',
+        sessionId,
+        'managed-tool-outcome',
+      );
+      let blanked = 0;
+      for (const file of await fs.readdir(outcomesDir)) {
+        if (file.startsWith('.')) continue;
+        await fs.writeFile(path.join(outcomesDir, file), Buffer.alloc(0));
+        blanked += 1;
+      }
+      expect(blanked).toBeGreaterThan(0);
+    }
+
+    const { session: restored } = await openSession(root, sessionId);
+    try {
+      // The record the model's history needs exists either way: without it
+      // the assistant's functionCall pairs with nothing, and the provider
+      // rejects the next request as malformed with no gate left to say why.
+      await expect(
+        new LocalManagedRuntimeOutcomes(restored).recoverCommittedReceipts(),
+      ).resolves.toBeUndefined();
+      const resultsRecorded = events(restored, 'message.committed').filter(
+        (event) => event.payload['role'] === 'tool_result',
+      );
+      expect(resultsRecorded).toHaveLength(1);
+      const body = await restored.resources.read(
+        resultsRecorded[0]!.payload['contentRef'] as never,
+      );
+      const record = JSON.parse(body.toString()) as {
+        message?: { parts?: Array<Record<string, unknown>> };
+        toolCallResult?: {
+          callId?: string;
+          status?: string;
+          error?: unknown;
+        };
+      };
+      expect(record.message?.parts?.[0]?.['functionResponse']).toMatchObject({
+        id: 'call-a',
+        name: 'read_file',
+        response: { error: expect.stringContaining('cannot be read') },
+      });
+      expect(record.toolCallResult?.callId).toBe('call-a');
+      expect(record.toolCallResult?.status).toBe('error');
+      expect(record.toolCallResult?.error).toBeDefined();
     } finally {
       await restored.close();
     }
@@ -943,6 +1167,99 @@ describe('restored runtime block', () => {
       expect(
         checkpoint.tools?.items.map((item) => item.executionCallId),
       ).toEqual(['call-b']);
+    } finally {
+      await restored.close();
+    }
+  });
+
+  it('reads no git branch when a restore has nothing to re-record', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    {
+      const { session, seal } = await openSession(root, 'session-nothing-lost');
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await outcomes.admit(admission('call-a'));
+      await outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: {
+          executionStatus: 'success',
+          responseParts: [{ type: 'text', text: 'the answer' }],
+        },
+      });
+      // The recorder's record landed before the close.
+      await session.sink.write({
+        ...session.authority.recordEnvelope,
+        uuid: 'recorded-result:call-a',
+        parentUuid: null,
+        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-a',
+                name: 'read_file',
+                response: { output: 'the answer' },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: 'call-a',
+          status: 'success',
+          responseParts: [{ text: 'the answer' }],
+        },
+      } as never);
+      await seal();
+    }
+
+    const { session: restored } = await openSession(
+      root,
+      'session-nothing-lost',
+    );
+    try {
+      vi.mocked(gitUtils.getGitBranch).mockClear();
+      vi.mocked(gitUtils.getCachedGitBranch).mockClear();
+      // Nothing to re-record: the blocking `git rev-parse` never runs. The
+      // branch annotates a record this restore writes, and it writes none.
+      await new LocalManagedRuntimeOutcomes(
+        restored,
+      ).recoverCommittedReceipts();
+      expect(gitUtils.getGitBranch).not.toHaveBeenCalled();
+      expect(gitUtils.getCachedGitBranch).not.toHaveBeenCalled();
+    } finally {
+      await restored.close();
+    }
+  });
+
+  it('reads no git branch on a blocked reopen with no receipts to repair', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+    roots.add(root);
+    {
+      const { session, seal } = await openSession(root, 'session-blocked-open');
+      const outcomes = new LocalManagedRuntimeOutcomes(session);
+      await outcomes.admit(admission('call-a'));
+      await seal();
+    }
+
+    const { session: restored } = await openSession(
+      root,
+      'session-blocked-open',
+    );
+    try {
+      vi.mocked(gitUtils.getGitBranch).mockClear();
+      vi.mocked(gitUtils.getCachedGitBranch).mockClear();
+      await new LocalManagedRuntimeOutcomes(
+        restored,
+      ).recoverCommittedReceipts();
+      expect(gitUtils.getGitBranch).not.toHaveBeenCalled();
+      expect(gitUtils.getCachedGitBranch).not.toHaveBeenCalled();
+      await expect(
+        unresolvedRuntimeWorkReason(restored.authority),
+      ).resolves.toContain('never settled');
     } finally {
       await restored.close();
     }

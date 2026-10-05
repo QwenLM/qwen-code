@@ -24,9 +24,9 @@ import { LocalExecutionEnvironment } from '@qwen-code/qwen-code-core/services/lo
 import {
   managedToolDigest,
   managedToolFailureMessage,
+  managedToolResponseParts,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
-import type { Part } from '@google/genai';
 import type { ToolResult } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { ToolErrorType } from '@qwen-code/qwen-code-core/tools/tool-error.js';
 import { promptIdContext } from '@qwen-code/qwen-code-core/utils/promptIdContext.js';
@@ -831,14 +831,7 @@ function refusalMessage(body: unknown): string {
 
 /** The tool result the host reports for a worker's settled payload. */
 export function toToolResult(payload: ManagedToolResultPayload): ToolResult {
-  // The worker marks text parts with a `type` that model parts do not have.
-  const parts = payload.responseParts.map((part): Part => {
-    const { type, ...rest } = part as { type?: unknown } & Record<
-      string,
-      unknown
-    >;
-    return (type === 'text' ? rest : part) as Part;
-  });
+  const parts = managedToolResponseParts(payload.responseParts);
   const text = parts
     .map((part) => (part as { text?: unknown }).text)
     .filter((value): value is string => typeof value === 'string')
@@ -919,6 +912,35 @@ export function createManagedRuntimeEnvironment(
         toolDefinition: prepared.toolDefinition(call.toolName),
         workerIncarnation: started.boot.runtimeIncarnation,
       });
+      // Every outcome this call reaches settles through the one guarded
+      // path. A settle that failed after its receipt committed left the
+      // durable proof the call took effect: what proves a call may never
+      // block, and the restore repair settles the checkpoint item from it on
+      // the next open. Only a settle whose receipt never landed is an unknown
+      // outcome, which blocks. The conversion covers the settle alone: a
+      // failure after the commit landed — shaping the result for the model —
+      // is an ordinary error, never this block.
+      const settleCall = async (
+        outcome: ManagedToolResultPayload,
+      ): Promise<void> => {
+        try {
+          // Settled before the model continues, then forgotten by the worker.
+          await outcomes.settle({
+            functionCallId: callId,
+            executionStatus: outcome.executionStatus,
+            payload: outcome,
+          });
+        } catch (error) {
+          if (outcomes.hasCommittedReceipt(callId)) return;
+          const blocked = new ManagedRuntimeOutcomeUnknownError(
+            'The durable settlement of a Runtime tool call failed.',
+            { cause: error },
+          );
+          config.blockManagedSession(blocked);
+          await worker.close().catch(() => undefined);
+          throw blocked;
+        }
+      };
       // Cancelled between the admission and the dispatch: the worker never
       // hears the call, so its outcome is known — cancelled — and settles
       // the same way, without contacting the worker. The payload carries the
@@ -934,11 +956,7 @@ export function createManagedRuntimeEnvironment(
             }),
           },
         };
-        await outcomes.settle({
-          functionCallId: callId,
-          executionStatus: payload.executionStatus,
-          payload,
-        });
+        await settleCall(payload);
         return toToolResult(payload);
       }
       const reference = worker.referenceFor(callId, params);
@@ -960,27 +978,7 @@ export function createManagedRuntimeEnvironment(
         }
         throw error;
       }
-      try {
-        // Settled before the model continues, then forgotten by the worker.
-        await outcomes.settle({
-          functionCallId: callId,
-          executionStatus: payload.executionStatus,
-          payload,
-        });
-      } catch (error) {
-        // A settled call whose durable settlement failed is as unknowable
-        // for the model as a lost outcome: block, never let it continue on
-        // a result nothing recorded. The conversion covers only the settle:
-        // a failure after the commit landed — shaping the result for the
-        // model — is an ordinary error, never this block.
-        const blocked = new ManagedRuntimeOutcomeUnknownError(
-          'The durable settlement of a Runtime tool call failed.',
-          { cause: error },
-        );
-        config.blockManagedSession(blocked);
-        await worker.close().catch(() => undefined);
-        throw blocked;
-      }
+      await settleCall(payload);
       // Fire-and-forget: the outcome is committed, and nothing in the turn
       // may wait on the worker hearing the receipt — a wedged boot or
       // worker must never hold a settled result back.

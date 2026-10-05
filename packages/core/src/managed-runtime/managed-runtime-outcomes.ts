@@ -19,7 +19,6 @@ import {
 } from './managed-harness-checkpoint.js';
 import type { ManagedSession } from './managed-session-assembly.js';
 import type { LocalManagedSessionAuthority } from './managed-session-authority.js';
-import type { Part } from '@google/genai';
 import type { ToolErrorType } from '../tools/tool-error.js';
 import {
   assertManagedSessionDurableRef,
@@ -28,12 +27,13 @@ import {
 import {
   managedToolDigest,
   managedToolFailureMessage,
+  managedToolResponseParts,
 } from '../tools/managed-tool-protocol.js';
 import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
 } from '../core/coreToolScheduler.js';
-import { getGitBranch } from '../utils/gitUtils.js';
+import { getCachedGitBranch } from '../utils/gitUtils.js';
 
 /** The tool protocol the local host dispatches over. */
 export const MANAGED_RUNTIME_TOOL_CAPABILITY_VERSION =
@@ -296,6 +296,22 @@ export class LocalManagedRuntimeOutcomes {
   }
 
   /**
+   * Whether the log carries this call's committed receipt: the durable proof
+   * the call took effect. A settle that failed after its receipt committed
+   * still left that proof behind, and what proves a call may never block —
+   * the restore repair settles the checkpoint item from it on the next open.
+   */
+  hasCommittedReceipt(executionCallId: string): boolean {
+    return this.session.authority
+      .eventsInSequenceRange(1, this.session.authority.committedSequence)
+      .some(
+        (event) =>
+          event.kind === 'tool.receipt' &&
+          event.payload['executionCallId'] === executionCallId,
+      );
+  }
+
+  /**
    * Below a restore, a crash may stand between a call's commits: the durable
    * outcome and receipt landed while the checkpoint item never settled, or
    * both settled while the recorded `tool_result` never landed. The receipts
@@ -431,11 +447,20 @@ export class LocalManagedRuntimeOutcomes {
       (item) => item.state === 'settled' && item.outcomeRef !== null,
     );
     const envelope = session.authority.recordEnvelope;
-    const gitBranch = getGitBranch(envelope.cwd);
+    // Read for a record this restore writes, never for the check itself:
+    // the lookup blocks on a `git rev-parse`, and a restore with nothing to
+    // re-record must not pay it.
+    let branch: string | undefined;
+    let branchRead = false;
+    const branchForRecord = () => {
+      if (!branchRead) {
+        branchRead = true;
+        branch = getCachedGitBranch(envelope.cwd);
+      }
+      return branch;
+    };
     for (const item of settled) {
       if (recorded.has(item.executionCallId)) continue;
-      // An outcome whose body no longer reads cannot become a record; the
-      // item is skipped rather than failing the open the gate classifies.
       const outcome = await session.resources
         .read(item.outcomeRef!)
         .then((bytes) => bytes.toString())
@@ -453,8 +478,16 @@ export class LocalManagedRuntimeOutcomes {
           }
         })
         .catch(() => undefined);
-      const result = outcome?.result;
-      if (result === undefined) continue;
+      // A settled outcome whose body no longer reads still owes the model
+      // its functionResponse: without one the projected history pairs the
+      // assistant's functionCall with nothing, and the provider rejects the
+      // next request as malformed with no gate left to say why.
+      const result = outcome?.result ?? {
+        executionStatus: 'error',
+        error: {
+          message: 'The tool call outcome cannot be read from the session log.',
+        },
+      };
       const executionStatus =
         typeof result.executionStatus === 'string'
           ? result.executionStatus
@@ -465,16 +498,15 @@ export class LocalManagedRuntimeOutcomes {
           : executionStatus === 'cancelled'
             ? 'cancelled'
             : 'error';
-      // The worker marks text parts with a `type` that model parts do not have.
-      const responseParts = (
-        Array.isArray(result.responseParts) ? result.responseParts : []
-      ).map((part): Part => {
-        const { type, ...rest } = part as { type?: unknown } & Record<
-          string,
-          unknown
-        >;
-        return (type === 'text' ? rest : part) as Part;
-      });
+      // A part that is not an object is dropped rather than failing the
+      // open: the durable body is already committed, and the live result
+      // path reports the same payload as an ordinary tool error.
+      const responseParts = managedToolResponseParts(
+        (Array.isArray(result.responseParts)
+          ? result.responseParts
+          : []
+        ).filter((part) => typeof part === 'object' && part !== null),
+      );
       // The message the live path would have reported, synthesized from the
       // same durable payload.
       const failureMessage =
@@ -503,6 +535,7 @@ export class LocalManagedRuntimeOutcomes {
       // The durable outcome is the recorded history: same tool_result shape
       // the recorder writes, idempotent by its deterministic id.
       const uuid = `recovered-tool-result:${item.executionCallId}`;
+      const gitBranch = branchForRecord();
       await session.sink.write({
         ...envelope,
         uuid,
