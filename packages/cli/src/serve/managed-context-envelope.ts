@@ -367,6 +367,7 @@ export class ManagedContextInstallations {
   async install(
     body: unknown,
     verify: (binding: ManagedContextBinding) => Promise<boolean>,
+    canRecord: () => boolean = () => true,
   ): Promise<ManagedContextOutcome<ManagedContextReceipt>> {
     const request = this.#read(body);
     if ('status' in request) {
@@ -376,11 +377,12 @@ export class ManagedContextInstallations {
     if (earlier) {
       return earlier;
     }
+    if (!canRecord()) return CONTEXT_UNAVAILABLE;
     const verified = await verify(request.binding);
     // Another installation may have been recorded during the verification.
     return (
       this.#match(request) ??
-      (verified ? this.#record(request) : CONTEXT_UNAVAILABLE)
+      (verified && canRecord() ? this.#record(request) : CONTEXT_UNAVAILABLE)
     );
   }
 

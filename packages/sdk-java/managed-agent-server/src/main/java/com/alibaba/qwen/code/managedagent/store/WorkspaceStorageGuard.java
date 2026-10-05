@@ -69,6 +69,7 @@ public class WorkspaceStorageGuard {
         if (!enabled) {
             return "disabled";
         }
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
         Path root = roots.get(new Storage(tenantId, storageId));
         if (root == null) {
             return "unconfigured";
@@ -136,6 +137,7 @@ public class WorkspaceStorageGuard {
     }
 
     public void verify(ContextBinding binding) {
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         if (!enabled) {
             return;
         }
@@ -143,6 +145,7 @@ public class WorkspaceStorageGuard {
     }
 
     void verifyLocked(ContextBinding binding) {
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         if (enabled) {
             verify(binding.getTenantId(), binding.getStorageId(), binding.getCwdRelative(), true);
         }
@@ -152,10 +155,13 @@ public class WorkspaceStorageGuard {
         if (!enabled || !validId(operationId)) {
             throw WorkspaceExecutionStore.unavailable();
         }
+        WorkspaceStorageKindGuard.requireFreshTransaction();
         Path root = root(tenantId, storageId);
         Identity identity = identity(root);
         String key = key(tenantId, storageId);
         Registration prepared = transaction.execute(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             jdbc.update("INSERT INTO managed_workspace_execution_lease"
                     + " (storage_key, tenant_id, storage_id) VALUES (?, ?, ?)"
                     + " ON DUPLICATE KEY UPDATE storage_key = storage_key",
@@ -182,7 +188,7 @@ public class WorkspaceStorageGuard {
                 jdbc.update("UPDATE managed_workspace_execution_lease SET tenant_id = ?, storage_id = ?,"
                         + " mount_operation_id = ?, mount_root = ?, mount_host_id = ?,"
                         + " mount_device = ?, mount_inode = ?, mount_birth_time = ?, mount_registration_id = ?"
-                        + " WHERE storage_key = ? AND mount_state = 'UNVERIFIED'",
+                        + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND mount_state = 'UNVERIFIED'",
                         tenantId, storageId, operationId, identity.root(), identity.hostId(),
                         identity.device(), identity.inode(), identity.birthTime(), registrationId, key);
                 return row(key, true);
@@ -206,6 +212,8 @@ public class WorkspaceStorageGuard {
         }
         publishMarker(root, marker);
         transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             Registration row = row(key, true);
             if (row == null || row.holderKey() != null || row.bindingId() != null
                     || row.runtimeGeneration() != null || row.runtimeSessionId() != null) {
@@ -224,7 +232,7 @@ public class WorkspaceStorageGuard {
             }
             int changed = jdbc.update("UPDATE managed_workspace_execution_lease"
                     + " SET mount_state = 'READY', mount_revision = mount_revision + 1,"
-                    + " mount_operation_id = NULL, mount_completed_operation_id = ? WHERE storage_key = ?"
+                    + " mount_operation_id = NULL, mount_completed_operation_id = ? WHERE storage_key = ? AND storage_kind = 'LOCAL' "
                     + " AND mount_state = 'UNVERIFIED' AND mount_operation_id = ?"
                     + " AND mount_revision = 0", operationId, key, operationId);
             if (changed != 1) {
@@ -238,6 +246,8 @@ public class WorkspaceStorageGuard {
             throw WorkspaceExecutionStore.unavailable();
         }
         transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             Registration current = row(key(tenantId, storageId), true);
             if (current != null && "FENCED".equals(current.state())
                     && tenantId.equals(current.tenantId()) && storageId.equals(current.storageId())
@@ -248,7 +258,7 @@ public class WorkspaceStorageGuard {
             int changed = jdbc.update("UPDATE managed_workspace_execution_lease"
                     + " SET mount_state = 'FENCED', mount_operation_id = ?,"
                     + " mount_completed_operation_id = NULL"
-                    + " WHERE storage_key = ? AND tenant_id = ? AND storage_id = ?"
+                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND tenant_id = ? AND storage_id = ?"
                     + " AND mount_state = 'READY' AND mount_revision = ?"
                     + " AND holder_key IS NULL AND binding_id IS NULL"
                     + " AND runtime_generation IS NULL AND runtime_session_id IS NULL",
@@ -266,6 +276,8 @@ public class WorkspaceStorageGuard {
         }
         Path root = root(tenantId, storageId);
         transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             Registration row = row(key(tenantId, storageId), true);
             if (row != null && "READY".equals(row.state())
                     && row.revision() == revision + 1 && row.operationId() == null
@@ -289,7 +301,7 @@ public class WorkspaceStorageGuard {
             int changed = jdbc.update("UPDATE managed_workspace_execution_lease"
                     + " SET mount_state = 'READY', mount_revision = mount_revision + 1,"
                     + " mount_operation_id = NULL, mount_completed_operation_id = ?"
-                    + " WHERE storage_key = ? AND mount_state = 'FENCED'"
+                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND mount_state = 'FENCED'"
                     + " AND mount_revision = ? AND mount_operation_id = ?",
                     operationId, key(tenantId, storageId), revision, operationId);
             if (changed != 1) {
@@ -328,7 +340,7 @@ public class WorkspaceStorageGuard {
                 + " mount_revision, mount_state, mount_operation_id, mount_root,"
                 + " mount_host_id, mount_device, mount_inode, mount_birth_time, mount_registration_id,"
                 + " mount_completed_operation_id"
-                + " FROM managed_workspace_execution_lease WHERE storage_key = ?"
+                + " FROM managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL'"
                 + (lock ? " FOR UPDATE" : ""), (result, index) -> new Registration(
                         result.getString("tenant_id"), result.getString("storage_id"),
                         result.getString("holder_key"), result.getString("binding_id"),
