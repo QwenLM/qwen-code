@@ -3087,15 +3087,16 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 400, 'invalid_event_cursor');
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-store');
+    // Disable proxy buffering (nginx): the keepalives below exist to put
+    // bytes on the wire during quiet phases, and a buffering intermediary
+    // would hold them until the client's idle watchdog aborts a healthy
+    // stream. The event-stream content type alone doesn't always reach
+    // the client through every proxy.
+    res.setHeader('X-Accel-Buffering', 'no');
     res.setHeader('X-Qwen-Event-Epoch', epoch);
     res.flushHeaders();
     let cursor = after;
     let busy = false;
-    const stop = (): void => {
-      clearInterval(timer);
-      if (!res.destroyed && !res.writableEnded) res.end();
-    };
-    session.streams.add(stop);
     // Seeded once per stream, then updated as deltas flow: a committed
     // message whose text streamed must not project a second chunk.
     const streamedDeltaIds = new Set(
@@ -3150,6 +3151,16 @@ export function registerHostedHarnessSessionRoutes(
       res.write(': keepalive\n\n');
     }, 15_000);
     keepaliveTimer.unref();
+    // stop funnels every teardown path — backpressure, pump failure,
+    // session close — through both timer clears; it is declared after
+    // the timers so it can clear them unconditionally, and the
+    // synchronous route body registers it before any path can fire.
+    const stop = (): void => {
+      clearInterval(timer);
+      clearInterval(keepaliveTimer);
+      if (!res.destroyed && !res.writableEnded) res.end();
+    };
+    session.streams.add(stop);
     res.on('close', () => {
       clearInterval(timer);
       clearInterval(keepaliveTimer);

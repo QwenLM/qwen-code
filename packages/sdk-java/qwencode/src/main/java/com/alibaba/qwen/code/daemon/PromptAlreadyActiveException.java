@@ -1,9 +1,12 @@
 package com.alibaba.qwen.code.daemon;
 
 /**
- * A second prompt identity met an already-active turn: either a local veto
- * (no status), or the Hosted Harness's definitive refusal on the wire, which
- * carries the HTTP status and the machine-readable refusal code.
+ * Thrown when the Hosted Harness definitively refuses a prompt submission
+ * with HTTP 409. The route's 409 vocabulary is wider than a turn conflict —
+ * see {@link #getCode()}, which is {@code null} when the response body
+ * carried no recognisable code. {@link DaemonSessionClient}'s local veto is
+ * the only producer that carries no status; {@link HostedHarnessClient}
+ * vetoes a second prompt identity with a bare {@link DaemonException}.
  */
 public final class PromptAlreadyActiveException extends DaemonException {
     private final int statusCode;

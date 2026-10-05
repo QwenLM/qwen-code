@@ -314,20 +314,31 @@ public final class HostedHarnessClient implements AutoCloseable {
                                 + response.getStatusCode());
             }
             if (response.getStatusCode() == 409) {
-                // The server definitively rejected this promptId, so no
-                // terminal event will ever reference it; retaining the
-                // marker here wedges the session client-side. On a
-                // same-identity retry the entry stays conservatively:
-                // several 409 reasons (the hook/mcp-busy codes above the
-                // route's promptId lookup) say nothing about whether the
-                // original admission reached the server at all.
-                if (ownsActivePrompt) {
+                // Narrow the release by refusal code, not by status class.
+                // hosted_prompt_recovery_required is answered from the
+                // route's hasAcceptedInput gate, so it proves this
+                // promptId already sits in the durable input log and the
+                // daemon still owes it a terminal event; releasing the
+                // marker would let a second prompt identity be admitted
+                // into a session with two unsettled inputs, which fails
+                // every recovery entrance closed. Every other 409 code is
+                // produced without admitting this submission
+                // (hosted_turn_active only after the same-identity replay
+                // branch already returned 202, the busy and closing codes
+                // above the route's promptId lookup), so a marker this
+                // call owns is released. On a same-identity retry the
+                // earlier entry stays either way: several 409 reasons say
+                // nothing about whether the original admission reached
+                // the server at all.
+                String code = refusalCode(response.getBody());
+                if (ownsActivePrompt
+                        && !"hosted_prompt_recovery_required".equals(code)) {
                     activePrompts.remove(session.getHarnessSessionId(),
                             candidate);
                 }
                 throw new PromptAlreadyActiveException(
                         "POST /session/:id/prompt", response.getStatusCode(),
-                        refusalCode(response.getBody()));
+                        code);
             }
             // A definitive non-409 refusal releases only the marker this
             // call owns: refusals produced before the route's promptId
@@ -500,7 +511,7 @@ public final class HostedHarnessClient implements AutoCloseable {
             HarnessEventStream stream = new HarnessEventStream(this, session,
                     response.body(), maximumSseFrameBytes, cursor,
                     eventEpoch);
-            streams.add(stream);
+            registerStream(stream);
             stream.startIdleWatchdog();
             return stream;
         } catch (RuntimeException e) {
@@ -742,6 +753,10 @@ public final class HostedHarnessClient implements AutoCloseable {
                 && event.belongsTo(active.promptId)) {
             activePrompts.remove(session.getHarnessSessionId(), active);
         }
+    }
+
+    void registerStream(HarnessEventStream stream) {
+        streams.add(stream);
     }
 
     void unregisterStream(HarnessEventStream stream) {

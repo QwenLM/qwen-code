@@ -65,7 +65,7 @@ Boot ID 是进程代际 fence，不是认证 secret 或公共标识。后续 Hos
 
 `qwen` Java SDK 为本协议提供 `HostedHarnessClient`。构造时完成 capability 协商，把对端发布的 capability digest 与配置的部署 digest 校验，并固定进程 boot ID；之后的每个请求自动携带协议与 boot ID fence，`hosted_harness_generation_mismatch` 以不可重试冲突而非可重试错误呈现。Session 的创建、加载、心跳、提交、事件流与取消都通过类型化请求对象进行，提交轮次携带预先计算的 payload digest，事件流复用 daemon SSE 读取器并支持续传游标。`HostedHarnessClientTest` 在 stub HTTP 服务器上验证协商、fence、流式与错误映射；`ManagedHostedRuntimeE2ETest` 以 `QWEN_MANAGED_HOSTED_E2E_BASE_URL` 为开关，验证真实 hosted profile。
 
-payload digest 是跨语言的线上契约，而非实现细节：它是 prompt 内容规范形式的 `sha256:<64 位小写十六进制>`（对象键递归排序、数组顺序保持；客户端作为线上 `prompt` 发出的正是该规范形式），服务端会把解析后的 `prompt` 成员按 JavaScript `JSON.stringify` 的语义重新序列化（紧凑分隔符、非 ASCII 字符保持字面形式）并对这些字节取哈希，从而重算出完全相同的值——任何语言的客户端都必须以该形式发出这个成员并对这些字节取哈希。因此更改 digest 算法即更改每个已持久化的轮次身份：改变取值的升级必须先排空（或重写）携带旧 digest 的在途 turn 行，再由新客户端恢复它们。事件流还保留 daemon 传输的静默上界——45 秒空闲看门狗，可通过 `Builder.sseIdleTimeout` 配置与关闭；它度量的是消费者停在 `next()` 内期间的对端静默，两次调用之间的时间绝不计入；看门狗每半个预算检查一次，因此空闲中止发生在所配置预算的 1 倍到 1.5 倍之间（默认 45–67.5 秒），任何外层监督时限都应高于该上限——且 hosted 事件路由每 15 秒写一次 keepalive 注释，使健康但静默的流（长工具调用、审批等待）不触发该上界，因此自定义空闲上界应明显高于该间隔。
+payload digest 是跨语言的线上契约，而非实现细节：它是 prompt 内容规范形式的 `sha256:<64 位小写十六进制>`（对象键递归排序、数组顺序保持；客户端作为线上 `prompt` 发出的正是该规范形式），服务端会把解析后的 `prompt` 成员按 JavaScript `JSON.stringify` 的语义重新序列化（紧凑分隔符、非 ASCII 字符保持字面形式）并对这些字节取哈希，从而重算出完全相同的值——任何语言的客户端都必须以该形式发出这个成员并对这些字节取哈希。因此更改 digest 算法即更改每个已持久化的轮次身份：改变取值的升级必须先排空（或重写）携带旧 digest 的在途 turn 行，再由新客户端恢复它们。事件流还保留 daemon 传输的静默上界——45 秒空闲看门狗，可通过 `Builder.sseIdleTimeout` 配置与关闭；它度量的是消费者停在 `next()` 内期间的对端静默，两次调用之间的时间绝不计入；看门狗每半个预算检查一次，但频率不高于每 100 ms 一次，因此空闲中止发生在所配置预算与预算加 max(100 ms，半个预算) 之间（默认 45–67.5 秒），任何外层监督时限都应高于该上限——且 hosted 事件路由每 15 秒写一次 keepalive 注释，使健康但静默的流（长工具调用、审批等待）不触发该上界，因此自定义空闲上界应明显高于该间隔。
 
 ## 验证
 

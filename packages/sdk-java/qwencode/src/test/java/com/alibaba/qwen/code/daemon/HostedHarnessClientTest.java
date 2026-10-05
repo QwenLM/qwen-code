@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -848,6 +849,57 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void aRecoveryRequiredRefusalKeepsTheOwnedMarker() {
+        // R4-1: hosted_prompt_recovery_required is answered from the
+        // route's hasAcceptedInput gate, so it fires precisely because
+        // this promptId already sits in the durable input log and the
+        // daemon still owes it a terminal event. Releasing the marker
+        // here would let a second prompt identity be admitted into a
+        // session with two unsettled inputs, which fails every recovery
+        // entrance closed permanently; the marker must stay until a
+        // terminal event or a status read clears it.
+        createSessionRoute();
+        AtomicInteger promptCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> sendSessionJson(exchange, 409,
+                        "{\"code\":\"hosted_prompt_recovery_required\"}"));
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "recovery-required");
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            PromptAlreadyActiveException refusal = assertThrows(
+                    PromptAlreadyActiveException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build()));
+            assertEquals(409, refusal.getStatusCode());
+            assertEquals("hosted_prompt_recovery_required",
+                    refusal.getCode());
+            // The retained marker still owns the session: a different
+            // identity is vetoed locally and never reaches the wire.
+            DaemonException veto = assertThrows(DaemonException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(SECOND_PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build()));
+            assertEquals("Hosted Harness session already has a running turn",
+                    veto.getMessage());
+        }
+
+        assertEquals(1, promptCalls.get());
+    }
+
+    @Test
     void anUnfencedDefinitiveRefusalKeepsTheRetainedEntry() {
         // F2: an outcome-unknown first attempt retains the slot so the
         // same identity can retry. A definitive refusal produced before
@@ -1136,6 +1188,62 @@ class HostedHarnessClientTest {
             answerPrompt.countDown();
             client.close();
         }
+    }
+
+    @Test
+    void aSettledStatusReadClearsTheRegisteredMarker() {
+        // R4-7: the positive control for the observedSettled gate. A status
+        // answer evaluated after the owning submission settled describes a
+        // server that holds no active prompt, so it may clear the marker —
+        // the only recovery path for a retained outcome-unknown entry. The
+        // settled submission fully returns before the status read starts,
+        // so the read snapshots the same ActivePrompt instance the map
+        // holds (ActivePrompt has no equals/hashCode; remove(key, value)
+        // matches only the identical instance).
+        createSessionRoute();
+        AtomicInteger promptCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    String promptId = promptCalls.incrementAndGet() == 1
+                            ? PROMPT_ID : SECOND_PROMPT_ID;
+                    sendSessionJson(exchange, 202,
+                            "{\"promptId\":\"" + promptId
+                                    + "\",\"lastEventId\":0,"
+                                    + "\"eventEpoch\":\""
+                                    + EVENT_EPOCH + "\"}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/status",
+                exchange -> sendSessionJson(exchange, 200,
+                        "{\"sessionId\":\"" + SESSION_ID
+                                + "\",\"hasActivePrompt\":false}"));
+        Map<String, Object> block = Map.of(
+                "type", "text", "text", "status-clears");
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertNotNull(client.submitTurn(SubmitHarnessTurn.builder()
+                    .session(session)
+                    .promptId(PROMPT_ID)
+                    .addContent(block)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(
+                            List.of(block)))
+                    .build()));
+            assertFalse(client.getStatus(session).hasActivePrompt());
+            // The cleared marker must not veto a different identity: the
+            // second submission is admitted and reaches the wire.
+            PromptReceipt receipt = client.submitTurn(
+                    SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(SECOND_PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build());
+            assertEquals(SECOND_PROMPT_ID, receipt.getPromptId());
+        }
+
+        assertEquals(2, promptCalls.get());
     }
 
     // Issue #13320: a load refused fail-closed with a machine-readable code
@@ -1536,16 +1644,7 @@ class HostedHarnessClientTest {
         CountDownLatch release = new CountDownLatch(1);
         server.createContext("/session/" + SESSION_ID + "/events",
                 exchange -> {
-                    exchange.getResponseHeaders().set("Content-Type",
-                            "text/event-stream");
-                    exchange.getResponseHeaders().set("Content-Encoding",
-                            "identity");
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.EVENT_EPOCH_HEADER,
-                            EVENT_EPOCH);
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-                    exchange.sendResponseHeaders(200, 0);
+                    sendSseHeaders(exchange);
                     exchange.getResponseBody().flush();
                     headersSent.countDown();
                     try {
@@ -1599,16 +1698,7 @@ class HostedHarnessClientTest {
         CountDownLatch release = new CountDownLatch(1);
         server.createContext("/session/" + SESSION_ID + "/events",
                 exchange -> {
-                    exchange.getResponseHeaders().set("Content-Type",
-                            "text/event-stream");
-                    exchange.getResponseHeaders().set("Content-Encoding",
-                            "identity");
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.EVENT_EPOCH_HEADER,
-                            EVENT_EPOCH);
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-                    exchange.sendResponseHeaders(200, 0);
+                    sendSseHeaders(exchange);
                     exchange.getResponseBody().write(terminalEvent(1,
                             PROMPT_ID).getBytes(StandardCharsets.UTF_8));
                     exchange.getResponseBody().flush();
@@ -1700,16 +1790,7 @@ class HostedHarnessClientTest {
         CountDownLatch stallOver = new CountDownLatch(1);
         server.createContext("/session/" + SESSION_ID + "/events",
                 exchange -> {
-                    exchange.getResponseHeaders().set("Content-Type",
-                            "text/event-stream");
-                    exchange.getResponseHeaders().set("Content-Encoding",
-                            "identity");
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.EVENT_EPOCH_HEADER,
-                            EVENT_EPOCH);
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-                    exchange.sendResponseHeaders(200, 0);
+                    sendSseHeaders(exchange);
                     exchange.getResponseBody().write(terminalEvent(1,
                             PROMPT_ID).getBytes(StandardCharsets.UTF_8));
                     exchange.getResponseBody().flush();
@@ -1786,16 +1867,7 @@ class HostedHarnessClientTest {
         CountDownLatch stopKeepalives = new CountDownLatch(1);
         server.createContext("/session/" + SESSION_ID + "/events",
                 exchange -> {
-                    exchange.getResponseHeaders().set("Content-Type",
-                            "text/event-stream");
-                    exchange.getResponseHeaders().set("Content-Encoding",
-                            "identity");
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.EVENT_EPOCH_HEADER,
-                            EVENT_EPOCH);
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-                    exchange.sendResponseHeaders(200, 0);
+                    sendSseHeaders(exchange);
                     exchange.getResponseBody().flush();
                     try {
                         // The handler thread must own the keepalive loop:
@@ -1832,6 +1904,11 @@ class HostedHarnessClientTest {
                             .session(session)
                             .eventEpoch(EVENT_EPOCH)
                             .build())) {
+                // Positive control for the disable case below: the
+                // watchdog must be sitting in the live pool's delay queue
+                // (read before any shutdown, where shutdownNow would
+                // already have removed it).
+                assertTrue(client.scheduler().getQueue().size() > 0);
                 // Consumer parked in read for three idle budgets while the
                 // peer proves liveness only with keepalive comments: the
                 // refills stamp the budget, so the stream must survive.
@@ -1864,16 +1941,7 @@ class HostedHarnessClientTest {
         CountDownLatch release = new CountDownLatch(1);
         server.createContext("/session/" + SESSION_ID + "/events",
                 exchange -> {
-                    exchange.getResponseHeaders().set("Content-Type",
-                            "text/event-stream");
-                    exchange.getResponseHeaders().set("Content-Encoding",
-                            "identity");
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.EVENT_EPOCH_HEADER,
-                            EVENT_EPOCH);
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-                    exchange.sendResponseHeaders(200, 0);
+                    sendSseHeaders(exchange);
                     exchange.getResponseBody().flush();
                     try {
                         release.await(15, TimeUnit.SECONDS);
@@ -1900,6 +1968,10 @@ class HostedHarnessClientTest {
                             .session(session)
                             .eventEpoch(EVENT_EPOCH)
                             .build())) {
+                // The disable sentinel must leave nothing scheduled on the
+                // client's scheduler; a refactor normalizing ZERO to the
+                // 45-second default would park its watchdog in this queue.
+                assertEquals(0, client.scheduler().getQueue().size());
                 ExecutorService consumer =
                         Executors.newSingleThreadExecutor();
                 try {
@@ -1935,16 +2007,7 @@ class HostedHarnessClientTest {
         CountDownLatch release = new CountDownLatch(1);
         server.createContext("/session/" + SESSION_ID + "/events",
                 exchange -> {
-                    exchange.getResponseHeaders().set("Content-Type",
-                            "text/event-stream");
-                    exchange.getResponseHeaders().set("Content-Encoding",
-                            "identity");
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.EVENT_EPOCH_HEADER,
-                            EVENT_EPOCH);
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-                    exchange.sendResponseHeaders(200, 0);
+                    sendSseHeaders(exchange);
                     exchange.getResponseBody().flush();
                     try {
                         release.await(15, TimeUnit.SECONDS);
@@ -1980,6 +2043,43 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void aFailedStreamCloseStillUnregistersTheStream() {
+        // R4-5: close() rethrows a failed input.close() (a socket reset
+        // while the daemon dies mid-turn) as DaemonTransportException; the
+        // registration must still be dropped from the finally, or the
+        // stranded entry keeps its growable frame buffer for the client's
+        // lifetime and is re-closed from the client.close() snapshot on
+        // every shutdown.
+        createSessionRoute();
+        InputStream failingOnClose = new InputStream() {
+            @Override
+            public int read() {
+                return -1;
+            }
+
+            @Override
+            public void close() throws IOException {
+                throw new IOException("reset by peer");
+            }
+        };
+
+        HostedHarnessClient client = newClient();
+        try {
+            HarnessSessionRef session = createSession(client);
+            HarnessEventStream stream = new HarnessEventStream(client,
+                    session, failingOnClose, 1024, 0, EVENT_EPOCH);
+            client.registerStream(stream);
+            assertEquals(1, client.registeredStreamCount());
+            DaemonTransportException failure = assertThrows(
+                    DaemonTransportException.class, stream::close);
+            assertTrue(failure.getCause() instanceof IOException);
+            assertEquals(0, client.registeredStreamCount());
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
     void aQueuedReaderSeesTheClosedSignal() throws Exception {
         // A caller already queued on cursorLock when the stream closes must
         // get the closed-stream signal, not a transport error from reading
@@ -1989,16 +2089,7 @@ class HostedHarnessClientTest {
         CountDownLatch release = new CountDownLatch(1);
         server.createContext("/session/" + SESSION_ID + "/events",
                 exchange -> {
-                    exchange.getResponseHeaders().set("Content-Type",
-                            "text/event-stream");
-                    exchange.getResponseHeaders().set("Content-Encoding",
-                            "identity");
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.EVENT_EPOCH_HEADER,
-                            EVENT_EPOCH);
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-                    exchange.sendResponseHeaders(200, 0);
+                    sendSseHeaders(exchange);
                     exchange.getResponseBody().flush();
                     headersSent.countDown();
                     try {
@@ -2628,6 +2719,22 @@ class HostedHarnessClientTest {
         exchange.getResponseHeaders().set("Connection", "close");
         exchange.sendResponseHeaders(204, -1);
         exchange.close();
+    }
+
+    // Header-only SSE prelude for the streaming fixtures: the zero content
+    // length keeps the response chunked and the exchange stays open so the
+    // handler can keep writing frames, which is why the fixed-length
+    // sendSse below cannot host this.
+    private static void sendSseHeaders(HttpExchange exchange)
+            throws IOException {
+        exchange.getResponseHeaders().set("Content-Type",
+                "text/event-stream");
+        exchange.getResponseHeaders().set("Content-Encoding", "identity");
+        exchange.getResponseHeaders().set(
+                HostedHarnessClient.EVENT_EPOCH_HEADER, EVENT_EPOCH);
+        exchange.getResponseHeaders().set(
+                HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+        exchange.sendResponseHeaders(200, 0);
     }
 
     private static void sendSse(HttpExchange exchange, String body,
