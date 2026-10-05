@@ -92,6 +92,28 @@ export class ManagedChildRunProcess {
     this.settled = true;
     return this.evidence;
   }
+
+  /**
+   * The natural-end twin of `terminate`: the root's exit is evidence only
+   * once the unit proves empty — a `setsid` daemon that outlives its
+   * launcher is still running, never an exit. Waits for membership to drain
+   * (a stop from another owner wins the same wait), then removes the unit
+   * and answers the exit evidence; `null` means nothing proved and the
+   * caller keeps the hold rather than settling over live members.
+   */
+  async settleOnEmpty(): Promise<ChildRunExitEvidence | null> {
+    if (this.settled) return this.evidence;
+    if (!this.exited) return null;
+    await this.unit.waitForEmpty(
+      Number.MAX_SAFE_INTEGER / 2,
+      () => this.settled,
+    );
+    if (this.settled) return this.evidence;
+    if (!this.unit.empty()) return null;
+    this.unit.remove();
+    this.settled = true;
+    return this.evidence;
+  }
 }
 
 export class ManagedChildRunSupervisor {

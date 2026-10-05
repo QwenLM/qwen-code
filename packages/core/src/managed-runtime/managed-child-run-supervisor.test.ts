@@ -251,6 +251,116 @@ describe.skipIf(process.platform === 'win32')(
       expect(removed.value).toBe(true);
     });
 
+    it('settles a natural end only once the unit proves empty', async () => {
+      const { unit, removed } = await fakeUnit('qwen-bg-natural');
+      vi.spyOn(HookCommandCgroup, 'create').mockReturnValue(unit);
+      const supervisor = ManagedChildRunSupervisor.create({
+        cgroupRoot: '/root',
+      });
+      const proc = await supervisor.start(
+        {
+          unitName: 'qwen-bg-natural',
+          executable: '/bin/sh',
+          args: ['-c', 'true'],
+          env: { PATH: '/bin:/usr/bin' },
+          cwd: directory,
+          onOutput: () => undefined,
+        },
+        { prove: async () => true },
+      );
+      await writeFile(
+        join(directory, 'qwen-bg-natural', 'cgroup.events'),
+        'populated 1\n',
+      );
+      await new Promise((resolve) => proc.child.once('exit', resolve));
+      expect(proc.evidence).toEqual({ exitCode: 0, exitSignal: null });
+      const settling = proc.settleOnEmpty();
+      // The root exited, but membership still proves life: the end answers
+      // nothing yet — the root's exit alone is never evidence.
+      const early = await Promise.race([
+        settling.then(() => 'answered'),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('held'), 300),
+        ),
+      ]);
+      expect(early).toBe('held');
+      expect(removed.value).toBe(false);
+      await writeFile(
+        join(directory, 'qwen-bg-natural', 'cgroup.events'),
+        'populated 0\n',
+      );
+      await expect(settling).resolves.toEqual({
+        exitCode: 0,
+        exitSignal: null,
+      });
+      expect(removed.value).toBe(true);
+    });
+
+    it('answers a natural end a drain already settled with the same evidence', async () => {
+      const { unit, removed } = await fakeUnit('qwen-bg-race');
+      vi.spyOn(HookCommandCgroup, 'create').mockReturnValue(unit);
+      await writeFile(join(directory, 'qwen-bg-race', 'cgroup.procs'), '\n');
+      const supervisor = ManagedChildRunSupervisor.create({
+        cgroupRoot: '/root',
+      });
+      const proc = await supervisor.start(
+        {
+          unitName: 'qwen-bg-race',
+          executable: '/bin/sh',
+          args: ['-c', 'true'],
+          env: { PATH: '/bin:/usr/bin' },
+          cwd: directory,
+          onOutput: () => undefined,
+        },
+        { prove: async () => true },
+      );
+      await writeFile(
+        join(directory, 'qwen-bg-race', 'cgroup.events'),
+        'populated 1\n',
+      );
+      await new Promise((resolve) => proc.child.once('exit', resolve));
+      const settling = proc.settleOnEmpty();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      // The drain drives the unit empty; both its settle and this one must
+      // converge on the same evidence, never on two different ends.
+      await writeFile(
+        join(directory, 'qwen-bg-race', 'cgroup.events'),
+        'populated 0\n',
+      );
+      const drained = proc.terminate(100);
+      await expect(drained).resolves.toEqual({
+        exitCode: 0,
+        exitSignal: null,
+      });
+      await expect(settling).resolves.toEqual({
+        exitCode: 0,
+        exitSignal: null,
+      });
+      expect(removed.value).toBe(true);
+    });
+
+    it('answers null for a natural end the root never produced', async () => {
+      const { unit } = await fakeUnit('qwen-bg-live');
+      vi.spyOn(HookCommandCgroup, 'create').mockReturnValue(unit);
+      const supervisor = ManagedChildRunSupervisor.create({
+        cgroupRoot: '/root',
+      });
+      const proc = await supervisor.start(
+        {
+          unitName: 'qwen-bg-live',
+          executable: '/bin/sh',
+          args: ['-c', 'sleep 30'],
+          env: { PATH: '/bin:/usr/bin' },
+          cwd: directory,
+          onOutput: () => undefined,
+        },
+        { prove: async () => true },
+      );
+      await expect(proc.settleOnEmpty()).resolves.toBeNull();
+      proc.child.kill('SIGKILL');
+      await new Promise((resolve) => proc.child.once('exit', resolve));
+    });
+
     it('forwards attachment with its root only', () => {
       const attached = { present: true };
       const attach = vi

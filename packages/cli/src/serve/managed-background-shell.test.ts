@@ -86,6 +86,9 @@ function fakeProcess(unitName: string): ManagedChildRunProcess {
       if (evidence === null) child.emitExit(null, 'SIGTERM');
       return evidence;
     },
+    async settleOnEmpty(): Promise<ChildRunExitEvidence | null> {
+      return evidence;
+    },
   };
   return process as unknown as ManagedChildRunProcess;
 }
