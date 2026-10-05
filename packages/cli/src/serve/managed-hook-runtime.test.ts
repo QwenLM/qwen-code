@@ -1179,6 +1179,75 @@ describe('ManagedHookRuntime', () => {
     await instance.close();
   });
 
+  it('clears an abandoned-evaluation fence once the module finishes loading', async () => {
+    const modulePath = path.join(directory, 'cold-cancel-handler.mjs');
+    await writeFile(
+      modulePath,
+      `import { appendFileSync } from 'node:fs';
+       await new Promise((resolve) => setTimeout(resolve, 300));
+       export const registered = { handlerRevision: 1, callback: async (input) => {
+         appendFileSync(input.cwd + '/counter', 'ran\\n');
+         return { continue: true };
+       } };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 60_000 },
+        handler: {
+          handlerId: 'cold',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    await vi.waitFor(async () => {
+      const view = await instance.control('runtime-session', {
+        kind: 'hook-status',
+        sessionKey: key,
+        operationId: 'probe',
+        targetOperationId: call.operationId,
+      });
+      expect(view.state).toBe('running');
+    });
+    await instance.control('runtime-session', {
+      kind: 'hook-cancel',
+      sessionKey: key,
+      operationId: 'cancel',
+      targetOperationId: call.operationId,
+    });
+    // The cancel lands while the module is still evaluating, so the receipt is
+    // fenced rather than certified, and the hold stays.
+    const fenced = await settled(instance);
+    expect(fenced).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_abandoned' },
+    });
+    expect(fenced.result).toBeUndefined();
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    // The fence is not terminal. Once the evaluation definitively ends the
+    // receipt republishes what is then provable — the callback never ran — so
+    // the Harness can reconcile the record instead of tombstoning the Session
+    // for the worker's lifetime.
+    await vi.waitFor(
+      async () => {
+        expect(await instance.control('runtime-session', call)).toMatchObject({
+          state: 'settled',
+          result: { outcome: 'cancelled' },
+        });
+      },
+      { timeout: 3000 },
+    );
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    await expect(
+      readFile(path.join(directory, 'counter'), 'utf8'),
+    ).rejects.toThrow();
+    await instance.close();
+  });
+
   it('keeps oversized output as a bounded failure receipt without replay', async () => {
     const modulePath = path.join(directory, 'large-handler.mjs');
     await writeFile(

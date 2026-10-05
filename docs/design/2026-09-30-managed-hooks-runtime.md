@@ -196,7 +196,14 @@ dedicated code `managed_hook_module_evaluation_timeout` and an evaluation
 abandoned by a cancel or shutdown with
 `managed_hook_module_evaluation_abandoned`, and the Harness fences both as
 outcome_unknown rather than claiming not_started_proven — or committing a
-definite cancellation — for code that may still be running. A module whose
+definite cancellation — for code that may still be running. That fence is not
+terminal. Once the evaluation definitively ends, the Runtime republishes the
+receipt with what is then provable — a cancelled result when the module loaded,
+since the callback demonstrably never dispatched, or
+`managed_hook_handler_unavailable` when the module itself failed — so the next
+status or drain reconciles the record and the Session stays usable and
+deletable. Only an evaluation that never ends keeps the fence, and with it the
+recovery barrier, for the worker's lifetime. A module whose
 evaluation fails settles as
 `managed_hook_handler_unavailable`, which the Harness records as
 not_started_proven — whether it was rejected before any top-level statement ran,

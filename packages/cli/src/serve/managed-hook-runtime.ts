@@ -118,14 +118,40 @@ function importHookModule(
     import(pathToFileURL(modulePath).href).then(
       (module) => {
         entry.moduleEvaluationPending = false;
+        settleAbandoned(entry, {
+          state: 'settled',
+          result: { success: false, outcome: 'cancelled', duration: 0 },
+        });
         finish(undefined, module as Record<string, unknown>);
       },
       (error: unknown) => {
         entry.moduleEvaluationPending = false;
+        settleAbandoned(entry, {
+          state: 'settled',
+          error: { code: 'managed_hook_handler_unavailable' },
+        });
         finish(error instanceof Error ? error : new Error(String(error)));
       },
     );
   });
+}
+
+/**
+ * The abandonment fence is not terminal. Once the evaluation definitively
+ * ends, republish the receipt so the Harness can reconcile the record: a
+ * module that loaded proves the callback never ran, and a module that failed
+ * is genuinely unavailable. Without this transition a cancel that merely raced
+ * a healthy cold import leaves the Session fenced for the worker's lifetime.
+ * Publishing happens only after `moduleEvaluationPending` clears, so no
+ * receipt is certified while top-level code is still running.
+ */
+function settleAbandoned(
+  entry: Operation,
+  view: Omit<ManagedHookOperationView, 'operationId'>,
+): void {
+  if (entry.view.error?.code !== 'managed_hook_module_evaluation_abandoned')
+    return;
+  entry.view = { operationId: entry.view.operationId, ...view };
 }
 
 const identifier = /^[a-zA-Z0-9:_.-]{1,512}$/u;
