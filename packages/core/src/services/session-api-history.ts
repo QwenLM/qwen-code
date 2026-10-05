@@ -5,7 +5,7 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import { isTurnResultRecordPayload } from './chatRecordingService.js';
+import { isTurnResultRecordPayload } from './turn-result-record.js';
 import { isApiUserPrompt } from './api-user-prompt.js';
 import { effectiveHistoryEnd } from '../core/turn-interruption.js';
 import type {
