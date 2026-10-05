@@ -148,37 +148,81 @@ export async function removeAgentHost(
       },
     );
     if (agentsChanged) await transaction.writeAgents(agents);
-    let runsEnded = 0;
-    const now = Date.now();
-    for (const thread of (await transaction.listThreads()).threads) {
-      for (const run of thread.runs) {
-        if (
-          run.lease?.hostId !== hostId ||
-          (run.status !== 'running' &&
-            run.status !== 'finishing' &&
-            run.status !== 'cancelling')
-        ) {
-          continue;
-        }
-        runsEnded += 1;
-        await finishRunInTransaction(transaction, {
-          threadId: thread.id,
-          runId: run.id,
-          outcome:
-            run.status === 'finishing'
-              ? { status: 'completed', attempt: run.attempts }
-              : {
-                  status: 'failed',
-                  attempt: run.attempts,
-                  error: AGENT_HOST_REMOVED,
-                  failureStage: 'host',
-                },
-          now,
-        });
-      }
-    }
+    const runsEnded = await finishAgentHostRunsInTransaction(
+      transaction,
+      hostId,
+    );
     return { removed: true as const, agentsMadeLocal, runsEnded };
   });
+}
+
+export async function replaceAgentHostInTransaction(
+  transaction: AgentStoreTransaction,
+  oldHostId: string,
+  newHostId: string,
+): Promise<void> {
+  const agents = await transaction.readAgents();
+  if (
+    agents.some(
+      (agent) =>
+        agent.execution?.mode === 'managed-host' &&
+        agent.execution.hostIds.includes(oldHostId),
+    )
+  ) {
+    await transaction.writeAgents(
+      agents.map((agent): WorkspaceAgent => {
+        const execution = agent.execution;
+        if (
+          execution?.mode !== 'managed-host' ||
+          !execution.hostIds.includes(oldHostId)
+        )
+          return agent;
+        const hostIds = [
+          ...new Set(
+            execution.hostIds.map((id) => (id === oldHostId ? newHostId : id)),
+          ),
+        ];
+        return { ...agent, execution: { ...execution, hostIds } };
+      }),
+    );
+  }
+  await finishAgentHostRunsInTransaction(transaction, oldHostId);
+}
+
+async function finishAgentHostRunsInTransaction(
+  transaction: AgentStoreTransaction,
+  hostId: string,
+): Promise<number> {
+  let runsEnded = 0;
+  const now = Date.now();
+  for (const thread of (await transaction.listThreads()).threads) {
+    for (const run of thread.runs) {
+      if (
+        run.lease?.hostId !== hostId ||
+        (run.status !== 'running' &&
+          run.status !== 'finishing' &&
+          run.status !== 'cancelling')
+      ) {
+        continue;
+      }
+      runsEnded += 1;
+      await finishRunInTransaction(transaction, {
+        threadId: thread.id,
+        runId: run.id,
+        outcome:
+          run.status === 'finishing'
+            ? { status: 'completed', attempt: run.attempts }
+            : {
+                status: 'failed',
+                attempt: run.attempts,
+                error: AGENT_HOST_REMOVED,
+                failureStage: 'host',
+              },
+        now,
+      });
+    }
+  }
+  return runsEnded;
 }
 
 export type LeaseRefusal =
