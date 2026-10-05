@@ -14,6 +14,20 @@ describe('resolveSessionDetailsCollisionBoundary', () => {
     expect(resolveSessionDetailsCollisionBoundary(sidebar)).toBe(webShellRoot);
   });
 
+  it('resolves an overview anchor inside a shell without an aside', () => {
+    const shell = document.createElement('div');
+    shell.dataset.webShellRoot = '';
+    const anchor = document.createElement('button');
+    shell.append(anchor);
+    expect(resolveSessionDetailsCollisionBoundary(anchor)).toBe(shell);
+  });
+
+  it('does not constrain standalone details to the trigger rectangle', () => {
+    expect(
+      resolveSessionDetailsCollisionBoundary(document.createElement('button')),
+    ).toBeNull();
+  });
+
   it('falls back to the sidebar when no WebShell root is present', () => {
     const sidebar = document.createElement('aside');
 

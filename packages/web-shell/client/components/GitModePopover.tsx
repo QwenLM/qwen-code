@@ -9,6 +9,12 @@ import { CircleDotIcon, GitBranchIcon, GitForkIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import styles from './GitModePopover.module.css';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './ui/tooltip';
 
 export type SessionGitIntent =
   | { mode: 'current' }
@@ -65,6 +71,7 @@ export function GitModePopover({
 }: GitModePopoverProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
+  const [tooltipOpen, setTooltipOpen] = useState(false);
   const [selectedMode, setSelectedMode] = useState<
     'current' | 'branch' | 'worktree'
   >(intent.mode);
@@ -82,6 +89,7 @@ export function GitModePopover({
   const handleOpenChange = useCallback(
     (v: boolean) => {
       setOpen(v);
+      setTooltipOpen(false);
       if (v) {
         setSelectedMode(intent.mode);
         setBranchName(intent.mode === 'branch' ? intent.name : '');
@@ -126,34 +134,45 @@ export function GitModePopover({
   return (
     <span className={styles.wrap}>
       <Popover open={open} onOpenChange={handleOpenChange}>
-        <PopoverTrigger asChild>
-          <button
-            type="button"
-            className={`${styles.chip} ${isBranch ? styles.chipBranch : ''} ${isWorktree ? styles.chipWorktree : ''} ${compact ? styles.chipCompact : ''}`}
-            data-web-shell-git-branch
-            data-testid="git-mode-chip"
-            aria-label={`${t('gitMode.title')}: ${chipLabel}`}
-          >
-            <span className={styles.chipIcon}>
-              {isWorktree ? (
-                <GitForkIcon size={14} strokeWidth={1.5} />
-              ) : (
-                <GitBranchIcon size={15} strokeWidth={1.5} />
-              )}
-            </span>
-            {!compact && <span className={styles.chipText}>{chipLabel}</span>}
-            <svg
-              className={`${styles.chevron} ${open ? styles.chevronOpen : ''}`}
-              viewBox="0 0 16 16"
-              fill="currentColor"
-              width={9}
-              height={9}
-              aria-hidden="true"
-            >
-              <path d="M4.427 7.427l3.396 3.396a.25.25 0 0 0 .354 0l3.396-3.396A.25.25 0 0 0 11.396 7H4.604a.25.25 0 0 0-.177.427Z" />
-            </svg>
-          </button>
-        </PopoverTrigger>
+        <TooltipProvider delayDuration={300}>
+          <Tooltip open={!open && tooltipOpen} onOpenChange={setTooltipOpen}>
+            <TooltipTrigger asChild>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  className={`${styles.chip} ${isBranch ? styles.chipBranch : ''} ${isWorktree ? styles.chipWorktree : ''} ${compact ? styles.chipCompact : ''}`}
+                  data-web-shell-git-branch
+                  data-testid="git-mode-chip"
+                  aria-label={`${t('gitMode.title')}: ${chipLabel}`}
+                >
+                  <span className={styles.chipIcon}>
+                    {isWorktree ? (
+                      <GitForkIcon size={14} strokeWidth={1.5} />
+                    ) : (
+                      <GitBranchIcon size={15} strokeWidth={1.5} />
+                    )}
+                  </span>
+                  {!compact && (
+                    <span className={styles.chipText}>{chipLabel}</span>
+                  )}
+                  <svg
+                    className={`${styles.chevron} ${open ? styles.chevronOpen : ''}`}
+                    viewBox="0 0 16 16"
+                    fill="currentColor"
+                    width={9}
+                    height={9}
+                    aria-hidden="true"
+                  >
+                    <path d="M4.427 7.427l3.396 3.396a.25.25 0 0 0 .354 0l3.396-3.396A.25.25 0 0 0 11.396 7H4.604a.25.25 0 0 0-.177.427Z" />
+                  </svg>
+                </button>
+              </PopoverTrigger>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="[overflow-wrap:anywhere]">
+              {isBranch ? intent.name : branch}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
         <PopoverContent
           ref={contentRef}
           side="top"

@@ -1473,7 +1473,7 @@ describe('BackgroundTasksDialog', () => {
     it('renders the Error block on failed status with a "+ Stopped because" verb', () => {
       // Dream failures need to surface — they are the user's only signal
       // that consolidation didn't happen as expected (success path
-      // already produces a memory_saved toast in useGeminiStream).
+      // already produces a memory_saved toast in useLlmStream).
       const h = setup([
         dreamEntry({
           status: 'failed',
@@ -1564,6 +1564,26 @@ describe('BackgroundTasksDialog', () => {
       expect(f).toContain('3.5k/10k tokens');
       expect(f).toContain('Plan');
       expect(f).toContain('3.5kt');
+    });
+
+    it('explains the large-workflow flag in the detail view', () => {
+      const wf = workflowEntry({
+        status: 'running',
+        sizeWarning: {
+          axis: 'agents' as const,
+          scheduledAgents: 40,
+          totalTokens: 0,
+          projectedTokens: 2_800_000,
+          agentCap: 15,
+          tokenCap: 1_500_000,
+          capFromGuideline: true,
+          at: 0,
+        },
+      });
+      const h = openWorkflowDetail([wf]);
+      const f = (h.lastFrame() ?? '').replace(/\s+/g, ' ');
+      expect(f).toContain('Large workflow:');
+      expect(f).toContain('40 agents scheduled');
     });
 
     it('renders plain spent (no cap) when uncapped and zero per-phase chips suppressed', () => {

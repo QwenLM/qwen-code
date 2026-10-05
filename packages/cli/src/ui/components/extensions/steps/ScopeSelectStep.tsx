@@ -6,10 +6,8 @@
 
 import { Box, Text } from 'ink';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
-import {
-  type Extension,
-  getExtensionDisplayName,
-} from '@qwen-code/qwen-code-core';
+import type { Extension } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
+import { getExtensionDisplayName } from '@qwen-code/qwen-code-core/extension/i18n.js';
 import { theme } from '../../../semantic-colors.js';
 import { t, getCurrentLanguage } from '../../../../i18n/index.js';
 
@@ -56,10 +54,16 @@ export function ScopeSelectStep({
   const title =
     mode === 'disable'
       ? t('Disable "{{name}}" - Select Scope', {
-          name: getExtensionDisplayName(selectedExtension, getCurrentLanguage()),
+          name: getExtensionDisplayName(
+            selectedExtension,
+            getCurrentLanguage(),
+          ),
         })
       : t('Enable "{{name}}" - Select Scope', {
-          name: getExtensionDisplayName(selectedExtension, getCurrentLanguage()),
+          name: getExtensionDisplayName(
+            selectedExtension,
+            getCurrentLanguage(),
+          ),
         });
 
   return (

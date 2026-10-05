@@ -1,17 +1,8 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { extractInlineScript, readIndexHtml } from './test/indexHtmlTestUtils';
 
 function extractMeasureScript(): string {
-  const html = readFileSync(resolve(__dirname, 'index.html'), 'utf8');
-  const script = Array.from(
-    html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g),
-  )
-    .map((match) => match[1] ?? '')
-    .find((source) => source.includes('performance.measure ='));
-
-  if (!script) throw new Error('Performance measure guard not found');
-  return script;
+  return extractInlineScript('performance.measure =');
 }
 
 function installMeasureGuard(
@@ -237,5 +228,139 @@ describe('React performance measure guard', () => {
 
     expect(() => install(undefined)).not.toThrow();
     expect(() => install({})).not.toThrow();
+  });
+});
+
+describe('brand pre-paint script', () => {
+  const BUILT_IN_TITLE = 'Qwen Code Web chat';
+  const BUILT_IN_ICON = 'data:image/svg+xml,BUILT-IN';
+
+  function runBrandScript(stored: string | null): {
+    title: string;
+    iconHref: string;
+  } {
+    const script = extractInlineScript('qwen-code-web-shell-brand');
+    const icon = { href: BUILT_IN_ICON };
+    const document = {
+      title: BUILT_IN_TITLE,
+      querySelector: (selector: string) =>
+        selector === 'link[rel="icon"]' ? icon : null,
+    };
+    const localStorage = {
+      getItem: (key: string) => {
+        // The inline script must ask for exactly this key — a drift between
+        // index.html's literal and main.tsx's BRAND_STORAGE_KEY silently
+        // disables the pre-paint cache, and an argument-ignoring stub would
+        // never catch it.
+        if (key !== 'qwen-code-web-shell-brand') return null;
+        return stored;
+      },
+    };
+    Function('localStorage', 'document', script)(localStorage, document);
+    return { title: document.title, iconHref: icon.href };
+  }
+
+  it('applies a cached title and logo before first paint', () => {
+    const result = runBrandScript(
+      JSON.stringify({
+        title: 'QiuQiu Code Web chat',
+        logo: 'data:image/svg+xml,CACHED',
+      }),
+    );
+
+    expect(result.title).toBe('QiuQiu Code Web chat');
+    expect(result.iconHref).toBe('data:image/svg+xml,CACHED');
+  });
+
+  it('applies the title alone when the cache holds no logo', () => {
+    const result = runBrandScript(
+      JSON.stringify({ title: 'QiuQiu Code Web chat' }),
+    );
+
+    expect(result.title).toBe('QiuQiu Code Web chat');
+    expect(result.iconHref).toBe(BUILT_IN_ICON);
+  });
+
+  it('leaves the built-in title and logo alone on a first-ever load', () => {
+    expect(runBrandScript(null)).toEqual({
+      title: BUILT_IN_TITLE,
+      iconHref: BUILT_IN_ICON,
+    });
+  });
+
+  it('leaves the built-in title and logo alone when the cache is corrupt', () => {
+    expect(runBrandScript('{not json')).toEqual({
+      title: BUILT_IN_TITLE,
+      iconHref: BUILT_IN_ICON,
+    });
+  });
+});
+
+describe('built-in brand document contract', () => {
+  // A deployment that configures no brand must get exactly the shell it got
+  // before branding was configurable. These two literals are what the
+  // pre-paint script and main.tsx fall back to, so they are pinned here rather
+  // than left to a visual diff.
+  it('ships the built-in document title', () => {
+    expect(readIndexHtml()).toContain('<title>Qwen Code Web chat</title>');
+  });
+
+  it('ships the built-in favicon as an inline data URI', () => {
+    const html = readIndexHtml();
+    const href = /rel="icon"[^>]*href="([^"]+)"/s.exec(html)?.[1];
+
+    expect(href?.startsWith('data:image/svg+xml,')).toBe(true);
+    // The Qwen mark's purple, percent-encoded.
+    expect(href).toContain('%236D44E8');
+  });
+
+  // The brand script swaps the icon link's href, so it must run after that
+  // element is parsed — earlier and querySelector finds nothing to swap, which
+  // silently degrades to "the favicon updates one load late". The script's own
+  // unit tests cannot catch this: they hand it a document that already has the
+  // link. Pinned against the real file for the same reason the watchdog order
+  // below is.
+  it('applies the cached brand after the icon link is parsed', () => {
+    const html = readIndexHtml();
+
+    expect(html.indexOf('qwen-code-web-shell-brand')).toBeGreaterThan(
+      html.indexOf('rel="icon"'),
+    );
+  });
+
+  it('applies the cached brand after the title is parsed', () => {
+    const html = readIndexHtml();
+
+    expect(html.indexOf('qwen-code-web-shell-brand')).toBeGreaterThan(
+      html.indexOf('<title>'),
+    );
+  });
+});
+
+describe('boot watchdog document contract', () => {
+  // The watchdog detects a mount as "#root has a first element child that is
+  // not the fallback box". A static child shipped in the HTML — a boot
+  // spinner, say — reads as already-mounted, which disables the watchdog
+  // outright: no immediate fallback on a module failure, no timeout
+  // fallback, exactly the white screen this feature exists to replace. No
+  // boot-watchdog unit test can catch that, because they all build their own
+  // #root; pin it against the real document instead.
+  it('ships an empty #root', () => {
+    const root = /<div id="root"[^>]*>([\s\S]*?)<\/div>/.exec(readIndexHtml());
+
+    expect(root).not.toBeNull();
+    expect(root?.[1]).toMatch(/^\s*$/);
+  });
+
+  // The watchdog is deliberately installed before #root is parsed so it is
+  // already listening while the module graph loads. If a future edit moves
+  // it after #root the DOMContentLoaded deferral becomes dead code, so the
+  // boot-watchdog suite must keep exercising the install-before-#root order.
+  it('installs the watchdog before #root is parsed', () => {
+    const html = readIndexHtml();
+
+    expect(html.indexOf('data-boot-fallback')).toBeLessThan(
+      html.indexOf('<div id="root">'),
+    );
   });
 });

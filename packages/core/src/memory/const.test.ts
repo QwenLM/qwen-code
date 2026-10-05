@@ -8,14 +8,16 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import {
   AGENT_CONTEXT_FILENAME,
   DEFAULT_CONTEXT_FILENAME,
-  setGeminiMdFilename,
-  getCurrentGeminiMdFilename,
-  getAllGeminiMdFilenames,
+  setMemoryFilename,
+  getCurrentMemoryFilename,
+  getAllMemoryFilenames,
 } from '../utils/memory-constants.js';
 import {
-  setGeminiMdFilename as setToolGeminiMdFilename,
-  getCurrentGeminiMdFilename as getToolCurrentGeminiMdFilename,
   getAllGeminiMdFilenames as getToolAllGeminiMdFilenames,
+  setMemoryFilename as setToolMemoryFilename,
+  getCurrentMemoryFilename as getToolCurrentMemoryFilename,
+  getAllMemoryFilenames as getToolAllMemoryFilenames,
+  setGeminiMdFilename as setToolGeminiMdFilename,
 } from '../tools/memory-config.js';
 
 // Mock dependencies
@@ -30,40 +32,46 @@ vi.mock(import('node:fs/promises'), async (importOriginal) => {
 
 vi.mock('os');
 
-describe('setGeminiMdFilename', () => {
+describe('setMemoryFilename', () => {
   beforeEach(() => {
-    setGeminiMdFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
+    setMemoryFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
   });
 
-  it('should update currentGeminiMdFilename when a valid new name is provided', () => {
+  it('should update currentMemoryFilename when a valid new name is provided', () => {
     const newName = 'CUSTOM_CONTEXT.md';
-    setGeminiMdFilename(newName);
-    expect(getCurrentGeminiMdFilename()).toBe(newName);
+    setMemoryFilename(newName);
+    expect(getCurrentMemoryFilename()).toBe(newName);
   });
 
-  it('should not update currentGeminiMdFilename if the new name is empty or whitespace', () => {
-    const initialName = getCurrentGeminiMdFilename(); // Get current before trying to change
-    setGeminiMdFilename('  ');
-    expect(getCurrentGeminiMdFilename()).toBe(initialName);
+  it('should not update currentMemoryFilename if the new name is empty or whitespace', () => {
+    const initialName = getCurrentMemoryFilename(); // Get current before trying to change
+    setMemoryFilename('  ');
+    expect(getCurrentMemoryFilename()).toBe(initialName);
 
-    setGeminiMdFilename('');
-    expect(getCurrentGeminiMdFilename()).toBe(initialName);
+    setMemoryFilename('');
+    expect(getCurrentMemoryFilename()).toBe(initialName);
   });
 
   it('should handle an array of filenames', () => {
     const newNames = ['CUSTOM_CONTEXT.md', 'ANOTHER_CONTEXT.md'];
-    setGeminiMdFilename(newNames);
-    expect(getCurrentGeminiMdFilename()).toBe('CUSTOM_CONTEXT.md');
-    expect(getAllGeminiMdFilenames()).toEqual(newNames);
+    setMemoryFilename(newNames);
+    expect(getCurrentMemoryFilename()).toBe('CUSTOM_CONTEXT.md');
+    expect(getAllMemoryFilenames()).toEqual(newNames);
   });
 
   it('shares filename state with the legacy tools memory config entrypoint', () => {
-    setGeminiMdFilename(['CUSTOM_CONTEXT.md', 'AGENTS.md']);
-    expect(getToolCurrentGeminiMdFilename()).toBe('CUSTOM_CONTEXT.md');
-    expect(getToolAllGeminiMdFilenames()).toEqual(getAllGeminiMdFilenames());
+    setMemoryFilename(['CUSTOM_CONTEXT.md', 'AGENTS.md']);
+    expect(getToolCurrentMemoryFilename()).toBe('CUSTOM_CONTEXT.md');
+    expect(getToolAllMemoryFilenames()).toEqual(getAllMemoryFilenames());
 
-    setToolGeminiMdFilename('LEGACY_CONTEXT.md');
-    expect(getCurrentGeminiMdFilename()).toBe('LEGACY_CONTEXT.md');
-    expect(getAllGeminiMdFilenames()).toEqual(['LEGACY_CONTEXT.md']);
+    setToolMemoryFilename('LEGACY_CONTEXT.md');
+    expect(getCurrentMemoryFilename()).toBe('LEGACY_CONTEXT.md');
+    expect(getAllMemoryFilenames()).toEqual(['LEGACY_CONTEXT.md']);
+  });
+
+  it('keeps the legacy public names wired to the renamed state', () => {
+    setToolGeminiMdFilename('LEGACY_NAME.md');
+    expect(getCurrentMemoryFilename()).toBe('LEGACY_NAME.md');
+    expect(getToolAllGeminiMdFilenames()).toEqual(['LEGACY_NAME.md']);
   });
 });

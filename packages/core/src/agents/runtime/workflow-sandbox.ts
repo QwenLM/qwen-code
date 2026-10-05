@@ -28,17 +28,40 @@ export function stripExportMeta(source: string): string {
 }
 
 /**
- * Locate the `export const meta = {...}` declaration's bounds in the source.
+ * Walk past leading whitespace and comments in `source` starting at
+ * `from`, and return the resulting offset. Used by `findMetaBlockBounds`
+ * to position the meta anchor.
  *
- * Shared by stripExportMeta (P1) and extractAndStripMeta (P4). Anchors at file
- * start (no `/m` flag — see T33 comment below); walks the brace block while
- * skipping over comment / regex / string contexts; throws on unbalanced
- * braces rather than returning a truncated string (T9/T17 — silently
- * deleting the script body is the worst-case failure mode).
- *
- * Returns null when no meta declaration is present at the file start —
- * callers treat this as "no meta", not an error.
+ * Why a walk, not a regex: a single-pass regex that skips leading
+ * whitespace, line and block comments in one expression either lets the
+ * inner quantifiers compete over trailing whitespace (K+1^N backtrack
+ * paths on K-space × N-comment input — a ReDoS vector), or silently
+ * extends a leading block comment past the comment terminator that lives
+ * inside a template literal (the T33-class false match). A walk consumes
+ * characters only from where it stands, so neither hazard is reachable.
  */
+const LINE_TERMINATORS = new Set(['\n', '\r', '\u2028', '\u2029']);
+const isLineTerminator = (ch: string) => LINE_TERMINATORS.has(ch);
+
+function skipTrivia(source: string, from: number): number {
+  let i = from;
+  for (;;) {
+    while (i < source.length && /\s/.test(source[i]!)) i++;
+    if (source.startsWith('//', i)) {
+      i += 2;
+      while (i < source.length && !isLineTerminator(source[i]!)) i++;
+      continue;
+    }
+    if (source.startsWith('/*', i)) {
+      const end = source.indexOf('*/', i + 2);
+      if (end === -1) return source.length; // unterminated — let the anchor check fail
+      i = end + 2;
+      continue;
+    }
+    return i;
+  }
+}
+
 function findMetaBlockBounds(source: string): {
   /** Start offset of the `export const meta` match. */
   exportIdx: number;
@@ -49,25 +72,40 @@ function findMetaBlockBounds(source: string): {
   /** Offset past meta + any trailing whitespace + optional `;`. */
   afterMeta: number;
 } | null {
-  // T33 (PR #4732 R4): anchor at file start (no `/m` flag). Per the design
-  // doc, `export const meta = {...}` must be the script's FIRST statement.
-  // With `/m`, the regex matched every line-start occurrence — including
-  // inside template literals — and the brace-walker then ripped content
-  // out of the string body, silently corrupting the script.
-  const re = /^\s*export\s+const\s+meta\s*=\s*\{/;
-  const match = re.exec(source);
-  if (!match) return null;
-  const exportIdx = match.index;
-  const startBrace = source.indexOf('{', exportIdx);
+  // T33 (PR #4732 R4): the meta declaration must be the first
+  // non-trivia token of the script. Walk past leading whitespace and
+  // comments rather than regex-matching the whole shape — see `skipTrivia`
+  // for the rationale. Once we are at the first non-trivia character,
+  // the anchor matches `export const meta = {` with whitespace tolerance
+  // (any number of spaces/tabs/newlines between the tokens), so:
+  //  - A `{` inside a leading comment cannot be confused with the meta
+  //    `{` (the brace-walker starts at the `=` after `meta`, not at index 0,
+  //    so it never scans characters before `exportIdx`).
+  //  - A template literal inside a leading block comment cannot
+  //    contribute to a false match: the walk consumes the comment
+  //    wholesale, including any `export const meta = {...}` it
+  //    contains, then continues.
+  const exportIdx = skipTrivia(source, 0);
+  // Match the meta anchor at the trivia offset. The walk already skipped
+  // leading whitespace and comments, so this is anchored at a single
+  // position and cannot extend through a `*/` inside a template
+  // literal. Whitespace between `export`/`const`/`meta`/`=`/`{` is
+  // tolerated to match the spellings Claude Code accepts.
+  const anchor = /^export\s+const\s+meta\s*=\s*\{/.exec(
+    source.slice(exportIdx),
+  );
+  if (!anchor) return null;
+  const startBrace = exportIdx + anchor[0].length - 1;
   let depth = 1;
   let i = startBrace + 1;
   while (i < source.length && depth > 0) {
     const ch = source[i];
     const next = source[i + 1];
-    // Single-line comment: skip to newline (T16).
+    // Single-line comment: skip to end-of-line (all four ECMAScript
+    // LineTerminators — T16 plus CR, LS, PS).
     if (ch === '/' && next === '/') {
       i += 2;
-      while (i < source.length && source[i] !== '\n') i++;
+      while (i < source.length && !isLineTerminator(source[i]!)) i++;
       continue;
     }
     // Block comment: skip to closing `*/` (T16).
@@ -87,7 +125,7 @@ function findMetaBlockBounds(source: string): {
       while (
         i < source.length &&
         (inClass || source[i] !== '/') &&
-        source[i] !== '\n'
+        !isLineTerminator(source[i]!)
       ) {
         if (source[i] === '\\') i += 2;
         else if (source[i] === '[') {
@@ -220,11 +258,12 @@ function wrapWorkflowBody(strippedSource: string): string {
  * Parse `export const meta`, strip it, and compile the remaining body.
  *
  * Exported so the pre-launch gate in `WorkflowRunner.start` and the run itself
- * compile through one function rather than two lookalikes. Throws exactly what
- * either step would throw: `extractAndStripMeta`'s errors for a malformed meta
- * literal, and V8's `SyntaxError` for a body that does not parse. The compile
- * copy masks the meta declaration instead of deleting it so V8's source lines
- * still match the author's original script.
+ * compile through one function rather than two lookalikes. Throws
+ * `extractAndStripMeta`'s errors for a malformed meta literal, V8's
+ * `SyntaxError` for a body that does not parse, and
+ * `WorkflowUnsupportedSyntaxError` for a body that uses dynamic `import()`.
+ * The compile copy masks the meta declaration instead of deleting it so V8's
+ * source lines still match the author's original script.
  */
 export function compileWorkflowScript(scriptSource: string): {
   script: vm.Script;
@@ -239,10 +278,23 @@ export function compileWorkflowScript(scriptSource: string): {
         .replace(/[^\r\n\u2028\u2029]/g, ' ') +
       scriptSource.slice(bounds.afterMeta)
     : stripped;
-  const script = new vm.Script(wrapWorkflowBody(compilable), {
+  const wrapped = wrapWorkflowBody(compilable);
+  const script = new vm.Script(wrapped, {
     filename: WORKFLOW_SCRIPT_FILENAME,
   });
+  assertNoDynamicImport(wrapped);
   return { script, meta };
+}
+
+/**
+ * The error a cancelled run settles with. Named `AbortError` so every
+ * `isAbortError` check on the way up classifies it as a cancellation rather
+ * than a failure.
+ */
+function workflowCancelledError(): Error {
+  const error = new Error('Workflow run was aborted (cancelled).');
+  error.name = 'AbortError';
+  return error;
 }
 
 /** Longest source line rendered in a compile-failure message. */
@@ -427,10 +479,24 @@ function isRegexContext(source: string, i: number): boolean {
   return /[{[(,;:=!&|?+\-*/%^~<>]/.test(prev);
 }
 
+import {
+  readWorkflowStepId,
+  type WorkflowCallTrace,
+} from '../workflow-correlation.js';
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import {
+  normalizeReasoningEffort,
+  REASONING_EFFORT_TIERS,
+  type ReasoningEffort,
+} from '../../core/reasoning-effort.js';
+import {
+  canonicalAgentToolName,
+  describeAgentToolAllowEntryProblem,
+} from './workflow-agent-tools.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import { parseWorkflowMetaLiteral } from './workflow-meta-literal.js';
+import { assertNoDynamicImport } from './workflow-script-validation.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 // Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
@@ -457,6 +523,7 @@ const ARGS_MAX_DEPTH = 64;
  * like `scema` before they reach dispatch.
  */
 export interface WorkflowAgentOpts {
+  stepId?: string;
   label?: string;
   phase?: string;
   schema?: object;
@@ -488,6 +555,33 @@ export interface WorkflowAgentOpts {
    * for this call.
    */
   stallMs?: number;
+  /**
+   * Reasoning effort for this one agent (`low` … `max`). The sandbox accepts
+   * the aliases `/effort` accepts and hands the host the canonical tier; the
+   * dispatch writes it onto the agent's own content-generator config, never
+   * the session's. Part of the resume key.
+   */
+  effort?: ReasoningEffort;
+  /**
+   * Tools this agent may not call, on top of the workflow floor. It only
+   * narrows: the dispatch unions it with the floor and the agentType's own
+   * denies, and refuses an entry that matches no tool. The sandbox hands the
+   * host a sorted, de-duplicated list with built-in display names mapped to
+   * tool names (and drops an empty one), so order, duplicates and the choice
+   * of name never change the resume key.
+   */
+  disallowedTools?: string[];
+  /**
+   * The only tools this agent may be declared, as exact tool names. It only
+   * narrows: the dispatch bounds it by the agentType's own allowlist and then
+   * removes the workflow floor and every deny, so it never brings a tool back.
+   * `'*'`, other patterns, a whole MCP server and `exec` are refused, and so is
+   * an entry that names no tool. The sandbox hands the host a sorted,
+   * de-duplicated list with built-in display names mapped to tool names;
+   * any other name is compared as written, so only those two differences leave
+   * the resume key unchanged.
+   */
+  tools?: string[];
   // The index signature exists so TypeScript accepts forward-compat opt names
   // at compile time; the runtime allowlist still rejects unknown names.
   [key: string]: unknown;
@@ -512,6 +606,15 @@ export interface WorkflowBudget {
   total: number | null;
   spent(): number;
   remaining(): number;
+  /**
+   * Host-only, never bridged into the script: this run's own agents' output
+   * tokens, and the cap that applies to this run alone. The run registry
+   * mirrors these, so a run's numbers never include tokens spent outside it
+   * when `spent()` measures the whole turn. A budget without them (test
+   * doubles) reports `spent()` / `total` instead.
+   */
+  runSpent?(): number;
+  runCap?(): number | null;
 }
 
 /**
@@ -530,6 +633,8 @@ export interface WorkflowBudget {
  * workflow does not flood the registry with thousands of events.
  */
 export interface WorkflowOrchestratorEmitter {
+  workflowCallUpdated?(call: WorkflowCallTrace): void;
+  workflowCallsTruncated?(): void;
   /** Sandbox `phase(title)` was called. */
   phaseStarted?(title: string): void;
   /** Sandbox `log(...)` produced one line of output (or `console.log`). */
@@ -540,6 +645,8 @@ export interface WorkflowOrchestratorEmitter {
   agentCompleted?(label?: string, error?: string): void;
   /** A dispatch was issued and joined to the runtime dependency graph. */
   dispatchQueued?(event: {
+    stepId?: string;
+    workflowCallId?: string;
     id: string;
     label?: string;
     prompt: string;
@@ -561,6 +668,8 @@ export interface WorkflowOrchestratorEmitter {
    * `WorkflowRunRequest.budget`.
    */
   budgetUpdated?(spent: number, total: number | null): void;
+  /** A resume ran a journaled call live again; `line` is also sandbox-logged. */
+  resumeRespawn?(line: string): void;
 }
 
 export interface SandboxOptions {
@@ -576,12 +685,15 @@ export interface SandboxOptions {
   runId?: string;
   /**
    * Function called by the script's `agent(prompt, opts)` global. Returns the
-   * agent's final text. Injected so tests can mock without spawning an LLM.
+   * agent's final text, or `null` when that agent failed on its own terms
+   * (turn/time cap, model error, stall, or no structured result) —
+   * the same value a fan-out slot has always carried for a missing agent.
+   * Injected so tests can mock without spawning an LLM.
    */
   dispatch: (
     prompt: string,
     opts: WorkflowAgentOpts,
-  ) => Promise<WorkflowAgentResult>;
+  ) => Promise<WorkflowAgentResult | null>;
   /**
    * Forward-compatibility injection seams for P2 (parallel / pipeline) and
    * P5 (budget). When omitted the sandbox falls back to throwing stubs.
@@ -606,6 +718,7 @@ export interface SandboxOptions {
   workflow?: (
     nameOrRef: string | { scriptPath: string },
     args: unknown,
+    stepId?: string,
   ) => Promise<unknown>;
   budget?: WorkflowBudget;
   /**
@@ -679,6 +792,31 @@ export interface SandboxOptions {
  * concurrency would already exceed 30 min).
  */
 const DEFAULT_MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
+
+/**
+ * How long the script's synchronous code may run before its first `await`
+ * returns control. Exported so the authoring reference's statement of it is
+ * pinned to this value.
+ */
+export const WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS = 30_000;
+
+/**
+ * Most entries each list of one `parallel()` or `pipeline()` call may hold:
+ * the thunks, the items, and the stages are each bounded separately. A longer
+ * list rejects the whole call; it is never truncated. Exported so the
+ * authoring reference's statement of it is pinned to this value.
+ */
+export const WORKFLOW_BATCH_LIMIT = 4096;
+
+/** The rejection message for a `parallel()` / `pipeline()` list over the limit. */
+export function describeOversizedBatch(list: string, length: number): string {
+  return (
+    `${list}: ${length} entries, over the limit of ` +
+    `${WORKFLOW_BATCH_LIMIT} per call. Nothing in this call ran. Split the ` +
+    `input into batches of at most ${WORKFLOW_BATCH_LIMIT}, await each ` +
+    'batch in turn, and concatenate the results in order.'
+  );
+}
 
 function resolveMaxWallClockMs(opts: SandboxOptions): number {
   if (typeof opts.maxWallClockMs === 'number' && opts.maxWallClockMs > 0) {
@@ -960,7 +1098,41 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     pushPhase: safePhase,
     pushLog: safeLog,
     lastPhase: () => phases[phases.length - 1],
-    hostAgent: opts.dispatch,
+    hostAgent: (
+      prompt: string,
+      agentOpts: WorkflowAgentOpts,
+      stepId: unknown,
+    ) => {
+      const validatedStepId = readWorkflowStepId(stepId);
+      const hostOpts = { ...agentOpts };
+      delete hostOpts.stepId;
+      if (validatedStepId !== undefined) hostOpts.stepId = validatedStepId;
+      return opts.dispatch(prompt, hostOpts);
+    },
+    // Effort tiers are resolved host-side so the sandbox accepts exactly the
+    // aliases `/effort` does without a second copy of the alias table. Takes
+    // and returns primitives only.
+    normalizeEffort: (raw: unknown): string | null =>
+      typeof raw === 'string' ? (normalizeReasoningEffort(raw) ?? null) : null,
+    effortTiers: REASONING_EFFORT_TIERS.join(', '),
+    // A built-in tool named by its display name or a legacy alias becomes its
+    // tool name, so both spellings share one resume key; any other entry comes
+    // back as given for the host to judge. Used for both disallowedTools and
+    // tools. Primitives only.
+    canonicalToolName: (raw: unknown): string | null =>
+      typeof raw === 'string' ? canonicalAgentToolName(raw) : null,
+    // Why a tools entry cannot name a tool to allow (a pattern, a whole MCP
+    // server, exec), already stripped of control characters, or null.
+    // Primitives only.
+    toolAllowEntryProblem: (raw: unknown): string | null => {
+      if (typeof raw !== 'string') return null;
+      const problem = describeAgentToolAllowEntryProblem(raw);
+      return problem === null ? null : stripAnsiAndControl(problem);
+    },
+    // JSON.stringify escapes only C0: strip DEL / C1 (incl. NEL) from a
+    // script-controlled echo so it cannot fragment a rejection message.
+    sanitizeForMessage: (raw: unknown): string =>
+      typeof raw === 'string' ? stripAnsiAndControl(raw) : '',
     // PR #4947 R2 T7 (qwen-code-ci-bot): host-side log hook for reviveInRealm's
     // catch path. Mirrors the rejection-logging in settleToNullArray so an
     // operator running with debug logging can distinguish "thunk rejected"
@@ -1038,7 +1210,18 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     hasBudget: !!opts.budget,
     hostParallel: opts.parallel,
     hostPipeline: opts.pipeline,
-    hostWorkflow: opts.workflow,
+    batchLimit: WORKFLOW_BATCH_LIMIT,
+    describeOversizedBatch,
+    hostWorkflow: (
+      ref: string | { scriptPath: string },
+      args: unknown,
+      stepId: unknown,
+    ) => {
+      const validated = readWorkflowStepId(stepId);
+      return validated === undefined
+        ? opts.workflow!(ref, args)
+        : opts.workflow!(ref, args, validated);
+    },
     budgetTotal: opts.budget ? opts.budget.total : null,
     hostBudgetSpent: opts.budget ? opts.budget.spent.bind(opts.budget) : null,
     hostBudgetRemaining: opts.budget
@@ -1160,6 +1343,17 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           isAbort = false;
         }
         if (isAbort || __b.isRunAborted()) vmErr.__wfAbort = true;
+        var isRunFailure = false;
+        try {
+          isRunFailure = !!(hostErr && (
+            hostErr.__wfRunFailure === true ||
+            hostErr.name === 'WorkflowBudgetExceededError' ||
+            hostErr.name === 'WorkflowAgentCapExceededError'
+          ));
+        } catch (e) {
+          isRunFailure = false;
+        }
+        if (isRunFailure) vmErr.__wfRunFailure = true;
         vmErr.__wfDispatchFailed = true;
         return vmErr;
       }
@@ -1450,7 +1644,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // FIX-Round1-T13: throw on any opts key not in the allowlist — catches
       // typos like { scema: ... } that previously slipped through the
       // [key:string]: unknown index signature.
-      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs', 'workingDir'];
+      const KNOWN_AGENT_OPTS = ['stepId', 'label', 'phase', 'schema', 'model', 'effort', 'isolation', 'agentType', 'stallMs', 'workingDir', 'disallowedTools', 'tools'];
       globalThis.agent = vmAsync(function (prompt, agentOpts) {
         agentOpts = agentOpts || {};
         const keys = Object.keys(agentOpts);
@@ -1467,9 +1661,9 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // createProductionDispatch → SubagentManager.createAgentHeadless.
         // The dispatch surfaces descriptive errors for "agent type not found",
         // "isolation:'remote' is not available in this build", parent-dirty
-        // refuse, worktree creation failures, and StructuredOutput contract
-        // violations ("completed without calling StructuredOutput after 2
-        // in-conversation nudges").
+        // refuse, worktree creation failures, schemas refused before dispatch,
+        // and structured_output contract violations (no valid result after
+        // the failed submissions it names).
         if (
           agentOpts.isolation !== undefined &&
           agentOpts.isolation !== 'worktree' &&
@@ -1508,11 +1702,6 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             );
           }
         }
-        if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
-          if (__b.lastPhase() !== agentOpts.phase) {
-            __b.pushPhase(agentOpts.phase);
-          }
-        }
         // SECURITY (P3 R2 self-review): user-script-controlled agentOpts
         // cross the vm/host boundary verbatim via vmAsync's hostFn.apply.
         // A Proxy / inherited-getter / non-plain object in agentOpts.schema
@@ -1530,6 +1719,85 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             "agent() opts contain a non-JSON-serializable value: " +
             String(e && e.message != null ? e.message : e)
           );
+        }
+        // effort, disallowedTools and tools are validated on the REVIVED
+        // copy: that is the object the host dispatch and the resume key see,
+        // so a getter cannot show one value here and hand another to the
+        // dispatch. All three are normalized in place (an effort alias becomes
+        // its tier; a tool list has built-in display names mapped to tool
+        // names and is sorted and de-duplicated) so equivalent spellings share
+        // one resume key.
+        if (safeOpts.effort !== undefined) {
+          var tier = __b.normalizeEffort(safeOpts.effort);
+          if (tier === null) {
+            throw new Error(
+              "agent({effort}): unknown effort tier " + __b.sanitizeForMessage(JSON.stringify(safeOpts.effort)) + ". " +
+              "Known tiers are: " + __b.effortTiers + "."
+            );
+          }
+          safeOpts.effort = tier;
+        }
+        if (safeOpts.disallowedTools !== undefined) {
+          var denied = safeOpts.disallowedTools;
+          if (
+            !Array.isArray(denied) ||
+            denied.some(function (name) {
+              return typeof name !== 'string' || name.length === 0 || name !== name.trim();
+            })
+          ) {
+            throw new Error(
+              "agent({disallowedTools}): must be an array of non-empty tool-name strings " +
+              "without surrounding whitespace, e.g. ['run_shell_command', 'write_file']."
+            );
+          }
+          var uniqueDenied = [];
+          for (var d = 0; d < denied.length; d++) {
+            var deniedName = __b.canonicalToolName(denied[d]);
+            if (uniqueDenied.indexOf(deniedName) === -1) uniqueDenied.push(deniedName);
+          }
+          uniqueDenied.sort();
+          if (uniqueDenied.length === 0) {
+            delete safeOpts.disallowedTools;
+          } else {
+            safeOpts.disallowedTools = uniqueDenied;
+          }
+        }
+        // An empty allowlist would leave the agent nothing to call, so unlike
+        // an empty deny list it is refused rather than dropped.
+        if (safeOpts.tools !== undefined) {
+          var allowed = safeOpts.tools;
+          if (
+            !Array.isArray(allowed) ||
+            allowed.length === 0 ||
+            allowed.some(function (name) {
+              return typeof name !== 'string' || name.length === 0 || name !== name.trim();
+            })
+          ) {
+            throw new Error(
+              "agent({tools}): must be a non-empty array of tool-name strings " +
+              "without surrounding whitespace, e.g. ['run_shell_command', 'read_file']. " +
+              "Omit tools to keep every tool."
+            );
+          }
+          var uniqueAllowed = [];
+          for (var a = 0; a < allowed.length; a++) {
+            var problem = __b.toolAllowEntryProblem(allowed[a]);
+            if (problem !== null) {
+              throw new Error("agent({tools}): " + problem);
+            }
+            var allowedName = __b.canonicalToolName(allowed[a]);
+            if (uniqueAllowed.indexOf(allowedName) === -1) uniqueAllowed.push(allowedName);
+          }
+          uniqueAllowed.sort();
+          safeOpts.tools = uniqueAllowed;
+        }
+        // The phase is recorded only once every option gate above has passed,
+        // so a call its options rejected leaves no phase that dispatched
+        // nothing.
+        if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
+          if (__b.lastPhase() !== agentOpts.phase) {
+            __b.pushPhase(agentOpts.phase);
+          }
         }
         // SECURITY (PR #4947 R1 wenshao, extended for P3): vmAsync's resolve
         // path is verbatim (no re-wrap of resolved values). Host-realm
@@ -1559,7 +1827,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // value isn't a tool_call payload. logRevivalFailure surfaces
         // the actionable detail (slot 0 + the error string) to operators
         // so a real trigger in production isn't silent.
-        return __b.hostAgent(prompt, safeOpts).then(function (value) {
+        return __b.hostAgent(prompt, safeOpts, safeOpts.stepId).then(function (value) {
           if (value === null || typeof value !== 'object') {
             return value;
           }
@@ -1633,6 +1901,13 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       }
       if (__b.hasPipeline) {
         const callPipeline = vmAsync(function (items) {
+          // Refuse before copying an oversized stage list; the host checks
+          // the final list again.
+          if (arguments.length - 1 > __b.batchLimit) {
+            throw new Error(
+              __b.describeOversizedBatch('pipeline() stages', arguments.length - 1)
+            );
+          }
           const stages = [];
           for (let i = 1; i < arguments.length; i++) stages.push(arguments[i]);
           return __b.hostPipeline.apply(null, [items].concat(stages));
@@ -1662,7 +1937,11 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // single-level nesting limit is enforced (a nested sandbox is created
       // without a workflow impl, so its workflow() lands in the else branch).
       if (__b.hasWorkflow) {
-        const callWorkflow = vmAsync(function (nameOrRef, wfArgs) {
+        const callWorkflow = vmAsync(function (nameOrRef, wfArgs, wfOpts) {
+          if (wfOpts !== undefined && (wfOpts === null || typeof wfOpts !== 'object' || Array.isArray(wfOpts) || Object.keys(wfOpts).some(function (key) { return key !== 'stepId'; }))) {
+            throw new Error('workflow() options must be an object containing only stepId.');
+          }
+          const stepId = wfOpts === undefined ? undefined : wfOpts.stepId;
           // Sanitize args through a JSON round-trip BEFORE crossing so the
           // host only ever sees vm-realm plain objects (same defense as
           // agent()'s safeOpts). nameOrRef may be a string or {scriptPath}.
@@ -1681,7 +1960,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
               String(e && e.message != null ? e.message : e)
             );
           }
-          return __b.hostWorkflow(safeRef, safeArgs).then(function (value) {
+          return __b.hostWorkflow(safeRef, safeArgs, stepId).then(function (value) {
             if (value === null || typeof value !== 'object') {
               return value;
             }
@@ -1693,8 +1972,8 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             }
           });
         });
-        globalThis.workflow = function workflow(nameOrRef, wfArgs) {
-          return callWorkflow(nameOrRef, wfArgs);
+        globalThis.workflow = function workflow(nameOrRef, wfArgs, wfOpts) {
+          return callWorkflow(nameOrRef, wfArgs, wfOpts);
         };
       } else {
         globalThis.workflow = function workflow() {
@@ -1860,6 +2139,8 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       let watchdog: WallClockWatchdog | undefined;
       let stopWatchingState: (() => void) | undefined;
       let rearmWatchdogOnAbort: (() => void) | undefined;
+      let settleOnAbort: (() => void) | undefined;
+      let wallClockFired = false;
       process.on('unhandledRejection', adoptionEscapeHook);
       try {
         // P4: extract `export const meta = {...}` once before the body runs.
@@ -1874,11 +2155,17 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // which is the failure the gate exists to prevent.
         const { script, meta } = compileWorkflowScript(scriptSource);
         extractedMeta = meta;
+        // A run cancelled before its script started must not start it: the
+        // registry pre-registers the run and shares this controller, so a
+        // user cancel can land before `run()` is entered.
+        if (opts.abortOnTimeout?.signal.aborted) {
+          throw workflowCancelledError();
+        }
         // 30s sync wall-clock cap inside vm — covers `while(true){}` style
         // synchronous loops only. Once the IIFE hits its first `await`,
         // `runInContext` returns and this timer is disarmed.
         const runOpts: vm.RunningScriptOptions = {
-          timeout: 30_000,
+          timeout: WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS,
         };
         const result = script.runInContext(ctx, runOpts) as Promise<unknown>;
 
@@ -1892,7 +2179,10 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             // T40 (PR #4732 R4): abort linked controller BEFORE rejecting so
             // in-flight subagents see the cancellation and stop. Order
             // matters: rejecting first then aborting would race the
-            // caller's finally block.
+            // caller's finally block. The abort arm below must let this
+            // abort through untouched — a timeout is not a cancellation,
+            // and it has to be reported as the timeout it is.
+            wallClockFired = true;
             opts.abortOnTimeout?.abort();
             reject(
               new Error(
@@ -1929,25 +2219,48 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         if (opts.scheduler?.snapshot().state === 'paused' && !aborted()) {
           watchdog?.pause();
         }
-        // Cancellation must settle the run even when the script hangs in
-        // ungated code: `registry.cancel()` aborts this controller, but
-        // `abortPending()` emits no state transition, so a pause-suspended
-        // watchdog would never re-arm and the race below has no abort arm
-        // — the hung run would never reach its settlement `finally`
-        // (snapshot, telemetry, and handle release all skipped). Re-arm
-        // with the banked remainder on abort to restore the bound.
+        // Belt to the abort arm's braces below: `registry.cancel()` aborts
+        // this controller, but `abortPending()` emits no state transition,
+        // so a pause-suspended watchdog would otherwise stay suspended.
+        // Re-arm it with the banked remainder so the wall clock keeps
+        // bounding the run independently of the abort arm.
         rearmWatchdogOnAbort = (): void => watchdog?.resume();
         opts.abortOnTimeout?.signal.addEventListener(
           'abort',
           rearmWatchdogOnAbort,
           { once: true },
         );
-        return await Promise.race([result, timeoutPromise]);
+        // Cancellation settles the run now, not when the wall clock runs
+        // out. Without this arm a script that is not currently blocked on a
+        // dispatch — sitting in ungated `await`s, or simply hung — keeps the
+        // run open until the banked remainder of the clock expires, and the
+        // user watches a cancelled run refuse to end. The script's own
+        // promise is left to settle by itself: its dispatches see the
+        // aborted signal and reject, so its `finally` blocks still run, and
+        // `Promise.race` keeps a handler attached so that later rejection
+        // is never an unhandled one.
+        const abortPromise = new Promise<never>((_, reject) => {
+          const signal = opts.abortOnTimeout?.signal;
+          if (!signal) return;
+          settleOnAbort = (): void => {
+            // The watchdog aborts the controller itself on the way to
+            // rejecting with the timeout; that abort is not a cancellation.
+            if (!wallClockFired) reject(workflowCancelledError());
+          };
+          signal.addEventListener('abort', settleOnAbort, { once: true });
+        });
+        return await Promise.race([result, timeoutPromise, abortPromise]);
       } finally {
         if (rearmWatchdogOnAbort) {
           opts.abortOnTimeout?.signal.removeEventListener(
             'abort',
             rearmWatchdogOnAbort,
+          );
+        }
+        if (settleOnAbort) {
+          opts.abortOnTimeout?.signal.removeEventListener(
+            'abort',
+            settleOnAbort,
           );
         }
         stopWatchingState?.();

@@ -6,6 +6,13 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import type { WebShellSidebarSessionActionsOptions } from './WebShellSidebar';
 import sidebarStyles from './WebShellSidebar.module.css';
+import {
+  clickSidebarElement as click,
+  flushSidebar,
+  installSidebarDomShims,
+  makeSidebarSession as makeSession,
+  resolveWebShellSessions,
+} from '../../test/sidebarHarness';
 
 const { connection, workspace, workspaceActions, active, pinned, archived } =
   vi.hoisted(() => {
@@ -84,7 +91,8 @@ const refreshSessionCatalogQueries = vi.hoisted(() => vi.fn());
 const useSessionCatalogQueries = vi.hoisted(() => vi.fn(() => []));
 const loadSession = vi.hoisted(() => vi.fn());
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useConnection: () => connection,
   useActions: () => ({ renameSession: vi.fn() }),
   useWorkspace: () => workspace,
@@ -114,14 +122,11 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
       workspaceCwd: connection.workspaceCwd,
       options,
     };
-    if (options?.enabled === false) {
-      return { ...state, sessions: [], data: undefined, catalogQuery };
-    }
-    return {
-      ...state,
-      data: state.data ?? state.sessions,
+    return resolveWebShellSessions(
+      state,
+      options?.enabled !== false,
       catalogQuery,
-    };
+    );
   },
   useSessionCatalogController: () => ({
     refreshQueries: refreshSessionCatalogQueries,
@@ -164,42 +169,7 @@ const { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY } = await import(
   './collapsedSessionSections'
 );
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-if (!globalThis.PointerEvent) {
-  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
-}
-if (!Element.prototype.hasPointerCapture) {
-  Element.prototype.hasPointerCapture = () => false;
-}
-if (!Element.prototype.setPointerCapture) {
-  Element.prototype.setPointerCapture = () => {};
-}
-if (!Element.prototype.releasePointerCapture) {
-  Element.prototype.releasePointerCapture = () => {};
-}
-if (!Element.prototype.scrollIntoView) {
-  Element.prototype.scrollIntoView = () => {};
-}
-
-function makeSession(
-  sessionId: string,
-  over: Partial<DaemonSessionSummary> = {},
-): DaemonSessionSummary {
-  return {
-    sessionId,
-    workspaceCwd: '/tmp/project',
-    displayName: `Session ${sessionId}`,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    clientCount: 0,
-    hasActivePrompt: false,
-    isArchived: false,
-    isPinned: false,
-    groupId: null,
-    color: null,
-    ...over,
-  } as DaemonSessionSummary;
-}
+installSidebarDomShims();
 
 const organizationCapabilities = {
   qwenCodeVersion: '1.2.3',
@@ -237,6 +207,7 @@ function renderSidebar(
       onOpenSettings={() => {}}
       onOpenDaemonStatus={() => {}}
       onOpenScheduledTasks={() => {}}
+      onOpenWorkflows={() => {}}
       onOpenGoals={() => {}}
       onOpenSessions={() => {}}
       onOpenSplitView={() => {}}
@@ -259,13 +230,6 @@ function renderSidebar(
   });
 }
 
-async function flushSidebar() {
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-}
-
 function groupHeader(label: string): HTMLButtonElement {
   const section = container.querySelector<HTMLElement>(
     `section[aria-label="${label}"]`,
@@ -276,10 +240,6 @@ function groupHeader(label: string): HTMLButtonElement {
   );
   expect(header).not.toBeNull();
   return header!;
-}
-
-function click(element: HTMLElement): void {
-  element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
 beforeEach(() => {
@@ -448,6 +408,53 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).not.toBeNull();
   });
 
+  it('prioritizes the prompt spinner over the background icon and clears it on completion', async () => {
+    const taskSession = makeSession('background-session', {
+      hasActivePrompt: true,
+      hasRunningBackgroundTasks: true,
+      activeWorkState: 'active',
+    });
+    const update = async (
+      hasActivePrompt: boolean,
+      hasRunningBackgroundTasks?: boolean,
+    ) => {
+      active.sessions = [
+        { ...taskSession, hasActivePrompt, hasRunningBackgroundTasks },
+      ];
+      active.data = active.sessions;
+      renderSidebar(false);
+      await flushSidebar();
+    };
+    await update(true, true);
+    expect(
+      container.querySelector('[data-web-shell-session-running]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-session-background-running]'),
+    ).toBeNull();
+    await update(false, true);
+    expect(
+      container.querySelector('[data-web-shell-session-running]'),
+    ).toBeNull();
+    const icon = container.querySelector(
+      '[data-web-shell-session-background-running]',
+    );
+    expect(icon?.getAttribute('aria-label')).toBe('Background tasks running');
+    expect(icon?.querySelector('svg')).toBeNull();
+    expect(container.querySelector('[aria-label="Active work"]')).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-session-active-work]'),
+    ).toBeNull();
+    await update(false, false);
+    expect(
+      container.querySelector('[data-web-shell-session-background-running]'),
+    ).toBeNull();
+    await update(false);
+    expect(
+      container.querySelector('[data-web-shell-session-background-running]'),
+    ).toBeNull();
+  });
+
   it('shows completion from a secondary workspace on the collapsed icon', async () => {
     const multiWorkspaceCapabilities = {
       ...organizationCapabilities,
@@ -546,6 +553,66 @@ describe('WebShellSidebar collapsed session group persistence', () => {
         '[data-web-shell-collapsed-session-status="completed"]',
       ),
     ).not.toBeNull();
+  });
+
+  it('shows the expanded attention pill short label with the full accessible name', async () => {
+    active.sessions = [
+      makeSession('attention-approval', {
+        displayName: 'Needs approval',
+        isWaitingForPermission: true,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    let pill = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.sessionAttention}`,
+    );
+    expect(pill?.textContent).toBe('Approval');
+    expect(pill?.getAttribute('aria-label')).toBe('Waiting for approval');
+    expect(
+      pill?.classList.contains(sidebarStyles.sessionAttentionUserInput),
+    ).toBe(false);
+
+    active.sessions = [
+      makeSession('attention-approval-and-input', {
+        displayName: 'Needs approval and input',
+        isWaitingForPermission: true,
+        isWaitingForUserQuestion: true,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    pill = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.sessionAttention}`,
+    );
+    expect(pill?.textContent).toBe('Approval');
+    expect(pill?.getAttribute('aria-label')).toBe('Waiting for approval');
+    expect(
+      pill?.classList.contains(sidebarStyles.sessionAttentionUserInput),
+    ).toBe(false);
+
+    active.sessions = [
+      makeSession('attention-input', {
+        displayName: 'Needs input',
+        isWaitingForUserQuestion: true,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    pill = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.sessionAttention}`,
+    );
+    expect(pill?.textContent).toBe('Input');
+    expect(pill?.getAttribute('aria-label')).toBe('User input needed');
+    expect(
+      pill?.classList.contains(sidebarStyles.sessionAttentionUserInput),
+    ).toBe(true);
   });
 
   it('keeps project sessions available from the collapsed sidebar', async () => {
@@ -1174,13 +1241,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).find((item) => item.textContent?.includes('Group'));
     expect(groupItem).not.toBeNull();
     act(() => {
-      groupItem!.dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-      );
-      groupItem!.dispatchEvent(
-        new PointerEvent('pointerup', { bubbles: true }),
-      );
-      groupItem!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      click(groupItem!, true);
     });
     await flushSidebar();
 
@@ -1488,13 +1549,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).find((item) => item.textContent?.includes('Rename'));
     expect(renameItem).toBeDefined();
     act(() => {
-      renameItem!.dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-      );
-      renameItem!.dispatchEvent(
-        new PointerEvent('pointerup', { bubbles: true }),
-      );
-      renameItem!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      click(renameItem!, true);
     });
     await flushSidebar();
 
@@ -1518,13 +1573,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     act(() => {
-      document.body.dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-      );
-      document.body.dispatchEvent(
-        new PointerEvent('pointerup', { bubbles: true }),
-      );
-      document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      click(document.body, true);
     });
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));

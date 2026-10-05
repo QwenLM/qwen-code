@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FunctionDeclaration } from '@google/genai';
+import type { Content, FunctionDeclaration } from '@google/genai';
 import type {
   AnyDeclarativeTool,
   ToolResult,
@@ -13,6 +13,7 @@ import type {
 } from './tools.js';
 import { Kind, BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
 import { type Config, matchesAnyServerPattern } from '../config/config.js';
+import { isMediaPolicyToolHiddenFromModel } from '../omni/policy/model-access.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
@@ -21,6 +22,11 @@ import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
+import { AGENT_HOST_TOOL_NAMES, ToolNames } from './tool-names.js';
+import {
+  MANAGED_RUNTIME_TOOL_NAMES,
+  type ExecutionEnvironment,
+} from '../services/execution-environment.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -29,6 +35,15 @@ import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import { getCurrentAgentChat } from '../agents/runtime/agent-context.js';
+import type { LlmChat } from '../core/llm-chat.js';
+import {
+  buildExecDeclaration,
+  getToolExposure,
+  planCodeModeBindings,
+  ToolMode,
+  type CodeModeBindingPlan,
+} from './code-mode.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -42,6 +57,30 @@ export interface DeferredToolSummary {
 }
 
 const debugLogger = createDebugLogger('TOOL_REGISTRY');
+
+/**
+ * What a deferred tool looked like when tool_search returned it: the parameter
+ * contract its arguments were written against plus, for an MCP tool, the server
+ * it belongs to. `tool_call` recomputes it and refuses a bridged call whose
+ * live value differs (#11321); a direct call never reaches that comparison.
+ *
+ * The free-text `description` is deliberately excluded. Shipped deferred tools
+ * rebuild it from mutable state on every `schema` access — `WebSearchTool`
+ * interpolates the current month/year and `ReadFileTool` the effective input
+ * modalities — intentionally, so a long-lived `qwen serve`/ACP process is not
+ * stale across a month boundary or a mid-session `/model` switch. Hashing that
+ * prose made an unchanged tool's fingerprint drift and refuse a legitimate call
+ * whose parameters still matched the reviewed schema.
+ */
+export function deferredDeclarationFingerprint(
+  tool: AnyDeclarativeTool,
+): string {
+  const server = tool instanceof DiscoveredMCPTool ? tool.serverName : '';
+  const schema = tool.schema;
+  return `${server}\u0000${schema.name ?? tool.name}\u0000${JSON.stringify(
+    schema.parametersJsonSchema,
+  )}`;
+}
 
 class DiscoveredToolInvocation extends BaseToolInvocation<
   ToolParams,
@@ -195,22 +234,36 @@ Signal: Signal number or \`(none)\` if no signal was received.
 export class ToolRegistry {
   // The tools keyed by tool name as seen by the LLM.
   private tools: Map<string, AnyDeclarativeTool> = new Map();
+  private mcpAppTools = new Map<string, DiscoveredMCPTool>();
   // Lazy tool factories keyed by tool name — resolved on first use.
   private factories: Map<string, ToolFactory> = new Map();
   // In-flight factory promises — ensures concurrent ensureTool() calls for the
   // same name share one promise instead of running the factory multiple times.
-  private inflight: Map<string, Promise<AnyDeclarativeTool>> = new Map();
-  // Deferred tools that ToolSearch has loaded this session. Once revealed, a
-  // tool's schema is included in subsequent function-declaration lists even
-  // though it would normally be hidden.
+  private inflight: Map<string, Promise<AnyDeclarativeTool | undefined>> =
+    new Map();
+  // Deferred tools promoted into the declaration list by session setup,
+  // compatibility replay, or an explicit runtime flow.
   private revealedDeferred: Set<string> = new Set();
-  // Reveals that are session SETUP rather than ToolSearch discovery (see
+  // Reveals that are session setup rather than transient runtime state (see
   // pinDeferredToolReveal): they survive the `/clear` reset that
-  // intentionally drops discovered reveals so the new session starts clean.
+  // intentionally drops transient reveals so the new session starts clean.
   private pinnedDeferredReveals: Set<string> = new Set();
-  // Built-in tools demoted to deferred by an active `permissions.allow`
-  // registry allowlist (#9827, #10075). They are fully registered — listed
-  // in `/tools`, discoverable and loadable via ToolSearch, callable through
+  // Fingerprint of each tool as tool_search last returned it into the current
+  // history. tool_call refuses a hidden tool with no entry, so an entry is the
+  // claim "the model has this schema in context": history replacement rebuilds
+  // it from surviving tool_search results (#12569). It survives tool
+  // removal: a disconnect does not take the schema out of history, and a
+  // reconnect is compared by fingerprint, so an identical republish still
+  // matches while a changed one asks for a fresh review.
+  private reviewedDeferredDeclarations: Map<string, string> = new Map();
+  private reviewedDeclarationsByChat = new WeakMap<
+    LlmChat,
+    Map<string, string>
+  >();
+  private codeModeCollisionWarnings = new Set<string>();
+  // Built-in tools demoted to deferred by an active `settings.tools.eager`
+  // allowlist (#9827, #10075). They are fully registered — listed
+  // in `/tools`, discoverable via ToolSearch, callable through ToolCall and
   // the normal approval flow — but their schemas are kept out of the eager
   // model request exactly like `shouldDefer=true` tools. Unlike ordinary
   // deferred tools they are never auto-revealed by the budget preload:
@@ -242,7 +295,7 @@ export class ToolRegistry {
   }
 
   // Stable declaration order keeps the serialized tools block independent of
-  // async registration history (MCP discovery, reconnects, ToolSearch reveals).
+  // async registration history (MCP discovery, reconnects, deferred reveals).
   private static compareToolsByDeclarationName(
     a: AnyDeclarativeTool,
     b: AnyDeclarativeTool,
@@ -254,9 +307,23 @@ export class ToolRegistry {
     return a.displayName.localeCompare(b.displayName);
   }
 
+  private static compareCodeModeTools(
+    a: AnyDeclarativeTool,
+    b: AnyDeclarativeTool,
+  ): number {
+    const aName = a.schema.name ?? a.name;
+    const bName = b.schema.name ?? b.name;
+    if (aName !== bName) return aName < bName ? -1 : 1;
+    return a.displayName < b.displayName
+      ? -1
+      : a.displayName > b.displayName
+        ? 1
+        : 0;
+  }
+
   /**
-   * Returns true when `name` is in the Config's `disabledTools` set, in
-   * which case `registerTool` / `registerFactory` will skip it. This is
+   * Returns true when Config disables `name` or the Host profile withholds it,
+   * in which case tool registration will skip it. This is
    * the chokepoint for the daemon mutation route at `POST /workspace/
    * tools/:name/enable {enabled:false}`; both
    * built-ins and MCP-discovered tools flow through `registerTool`, so
@@ -266,6 +333,12 @@ export class ToolRegistry {
     name: string,
     aliases: readonly string[] = [],
   ): boolean {
+    if (
+      this.config.getSessionSourceType?.() === 'agent-host' &&
+      !AGENT_HOST_TOOL_NAMES.includes(name)
+    ) {
+      return true;
+    }
     const disabledTools = this.config.getDisabledTools();
     const hasExactMatch =
       disabledTools.has(name) ||
@@ -283,10 +356,28 @@ export class ToolRegistry {
   }
 
   /**
+   * A Managed session never runs a tool's side effect in the host process,
+   * so its registry takes no tool from any path, including tools registered
+   * after the session starts (image generation, workflows, advisor).
+   */
+  private refusesHostTools(): boolean {
+    return this.config.getSessionExecutionEngine?.() === 'managed';
+  }
+
+  private refusesHostTool(name: string): boolean {
+    if (!this.refusesHostTools()) return false;
+    debugLogger.info(
+      `Tool "${name}" skipped: a Managed session has no host tools.`,
+    );
+    return true;
+  }
+
+  /**
    * Registers a tool definition.
    * @param tool - The tool object containing schema and execution logic.
    */
   registerTool(tool: AnyDeclarativeTool): void {
+    if (this.refusesHostTool(tool.name)) return;
     if (
       this.isToolDisabled(
         tool.name,
@@ -294,7 +385,7 @@ export class ToolRegistry {
       )
     ) {
       debugLogger.info(
-        `Tool "${tool.name}" skipped: present in disabledTools set.`,
+        `Tool "${tool.name}" skipped: disabled for this session.`,
       );
       return;
     }
@@ -340,6 +431,15 @@ export class ToolRegistry {
       );
       return;
     }
+    if (tool instanceof DiscoveredMCPTool) {
+      if (tool.isAppVisible) {
+        this.mcpAppTools.set(
+          JSON.stringify([tool.serverName, tool.serverToolName]),
+          tool,
+        );
+      }
+      if (!tool.isModelVisible) return;
+    }
     this.tools.set(tool.name, tool);
   }
 
@@ -348,9 +448,10 @@ export class ToolRegistry {
    * is not instantiated until {@link ensureTool} or {@link warmAll} is called.
    */
   registerFactory(name: string, factory: ToolFactory): void {
+    if (this.refusesHostTool(name)) return;
     if (this.isToolDisabled(name)) {
       debugLogger.info(
-        `Tool factory "${name}" skipped: present in disabledTools set.`,
+        `Tool factory "${name}" skipped: disabled for this session.`,
       );
       return;
     }
@@ -358,8 +459,51 @@ export class ToolRegistry {
   }
 
   /**
+   * Registers one of the tools a Managed session runs in its Runtime worker.
+   * Only these pass the Managed refusal, and only as the tool built for the
+   * session's own environment: any other name, environment, or tool under the
+   * name, is refused.
+   */
+  registerRuntimeBackedFactory(
+    name: string,
+    factory: ToolFactory,
+    environment: ExecutionEnvironment,
+    deferred: boolean,
+  ): void {
+    if (
+      !this.refusesHostTools() ||
+      !MANAGED_RUNTIME_TOOL_NAMES.has(name) ||
+      environment !== this.config.getManagedRuntimeEnvironment?.()
+    ) {
+      debugLogger.info(`Tool "${name}" skipped: it is not Runtime-backed.`);
+      return;
+    }
+    if (this.isToolDisabled(name)) {
+      debugLogger.info(
+        `Tool factory "${name}" skipped: present in disabledTools set.`,
+      );
+      return;
+    }
+    this.factories.set(name, async () => {
+      const tool = await factory();
+      if (
+        tool.name !== name ||
+        (tool as { environment?: unknown }).environment !== environment
+      ) {
+        throw new Error(`Tool "${name}" is not Runtime-backed.`);
+      }
+      return tool;
+    });
+    if (deferred) this.permissionDeferred.add(name);
+  }
+
+  unregisterTool(name: string): void {
+    this.tools.delete(name);
+  }
+
+  /**
    * Registers a lazy tool factory for a tool that an active
-   * `permissions.allow` registry allowlist demoted to deferred (#9827,
+   * `settings.tools.eager` allowlist demoted to deferred (#9827,
    * #10075). Registration is identical to {@link registerFactory}; the name
    * is additionally tracked so every deferred-hiding decision
    * ({@link getFunctionDeclarations}, {@link isDeferredAndHidden},
@@ -367,9 +511,10 @@ export class ToolRegistry {
    * tool while {@link preloadDeferredToolsWithinBudget} skips it.
    */
   registerPermissionDeferredFactory(name: string, factory: ToolFactory): void {
+    if (this.refusesHostTool(name)) return;
     if (this.isToolDisabled(name)) {
       debugLogger.info(
-        `Tool factory "${name}" skipped: present in disabledTools set.`,
+        `Tool factory "${name}" skipped: disabled for this session.`,
       );
       return;
     }
@@ -387,11 +532,17 @@ export class ToolRegistry {
 
   /**
    * Whether a tool is deferred for hiding purposes: either the tool class
-   * opted in via `shouldDefer=true`, or an active `permissions.allow`
-   * registry allowlist demoted it (#10075).
+   * opted in via `shouldDefer=true`, or an active `settings.tools.eager`
+   * allowlist demoted it (#10075).
    */
   private isEffectivelyDeferred(tool: AnyDeclarativeTool): boolean {
     return tool.shouldDefer || this.permissionDeferred.has(tool.name);
+  }
+
+  private isToolAvailable(name: string): boolean {
+    return (
+      name !== ToolNames.IMAGE_GEN || this.config.isImageGenerationEnabled()
+    );
   }
 
   /**
@@ -401,6 +552,7 @@ export class ToolRegistry {
    * factory is never executed more than once.
    */
   async ensureTool(name: string): Promise<AnyDeclarativeTool | undefined> {
+    if (!this.isToolAvailable(name)) return undefined;
     const cached = this.tools.get(name);
     if (cached) {
       // Clean up any stale factory for this name so warmAll() and bulk
@@ -420,7 +572,7 @@ export class ToolRegistry {
         this.tools.set(name, tool);
         this.factories.delete(name);
         this.inflight.delete(name);
-        return tool;
+        return this.isToolAvailable(name) ? tool : undefined;
       })
       .catch((err: unknown) => {
         this.inflight.delete(name);
@@ -461,17 +613,36 @@ export class ToolRegistry {
    * that were built with skipDiscovery.
    */
   copyDiscoveredToolsFrom(source: ToolRegistry): void {
+    // The writes below bypass registerTool, so this refusal covers them all.
+    if (this.refusesHostTools()) {
+      debugLogger.info(
+        'Discovered tools skipped: a Managed session has no host tools.',
+      );
+      return;
+    }
+    for (const [key, tool] of source.mcpAppTools) {
+      if (
+        !this.mcpAppTools.has(key) &&
+        !this.isToolDisabled(tool.name, tool.permissionAliases)
+      ) {
+        this.mcpAppTools.set(key, tool);
+      }
+    }
     for (const tool of source.tools.values()) {
       if (
         (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) &&
         !this.tools.has(tool.name)
       ) {
         this.tools.set(tool.name, tool);
+        if (source.isPermissionDeferred(tool.name)) {
+          this.permissionDeferred.add(tool.name);
+        }
       }
     }
   }
 
   private removeDiscoveredTools(): void {
+    this.mcpAppTools.clear();
     for (const tool of this.tools.values()) {
       if (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) {
         this.tools.delete(tool.name);
@@ -488,6 +659,9 @@ export class ToolRegistry {
    * @param serverName The name of the server to remove tools from.
    */
   removeMcpToolsByServer(serverName: string): void {
+    for (const [key, tool] of this.mcpAppTools) {
+      if (tool.serverName === serverName) this.mcpAppTools.delete(key);
+    }
     for (const [name, tool] of this.tools.entries()) {
       if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
         this.tools.delete(name);
@@ -496,7 +670,8 @@ export class ToolRegistry {
         // the same name would inherit `revealed: true` from the prior
         // session — `getFunctionDeclarations` would emit it (since it
         // checks reveal state) before the model has any way to know
-        // the tool exists this session.
+        // the tool exists this session. The reviewed-declaration record
+        // is deliberately left alone: see `reviewedDeferredDeclarations`.
         this.revealedDeferred.delete(name);
       }
     }
@@ -617,18 +792,11 @@ export class ToolRegistry {
    * Discover or re-discover tools for a single MCP server.
    * @param serverName - The name of the server to discover tools from.
    */
-  async discoverToolsForServer(serverName: string): Promise<void> {
-    // Remove any previously discovered tools from this server
-    for (const [name, tool] of this.tools.entries()) {
-      if (tool instanceof DiscoveredMCPTool && tool.serverName === serverName) {
-        this.tools.delete(name);
-        // Drop reveal state too so a re-discovered tool of the same
-        // name doesn't inherit a `revealed: true` from before the
-        // disconnect (would surface in declarations before any
-        // ToolSearch call this session).
-        this.revealedDeferred.delete(name);
-      }
-    }
+  async discoverToolsForServer(
+    serverName: string,
+    reconnect = false,
+  ): Promise<void> {
+    this.removeMcpToolsByServer(serverName);
 
     this.config.getPromptRegistry().removePromptsByServer(serverName);
     this.config.getResourceRegistry().removeResourcesByServer(serverName);
@@ -636,6 +804,7 @@ export class ToolRegistry {
     await this.mcpClientManager.discoverMcpToolsForServer(
       serverName,
       this.config,
+      reconnect,
     );
   }
 
@@ -742,19 +911,16 @@ export class ToolRegistry {
       // register each function as a tool
       //
       // The same PermissionManager gate that createToolRegistry applies to
-      // built-ins (via registerLazy) applies here too — but with one
-      // deliberate difference: a discovered tool the active allowlist does
-      // not cover is DROPPED, not demoted to deferred. Discovered tools are
-      // dynamic (their schemas are only known after the discovery command
-      // runs), so keeping an uncovered one registered-and-deferred would
-      // still advertise it in the deferred-tools reminder and let ToolSearch
-      // re-add its schema on demand — defeating the #9827 schema-shrink
-      // guarantee for exactly the tools the allowlist was configured to
-      // exclude. Gating at registration keeps both sides of the gate
-      // consistent: an uncovered tool is hidden from the model instead of
-      // always failing (#9827). Whole-tool deny rules benefit from the same
-      // consistency ("a whole-tool deny rule also removes the tool from the
-      // registry", settings.md). Deny rules still apply at runtime
+      // built-ins (via registerLazy) applies here too, with the same
+      // three-state outcome. A discovered tool the `tools.eager` allowlist
+      // omits is DEFERRED, not dropped: its schema stays out of the eager
+      // model request (the #9827 guarantee) while the tool remains listed
+      // in `/tools` and reachable on demand through the stable ToolSearch +
+      // ToolCall bridge. Dropping it instead would recreate exactly the
+      // silent-disappearance bug that #10075 reported for built-ins, just
+      // under a different knob. Whole-tool deny rules still remove the tool
+      // outright ("a whole-tool deny rule also removes the tool from the
+      // registry", settings.md), and deny rules still apply at runtime
       // regardless.
       const permissionManager = this.config.getPermissionManager?.();
       for (const func of functions) {
@@ -762,16 +928,18 @@ export class ToolRegistry {
           debugLogger.warn('Discovered a tool with no name. Skipping.');
           continue;
         }
+        let deferred = false;
         if (permissionManager) {
           const status = await permissionManager.getToolRegistrationStatus(
             func.name,
           );
-          if (status !== 'registered') {
+          if (status === 'disabled') {
             debugLogger.info(
-              `Discovered tool "${func.name}" skipped: not covered by the permission manager (permissions.allow registry allowlist or whole-tool deny rule, #9827).`,
+              `Discovered tool "${func.name}" skipped: removed by a whole-tool deny rule or the legacy coreTools allowlist.`,
             );
             continue;
           }
+          deferred = status === 'deferred';
         }
         const parameters =
           func.parametersJsonSchema &&
@@ -787,6 +955,12 @@ export class ToolRegistry {
             parameters as Record<string, unknown>,
           ),
         );
+        // Mark AFTER registerTool so every deferred-hiding decision
+        // (getFunctionDeclarations / isDeferredAndHidden /
+        // getDeferredToolSummary) treats it like a `shouldDefer` tool.
+        if (deferred) {
+          this.permissionDeferred.add(func.name);
+        }
       }
     } catch (e) {
       debugLogger.error(`Tool discovery command "${discoveryCmd}" failed:`, e);
@@ -800,7 +974,7 @@ export class ToolRegistry {
    * Includes discovered (vs registered) tools if configured.
    *
    * By default, tools marked `shouldDefer=true` are excluded (they are
-   * discovered by the model on demand via the ToolSearch tool). Pass
+   * discovered and invoked by the model through the stable bridge). Pass
    * `{ includeDeferred: true }` to include them, e.g. for diagnostics.
    *
    * Tools marked `alwaysLoad=true` are always included regardless of
@@ -811,8 +985,14 @@ export class ToolRegistry {
   getFunctionDeclarations(options?: {
     includeDeferred?: boolean;
   }): FunctionDeclaration[] {
+    if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
+      return this.getCodeModeFunctionDeclarations();
+    }
     const includeDeferred = options?.includeDeferred === true;
     return Array.from(this.tools.values())
+      .filter((tool) => this.isToolAvailable(tool.name))
+      .filter((tool) => this.isToolDeclared(tool.name))
+      .filter((tool) => this.isMemoryRecallToolDeclared(tool.name))
       .filter(
         (tool) =>
           includeDeferred ||
@@ -825,10 +1005,78 @@ export class ToolRegistry {
   }
 
   /**
+   * `search_memory` / `manage_memory` only work under the structured recall
+   * protocol; under the legacy protocol both deny every call. Advertising them
+   * anyway hands the model tools that can only fail, so they are withheld.
+   * Shared by both declaration paths — the direct one and the code-mode exec
+   * bindings — because a code-mode session reaches them through the binding
+   * plan rather than through `getFunctionDeclarations`.
+   */
+  private isMemoryRecallToolDeclared(name: string): boolean {
+    if (name !== ToolNames.SEARCH_MEMORY && name !== ToolNames.MANAGE_MEMORY) {
+      return true;
+    }
+    return (this.config.getMemoryRecallMode?.() ?? 'legacy') === 'structured';
+  }
+
+  private getCodeModeFunctionDeclarations(
+    allowedNames?: ReadonlySet<string>,
+  ): FunctionDeclaration[] {
+    const plan = this.getCodeModeBindingPlan(allowedNames);
+    const searchAvailable =
+      !!this.getTool(ToolNames.TOOL_SEARCH) &&
+      (!allowedNames || allowedNames.has(ToolNames.TOOL_SEARCH));
+    return Array.from(this.tools.values())
+      .filter((tool) => {
+        const exposure = getToolExposure(tool.name);
+        if (exposure === 'exec') return true;
+        return (
+          exposure === 'direct-only' &&
+          (!allowedNames || allowedNames.has(tool.name))
+        );
+      })
+      .sort(ToolRegistry.compareCodeModeTools)
+      .map((tool) =>
+        tool.name === ToolNames.EXEC
+          ? buildExecDeclaration(tool, plan, searchAvailable)
+          : tool.schema,
+      );
+  }
+
+  getCodeModeBindingPlan(
+    allowedNames?: ReadonlySet<string>,
+  ): CodeModeBindingPlan {
+    const plan = planCodeModeBindings(
+      Array.from(this.tools.values()).filter(
+        (tool) =>
+          this.isToolAvailable(tool.name) &&
+          this.isToolDeclared(tool.name) &&
+          this.isMemoryRecallToolDeclared(tool.name),
+      ),
+      (name) => this.isDeferredAndHidden(name),
+      allowedNames,
+    );
+    this.warnCodeModeCollisions(plan);
+    return plan;
+  }
+
+  private warnCodeModeCollisions(plan: CodeModeBindingPlan): void {
+    for (const collision of plan.collisions) {
+      const key = `${collision.jsName}:${collision.kept}:${collision.omitted}`;
+      if (this.codeModeCollisionWarnings.has(key)) continue;
+      this.codeModeCollisionWarnings.add(key);
+      debugLogger.warn(
+        `Code mode tool "${collision.omitted}" is unavailable because its JavaScript name ` +
+          `tools.${collision.jsName} collides with "${collision.kept}".`,
+      );
+    }
+  }
+
+  /**
    * Marks a deferred tool as revealed. Revealed tools are included in
    * {@link getFunctionDeclarations} output for the rest of the session, even
-   * though they are normally hidden. Called by the ToolSearch tool after it
-   * successfully loads a tool so the model can invoke it on subsequent turns.
+   * though they are normally hidden. Used by startup preload, plan lifecycle
+   * setup, and compatibility replay for histories with direct deferred calls.
    */
   revealDeferredTool(name: string): void {
     this.revealedDeferred.add(name);
@@ -849,15 +1097,148 @@ export class ToolRegistry {
   }
 
   /**
-   * Removes a single tool from the revealed-deferred set. Used for rollback
-   * when a `setTools()` re-sync fails after revealing — leaving the tool
-   * "revealed" in the registry while the chat's declaration list never
-   * received the schema would mean future ToolSearch keyword queries
-   * exclude the tool (per `collectCandidates`'s isDeferredToolRevealed
-   * filter), making it unreachable until `/clear`.
+   * Removes a single tool from the revealed-deferred set. Used to roll back an
+   * explicit reveal when the corresponding declaration refresh fails.
    */
   unrevealDeferredTool(name: string): void {
     this.revealedDeferred.delete(name);
+  }
+
+  private getReviewedChat(): LlmChat | undefined {
+    const chat = getCurrentAgentChat();
+    if (chat) return chat;
+    const client = this.config.getLlmClient?.();
+    return client?.isInitialized?.() ? client.getChat?.() : undefined;
+  }
+
+  /** Records the declaration tool_search just returned. */
+  recordReviewedDeclaration(tool: AnyDeclarativeTool): void {
+    const chat = this.getReviewedChat();
+    const reviewed = chat
+      ? (this.reviewedDeclarationsByChat.get(chat) ?? new Map<string, string>())
+      : this.reviewedDeferredDeclarations;
+    reviewed.set(tool.name, deferredDeclarationFingerprint(tool));
+    if (chat) this.reviewedDeclarationsByChat.set(chat, reviewed);
+    // Unscoped callers must not mutate a chat's review map through an alias.
+    this.reviewedDeferredDeclarations = chat ? new Map(reviewed) : reviewed;
+  }
+
+  /** Forgets every review when starting a different session. */
+  clearReviewedDeclarations(): void {
+    this.reviewedDeferredDeclarations.clear();
+    this.reviewedDeclarationsByChat = new WeakMap();
+  }
+
+  /**
+   * Rebuilds reviews from schemas actually retained in the primary history.
+   *
+   * Replacement is the contract for history-replacement events: when a
+   * compaction or truncation removes the tool_search block entirely, the
+   * model can no longer see the schema, so the review must be forgotten.
+   * The one exception is a block that is still present but unreadable —
+   * model-facing truncation can cut a tool_search response mid-JSON, which
+   * fails the parse without meaning the review never happened: the model
+   * did receive the full schema when the response arrived. Such a name is
+   * recovered from the block's intact head and its in-memory review carries
+   * over only for that same chat; another chat cannot supply it. A name
+   * absent from every tool_search block in history is still
+   * forgotten.
+   */
+  syncReviewedDeclarations(
+    history: readonly Content[],
+    chat = this.getReviewedChat(),
+  ): void {
+    const previousReviews = chat
+      ? this.reviewedDeclarationsByChat.get(chat)
+      : this.reviewedDeferredDeclarations;
+    const derived = new Map<string, string>();
+    // Names mentioned by a tool_search block, recoverable from the block's
+    // head even when truncation cut the JSON tail.
+    const mentioned = new Set<string>();
+    for (const entry of history) {
+      for (const part of entry.parts ?? []) {
+        const response = part.functionResponse;
+        if (response?.name !== ToolNames.TOOL_SEARCH) continue;
+        const output = response.response?.['output'];
+        if (typeof output !== 'string') continue;
+        for (const mention of output.matchAll(
+          /<function>\s*\{\s*"name"\s*:\s*"([^"]+)"/gs,
+        )) {
+          mentioned.add(mention[1]!);
+        }
+        for (const match of output.matchAll(/<function>(.*?)<\/function>/gs)) {
+          try {
+            const { name, parametersJsonSchema, serverName } = JSON.parse(
+              match[1]!,
+            ) as Record<string, unknown>;
+            if (typeof name !== 'string') continue;
+            const suffix = `\u0000${name}\u0000${JSON.stringify(parametersJsonSchema)}`;
+            const previous = previousReviews?.get(name);
+            if (typeof serverName === 'string') {
+              derived.set(name, `${serverName}${suffix}`);
+            } else if (previous?.endsWith(suffix)) {
+              // Old transcripts did not serialize the MCP server identity.
+              derived.set(name, previous);
+            } else {
+              // Legacy block without server provenance, and no in-memory
+              // review to re-adopt (fresh process, or a cleared map).
+              const live = this.getTool(name);
+              if (live === undefined) {
+                // Progressive MCP discovery may not have registered the tool
+                // yet: recording the bare suffix now would refuse the call as
+                // "changed since tool_search" once the real server-prefixed
+                // fingerprint exists. Leave it unreviewed — one fresh
+                // `select:` re-arms it honestly.
+                continue;
+              }
+              if (live instanceof DiscoveredMCPTool) {
+                // Re-arm from the live tool's server identity, but only when
+                // the legacy schema is still byte-identical; a genuinely
+                // changed schema must keep refusing.
+                const liveFingerprint = deferredDeclarationFingerprint(live);
+                if (liveFingerprint === `${live.serverName}${suffix}`) {
+                  derived.set(name, liveFingerprint);
+                }
+              } else {
+                derived.set(name, suffix);
+              }
+            }
+          } catch {
+            // Truncated or malformed results do not establish a reviewed schema.
+          }
+        }
+      }
+    }
+    for (const name of mentioned) {
+      if (derived.has(name)) continue;
+      // Present but unreadable (truncated mid-block): keep the review the
+      // model genuinely received rather than disarming the tool.
+      const existing = previousReviews?.get(name);
+      if (existing !== undefined) {
+        derived.set(name, existing);
+      }
+    }
+    if (chat) this.reviewedDeclarationsByChat.set(chat, derived);
+    this.reviewedDeferredDeclarations = chat ? new Map(derived) : derived;
+  }
+
+  /**
+   * The fingerprint recorded by {@link recordReviewedDeclaration}, or
+   * `undefined` when tool_search has not returned this tool into the current
+   * history.
+   */
+  getReviewedDeclaration(name: string): string | undefined {
+    const chat = this.getReviewedChat();
+    const client = chat ? undefined : this.config.getLlmClient?.();
+    const history =
+      chat?.getHistoryShallow(true) ??
+      (client?.isInitialized?.() ? client.getHistoryShallow(true) : undefined);
+    if (history !== undefined) this.syncReviewedDeclarations(history, chat);
+    return (
+      chat
+        ? this.reviewedDeclarationsByChat.get(chat)
+        : this.reviewedDeferredDeclarations
+    )?.get(name);
   }
 
   /** Whether a given tool has been revealed via {@link revealDeferredTool}. */
@@ -869,7 +1250,7 @@ export class ToolRegistry {
    * Whether a deferred tool is currently hidden from the model's
    * function-declaration list. Returns `true` when the tool:
    * - is deferred (`shouldDefer=true`, or demoted by an active
-   *   `permissions.allow` registry allowlist, #10075),
+   *   `settings.tools.eager` allowlist, #10075),
    * - is not always-loaded,
    * - has not been revealed this session, AND
    * - is not in the visibleTools config list.
@@ -886,9 +1267,9 @@ export class ToolRegistry {
   }
 
   /**
-   * Clears the set of revealed deferred tools. Called by {@link GeminiClient}
+   * Clears the set of revealed deferred tools. Called by {@link LlmClient}
    * when a chat session is reset (e.g. `/clear`) so the new session starts
-   * with no ToolSearch-discovered reveals — the same state as any fresh
+   * with no transient deferred reveals — the same state as any fresh
    * session. Session-setup reveals pinned via {@link pinDeferredToolReveal}
    * survive the reset (while still registered and deferred): they are part
    * of that fresh session's setup, not of the dropped session's discovery.
@@ -907,15 +1288,26 @@ export class ToolRegistry {
    * Returns a lightweight summary of tools that are
    * deferred from the initial function-declaration list. Used to describe the
    * set of on-demand tools in the startup reminder so the model knows what is
-   * reachable via ToolSearch. `alwaysLoad` tools and tools listed in
+   * reachable via ToolSearch + ToolCall. `alwaysLoad` tools and tools listed in
    * {@link Config.getVisibleTools} are excluded.
+   *
+   * Empty in CodeModeOnly: exec describes on-demand discovery without a full
+   * startup catalog or the Direct-mode reminders' tool_call instructions.
+   * The empty result also keeps the client's incomplete-bridge fallback, which
+   * reveals ordinary deferred tools, from rewriting the exec declaration and
+   * breaking the prompt cache when a deny rule removes tool_call.
    */
   getDeferredToolSummary(): DeferredToolSummary[] {
+    if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
+      return [];
+    }
     const summary: DeferredToolSummary[] = [];
     this.tools.forEach((tool) => {
       if (
+        this.isToolAvailable(tool.name) &&
         this.isEffectivelyDeferred(tool) &&
         !tool.alwaysLoad &&
+        this.isToolDeclared(tool.name) &&
         !this.config.getVisibleTools().has(tool.name)
       ) {
         summary.push({
@@ -935,12 +1327,9 @@ export class ToolRegistry {
   /**
    * Reveals every deferred tool — bundled built-ins and MCP alike — when
    * the combined estimated token footprint of their schemas fits within
-   * `budgetTokens`. Every mid-session reveal rewrites the declaration
-   * list and invalidates the prompt-cache prefix, so the prefix only
-   * stays stable when NOTHING is left for ToolSearch to reveal: a small
-   * deferred set is cheaper to declare upfront in full than to load one
-   * cache-busting piece at a time. All-or-nothing on purpose — a partial
-   * reveal would leave an arbitrary subset behind ToolSearch.
+   * `budgetTokens`. A small deferred set can be cheaper to declare upfront
+   * than to pay for bridge round trips. All-or-nothing on purpose — a partial
+   * reveal would leave an arbitrary subset behind the bridge.
    *
    * Already-revealed tools count toward the total (reveal is
    * idempotent), so repeated calls cannot ratchet past the budget as MCP
@@ -950,13 +1339,14 @@ export class ToolRegistry {
     const candidates: string[] = [];
     let totalChars = 0;
     for (const tool of this.tools.values()) {
+      if (!this.isToolAvailable(tool.name)) continue;
       if (!this.isEffectivelyDeferred(tool) || tool.alwaysLoad) continue;
       // Permission-deferred tools (#10075) are deliberately excluded: the
       // budget preload exists to stabilise the prompt cache for ordinary
-      // deferred tools, but auto-revealing an allowlist-demoted tool would
-      // re-add exactly the schema the `permissions.allow` registry
-      // allowlist keeps out of the eager request (#9827). Such tools stay
-      // loadable on demand via ToolSearch.
+      // deferred tools, but auto-revealing a demoted tool would re-add
+      // exactly the schema the `settings.tools.eager` allowlist keeps out
+      // of the eager request (#9827). Such tools stay reachable on demand
+      // via ToolSearch + ToolCall.
       if (this.permissionDeferred.has(tool.name)) continue;
       if (this.config.getVisibleTools().has(tool.name)) continue;
       candidates.push(tool.name);
@@ -971,7 +1361,7 @@ export class ToolRegistry {
     }
     if (estimatedTokens > budgetTokens) {
       debugLogger.debug(
-        `preloadDeferredToolsWithinBudget: keeping ${candidates.length} deferred tool(s) behind ToolSearch ` +
+        `preloadDeferredToolsWithinBudget: keeping ${candidates.length} deferred tool(s) behind ToolSearch + ToolCall ` +
           `(estimated ${estimatedTokens} tokens > budget ${budgetTokens} tokens).`,
       );
       return 0;
@@ -1003,20 +1393,34 @@ export class ToolRegistry {
    * tools that have not yet been loaded will be silently omitted.
    */
   getFunctionDeclarationsFiltered(toolNames: string[]): FunctionDeclaration[] {
+    if (toolNames.length === 0) return [];
     if (this.factories.size > 0) {
       debugLogger.warn(
         `getFunctionDeclarationsFiltered() called with ${this.factories.size} unloaded ` +
           `tool factories. Call warmAll() first to avoid incomplete results.`,
       );
     }
+    if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
+      return this.getCodeModeFunctionDeclarations(new Set(toolNames));
+    }
     const declarations: FunctionDeclaration[] = [];
     for (const name of toolNames) {
-      const tool = this.tools.get(name);
-      if (tool) {
+      const tool = this.getTool(name);
+      if (tool && this.isToolDeclared(tool.name)) {
         declarations.push(tool.schema);
       }
     }
     return declarations;
+  }
+
+  isToolDeclared(name: string): boolean {
+    const tool = this.tools.get(name);
+    if (tool && isMediaPolicyToolHiddenFromModel(this.config, tool)) {
+      return false;
+    }
+    return (
+      name !== ToolNames.PROPOSE_GOAL || this.config.isGoalProposalAvailable()
+    );
   }
 
   /**
@@ -1025,7 +1429,7 @@ export class ToolRegistry {
    */
   getAllToolNames(): string[] {
     const names = new Set([...this.tools.keys(), ...this.factories.keys()]);
-    return Array.from(names);
+    return Array.from(names).filter((name) => this.isToolAvailable(name));
   }
 
   /**
@@ -1041,9 +1445,9 @@ export class ToolRegistry {
           `Call warmAll() first to avoid incomplete results.`,
       );
     }
-    return Array.from(this.tools.values()).sort((a, b) =>
-      a.displayName.localeCompare(b.displayName),
-    );
+    return Array.from(this.tools.values())
+      .filter((tool) => this.isToolAvailable(tool.name))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
   }
 
   /**
@@ -1063,7 +1467,27 @@ export class ToolRegistry {
    * Get the definition of a specific tool.
    */
   getTool(name: string): AnyDeclarativeTool | undefined {
-    return this.tools.get(name);
+    return this.isToolAvailable(name) ? this.tools.get(name) : undefined;
+  }
+
+  getMcpAppTool(
+    serverName: string,
+    rawName: string,
+  ): DiscoveredMCPTool | undefined {
+    const tool = this.mcpAppTools.get(JSON.stringify([serverName, rawName]));
+    return tool && !this.isToolDisabled(tool.name, tool.permissionAliases)
+      ? tool
+      : undefined;
+  }
+
+  hasMcpAppResource(serverName: string, uri: string): boolean {
+    return [...this.tools.values(), ...this.mcpAppTools.values()].some(
+      (tool) =>
+        tool instanceof DiscoveredMCPTool &&
+        tool.serverName === serverName &&
+        tool.appResourceUri === uri &&
+        !this.isToolDisabled(tool.name, tool.permissionAliases),
+    );
   }
 
   async readMcpResource(
@@ -1083,6 +1507,7 @@ export class ToolRegistry {
    * This method is idempotent and safe to call multiple times.
    */
   async stop(): Promise<void> {
+    this.mcpAppTools.clear();
     // Wait for any in-flight factory promises to settle before disposing, so
     // that tools which finish loading after stop() is called are still cleaned
     // up rather than leaking their listeners and resources.

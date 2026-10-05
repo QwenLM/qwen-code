@@ -25,6 +25,11 @@ import { serializeContextUsage } from '../../telemetry/context-usage.js';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { appendAdditionalContext } from '../toolHookTriggers.js';
 import { createContextUsageSnapshot } from './context-usage-snapshot.js';
+import {
+  content,
+  fnResponse,
+  userText,
+} from '../../test-utils/model-fixtures.js';
 
 function createConfig(options?: {
   userMemory?: string;
@@ -72,13 +77,50 @@ function skillConfig(): SkillConfig {
   };
 }
 
+/** The loaded output of `skillConfig()` (same path and body). */
+const LOADED_OUTPUT = buildSkillLlmContent(
+  '/skills/example-skill',
+  '# Example body',
+);
+
+/** A user turn of Skill function responses carrying `outputs`. */
+const skillTurn = (...outputs: unknown[]): Content =>
+  content(
+    'user',
+    ...outputs.map((output) => fnResponse(ToolNames.SKILL, { output })),
+  );
+
+const requestOf = (
+  contents: Content[],
+  config?: GenerateContentParameters['config'],
+): GenerateContentParameters => ({
+  model: 'test-model',
+  contents,
+  ...(config ? { config } : {}),
+});
+
+/** Snapshots `contents` in a 200k window and checks the Skill tokens are
+ * exactly `skillsTokens` while messages estimate as `messages`. */
+function expectSplit(
+  contents: Content[],
+  config: Config,
+  skillsTokens: number,
+  messages: Content[],
+) {
+  const snapshot = createContextUsageSnapshot(
+    requestOf(contents),
+    config,
+    200_000,
+  );
+  expect(snapshot?.breakdown.skills_tokens).toBe(skillsTokens);
+  expect(snapshot?.breakdown.messages_tokens).toBe(
+    estimateContentTokens(messages),
+  );
+}
+
 describe('createContextUsageSnapshot', () => {
   it('attributes exact memory, tools, and the first loaded Skill body', () => {
     const skill = skillConfig();
-    const skillOutput = buildSkillLlmContent(
-      '/skills/example-skill',
-      skill.body,
-    );
     const mcpTool = new DiscoveredMCPTool(
       {} as CallableTool,
       'server',
@@ -97,27 +139,9 @@ describe('createContextUsageSnapshot', () => {
       parametersJsonSchema: { type: 'object' },
     };
     const mcpDeclaration = mcpTool.schema;
-    const systemInstruction =
-      'Base prompt\n\n---\n\nProject memory\n\n---\n\nAuto memory';
     const contents: Content[] = [
-      { role: 'user', parts: [{ text: 'hello' }] },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: ToolNames.SKILL,
-              response: { output: skillOutput },
-            },
-          },
-          {
-            functionResponse: {
-              name: ToolNames.SKILL,
-              response: { output: 'Skill already loaded' },
-            },
-          },
-        ],
-      },
+      userText('hello'),
+      skillTurn(LOADED_OUTPUT, 'Skill already loaded'),
     ];
     const listSkills = vi.fn();
     const config = createConfig({
@@ -129,22 +153,19 @@ describe('createContextUsageSnapshot', () => {
       listSkills,
       autoCompactThreshold: 0.5,
     });
-    const request: GenerateContentParameters = {
-      model: 'test-model',
-      contents,
-      config: {
-        systemInstruction,
-        tools: [
-          {
-            functionDeclarations: [
-              builtinDeclaration,
-              skillDeclaration,
-              mcpDeclaration,
-            ],
-          },
-        ],
-      },
-    };
+    const request = requestOf(contents, {
+      systemInstruction:
+        'Base prompt\n\n---\n\nProject memory\n\n---\n\nAuto memory',
+      tools: [
+        {
+          functionDeclarations: [
+            builtinDeclaration,
+            skillDeclaration,
+            mcpDeclaration,
+          ],
+        },
+      ],
+    });
 
     const snapshot = createContextUsageSnapshot(request, config, 100_000);
 
@@ -166,21 +187,14 @@ describe('createContextUsageSnapshot', () => {
           estimateContextTextTokens('Auto memory'),
         skills_tokens:
           estimateContextTextTokens(JSON.stringify(skillDeclaration)) +
-          estimateContextTextTokens(skillOutput),
+          estimateContextTextTokens(LOADED_OUTPUT),
         messages_tokens: estimateContentTokens([
           contents[0]!,
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  name: ToolNames.SKILL,
-                  response: { output: '' },
-                },
-              },
-              contents[1]!.parts![1]!,
-            ],
-          },
+          content(
+            'user',
+            fnResponse(ToolNames.SKILL, { output: '' }),
+            contents[1]!.parts![1]!,
+          ),
         ]),
       },
       compaction_reserve_tokens: 100_000 - computeThresholds(100_000, 0.5).auto,
@@ -195,11 +209,9 @@ describe('createContextUsageSnapshot', () => {
     const tool = vi.fn().mockResolvedValue({
       functionDeclarations: [{ name: 'callable_decl' }],
     });
-    const request: GenerateContentParameters = {
-      model: 'test-model',
-      contents: [],
-      config: { tools: [{ tool } as unknown as CallableTool] },
-    };
+    const request = requestOf([], {
+      tools: [{ tool } as unknown as CallableTool],
+    });
 
     expect(
       createContextUsageSnapshot(request, createConfig(), 100_000),
@@ -209,164 +221,54 @@ describe('createContextUsageSnapshot', () => {
 
   it('keeps unmatched and duplicate Skill outputs in messages', () => {
     const skill = skillConfig();
-    const skillOutput = buildSkillLlmContent(
-      '/skills/example-skill',
-      skill.body,
-    );
-    const contents: Content[] = [
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: ToolNames.SKILL,
-              response: { output: skillOutput },
-            },
-          },
-          {
-            functionResponse: {
-              name: ToolNames.SKILL,
-              response: { output: skillOutput },
-            },
-          },
-        ],
-      },
-    ];
-    const request: GenerateContentParameters = {
-      model: 'test-model',
+    const contents = [skillTurn(LOADED_OUTPUT, LOADED_OUTPUT)];
+    expectSplit(
       contents,
-    };
-    const config = createConfig({
-      cachedSkills: [skill],
-      loadedSkillNames: new Set([skill.name]),
-    });
-
-    const snapshot = createContextUsageSnapshot(request, config, 200_000);
-
-    expect(snapshot?.breakdown.skills_tokens).toBe(
-      estimateContextTextTokens(skillOutput),
-    );
-    expect(snapshot?.breakdown.messages_tokens).toBe(
-      estimateContentTokens([
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                name: ToolNames.SKILL,
-                response: { output: '' },
-              },
-            },
-            contents[0]!.parts![1]!,
-          ],
-        },
-      ]),
+      createConfig({
+        cachedSkills: [skill],
+        loadedSkillNames: new Set([skill.name]),
+      }),
+      estimateContextTextTokens(LOADED_OUTPUT),
+      [
+        content(
+          'user',
+          fnResponse(ToolNames.SKILL, { output: '' }),
+          contents[0]!.parts![1]!,
+        ),
+      ],
     );
   });
 
   it('attributes the immutable loaded output after the Skill cache changes', () => {
     const loadedSkill = skillConfig();
-    const loadedOutput = buildSkillLlmContent(
-      '/skills/example-skill',
-      loadedSkill.body,
-    );
     const editedSkill = { ...loadedSkill, body: '# Edited body' };
-    const request: GenerateContentParameters = {
-      model: 'test-model',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                name: ToolNames.SKILL,
-                response: { output: loadedOutput },
-              },
-            },
-          ],
-        },
-      ],
-    };
-    const config = createConfig({
-      cachedSkills: [editedSkill],
-      loadedSkillNames: new Set([loadedSkill.name]),
-      loadedSkillContents: new Set([loadedOutput]),
-    });
-
-    const snapshot = createContextUsageSnapshot(request, config, 200_000);
-
-    expect(snapshot?.breakdown.skills_tokens).toBe(
-      estimateContextTextTokens(loadedOutput),
-    );
-    expect(snapshot?.breakdown.messages_tokens).toBe(
-      estimateContentTokens([
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                name: ToolNames.SKILL,
-                response: { output: '' },
-              },
-            },
-          ],
-        },
-      ]),
+    expectSplit(
+      [skillTurn(LOADED_OUTPUT)],
+      createConfig({
+        cachedSkills: [editedSkill],
+        loadedSkillNames: new Set([loadedSkill.name]),
+        loadedSkillContents: new Set([LOADED_OUTPUT]),
+      }),
+      estimateContextTextTokens(LOADED_OUTPUT),
+      [skillTurn('')],
     );
   });
 
   it('attributes a retained Skill body while leaving an appended hook suffix in messages', () => {
-    const loadedOutput = buildSkillLlmContent(
-      '/skills/example-skill',
-      '# Example body',
-    );
     const responseParts = convertToFunctionResponse(
       ToolNames.SKILL,
       'skill-call',
-      appendAdditionalContext([{ text: loadedOutput }], 'hook context'),
+      appendAdditionalContext([{ text: LOADED_OUTPUT }], 'hook context'),
     );
     const output = responseParts[0]?.functionResponse?.response?.['output'];
     expect(typeof output).toBe('string');
-    const hookSuffix = (output as string).slice(loadedOutput.length);
-    const request: GenerateContentParameters = {
-      model: 'test-model',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                name: ToolNames.SKILL,
-                response: { output },
-              },
-            },
-          ],
-        },
-      ],
-    };
-    const config = createConfig({
-      loadedSkillContents: new Set([loadedOutput]),
-    });
+    const hookSuffix = (output as string).slice(LOADED_OUTPUT.length);
 
-    const snapshot = createContextUsageSnapshot(request, config, 200_000);
-
-    expect(snapshot?.breakdown.skills_tokens).toBe(
-      estimateContextTextTokens(loadedOutput),
-    );
-    expect(snapshot?.breakdown.messages_tokens).toBe(
-      estimateContentTokens([
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                name: ToolNames.SKILL,
-                response: { output: hookSuffix },
-              },
-            },
-          ],
-        },
-      ]),
+    expectSplit(
+      [skillTurn(output)],
+      createConfig({ loadedSkillContents: new Set([LOADED_OUTPUT]) }),
+      estimateContextTextTokens(LOADED_OUTPUT),
+      [skillTurn(hookSuffix)],
     );
   });
 
@@ -374,58 +276,20 @@ describe('createContextUsageSnapshot', () => {
     ['truncated', 'Tool output was too large and has been truncated\npreview'],
     ['persisted', '<persisted-output>\npreview\n</persisted-output>'],
   ])('keeps a %s Skill output in messages', (_, transformedOutput) => {
-    const loadedOutput = buildSkillLlmContent(
-      '/skills/example-skill',
-      '# Example body',
-    );
-    const request: GenerateContentParameters = {
-      model: 'test-model',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                name: ToolNames.SKILL,
-                response: { output: transformedOutput },
-              },
-            },
-          ],
-        },
-      ],
-    };
-    const config = createConfig({
-      loadedSkillContents: new Set([loadedOutput]),
-    });
-
-    const snapshot = createContextUsageSnapshot(request, config, 200_000);
-
-    expect(snapshot?.breakdown.skills_tokens).toBe(0);
-    expect(snapshot?.breakdown.messages_tokens).toBe(
-      estimateContentTokens(request.contents as Content[]),
+    const contents = [skillTurn(transformedOutput)];
+    expectSplit(
+      contents,
+      createConfig({ loadedSkillContents: new Set([LOADED_OUTPUT]) }),
+      0,
+      contents,
     );
   });
 
   it('uses only committed Skill cache data and exact in-request memory', () => {
-    const body = 'not indexed on a cold cache';
     const listSkills = vi.fn();
-    const request: GenerateContentParameters = {
-      model: 'test-model',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                name: ToolNames.SKILL,
-                response: { output: body },
-              },
-            },
-          ],
-        },
-      ],
-      config: { systemInstruction: 'Base prompt' },
-    };
+    const request = requestOf([skillTurn('not indexed on a cold cache')], {
+      systemInstruction: 'Base prompt',
+    });
     const config = createConfig({
       userMemory: 'configured but absent',
       cachedSkills: null,
@@ -447,10 +311,7 @@ describe('createContextUsageSnapshot', () => {
   });
 
   it('omits an invalid context window', () => {
-    const request: GenerateContentParameters = {
-      model: 'test-model',
-      contents: [],
-    };
+    const request = requestOf([]);
     expect(
       createContextUsageSnapshot(request, createConfig(), 0),
     ).toBeUndefined();

@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { DAEMON_SESSION_DEFAULT_MAX_BLOCKS } from '@qwen-code/webui/daemon-react-sdk';
+import { DAEMON_SESSION_DEFAULT_MAX_BLOCKS } from '@qwen-code/web-shell/daemon-react-sdk';
 import { WEB_SHELL_MAX_TRANSCRIPT_BLOCKS } from './sessions';
 
 describe('web-shell session constants', () => {

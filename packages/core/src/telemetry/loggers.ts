@@ -8,6 +8,10 @@ import type { LogAttributes, LogRecord } from '@opentelemetry/api-logs';
 import { logs } from '@opentelemetry/api-logs';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import type { Config } from '../config/config.js';
+// The #13003 experiment flag is read through its single definition, kept in a
+// no-import leaf module so telemetry can share it with `memory/recall.ts`
+// (which owns the flag but already imports this file) without a module cycle.
+import { isSkipSelectorOnUniqueStrongHitEnabled } from '../memory/recall-experiment.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import {
@@ -40,6 +44,7 @@ import {
   EVENT_MODEL_SLASH_COMMAND,
   EVENT_EXTENSION_DISABLE,
   EVENT_SUBAGENT_EXECUTION,
+  EVENT_GOAL_STATE,
   EVENT_MALFORMED_JSON_RESPONSE,
   EVENT_INVALID_CHUNK,
   EVENT_AUTH,
@@ -53,10 +58,14 @@ import {
   EVENT_SPECULATION,
   EVENT_WORKFLOW_KEYWORD,
   EVENT_WORKFLOW_RUN,
+  EVENT_WORKFLOW_SIZE_WARNING,
   EVENT_MEMORY_EXTRACT,
   EVENT_MEMORY_DREAM,
   EVENT_MEMORY_RECALL,
   EVENT_MEMORY_RECALL_DELIVERY,
+  EVENT_MEMORY_SEARCH,
+  EVENT_MEMORY_MIGRATION,
+  EVENT_MEMORY_RECALL_MODE_TRANSITION,
   EVENT_TOOL_OUTPUT_TRUNCATED,
 } from './constants.js';
 import {
@@ -70,6 +79,7 @@ import {
   recordInvalidChunk,
   recordModelSlashCommand,
   recordSubagentExecutionMetrics,
+  recordGoalStateMetrics,
   recordTokenUsageMetrics,
   recordToolCallMetrics,
   recordToolExecutionMetrics,
@@ -118,6 +128,7 @@ import type {
   ExtensionInstallEvent,
   ModelSlashCommandEvent,
   SubagentExecutionEvent,
+  GoalStateEvent,
   MalformedJsonResponseEvent,
   InvalidChunkEvent,
   AuthEvent,
@@ -130,10 +141,14 @@ import type {
   SpeculationEvent,
   WorkflowKeywordEvent,
   WorkflowRunEvent,
+  WorkflowSizeWarningEvent,
   MemoryExtractEvent,
   MemoryDreamEvent,
   MemoryRecallEvent,
   MemoryRecallDeliveryEvent,
+  MemorySearchEvent,
+  MemoryMigrationEvent,
+  MemoryRecallModeTransitionEvent,
 } from './types.js';
 import type { HookCallEvent } from './types.js';
 import type { UiEvent, UiSubagentIdentity } from './uiTelemetry.js';
@@ -984,7 +999,7 @@ export function logContentRetryFailure(
 /**
  * Phase 4b — Emits an HTTP-status retry event fired from `retryWithBackoff`
  * at an LLM call site (via the `onRetry` callback opt-in). Distinct from
- * `logContentRetry`, which is fired by `geminiChat`'s content-recovery loop.
+ * `logContentRetry`, which is fired by `llmChat`'s content-recovery loop.
  *
  * Fan-out (sink 0 fires first, before the SDK guard, so retries are counted
  * even with telemetry off; sinks 1–3 match the `logContentRetry` shape):
@@ -1043,6 +1058,26 @@ export function logSubagentExecution(
     event.status,
     event.terminate_reason,
   );
+}
+
+export function logGoalState(config: Config, event: GoalStateEvent): void {
+  QwenLogger.getInstance(config)?.logGoalStateEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_GOAL_STATE,
+    'event.timestamp': new Date().toISOString(),
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Goal ${event.cause}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordGoalStateMetrics(config, event);
 }
 
 export function logModelSlashCommand(
@@ -1462,12 +1497,39 @@ export function logWorkflowRun(config: Config, event: WorkflowRunEvent): void {
     status: event.status,
     agents_dispatched: event.agents_dispatched,
     agents_completed: event.agents_completed,
+    agents_failed: event.agents_failed,
+    agents_cached: event.agents_cached,
+    agents_respawned: event.agents_respawned,
     phase_count: event.phase_count,
     tokens_spent: event.tokens_spent,
     duration_ms: event.duration_ms,
   };
   const logger = logs.getLogger(SERVICE_NAME);
   logger.emit({ body: `Workflow run ${event.status}.`, attributes });
+}
+
+export function logWorkflowSizeWarning(
+  config: Config,
+  event: WorkflowSizeWarningEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_WORKFLOW_SIZE_WARNING,
+    'event.timestamp': event['event.timestamp'],
+    axis: event.axis,
+    scheduled_agents: event.scheduled_agents,
+    total_tokens: event.total_tokens,
+    projected_tokens: event.projected_tokens,
+    agent_cap: event.agent_cap,
+    token_cap: event.token_cap,
+    cap_from_guideline: event.cap_from_guideline,
+  };
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Workflow run flagged as large (${event.axis}).`,
+    attributes,
+  });
 }
 
 // ─── Auto-Memory Log Functions ───────────────────────────────────────────────
@@ -1512,8 +1574,16 @@ export function logMemoryDream(config: Config, event: MemoryDreamEvent): void {
     'event.name': EVENT_MEMORY_DREAM,
     'event.timestamp': event['event.timestamp'],
     trigger: event.trigger,
+    scope: event.scope,
     status: event.status,
+    created_entries: event.created_entries,
+    updated_entries: event.updated_entries,
+    deleted_entries: event.deleted_entries,
     deduped_entries: event.deduped_entries,
+    split_entries: event.split_entries,
+    keyword_backfilled: event.keyword_backfilled,
+    dirty_mutations: event.dirty_mutations,
+    scheduling_reason: event.scheduling_reason,
     touched_topics_count: event.touched_topics_count,
     touched_topics: event.touched_topics,
     duration_ms: event.duration_ms,
@@ -1526,6 +1596,7 @@ export function logMemoryDream(config: Config, event: MemoryDreamEvent): void {
   });
   recordMemoryDreamMetrics(config, event.duration_ms, {
     trigger: event.trigger,
+    scope: event.scope,
     status: event.status,
     deduped_entries: event.deduped_entries,
   });
@@ -1546,7 +1617,13 @@ export function logMemoryRecall(
     docs_selected: event.docs_selected,
     strategy: event.strategy,
     duration_ms: event.duration_ms,
+    scan_duration_ms: event.scan_duration_ms,
+    fast_duration_ms: event.fast_duration_ms,
+    selector_duration_ms: event.selector_duration_ms,
   };
+  if (event.selector_skipped !== undefined) {
+    attributes['selector_skipped'] = event.selector_skipped;
+  }
 
   const logger = logs.getLogger(SERVICE_NAME);
   logger.emit({
@@ -1556,6 +1633,18 @@ export function logMemoryRecall(
   recordMemoryRecallMetrics(config, event.duration_ms, {
     strategy: event.strategy,
     docs_selected: event.docs_selected,
+    // The selector_skipped metric dimension belongs to the #13003
+    // skip-selector experiment: attach it only while the experiment is
+    // enabled AND the recall mode had a skip decision to make (structured;
+    // legacy recalls leave the event field undefined), so deployments
+    // without the flag keep the pre-existing attribute space on these
+    // series and legacy-mode recalls do not mix a constant `false` into the
+    // experiment's control series. Logs keep any explicit decision,
+    // regardless of the experiment flag.
+    ...(isSkipSelectorOnUniqueStrongHitEnabled() &&
+    typeof event.selector_skipped === 'boolean'
+      ? { selector_skipped: event.selector_skipped }
+      : {}),
   });
 }
 
@@ -1574,6 +1663,7 @@ export function logMemoryRecallDelivery(
     strategy: event.strategy,
     docs_selected: event.docs_selected,
     latency_ms: event.latency_ms,
+    router_delivered: event.router_delivered,
   };
   if (event.discard_reason) {
     attributes['discard_reason'] = event.discard_reason;
@@ -1589,5 +1679,55 @@ export function logMemoryRecallDelivery(
     delivery_point: event.delivery_point,
     ...(event.discard_reason ? { discard_reason: event.discard_reason } : {}),
     strategy: event.strategy,
+  });
+}
+
+export function logMemorySearch(
+  config: Config,
+  event: MemorySearchEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_MEMORY_SEARCH,
+    'event.timestamp': event['event.timestamp'],
+    mode: event.mode,
+    docs_scanned: event.docs_scanned,
+    results_returned: event.results_returned,
+    duration_ms: event.duration_ms,
+  };
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Memory search: mode=${event.mode}. Returned ${event.results_returned}/${event.docs_scanned} docs.`,
+    attributes,
+  });
+}
+
+export function logMemoryMigration(
+  config: Config,
+  event: MemoryMigrationEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Memory metadata migration: scope=${event.scope}. status=${event.status}. Committed ${event.committed}/${event.batch_files}.`,
+    attributes: {
+      ...getCommonAttributes(config),
+      ...event,
+      'event.name': EVENT_MEMORY_MIGRATION,
+    },
+  });
+}
+
+export function logMemoryRecallModeTransition(
+  config: Config,
+  event: MemoryRecallModeTransitionEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Memory recall mode transition: ${event.from_mode} -> ${event.to_mode}. status=${event.status}.`,
+    attributes: {
+      ...getCommonAttributes(config),
+      ...event,
+      'event.name': EVENT_MEMORY_RECALL_MODE_TRANSITION,
+    },
   });
 }

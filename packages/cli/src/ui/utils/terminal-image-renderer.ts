@@ -51,6 +51,12 @@ const inlineDecodeCache = new Map<
   string,
   { png: Buffer; size: { width: number; height: number } }
 >();
+export const INLINE_DECODE_NEGATIVE_CACHE_LIMIT = 64;
+// Preserve the eight-entry cache's worst-case raw-key budget for large payloads.
+export const INLINE_DECODE_NEGATIVE_CACHE_BYTE_LIMIT =
+  8 * MAX_INLINE_IMAGE_ENCODED_LENGTH;
+const invalidInlineImageCache = new Map<string, number>();
+let invalidInlineImageCacheBytes = 0;
 
 // A Kitty terminal keeps a transmitted image and redraws it from the placeholder
 // cells alone. The live-row -> Static-row move and every resize remount
@@ -344,10 +350,6 @@ function getImageFormat(mimeType: string): string | null {
 }
 
 function decodeInlineImage(data: string): Buffer | null {
-  if (data.length === 0 || data.length > MAX_INLINE_IMAGE_ENCODED_LENGTH) {
-    return null;
-  }
-
   const normalized = data.replace(/\s/g, '');
   if (
     normalized.length === 0 ||
@@ -372,6 +374,10 @@ function decodeInlineImage(data: string): Buffer | null {
 function getDecodedInlinePng(
   data: string,
 ): { png: Buffer; size: { width: number; height: number } } | null {
+  if (data.length === 0 || data.length > MAX_INLINE_IMAGE_ENCODED_LENGTH) {
+    return null;
+  }
+
   const cached = inlineDecodeCache.get(data);
   if (cached) {
     inlineDecodeCache.delete(data);
@@ -379,10 +385,30 @@ function getDecodedInlinePng(
     return cached;
   }
 
+  const invalidBytes = invalidInlineImageCache.get(data);
+  if (invalidBytes !== undefined) {
+    invalidInlineImageCache.delete(data);
+    invalidInlineImageCache.set(data, invalidBytes);
+    return null;
+  }
+
   const png = decodeInlineImage(data);
-  if (!png) return null;
-  const size = readValidatedInlinePngSize(png);
-  if (!size) return null;
+  const size = png ? readValidatedInlinePngSize(png) : null;
+  if (!png || !size) {
+    const dataBytes = Buffer.byteLength(data);
+    invalidInlineImageCache.set(data, dataBytes);
+    invalidInlineImageCacheBytes += dataBytes;
+    while (
+      invalidInlineImageCache.size > INLINE_DECODE_NEGATIVE_CACHE_LIMIT ||
+      invalidInlineImageCacheBytes > INLINE_DECODE_NEGATIVE_CACHE_BYTE_LIMIT
+    ) {
+      const oldest = invalidInlineImageCache.entries().next().value;
+      if (oldest === undefined) break;
+      invalidInlineImageCache.delete(oldest[0]);
+      invalidInlineImageCacheBytes -= oldest[1];
+    }
+    return null;
+  }
 
   const decoded = { png, size };
   inlineDecodeCache.set(data, decoded);

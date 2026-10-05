@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { renderHook } from '@testing-library/react';
 import { vi } from 'vitest';
@@ -16,7 +17,7 @@ const { mockDebugLogger } = vi.hoisted(() => ({
     error: vi.fn(),
   },
 }));
-vi.mock('@qwen-code/qwen-code-core', () => ({
+vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', () => ({
   createDebugLogger: () => mockDebugLogger,
 }));
 

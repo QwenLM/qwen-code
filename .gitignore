@@ -129,6 +129,8 @@ coverage/
 
 # Dev symlink: qc-helper bundled skill docs (created by scripts/dev.js)
 packages/core/src/skills/bundled/qc-helper/docs
+# Generated browser-use runtime (staged by scripts/dev.js)
+packages/core/src/skills/bundled/browser-use/runtime/
 tmp/
 .worktrees/
 
@@ -139,3 +141,13 @@ tmp/
 # Auto-generated computer-use marker can also appear under nested packages.
 **/.qwen/computer-use/
 .playwright-mcp/
+
+# Tool state written to the repo root when $HOME is unset (e.g. gh CLI)
+.local/
+
+# Brand build workspaces (created by the desktop-brand-builder skill)
+brand-builds/
+
+# Dependencies install with pnpm from pnpm-lock.yaml; keep an npm install
+# from bringing the retired root lockfile back.
+/package-lock.json

@@ -17,7 +17,8 @@
 // file path exists — stays with the caller.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
   writeStdoutLine,
@@ -27,13 +28,19 @@ import { tokenizeArgs } from '../../utils/shell-args.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
 import { isAoneCanonicalHost } from './lib/remote-match.js';
+import {
+  ensureReviewTmpDir,
+  lastReviewEffortPath,
+  writesIntoReviewTmp,
+} from './lib/paths.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
 /**
  * The posting floor for findings on a PR review: `critical` posts only
  * Critical findings (otherwise-postable high-confidence Suggestions are
- * recorded and deferred; low-confidence and Nice-to-have stay terminal-only
+ * recorded and deferred — and so is a Critical classified fails-closed on
+ * new surface, #10291; low-confidence and Nice-to-have stay terminal-only
  * as ever), `suggestion` posts Criticals and Suggestions — today's behaviour. The floor governs what
  * the review PUBLISHES, never what it finds or verifies.
  */
@@ -84,6 +91,7 @@ export interface ParsedReviewArgs {
   effortSource:
     | 'explicit'
     | 'configured'
+    | 'last_used'
     | 'default'
     | 'forced-by-comment'
     | 'forced-by-fix';
@@ -180,11 +188,47 @@ export const EFFORT_OPTION = {
   choices: [...EFFORT_LEVELS],
   describe:
     'The review effort. `medium` (balanced) drops the adversarial ' +
-    'personas (6a/6b/6c) and the language-pitfall and wrapper/proxy ' +
-    'specialists (1d/1e) from the required roster; recorded in the plan ' +
+    'personas (6a/6b/6c), the counter-frame audit (6d) and the ' +
+    'language-pitfall and wrapper/proxy specialists (1d/1e) from the ' +
+    'required roster; recorded in the plan ' +
     'so check-coverage, agent-prompt --roster and compose-review all ' +
     'read one value. Omit for the full (high) roster.',
 } as const;
+
+/**
+ * `--deadline`, shared by the three capture commands so the wall is one
+ * option with one grammar everywhere: a whole number of minutes, or `none`.
+ * Omitted, the capture records the tier's default wall (lib/deadline.ts).
+ * Only `fetch-pr` has a `--resume`, so only its help speaks of one: the
+ * other two commands' `--help` must not describe a flag they do not take.
+ */
+export const deadlineOption = (command: {
+  resumes: boolean;
+}): { type: 'string'; describe: string } => ({
+  type: 'string',
+  describe:
+    "The review's wall, in minutes, recorded in the plan as a duration from " +
+    "the attempt's start — the round builder refuses a reverse-audit round " +
+    'that no longer fits inside it plus the tail reserve' +
+    (command.resumes ? ', and a `--resume` from a new session renews it' : '') +
+    ". Omit for the topology's default (8h on a 3A diff, 12h on a " +
+    '3B one, 16h when huge), which bounds a run that has stopped converging ' +
+    'without touching a healthy one; `none` records no wall; a wall that ' +
+    'cannot hold a convergence (two rounds plus the reserve — at or under ' +
+    "ninety minutes under the default reserve, more under the shell's " +
+    'reserve / compose-floor overrides) is refused up front, and the ' +
+    'fan-out before round 1 spends any wall too. ' +
+    (command.resumes
+      ? 'Ignored on a resumed run once it parses (the grammar and the ' +
+        'default rule still apply; the plan keeps its recorded wall). '
+      : '') +
+    'A QWEN_REVIEW_DEADLINE_EPOCH in the environment (CI) wins over the ' +
+    "flag and the default. An explicit deadline, like the environment's, " +
+    "applies the huge tier's round reduction; the default does not. " +
+    'Pauses count against the wall and also price the next round; the ' +
+    'Review Deadline section of the code-review docs gives the ceilings ' +
+    '(about 3h20m / 5h20m / 7h20m on the 8h / 12h / 16h defaults).',
+});
 
 export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
   'critical',
@@ -262,6 +306,12 @@ function asTopology(value: string): ReviewTopology | null {
  */
 function isFlag(token: string): boolean {
   return token.length > 1 && token.startsWith('-');
+}
+
+/** What `--deadline` accepts: whole minutes or `none`, whitespace trimmed. */
+function isDeadlineValue(token: string): boolean {
+  const t = token.trim();
+  return /^\d+$/.test(t) || t.toLowerCase() === 'none';
 }
 
 function isPureInteger(token: string): boolean {
@@ -354,31 +404,35 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   return { type: 'file', path: token };
 }
 
+interface ReviewArgsDefaults {
+  /**
+   * The standing default from `review.effort`, raw (`auto` already mapped
+   * to undefined by the caller), applied when neither an explicit nor a
+   * remembered effort is present. Validated case-insensitively exactly like
+   * an explicit flag — an invalid value warns and falls back instead of
+   * dropping silently. The `--comment`/`--fix` forcings still override it.
+   */
+  effort?: string;
+  /** The last valid effort explicitly typed for this project. */
+  lastUsedEffort?: ReviewEffort;
+  /**
+   * The standing `review.comment` setting: treat a PR review as if
+   * `--comment` was passed. The target binding is untouched — the run still
+   * authorises only the PR the arguments name.
+   */
+  comment?: boolean;
+  /**
+   * The standing `review.severityFloor` setting, raw (`auto` already mapped
+   * to undefined by the caller). Validated exactly like the flag — a typo
+   * warns and falls back to the round-adaptive default.
+   */
+  severityFloor?: string;
+}
+
 export function parseReviewArgs(
   raw: string,
-  defaults: {
-    /**
-     * The standing default from `review.effort`, raw (`auto` already mapped
-     * to undefined by the caller), applied when no `--effort` flag is
-     * present. Validated case-insensitively exactly like an explicit flag —
-     * an invalid value warns and falls back instead of dropping silently.
-     * An explicit flag still wins; the `--comment`/`--fix` forcings still
-     * override it.
-     */
-    effort?: string;
-    /**
-     * The standing `review.comment` setting: treat a PR review as if
-     * `--comment` was passed. The target binding is untouched — the run still
-     * authorises only the PR the arguments name.
-     */
-    comment?: boolean;
-    /**
-     * The standing `review.severityFloor` setting, raw (`auto` already mapped
-     * to undefined by the caller). Validated exactly like the flag — a typo
-     * warns and falls back to the round-adaptive default.
-     */
-    severityFloor?: string;
-  } = {},
+  defaults: ReviewArgsDefaults = {},
+  rememberExplicitEffort?: (effort: ReviewEffort) => void,
 ): ParsedReviewArgs {
   const tokens = tokenizeArgs(raw);
   const warnings: string[] = [];
@@ -434,6 +488,13 @@ export function parseReviewArgs(
     | { kind: 'discarded'; value: string }
     | { kind: 'kept-as-target'; value: string };
   const effortIssues: EffortIssue[] = [];
+  // `--deadline` is not a `/review` flag at all (it belongs to the capture
+  // commands), but it takes a value, so its leftovers ride the same
+  // disposal pool as the three value flags above: a deadline-shaped value
+  // is consumed with the flag, anything else is an invalid value of it and
+  // is rescued or discarded exactly as `--effort`'s would be.
+  const deadlineIssues: EffortIssue[] = [];
+  const consumedDeadlineValues: string[] = [];
   // `--severity-floor` shares the value-token grammar and therefore the same
   // deferred-warning problem; its issues are a separate list because its
   // resolution sentence is its own.
@@ -448,7 +509,11 @@ export function parseReviewArgs(
   interface Kept {
     token: string;
     /** Set when this token arrived as an invalid value of the named flag. */
-    invalidValueOf?: '--effort' | '--severity-floor' | '--topology';
+    invalidValueOf?:
+      | '--effort'
+      | '--severity-floor'
+      | '--topology'
+      | '--deadline';
   }
   const kept: Kept[] = [];
 
@@ -600,6 +665,48 @@ export function parseReviewArgs(
       continue;
     }
 
+    // `--deadline` is a capture-command option (fetch-pr / capture-local /
+    // plan-diff), not a `/review` flag — but it takes a value, and the
+    // generic unknown-flag arm below would leave that value on the line,
+    // where `90` reads as PR #90 and `none` as a file. Consume it, and say
+    // which wall the run gets instead.
+    if (token === '--deadline' || token.startsWith('--deadline=')) {
+      unknownFlags.push('--deadline');
+      if (token.includes('=')) {
+        const value = token.slice(token.indexOf('=') + 1);
+        if (value === '') {
+          deadlineIssues.push({ kind: 'missing' });
+        } else if (isDeadlineValue(value)) {
+          consumedDeadlineValues.push(value);
+        } else if (isPrShapedToken(value)) {
+          kept.push({ token: value, invalidValueOf: '--deadline' });
+        } else {
+          deadlineIssues.push({ kind: 'invalid-eq', value });
+        }
+        continue;
+      }
+      const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
+      if (next === undefined || isFlag(next)) {
+        deadlineIssues.push({ kind: 'missing' });
+        continue;
+      }
+      if (next === '') {
+        deadlineIssues.push({ kind: 'missing' });
+        i++;
+        continue;
+      }
+      if (isDeadlineValue(next)) {
+        consumedDeadlineValues.push(next);
+        i++;
+        continue;
+      }
+      // Not a deadline: the ordinary invalid-value disposal decides whether
+      // it is the target the caller meant (a PR number or URL) or a typo.
+      kept.push({ token: next, invalidValueOf: '--deadline' });
+      i++;
+      continue;
+    }
+
     if (isFlag(token)) {
       unknownFlags.push(token);
       warnings.push(`Unrecognized flag ${JSON.stringify(token)}; ignored.`);
@@ -747,6 +854,7 @@ export function parseReviewArgs(
     '--effort': effortIssues,
     '--severity-floor': floorIssues,
     '--topology': topologyIssues,
+    '--deadline': deadlineIssues,
   };
   let rescuedPr = false;
   for (const k of kept) {
@@ -896,6 +1004,9 @@ export function parseReviewArgs(
   if (explicitEffort !== null) {
     effort = explicitEffort;
     effortSource = 'explicit';
+  } else if (defaults.lastUsedEffort !== undefined) {
+    effort = defaults.lastUsedEffort;
+    effortSource = 'last_used';
   } else if (configuredEffort !== undefined) {
     effort = configuredEffort;
     effortSource = 'configured';
@@ -932,6 +1043,13 @@ export function parseReviewArgs(
     );
   }
 
+  if (effortSource === 'last_used') {
+    const example = effort === 'medium' ? 'high' : 'medium';
+    warnings.push(
+      `No effort level given — reusing ${effort}, the level you typed last time. Type a level like \`/review --effort ${example}\` to change it.`,
+    );
+  }
+
   // Now the resolution is final; compose the deferred effort warnings so
   // each states what is actually in effect.
   const resolution =
@@ -945,7 +1063,9 @@ export function parseReviewArgs(
           ? '`--fix` forces at least medium effort'
           : effortSource === 'configured'
             ? 'using the configured review.effort'
-            : 'using the default effort';
+            : effortSource === 'last_used'
+              ? 'using the last explicitly typed effort'
+              : 'using the default effort';
   for (const issue of effortIssues) {
     switch (issue.kind) {
       case 'invalid-eq':
@@ -974,6 +1094,38 @@ export function parseReviewArgs(
     warnings.push(
       `Invalid review.effort value ${JSON.stringify(invalidConfiguredEffort)} in settings; ${resolution}.`,
     );
+  }
+  const deadlinePrefix =
+    '`--deadline` is an option of the capture commands (`fetch-pr`, ' +
+    '`capture-local`, `plan-diff`), not of /review; ignored';
+  for (const value of consumedDeadlineValues) {
+    warnings.push(
+      `${deadlinePrefix} together with its value ${JSON.stringify(value)}.`,
+    );
+  }
+  for (const issue of deadlineIssues) {
+    switch (issue.kind) {
+      case 'missing':
+        warnings.push(`${deadlinePrefix} (it had no value).`);
+        break;
+      case 'invalid-eq':
+        warnings.push(
+          `${deadlinePrefix}; its value ${JSON.stringify(issue.value)} is not a deadline.`,
+        );
+        break;
+      case 'discarded':
+        warnings.push(
+          `${deadlinePrefix}; its value ${JSON.stringify(issue.value)} is not a deadline and was discarded.`,
+        );
+        break;
+      case 'kept-as-target':
+        warnings.push(
+          `${deadlinePrefix}; its value ${JSON.stringify(issue.value)} is not a deadline — treating it as the review target.`,
+        );
+        break;
+      default:
+        break;
+    }
   }
 
   // The floor resolves like the effort — explicit flag over configured
@@ -1063,6 +1215,10 @@ export function parseReviewArgs(
     }
   }
 
+  if (explicitEffort !== null) {
+    rememberExplicitEffort?.(explicitEffort);
+  }
+
   return {
     target,
     effort,
@@ -1114,6 +1270,71 @@ function reviewDefaultsFromSettings(): {
         ? undefined
         : review.severityFloor,
   };
+}
+
+function readLastReviewEffort(path: string): ReviewEffort | undefined {
+  let value: string;
+  try {
+    if (!existsSync(path)) return undefined;
+    value = readFileSync(path, 'utf8').trim();
+  } catch (error) {
+    writeStderrLineSafe(
+      `NOTE: the remembered review effort at ${path} could not be read (${
+        error instanceof Error ? error.message.split('\n')[0] : String(error)
+      }); resolving from review.effort and the target default instead. Type \`--effort <level>\` to record a new one.`,
+    );
+    return undefined;
+  }
+  const effort = asEffort(value);
+  if (effort === null) {
+    writeStderrLineSafe(
+      `NOTE: ${path} must contain low, medium, or high; got ${JSON.stringify(value)}. Ignoring it; resolving from review.effort and the target default instead. Type \`--effort <level>\` to record a new one.`,
+    );
+    return undefined;
+  }
+  return effort;
+}
+
+function writeLastReviewEffort(
+  path: string,
+  explicitEffort: ReviewEffort,
+  resolvedEffort: ReviewEffort,
+): void {
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    atomicWriteFileSync(path, `${explicitEffort}\n`, {
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
+  } catch (error) {
+    writeStderrLineSafe(
+      `NOTE: the explicit review effort ${explicitEffort} could not be remembered at ${path} (${
+        error instanceof Error ? error.message.split('\n')[0] : String(error)
+      }); this review still uses ${resolvedEffort}.`,
+    );
+  }
+}
+
+function parseReviewArgsWithMemory(
+  raw: string,
+  defaults: ReviewArgsDefaults,
+  effortPath: string,
+): ParsedReviewArgs {
+  let explicitEffort: ReviewEffort | undefined;
+  const initial = parseReviewArgs(raw, defaults, (effort) => {
+    explicitEffort = effort;
+  });
+
+  if (explicitEffort !== undefined) {
+    writeLastReviewEffort(effortPath, explicitEffort, initial.effort);
+    return initial;
+  }
+
+  const lastUsedEffort = readLastReviewEffort(effortPath);
+  return lastUsedEffort === undefined
+    ? initial
+    : parseReviewArgs(raw, { ...defaults, lastUsedEffort });
 }
 
 export const parseArgsCommand: CommandModule = {
@@ -1181,9 +1402,22 @@ export const parseArgsCommand: CommandModule = {
       writeStderrLineSafe(bundleNotice);
     }
 
-    const parsed = parseReviewArgs(rawStr, reviewDefaultsFromSettings());
+    const projectRoot = process.cwd();
+    const effortPath = lastReviewEffortPath(
+      projectRoot,
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    const parsed = parseReviewArgsWithMemory(
+      rawStr,
+      reviewDefaultsFromSettings(),
+      effortPath,
+    );
     const json = JSON.stringify(parsed, null, 2);
     if (out) {
+      // Step 0's write is the round's FIRST into `.qwen/tmp`: the scratch
+      // directory is refused here when the workspace redirected it, before
+      // this file — or anything after it — lands through the link.
+      if (writesIntoReviewTmp(out)) ensureReviewTmpDir('parse-args');
       mkdirSync(dirname(out), { recursive: true });
       writeFileSync(out, json, 'utf8');
     }

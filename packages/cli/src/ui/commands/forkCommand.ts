@@ -92,8 +92,7 @@ export const forkCommand: SlashCommand = {
     // Guard: a fork inherits the conversation history; there must be one.
     let hasHistory = false;
     try {
-      hasHistory =
-        (config.getGeminiClient().getHistoryShallow() ?? []).length > 0;
+      hasHistory = (config.getLlmClient().getHistoryShallow() ?? []).length > 0;
     } catch (error) {
       debugLogger.debug('Failed to read history before /fork:', error);
       hasHistory = false;
@@ -167,7 +166,7 @@ export const forkCommand: SlashCommand = {
     }
 
     try {
-      config.getGeminiClient().addHistory({
+      config.getLlmClient().addHistory({
         role: 'user',
         parts: [
           {

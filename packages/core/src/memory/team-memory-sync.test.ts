@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { syncTeamMemory } from './team-memory-sync.js';
 import { clearAutoMemoryRootCache, getTeamAutoMemoryRoot } from './paths.js';
 
@@ -39,9 +39,14 @@ describe('syncTeamMemory', () => {
 
   beforeEach(() => {
     clearAutoMemoryRootCache();
+    // Scrub ambient git config: a system/global `core.hooksPath` would make
+    // the planted post-index-change canary resolve elsewhere and fail silently.
+    vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+    vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     clearAutoMemoryRootCache();
     for (const dir of cleanup.splice(0)) {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -90,6 +95,27 @@ describe('syncTeamMemory', () => {
       ),
     ).toBe(true);
   }, 30_000);
+
+  it.skipIf(process.platform === 'win32')(
+    'commits without running the repository gpg program',
+    async () => {
+      const { repo } = freshRemoteAndClone('alice');
+      const canary = path.join(repo, 'PWNED');
+      const helper = path.join(repo, 'gpg-plant.sh');
+      fs.writeFileSync(helper, `#!/bin/sh\ntouch '${canary}'\nexit 1\n`);
+      fs.chmodSync(helper, 0o755);
+      git(repo, 'config', 'commit.gpgsign', 'true');
+      git(repo, 'config', 'gpg.program', helper);
+      writeTeamMemory(repo, 'feedback/use-real-db.md', 'use real DBs');
+
+      const result = await syncTeamMemory(repo, { message: 'sync' });
+
+      expect(result.committed).toBe(true);
+      expect(result.pushed).toBe(true);
+      expect(fs.existsSync(canary)).toBe(false);
+    },
+    30_000,
+  );
 
   it('attributes the commit to opts.author when provided', async () => {
     const { repo } = freshRemoteAndClone('alice');
@@ -261,4 +287,99 @@ describe('syncTeamMemory', () => {
     cleanup.push(path.dirname(verify));
     expect(fs.existsSync(path.join(verify, 'unrelated.txt'))).toBe(false);
   }, 30_000);
+
+  it.skipIf(process.platform === 'win32')(
+    'does not run a tree-shipped post-index-change hook on the clean-path status probe',
+    async () => {
+      // A repo with no upstream. Seed a committed team-memory file so the team
+      // path EXISTS and is clean: then the status probe is the flow's only
+      // index-writing call (no upstream, so `pull --ff-only` never runs), and
+      // a shipped `.git/hooks/post-index-change` would run on it without the
+      // flag.
+      const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sync-pic-'));
+      cleanup.push(parent);
+      const repo = path.join(parent, 'repo');
+      fs.mkdirSync(repo);
+      git(repo, 'init', '--initial-branch=main');
+      git(repo, 'config', 'user.email', 'solo@example.com');
+      git(repo, 'config', 'user.name', 'solo');
+      writeTeamMemory(repo, 'feedback/seeded.md', 'seeded');
+      git(repo, 'add', '--', '.qwen/team-memory');
+      git(repo, 'commit', '-m', 'seed');
+
+      const canary = path.join(repo, 'PWNED');
+      const hook = path.join(repo, '.git', 'hooks', 'post-index-change');
+      fs.writeFileSync(hook, `#!/bin/sh\ntouch '${canary}'\n`);
+      fs.chmodSync(hook, 0o755);
+
+      const result = await syncTeamMemory(repo, { message: 'sync' });
+
+      expect(result.skippedReason).toBe('no-upstream');
+      expect(fs.existsSync(canary)).toBe(false);
+    },
+    30_000,
+  );
+
+  it('rolls back its own commit when the push is rejected', async () => {
+    const { bare, repo } = freshRemoteAndClone('alice');
+    // The remote rejects every push (e.g. a "require signed commits" rule), so
+    // this sync's unsigned commit would be stranded unless the flow undoes it.
+    const hook = path.join(bare, 'hooks', 'pre-receive');
+    fs.writeFileSync(hook, '#!/bin/sh\nexit 1\n');
+    fs.chmodSync(hook, 0o755);
+
+    writeTeamMemory(repo, 'feedback/x.md', 'note');
+    const preHead = git(repo, 'rev-parse', 'HEAD').trim();
+
+    const first = await syncTeamMemory(repo, { message: 'sync' });
+    expect(first.committed).toBe(true);
+    expect(first.pushed).toBe(false);
+    // The rejected push must not strand our commit on the branch.
+    expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(preHead);
+
+    // The rollback must leave the working tree and index as they were.
+    expect(git(repo, 'diff', '--cached', '--name-only').trim()).toBe('');
+    expect(
+      fs.existsSync(path.join(repo, '.qwen/team-memory/feedback/x.md')),
+    ).toBe(true);
+
+    // A second sync must not read a stale ahead state (which would wedge
+    // pushing permanently): it commits the new note and tries again.
+    writeTeamMemory(repo, 'feedback/y.md', 'second note');
+    const second = await syncTeamMemory(repo, { message: 'sync' });
+    expect(second.committed).toBe(true);
+    expect(second.skippedReason).toBe('push-failed');
+    expect(second.pushed).toBe(false);
+  }, 30_000);
+
+  it.skipIf(process.platform === 'win32')(
+    'does not rewind over a concurrent commit when the push is rejected',
+    async () => {
+      const { repo } = freshRemoteAndClone('alice');
+      // A client-side pre-push hook plays the "second writer": it commits and
+      // publishes its own file with `--no-verify`, then exits 1 so THIS sync's
+      // push fails. A blind `HEAD~1` rollback would rewind over the hook's
+      // commit and sweep its file into the shared index; the SHA guard must
+      // leave it alone.
+      const hook = path.join(repo, '.git', 'hooks', 'pre-push');
+      fs.writeFileSync(
+        hook,
+        "#!/bin/sh\necho precious > user-precious.txt\ngit add user-precious.txt\ngit commit -m 'USER PRECIOUS'\ngit push --no-verify origin HEAD:main\nexit 1\n",
+      );
+      fs.chmodSync(hook, 0o755);
+
+      writeTeamMemory(repo, 'feedback/x.md', 'note');
+      const result = await syncTeamMemory(repo, { message: 'sync' });
+
+      expect(result.pushed).toBe(false);
+      // The hook's commit is still HEAD — the rewind must not have stripped it.
+      expect(git(repo, 'log', '-1', '--format=%s').trim()).toBe(
+        'USER PRECIOUS',
+      );
+      // Its file is committed, not stranded in the shared index.
+      expect(git(repo, 'diff', '--cached', '--name-only').trim()).toBe('');
+      expect(fs.existsSync(path.join(repo, 'user-precious.txt'))).toBe(true);
+    },
+    30_000,
+  );
 });

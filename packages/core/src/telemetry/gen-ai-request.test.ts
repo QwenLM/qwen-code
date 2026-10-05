@@ -9,7 +9,7 @@ import { ROOT_CONTEXT, type Attributes, type Span } from '@opentelemetry/api';
 import {
   createGenAiRequestObserverContext,
   extractAnthropicRequestAttributes,
-  extractGeminiRequestAttributes,
+  extractLlmRequestAttributes,
   extractOpenAiRequestAttributes,
   reportOpenAiRequest,
 } from './gen-ai-request.js';
@@ -144,7 +144,7 @@ describe('GenAI request attribute extraction', () => {
 
   it('extracts fields from the final Gemini config', () => {
     expect(
-      extractGeminiRequestAttributes({
+      extractLlmRequestAttributes({
         candidateCount: 99,
         config: {
           candidateCount: 2,
@@ -168,8 +168,8 @@ describe('GenAI request attribute extraction', () => {
   });
 
   it('omits invalid Gemini config shapes', () => {
-    expect(extractGeminiRequestAttributes({ config: null })).toEqual({});
-    expect(extractGeminiRequestAttributes({ config: 'invalid' })).toEqual({});
+    expect(extractLlmRequestAttributes({ config: null })).toEqual({});
+    expect(extractLlmRequestAttributes({ config: 'invalid' })).toEqual({});
   });
 });
 

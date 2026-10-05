@@ -13,7 +13,7 @@ import { readInlineMathSpanAt } from './inline-math.js';
  * terminal row: a wide/CJK line wraps, and a markdown table renders ~2 rows per
  * data row (TableRenderer draws a separator between every data row) plus
  * borders and vertical margin. Both the incremental scrollback commit
- * (useGeminiStream) and the render-side safety-net slice (MarkdownDisplay) use
+ * (useLlmStream) and the render-side safety-net slice (MarkdownDisplay) use
  * this module so they agree on how tall the pending content will render — a
  * divergent estimate would let the safety net engage out of step with the
  * commit and flicker.

@@ -9,6 +9,9 @@
 **Existing direct integration:**
 [Direct External Context Provider](./direct-external-context-provider.md)
 
+**Mem0 family extension:**
+[Configurable Mem0 Provider Extension](./external-context-mem0-extension.md)
+
 ## Decision
 
 External context integrations owned by other teams use Qwen Code Extensions
@@ -218,6 +221,13 @@ Mem0 write tool. Profile v1 adds a portable read contract and structured MCP
 result to its existing `context_search`; it does not change Provider HTTP
 requests, result ranking, write behavior, configuration schemas, or Auto
 Recall output.
+
+That private integration may carry a bounded set of maintainer-owned,
+versioned Mem0 presets as documented in
+[Direct External Context Mem0 Presets](./direct-external-context-mem0-presets.md).
+Those built-ins are a compatibility surface for verified Mem0-family
+contracts, not a public registry or an alternative distribution path for
+third-party providers.
 
 The reference MCP now rejects unrecognized `context_search` arguments instead
 of silently ignoring them. Existing query-only calls are unchanged. A client

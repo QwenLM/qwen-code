@@ -7,7 +7,8 @@ use cua_driver_core::observation_revision::{
     ObservationSessionIdentity,
 };
 
-use super::tree::{format_revision_body, AXIdentity, AXNode};
+use super::projection::format_app_body;
+use super::tree::{format_revision_body, AXIdentity, AXNode, TreeWalkResult};
 
 const RETAINED_REVISIONS: usize = 8;
 const MAX_LINEAGES: usize = 64;
@@ -19,6 +20,8 @@ struct RevisionKey {
     window_id: u32,
     max_elements: usize,
     max_depth: usize,
+    app_context: bool,
+    bounded: bool,
     serializer_version: String,
     projection_version: String,
 }
@@ -70,8 +73,9 @@ impl MacObservationRevisions {
         window_id: u32,
         max_elements: usize,
         max_depth: usize,
-        nodes: &[AXNode],
-        complete: bool,
+        app_context: bool,
+        tree: &TreeWalkResult,
+        scope_matched: bool,
         request: &ObservationRevisionRequest,
     ) -> Result<ObservationRevisionResult, String> {
         let session = current_observation_session_identity().ok_or_else(|| {
@@ -83,10 +87,18 @@ impl MacObservationRevisions {
             window_id,
             max_elements,
             max_depth,
+            app_context,
+            bounded: tree.truncated,
             serializer_version: request.serializer_version.clone(),
             projection_version: request.projection_version.clone(),
         };
         let mut store = self.store.lock().unwrap();
+        store.remove(&RevisionKey {
+            bounded: !key.bounded,
+            ..key.clone()
+        });
+        let nodes = &tree.nodes;
+        let complete = tree.read_complete && scope_matched;
         let identities = nodes
             .iter()
             .map(|node| node.identity.clone())
@@ -102,7 +114,7 @@ impl MacObservationRevisions {
             } else {
                 FullResyncReason::CaptureIncomplete
             };
-            return transient_full(nodes, reason);
+            return transient_full(nodes, reason, app_context);
         }
         let captured = nodes
             .iter()
@@ -110,7 +122,11 @@ impl MacObservationRevisions {
             .map(|(node, identity)| CapturedNode {
                 identity,
                 depth: node.depth,
-                body: format_revision_body(node),
+                body: if app_context {
+                    format_app_body(node)
+                } else {
+                    format_revision_body(node)
+                },
                 actionable_index: node.element_index,
             })
             .collect::<Vec<_>>();
@@ -122,17 +138,42 @@ impl MacObservationRevisions {
                     format!("l_{}", uuid::Uuid::new_v4().simple()),
                     RETAINED_REVISIONS,
                 )
+                .map(|lineage| {
+                    if app_context {
+                        lineage.for_app()
+                    } else {
+                        lineage
+                    }
+                })
                 .map_err(|error| error.to_string())?,
             );
         }
         store.touch(&key);
         let lineage = store.lineages.get_mut(&key).expect("inserted above");
-        let forced_reason =
-            cua_driver_core::observation_revision::requested_format_resync_reason(request)
-                .or_else(|| request.force_full.then_some(FullResyncReason::Requested));
-        lineage
-            .observe_with_reason(captured, request.base_revision_id.as_deref(), forced_reason)
-            .map_err(|error: ObservationRevisionError| error.to_string())
+        let projection = if app_context {
+            cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION
+        } else {
+            cua_driver_core::observation_revision::ACCESSIBILITY_PROJECTION_VERSION
+        };
+        let forced_reason = if request.serializer_version
+            != cua_driver_core::observation_revision::ACCESSIBILITY_SERIALIZER_VERSION
+        {
+            Some(FullResyncReason::SerializerChanged)
+        } else if request.projection_version != projection {
+            Some(FullResyncReason::ProjectionChanged)
+        } else {
+            request.force_full.then_some(FullResyncReason::Requested)
+        };
+        let result = if tree.truncated {
+            lineage.observe_bounded(captured, request.base_revision_id.as_deref(), forced_reason)
+        } else {
+            lineage.observe_with_reason(
+                captured,
+                request.base_revision_id.as_deref(),
+                forced_reason,
+            )
+        };
+        result.map_err(|error: ObservationRevisionError| error.to_string())
     }
 
     pub fn clear_session(&self, session_id: &str) {
@@ -170,6 +211,7 @@ impl Default for MacObservationRevisions {
 fn transient_full(
     nodes: &[AXNode],
     reason: FullResyncReason,
+    app_context: bool,
 ) -> Result<ObservationRevisionResult, String> {
     let captured = nodes
         .iter()
@@ -177,7 +219,11 @@ fn transient_full(
         .map(|(identity, node)| CapturedNode {
             identity,
             depth: node.depth,
-            body: format_revision_body(node),
+            body: if app_context {
+                format_app_body(node)
+            } else {
+                format_revision_body(node)
+            },
             actionable_index: node.element_index,
         })
         .collect::<Vec<_>>();

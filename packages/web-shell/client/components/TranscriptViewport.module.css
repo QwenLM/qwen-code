@@ -1,0 +1,19 @@
+.root {
+  container-type: inline-size;
+}
+
+.navigation {
+  display: none;
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 4;
+  width: clamp(
+    20px,
+    calc((100% - var(--chat-content-width, 1000px)) / 2),
+    64px
+  );
+}
+
+.navigation:not([hidden]) {
+  display: flex;
+}

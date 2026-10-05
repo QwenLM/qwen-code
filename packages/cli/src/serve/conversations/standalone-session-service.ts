@@ -4,9 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  applySessionStartupConfig,
+  isSessionStartupConfigError,
+  parseSessionStartupConfig,
+  type SessionStartupConfig,
+} from '@qwen-code/acp-bridge/sessionStartupConfig';
 import { randomUUID } from 'node:crypto';
 import {
   CdWhilePromptActiveError,
+  RequestedSessionIdRejectedError,
+  SessionArchivingError,
   SessionNotFoundError,
   StandaloneSessionSpawnError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -19,14 +27,36 @@ import type {
   BridgeSessionSummary,
   BridgeStandaloneRestoreSessionRequest,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import { STANDALONE_SESSION_SOURCE_TYPE } from '@qwen-code/acp-bridge/sessionSource';
 import {
+  BridgeChannelClosedError,
+  BridgeTimeoutError,
+  type ServeWorkspaceProvidersStatus,
+} from '@qwen-code/acp-bridge/status';
+import {
+  isScheduledTaskRunSource,
+  STANDALONE_SESSION_SOURCE_TYPE,
+} from '@qwen-code/acp-bridge/sessionSource';
+import {
+  createDebugLogger,
   readSessionPrs,
   SessionIdCaseConflictError,
+  SessionStorageEntryError,
+  SessionTranscriptDurabilityError,
+  SessionTranscriptChangedError,
+  SessionWriterError,
+  SessionWriterLostError,
+  SessionWriterUnavailableError,
   type ApprovalMode,
   type SessionArchiveState,
   type SessionListItem,
+  type SessionService,
+  type SessionWriterErrorKind,
+  type SessionWriterLease,
 } from '@qwen-code/qwen-code-core';
+import {
+  AcpChildCapacityExceededError,
+  type AcpChildCapacity,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   parseCallerSuppliedSessionId,
   normalizeSessionIdForLookup,
@@ -37,11 +67,17 @@ import {
   type LoadableConversationSession,
 } from '../../runtime/live-session-source.js';
 import {
+  ConversationDirectoryIdentityError,
   isSameConversationPath,
   type ConversationDirectoryIdentity,
 } from '../../utils/conversation-directory-identity.js';
 import type { RequestedSessionIdAdmission } from '../session-id-admission.js';
 import type { SessionArchiveCoordinator } from '../server/session-archive.js';
+import {
+  exportSessionTranscript,
+  type SessionExportFormat,
+  type SessionExportResult,
+} from '../server/session-export.js';
 import { listWorkspaceSessionsForResponse } from '../server/session-list.js';
 import {
   createWorkspaceRuntimeSessionService,
@@ -49,32 +85,91 @@ import {
 } from '../workspace-runtime-storage.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import type { ConversationWorkspace } from './conversation-workspace.js';
+import { ConversationRuntimeOwnershipError } from './conversation-runtime-errors.js';
+import {
+  StandaloneDeletionJournalError,
+  type StandaloneDeletionJournal,
+  type StandaloneDeletionRecordV2,
+} from './standalone-deletion-journal.js';
+
+import type { DaemonLogger } from '../daemon-logger.js';
+import {
+  emitDaemonLog,
+  recordDaemonError,
+} from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
+
+interface CreationDiagnostic {
+  sessionId: string;
+  relatedSessionId?: string;
+  workspaceId?: string;
+  phase:
+    | 'runtime'
+    | 'parent_validation'
+    | 'directory_prepare'
+    | 'spawn_pre_dispatch'
+    | 'spawn_dispatched'
+    | 'source_persistence'
+    | 'durable_validation'
+    | 'model_selection'
+    | 'binding'
+    | 'initial_prompt';
+  reason:
+    | 'unknown'
+    | 'rpc_timeout'
+    | 'transport_closed'
+    | 'runtime_changed'
+    | 'source_not_confirmed';
+  dispatchState: 'not_dispatched' | 'dispatched' | 'unknown';
+  cleanupOutcome:
+    | 'not_needed'
+    | 'rolled_back'
+    | 'closed'
+    | 'quarantined'
+    | 'unknown';
+}
+
+interface CreationAttempt {
+  diagnostic: CreationDiagnostic;
+  cause?: unknown;
+}
+
+const debugLogger = createDebugLogger('STANDALONE_SESSION_SERVICE');
 
 export type StandaloneSessionServiceErrorCode =
   | 'invalid_request'
   | 'standalone_session_not_found'
   | 'standalone_session_conflict'
+  | 'standalone_session_operation_failed'
   | 'session_archived'
   | 'session_busy'
+  | 'model_selection_failed'
   | 'standalone_creation_rolled_back'
   | 'standalone_creation_outcome_unknown'
   | 'working_directory_missing'
-  | 'working_directory_compromised';
+  | 'working_directory_compromised'
+  | 'deletion_recovery_compromised'
+  | 'transcript_deletion_failed'
+  | 'transcript_deletion_outcome_unknown'
+  | 'working_directory_recovery_failed';
 
 export class StandaloneSessionServiceError extends Error {
   override readonly name = 'StandaloneSessionServiceError';
+  creationDiagnostic?: Readonly<CreationDiagnostic>;
 
   constructor(
     readonly code: StandaloneSessionServiceErrorCode,
     readonly sessionId: string | undefined,
     message: string,
     readonly retryable = false,
+    readonly capacity?: AcpChildCapacity,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
   }
 }
 
 export interface CreateStandaloneSessionRequest {
+  startupConfig?: SessionStartupConfig;
   sessionId: string;
   modelServiceId?: string;
   approvalMode?: ApprovalMode;
@@ -84,12 +179,60 @@ export interface CreateStandaloneChildSessionRequest
   extends CreateStandaloneSessionRequest {
   parentSessionId: string;
   promptId: string;
+  sourceType?: string;
+  sourceId?: string;
 }
 
 export interface CreatedStandaloneSession {
   session: BridgeSession;
   projectlessOutputDirectory: string;
   workingDirectory: { state: 'ready' };
+}
+
+export type StandaloneSessionOptions = Omit<
+  ServeWorkspaceProvidersStatus,
+  'workspaceCwd' | 'acpChannelLive'
+>;
+
+export interface StandaloneSessionDirectoryResult {
+  sessionId: string;
+  projectlessOutputDirectory: string;
+  workingDirectory: {
+    state: 'ready' | 'recreated';
+    warnings?: string[];
+  };
+}
+
+export interface StandaloneSessionMetadataResult {
+  sessionId: string;
+  displayName: string;
+}
+
+export interface StandaloneBatchError {
+  sessionId: string;
+  code: StandaloneSessionServiceErrorCode | SessionWriterErrorKind;
+  message: string;
+}
+
+export interface ArchiveStandaloneSessionsResult {
+  archived: string[];
+  alreadyArchived: string[];
+  notFound: string[];
+  errors: StandaloneBatchError[];
+}
+
+export interface UnarchiveStandaloneSessionsResult {
+  unarchived: string[];
+  alreadyActive: string[];
+  notFound: string[];
+  errors: StandaloneBatchError[];
+}
+
+export interface DeleteStandaloneSessionsResult {
+  removed: string[];
+  notFound: string[];
+  errors: StandaloneBatchError[];
+  fileCleanupPending: string[];
 }
 
 export interface CreatedStandaloneChildSession
@@ -100,6 +243,10 @@ export interface CreatedStandaloneChildSession
     turn: ReturnType<AcpSessionBridge['sendPrompt']>;
   };
 }
+
+type CreatedStandaloneSessionInternal = CreatedStandaloneSession & {
+  initialPrompt?: CreatedStandaloneChildSession['initialPrompt'];
+};
 
 export interface StandaloneSessionSummary extends BridgeSessionSummary {
   sessionId: string;
@@ -135,6 +282,7 @@ export type RestoreStandaloneSessionOptions = Pick<
   | 'clientId'
   | 'historyPageSize'
   | 'liveReplayMode'
+  | 'compactedReplayMode'
   | 'hideInheritedHistory'
   | 'approvalMode'
 >;
@@ -150,6 +298,7 @@ export interface RestoredStandaloneSession extends BridgeRestoredSession {
 }
 
 export interface StandaloneSessionServiceOptions {
+  daemonLog?: Pick<DaemonLogger, 'warn'>;
   ensureRuntime(): Promise<WorkspaceRuntime>;
   assertRuntimeCurrent(runtime: WorkspaceRuntime): void;
   quarantineRuntime(runtime: WorkspaceRuntime): Promise<void>;
@@ -161,17 +310,30 @@ export interface StandaloneSessionServiceOptions {
     ConversationWorkspace,
     | 'assertExactRoot'
     | 'prepareStandaloneDirectory'
+    | 'discardEmptyConversationDirectory'
     | 'inspectStandaloneDirectory'
     | 'ensureStandaloneDirectory'
+    | 'inspectStandaloneDeletionPaths'
+    | 'createStandaloneDeletionExpectation'
+    | 'stageStandaloneDirectory'
+    | 'restoreStagedStandaloneDirectory'
+    | 'removeStagedStandaloneDirectory'
+    | 'confirmStandaloneRootDurability'
   >;
+  deletionJournal: StandaloneDeletionJournal;
   lifecycle: SessionArchiveCoordinator;
   requestedSessionIdAdmission: RequestedSessionIdAdmission;
+  hasForeignSessionOwner(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+  ): Promise<boolean>;
   invalidateSessionListCache(runtime: WorkspaceRuntime): void;
 }
 
 interface CreatingEntry {
   readonly canonicalSessionId: string;
   readonly runtime: WorkspaceRuntime;
+  readonly scope: 'top-level' | 'child';
   state: 'running' | 'quarantine-frozen';
   reservation?: { release(): void };
 }
@@ -189,9 +351,23 @@ interface PreparedRestoreDirectory {
   state: 'ready' | 'recreated';
 }
 
+type StoredStandaloneState =
+  | { kind: 'missing' }
+  | { kind: 'conflict' }
+  | { kind: 'foreign' }
+  | {
+      kind: 'standalone';
+      storageSessionId: string;
+      location: SessionArchiveState;
+      source: LoadableConversationSession;
+    };
+
 class TerminalQuarantineSignal extends Error {
-  constructor(readonly completion: Promise<void>) {
-    super('Terminal Conversations runtime quarantine started');
+  constructor(
+    readonly completion: Promise<void>,
+    cause?: unknown,
+  ) {
+    super('Terminal Conversations runtime quarantine started', { cause });
   }
 }
 
@@ -215,14 +391,19 @@ function serviceError(
   code: StandaloneSessionServiceErrorCode,
   sessionId: string,
   retryable = code === 'working_directory_missing',
+  cause?: unknown,
 ): StandaloneSessionServiceError {
   const messages: Record<StandaloneSessionServiceErrorCode, string> = {
     invalid_request: 'The standalone session request is invalid.',
     standalone_session_not_found: 'The standalone session was not found.',
     standalone_session_conflict:
       'The standalone session id or durable state conflicts with an existing session.',
+    standalone_session_operation_failed:
+      'The standalone session operation failed.',
     session_archived: 'The standalone session is archived.',
     session_busy: 'The standalone session is busy.',
+    model_selection_failed:
+      'The selected model could not be applied to the standalone session.',
     standalone_creation_rolled_back:
       'Standalone session creation failed before durable source persistence and was rolled back.',
     standalone_creation_outcome_unknown:
@@ -230,12 +411,22 @@ function serviceError(
     working_directory_missing: 'The standalone working directory is missing.',
     working_directory_compromised:
       'The standalone working directory identity is compromised.',
+    deletion_recovery_compromised:
+      'Standalone session deletion recovery is compromised.',
+    transcript_deletion_failed:
+      'The standalone transcript could not be deleted.',
+    transcript_deletion_outcome_unknown:
+      'The standalone transcript deletion outcome is unknown.',
+    working_directory_recovery_failed:
+      'The standalone working directory could not be recovered.',
   };
   return new StandaloneSessionServiceError(
     code,
     sessionId,
     messages[code],
     retryable,
+    undefined,
+    { cause },
   );
 }
 
@@ -273,6 +464,9 @@ function toStandaloneSummary(
     createdAt: item.startTime,
     updatedAt: new Date(item.mtime).toISOString(),
     ...(displayName ? { displayName } : {}),
+    ...(item.customTitle && item.titleSource
+      ? { titleSource: item.titleSource }
+      : {}),
     sourceType: STANDALONE_SESSION_SOURCE_TYPE,
     context: { kind: 'standalone' },
     ...(source.metadata.parentSessionId !== undefined
@@ -309,6 +503,11 @@ function mergeLiveStandaloneSummary(
     updatedAt: laterTimestamp(live.updatedAt, persisted.updatedAt),
     clientCount: live.clientCount,
     hasActivePrompt: live.hasActivePrompt,
+    ...(live.activeWorkState !== undefined
+      ? { activeWorkState: live.activeWorkState }
+      : {}),
+    backgroundTurn: live.backgroundTurn,
+    hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     ...(live.isWaitingForPermission !== undefined
       ? { isWaitingForPermission: live.isWaitingForPermission }
       : {}),
@@ -357,11 +556,59 @@ function isSameDirectoryIdentity(
 }
 
 export class StandaloneSessionService {
+  private readonly responseCreateRuntimes = new WeakMap<
+    CreatedStandaloneSession,
+    WorkspaceRuntime
+  >();
+  private readonly responseRestoreRuntimes = new WeakMap<
+    RestoredStandaloneSession,
+    WorkspaceRuntime
+  >();
+  private readonly pendingLifecycleLeaseReleases = new Map<
+    string,
+    SessionWriterLease
+  >();
   private readonly creating = new Map<string, CreatingEntry>();
   private readonly directoryStates = new Map<string, DirectoryState>();
+  private readonly reconciliations = new WeakMap<
+    WorkspaceRuntime,
+    Promise<void>
+  >();
   private terminal = false;
 
   constructor(private readonly options: StandaloneSessionServiceOptions) {}
+
+  async getOptions(): Promise<StandaloneSessionOptions> {
+    const runtime = await this.options.ensureRuntime();
+    return this.options.runRuntimeActivity(runtime, async () => {
+      this.options.assertRuntimeCurrent(runtime);
+      await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
+      this.options.assertRuntimeCurrent(runtime);
+      const status = await runtime.workspaceService.getWorkspaceProvidersStatus(
+        {
+          route: 'GET /standalone/session-options',
+          workspaceCwd: runtime.workspaceCwd,
+        },
+      );
+      this.options.assertRuntimeCurrent(runtime);
+      if (status.workspaceCwd !== runtime.workspaceCwd) {
+        throw new ConversationRuntimeOwnershipError(
+          'conversation_runtime_ownership_compromised',
+          false,
+        );
+      }
+      return {
+        v: status.v,
+        initialized: status.initialized,
+        ...(status.current !== undefined ? { current: status.current } : {}),
+        ...(status.approvalMode !== undefined
+          ? { approvalMode: status.approvalMode }
+          : {}),
+        providers: status.providers,
+        ...(status.errors !== undefined ? { errors: status.errors } : {}),
+      };
+    });
+  }
 
   freezeForTerminalQuarantine(runtime: WorkspaceRuntime): void {
     this.terminal = true;
@@ -370,10 +617,28 @@ export class StandaloneSessionService {
     }
   }
 
-  async get(rawSessionId: string): Promise<StandaloneSessionLookup> {
+  get(rawSessionId: string): Promise<StandaloneSessionLookup> {
+    return this.getWithRequiredScope(rawSessionId, 'top-level');
+  }
+
+  getForInternalTask(rawSessionId: string): Promise<StandaloneSessionLookup> {
+    return this.getWithRequiredScope(rawSessionId, 'any');
+  }
+
+  private async getWithRequiredScope(
+    rawSessionId: string,
+    requiredScope: 'top-level' | 'any',
+  ): Promise<StandaloneSessionLookup> {
     const { sessionId } = parseRequiredSessionId(rawSessionId);
-    if (this.creating.has(sessionId)) {
+    const creating = this.creating.get(sessionId);
+    if (
+      creating !== undefined &&
+      (requiredScope === 'any' || creating.scope === 'top-level')
+    ) {
       return { sessionId, state: 'creating' };
+    }
+    if (creating) {
+      throw serviceError('standalone_session_not_found', sessionId);
     }
     const runtime = await this.options.ensureRuntime();
     try {
@@ -386,7 +651,11 @@ export class StandaloneSessionService {
           const persisted = await this.readStandaloneSummary(
             runtime,
             sessionId,
+            requiredScope,
           );
+          if (await this.options.deletionJournal.hasRecord(sessionId)) {
+            throw serviceError('standalone_session_conflict', sessionId, true);
+          }
           this.options.assertRuntimeCurrent(runtime);
           if (persisted.isArchived) return persisted;
           let live: BridgeSessionSummary;
@@ -400,7 +669,9 @@ export class StandaloneSessionService {
             live.sourceType !== STANDALONE_SESSION_SOURCE_TYPE ||
             live.sourceId !== undefined ||
             normalizeSessionIdForLookup(live.parentSessionId ?? '') !==
-              normalizeSessionIdForLookup(persisted.parentSessionId ?? '')
+              normalizeSessionIdForLookup(persisted.parentSessionId ?? '') ||
+            live.worktree !== undefined ||
+            live.branch !== undefined
           ) {
             throw serviceError('standalone_session_conflict', sessionId);
           }
@@ -446,6 +717,14 @@ export class StandaloneSessionService {
       for (const raw of result.sessions) {
         const parsed = parseCallerSuppliedSessionId(raw.sessionId);
         if (parsed.kind !== 'valid') continue;
+        if (
+          raw.sourceId !== undefined ||
+          raw.parentSessionId !== undefined ||
+          raw.worktree !== undefined ||
+          raw.branch !== undefined
+        ) {
+          continue;
+        }
         if (conflictedIds.has(parsed.sessionId)) continue;
         if (byCanonicalId.has(parsed.sessionId)) {
           byCanonicalId.delete(parsed.sessionId);
@@ -465,8 +744,42 @@ export class StandaloneSessionService {
           context: { kind: 'standalone' },
         });
       }
+      const sessions: StandaloneSessionSummary[] = [];
+      for (const summary of byCanonicalId.values()) {
+        options.signal?.throwIfAborted();
+        let stable = false;
+        try {
+          stable = await this.options.lifecycle.runSharedMany(
+            [summary.sessionId],
+            async () => {
+              options.signal?.throwIfAborted();
+              if (
+                await this.options.deletionJournal.hasRecord(summary.sessionId)
+              ) {
+                return false;
+              }
+              options.signal?.throwIfAborted();
+              const durable = await this.inspectStoredStandalone(
+                runtime,
+                summary.sessionId,
+              );
+              options.signal?.throwIfAborted();
+              return (
+                durable.kind === 'standalone' &&
+                durable.source.metadata.parentSessionId === undefined &&
+                (durable.location === 'archived') ===
+                  (summary.isArchived === true)
+              );
+            },
+          );
+        } catch (error) {
+          if (!(error instanceof SessionArchivingError)) throw error;
+        }
+        options.signal?.throwIfAborted();
+        if (stable) sessions.push(summary);
+      }
       return {
-        sessions: [...byCanonicalId.values()],
+        sessions,
         ...(result.nextCursor !== undefined
           ? { nextCursor: result.nextCursor }
           : {}),
@@ -474,6 +787,188 @@ export class StandaloneSessionService {
         ...(result.truncated ? { truncated: true } : {}),
       };
     });
+  }
+
+  async repairDirectory(
+    rawSessionId: string,
+  ): Promise<StandaloneSessionDirectoryResult> {
+    const clientId = randomUUID();
+    const restored = await this.restore('resume', rawSessionId, { clientId });
+    try {
+      await this.cleanupDisconnectedRestore(restored);
+    } catch {
+      try {
+        await this.cleanupDisconnectedRestore(restored);
+      } catch {
+        throw serviceError(
+          'working_directory_recovery_failed',
+          restored.sessionId,
+          true,
+        );
+      }
+    }
+    return {
+      sessionId: restored.sessionId,
+      projectlessOutputDirectory: restored.projectlessOutputDirectory,
+      workingDirectory: restored.workingDirectory,
+    };
+  }
+
+  async rename(
+    rawSessionId: string,
+    displayName: string,
+    clientId?: string,
+  ): Promise<StandaloneSessionMetadataResult> {
+    const { sessionId } = parseRequiredSessionId(rawSessionId);
+    this.assertDisplayName(displayName);
+    const runtime = await this.options.ensureRuntime();
+    return this.options.runRuntimeActivity(runtime, async () => {
+      this.options.assertRuntimeCurrent(runtime);
+      await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
+      await this.reconcilePendingDeletions(runtime);
+      return this.options.lifecycle.runExclusiveAfterShared(
+        sessionId,
+        async () => {
+          await this.reconcileDeletionUnderExclusive(runtime, sessionId);
+          const durable = await this.requireTopLevelStoredStandalone(
+            runtime,
+            sessionId,
+          );
+          let live: BridgeSessionSummary | undefined;
+          try {
+            live = runtime.bridge.getSessionSummary(sessionId);
+          } catch (error) {
+            if (!(error instanceof SessionNotFoundError)) throw error;
+          }
+          if (live) {
+            this.assertMatchingLiveStandalone(live, durable, sessionId);
+            runtime.bridge.updateSessionMetadata(
+              sessionId,
+              { displayName },
+              clientId !== undefined ? { clientId } : undefined,
+            );
+          } else {
+            await runWithWorkspaceRuntimeStorage(runtime, async () => {
+              const service = createWorkspaceRuntimeSessionService(runtime);
+              const lease = await this.acquireLifecycleLease(
+                service,
+                durable.storageSessionId,
+              );
+              try {
+                const renamed = await service.renameSessionForLifecycle(
+                  durable.storageSessionId,
+                  displayName,
+                  'manual',
+                  durable.location,
+                  {
+                    assertStorageUnchanged: () =>
+                      lease.assertOwnedAndUnchanged(),
+                    assertCanMutate: () =>
+                      this.options.assertRuntimeCurrent(runtime),
+                  },
+                );
+                if (!renamed) {
+                  throw serviceError('standalone_session_not_found', sessionId);
+                }
+              } catch (error) {
+                await this.releaseLifecycleLease(
+                  lease,
+                  durable.storageSessionId,
+                );
+                throw error;
+              }
+              if (
+                !(await this.releaseLifecycleLease(
+                  lease,
+                  durable.storageSessionId,
+                ))
+              ) {
+                throw new SessionWriterUnavailableError();
+              }
+            });
+            runtime.bridge.markSessionCatalogChanged();
+          }
+          this.options.invalidateSessionListCache(runtime);
+          return { sessionId, displayName };
+        },
+      );
+    });
+  }
+
+  async export(
+    rawSessionId: string,
+    format: SessionExportFormat,
+  ): Promise<SessionExportResult> {
+    const { sessionId } = parseRequiredSessionId(rawSessionId);
+    const runtime = await this.options.ensureRuntime();
+    return this.options.runRuntimeActivity(runtime, async () => {
+      this.options.assertRuntimeCurrent(runtime);
+      await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
+      return this.options.lifecycle.runSharedMany([sessionId], async () => {
+        const durable = await this.requireTopLevelStoredStandalone(
+          runtime,
+          sessionId,
+        );
+        if (await this.options.deletionJournal.hasRecord(sessionId)) {
+          throw serviceError('standalone_session_conflict', sessionId, true);
+        }
+        return exportSessionTranscript({
+          workspaceCwd: runtime.workspaceCwd,
+          sessionId: durable.storageSessionId,
+          format,
+          archiveState: durable.location,
+          runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+        });
+      });
+    });
+  }
+
+  archive(rawSessionIds: string[]): Promise<ArchiveStandaloneSessionsResult> {
+    const sessionIds = this.parseSessionIds(rawSessionIds);
+    return this.archiveMany(sessionIds);
+  }
+
+  unarchive(
+    rawSessionIds: string[],
+  ): Promise<UnarchiveStandaloneSessionsResult> {
+    const sessionIds = this.parseSessionIds(rawSessionIds);
+    return this.unarchiveMany(sessionIds);
+  }
+
+  delete(rawSessionIds: string[]): Promise<DeleteStandaloneSessionsResult> {
+    const sessionIds = this.parseSessionIds(rawSessionIds);
+    return this.deleteMany(sessionIds);
+  }
+
+  async cleanupDisconnectedCreate(
+    created: CreatedStandaloneSession,
+  ): Promise<void> {
+    const runtime = this.responseCreateRuntimes.get(created);
+    if (!runtime || created.session.clientId === undefined) {
+      throw serviceError(
+        'standalone_session_operation_failed',
+        created.session.sessionId,
+      );
+    }
+    await runtime.bridge.detachClient(
+      created.session.sessionId,
+      created.session.clientId,
+    );
+    this.responseCreateRuntimes.delete(created);
+  }
+
+  async cleanupDisconnectedRestore(
+    restored: RestoredStandaloneSession,
+  ): Promise<void> {
+    const runtime = this.responseRestoreRuntimes.get(restored);
+    if (!runtime) {
+      throw serviceError(
+        'standalone_session_operation_failed',
+        restored.sessionId,
+      );
+    }
+    await runtime.bridge.detachClient(restored.sessionId, restored.clientId);
+    this.responseRestoreRuntimes.delete(restored);
   }
 
   load(
@@ -490,12 +985,19 @@ export class StandaloneSessionService {
     return this.restore('resume', rawSessionId, options);
   }
 
+  resumeForInternalTask(
+    rawSessionId: string,
+    options: RestoreStandaloneSessionOptions = {},
+  ): Promise<RestoredStandaloneSession> {
+    return this.restore('resume', rawSessionId, options, 'any', 'any');
+  }
+
   restoreLegacyForCompatibility(
     action: 'load' | 'resume',
     rawSessionId: string,
     options: RestoreStandaloneSessionOptions = {},
   ): Promise<RestoredStandaloneSession> {
-    return this.restore(action, rawSessionId, options, 'legacy');
+    return this.restore(action, rawSessionId, options, 'legacy', 'any');
   }
 
   async assertCwdReadyUnderShared(
@@ -509,6 +1011,8 @@ export class StandaloneSessionService {
     const durable = await this.assertActiveStandaloneSession(
       expectedRuntime,
       sessionId,
+      'any',
+      'any',
     );
     const state = this.directoryStates.get(sessionId);
     if (!state) throw serviceError('working_directory_missing', sessionId);
@@ -595,11 +1099,1154 @@ export class StandaloneSessionService {
     });
   }
 
+  private reconcilePendingDeletions(runtime: WorkspaceRuntime): Promise<void> {
+    const existing = this.reconciliations.get(runtime);
+    if (existing) return existing;
+    const pending = (async () => {
+      const sessionIds = await this.options.deletionJournal.listSessionIds(32);
+      for (const sessionId of sessionIds) {
+        try {
+          await this.options.lifecycle.runExclusiveAfterShared(
+            sessionId,
+            async () => {
+              await this.reconcileDeletionUnderExclusive(runtime, sessionId);
+            },
+          );
+        } catch {
+          // A compromised or temporarily unavailable record is isolated to
+          // its UUID. The exact operation for that UUID will surface the
+          // structured failure while other sessions remain usable.
+        }
+      }
+    })();
+    this.reconciliations.set(runtime, pending);
+    const clearPending = () => {
+      if (this.reconciliations.get(runtime) === pending) {
+        this.reconciliations.delete(runtime);
+      }
+    };
+    void pending.then(clearPending, clearPending);
+    return pending;
+  }
+
+  private async reconcileDeletionUnderExclusive(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+    allowCommittedCleanupPending = false,
+  ): Promise<'none' | 'rolled-back' | 'committed' | 'cleanup-pending'> {
+    this.options.assertRuntimeCurrent(runtime);
+    const root = await this.options.workspace.assertExactRoot(
+      runtime.workspaceCwd,
+    );
+    let journal;
+    try {
+      journal = await this.options.deletionJournal.read(sessionId, root);
+    } catch (error) {
+      if (error instanceof StandaloneDeletionJournalError) {
+        throw serviceError('deletion_recovery_compromised', sessionId);
+      }
+      throw error;
+    }
+    if (!journal) return 'none';
+
+    if (await this.options.hasForeignSessionOwner(runtime, sessionId)) {
+      throw serviceError('deletion_recovery_compromised', sessionId);
+    }
+
+    try {
+      runtime.bridge.getSessionSummary(sessionId);
+      throw serviceError('deletion_recovery_compromised', sessionId);
+    } catch (error) {
+      if (!(error instanceof SessionNotFoundError)) throw error;
+    }
+
+    const record = journal.prepared;
+    const expected =
+      record.directory.kind === 'present'
+        ? await this.options.workspace.createStandaloneDeletionExpectation(
+            sessionId,
+            record.directory,
+          )
+        : undefined;
+    const paths = await this.options.workspace.inspectStandaloneDeletionPaths(
+      sessionId,
+      expected,
+    );
+    if (paths.status === 'compromised') {
+      throw serviceError('deletion_recovery_compromised', sessionId);
+    }
+
+    return runWithWorkspaceRuntimeStorage(runtime, async () => {
+      const service = createWorkspaceRuntimeSessionService(runtime);
+      const lease = await this.acquireLifecycleLease(
+        service,
+        record.storageSessionId,
+      );
+      const mapRecoveryError = (error: unknown): never => {
+        if (error instanceof StandaloneSessionServiceError) throw error;
+        if (error instanceof SessionTranscriptDurabilityError) {
+          throw serviceError('transcript_deletion_outcome_unknown', sessionId);
+        }
+        if (
+          error instanceof ConversationDirectoryIdentityError ||
+          error instanceof SessionStorageEntryError ||
+          error instanceof StandaloneDeletionJournalError
+        ) {
+          throw serviceError('deletion_recovery_compromised', sessionId);
+        }
+        throw serviceError(
+          'working_directory_recovery_failed',
+          sessionId,
+          true,
+        );
+      };
+
+      let durable: StoredStandaloneState;
+      try {
+        durable = await this.inspectStoredStandalone(runtime, sessionId);
+        await lease.assertOwnedAndUnchanged();
+        if (durable.kind === 'conflict' || durable.kind === 'foreign') {
+          throw serviceError('deletion_recovery_compromised', sessionId);
+        }
+        if (record.version === 1 && durable.kind !== 'standalone') {
+          const physical =
+            await service.getSessionTranscriptLocationForLifecycle(
+              record.storageSessionId,
+            );
+          if (physical === undefined) {
+            throw serviceError(
+              'transcript_deletion_outcome_unknown',
+              sessionId,
+            );
+          }
+          if (physical !== record.transcriptLocation) {
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          if (record.directory.kind === 'absent') {
+            if (paths.status !== 'absent') {
+              throw serviceError('deletion_recovery_compromised', sessionId);
+            }
+          } else if (paths.status === 'staged') {
+            await this.options.workspace.restoreStagedStandaloneDirectory(
+              sessionId,
+              expected!,
+            );
+          } else if (paths.status !== 'normal') {
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          await this.options.workspace.confirmStandaloneRootDurability(root);
+          await lease.assertOwnedAndUnchanged();
+          if (
+            !(await this.releaseLifecycleLease(lease, record.storageSessionId))
+          ) {
+            throw serviceError(
+              'working_directory_recovery_failed',
+              sessionId,
+              true,
+            );
+          }
+          try {
+            await this.options.deletionJournal.clear(sessionId, root);
+          } catch (error) {
+            return mapRecoveryError(error);
+          }
+          return 'rolled-back';
+        }
+        if (durable.kind === 'standalone') {
+          if (
+            durable.storageSessionId !== record.storageSessionId ||
+            durable.location !== record.transcriptLocation ||
+            durable.source.metadata.parentSessionId !== undefined
+          ) {
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          if (record.directory.kind === 'absent') {
+            if (paths.status !== 'absent') {
+              throw serviceError('deletion_recovery_compromised', sessionId);
+            }
+          } else if (paths.status === 'staged') {
+            await this.options.workspace.restoreStagedStandaloneDirectory(
+              sessionId,
+              expected!,
+            );
+          } else if (paths.status !== 'normal') {
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          await this.options.workspace.confirmStandaloneRootDurability(root);
+          await lease.assertOwnedAndUnchanged();
+        } else {
+          if (record.version !== 2) {
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          const physical =
+            await service.getSessionTranscriptLocationForLifecycle(
+              record.storageSessionId,
+            );
+          if (
+            physical === 'conflict' ||
+            (physical !== undefined && physical !== record.transcriptLocation)
+          ) {
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          if (physical === record.transcriptLocation) {
+            const removed = await service.removeSessionTranscriptForLifecycle(
+              record.storageSessionId,
+              record.transcriptLocation,
+              record.transcriptParent,
+              {
+                assertStorageUnchanged: () => lease.assertOwnedAndUnchanged(),
+                assertCanMutate: () =>
+                  this.options.assertRuntimeCurrent(runtime),
+              },
+            );
+            if (
+              !removed ||
+              (await service.getSessionTranscriptLocationForLifecycle(
+                record.storageSessionId,
+              )) !== undefined
+            ) {
+              throw serviceError('deletion_recovery_compromised', sessionId);
+            }
+          }
+          await service.confirmSessionTranscriptDeletionForLifecycle(
+            record.transcriptLocation,
+            record.transcriptParent,
+          );
+        }
+      } catch (error) {
+        await this.releaseLifecycleLease(lease, record.storageSessionId);
+        return mapRecoveryError(error);
+      }
+
+      if (durable.kind === 'standalone') {
+        if (
+          !(await this.releaseLifecycleLease(lease, record.storageSessionId))
+        ) {
+          throw serviceError(
+            'working_directory_recovery_failed',
+            sessionId,
+            true,
+          );
+        }
+        try {
+          await this.options.deletionJournal.clear(sessionId, root);
+        } catch (error) {
+          return mapRecoveryError(error);
+        }
+        return 'rolled-back';
+      }
+
+      let cleanupPending = false;
+      if (record.directory.kind === 'absent') {
+        if (paths.status !== 'absent') {
+          await this.releaseLifecycleLease(lease, record.storageSessionId);
+          throw serviceError('deletion_recovery_compromised', sessionId);
+        }
+        try {
+          await this.options.workspace.confirmStandaloneRootDurability(root);
+        } catch (error) {
+          if (error instanceof ConversationDirectoryIdentityError) {
+            await this.releaseLifecycleLease(lease, record.storageSessionId);
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          cleanupPending = true;
+        }
+      } else if (paths.status === 'staged') {
+        try {
+          await this.options.workspace.removeStagedStandaloneDirectory(
+            sessionId,
+            expected!,
+          );
+        } catch (error) {
+          if (error instanceof ConversationDirectoryIdentityError) {
+            await this.releaseLifecycleLease(lease, record.storageSessionId);
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          cleanupPending = true;
+        }
+      } else if (paths.status !== 'absent') {
+        await this.releaseLifecycleLease(lease, record.storageSessionId);
+        throw serviceError('deletion_recovery_compromised', sessionId);
+      } else {
+        try {
+          await this.options.workspace.confirmStandaloneRootDurability(root);
+        } catch (error) {
+          if (error instanceof ConversationDirectoryIdentityError) {
+            await this.releaseLifecycleLease(lease, record.storageSessionId);
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          cleanupPending = true;
+        }
+      }
+      let cleanupOwnershipLost = false;
+      try {
+        await service.cleanupRemovedSessionStateForLifecycle(
+          record.storageSessionId,
+          {
+            assertCanMutate: () => this.options.assertRuntimeCurrent(runtime),
+            assertCleanupOwned: () => {
+              this.options.assertRuntimeCurrent(runtime);
+              lease.assertCleanupOwned();
+            },
+          },
+        );
+      } catch (error) {
+        cleanupPending = true;
+        cleanupOwnershipLost =
+          error instanceof SessionWriterError ||
+          error instanceof ConversationRuntimeOwnershipError;
+      }
+      if (!cleanupOwnershipLost) {
+        try {
+          await runtime.bridge.deleteSessionAttachments(sessionId, {
+            assertCanCommit: () => this.options.assertRuntimeCurrent(runtime),
+          });
+        } catch {
+          cleanupPending = true;
+        }
+      }
+      if (!(await this.releaseLifecycleLease(lease, record.storageSessionId))) {
+        cleanupPending = true;
+      }
+      if (!cleanupPending) {
+        try {
+          await this.options.deletionJournal.clear(sessionId, root);
+        } catch {
+          cleanupPending = true;
+        }
+      }
+      this.directoryStates.delete(sessionId);
+      runtime.bridge.markSessionCatalogChanged();
+      this.options.invalidateSessionListCache(runtime);
+      if (cleanupPending) {
+        if (allowCommittedCleanupPending) return 'cleanup-pending';
+        throw serviceError(
+          'working_directory_recovery_failed',
+          sessionId,
+          true,
+        );
+      }
+      return 'committed';
+    });
+  }
+
+  private async inspectStoredStandalone(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+  ): Promise<StoredStandaloneState> {
+    try {
+      return await runWithWorkspaceRuntimeStorage(runtime, async () => {
+        const service = createWorkspaceRuntimeSessionService(runtime);
+        const storageSessionId =
+          await service.findSessionIdIgnoringCase(sessionId);
+        if (storageSessionId === undefined) return { kind: 'missing' };
+        const location = await service.getSessionLocation(storageSessionId);
+        if (location === 'conflict') return { kind: 'conflict' };
+        if (location !== 'active' && location !== 'archived') {
+          return { kind: 'missing' };
+        }
+        const source = await readLoadableConversationSession(
+          storageSessionId,
+          service,
+        );
+        if (source?.kind !== 'standalone') return { kind: 'foreign' };
+        return {
+          kind: 'standalone',
+          storageSessionId,
+          location,
+          source,
+        };
+      });
+    } catch (error) {
+      if (error instanceof SessionIdCaseConflictError) {
+        return { kind: 'conflict' };
+      }
+      throw error;
+    }
+  }
+
+  private async acquireLifecycleLease(
+    service: SessionService,
+    storageSessionId: string,
+  ): Promise<SessionWriterLease> {
+    const pendingKey = normalizeSessionIdForLookup(storageSessionId);
+    const pending = this.pendingLifecycleLeaseReleases.get(pendingKey);
+    if (
+      pending &&
+      !(await this.releaseLifecycleLease(pending, storageSessionId)) &&
+      this.pendingLifecycleLeaseReleases.get(pendingKey) === pending
+    ) {
+      throw new SessionWriterUnavailableError({
+        message: 'A previous session writer lease is still being released.',
+      });
+    }
+    // Parent-side lifecycle and maintenance acquisitions on the
+    // Conversations runtime share the ACP writer's hardened local policy so a
+    // provably dead same-domain writer does not fence recovery forever.
+    const leaseOptions = {
+      processKind: 'daemon' as const,
+      reclaimPolicy: 'local' as const,
+      takeoverPolicy: 'certified' as const,
+    };
+    try {
+      return await service.acquireSessionWriterLease(
+        storageSessionId,
+        leaseOptions,
+      );
+    } catch (error) {
+      if (
+        !(error instanceof SessionWriterUnavailableError) &&
+        !(error instanceof SessionTranscriptChangedError)
+      ) {
+        throw error;
+      }
+      return service.acquireSessionMaintenanceLease(
+        storageSessionId,
+        leaseOptions,
+      );
+    }
+  }
+
+  private async releaseLifecycleLease(
+    lease: SessionWriterLease,
+    storageSessionId: string,
+  ): Promise<boolean> {
+    const pendingKey = normalizeSessionIdForLookup(storageSessionId);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await lease.release();
+        if (this.pendingLifecycleLeaseReleases.get(pendingKey) === lease) {
+          this.pendingLifecycleLeaseReleases.delete(pendingKey);
+        }
+        return true;
+      } catch (error) {
+        if (error instanceof SessionWriterLostError) {
+          if (this.pendingLifecycleLeaseReleases.get(pendingKey) === lease) {
+            this.pendingLifecycleLeaseReleases.delete(pendingKey);
+          }
+          return false;
+        }
+        // The lease clears retryable terminal failures itself.
+      }
+    }
+    if (!lease.isReleased || lease.isReleaseDurabilityPending) {
+      this.pendingLifecycleLeaseReleases.set(pendingKey, lease);
+    } else if (this.pendingLifecycleLeaseReleases.get(pendingKey) === lease) {
+      this.pendingLifecycleLeaseReleases.delete(pendingKey);
+    }
+    return false;
+  }
+
+  private parseSessionIds(rawSessionIds: string[]): string[] {
+    if (rawSessionIds.length === 0 || rawSessionIds.length > 100) {
+      throw invalidRequest();
+    }
+    const sessionIds: string[] = [];
+    const seen = new Set<string>();
+    for (const rawSessionId of rawSessionIds) {
+      const { sessionId } = parseRequiredSessionId(rawSessionId);
+      if (!seen.has(sessionId)) {
+        seen.add(sessionId);
+        sessionIds.push(sessionId);
+      }
+    }
+    return sessionIds;
+  }
+
+  private assertDisplayName(displayName: string): void {
+    if (
+      typeof displayName !== 'string' ||
+      displayName.trim().length === 0 ||
+      displayName.length > 256 ||
+      /\p{Cc}/u.test(displayName)
+    ) {
+      throw new StandaloneSessionServiceError(
+        'invalid_request',
+        undefined,
+        '`displayName` must be a non-empty string of at most 256 characters without control characters.',
+      );
+    }
+  }
+
+  private async requireTopLevelStoredStandalone(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+  ): Promise<Extract<StoredStandaloneState, { kind: 'standalone' }>> {
+    const durable = await this.inspectStoredStandalone(runtime, sessionId);
+    if (durable.kind === 'missing') {
+      throw serviceError('standalone_session_not_found', sessionId);
+    }
+    if (
+      durable.kind !== 'standalone' ||
+      durable.storageSessionId.toLowerCase() !== sessionId ||
+      durable.source.metadata.parentSessionId !== undefined
+    ) {
+      throw serviceError('standalone_session_conflict', sessionId);
+    }
+    return durable;
+  }
+
+  private assertMatchingLiveStandalone(
+    live: BridgeSessionSummary,
+    durable: Extract<StoredStandaloneState, { kind: 'standalone' }>,
+    sessionId: string,
+  ): void {
+    if (
+      live.sourceType !== STANDALONE_SESSION_SOURCE_TYPE ||
+      live.sourceId !== undefined ||
+      live.parentSessionId !== undefined ||
+      durable.source.metadata.parentSessionId !== undefined ||
+      live.worktree !== undefined ||
+      live.branch !== undefined
+    ) {
+      throw serviceError('standalone_session_conflict', sessionId);
+    }
+  }
+
+  private async closeLiveStandaloneIfPresent(
+    runtime: WorkspaceRuntime,
+    durable: Extract<StoredStandaloneState, { kind: 'standalone' }>,
+    sessionId: string,
+  ): Promise<void> {
+    let live: BridgeSessionSummary;
+    try {
+      live = runtime.bridge.getSessionSummary(sessionId);
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) return;
+      throw error;
+    }
+    this.assertMatchingLiveStandalone(live, durable, sessionId);
+    if (live.hasActivePrompt || live.clientCount > 0) {
+      throw serviceError('session_busy', sessionId, true);
+    }
+    try {
+      const closed = await runtime.bridge.killSession(sessionId, {
+        requireZeroAttaches: true,
+      });
+      if (!closed) throw serviceError('session_busy', sessionId, true);
+    } catch (error) {
+      if (error instanceof StandaloneSessionServiceError) throw error;
+      throw serviceError('session_busy', sessionId, true);
+    }
+    try {
+      runtime.bridge.getSessionSummary(sessionId);
+      throw serviceError('session_busy', sessionId, true);
+    } catch (error) {
+      if (!(error instanceof SessionNotFoundError)) throw error;
+    }
+    const directory = this.directoryStates.get(sessionId);
+    if (directory) {
+      this.directoryStates.set(sessionId, { pinned: directory.pinned });
+    }
+  }
+
+  private batchError(sessionId: string, error: unknown): StandaloneBatchError {
+    if (error instanceof StandaloneSessionServiceError) {
+      return { sessionId, code: error.code, message: error.message };
+    }
+    // Preserve the session-writer protocol kind so a batch caller can
+    // distinguish a fenced same-session conflict from a storage failure.
+    if (error instanceof SessionWriterError) {
+      return { sessionId, code: error.errorKind, message: error.message };
+    }
+    const mapped = serviceError(
+      'standalone_session_operation_failed',
+      sessionId,
+    );
+    return { sessionId, code: mapped.code, message: mapped.message };
+  }
+
+  private async reconcileCatalogAfterLifecycleError(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+    expectedLocation: 'active' | 'archived',
+  ): Promise<void> {
+    try {
+      const durable = await this.inspectStoredStandalone(runtime, sessionId);
+      if (
+        durable.kind !== 'standalone' ||
+        durable.location !== expectedLocation
+      ) {
+        return;
+      }
+      runtime.bridge.markSessionCatalogChanged();
+      this.options.invalidateSessionListCache(runtime);
+    } catch {
+      return;
+    }
+  }
+
+  private async archiveMany(
+    sessionIds: string[],
+  ): Promise<ArchiveStandaloneSessionsResult> {
+    const result: ArchiveStandaloneSessionsResult = {
+      archived: [],
+      alreadyArchived: [],
+      notFound: [],
+      errors: [],
+    };
+    const runtime = await this.options.ensureRuntime();
+    await this.options.runRuntimeActivity(runtime, async () => {
+      await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
+      await this.reconcilePendingDeletions(runtime);
+      for (const sessionId of sessionIds) {
+        try {
+          const outcome = await this.options.lifecycle.runExclusiveAfterShared(
+            sessionId,
+            async () => {
+              await this.reconcileDeletionUnderExclusive(runtime, sessionId);
+              const durable = await this.requireTopLevelStoredStandalone(
+                runtime,
+                sessionId,
+              );
+              if (durable.location === 'archived') return 'alreadyArchived';
+              await this.closeLiveStandaloneIfPresent(
+                runtime,
+                durable,
+                sessionId,
+              );
+              return runWithWorkspaceRuntimeStorage(runtime, async () => {
+                const service = createWorkspaceRuntimeSessionService(runtime);
+                const lease = await this.acquireLifecycleLease(
+                  service,
+                  durable.storageSessionId,
+                );
+                let archiveOutcome: 'archived' | 'alreadyArchived';
+                try {
+                  const locked = await this.requireTopLevelStoredStandalone(
+                    runtime,
+                    sessionId,
+                  );
+                  if (locked.location === 'archived') {
+                    archiveOutcome = 'alreadyArchived';
+                  } else {
+                    await lease.assertOwnedAndUnchanged();
+                    const archived = await service.archiveSessions(
+                      [locked.storageSessionId],
+                      {
+                        knownLocation: 'active',
+                        resolveConflicts: false,
+                        assertStorageUnchanged: () =>
+                          lease.assertOwnedAndUnchanged(),
+                        assertCanMutate: () =>
+                          this.options.assertRuntimeCurrent(runtime),
+                        assertCleanupOwned: () => {
+                          this.options.assertRuntimeCurrent(runtime);
+                          lease.assertCleanupOwned();
+                        },
+                      },
+                    );
+                    if (archived.errors[0]) throw archived.errors[0].error;
+                    archiveOutcome =
+                      archived.archived.length > 0
+                        ? 'archived'
+                        : 'alreadyArchived';
+                  }
+                } catch (error) {
+                  await this.releaseLifecycleLease(
+                    lease,
+                    durable.storageSessionId,
+                  );
+                  throw error;
+                }
+                if (
+                  !(await this.releaseLifecycleLease(
+                    lease,
+                    durable.storageSessionId,
+                  ))
+                ) {
+                  throw new SessionWriterUnavailableError();
+                }
+                return archiveOutcome;
+              });
+            },
+          );
+          result[outcome].push(sessionId);
+          runtime.bridge.markSessionCatalogChanged();
+          this.options.invalidateSessionListCache(runtime);
+        } catch (error) {
+          await this.reconcileCatalogAfterLifecycleError(
+            runtime,
+            sessionId,
+            'archived',
+          );
+          if (
+            error instanceof StandaloneSessionServiceError &&
+            error.code === 'standalone_session_not_found'
+          ) {
+            result.notFound.push(sessionId);
+          } else {
+            result.errors.push(this.batchError(sessionId, error));
+          }
+        }
+      }
+    });
+    return result;
+  }
+
+  private async unarchiveMany(
+    sessionIds: string[],
+  ): Promise<UnarchiveStandaloneSessionsResult> {
+    const result: UnarchiveStandaloneSessionsResult = {
+      unarchived: [],
+      alreadyActive: [],
+      notFound: [],
+      errors: [],
+    };
+    const runtime = await this.options.ensureRuntime();
+    await this.options.runRuntimeActivity(runtime, async () => {
+      await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
+      await this.reconcilePendingDeletions(runtime);
+      for (const sessionId of sessionIds) {
+        try {
+          const outcome = await this.options.lifecycle.runExclusiveAfterShared(
+            sessionId,
+            async () => {
+              await this.reconcileDeletionUnderExclusive(runtime, sessionId);
+              const durable = await this.requireTopLevelStoredStandalone(
+                runtime,
+                sessionId,
+              );
+              if (durable.location === 'active') return 'alreadyActive';
+              try {
+                runtime.bridge.getSessionSummary(sessionId);
+                throw serviceError('standalone_session_conflict', sessionId);
+              } catch (error) {
+                if (!(error instanceof SessionNotFoundError)) throw error;
+              }
+              return runWithWorkspaceRuntimeStorage(runtime, async () => {
+                const service = createWorkspaceRuntimeSessionService(runtime);
+                const lease = await this.acquireLifecycleLease(
+                  service,
+                  durable.storageSessionId,
+                );
+                let unarchiveOutcome: 'unarchived' | 'alreadyActive';
+                try {
+                  const locked = await this.requireTopLevelStoredStandalone(
+                    runtime,
+                    sessionId,
+                  );
+                  if (locked.location === 'active') {
+                    unarchiveOutcome = 'alreadyActive';
+                  } else {
+                    await lease.assertOwnedAndUnchanged();
+                    const unarchived = await service.unarchiveSessions(
+                      [locked.storageSessionId],
+                      {
+                        knownLocation: 'archived',
+                        resolveConflicts: false,
+                        assertStorageUnchanged: () =>
+                          lease.assertOwnedAndUnchanged(),
+                        assertCanMutate: () =>
+                          this.options.assertRuntimeCurrent(runtime),
+                        assertCleanupOwned: () => {
+                          this.options.assertRuntimeCurrent(runtime);
+                          lease.assertCleanupOwned();
+                        },
+                      },
+                    );
+                    if (unarchived.errors[0]) throw unarchived.errors[0].error;
+                    unarchiveOutcome =
+                      unarchived.unarchived.length > 0
+                        ? 'unarchived'
+                        : 'alreadyActive';
+                  }
+                } catch (error) {
+                  await this.releaseLifecycleLease(
+                    lease,
+                    durable.storageSessionId,
+                  );
+                  throw error;
+                }
+                if (
+                  !(await this.releaseLifecycleLease(
+                    lease,
+                    durable.storageSessionId,
+                  ))
+                ) {
+                  throw new SessionWriterUnavailableError();
+                }
+                return unarchiveOutcome;
+              });
+            },
+          );
+          result[outcome].push(sessionId);
+          runtime.bridge.markSessionCatalogChanged();
+          this.options.invalidateSessionListCache(runtime);
+        } catch (error) {
+          await this.reconcileCatalogAfterLifecycleError(
+            runtime,
+            sessionId,
+            'active',
+          );
+          if (
+            error instanceof StandaloneSessionServiceError &&
+            error.code === 'standalone_session_not_found'
+          ) {
+            result.notFound.push(sessionId);
+          } else {
+            result.errors.push(this.batchError(sessionId, error));
+          }
+        }
+      }
+    });
+    return result;
+  }
+
+  private async deleteMany(
+    sessionIds: string[],
+  ): Promise<DeleteStandaloneSessionsResult> {
+    const result: DeleteStandaloneSessionsResult = {
+      removed: [],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [],
+    };
+    const runtime = await this.options.ensureRuntime();
+    await this.options.runRuntimeActivity(runtime, async () => {
+      await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
+      await this.reconcilePendingDeletions(runtime);
+      for (const sessionId of sessionIds) {
+        try {
+          const outcome = await this.options.lifecycle.runExclusiveAfterShared(
+            sessionId,
+            () => this.deleteUnderExclusive(runtime, sessionId),
+          );
+          if (outcome === 'notFound') {
+            result.notFound.push(sessionId);
+          } else {
+            result.removed.push(sessionId);
+            if (outcome === 'cleanupPending') {
+              result.fileCleanupPending.push(sessionId);
+            }
+          }
+        } catch (error) {
+          if (
+            error instanceof StandaloneSessionServiceError &&
+            error.code === 'standalone_session_not_found'
+          ) {
+            result.notFound.push(sessionId);
+          } else {
+            result.errors.push(this.batchError(sessionId, error));
+          }
+        }
+      }
+    });
+    return result;
+  }
+
+  private async deleteUnderExclusive(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+  ): Promise<'removed' | 'cleanupPending' | 'notFound'> {
+    const recovered = await this.reconcileDeletionUnderExclusive(
+      runtime,
+      sessionId,
+      true,
+    );
+    if (recovered === 'committed') return 'removed';
+    if (recovered === 'cleanup-pending') return 'cleanupPending';
+    let durable: Extract<StoredStandaloneState, { kind: 'standalone' }>;
+    try {
+      durable = await this.requireTopLevelStoredStandalone(runtime, sessionId);
+    } catch (error) {
+      if (
+        error instanceof StandaloneSessionServiceError &&
+        error.code === 'standalone_session_not_found'
+      ) {
+        return 'notFound';
+      }
+      throw error;
+    }
+    if (await this.options.hasForeignSessionOwner(runtime, sessionId)) {
+      throw serviceError('standalone_session_conflict', sessionId);
+    }
+    await this.closeLiveStandaloneIfPresent(runtime, durable, sessionId);
+    const root = await this.options.workspace.assertExactRoot(
+      runtime.workspaceCwd,
+    );
+
+    return runWithWorkspaceRuntimeStorage(runtime, async () => {
+      const service = createWorkspaceRuntimeSessionService(runtime);
+      const lease = await this.acquireLifecycleLease(
+        service,
+        durable.storageSessionId,
+      );
+      let transcriptCommitted = false;
+      let directoryWasStaged = false;
+      let cleanupPending = false;
+      let leaseReleased = false;
+      try {
+        const locked = await this.requireTopLevelStoredStandalone(
+          runtime,
+          sessionId,
+        );
+        if (
+          locked.storageSessionId !== durable.storageSessionId ||
+          locked.location !== durable.location
+        ) {
+          throw serviceError('standalone_session_conflict', sessionId);
+        }
+        await lease.assertOwnedAndUnchanged();
+        const transcriptParent =
+          await service.getSessionTranscriptParentIdentityForLifecycle(
+            locked.location,
+          );
+        // The local session was closed above and the lifecycle lease is now
+        // held, so capture the directory identity fresh rather than trusting
+        // a pin that may predate another participant's legitimate recreation.
+        const pinned = this.effectiveDirectoryPin(runtime, sessionId);
+        const paths =
+          await this.options.workspace.inspectStandaloneDeletionPaths(
+            sessionId,
+            pinned,
+          );
+        if (paths.status === 'compromised' || paths.status === 'staged') {
+          throw serviceError('working_directory_compromised', sessionId);
+        }
+        const directory: StandaloneDeletionRecordV2['directory'] =
+          paths.status === 'normal'
+            ? {
+                kind: 'present',
+                normalName: paths.identity.name,
+                stagedName: `${paths.identity.name}.deleting`,
+                device: paths.identity.device,
+                inode: paths.identity.inode,
+                inodeVerifiable: paths.identity.inode !== 0,
+              }
+            : { kind: 'absent' };
+        const prepared: StandaloneDeletionRecordV2 = {
+          version: 2,
+          phase: 'prepared',
+          sessionId,
+          storageSessionId: locked.storageSessionId,
+          transcriptLocation: locked.location,
+          transcriptParent,
+          root: {
+            canonicalPath: root.canonicalRoot,
+            device: root.device,
+            inode: root.inode,
+            inodeVerifiable: root.inodeVerifiable,
+          },
+          directory,
+        };
+        await this.options.deletionJournal.writePrepared(prepared, root);
+        if (paths.status === 'normal') {
+          try {
+            await this.options.workspace.stageStandaloneDirectory(
+              sessionId,
+              paths.identity,
+            );
+            directoryWasStaged = true;
+            await this.options.deletionJournal.writeStaged(
+              { ...prepared, phase: 'staged' },
+              root,
+            );
+          } catch (error) {
+            await this.rollbackPreparedDeletion(
+              sessionId,
+              root,
+              paths.identity,
+            );
+            throw error;
+          }
+        }
+
+        try {
+          transcriptCommitted =
+            await service.removeSessionTranscriptForLifecycle(
+              locked.storageSessionId,
+              locked.location,
+              prepared.transcriptParent,
+              {
+                assertStorageUnchanged: () => lease.assertOwnedAndUnchanged(),
+                assertCanMutate: () =>
+                  this.options.assertRuntimeCurrent(runtime),
+              },
+            );
+        } catch (error) {
+          if (error instanceof SessionTranscriptDurabilityError) {
+            throw serviceError(
+              'transcript_deletion_outcome_unknown',
+              sessionId,
+            );
+          }
+          let physical: SessionArchiveState | 'conflict' | undefined;
+          try {
+            physical = await service.getSessionTranscriptLocationForLifecycle(
+              locked.storageSessionId,
+            );
+          } catch {
+            throw serviceError(
+              'transcript_deletion_outcome_unknown',
+              sessionId,
+            );
+          }
+          if (physical === locked.location) {
+            await this.rollbackPreparedDeletion(
+              sessionId,
+              root,
+              paths.status === 'normal' ? paths.identity : undefined,
+            );
+            throw serviceError('transcript_deletion_failed', sessionId, true);
+          }
+          if (physical === undefined) {
+            try {
+              await service.confirmSessionTranscriptDeletionForLifecycle(
+                locked.location,
+                prepared.transcriptParent,
+              );
+            } catch {
+              throw serviceError(
+                'transcript_deletion_outcome_unknown',
+                sessionId,
+              );
+            }
+            transcriptCommitted = true;
+          } else {
+            throw serviceError(
+              'transcript_deletion_outcome_unknown',
+              sessionId,
+            );
+          }
+        }
+        if (!transcriptCommitted) {
+          let physical: SessionArchiveState | 'conflict' | undefined;
+          try {
+            physical = await service.getSessionTranscriptLocationForLifecycle(
+              locked.storageSessionId,
+            );
+          } catch {
+            throw serviceError(
+              'transcript_deletion_outcome_unknown',
+              sessionId,
+            );
+          }
+          if (physical === undefined) {
+            try {
+              await service.confirmSessionTranscriptDeletionForLifecycle(
+                locked.location,
+                prepared.transcriptParent,
+              );
+            } catch {
+              throw serviceError(
+                'transcript_deletion_outcome_unknown',
+                sessionId,
+              );
+            }
+            transcriptCommitted = true;
+          } else if (physical === locked.location) {
+            await this.rollbackPreparedDeletion(
+              sessionId,
+              root,
+              paths.status === 'normal' ? paths.identity : undefined,
+            );
+            throw serviceError('transcript_deletion_failed', sessionId, true);
+          } else {
+            throw serviceError(
+              'transcript_deletion_outcome_unknown',
+              sessionId,
+            );
+          }
+        }
+
+        let cleanupOwnershipLost = false;
+        try {
+          await service.cleanupRemovedSessionStateForLifecycle(
+            locked.storageSessionId,
+            {
+              assertCanMutate: () => this.options.assertRuntimeCurrent(runtime),
+              assertCleanupOwned: () => {
+                this.options.assertRuntimeCurrent(runtime);
+                lease.assertCleanupOwned();
+              },
+            },
+          );
+        } catch (error) {
+          cleanupPending = true;
+          cleanupOwnershipLost =
+            error instanceof SessionWriterError ||
+            error instanceof ConversationRuntimeOwnershipError;
+        }
+        if (!cleanupOwnershipLost) {
+          try {
+            await runtime.bridge.deleteSessionAttachments(sessionId, {
+              assertCanCommit: () => this.options.assertRuntimeCurrent(runtime),
+            });
+          } catch {
+            cleanupPending = true;
+          }
+          if (directoryWasStaged && paths.status === 'normal') {
+            try {
+              await this.options.workspace.removeStagedStandaloneDirectory(
+                sessionId,
+                paths.identity,
+              );
+            } catch {
+              cleanupPending = true;
+            }
+          }
+        }
+        if (
+          !(await this.releaseLifecycleLease(lease, durable.storageSessionId))
+        ) {
+          cleanupPending = true;
+        }
+        leaseReleased = true;
+        if (!cleanupPending) {
+          try {
+            await this.options.deletionJournal.clear(sessionId, root);
+          } catch {
+            cleanupPending = true;
+          }
+        }
+        this.directoryStates.delete(sessionId);
+        runtime.bridge.markSessionCatalogChanged();
+        this.options.invalidateSessionListCache(runtime);
+        return cleanupPending ? 'cleanupPending' : 'removed';
+      } finally {
+        if (!leaseReleased) {
+          await this.releaseLifecycleLease(lease, durable.storageSessionId);
+        }
+      }
+    });
+  }
+
+  private async rollbackPreparedDeletion(
+    sessionId: string,
+    root: ConversationDirectoryIdentity['root'],
+    expected?: ConversationDirectoryIdentity,
+  ): Promise<void> {
+    try {
+      if (expected) {
+        const paths =
+          await this.options.workspace.inspectStandaloneDeletionPaths(
+            sessionId,
+            expected,
+          );
+        if (paths.status === 'staged') {
+          await this.options.workspace.restoreStagedStandaloneDirectory(
+            sessionId,
+            expected,
+          );
+        } else if (paths.status !== 'normal') {
+          throw serviceError('deletion_recovery_compromised', sessionId);
+        }
+      }
+      await this.options.workspace.confirmStandaloneRootDurability(root);
+      await this.options.deletionJournal.clear(sessionId, root);
+    } catch (error) {
+      if (error instanceof StandaloneSessionServiceError) throw error;
+      throw serviceError('working_directory_recovery_failed', sessionId, true);
+    }
+  }
+
   private async restore(
     action: 'load' | 'resume',
     rawSessionId: string,
     options: RestoreStandaloneSessionOptions,
     requiredPersistence: 'any' | 'legacy' = 'any',
+    requiredScope: 'top-level' | 'any' = 'top-level',
   ): Promise<RestoredStandaloneSession> {
     const { sessionId } = parseRequiredSessionId(rawSessionId);
     const runtime = await this.options.ensureRuntime();
@@ -608,6 +2255,8 @@ export class StandaloneSessionService {
       return await this.options.runRuntimeActivity(runtime, async () => {
         this.options.assertRuntimeCurrent(runtime);
         await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
+        this.options.assertRuntimeCurrent(runtime);
+        await this.reconcilePendingDeletions(runtime);
         this.options.assertRuntimeCurrent(runtime);
         reservation = this.options.requestedSessionIdAdmission.reserveRestore(
           sessionId,
@@ -621,10 +2270,12 @@ export class StandaloneSessionService {
         return this.options.lifecycle.runExclusiveAfterShared(
           sessionId,
           async () => {
+            await this.reconcileDeletionUnderExclusive(runtime, sessionId);
             const durable = await this.assertActiveStandaloneSession(
               runtime,
               sessionId,
               requiredPersistence,
+              requiredScope,
             );
 
             let existing: BridgeSessionSummary | undefined;
@@ -688,6 +2339,7 @@ export class StandaloneSessionService {
               throw serviceError('standalone_session_conflict', sessionId);
             }
             const prepared = await this.prepareRestoreDirectory(
+              runtime,
               sessionId,
               async () => {
                 if (!existing) return;
@@ -746,6 +2398,9 @@ export class StandaloneSessionService {
                 : {}),
               ...(action === 'load' && options.historyPageSize !== undefined
                 ? { historyPageSize: options.historyPageSize }
+                : {}),
+              ...(action === 'load' && options.compactedReplayMode !== undefined
+                ? { compactedReplayMode: options.compactedReplayMode }
                 : {}),
               ...(action === 'load' && options.liveReplayMode !== undefined
                 ? { liveReplayMode: options.liveReplayMode }
@@ -847,7 +2502,7 @@ export class StandaloneSessionService {
               }
             }
             this.options.assertRuntimeCurrent(runtime);
-            return {
+            const response: RestoredStandaloneSession = {
               ...restored,
               sessionId,
               workspaceCwd: runtime.workspaceCwd,
@@ -866,6 +2521,8 @@ export class StandaloneSessionService {
                   : {}),
               },
             };
+            this.responseRestoreRuntimes.set(response, runtime);
+            return response;
           },
         );
       });
@@ -888,7 +2545,7 @@ export class StandaloneSessionService {
     request: CreateStandaloneSessionRequest,
     prompt: string,
   ): Promise<CreatedStandaloneSession> {
-    const created = await this.createWithInitialPromptInternal(request, prompt);
+    const created = await this.createInternal(request, prompt);
     return {
       session: created.session,
       projectlessOutputDirectory: created.projectlessOutputDirectory,
@@ -896,39 +2553,83 @@ export class StandaloneSessionService {
     };
   }
 
+  create(
+    request: CreateStandaloneSessionRequest,
+  ): Promise<CreatedStandaloneSession> {
+    return this.createInternal(request);
+  }
+
   async createChildWithInitialPrompt(
     request: CreateStandaloneChildSessionRequest,
     prompt: string,
   ): Promise<CreatedStandaloneChildSession> {
-    const { sessionId: parentSessionId } = parseRequiredSessionId(
-      request.parentSessionId,
-    );
-    if (parentSessionId === normalizeSessionIdForLookup(request.sessionId)) {
-      throw serviceError('standalone_session_conflict', parentSessionId);
-    }
-    return this.createWithInitialPromptInternal(
+    const created = await this.createInternal(
       request,
       prompt,
-      parentSessionId,
+      request,
       request.promptId,
     );
+    if (!created.initialPrompt) {
+      throw serviceError(
+        'standalone_creation_outcome_unknown',
+        normalizeSessionIdForLookup(request.sessionId),
+      );
+    }
+    return { ...created, initialPrompt: created.initialPrompt };
   }
 
-  private async createWithInitialPromptInternal(
+  private async createInternal(
     request: CreateStandaloneSessionRequest,
-    prompt: string,
-    parentSessionId?: string,
+    prompt?: string,
+    parentRequest?: Pick<
+      CreateStandaloneChildSessionRequest,
+      'parentSessionId'
+    >,
     promptId: string = randomUUID(),
-  ): Promise<CreatedStandaloneChildSession> {
+  ): Promise<CreatedStandaloneSessionInternal> {
+    const startupConfig = parseSessionStartupConfig(
+      request.startupConfig,
+      request,
+    );
+    request = { ...request, ...(startupConfig ? { startupConfig } : {}) };
     const { sessionId } = parseRequiredSessionId(request.sessionId);
     let entry: CreatingEntry | undefined;
+    const attempt: CreationAttempt = {
+      diagnostic: {
+        sessionId,
+        phase: 'runtime',
+        reason: 'unknown',
+        dispatchState: 'not_dispatched',
+        cleanupOutcome: 'not_needed',
+      },
+    };
     try {
+      if (parentRequest !== undefined)
+        attempt.diagnostic.phase = 'parent_validation';
+      const parentSessionId =
+        parentRequest === undefined
+          ? undefined
+          : parseRequiredSessionId(parentRequest.parentSessionId).sessionId;
+      if (parentSessionId !== undefined) {
+        attempt.diagnostic.phase = 'parent_validation';
+        attempt.diagnostic.relatedSessionId = parentSessionId;
+        if (parentSessionId === sessionId)
+          throw serviceError('standalone_session_conflict', parentSessionId);
+      }
+      attempt.diagnostic.phase = 'runtime';
       const runtime = await this.options.ensureRuntime();
+      attempt.diagnostic.workspaceId = runtime.workspaceId;
       return await this.options.runRuntimeActivity(runtime, async () => {
         this.options.assertRuntimeCurrent(runtime);
         await this.options.workspace.assertExactRoot(runtime.workspaceCwd);
         this.options.assertRuntimeCurrent(runtime);
-        const creatingEntry = this.insertCreating(sessionId, runtime);
+        await this.reconcilePendingDeletions(runtime);
+        this.options.assertRuntimeCurrent(runtime);
+        const creatingEntry = this.insertCreating(
+          sessionId,
+          runtime,
+          parentSessionId === undefined ? 'top-level' : 'child',
+        );
         entry = creatingEntry;
         creatingEntry.reservation =
           await this.options.requestedSessionIdAdmission.reserveCreate(
@@ -940,21 +2641,28 @@ export class StandaloneSessionService {
             },
           );
         this.options.assertRuntimeCurrent(runtime);
-        const create = (persistedParentSessionId?: string) =>
-          this.options.lifecycle.runExclusiveAfterShared(sessionId, () =>
-            this.createUnderExclusive(
-              runtime,
-              sessionId,
-              request,
-              prompt,
-              promptId,
-              persistedParentSessionId,
-            ),
+        const create = async (persistedParentSessionId?: string) => {
+          const created = await this.options.lifecycle.runExclusiveAfterShared(
+            sessionId,
+            () =>
+              this.createUnderExclusive(
+                runtime,
+                sessionId,
+                request,
+                prompt,
+                promptId,
+                attempt,
+                persistedParentSessionId,
+              ),
           );
+          this.responseCreateRuntimes.set(created, runtime);
+          return created;
+        };
         if (parentSessionId === undefined) return create();
         return this.options.lifecycle.runSharedMany(
           [parentSessionId],
           async () => {
+            attempt.diagnostic.phase = 'parent_validation';
             const persistedParentSessionId =
               await this.assertCwdReadyUnderShared(runtime, parentSessionId);
             const parent = runtime.bridge.getSessionSummary(parentSessionId);
@@ -974,9 +2682,25 @@ export class StandaloneSessionService {
       });
     } catch (error) {
       if (error instanceof TerminalQuarantineSignal) {
-        await error.completion.catch(() => undefined);
-        throw serviceError('standalone_creation_outcome_unknown', sessionId);
+        attempt.cause ??= error.cause ?? error;
+        attempt.diagnostic.cleanupOutcome = 'unknown';
+        await error.completion.then(
+          () => {
+            attempt.diagnostic.cleanupOutcome = 'quarantined';
+          },
+          () => undefined,
+        );
+        const outcome = serviceError(
+          'standalone_creation_outcome_unknown',
+          sessionId,
+          false,
+          attempt.cause,
+        );
+        this.recordCreationFailure(attempt, outcome);
+        throw outcome;
       }
+      attempt.cause ??= error;
+      this.recordCreationFailure(attempt, error);
       throw error;
     } finally {
       const ownedEntry = entry;
@@ -991,9 +2715,57 @@ export class StandaloneSessionService {
     }
   }
 
+  private recordCreationFailure(
+    attempt: CreationAttempt,
+    error: unknown,
+  ): void {
+    const diagnostic = attempt.diagnostic;
+    const cause =
+      attempt.cause instanceof StandaloneSessionSpawnError
+        ? attempt.cause.cause
+        : attempt.cause;
+    if (diagnostic.reason === 'unknown') {
+      if (cause instanceof BridgeTimeoutError)
+        diagnostic.reason = 'rpc_timeout';
+      else if (cause instanceof BridgeChannelClosedError)
+        diagnostic.reason = 'transport_closed';
+      else if (cause instanceof ConversationRuntimeOwnershipError)
+        diagnostic.reason = 'runtime_changed';
+    }
+    if (error instanceof StandaloneSessionServiceError) {
+      error.creationDiagnostic = { ...diagnostic };
+    }
+    const message = 'Standalone session creation failed.';
+    const attributes = {
+      'session.id': diagnostic.sessionId,
+      'creation.phase': diagnostic.phase,
+      'creation.reason': diagnostic.reason,
+      'creation.dispatch_state': diagnostic.dispatchState,
+      'creation.cleanup_outcome': diagnostic.cleanupOutcome,
+      ...(diagnostic.relatedSessionId
+        ? { 'creation.related_session_id': diagnostic.relatedSessionId }
+        : {}),
+      ...(diagnostic.workspaceId
+        ? { 'workspace.id': diagnostic.workspaceId }
+        : {}),
+    };
+    try {
+      recordDaemonError(undefined, new Error(message), attributes);
+      emitDaemonLog(message, attributes);
+    } catch {
+      /* Diagnostics must not affect creation. */
+    }
+    try {
+      this.options.daemonLog?.warn(message, { ...diagnostic });
+    } catch {
+      /* Best effort. */
+    }
+  }
+
   private insertCreating(
     canonicalSessionId: string,
     runtime: WorkspaceRuntime,
+    scope: 'top-level' | 'child',
   ): CreatingEntry {
     if (this.terminal) {
       this.options.assertRuntimeCurrent(runtime);
@@ -1012,6 +2784,7 @@ export class StandaloneSessionService {
     const entry: CreatingEntry = {
       canonicalSessionId,
       runtime,
+      scope,
       state: 'running',
     };
     this.creating.set(canonicalSessionId, entry);
@@ -1021,19 +2794,29 @@ export class StandaloneSessionService {
   private async createUnderExclusive(
     runtime: WorkspaceRuntime,
     sessionId: string,
-    request: CreateStandaloneSessionRequest,
-    prompt: string,
+    request: CreateStandaloneSessionRequest & {
+      sourceType?: string;
+      sourceId?: string;
+    },
+    prompt: string | undefined,
     promptId: string,
+    attempt: CreationAttempt,
     parentSessionId?: string,
-  ): Promise<CreatedStandaloneChildSession> {
+  ): Promise<CreatedStandaloneSessionInternal> {
+    attempt.diagnostic.phase = 'durable_validation';
+    this.options.assertRuntimeCurrent(runtime);
+    await this.reconcileDeletionUnderExclusive(runtime, sessionId);
     this.options.assertRuntimeCurrent(runtime);
     await this.assertPersistedSessionAbsent(runtime, sessionId);
     this.options.assertRuntimeCurrent(runtime);
+    attempt.diagnostic.phase = 'directory_prepare';
     const prepared =
       await this.options.workspace.prepareStandaloneDirectory(sessionId);
     this.options.assertRuntimeCurrent(runtime);
     this.directoryStates.set(sessionId, { pinned: prepared.identity });
 
+    attempt.diagnostic.phase = 'spawn_pre_dispatch';
+    attempt.diagnostic.dispatchState = 'unknown';
     let session: BridgeSession;
     try {
       session = await runtime.bridge.spawnStandaloneSession({
@@ -1048,30 +2831,88 @@ export class StandaloneSessionService {
           : {}),
       });
     } catch (error) {
+      attempt.cause = error;
+      attempt.diagnostic.dispatchState =
+        error instanceof StandaloneSessionSpawnError
+          ? error.dispatched
+            ? 'dispatched'
+            : 'not_dispatched'
+          : 'unknown';
+      if (attempt.diagnostic.dispatchState !== 'not_dispatched')
+        attempt.diagnostic.phase = 'spawn_dispatched';
       if (error instanceof StandaloneSessionSpawnError && !error.dispatched) {
-        try {
-          await this.assertPersistedSessionAbsent(runtime, sessionId);
-        } catch {
-          this.beginTerminalQuarantine(runtime);
+        // A paired Bridge refuses an ID a direct creator registered after
+        // shared admission. Nothing was dispatched, so nothing is rolled back,
+        // and the live owner's transcript on disk is expected.
+        const conflict =
+          error.cause instanceof RequestedSessionIdRejectedError &&
+          error.cause.errorKind === 'session_id_conflict';
+        if (!conflict) {
+          try {
+            await this.assertPersistedSessionAbsent(runtime, sessionId);
+          } catch {
+            this.beginTerminalQuarantine(runtime);
+          }
         }
-        throw serviceError('standalone_creation_rolled_back', sessionId);
+        const outcome = conflict
+          ? serviceError('standalone_session_conflict', sessionId, false, error)
+          : serviceError(
+              'standalone_creation_rolled_back',
+              sessionId,
+              true,
+              error,
+            );
+        if (!conflict) attempt.diagnostic.cleanupOutcome = 'rolled_back';
+        if (error.cause instanceof AcpChildCapacityExceededError) {
+          throw new StandaloneSessionServiceError(
+            outcome.code,
+            sessionId,
+            outcome.message,
+            outcome.retryable,
+            {
+              code: error.cause.code,
+              maxConcurrentChildren: error.cause.maxConcurrentChildren,
+              committedAcpChildren: error.cause.committedAcpChildren,
+            },
+            { cause: error },
+          );
+        }
+        throw outcome;
       }
       this.beginTerminalQuarantine(runtime);
     }
+    attempt.diagnostic.dispatchState = 'dispatched';
+    attempt.diagnostic.phase = 'spawn_dispatched';
     this.assertRuntimeCurrentOrQuarantine(runtime);
     if (
       session.attached ||
       session.sessionId !== sessionId ||
       session.sourceType !== STANDALONE_SESSION_SOURCE_TYPE ||
-      (parentSessionId !== undefined && session.parentSessionPersisted !== true)
+      session.sourceId !== undefined ||
+      session.worktree !== undefined ||
+      session.branch !== undefined ||
+      (parentSessionId === undefined
+        ? session.parentSessionPersisted !== undefined
+        : session.parentSessionPersisted !== true)
     ) {
       await this.discardUntrustedSpawnResult(runtime.bridge, session);
       this.beginTerminalQuarantine(runtime);
     }
     if (session.sourcePersisted !== true) {
+      attempt.diagnostic.phase = 'source_persistence';
+      attempt.diagnostic.reason = 'source_not_confirmed';
+      const outcome = serviceError(
+        'standalone_creation_rolled_back',
+        sessionId,
+        true,
+      );
+      attempt.cause = outcome;
+      attempt.diagnostic.cleanupOutcome = 'unknown';
       await this.cleanRollbackBeforePersistence(runtime, sessionId);
-      throw serviceError('standalone_creation_rolled_back', sessionId);
+      attempt.diagnostic.cleanupOutcome = 'rolled_back';
+      throw outcome;
     }
+    attempt.diagnostic.phase = 'durable_validation';
 
     try {
       await this.assertDurableStandaloneSession(
@@ -1081,23 +2922,80 @@ export class StandaloneSessionService {
       );
     } catch (error) {
       if (error instanceof TerminalQuarantineSignal) throw error;
+      attempt.cause = error;
       this.beginTerminalQuarantine(runtime);
     }
     this.assertRuntimeCurrentOrQuarantine(runtime);
-    let initialPrompt: CreatedStandaloneChildSession['initialPrompt'];
+    if (
+      isScheduledTaskRunSource(request) &&
+      request.modelServiceId !== undefined &&
+      session.modelApplied === false
+    ) {
+      attempt.diagnostic.phase = 'model_selection';
+      attempt.cause = serviceError('model_selection_failed', sessionId, true);
+      attempt.diagnostic.cleanupOutcome = 'unknown';
+      await this.rollbackSessionAndDiscardDirectory(runtime, sessionId);
+      attempt.diagnostic.cleanupOutcome = 'rolled_back';
+      throw serviceError('model_selection_failed', sessionId, true);
+    }
+    let initialPrompt:
+      | CreatedStandaloneChildSession['initialPrompt']
+      | undefined;
+    const startupConfig = request.startupConfig;
+    let startupPreparationFailed = false;
+    attempt.diagnostic.phase = 'binding';
     try {
-      await this.bindAndRelease(runtime, sessionId, prepared.identity);
-      initialPrompt = await this.admitInitialPrompt(
-        runtime.bridge,
+      await this.bindAndRelease(
+        runtime,
         sessionId,
-        prompt,
-        promptId,
+        prepared.identity,
+        startupConfig
+          ? async () => {
+              const startupConfigApplied = await applySessionStartupConfig(
+                runtime.bridge,
+                sessionId,
+                startupConfig,
+              ).catch((error: unknown) => {
+                startupPreparationFailed = isSessionStartupConfigError(error);
+                throw error;
+              });
+              this.assertRuntimeCurrentOrQuarantine(runtime);
+              session = {
+                ...session,
+                modelApplied: true,
+                startupConfigApplied,
+              };
+            }
+          : undefined,
       );
+      if (prompt !== undefined) {
+        attempt.diagnostic.phase = 'initial_prompt';
+        initialPrompt = await this.admitInitialPrompt(
+          runtime.bridge,
+          sessionId,
+          prompt,
+          promptId,
+        );
+      }
       this.assertRuntimeCurrentOrQuarantine(runtime);
     } catch (error) {
       if (error instanceof TerminalQuarantineSignal) throw error;
+      attempt.cause = error;
+      if (startupPreparationFailed) {
+        attempt.diagnostic.cleanupOutcome = 'unknown';
+        await this.rollbackSessionAndDiscardDirectory(runtime, sessionId);
+        attempt.diagnostic.cleanupOutcome = 'rolled_back';
+        throw error;
+      }
+      attempt.diagnostic.cleanupOutcome = 'unknown';
       await this.closeOwnedSessionOrQuarantine(runtime, sessionId);
-      throw serviceError('standalone_creation_outcome_unknown', sessionId);
+      attempt.diagnostic.cleanupOutcome = 'closed';
+      throw serviceError(
+        'standalone_creation_outcome_unknown',
+        sessionId,
+        false,
+        error,
+      );
     }
 
     try {
@@ -1107,10 +3005,13 @@ export class StandaloneSessionService {
       // The durable session and admitted prompt are already committed.
     }
     return {
-      session,
+      session: {
+        ...session,
+        currentCwd: prepared.identity.canonicalPath,
+      },
       projectlessOutputDirectory: prepared.identity.canonicalPath,
       workingDirectory: { state: 'ready' },
-      initialPrompt,
+      ...(initialPrompt ? { initialPrompt } : {}),
     };
   }
 
@@ -1118,6 +3019,7 @@ export class StandaloneSessionService {
     runtime: WorkspaceRuntime,
     sessionId: string,
     pinned: ConversationDirectoryIdentity,
+    beforeRelease?: () => Promise<void>,
   ): Promise<void> {
     const expectation = toBridgeExpectation(sessionId, pinned);
     const changed = await runtime.bridge.changeSessionCwd(sessionId, {
@@ -1148,8 +3050,10 @@ export class StandaloneSessionService {
           expectation,
         );
       } catch (retryError) {
-        if (retryError instanceof TerminalQuarantineSignal) throw retryError;
-        this.beginTerminalQuarantine(runtime);
+        if (retryError instanceof TerminalQuarantineSignal) {
+          throw new TerminalQuarantineSignal(retryError.completion, error);
+        }
+        this.beginTerminalQuarantine(runtime, error);
       }
     }
     this.assertRuntimeCurrentOrQuarantine(runtime);
@@ -1162,6 +3066,10 @@ export class StandaloneSessionService {
       pinned,
       agentBound: { eventEpoch, released: false },
     });
+    if (beforeRelease) {
+      await beforeRelease();
+      this.assertRuntimeCurrentOrQuarantine(runtime);
+    }
     try {
       this.assertRuntimeCurrentOrQuarantine(runtime);
       await runtime.bridge.releaseManagedConversationBinding(
@@ -1177,9 +3085,11 @@ export class StandaloneSessionService {
           expectation,
         );
       } catch (retryError) {
-        if (retryError instanceof TerminalQuarantineSignal) throw retryError;
+        if (retryError instanceof TerminalQuarantineSignal) {
+          throw new TerminalQuarantineSignal(retryError.completion, error);
+        }
         this.directoryStates.set(sessionId, { pinned });
-        this.beginTerminalQuarantine(runtime);
+        this.beginTerminalQuarantine(runtime, error);
       }
     }
     this.assertRuntimeCurrentOrQuarantine(runtime);
@@ -1227,6 +3137,7 @@ export class StandaloneSessionService {
     runtime: WorkspaceRuntime,
     sessionId: string,
     requiredPersistence: 'any' | 'legacy' = 'any',
+    requiredScope: 'top-level' | 'any' = 'top-level',
   ): Promise<{
     storageSessionId: string;
     source: LoadableConversationSession;
@@ -1247,7 +3158,9 @@ export class StandaloneSessionService {
       );
       if (
         source?.kind !== 'standalone' ||
-        (requiredPersistence === 'legacy' && source.persistence !== 'legacy')
+        (requiredPersistence === 'legacy' && source.persistence !== 'legacy') ||
+        (requiredScope === 'top-level' &&
+          source.metadata.parentSessionId !== undefined)
       ) {
         return { kind: 'not-found' } as const;
       }
@@ -1266,20 +3179,57 @@ export class StandaloneSessionService {
     return result;
   }
 
+  /**
+   * A pin is authoritative only while its matching local bridge session
+   * generation remains resident. A bare pin left by a terminal close, an
+   * entry whose session an idle reap dropped, or a replaced event epoch is
+   * daemon-local history: discard it rather than condemning a directory
+   * another participant may have legitimately recreated. An indeterminate
+   * bridge probe fails closed by propagating.
+   */
+  private effectiveDirectoryPin(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+  ): ConversationDirectoryIdentity | undefined {
+    const state = this.directoryStates.get(sessionId);
+    if (!state) return undefined;
+    const bound = state.agentBound;
+    if (!bound) {
+      this.directoryStates.delete(sessionId);
+      return undefined;
+    }
+    let eventEpoch: string;
+    try {
+      eventEpoch = runtime.bridge.getSessionEventEpoch(sessionId);
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) {
+        this.directoryStates.delete(sessionId);
+        return undefined;
+      }
+      throw error;
+    }
+    if (eventEpoch !== bound.eventEpoch) {
+      this.directoryStates.delete(sessionId);
+      return undefined;
+    }
+    return state.pinned;
+  }
+
   private async prepareRestoreDirectory(
+    runtime: WorkspaceRuntime,
     sessionId: string,
     beforeRecreate?: () => Promise<void>,
   ): Promise<PreparedRestoreDirectory> {
-    const previous = this.directoryStates.get(sessionId);
+    const expected = this.effectiveDirectoryPin(runtime, sessionId);
     const inspected = await this.options.workspace.inspectStandaloneDirectory(
       sessionId,
-      previous?.pinned,
+      expected,
     );
     if (inspected.status === 'compromised') {
       throw serviceError('working_directory_compromised', sessionId);
     }
     if (inspected.status === 'ready') {
-      if (!previous) {
+      if (!this.directoryStates.get(sessionId)) {
         this.directoryStates.set(sessionId, { pinned: inspected.identity });
       }
       return { identity: inspected.identity, state: 'ready' };
@@ -1288,7 +3238,7 @@ export class StandaloneSessionService {
     await beforeRecreate?.();
     const ensured = await this.options.workspace.ensureStandaloneDirectory(
       sessionId,
-      previous?.pinned,
+      expected,
     );
     if (ensured.status === 'compromised') {
       throw serviceError('working_directory_compromised', sessionId);
@@ -1337,6 +3287,7 @@ export class StandaloneSessionService {
   private async readStandaloneSummary(
     runtime: WorkspaceRuntime,
     sessionId: string,
+    requiredScope: 'top-level' | 'any',
   ): Promise<StandaloneSessionSummary> {
     const durable = await runWithWorkspaceRuntimeStorage(runtime, async () => {
       const service = createWorkspaceRuntimeSessionService(runtime);
@@ -1353,6 +3304,12 @@ export class StandaloneSessionService {
         service,
       );
       if (source?.kind !== 'standalone') {
+        return undefined;
+      }
+      if (
+        requiredScope === 'top-level' &&
+        source.metadata.parentSessionId !== undefined
+      ) {
         return undefined;
       }
       const item = await service.getSessionListItem(storageSessionId, location);
@@ -1438,6 +3395,21 @@ export class StandaloneSessionService {
     }
   }
 
+  private async rollbackSessionAndDiscardDirectory(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+  ): Promise<void> {
+    await this.cleanRollbackBeforePersistence(runtime, sessionId);
+    try {
+      await this.options.workspace.discardEmptyConversationDirectory(sessionId);
+    } catch (error) {
+      debugLogger.warn(
+        `Could not discard the rolled-back standalone directory for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    this.directoryStates.delete(sessionId);
+  }
+
   private async closeOwnedSessionOrQuarantine(
     runtime: WorkspaceRuntime,
     sessionId: string,
@@ -1495,18 +3467,29 @@ export class StandaloneSessionService {
         },
       },
     );
-    void turn.then(resolveAdmission, resolveAdmission);
+    let admissionFailure: unknown;
+    void turn.then(resolveAdmission, (error: unknown) => {
+      admissionFailure = error;
+      resolveAdmission();
+    });
     await admission;
-    if (!admitted) throw new Error('Initial prompt was not admitted');
+    if (!admitted) {
+      throw new Error('Initial prompt was not admitted', {
+        cause: admissionFailure,
+      });
+    }
     return { promptId, lastEventId, turn };
   }
 
-  private beginTerminalQuarantine(runtime: WorkspaceRuntime): never {
+  private beginTerminalQuarantine(
+    runtime: WorkspaceRuntime,
+    cause?: unknown,
+  ): never {
     try {
       this.options.assertRuntimeCurrent(runtime);
     } catch (error) {
       this.freezeForTerminalQuarantine(runtime);
-      throw new TerminalQuarantineSignal(Promise.reject(error));
+      throw new TerminalQuarantineSignal(Promise.reject(error), cause ?? error);
     }
     let completion: Promise<void>;
     try {
@@ -1516,7 +3499,7 @@ export class StandaloneSessionService {
       completion = Promise.reject(error);
     }
     if (!this.terminal) this.freezeForTerminalQuarantine(runtime);
-    throw new TerminalQuarantineSignal(completion);
+    throw new TerminalQuarantineSignal(completion, cause);
   }
 
   private assertRuntimeCurrentOrQuarantine(runtime: WorkspaceRuntime): void {
@@ -1524,7 +3507,7 @@ export class StandaloneSessionService {
       this.options.assertRuntimeCurrent(runtime);
     } catch (error) {
       this.freezeForTerminalQuarantine(runtime);
-      throw new TerminalQuarantineSignal(Promise.reject(error));
+      throw new TerminalQuarantineSignal(Promise.reject(error), error);
     }
   }
 }

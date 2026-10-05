@@ -40,7 +40,7 @@ export async function handleAutoUpdate(
     return;
   }
 
-  // enableAutoUpdate is checked in gemini.tsx before calling this function,
+  // enableAutoUpdate is checked in llm.tsx before calling this function,
   // so if we get here, auto-update is enabled (or undefined, which defaults to enabled).
   const isAutoUpdateEnabled =
     settings.merged.general?.enableAutoUpdate !== false;

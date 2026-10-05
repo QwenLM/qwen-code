@@ -116,14 +116,14 @@ export const clearCommand: SlashCommand = {
       // Clear UI first for immediate responsiveness
       context.ui.clear();
 
-      const geminiClient = config.getGeminiClient();
-      if (geminiClient) {
+      const llmClient = config.getLlmClient();
+      if (llmClient) {
         context.ui.setDebugMessage(
           t('Starting a new session, resetting chat, and clearing terminal.'),
         );
         // If resetChat fails, the exception will propagate and halt the command,
         // which is the correct behavior to signal a failure to the user.
-        await geminiClient.resetChat();
+        await llmClient.resetChat();
       } else {
         context.ui.setDebugMessage(t('Starting a new session and clearing.'));
       }

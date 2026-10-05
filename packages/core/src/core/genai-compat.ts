@@ -17,8 +17,8 @@ export type FinishReason = GenAiFinishReason;
 export const FinishReason = {
   STOP: 'STOP' as GenAiFinishReason,
   MAX_TOKENS: 'MAX_TOKENS' as GenAiFinishReason,
-  // Content-filter family (mirrors mapGeminiFinishReasonToOpenAI's
-  // 'content_filter' grouping) — the quiet-completion gate in geminiChat
+  // Content-filter family (mirrors mapLlmFinishReasonToOpenAI's
+  // 'content_filter' grouping) — the quiet-completion gate in llmChat
   // must keep all of these fatal.
   SAFETY: 'SAFETY' as GenAiFinishReason,
   RECITATION: 'RECITATION' as GenAiFinishReason,

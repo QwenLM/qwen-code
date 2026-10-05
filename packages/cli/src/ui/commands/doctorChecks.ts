@@ -150,7 +150,7 @@ async function checkApiClient(
   }
 
   try {
-    const client = config.getGeminiClient();
+    const client = config.getLlmClient();
     if (client.isInitialized()) {
       return {
         category: t('Authentication'),

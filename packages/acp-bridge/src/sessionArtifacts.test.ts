@@ -5,22 +5,27 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs, type BigIntStats, type Stats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   SessionArtifactAuthorizationError,
   SessionArtifactStore,
   SessionArtifactValidationError,
 } from './sessionArtifacts.js';
 import {
+  rebuildSessionArtifactSnapshot,
+  readArtifactSnapshot,
+  retainArtifactSnapshot,
+  deleteArtifactSnapshot,
   stableSessionArtifactId,
   type RebuiltSessionArtifactSnapshot,
   type SessionArtifactEventRecordPayload,
   type SessionArtifactSnapshotRecordPayload,
 } from '@qwen-code/qwen-code-core';
+import { UNVERIFIABLE_IDENTITY_CODE } from '@qwen-code/qwen-code-core/noFollowOpen';
 
 vi.mock('@xterm/headless', () => ({
   Terminal: class Terminal {},
@@ -102,9 +107,15 @@ describe('SessionArtifactStore', () => {
       ],
     });
 
-    await expect(store.remove(artifactId!)).resolves.toMatchObject({
+    const createdAt = created.changes[0]?.artifact?.createdAt;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const removed = await store.remove(artifactId!);
+    expect(removed).toMatchObject({
       changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
     });
+    expect(removed.changes[0]?.artifact?.createdAt).toBe(createdAt);
+    expect(removed.changes[0]?.artifact?.updatedAt).not.toBe(createdAt);
     await expect(store.remove(artifactId!)).resolves.toMatchObject({
       changes: [],
     });
@@ -183,15 +194,603 @@ describe('SessionArtifactStore', () => {
     );
     vi.useFakeTimers();
     vi.setSystemTime(new Date(Date.now() + 6_000));
+    const createdAt = created.changes[0]?.artifact?.createdAt;
+    const recordedSha = createHash('sha256').update('hello').digest('hex');
     const changed = await store.get(artifactId);
     expect(changed).toMatchObject({ id: artifactId, status: 'changed' });
     expect(changed).toMatchObject({ sizeBytes: 5 });
+    expect(changed?.updatedAt).not.toBe(createdAt);
+    expect(changed?.metadata).toMatchObject({
+      'qwen.workspace.sha256': recordedSha,
+      'qwen.workspace.sizeBytes': 5,
+    });
 
     await fs.rm(path.join(workspace, 'report.txt'));
     vi.setSystemTime(new Date(Date.now() + 6_000));
     const missing = await store.get(artifactId);
     expect(missing).toMatchObject({ id: artifactId, status: 'missing' });
     expect(missing).not.toHaveProperty('sizeBytes');
+  });
+
+  it('forgets a write_file artifact after its workspace file is deleted', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-write-file-vanished',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(
+      path.join(workspace, 'alibaba.html'),
+      '<html>tmp</html>',
+    );
+    const created = await store.upsertMany([
+      {
+        title: 'alibaba.html',
+        workspacePath: 'alibaba.html',
+        toolName: 'write_file',
+      },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+
+    await fs.rm(path.join(workspace, 'alibaba.html'));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+
+    await expect(store.get(artifactId)).resolves.toBeUndefined();
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
+  it('forgets a vanished write_file artifact from list before the refresh ttl', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+    const store = new SessionArtifactStore({
+      sessionId: 's1-write-file-vanished-list',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(
+      path.join(workspace, 'alibaba.html'),
+      '<html>tmp</html>',
+    );
+    await store.upsertMany([
+      {
+        title: 'alibaba.html',
+        workspacePath: 'alibaba.html',
+        toolName: 'write_file',
+      },
+    ]);
+
+    await fs.rm(path.join(workspace, 'alibaba.html'));
+    vi.setSystemTime(new Date('2026-08-24T00:00:02.000Z'));
+
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
+  it('keeps a write_file artifact when list refresh hits a transient fs error', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-write-file-stat-error',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(
+      path.join(workspace, 'alibaba.html'),
+      '<html>tmp</html>',
+    );
+    const created = await store.upsertMany([
+      {
+        title: 'alibaba.html',
+        workspacePath: 'alibaba.html',
+        toolName: 'write_file',
+      },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const realpathSpy = vi
+      .spyOn(fs, 'realpath')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+      );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [{ id: artifactId, status: 'missing' }],
+      });
+
+      realpathSpy.mockRestore();
+      vi.setSystemTime(new Date(Date.now() + 6_000));
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [{ id: artifactId, status: 'available' }],
+      });
+
+      await fs.rm(path.join(workspace, 'alibaba.html'));
+      await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+    } finally {
+      realpathSpy.mockRestore();
+      stderr.mockRestore();
+    }
+  });
+
+  it('keeps a vanished write_file artifact when tombstone persistence fails', async () => {
+    let failWrites = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's1-write-file-persist-fail',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          if (failWrites) {
+            throw new Error('disk full');
+          }
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.writeFile(
+      path.join(workspace, 'alibaba.html'),
+      '<html>tmp</html>',
+    );
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'alibaba.html',
+          workspacePath: 'alibaba.html',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+
+    await fs.rm(path.join(workspace, 'alibaba.html'));
+    failWrites = true;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ id: artifactId, status: 'missing' }],
+    });
+    await expect(store.get(artifactId)).resolves.toMatchObject({
+      id: artifactId,
+      status: 'missing',
+    });
+
+    await fs.writeFile(
+      path.join(workspace, 'alibaba.html'),
+      '<html>tmp</html>',
+    );
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ id: artifactId, status: 'available' }],
+    });
+
+    failWrites = false;
+    await fs.rm(path.join(workspace, 'alibaba.html'));
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
+  it('get() does not forget a sibling write_file artifact from a stale missing observation', async () => {
+    let failWrites = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's1-get-scoped-forget',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          if (failWrites) {
+            throw new Error('disk full');
+          }
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.writeFile(path.join(workspace, 'a.html'), '<html>a</html>');
+    await fs.writeFile(path.join(workspace, 'b.html'), '<html>b</html>');
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'a.html',
+          workspacePath: 'a.html',
+          toolName: 'write_file',
+        },
+        {
+          title: 'b.html',
+          workspacePath: 'b.html',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+    const artifactA = created.changes[0]!.artifactId;
+    const artifactB = created.changes[1]!.artifactId;
+
+    await fs.rm(path.join(workspace, 'a.html'));
+    await fs.rm(path.join(workspace, 'b.html'));
+    failWrites = true;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        { id: artifactA, status: 'missing' },
+        { id: artifactB, status: 'missing' },
+      ],
+    });
+
+    failWrites = false;
+    await fs.writeFile(path.join(workspace, 'b.html'), '<html>b</html>');
+    await expect(store.get(artifactA)).resolves.toBeUndefined();
+    await expect(store.get(artifactB)).resolves.toMatchObject({
+      id: artifactB,
+      status: 'available',
+    });
+  });
+
+  it('restamps an available write_file fingerprint after a same-content mtime drift', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+    const store = new SessionArtifactStore({
+      sessionId: 's1-write-file-mtime-restamp',
+      workspaceCwd: workspace,
+    });
+    const filePath = path.join(workspace, 'alibaba.html');
+    await fs.writeFile(filePath, 'hello');
+    const created = await store.upsertMany([
+      {
+        title: 'alibaba.html',
+        workspacePath: 'alibaba.html',
+        toolName: 'write_file',
+      },
+    ]);
+    const recordedMtime =
+      created.changes[0]?.artifact?.metadata?.['qwen.workspace.mtimeMs'];
+    expect(typeof recordedMtime).toBe('number');
+
+    const drifted = new Date('2026-08-24T00:00:01.000Z');
+    await fs.utimes(filePath, drifted, drifted);
+    const driftedMtime = (await fs.stat(filePath)).mtimeMs;
+    vi.setSystemTime(new Date('2026-08-24T00:00:02.000Z'));
+    const refreshed = (await store.list()).artifacts[0];
+    expect(refreshed).toMatchObject({
+      status: 'available',
+      sizeBytes: 5,
+    });
+    expect(refreshed?.metadata?.['qwen.workspace.mtimeMs']).toBe(driftedMtime);
+    expect(refreshed?.metadata?.['qwen.workspace.mtimeMs']).not.toBe(
+      recordedMtime,
+    );
+
+    const originalOpen = fs.open.bind(fs);
+    let hashed = 0;
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      const createReadStream = handle.createReadStream.bind(handle);
+      handle.createReadStream = ((...streamArgs) => {
+        hashed++;
+        return createReadStream(...streamArgs);
+      }) as typeof handle.createReadStream;
+      return handle;
+    });
+    try {
+      vi.setSystemTime(new Date('2026-08-24T00:00:03.000Z'));
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [{ status: 'available', sizeBytes: 5 }],
+      });
+      expect(hashed).toBe(0);
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it('does not rehash a changed write_file artifact before the refresh ttl', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+    const store = new SessionArtifactStore({
+      sessionId: 's1-write-file-changed-ttl',
+      workspaceCwd: workspace,
+    });
+    const filePath = path.join(workspace, 'alibaba.html');
+    await fs.writeFile(filePath, 'hello');
+    await store.upsertMany([
+      {
+        title: 'alibaba.html',
+        workspacePath: 'alibaba.html',
+        toolName: 'write_file',
+      },
+    ]);
+
+    await fs.writeFile(filePath, 'HELLO');
+    await fs.utimes(
+      filePath,
+      new Date('2026-08-24T00:00:01.000Z'),
+      new Date('2026-08-24T00:00:01.000Z'),
+    );
+    vi.setSystemTime(new Date('2026-08-24T00:00:06.000Z'));
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ status: 'changed', sizeBytes: 5 }],
+    });
+
+    const openSpy = vi.spyOn(fs, 'open');
+    try {
+      vi.setSystemTime(new Date('2026-08-24T00:00:08.000Z'));
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [{ status: 'changed', sizeBytes: 5 }],
+      });
+      expect(openSpy).not.toHaveBeenCalled();
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it('keeps an explicit record_artifact entry missing after its file is deleted', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-record-artifact-missing',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'alibaba.pdf'), 'pdf');
+    const created = await store.upsertMany([
+      {
+        title: '阿里巴巴牛逼',
+        workspacePath: 'alibaba.pdf',
+        toolName: 'record_artifact',
+      },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+    const createdAt = created.changes[0]?.artifact?.createdAt;
+
+    await fs.rm(path.join(workspace, 'alibaba.pdf'));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+
+    const missing = await store.get(artifactId);
+    expect(missing).toMatchObject({
+      id: artifactId,
+      status: 'missing',
+    });
+    expect(missing?.updatedAt).not.toBe(createdAt);
+  });
+
+  it('exposes the live size after a workspace file grows without re-registering', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-get-grown',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+    const created = await store.upsertMany([
+      { title: 'Report', workspacePath: 'report.txt' },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+    const createdAt = created.changes[0]?.artifact?.createdAt;
+    const recordedSha = createHash('sha256').update('hello').digest('hex');
+
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello world');
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const grown = await store.get(artifactId);
+
+    expect(grown).toMatchObject({
+      id: artifactId,
+      status: 'changed',
+      sizeBytes: 11,
+      metadata: {
+        'qwen.workspace.sha256': recordedSha,
+        'qwen.workspace.sizeBytes': 5,
+      },
+    });
+    expect(grown?.updatedAt).not.toBe(createdAt);
+  });
+
+  it('keeps a changed workspace artifact changed when no content hash was recorded', async () => {
+    const sessionId = 's1-unhashed-baseline';
+    const artifactId = stableSessionArtifactId(
+      sessionId,
+      'workspace:report.txt',
+    );
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [
+        {
+          id: artifactId,
+          kind: 'file',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'Report',
+          workspacePath: 'report.txt',
+          sizeBytes: 5,
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    expect(await store.get(artifactId)).toMatchObject({
+      status: 'available',
+      metadata: { 'qwen.workspace.sizeBytes': 5 },
+    });
+
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello world');
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const changed = await store.get(artifactId);
+    expect(changed).toMatchObject({ status: 'changed', sizeBytes: 11 });
+    expect(changed?.updatedAt).not.toBe('2026-07-04T00:00:00.000Z');
+
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const stillChanged = await store.get(artifactId);
+    expect(stillChanged).toMatchObject({
+      status: 'changed',
+      sizeBytes: 11,
+      metadata: { 'qwen.workspace.sizeBytes': 5 },
+    });
+    expect(stillChanged?.updatedAt).toBe(changed?.updatedAt);
+  });
+
+  it('advances updatedAt when a changed workspace file is edited again at the same size', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-second-same-size-edit',
+      workspaceCwd: workspace,
+    });
+    const filePath = path.join(workspace, 'report.txt');
+    await fs.writeFile(filePath, 'aaaa');
+    const created = await store.upsertMany([
+      { title: 'Report', workspacePath: 'report.txt' },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+    const createdAt = created.changes[0]?.artifact?.createdAt;
+
+    await fs.writeFile(filePath, 'bbbb');
+    await fs.utimes(
+      filePath,
+      new Date('2026-07-06T00:00:00.000Z'),
+      new Date('2026-07-06T00:00:00.000Z'),
+    );
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const firstEdit = await store.get(artifactId);
+    expect(firstEdit).toMatchObject({ status: 'changed', sizeBytes: 4 });
+    expect(firstEdit?.updatedAt).not.toBe(createdAt);
+
+    await fs.writeFile(filePath, 'cccc');
+    await fs.utimes(
+      filePath,
+      new Date('2026-07-07T00:00:00.000Z'),
+      new Date('2026-07-07T00:00:00.000Z'),
+    );
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const secondEdit = await store.get(artifactId);
+    expect(secondEdit).toMatchObject({ status: 'changed', sizeBytes: 4 });
+    expect(secondEdit?.updatedAt).not.toBe(firstEdit?.updatedAt);
+
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const restat = await store.get(artifactId);
+    expect(restat?.updatedAt).toBe(secondEdit?.updatedAt);
+  });
+
+  it('does not bump updatedAt again after re-registering a changed workspace file', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-reregister-clears-observation',
+      workspaceCwd: workspace,
+    });
+    const filePath = path.join(workspace, 'report.txt');
+    await fs.writeFile(filePath, 'aaaa');
+    await store.upsertMany([{ title: 'Report', workspacePath: 'report.txt' }]);
+
+    await fs.writeFile(filePath, 'bbbb');
+    await fs.utimes(
+      filePath,
+      new Date('2026-07-06T00:00:00.000Z'),
+      new Date('2026-07-06T00:00:00.000Z'),
+    );
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const artifactId = stableSessionArtifactId(
+      's1-reregister-clears-observation',
+      'workspace:report.txt',
+    );
+    await expect(store.get(artifactId)).resolves.toMatchObject({
+      status: 'changed',
+    });
+
+    const reregistered = await store.upsertMany([
+      { title: 'Report', workspacePath: 'report.txt' },
+    ]);
+    const afterRegister = reregistered.changes[0]?.artifact?.updatedAt;
+    expect(reregistered.changes[0]?.artifact).toMatchObject({
+      status: 'available',
+    });
+
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const refreshed = (await store.list()).artifacts[0];
+    expect(refreshed).toMatchObject({ status: 'available', sizeBytes: 4 });
+    expect(refreshed?.updatedAt).toBe(afterRegister);
+  });
+
+  it('lets a client record a workspace path after write_file vanish-forget', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's1-write-file-vanish-client-rerecord',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.writeFile(
+      path.join(workspace, 'alibaba.html'),
+      '<html>tmp</html>',
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'alibaba.html',
+          workspacePath: 'alibaba.html',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+
+    await fs.rm(path.join(workspace, 'alibaba.html'));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+    expect(events.at(-1)?.changes).toEqual([
+      expect.objectContaining({
+        action: 'removed',
+        reason: 'eviction',
+      }),
+    ]);
+
+    await fs.writeFile(
+      path.join(workspace, 'alibaba.html'),
+      '<html>kept</html>',
+    );
+    const rerecorded = await store.upsertMany([
+      {
+        title: 'alibaba.html',
+        workspacePath: 'alibaba.html',
+        source: 'client',
+        clientId: 'client-a',
+      },
+    ]);
+    expect(rerecorded.changes).toEqual([
+      expect.objectContaining({
+        action: 'created',
+        artifact: expect.objectContaining({
+          workspacePath: 'alibaba.html',
+          source: 'client',
+        }),
+      }),
+    ]);
+  });
+
+  it('ignores a published content hash supplied by an untrusted caller', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-untrusted-published-hash',
+      workspaceCwd: workspace,
+    });
+    const created = await store.upsertMany([
+      {
+        title: 'Client page',
+        source: 'client',
+        clientId: 'client-a',
+        url: 'https://example.com/client-page',
+        metadata: { 'qwen.published.sha256': 'a'.repeat(64), keep: true },
+      },
+    ]);
+
+    expect(created.changes[0]?.artifact?.metadata).toEqual({ keep: true });
   });
 
   it('does not count injected workspace hash metadata against the user metadata limit', async () => {
@@ -234,6 +833,7 @@ describe('SessionArtifactStore', () => {
         metadata: {
           'qwen.workspace.sha256': 'a'.repeat(64),
           'qwen.workspace.mtimeMs': 123,
+          'qwen.workspace.sizeBytes': 12,
           keep: true,
         },
       },
@@ -783,6 +1383,61 @@ describe('SessionArtifactStore', () => {
       },
     });
     expect((await store.list()).artifacts).toHaveLength(1);
+  });
+
+  it('updates a republished artifact when only the content hash changes', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-published-hash-refresh',
+      workspaceCwd: workspace,
+    });
+    const firstHash = 'a'.repeat(64);
+    const secondHash = 'b'.repeat(64);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'Dashboard',
+          storage: 'published',
+          managedId: 'managed-hash',
+          url: 'https://example.com/dashboard',
+          mimeType: 'text/html',
+          sizeBytes: 20,
+          metadata: { 'qwen.published.sha256': firstHash },
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+    const createdAt = created.changes[0]?.artifact?.createdAt;
+    vi.setSystemTime(new Date('2026-08-24T00:00:01.000Z'));
+
+    const republished = await store.upsertMany(
+      [
+        {
+          title: 'Dashboard',
+          storage: 'published',
+          managedId: 'managed-hash',
+          url: 'https://example.com/dashboard',
+          mimeType: 'text/html',
+          sizeBytes: 20,
+          metadata: { 'qwen.published.sha256': secondHash },
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    expect(republished.changes).toHaveLength(1);
+    expect(republished.changes[0]).toMatchObject({
+      action: 'updated',
+      artifact: {
+        title: 'Dashboard',
+        sizeBytes: 20,
+        metadata: { 'qwen.published.sha256': secondHash },
+      },
+    });
+    expect(republished.changes[0]?.artifact?.updatedAt).not.toBe(createdAt);
+    expect(republished.changes[0]?.artifact?.createdAt).toBe(createdAt);
   });
 
   it('upgrades a workspace artifact when the artifact tool publishes the same path', async () => {
@@ -3106,6 +3761,47 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('keeps a write_file artifact missing after it escapes by symlink', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-write-file-symlink-escape',
+      workspaceCwd: workspace,
+    });
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      await fs.writeFile(
+        path.join(workspace, 'alibaba.html'),
+        '<html>ok</html>',
+      );
+      const created = await store.upsertMany([
+        {
+          title: 'alibaba.html',
+          workspacePath: 'alibaba.html',
+          toolName: 'write_file',
+        },
+      ]);
+      const artifactId = created.changes[0]!.artifactId;
+
+      await fs.writeFile(path.join(outside, 'secret.html'), '<html>no</html>');
+      await fs.rm(path.join(workspace, 'alibaba.html'));
+      await fs.symlink(
+        path.join(outside, 'secret.html'),
+        path.join(workspace, 'alibaba.html'),
+      );
+
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(Date.now() + 6_000));
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [{ id: artifactId, status: 'missing' }],
+      });
+      expect((await store.list()).artifacts[0]).not.toHaveProperty(
+        'workspacePath',
+      );
+    } finally {
+      vi.useRealTimers();
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it('restores workspacePath when a healed artifact is recorded again', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's7-symlink-healed',
@@ -3396,6 +4092,93 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('treats an unverifiable inode identity as missing, not an escape, on upsert', async () => {
+    // On volumes that never report inode numbers (ino 0: FAT/exFAT, some
+    // SMB shares) openNoFollow cannot prove the opened file matches the
+    // pre-open check and refuses with UNVERIFIABLE_IDENTITY_CODE. The
+    // upsert must then degrade to a plain missing artifact — it must not
+    // reject outright, and it must not raise the symlink-escape flag for a
+    // path the containment check already accepted (#8227 follow-up).
+    const store = new SessionArtifactStore({
+      sessionId: 's7-unverifiable-upsert',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+    const originalOpen = fs.open.bind(fs);
+    const openSpy = vi
+      .spyOn(fs, 'open')
+      .mockImplementation(async (entry, flags, mode) => {
+        if (String(entry).endsWith('report.txt')) {
+          throw Object.assign(new Error('inode 0 cannot be verified'), {
+            code: UNVERIFIABLE_IDENTITY_CODE,
+          });
+        }
+        return originalOpen(entry, flags, mode);
+      });
+
+    try {
+      const created = await store.upsertMany(
+        [{ title: 'Report', workspacePath: 'report.txt' }],
+        { strict: true },
+      );
+      expect(created.changes).toHaveLength(1);
+      expect(created.changes[0]).toMatchObject({
+        action: 'created',
+        artifact: expect.objectContaining({
+          status: 'missing',
+          workspacePath: 'report.txt',
+        }),
+      });
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it('keeps reporting unverifiable artifacts missing on refresh without an escape flag', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-unverifiable-refresh',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+    await store.upsertMany([{ title: 'Report', workspacePath: 'report.txt' }], {
+      strict: true,
+    });
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const originalOpen = fs.open.bind(fs);
+    const openSpy = vi
+      .spyOn(fs, 'open')
+      .mockImplementation(async (entry, flags, mode) => {
+        if (String(entry).endsWith('report.txt')) {
+          throw Object.assign(new Error('inode 0 cannot be verified'), {
+            code: UNVERIFIABLE_IDENTITY_CODE,
+          });
+        }
+        return originalOpen(entry, flags, mode);
+      });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      const artifact = (await store.list()).artifacts[0];
+      expect(artifact).toMatchObject({
+        status: 'missing',
+        workspacePath: 'report.txt',
+      });
+      expect(artifact).not.toHaveProperty('sizeBytes');
+      // The degradation is a graceful missing status, not a refresh error:
+      // deleting the branch would re-throw the refusal and log this marker.
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).not.toContain('status_refresh_failed');
+    } finally {
+      vi.useRealTimers();
+      openSpy.mockRestore();
+      stderr.mockRestore();
+    }
+  });
+
   it('rejects relative dangling symlinks that point outside the workspace', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's7-dangling-symlink',
@@ -3462,6 +4245,131 @@ describe('SessionArtifactStore', () => {
     expect(
       (await store.list()).artifacts.map((artifact) => artifact.id),
     ).toContain(restored.changes[0]?.artifactId);
+  });
+
+  it('evicts a vanished write_file artifact before a healthy one during overflow', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+    const store = new SessionArtifactStore({
+      sessionId: 's8-write-file-overflow',
+      workspaceCwd: workspace,
+      maxArtifacts: 2,
+    });
+    await fs.writeFile(path.join(workspace, 'keep.html'), '<html>a</html>');
+    await fs.writeFile(path.join(workspace, 'gone.html'), '<html>b</html>');
+    const keep = await store.upsertMany([
+      {
+        title: 'keep.html',
+        workspacePath: 'keep.html',
+        toolName: 'write_file',
+      },
+    ]);
+    const gone = await store.upsertMany([
+      {
+        title: 'gone.html',
+        workspacePath: 'gone.html',
+        toolName: 'write_file',
+      },
+    ]);
+
+    await fs.rm(path.join(workspace, 'gone.html'));
+    vi.setSystemTime(new Date('2026-08-24T00:00:02.000Z'));
+    const overflow = await store.upsertMany([
+      { title: 'New link', url: 'https://example.com/new' },
+    ]);
+    const createdId = overflow.changes.find(
+      (change) => change.action === 'created',
+    )?.artifactId;
+
+    expect(overflow.changes).toContainEqual(
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: gone.changes[0]?.artifactId,
+        reason: 'eviction',
+      }),
+    );
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({ id: keep.changes[0]?.artifactId }),
+        expect.objectContaining({ id: createdId }),
+      ],
+    });
+  });
+
+  it('does not evict a write_file artifact whose missing status is a transient stat error', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+    const store = new SessionArtifactStore({
+      sessionId: 's8-write-file-overflow-stat-error',
+      workspaceCwd: workspace,
+      maxArtifacts: 2,
+    });
+    await fs.writeFile(path.join(workspace, 'keep.html'), '<html>a</html>');
+    await fs.writeFile(path.join(workspace, 'error.html'), '<html>b</html>');
+    const keep = await store.upsertMany([
+      {
+        title: 'keep.html',
+        workspacePath: 'keep.html',
+        toolName: 'write_file',
+      },
+    ]);
+    const errored = await store.upsertMany([
+      {
+        title: 'error.html',
+        workspacePath: 'error.html',
+        toolName: 'write_file',
+      },
+    ]);
+
+    const originalRealpath = fs.realpath.bind(fs);
+    const realpathSpy = vi
+      .spyOn(fs, 'realpath')
+      .mockImplementation(async (entry) => {
+        if (String(entry).endsWith('error.html')) {
+          throw Object.assign(new Error('too many open files'), {
+            code: 'EMFILE',
+          });
+        }
+        return originalRealpath(entry);
+      });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: expect.arrayContaining([
+          expect.objectContaining({
+            id: errored.changes[0]?.artifactId,
+            status: 'missing',
+          }),
+        ]),
+      });
+    } finally {
+      realpathSpy.mockRestore();
+      stderr.mockRestore();
+    }
+
+    vi.setSystemTime(new Date('2026-08-24T00:00:02.000Z'));
+    const overflow = await store.upsertMany([
+      { title: 'New link', url: 'https://example.com/new' },
+    ]);
+    expect(overflow.changes).toContainEqual(
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: keep.changes[0]?.artifactId,
+        reason: 'eviction',
+      }),
+    );
+    expect(overflow.changes).not.toContainEqual(
+      expect.objectContaining({
+        artifactId: errored.changes[0]?.artifactId,
+      }),
+    );
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: expect.arrayContaining([
+        expect.objectContaining({ id: errored.changes[0]?.artifactId }),
+      ]),
+    });
   });
 
   it('keeps fresh cached workspace status during overflow eviction', async () => {
@@ -5286,6 +6194,887 @@ describe('SessionArtifactStore', () => {
     expect(warnings).toEqual([staleWarning]);
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [],
+    });
+  });
+
+  it('restores saved webpage records and deletion markers without reading their files', async () => {
+    const sessionId = 'saved-webpages';
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [
+        '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad',
+        '9c5e8dc7-4d9c-4a52-a703-7391e9b42dad',
+      ].map((uuid) => ({
+        kind: 'html' as const,
+        storage: 'published' as const,
+        source: 'tool' as const,
+        toolName: 'artifact',
+        toolCallId: `call-${uuid}`,
+        title: 'Saved page',
+        managedId: `preview-${uuid}`,
+        url: pathToFileURL(
+          path.join(workspace, 'artifacts', 'snapshots', uuid, 'index.html'),
+        ).href,
+        metadata: {
+          artifactType: 'web_preview_snapshot',
+          publishedUrl: 'https://example.com/latest',
+          'qwen.published.sha256': 'a'.repeat(64),
+        },
+      })),
+      { strict: true, trustedPublisher: true },
+    );
+    const rebuilt = rebuildSessionArtifactSnapshot(
+      events.map((systemPayload) => ({
+        type: 'system',
+        subtype: 'session_artifact_event',
+        systemPayload,
+      })),
+    )!;
+    expect(rebuilt.artifacts).toHaveLength(2);
+    expect(rebuilt.artifacts[0]?.metadata?.['publishedUrl']).toBe(
+      'https://example.com/latest',
+    );
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const restored = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+    await expect(restored.restore(rebuilt)).resolves.toEqual([]);
+    const listed = await restored.list();
+    for (const saved of rebuilt.artifacts) {
+      expect(listed.artifacts).toContainEqual(
+        expect.objectContaining({ ...saved, restoreState: 'restored' }),
+      );
+    }
+    const first = rebuilt.artifacts[0]!;
+    await expect(
+      restored.restore({
+        ...rebuilt,
+        artifacts: [rebuilt.artifacts[1]!],
+        tombstonedIds: [first.id],
+        markerArtifacts: [first],
+      }),
+    ).resolves.toEqual([]);
+    await restored.recordSnapshot();
+    expect(snapshots.at(-1)?.markerArtifacts).toEqual([
+      expect.objectContaining(first),
+    ]);
+    expect((await restored.list()).artifacts.map((entry) => entry.id)).toEqual([
+      rebuilt.artifacts[1]!.id,
+    ]);
+
+    for (const override of [
+      { source: 'client' as const },
+      { source: 'hook' as const },
+      { toolName: 'record_artifact' },
+    ]) {
+      const rejected = new SessionArtifactStore({
+        sessionId,
+        workspaceCwd: workspace,
+      });
+      const warnings = await rejected.restore({
+        ...rebuilt,
+        artifacts: [{ ...first, ...override }],
+      });
+      expect(warnings).toContain(
+        'artifact snapshot restore failed; kept existing live artifacts',
+      );
+      expect((await rejected.list()).artifacts).toEqual([]);
+    }
+  });
+
+  it('reclaims saved webpage snapshot files when their records leave the store', async () => {
+    const runtime = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-snapshot-runtime-'),
+    );
+    vi.stubEnv('QWEN_RUNTIME_DIR', runtime);
+    try {
+      const firstUuid = '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+      const secondUuid = '9c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+      const snapshotArtifact = async (uuid: string, html: string) => {
+        const dir = path.join(runtime, 'artifacts', 'snapshots', uuid);
+        await fs.mkdir(path.join(dir, 'references'), { recursive: true });
+        await fs.writeFile(path.join(dir, 'index.html'), html);
+        return {
+          kind: 'html' as const,
+          storage: 'published' as const,
+          source: 'tool' as const,
+          toolName: 'artifact',
+          toolCallId: `call-${uuid}`,
+          title: 'Saved page',
+          managedId: `preview-${uuid}`,
+          url: pathToFileURL(path.join(dir, 'index.html')).href,
+          metadata: {
+            artifactType: 'web_preview_snapshot',
+            'qwen.snapshot.references': 1,
+            publishedUrl: 'https://example.com/latest',
+            'qwen.published.sha256': createHash('sha256')
+              .update(html)
+              .digest('hex'),
+          },
+        };
+      };
+      const first = await snapshotArtifact(firstUuid, 'first');
+      const second = await snapshotArtifact(secondUuid, 'second');
+      const dirFor = (uuid: string) =>
+        path.join(runtime, 'artifacts', 'snapshots', uuid);
+      const store = new SessionArtifactStore({
+        sessionId: 'snapshot-reclaim',
+        workspaceCwd: workspace,
+        maxArtifacts: 1,
+        persistence: {
+          recordEvent: async () => {},
+          recordSnapshot: async () => {},
+        },
+      });
+      await store.upsertMany([first], {
+        strict: true,
+        trustedPublisher: true,
+      });
+      await store.upsertMany([second], {
+        strict: true,
+        trustedPublisher: true,
+      });
+
+      const listed = await store.list();
+      expect(listed.artifacts).toHaveLength(1);
+      // The evicted record's snapshot bytes are reclaimed; the retained
+      // record's snapshot stays in place.
+      await expect(fs.stat(dirFor(firstUuid))).rejects.toThrow();
+      await expect(
+        fs.readFile(path.join(dirFor(secondUuid), 'index.html'), 'utf8'),
+      ).resolves.toBe('second');
+
+      await store.remove(listed.artifacts[0]!.id);
+      await expect(fs.stat(dirFor(secondUuid))).rejects.toThrow();
+    } finally {
+      vi.unstubAllEnvs();
+      await fs.rm(runtime, { recursive: true, force: true });
+    }
+  });
+
+  it('reclaims snapshot files for restored records pruned to the live limit', async () => {
+    const runtime = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-snapshot-runtime-'),
+    );
+    vi.stubEnv('QWEN_RUNTIME_DIR', runtime);
+    try {
+      const firstUuid = '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+      const secondUuid = '9c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+      const persistedSnapshot = async (
+        uuid: string,
+        html: string,
+        createdAt: string,
+      ) => {
+        const dir = path.join(runtime, 'artifacts', 'snapshots', uuid);
+        await fs.mkdir(path.join(dir, 'references'), { recursive: true });
+        await fs.writeFile(path.join(dir, 'index.html'), html);
+        return {
+          id: stableSessionArtifactId(
+            'snapshot-restore-reclaim',
+            `managed:preview-${uuid}`,
+          ),
+          kind: 'html' as const,
+          storage: 'published' as const,
+          source: 'tool' as const,
+          status: 'available' as const,
+          toolName: 'artifact',
+          title: 'Saved page',
+          managedId: `preview-${uuid}`,
+          url: pathToFileURL(path.join(dir, 'index.html')).href,
+          metadata: {
+            artifactType: 'web_preview_snapshot',
+            'qwen.snapshot.references': 1,
+            publishedUrl: 'https://example.com/latest',
+            'qwen.published.sha256': createHash('sha256')
+              .update(html)
+              .digest('hex'),
+          },
+          retention: 'restorable' as const,
+          clientRetained: false,
+          createdAt,
+          updatedAt: createdAt,
+        };
+      };
+      const first = await persistedSnapshot(
+        firstUuid,
+        'first',
+        '2026-09-07T00:00:00.000Z',
+      );
+      const second = await persistedSnapshot(
+        secondUuid,
+        'second',
+        '2026-09-07T00:01:00.000Z',
+      );
+      const dirFor = (uuid: string) =>
+        path.join(runtime, 'artifacts', 'snapshots', uuid);
+      const store = new SessionArtifactStore({
+        sessionId: 'snapshot-restore-reclaim',
+        workspaceCwd: workspace,
+        maxArtifacts: 1,
+        persistence: {
+          recordEvent: async () => {},
+          recordSnapshot: async () => {},
+        },
+      });
+      const warnings = await store.restore({
+        v: 2,
+        sessionId: 'snapshot-restore-reclaim',
+        sequence: 1,
+        artifacts: [first, second],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      });
+      expect(warnings).toContain('restored artifact list pruned to live limit');
+      expect((await store.list()).artifacts).toHaveLength(1);
+      await expect(fs.stat(dirFor(firstUuid))).rejects.toThrow();
+      await expect(
+        fs.readFile(path.join(dirFor(secondUuid), 'index.html'), 'utf8'),
+      ).resolves.toBe('second');
+    } finally {
+      vi.unstubAllEnvs();
+      await fs.rm(runtime, { recursive: true, force: true });
+    }
+  });
+
+  describe('saved webpage ownership', () => {
+    const persistence = {
+      recordEvent: async () => {},
+      recordSnapshot: async () => {},
+    };
+    async function saved(sessionId: string, html: string) {
+      const uuid = randomUUID();
+      const dir = path.join(workspace, 'artifacts', 'snapshots', uuid);
+      await fs.mkdir(path.join(dir, 'references'), { recursive: true });
+      await fs.writeFile(path.join(dir, 'index.html'), html);
+      return {
+        id: stableSessionArtifactId(sessionId, `managed:preview-${uuid}`),
+        kind: 'html' as const,
+        storage: 'published' as const,
+        source: 'tool' as const,
+        toolName: 'artifact',
+        title: 'Saved page',
+        managedId: `preview-${uuid}`,
+        url: pathToFileURL(path.join(dir, 'index.html')).href,
+        status: 'available' as const,
+        retention: 'restorable' as const,
+        clientRetained: false,
+        createdAt: '2026-09-07T00:00:00.000Z',
+        updatedAt: '2026-09-07T00:00:00.000Z',
+        metadata: {
+          artifactType: 'web_preview_snapshot',
+          'qwen.snapshot.references': 1,
+          'qwen.published.sha256': createHash('sha256')
+            .update(html)
+            .digest('hex'),
+        },
+      };
+    }
+    function snapshot(
+      sessionId: string,
+      artifacts: Array<Awaited<ReturnType<typeof saved>>>,
+    ): RebuiltSessionArtifactSnapshot {
+      return {
+        v: 2,
+        sessionId,
+        sequence: 1,
+        artifacts,
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      };
+    }
+    function store(sessionId: string, maxArtifacts = 200) {
+      return new SessionArtifactStore({
+        sessionId,
+        workspaceCwd: workspace,
+        runtimeBaseDir: workspace,
+        maxArtifacts,
+        persistence,
+      });
+    }
+
+    it.each(['remove', 'evict'] as const)(
+      'keeps the parent readable after a fork %s',
+      async (action) => {
+        const page = await saved('parent', 'original');
+        const parent = store('parent');
+        await parent.restore(snapshot('parent', [page]));
+        const forked = {
+          ...page,
+          id: stableSessionArtifactId('fork', `managed:${page.managedId}`),
+        };
+        const fork = store('fork', 1);
+        await fork.restore(snapshot('fork', [forked]));
+        if (action === 'remove') await fork.remove(forked.id);
+        else
+          await fork.upsertMany([await saved('fork', 'new')], {
+            strict: true,
+            trustedPublisher: true,
+          });
+        expect((await parent.list()).artifacts[0]!.status).toBe('available');
+        await expect(readArtifactSnapshot(page, workspace)).resolves.toBe(
+          'original',
+        );
+        await parent.remove(page.id);
+        await expect(readArtifactSnapshot(page, workspace)).rejects.toThrow();
+      },
+    );
+
+    it.each(['reject', 'unavailable'] as const)(
+      'keeps durable bytes when restore pruning persistence is %s',
+      async (failure) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        const original = snapshot('owner', [first, second]);
+        const pruned = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          maxArtifacts: 1,
+          persistence:
+            failure === 'reject'
+              ? {
+                  ...persistence,
+                  recordEvent: async () => {
+                    throw new Error('disk full');
+                  },
+                }
+              : undefined,
+        });
+        const warnings = await pruned.restore(original);
+        expect(warnings).toContain(
+          'artifact removal not persisted; live removal kept',
+        );
+        expect((await pruned.list()).artifacts).toHaveLength(1);
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+        const reloaded = store('owner');
+        await reloaded.restore(original);
+        expect((await reloaded.list()).artifacts).toHaveLength(2);
+        await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+          'second',
+        );
+      },
+    );
+
+    it.each(['strict persistence', 'durable transition', 'capacity'])(
+      'releases new ownership after %s rollback and preserves existing owners',
+      async (failure) => {
+        let failWrites = false;
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          maxArtifacts: failure === 'strict persistence' ? 200 : 1,
+          persistence: {
+            ...persistence,
+            recordEvent: async () => {
+              if (failWrites) throw new Error('disk full');
+            },
+          },
+        });
+        const prior = await saved('owner', 'prior');
+        if (failure !== 'capacity') {
+          await live.upsertMany([prior], {
+            strict: true,
+            trustedPublisher: true,
+          });
+        }
+        const before = (await live.list()).artifacts;
+        const pages = [await saved('owner', 'new')];
+        if (failure === 'capacity') pages.push(await saved('owner', 'second'));
+        for (const page of pages) {
+          await retainArtifactSnapshot(page, workspace, 'producer');
+        }
+        failWrites = true;
+        const result = live.upsertMany(
+          [
+            ...(failure === 'capacity'
+              ? []
+              : [{ ...prior, title: 'Attempted update' }]),
+            ...pages,
+          ],
+          { strict: failure !== 'durable transition', trustedPublisher: true },
+        );
+        if (failure === 'durable transition') {
+          await expect(result).resolves.toMatchObject({
+            changes: [],
+            warnings: [
+              'artifact durable removal not persisted; live changes rolled back',
+            ],
+          });
+        } else {
+          await expect(result).rejects.toThrow(
+            failure === 'capacity' ? 'artifact store is full' : 'disk full',
+          );
+        }
+        expect((await live.list()).artifacts).toEqual(before);
+        if (failure !== 'capacity') {
+          await expect(readArtifactSnapshot(prior, workspace)).resolves.toBe(
+            'prior',
+          );
+          expect(
+            await fs.readdir(
+              path.join(path.dirname(fileURLToPath(prior.url)), 'references'),
+            ),
+          ).toEqual([createHash('sha256').update('owner').digest('hex')]);
+        }
+        for (const page of pages) {
+          expect(
+            await fs.readdir(
+              path.join(path.dirname(fileURLToPath(page.url)), 'references'),
+            ),
+          ).toEqual([createHash('sha256').update('producer').digest('hex')]);
+          await deleteArtifactSnapshot(page, workspace, 'producer');
+          await expect(
+            fs.stat(path.dirname(fileURLToPath(page.url))),
+          ).rejects.toMatchObject({ code: 'ENOENT' });
+        }
+      },
+    );
+
+    it.each(['before', 'after'] as const)(
+      'returns the complete non-strict batch when retaining a snapshot fails %s its reference write',
+      async (failure) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          persistence: {
+            ...persistence,
+            recordSnapshot: async (payload) => {
+              snapshots.push(payload);
+            },
+          },
+        });
+        const references = path.join(
+          path.dirname(fileURLToPath(first.url)),
+          'references',
+        );
+        const writeFile = fs.writeFile;
+        const spy = vi
+          .spyOn(fs, 'writeFile')
+          .mockImplementation(async (...args) => {
+            if (path.dirname(String(args[0])) === references) {
+              if (failure === 'after') await writeFile(...args);
+              throw Object.assign(new Error('ENOSPC: reference write failed'), {
+                code: 'ENOSPC',
+              });
+            }
+            await writeFile(...args);
+          });
+        try {
+          const result = await live.upsertMany([first, second], {
+            trustedPublisher: true,
+          });
+          expect(result.warnings).toEqual([
+            `artifact ${first.id} kept without retaining its snapshot: ENOSPC: reference write failed`,
+          ]);
+          expect(result.changes.map((change) => change.action)).toEqual([
+            'created',
+            'created',
+          ]);
+          expect(result.changes.map((change) => change.artifact)).toEqual(
+            (await live.list()).artifacts,
+          );
+          await expect(live.recordSnapshot()).resolves.toEqual([]);
+          expect(snapshots.at(-1)?.artifacts.map((page) => page.id)).toEqual(
+            result.changes.map((change) => change.artifactId),
+          );
+          await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+            'first',
+          );
+          await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+            'second',
+          );
+          expect(
+            await fs.readdir(
+              path.join(path.dirname(fileURLToPath(second.url)), 'references'),
+            ),
+          ).toEqual([createHash('sha256').update('owner').digest('hex')]);
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it.each(['EEXIST', 'ENOENT'] as const)(
+      'does not warn when snapshot retention tolerates %s',
+      async (code) => {
+        const page = await saved('owner', 'original');
+        const references = path.join(
+          path.dirname(fileURLToPath(page.url)),
+          'references',
+        );
+        if (code === 'ENOENT') await fs.unlink(fileURLToPath(page.url));
+        const writeFile = fs.writeFile;
+        const spy = vi
+          .spyOn(fs, 'writeFile')
+          .mockImplementation(async (...args) => {
+            if (path.dirname(String(args[0])) === references) {
+              await writeFile(...args);
+            }
+            await writeFile(...args);
+          });
+        try {
+          const live = store('owner');
+          const result = await live.upsertMany([page], {
+            trustedPublisher: true,
+          });
+          expect(result.warnings).toBeUndefined();
+          expect(result.changes).toHaveLength(1);
+          expect(result.changes[0]!.artifact).toEqual(
+            (await live.list()).artifacts[0],
+          );
+          if (code === 'EEXIST') {
+            expect(spy).toHaveBeenCalledTimes(1);
+            await expect(readArtifactSnapshot(page, workspace)).resolves.toBe(
+              'original',
+            );
+          }
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it.each([
+      { strict: true },
+      { validationStrict: true },
+      { persistenceStrict: true },
+    ])(
+      'cleans the whole batch after a reference write fails with %j',
+      async (strictOptions) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        await retainArtifactSnapshot(second, workspace, 'owner');
+        const live = store('owner');
+        const references = path.join(
+          path.dirname(fileURLToPath(first.url)),
+          'references',
+        );
+        const writeFile = fs.writeFile;
+        const spy = vi
+          .spyOn(fs, 'writeFile')
+          .mockImplementation(async (...args) => {
+            await writeFile(...args);
+            if (path.dirname(String(args[0])) === references) {
+              throw new Error('reference write failed');
+            }
+          });
+        try {
+          await expect(
+            live.upsertMany([first, second], {
+              ...strictOptions,
+              trustedPublisher: true,
+            }),
+          ).rejects.toThrow('reference write failed');
+          expect((await live.list()).artifacts).toEqual([]);
+          for (const page of [first, second]) {
+            await expect(
+              fs.stat(path.dirname(fileURLToPath(page.url))),
+            ).rejects.toMatchObject({ code: 'ENOENT' });
+          }
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it.each([false, true])(
+      'protects failed durable pruning through rollback after partial restore: %s',
+      async (partialRestore) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          maxArtifacts: 1,
+          persistence: {
+            ...persistence,
+            recordEvent: async () => {
+              throw new Error('disk full');
+            },
+          },
+        });
+        await expect(
+          live.restore(snapshot('owner', [first, second])),
+        ).resolves.toContain(
+          'artifact removal not persisted; live removal kept',
+        );
+        if (partialRestore) {
+          await expect(
+            live.restore(
+              snapshot('owner', [{ ...first, id: 'abcdef1234567890' }, second]),
+            ),
+          ).resolves.toContain(
+            'skipped artifact with mismatched id abcdef1234567890',
+          );
+        }
+        await expect(
+          live.upsertMany([first], { strict: true, trustedPublisher: true }),
+        ).rejects.toThrow('disk full');
+        expect((await live.list()).artifacts.map((page) => page.id)).toEqual([
+          second.id,
+        ]);
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+        await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+          'second',
+        );
+      },
+    );
+
+    it.each(['event', 'snapshot', 'restore'])(
+      'stops protecting an old failed removal after a complete %s commit',
+      async (commit) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        await retainArtifactSnapshot(first, workspace, 'fork');
+        let failWrites = true;
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          maxArtifacts: 1,
+          persistence: {
+            ...persistence,
+            recordEvent: async () => {
+              if (failWrites) throw new Error('disk full');
+            },
+          },
+        });
+        await live.restore(snapshot('owner', [first, second]));
+        failWrites = false;
+        if (commit === 'event') {
+          await live.upsertMany([first], {
+            strict: true,
+            trustedPublisher: true,
+          });
+          await live.remove(first.id);
+        } else if (commit === 'snapshot') {
+          await expect(live.recordSnapshot()).resolves.toEqual([]);
+        } else {
+          await expect(
+            live.restore(snapshot('owner', [second])),
+          ).resolves.toEqual([]);
+        }
+        failWrites = true;
+        await expect(
+          live.upsertMany([first], { strict: true, trustedPublisher: true }),
+        ).rejects.toThrow('disk full');
+        expect(
+          await fs.readdir(
+            path.join(path.dirname(fileURLToPath(first.url)), 'references'),
+          ),
+        ).toEqual([createHash('sha256').update('fork').digest('hex')]);
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+      },
+    );
+
+    it('releases a failed reintroduction after successful durable removal', async () => {
+      const page = await saved('owner', 'shared');
+      let failWrites = false;
+      const live = new SessionArtifactStore({
+        sessionId: 'owner',
+        workspaceCwd: workspace,
+        runtimeBaseDir: workspace,
+        persistence: {
+          ...persistence,
+          recordEvent: async () => {
+            if (failWrites) throw new Error('disk full');
+          },
+        },
+      });
+      await live.restore(snapshot('owner', [page]));
+      await retainArtifactSnapshot(page, workspace, 'fork');
+      await live.remove(page.id);
+      failWrites = true;
+      await expect(
+        live.upsertMany([page], { strict: true, trustedPublisher: true }),
+      ).rejects.toThrow('disk full');
+      expect((await live.list()).artifacts).toEqual([]);
+      expect(
+        await fs.readdir(
+          path.join(path.dirname(fileURLToPath(page.url)), 'references'),
+        ),
+      ).toEqual([createHash('sha256').update('fork').digest('hex')]);
+      await deleteArtifactSnapshot(page, workspace, 'fork');
+      await expect(
+        fs.stat(path.dirname(fileURLToPath(page.url))),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it.each(['id', 'title'])(
+      'preserves history skipped due to %s through partial restore and later rollback',
+      async (invalidField) => {
+        const first = await saved('owner', 'first');
+        const second = await saved('owner', 'second');
+        const live = new SessionArtifactStore({
+          sessionId: 'owner',
+          workspaceCwd: workspace,
+          runtimeBaseDir: workspace,
+          persistence: {
+            ...persistence,
+            recordEvent: async () => {
+              throw new Error('disk full');
+            },
+          },
+        });
+        await live.restore(snapshot('owner', [first, second]));
+        await expect(
+          live.restore(
+            snapshot('owner', [
+              invalidField === 'id'
+                ? { ...first, id: 'abcdef1234567890' }
+                : { ...first, title: '' },
+              second,
+            ]),
+          ),
+        ).resolves.toContain(
+          invalidField === 'id'
+            ? 'skipped artifact with mismatched id abcdef1234567890'
+            : 'skipped artifact restore: title is required',
+        );
+        expect((await live.list()).artifacts.map((page) => page.id)).toEqual([
+          second.id,
+        ]);
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+        await expect(
+          live.upsertMany([first], { strict: true, trustedPublisher: true }),
+        ).rejects.toThrow('disk full');
+        await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+          'first',
+        );
+        await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+          'second',
+        );
+      },
+    );
+
+    it('preserves pending durable history dropped from a later successful batch', async () => {
+      const first = await saved('owner', 'first');
+      const second = await saved('owner', 'second');
+      const third = await saved('owner', 'third');
+      let failWrites = true;
+      const live = new SessionArtifactStore({
+        sessionId: 'owner',
+        workspaceCwd: workspace,
+        runtimeBaseDir: workspace,
+        maxArtifacts: 1,
+        persistence: {
+          ...persistence,
+          recordEvent: async () => {
+            if (failWrites) throw new Error('disk full');
+          },
+        },
+      });
+      await live.restore(snapshot('owner', [first, second]));
+      failWrites = false;
+      const result = await live.upsertMany([third, first], {
+        trustedPublisher: true,
+      });
+      expect(result.warnings).toContain(
+        'dropped 1 newly created artifacts because the store is full',
+      );
+      expect((await live.list()).artifacts.map((page) => page.id)).toEqual([
+        third.id,
+      ]);
+      await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+        'first',
+      );
+      await expect(
+        readArtifactSnapshot(second, workspace),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(readArtifactSnapshot(third, workspace)).resolves.toBe(
+        'third',
+      );
+    });
+
+    it('reclaims discarded rewind history only after a complete restore', async () => {
+      const first = await saved('owner', 'first');
+      const second = await saved('owner', 'second');
+      const live = store('owner');
+      await live.restore(snapshot('owner', [first, second]));
+      await live.restore(snapshot('owner', [{ ...second, id: 'invalid-id' }]));
+      expect((await live.list()).artifacts).toHaveLength(2);
+      await expect(readArtifactSnapshot(first, workspace)).resolves.toBe(
+        'first',
+      );
+      await live.restore(snapshot('owner', [second]));
+      await expect(readArtifactSnapshot(first, workspace)).rejects.toThrow();
+      await expect(readArtifactSnapshot(second, workspace)).resolves.toBe(
+        'second',
+      );
+    });
+
+    it('uses the runtime captured before the ambient environment changes', async () => {
+      const page = await saved('owner', 'secondary');
+      const live = store('owner');
+      await live.restore(snapshot('owner', [page]));
+      vi.stubEnv('QWEN_RUNTIME_DIR', path.join(workspace, 'primary'));
+      try {
+        await live.remove(page.id);
+        await expect(readArtifactSnapshot(page, workspace)).rejects.toThrow();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('keeps the restored record when snapshot retain bookkeeping fails', async () => {
+      const page = await saved('owner', 'original');
+      const references = path.join(
+        workspace,
+        'artifacts',
+        'snapshots',
+        page.managedId.replace('preview-', ''),
+        'references',
+      );
+      await fs.rm(references, { recursive: true });
+      await fs.writeFile(references, 'not a directory');
+
+      const restored = store('owner');
+      const warnings = await restored.restore(snapshot('owner', [page]));
+
+      expect(warnings).toEqual([
+        expect.stringContaining(
+          `restored artifact ${page.id} without retaining its snapshot`,
+        ),
+      ]);
+      await expect(restored.list()).resolves.toMatchObject({
+        artifacts: [expect.objectContaining({ id: page.id })],
+      });
+      await expect(readArtifactSnapshot(page, workspace)).resolves.toBe(
+        'original',
+      );
     });
   });
 

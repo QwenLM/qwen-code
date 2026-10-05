@@ -5,7 +5,9 @@
  */
 
 import { describe, it, expect, expectTypeOf } from 'vitest';
+import type { DaemonContinueSessionResult } from '../../src/daemon/index.js';
 import * as Public from '../../src/index.js';
+
 import {
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
   PENDING_PROMPT_ADDED_EVENT,
@@ -20,6 +22,26 @@ import {
 // gap that two-layer SDK re-exports are easy to drift on.
 import type {
   DaemonClient,
+  CreateStandaloneSessionOptions,
+  DaemonArchiveStandaloneSessionsResult,
+  DaemonDeleteStandaloneSessionsResult,
+  DaemonRestoredStandaloneSession,
+  DaemonSessionRestoreStrategy,
+  DaemonStandaloneBatchError,
+  DaemonStandaloneCreationRecovery,
+  DaemonStandaloneDirectoryResult,
+  DaemonStandaloneFields,
+  DaemonStandaloneMetadataResult,
+  DaemonStandaloneSession,
+  DaemonStandaloneSessionOptions,
+  DaemonStandaloneSessionCreating,
+  DaemonStandaloneSessionListOptions,
+  DaemonStandaloneSessionListPage,
+  DaemonStandaloneSessionLookup,
+  DaemonStandaloneSessionSummary,
+  DaemonStandaloneWorkingDirectory,
+  DaemonUnarchiveStandaloneSessionsResult,
+  RestoreStandaloneSessionRequest,
   WorkspaceDaemonClient,
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
@@ -73,6 +95,10 @@ import type {
   DaemonPendingPromptSummary,
   DaemonPendingPromptsResult,
   DaemonSessionLspStatus,
+  DaemonSessionAgentsStatus,
+  DaemonAgentTrace,
+  DaemonAgentTraceNode,
+  DaemonSessionResourcesStatus,
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
@@ -80,7 +106,15 @@ import type {
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
   DaemonSessionCatalogVersion,
+  DaemonSessionCatalogWorkspace,
+  DaemonSessionCatalogRequest,
+  DaemonSessionCatalogPage,
+  DaemonSessionCatalogError,
+  DaemonSessionCatalogResult,
   DaemonSessionLiveState,
+  DaemonSessionTurnIndexEntry,
+  DaemonSessionTurnIndexPage,
+  DaemonSessionTurnIndexPageOptions,
   DaemonWorkspaceSessionLiveState,
   DaemonSessionRecapResult,
   DaemonSkillBatchToggleError,
@@ -145,20 +179,67 @@ import type {
 import {
   DAEMON_UI_DEBUG_REASONS,
   DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS,
+  isTaskExecutionMode,
   selectUnrecognizedDiagnostics,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from '../../src/daemon/index.js';
 import type {
+  DaemonResourceLink,
+  DaemonUiUserResourceLinkEvent,
+  PromptContentBlock,
   DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
   DaemonChannelStartupFailure as DaemonEntryChannelStartupFailure,
   DaemonChannelWorkerStartErrorResponse as DaemonEntryChannelWorkerStartErrorResponse,
+  DaemonSessionResourcesStatus as DaemonEntrySessionResourcesStatus,
   DaemonUiDebugReason as DaemonEntryUiDebugReason,
   DaemonUnrecognizedDiagnostic as DaemonEntryUnrecognizedDiagnostic,
   DaemonUnrecognizedDiagnosticReason as DaemonEntryUnrecognizedDiagnosticReason,
 } from '../../src/daemon/index.js';
 
+describe('resource-link public surface', () => {
+  it('keeps the ACP discriminator and nullable metadata in the daemon API', () => {
+    const resourceLink: DaemonResourceLink = {
+      type: 'resource_link',
+      uri: 'transit://attachment',
+      name: 'report.pdf',
+      mimeType: null,
+      size: null,
+      description: null,
+      title: null,
+      annotations: {
+        audience: null,
+        lastModified: null,
+        priority: null,
+        _meta: null,
+      },
+      _meta: null,
+    };
+    const event: DaemonUiUserResourceLinkEvent = {
+      type: 'user.resource_link.delta',
+      resourceLink,
+    };
+    const promptContent: PromptContentBlock[] = [resourceLink];
+    expect(event.resourceLink).toBe(resourceLink);
+    expect(promptContent[0]).toBe(resourceLink);
+    expectTypeOf(event.resourceLink.type).toEqualTypeOf<'resource_link'>();
+  });
+});
+
+describe('continuation compatibility', () => {
+  it('accepts an older daemon response without an event epoch', () => {
+    const accepted: DaemonContinueSessionResult = {
+      accepted: true,
+      interruption: 'interrupted_prompt',
+      promptId: 'continue-1',
+      lastEventId: 17,
+    };
+    expect(accepted.eventEpoch).toBeUndefined();
+    expectTypeOf(accepted.eventEpoch).toEqualTypeOf<string | undefined>();
+  });
+});
 describe('public SDK entry — typed daemon event surface (#4217)', () => {
   it('exports the runtime narrow + reducer surface', () => {
+    expect(typeof Public.DaemonAttachmentUploadError).toBe('function');
     expect(typeof Public.asKnownDaemonEvent).toBe('function');
     expect(typeof Public.isKnownDaemonEvent).toBe('function');
     expect(typeof Public.isDaemonEventType).toBe('function');
@@ -180,6 +261,50 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // failure mode caught for PR-21 auth surface).
     expect(typeof Public.isWorkspaceScopedBudgetEvent).toBe('function');
     expect('projectChatRecordsToDaemonTranscript' in Public).toBe(false);
+    expect(Public.STANDALONE_SESSIONS_CAPABILITY).toBe(
+      'standalone_sessions_v1',
+    );
+    expect(Public.STANDALONE_SESSION_OPTIONS_CAPABILITY).toBe(
+      'standalone_session_options_v1',
+    );
+    expect(typeof Public.isStandaloneSessionNotFoundError).toBe('function');
+    expect(typeof Public.isStandaloneCreationOutcomeUnknown).toBe('function');
+    expect(typeof Public.DaemonStandaloneProtocolError).toBe('function');
+    expect(typeof Public.DaemonStandaloneCreationOutcomeUnknownError).toBe(
+      'function',
+    );
+  });
+
+  it('exports standalone session SDK types from the package entry', () => {
+    expectTypeOf<CreateStandaloneSessionOptions>().not.toBeNever();
+    expectTypeOf<RestoreStandaloneSessionRequest>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSession>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionOptions>().not.toBeNever();
+    expectTypeOf<DaemonRestoredStandaloneSession>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionSummary>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionLookup>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionListOptions>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionListPage>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneDirectoryResult>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneMetadataResult>().not.toBeNever();
+    expectTypeOf<DaemonArchiveStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonUnarchiveStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonDeleteStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneBatchError>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneFields>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionCreating>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneWorkingDirectory>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneCreationRecovery>().not.toBeNever();
+    expectTypeOf<DaemonSessionRestoreStrategy>().not.toBeNever();
+    expectTypeOf<DaemonSessionTurnIndexEntry>().not.toBeNever();
+    expectTypeOf<DaemonSessionTurnIndexPage>().not.toBeNever();
+    expectTypeOf<DaemonSessionTurnIndexPageOptions>().not.toBeNever();
+  });
+
+  it('exports session agent types from the package entry', () => {
+    expectTypeOf<DaemonSessionAgentsStatus>().not.toBeNever();
+    expectTypeOf<DaemonAgentTrace>().not.toBeNever();
+    expectTypeOf<DaemonAgentTraceNode>().not.toBeNever();
   });
 
   it('round-trips a raw DaemonEvent through the public narrow helper', () => {
@@ -268,6 +393,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonPermissionOption>().not.toBeNever();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
+    expectTypeOf<DaemonSessionResourcesStatus>().toEqualTypeOf<DaemonEntrySessionResourcesStatus>();
     expectTypeOf<DaemonTrustChangeRequestedData>().not.toBeNever();
     expectTypeOf<DaemonTrustChangeRequestedEvent>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceTrustChangeRequest>().not.toBeNever();
@@ -488,7 +614,78 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonStatusReportSession>().not.toBeNever();
   });
 
+  it('exposes batched session catalogs at the public entry', () => {
+    expect(typeof Public.DaemonClient.prototype.listSessionsCatalog).toBe(
+      'function',
+    );
+    expectTypeOf<DaemonSessionCatalogWorkspace>().toEqualTypeOf<{
+      workspace: string;
+      cursor?: string;
+    }>();
+    expectTypeOf<DaemonSessionCatalogRequest>().toEqualTypeOf<{
+      workspaces: 'all' | DaemonSessionCatalogWorkspace[];
+      options?: Omit<Public.DaemonSessionListPageOptions, 'cursor'>;
+      includeGroups?: boolean;
+    }>();
+    expectTypeOf<DaemonSessionCatalogPage>().toEqualTypeOf<{
+      sessions: Public.DaemonSessionSummary[];
+      nextCursor?: string;
+      liveMergeFailed?: boolean;
+      truncated?: boolean;
+      workspace: string;
+      workspaceId: string;
+      cwd: string;
+      groups?: Public.DaemonSessionGroupCatalog;
+    }>();
+    expectTypeOf<DaemonSessionCatalogError>().toEqualTypeOf<{
+      workspace: string;
+      workspaceId?: string;
+      cwd?: string;
+      error: { code: string; message: string; status: number };
+    }>();
+    expectTypeOf<DaemonSessionCatalogResult>().toEqualTypeOf<{
+      workspaces: Array<DaemonSessionCatalogPage | DaemonSessionCatalogError>;
+    }>();
+    expectTypeOf<DaemonClient['listSessionsCatalog']>().toEqualTypeOf<
+      (
+        request: DaemonSessionCatalogRequest,
+        opts?: { signal?: AbortSignal; timeoutMs?: number },
+      ) => Promise<DaemonSessionCatalogResult>
+    >();
+  });
+
+  it('parses every kind of background turn a daemon emits', () => {
+    // A consumer built against an older SDK would reject a kind it has
+    // never seen and lose the turn, so every kind the daemon can emit has
+    // to be listed here as well as in the type.
+    for (const kind of [
+      'agent',
+      'monitor',
+      'shell',
+      'workflow',
+      'peer',
+    ] as const) {
+      expect(
+        Public.parseDaemonBackgroundTurn({
+          turnId: 't1',
+          taskId: 'k1',
+          kind,
+          startedAt: 1,
+        }),
+      ).toMatchObject({ kind });
+    }
+    expect(
+      Public.parseDaemonBackgroundTurn({
+        turnId: 't1',
+        taskId: 'k1',
+        kind: 'something-else',
+        startedAt: 1,
+      }),
+    ).toBeUndefined();
+  });
+
   it('exposes the workspace session live-state surface at the public entry', () => {
+    expect(typeof Public.parseDaemonBackgroundTurn).toBe('function');
     // The prototype checks execute under vitest (type-only imports are
     // erased). The type shape assertions pin the wire contract via the
     // package typecheck, which compiles this file through
@@ -507,6 +704,9 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       sessionId: string;
       clientCount: number;
       hasActivePrompt: boolean;
+      activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
+      backgroundTurn?: Public.DaemonBackgroundTurn;
+      hasRunningBackgroundTasks?: boolean;
       isWaitingForPermission: boolean;
       isWaitingForUserQuestion: boolean;
       updatedAt?: string;
@@ -606,7 +806,13 @@ describe('runtime MCP add/remove SDK types', () => {
   it('request type compiles', () => {
     const req: DaemonRuntimeMcpAddRequest = {
       name: 'echo',
-      config: { command: 'node', args: ['echo.js'], type: 'stdio' },
+      config: {
+        command: 'node',
+        args: ['echo.js'],
+        type: 'stdio',
+        appResourceMaxBytes: 4_194_304,
+        appResourceTimeoutMs: 30_000,
+      },
       displayName: 'Echo Server',
     };
     expect(req.name).toBe('echo');
@@ -703,5 +909,24 @@ describe('unrecognized-diagnostic sidechannel public surface (#8823)', () => {
     expectTypeOf<DaemonEntryUnrecognizedDiagnostic>().toHaveProperty(
       'debugReason',
     );
+  });
+});
+
+describe('task executionMode guard public surface', () => {
+  it('pins the fail-closed literal whitelist at the daemon entry', () => {
+    // webui's projection (`projectSubagentToolUpdate`) and the web-shell
+    // adapter (`daemonToolBlockToToolCall`) both import this guard from
+    // @qwen-code/sdk/daemon; a dropped re-export is a compile error for
+    // them, and a widened or narrowed literal set silently re-routes live
+    // vs recorded classification. Pin the runtime behavior here the way
+    // DAEMON_UI_DEBUG_REASONS pins its closed union.
+    expect(typeof isTaskExecutionMode).toBe('function');
+    expect(isTaskExecutionMode('foreground')).toBe(true);
+    expect(isTaskExecutionMode('background')).toBe(true);
+    expect(isTaskExecutionMode('detached')).toBe(false);
+    expect(isTaskExecutionMode('')).toBe(false);
+    expect(isTaskExecutionMode(undefined)).toBe(false);
+    expect(isTaskExecutionMode(42)).toBe(false);
+    expect(isTaskExecutionMode({})).toBe(false);
   });
 });

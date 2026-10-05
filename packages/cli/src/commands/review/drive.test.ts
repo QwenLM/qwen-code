@@ -17,6 +17,7 @@ import {
   readFileSync,
   readdirSync,
   writeFileSync,
+  truncateSync,
   existsSync,
   rmSync,
 } from 'node:fs';
@@ -32,6 +33,7 @@ import {
   DRIVE_SENTINEL,
   parseCaptureSpecs,
   extractCaptures,
+  readCapped,
   type ExecResult,
 } from './drive.js';
 import { BRIEFS } from './lib/agent-briefs.js';
@@ -45,6 +47,7 @@ import {
   makeStaleBundleFixture,
   stampDigest,
 } from './lib/test-utils.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 // The handler's output goes through the same helpers the parse-args suite
 // mocks; the wiring tests below intercept them so no real terminal is touched.
@@ -152,7 +155,9 @@ describe('the sentinel', () => {
   it('carries the exit code on the same line it announces completion', () => {
     // Two facts read from one capture. A capture holding the marker but not the
     // code would report `completed` with an unknown result.
-    expect(wrapScript('true', '/tmp/rc')).toContain(`${DRIVE_SENTINEL} rc=`);
+    expect(wrapScript('/tmp/body.sh', '/tmp/rc')).toContain(
+      `${DRIVE_SENTINEL} rc=`,
+    );
     expect(sentinelExitCode(`x\n${DRIVE_SENTINEL} rc=0\n`)).toBe(0);
     expect(sentinelExitCode(`x\n${DRIVE_SENTINEL} rc=17\n`)).toBe(17);
   });
@@ -177,7 +182,7 @@ describe('the sentinel', () => {
     // `timed-out` with a null exit code — a run that answered in milliseconds
     // reported as one that never finished. A `set +e` assertion did not catch
     // it, because `set +e` has no bearing on `exit`; the trap does.
-    expect(wrapScript('exit 17', '/tmp/rc')).toMatch(/^trap .* EXIT/);
+    expect(wrapScript('/tmp/body.sh', '/tmp/rc')).toMatch(/^trap .* EXIT/);
   });
 });
 
@@ -189,8 +194,11 @@ describe.skipIf(process.platform === 'win32')(
     // and read the verdict from the sentinel FILE, the channel that has to
     // survive a bounded log.
     const realExit = (script: string): number | null => {
-      const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
-      spawnSync('bash', ['-c', wrapScript(script, rc)], { encoding: 'utf8' });
+      const dir = mkdtempSync(join(tmpdir(), 'drv-'));
+      const rc = join(dir, 'drive.rc');
+      const body = join(dir, 'body.sh');
+      writeFileSync(body, `${script}\n`);
+      spawnSync('bash', ['-c', wrapScript(body, rc)], { encoding: 'utf8' });
       return existsSync(rc) ? sentinelExitCode(readFileSync(rc, 'utf8')) : null;
     };
 
@@ -201,11 +209,34 @@ describe.skipIf(process.platform === 'win32')(
       expect(realExit('exit 0')).toBe(0);
     });
 
+    it('survives a body that ends in exec — the child bash takes the image swap, not the trap', () => {
+      // A verifier script whose last line is `exec <cmd>` replaces the shell
+      // image; if that were the trap-owning shell the EXIT trap would never fire
+      // and the sentinel never be written, so the driver would read a null
+      // verdict for a run that actually finished. Running the body as its own
+      // `bash <file>` child gives exec a child to replace while the wrapper's
+      // trap still stamps that child's real exit code.
+      expect(realExit('exec true')).toBe(0);
+      expect(realExit('exec bash -c "exit 5"')).toBe(5);
+    });
+
+    it('runs a body that ends in an unterminated heredoc instead of eating the wrapper', () => {
+      // The body is its own file, so `cat <<EOF` with no closing delimiter is
+      // delimited by the end of that file and runs (bash warns, exit 0). An
+      // inlined subshell would have let the dangling heredoc swallow the
+      // wrapper's own closing `)`, turning the whole body into a syntax error
+      // that stamped rc=2 for a body that never ran.
+      expect(realExit('echo ran; cat <<EOF\nsome text')).toBe(0);
+    });
+
     it('keeps the script output on stdout and the verdict in its own file', () => {
       // Two channels on purpose. The log is bounded; the verdict must not be
       // bounded with it, and the next test shows what happens when it is.
-      const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
-      const r = spawnSync('bash', ['-c', wrapScript('echo hello-there', rc)], {
+      const dir = mkdtempSync(join(tmpdir(), 'drv-'));
+      const rc = join(dir, 'drive.rc');
+      const body = join(dir, 'body.sh');
+      writeFileSync(body, 'echo hello-there\n');
+      const r = spawnSync('bash', ['-c', wrapScript(body, rc)], {
         encoding: 'utf8',
       });
       expect(r.stdout).toContain('hello-there');
@@ -233,13 +264,12 @@ describe.skipIf(process.platform === 'win32')(
       const dir = mkdtempSync(join(tmpdir(), 'drv-'));
       const rc = join(dir, 'drive.rc');
       const sh = join(dir, 's.sh');
+      const body = join(dir, 'body.sh');
       writeFileSync(
-        sh,
-        wrapScript(
-          'for i in $(seq 1 20000); do echo padding-line-$i-aaaaaaaaaaaaaaaaaaaa; done; exit 5',
-          rc,
-        ),
+        body,
+        'for i in $(seq 1 20000); do echo padding-line-$i-aaaaaaaaaaaaaaaaaaaa; done; exit 5\n',
       );
+      writeFileSync(sh, wrapScript(body, rc));
       spawnSync(
         'bash',
         ['-c', `bash ${sh} 2>&1 | head -c 4096 > ${join(dir, 'log')}`],
@@ -561,6 +591,203 @@ describe('the log cap', () => {
     expect(r.observed).toBe(false);
     expect(r.note).toContain('was stopped');
     expect(poll).toBeLessThan(20); // stopped early, did not sit out the timeout
+  });
+
+  it('classifies a log past the hard read ceiling as overflowed WITHOUT reading it', () => {
+    // A log can grow past V8's ~512 MiB string limit between polls; reading it
+    // then throws ERR_STRING_TOO_LONG out of the loop. The poll loop must stat
+    // first and stop unread past MAX_READ_BYTES. A sparse file gives the
+    // apparent size (300 MiB > the 256 MiB ceiling) without the bytes; the
+    // proof it was never read is that `output` is empty rather than the
+    // trimmed tail a read would have produced.
+    const dir = mkdtempSync(join(tmpdir(), 'drv-huge-'));
+    const log = join(dir, 'drive.log');
+    const exec = (cmd: string, args: string[]): ExecResult => {
+      if (cmd === 'tmux' && args[0] === '-V') return ok();
+      if (cmd === 'tmux' && args[2] === 'new-session') {
+        writeFileSync(log, '');
+        truncateSync(log, 300 * 1024 * 1024); // sparse: apparent size only
+        return ok();
+      }
+      return ok();
+    };
+    const r = runDrive({
+      script: 'noisy',
+      cwd: dir,
+      readyTimeout: 1,
+      timeout: 30,
+      server: 'huge',
+      exec,
+      logPath: log,
+    });
+    rmSync(dir, { recursive: true, force: true });
+    expect(r.outcome).toBe('overflowed');
+    expect(r.exitCode).toBeNull(); // a stopped run never carries a verdict
+    expect(r.output).toBe(''); // never read — not the 300 MiB (trimmed) tail
+  });
+
+  it('readCapped reads a file bounded by its size at open, not a concurrent writer', () => {
+    // The load-bearing property: the read is bounded by the fstat AT open, so a
+    // writer that appends after the fstat cannot enlarge the allocation into an
+    // ERR_STRING_TOO_LONG throw. A sparse file grown past the cap after this
+    // handle opened would still stat over-cap here, so this pins the two
+    // reachable outcomes directly: a normal read, an absent read, and an
+    // over-cap file classified overflow WITHOUT allocating it.
+    const dir = mkdtempSync(join(tmpdir(), 'drv-cap-'));
+    const small = join(dir, 'small.log');
+    writeFileSync(small, 'hello');
+    expect(readCapped(small, 1024)).toEqual({ overflow: false, text: 'hello' });
+    // Absent file: an empty snapshot, never an overflow.
+    expect(readCapped(join(dir, 'missing.log'), 1024)).toEqual({
+      overflow: false,
+      text: '',
+    });
+    // Over the cap: overflow, and the bytes are never allocated (empty text).
+    const huge = join(dir, 'huge.log');
+    writeFileSync(huge, '');
+    truncateSync(huge, 300 * 1024 * 1024); // sparse
+    expect(readCapped(huge, 256 * 1024 * 1024)).toEqual({
+      overflow: true,
+      text: '',
+    });
+    // Exactly AT the cap is allowed (boundary is strictly greater-than).
+    writeFileSync(small, 'abc');
+    expect(readCapped(small, 3)).toEqual({ overflow: false, text: 'abc' });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("drive's own --ready probe is bounded by the remaining budget and killed with SIGKILL (R15-3)", () => {
+    // The same contract ab-drive's probeOnce carries: without the budget a
+    // hanging probe spends the fixed 30s default per call (any --ready-timeout
+    // under 30s is overrun by one probe); without SIGKILL a TERM-trapping probe
+    // is waited on by spawnSync forever, hanging the CLI with no report.
+    const seen: Array<{ timeoutMs?: number; killSignal?: NodeJS.Signals }> = [];
+    const dir = mkdtempSync(join(tmpdir(), 'drv-ready-'));
+    const exec = (
+      cmd: string,
+      args: string[],
+      _input?: string,
+      timeoutMs?: number,
+      killSignal?: NodeJS.Signals,
+    ): ExecResult => {
+      if (cmd === 'bash' && args[1] === 'true') {
+        seen.push({ timeoutMs, killSignal });
+      }
+      return ok();
+    };
+    runDrive({
+      script: 'noop',
+      cwd: dir,
+      ready: 'true',
+      readyTimeout: 5,
+      timeout: 0, // one poll, then timed-out — we only care about the probe
+      server: 'ready-budget',
+      exec,
+      logPath: join(dir, 'drive.log'),
+    });
+    rmSync(dir, { recursive: true, force: true });
+    expect(seen.length).toBeGreaterThan(0); // the probe really ran
+    for (const s of seen) {
+      expect(s.killSignal).toBe('SIGKILL');
+      expect(s.timeoutMs).toBeGreaterThan(0);
+      expect(s.timeoutMs).toBeLessThanOrEqual(5_000); // ≤ --ready-timeout, not 30s
+    }
+  });
+
+  it('refuses a non-finite or non-positive time budget up front instead of throwing (R15-2)', () => {
+    // The readiness probe's budget goes to spawnSync's `timeout`, validated as
+    // an unsigned integer: NaN (yargs on `--ready-timeout abc`), Infinity and
+    // a fraction would throw ERR_OUT_OF_RANGE out of the ready loop into the
+    // handler catch-all — exit 1, no report. ab-drive already refuses these.
+    const dir = mkdtempSync(join(tmpdir(), 'drv-budget-'));
+    const exec = (cmd: string, args: string[]): ExecResult => {
+      if (cmd === 'tmux' && args[0] === '-V') return ok();
+      return ok();
+    };
+    // 0 is a legitimate "one poll" budget the suite itself uses; 1e306 is
+    // finite and merely clamped. Only non-finite and negative are refused.
+    for (const readyTimeout of [NaN, Infinity, -1]) {
+      const r = runDrive({
+        script: 'noop',
+        cwd: dir,
+        ready: 'true',
+        readyTimeout,
+        timeout: 1,
+        server: 'budget',
+        exec,
+        logPath: join(dir, 'drive.log'),
+      });
+      expect(r.outcome).toBe('unavailable');
+      expect(r.note).toContain('--ready-timeout');
+    }
+    // A fractional budget must be truncated, not passed through.
+    const seen: number[] = [];
+    runDrive({
+      script: 'noop',
+      cwd: dir,
+      ready: 'true',
+      readyTimeout: 0.5,
+      timeout: 0,
+      server: 'frac',
+      exec: (cmd, args, _i, timeoutMs) => {
+        if (cmd === 'bash' && args[1] === 'true' && timeoutMs !== undefined) {
+          seen.push(timeoutMs);
+        }
+        return ok();
+      },
+      logPath: join(dir, 'drive.log'),
+    });
+    rmSync(dir, { recursive: true, force: true });
+    for (const t of seen) expect(Number.isInteger(t)).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'a FIFO planted at the sentinel path cannot hang the poll loop (R15-6)',
+    () => {
+      // The sentinel is arm-controlled like the log; a bare blocking read on a
+      // writer-less FIFO would block forever, past --timeout, with the finally
+      // never reached. Read through readCapped: non-blocking, non-file → "no
+      // sentinel yet" → the run times out normally.
+      const dir = mkdtempSync(join(tmpdir(), 'drv-fifo-'));
+      const workDir = join(tmpdir(), 'qwen-review-drive-fifo-sentinel');
+      const exec = (cmd: string, args: string[]): ExecResult => {
+        if (cmd === 'tmux' && args[0] === '-V') return ok();
+        if (cmd === 'tmux' && args[2] === 'new-session') {
+          mkdirSync(workDir, { recursive: true });
+          rmSync(join(workDir, 'drive.rc'), { force: true });
+          spawnSync('mkfifo', [join(workDir, 'drive.rc')]);
+          return ok();
+        }
+        return ok();
+      };
+      const started = Date.now();
+      const r = runDrive({
+        script: 'noop',
+        cwd: dir,
+        readyTimeout: 1,
+        timeout: 0,
+        server: 'fifo-sentinel',
+        exec,
+        logPath: join(dir, 'drive.log'),
+      });
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(workDir, { recursive: true, force: true });
+      expect(r.outcome).toBe('timed-out'); // returned — did not block on the FIFO
+      expect(r.exitCode).toBeNull();
+      expectWithinLatencyBudget(Date.now() - started, 10_000);
+    },
+  );
+
+  it('readCapped returns an empty snapshot for a non-regular file (R14-5)', () => {
+    // An untrusted arm can swap its log for a DIRECTORY (`rm log; mkdir log`).
+    // openSync succeeds, fstat reports a dir, and readSync would throw EISDIR
+    // out of the poll loop into the handler catch-all — the run's report lost.
+    // The isFile guard treats it as an empty snapshot instead of throwing.
+    const dir = mkdtempSync(join(tmpdir(), 'drv-dircap-'));
+    const asDir = join(dir, 'log');
+    mkdirSync(asDir);
+    expect(readCapped(asDir, 1024)).toEqual({ overflow: false, text: '' });
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

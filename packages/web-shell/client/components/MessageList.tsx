@@ -1,3 +1,4 @@
+import { getSourcesByTurn } from './sources/sourceEntries';
 import {
   forwardRef,
   memo,
@@ -28,20 +29,37 @@ import type {
 } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
+  groupParallelAgents as groupParallelAgentsBase,
+  isAgentOnlyToolGroup,
+  type ParallelAgentDisplayItem,
+} from '../adapters/parallelAgentGrouping';
+import {
   backgroundShellTaskId,
   isBackgroundSubAgentToolCall,
+  isTerminalBackgroundAgentStatus,
   isSubAgentToolCall,
+  projectTerminalBackgroundAgentTool,
+  type TerminalBackgroundAgentStatus,
 } from '../adapters/toolClassification';
 import { CompactModeContext } from '../WebShellContexts';
 import {
   useWebShellCustomization,
+  type WebShellAssistantFeedbackRating,
   type WebShellAssistantTurnFooterRenderInfo,
+  type WebShellSource,
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
+import { useAssistantFeedback } from '../hooks/useAssistantFeedback';
+import {
+  feedbackUserMessageOf,
+  notifyAssistantFeedback,
+  shouldOfferAssistantFeedback,
+} from '../utils/assistantFeedback';
 import { MessageItem } from './MessageItem';
+import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
 import { MessageTimestamp } from './MessageTimestamp';
 import {
@@ -52,15 +70,22 @@ import {
 } from './artifacts/TurnOutputs';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
+import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import {
   isActiveToolStatus,
+  isCompletedAskUserQuestion,
+  isAskUserQuestionToolName,
   toolContainsCallId,
 } from './messages/toolFormatting';
+import { McpAppSessionContext } from '../mcpAppHostContext';
 import { getMcpAppDisplay } from './messages/McpApp';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
-import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
+import {
+  SESSION_TIMELINE_MIN_VISIBLE_ENTRIES,
+  WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS,
+} from '../constants/sessions';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 
 const noopTurnOutputAction = () => undefined;
@@ -72,8 +97,9 @@ const AGENT_SUMMARY_COLLAPSE_DELAY_MS = 400;
 // lost notification cannot hide the final footer forever.
 const UNMATCHED_AGENT_COMPLETION_GRACE_MS = 5_000;
 
-interface MessageListProps {
+export interface MessageListProps {
   messages: Message[];
+  frozenViewport?: boolean;
   terminalBackgroundShellTaskIds?: ReadonlySet<string>;
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
@@ -81,6 +107,17 @@ interface MessageListProps {
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  onInsightReportOpen?: (path: string) => void;
+  /** Open the in-place editor; return true when a host owns the lifecycle. */
+  onEditUserMessage?: (
+    targetTurnIndex: number,
+    content: string,
+  ) => boolean | void;
+  /** Send the text confirmed in the in-place editor. `false` keeps it open. */
+  onSubmitUserMessageEdit?: (
+    targetTurnIndex: number,
+    content: string,
+  ) => boolean | void | Promise<boolean | void>;
   loadingTranscript?: boolean;
   catchingUp?: boolean;
   hasOlderHistory?: boolean;
@@ -88,6 +125,14 @@ interface MessageListProps {
   historyCapacityReached?: boolean;
   historyPaginationError?: boolean;
   onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
+  /**
+   * Identity of the session whose transcript `messages` show. Block ids are
+   * per-session ordinals, so changing it resets every session-scoped UI state
+   * (collapse overrides, pagination keep-open, pending page snapshots, the
+   * scroll anchor, the settled-stale-message latch) — a direct session switch
+   * never renders empty messages.
+   */
+  sessionKey?: string;
   transcriptBlockCount?: number;
   transcriptActivity?: {
     getSnapshot(): {
@@ -100,7 +145,11 @@ interface MessageListProps {
   transcriptReloadPaused?: boolean;
   /**
    * True while the agent is still answering. The newest turn then stays
-   * expanded and un-collapsible so streaming output is never hidden.
+   * expanded and un-collapsible so streaming output is never hidden. When
+   * false, stale assistant/thinking/tool-group-thought streaming flags left
+   * by a restored replay are settled before render — and stay settled when
+   * the session responds again, for as long as their content is unchanged —
+   * which is what hosts observe through MarkdownRenderContext.isStreaming.
    */
   isResponding?: boolean;
   welcomeHeader?: ReactNode;
@@ -123,6 +172,7 @@ interface MessageListProps {
    */
   bottomOverlayInset?: number;
   hideSessionTimeline?: boolean;
+  timelineAction?: ReactNode;
   hideFirstUserMessage?: boolean;
   firstTurnMetrics?: {
     durationMs?: number;
@@ -139,6 +189,10 @@ interface MessageListProps {
   onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
   turnArtifacts?: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
+  sourceEntries?: readonly WebShellSource[];
+  sourceSessionId?: string;
+  mcpAppSessionId?: string;
+  onSourceOpen?: (source: WebShellSource) => void;
   turnScheduledTasks?: ReadonlyMap<string, readonly TurnOutputScheduledTask[]>;
   onReviewChanges?: (
     changes: readonly TurnOutputFileChange[],
@@ -147,6 +201,7 @@ interface MessageListProps {
   onOpenArtifact?: (artifactId: string, previewContent?: string) => void;
   onOpenScheduledTask?: (task: TurnOutputScheduledTask) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onToolResultOpen?: (itemId: string) => void;
   onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
 }
@@ -220,28 +275,15 @@ function getLastTurnStartMessageId(messages: Message[]): string | null {
 }
 
 export type DisplayItem =
-  | {
-      type: 'message';
-      key: string;
-      message: Message;
+  | (Extract<ParallelAgentDisplayItem, { type: 'message' }> & {
       /** Metrics info for the final answer assistant message. */
       turnCollapse?: TurnCollapseHead;
-    }
+    })
+  | Extract<ParallelAgentDisplayItem, { type: 'parallel_agents' }>
   | {
       type: 'turn_collapse';
       key: string;
       turnCollapse: TurnCollapseHead;
-    }
-  | {
-      type: 'parallel_agents';
-      key: string;
-      turnId: string;
-      agents: ACPToolCall[];
-      /**
-       * Wall-clock time of the first grouped launch, carried so the grouped
-       * box reveals its time on hover exactly like a standalone message row.
-       */
-      timestamp?: number;
     }
   | {
       type: 'turn_outputs';
@@ -287,36 +329,6 @@ export interface SessionTimelineRange {
   currentIndex: number;
 }
 
-// Synthetic compact summaries carry a folded thought next to their single
-// tool; the parallel-agent path must never swallow that row, so agent-only
-// detection excludes them.
-function isAgentOnlyToolGroup(msg: Message): boolean {
-  return (
-    msg.role === 'tool_group' &&
-    !msg.id.startsWith('summary-') &&
-    msg.tools.length === 1 &&
-    isSubAgentToolCall(msg.tools[0])
-  );
-}
-
-function isBackgroundAgentOnlyToolGroup(msg: Message): boolean {
-  return (
-    msg.role === 'tool_group' &&
-    !msg.id.startsWith('summary-') &&
-    msg.tools.length === 1 &&
-    isBackgroundSubAgentToolCall(msg.tools[0])
-  );
-}
-
-function isBackgroundLaunchNarration(msg: Message): boolean {
-  // The daemon often streams short main-agent thought text between background
-  // launches, e.g. "agent A is running, now starting agent B". The CLI treats
-  // those as internal launch narration and shows a single Parallel agents box.
-  // Only skip thought-only messages here; any user-facing assistant content
-  // still breaks the group and remains visible.
-  return msg.role === 'thinking';
-}
-
 function isForceExpandGroup(
   msg: Message,
   pendingApproval: PermissionRequest | null,
@@ -330,6 +342,54 @@ function isForceExpandGroup(
   return false;
 }
 
+function isStandaloneTool(tool: ACPToolCall): boolean {
+  return isCompletedAskUserQuestion(tool) || !!getMcpAppDisplay(tool.rawOutput);
+}
+
+function splitStandaloneToolGroups(messages: Message[]): Message[] {
+  const result: Message[] = [];
+  let changed = false;
+
+  for (const message of messages) {
+    if (
+      message.role !== 'tool_group' ||
+      message.tools.length < 2 ||
+      !message.tools.some(isStandaloneTool)
+    ) {
+      result.push(message);
+      continue;
+    }
+
+    changed = true;
+    let segment: ACPToolCall[] = [];
+    let segmentIndex = 0;
+    const pushSegment = (tools: ACPToolCall[]) => {
+      if (tools.length === 0) return;
+      result.push({
+        ...message,
+        id:
+          segmentIndex++ === 0
+            ? message.id
+            : `${message.id}-${tools[0]!.callId}`,
+        tools,
+      });
+    };
+
+    for (const tool of message.tools) {
+      if (isStandaloneTool(tool)) {
+        pushSegment(segment);
+        segment = [];
+        pushSegment([tool]);
+      } else {
+        segment.push(tool);
+      }
+    }
+    pushSegment(segment);
+  }
+
+  return changed ? result : messages;
+}
+
 function mergeCompactToolGroups(
   messages: Message[],
   pendingApproval: PermissionRequest | null,
@@ -338,7 +398,9 @@ function mergeCompactToolGroups(
   let i = 0;
 
   const isMergedToolGroup = (m: Message): boolean =>
-    m.role === 'tool_group' && !isForceExpandGroup(m, pendingApproval);
+    m.role === 'tool_group' &&
+    !isForceExpandGroup(m, pendingApproval) &&
+    !m.tools.some(isStandaloneTool);
 
   while (i < messages.length) {
     const msg = messages[i];
@@ -411,7 +473,7 @@ function mergeCompactToolGroups(
       // Synthetic id so the aggregated group never collides with an original
       // message key: React then remounts instead of carrying the expanded
       // summary state into non-compact mode.
-      id: `summary-${run[0]!.id}`,
+      id: summaryRunId(run[0]!.id),
       role: 'tool_group',
       tools,
       ...(thoughts.length > 0 ? { thoughts } : {}),
@@ -430,7 +492,7 @@ function updateCompactStreamingThinkingTail(
   const group = messages[messages.length - 1];
   if (
     group?.role !== 'tool_group' ||
-    !group.id.startsWith('summary-') ||
+    summaryRunFirstMemberId(group.id) === undefined ||
     !group.thoughts?.length
   ) {
     return undefined;
@@ -448,86 +510,72 @@ function updateCompactStreamingThinkingTail(
   result[result.length - 1] = {
     ...group,
     thoughts,
-    ...(group.id === `summary-${tail.id}` ? { timestamp: tail.timestamp } : {}),
+    ...(group.id === summaryRunId(tail.id)
+      ? { timestamp: tail.timestamp }
+      : {}),
   };
   return result;
 }
 
-export function groupParallelAgents(messages: Message[]): DisplayItem[] {
-  const items: DisplayItem[] = [];
-  let i = 0;
-  while (i < messages.length) {
-    if (isBackgroundAgentOnlyToolGroup(messages[i])) {
-      const grouped: Message[] = [];
-      let j = i;
-      while (j < messages.length) {
-        const current = messages[j];
-        if (isBackgroundAgentOnlyToolGroup(current)) {
-          grouped.push(current);
-          j++;
-          continue;
-        }
-        if (isBackgroundLaunchNarration(current)) {
-          let nextAgentIdx = j + 1;
-          while (
-            nextAgentIdx < messages.length &&
-            isBackgroundLaunchNarration(messages[nextAgentIdx])
-          ) {
-            nextAgentIdx++;
-          }
-          if (
-            nextAgentIdx < messages.length &&
-            isBackgroundAgentOnlyToolGroup(messages[nextAgentIdx])
-          ) {
-            j = nextAgentIdx;
-            continue;
-          }
-        }
-        break;
-      }
-
-      if (grouped.length >= 2) {
-        items.push({
-          type: 'parallel_agents',
-          key: `par-${grouped[0].id}`,
-          turnId: grouped[0].id,
-          agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
-          timestamp: grouped[0].timestamp,
-        });
-        i = j;
-        continue;
-      }
-    }
-
-    if (isAgentOnlyToolGroup(messages[i])) {
-      const start = i;
-      while (i < messages.length && isAgentOnlyToolGroup(messages[i])) i++;
-      if (i - start >= 2) {
-        const grouped = messages.slice(start, i);
-        items.push({
-          type: 'parallel_agents',
-          key: `par-${grouped[0].id}`,
-          turnId: grouped[0].id,
-          agents: grouped.map((m) => (m as { tools: ACPToolCall[] }).tools[0]),
-          timestamp: grouped[0].timestamp,
-        });
-      } else {
-        items.push({
-          type: 'message',
-          key: messages[start].id,
-          message: messages[start],
-        });
-      }
-    } else {
-      items.push({
-        type: 'message',
-        key: messages[i].id,
-        message: messages[i],
-      });
-      i++;
-    }
+function settleStaleStreamingMessage(message: Message): Message {
+  if (message.role === 'assistant' || message.role === 'thinking') {
+    return message.isStreaming ? { ...message, isStreaming: false } : message;
   }
-  return items;
+  if (message.role !== 'tool_group' || !message.thoughts?.length)
+    return message;
+  let changed = false;
+  const thoughts = message.thoughts.map((thought) => {
+    if (!thought.isStreaming) return thought;
+    changed = true;
+    return { ...thought, isStreaming: false };
+  });
+  return changed ? { ...message, thoughts } : message;
+}
+
+/**
+ * The content a settleable message carries, ignoring streaming flags. The
+ * idle-settle latch records it so a responding render can tell a stale replay
+ * row (content never changes) from a genuinely live row that reused the id
+ * (content grows every tick).
+ */
+function staleStreamingContentSignature(message: Message): string | undefined {
+  if (message.role === 'assistant' || message.role === 'thinking') {
+    return message.content;
+  }
+  if (message.role === 'tool_group' && message.thoughts?.length) {
+    return JSON.stringify(message.thoughts.map((thought) => thought.content));
+  }
+  return undefined;
+}
+
+/** Settled copies are pure in the source message; reuse them per source
+ * object instead of recloning the same latched rows every streaming frame. */
+function settleStaleStreamingMessageCached(
+  cache: WeakMap<Message, Message>,
+  message: Message,
+): Message {
+  const cached = cache.get(message);
+  if (cached !== undefined) return cached;
+  const next = settleStaleStreamingMessage(message);
+  cache.set(message, next);
+  return next;
+}
+
+/**
+ * Ids an idle render settled, mapped to the content they held at settle time.
+ * Reads ignore latches recorded for another `sessionKey`: block ids are
+ * per-projection ordinals, so a different session's latch can never be
+ * trusted to denote the rows on screen.
+ */
+interface SettledStaleMessages {
+  sessionKey: string | undefined;
+  ids: ReadonlyMap<string, string>;
+}
+
+export function groupParallelAgents(sourceMessages: Message[]): DisplayItem[] {
+  return groupParallelAgentsBase(
+    normalizeTerminalBackgroundAgentTools(sourceMessages),
+  );
 }
 
 export function getDisplayItemVirtualKey(item: DisplayItem): string {
@@ -572,7 +620,17 @@ export function attachTurnOutputs(
     ) {
       return;
     }
-    result.push({
+    // The card closes the turn's own content, so it belongs above a local recap
+    // that trails the turn rather than after it. Status rows are not turn
+    // content, and the walk stops at the turn's own last row, so the card can
+    // never land inside the turn.
+    let insertAt = result.length;
+    for (let index = result.length - 1; index >= 0; index -= 1) {
+      const item = result[index];
+      if (item.type !== 'message' || item.message.role !== 'system') break;
+      if (item.message.source === 'recap') insertAt = index;
+    }
+    result.splice(insertAt, 0, {
       type: 'turn_outputs',
       key: turnId,
       turnId,
@@ -665,6 +723,14 @@ export interface ApplyTurnCollapseOptions {
    */
   pendingApprovalCallId?: string | null;
   includeSubagentToolUsageInMetrics?: boolean;
+  /**
+   * Turns kept expanded despite being complete. Two sources: pagination
+   * split-turn detection (the tail was on screen before pagination completed
+   * the user prompt), and the anchor fallback (a turn collapsed while a
+   * history anchor sat on it). Entries persist until the user toggles the
+   * turn or the screen is cleared; an explicit user toggle always wins.
+   */
+  paginatedExpanded?: ReadonlySet<string>;
   /** Master switch; when false the items pass through untouched. */
   enabled: boolean;
 }
@@ -694,15 +760,21 @@ function findFinalAnswerIndex(
   end: number,
   includeBackgroundNotifications = true,
 ): number {
-  let lastWorkStepIndex = start;
+  let hasLaterWork = false;
   for (let i = end; i > start; i--) {
-    if (isExecutionWorkStep(items[i]!)) {
-      lastWorkStepIndex = i;
-      break;
-    }
-  }
-  for (let i = end; i > lastWorkStepIndex; i--) {
-    if (isFinalContentCandidate(items[i]!, includeBackgroundNotifications)) {
+    const item = items[i]!;
+    if (
+      item.type === 'message' &&
+      item.message.role === 'system' &&
+      item.message.source === 'background_notification_turn_started'
+    ) {
+      hasLaterWork = false;
+    } else if (isExecutionWorkStep(item)) {
+      hasLaterWork = true;
+    } else if (
+      !hasLaterWork &&
+      isFinalContentCandidate(item, includeBackgroundNotifications)
+    ) {
       return i;
     }
   }
@@ -775,6 +847,7 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   if (item.type === 'turn_collapse') return false;
   switch (item.message.role) {
     case 'tool_group':
+      return !item.message.tools.some(isCompletedAskUserQuestion);
     case 'plan':
       return true;
     case 'assistant':
@@ -980,6 +1053,44 @@ function isScheduledTaskMessage(message: {
 // auto-follow still uses getLastUserMessageId so shell prompts do not jump.
 function isTurnStartMessage(message: Message): boolean {
   return message.role === 'user' || message.role === 'user_shell';
+}
+
+// Find the turn head (user message id) owning the message referenced by a
+// `msg:` row key, when the message is still present.
+function turnIdOfMessageRow(
+  messages: Message[],
+  rowKey: string,
+): string | undefined {
+  if (!rowKey.startsWith('msg:')) return undefined;
+  let messageId = rowKey.slice('msg:'.length);
+  // Compact-aggregate row keys embed the run's first member id. Resolve
+  // through it so the key still maps to its turn when looked up in the raw
+  // message list, including after a page extending the run re-keyed the
+  // aggregate.
+  messageId = summaryRunFirstMemberId(messageId) ?? messageId;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.id !== messageId) continue;
+    for (let j = i; j >= 0; j--) {
+      const candidate = messages[j];
+      if (candidate && isTurnStartMessage(candidate)) return candidate.id;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+// True when the given turn currently renders as a collapsed turn_collapse row.
+function isTurnCollapsedInVisibleItems(
+  items: DisplayItem[],
+  turnId: string,
+): boolean {
+  for (const item of items) {
+    if (item.type === 'turn_collapse' && item.turnCollapse.turnId === turnId) {
+      return item.turnCollapse.collapsed;
+    }
+  }
+  return false;
 }
 
 function timelineDetailSnippetForMessage(
@@ -1364,7 +1475,11 @@ function itemToolCallCount(item: DisplayItem): number {
   if (item.type === 'parallel_agents') return item.agents.length;
   if (item.type === 'turn_outputs') return 0;
   if (item.type === 'turn_collapse') return 0;
-  return item.message.role === 'tool_group' ? item.message.tools.length : 0;
+  return item.message.role === 'tool_group'
+    ? item.message.tools.filter(
+        (tool) => !isAskUserQuestionToolName(tool.toolName),
+      ).length
+    : 0;
 }
 
 /**
@@ -1538,8 +1653,21 @@ function completedBackgroundShellTaskIds(
   const taskIds = new Set(terminalTaskIds);
   for (const item of items) {
     if (item.type !== 'message' || item.message.role !== 'system') continue;
-    if (item.message.source !== 'background_notification') continue;
-    const data = item.message.data;
+    if (
+      item.message.source !== 'background_notification' &&
+      item.message.source !== 'background_task_completed' &&
+      item.message.source !== 'background_notification_turn_started'
+    )
+      continue;
+    let data = item.message.data;
+    if (
+      item.message.source === 'background_notification_turn_started' &&
+      data &&
+      typeof data === 'object' &&
+      'backgroundTask' in data
+    ) {
+      data = data.backgroundTask ?? data;
+    }
     if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
     if (!('kind' in data) || data.kind !== 'shell') continue;
     // Shell background notifications are terminal-only.
@@ -1617,12 +1745,16 @@ function backgroundAgentCallIds(item: DisplayItem): string[] {
   return [];
 }
 
-function backgroundAgentCompletionForMessage(
-  message: Message,
-): { callId?: string } | null {
+function backgroundAgentCompletionForMessage(message: Message): {
+  callId?: string;
+  status: TerminalBackgroundAgentStatus;
+  endTime?: number;
+} | null {
   if (
     message.role !== 'system' ||
-    message.source !== 'background_notification'
+    (message.source !== 'background_notification' &&
+      message.source !== 'background_task_completed' &&
+      message.source !== 'background_notification_turn_started')
   ) {
     return null;
   }
@@ -1631,24 +1763,91 @@ function backgroundAgentCompletionForMessage(
       ?.trimStart()
       .toLowerCase()
       .startsWith('background agent ') === true;
-  const data = message.data;
-  if (typeof data !== 'object' || data === null || Array.isArray(data)) {
-    return identifiesAgent ? {} : null;
+  let data = message.data;
+  if (
+    message.source === 'background_notification_turn_started' &&
+    data &&
+    typeof data === 'object' &&
+    'backgroundTask' in data
+  ) {
+    data = data.backgroundTask ?? data;
   }
-  const { kind, toolUseId } = data as {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+    return identifiesAgent
+      ? {
+          status: 'completed',
+          ...(message.timestamp !== undefined
+            ? { endTime: message.timestamp }
+            : {}),
+        }
+      : null;
+  }
+  const { kind, toolUseId, status } = data as {
     kind?: unknown;
     toolUseId?: unknown;
+    status?: unknown;
   };
   if (kind !== 'agent' && !(kind === undefined && identifiesAgent)) return null;
-  return typeof toolUseId === 'string' ? { callId: toolUseId } : {};
+  const terminalStatus =
+    status === undefined
+      ? 'completed'
+      : isTerminalBackgroundAgentStatus(status)
+        ? status
+        : undefined;
+  if (!terminalStatus) return null;
+  return {
+    ...(typeof toolUseId === 'string' ? { callId: toolUseId } : {}),
+    status: terminalStatus,
+    ...(message.timestamp !== undefined ? { endTime: message.timestamp } : {}),
+  };
 }
 
 function backgroundAgentCompletion(
   item: DisplayItem,
-): { callId?: string } | null {
+): ReturnType<typeof backgroundAgentCompletionForMessage> {
   return item.type === 'message'
     ? backgroundAgentCompletionForMessage(item.message)
     : null;
+}
+
+function normalizeTerminalBackgroundAgentTools(messages: Message[]): Message[] {
+  const updates = new Map<
+    string,
+    NonNullable<ReturnType<typeof backgroundAgentCompletionForMessage>>
+  >();
+  for (const message of messages) {
+    const completion = backgroundAgentCompletionForMessage(message);
+    if (completion?.callId) updates.set(completion.callId, completion);
+  }
+  if (updates.size === 0) return messages;
+
+  let changed = false;
+  const normalized = messages.map((message) => {
+    if (message.role !== 'tool_group') return message;
+    let toolsChanged = false;
+    const tools = message.tools.map((tool) => {
+      const update = updates.get(tool.callId);
+      if (
+        !update ||
+        !isBackgroundSubAgentToolCall(tool) ||
+        !isActiveToolStatus(tool.status)
+      ) {
+        return tool;
+      }
+      const normalizedTool = projectTerminalBackgroundAgentTool(
+        tool,
+        update.status,
+        update.endTime,
+      );
+      if (normalizedTool === tool) return tool;
+      toolsChanged = true;
+      return normalizedTool;
+    });
+    if (!toolsChanged) return message;
+    changed = true;
+    return { ...message, tools };
+  });
+  return changed ? normalized : messages;
 }
 
 interface BackgroundAgentSummaryState {
@@ -1798,6 +1997,7 @@ export function applyTurnCollapse(
     automaticallyExpandedAgentKeys,
     pendingApprovalCallId,
     includeSubagentToolUsageInMetrics = true,
+    paginatedExpanded,
     enabled,
   }: ApplyTurnCollapseOptions,
 ): DisplayItem[] {
@@ -1863,8 +2063,30 @@ export function applyTurnCollapse(
     );
 
     const answerIdx = findFinalAnswerIndex(items, start, end);
+    let answerStartIdx = answerIdx;
+    // A passive completion can split one streamed answer into several rows.
+    // Keep those segments, but stop at work or an automatic execution marker.
+    if (answerIdx >= 0 && isFinalContentCandidate(items[answerIdx]!, false)) {
+      let crossedCompletion = false;
+      for (let i = answerIdx - 1; i > start; i--) {
+        const item = items[i]!;
+        if (item.type !== 'message') break;
+        if (
+          item.message.role === 'system' &&
+          item.message.source === 'background_task_completed'
+        ) {
+          crossedCompletion = true;
+        } else if (crossedCompletion && item.message.role === 'assistant') {
+          answerStartIdx = i;
+          crossedCompletion = false;
+        } else {
+          break;
+        }
+      }
+    }
     let hiddenCount = 0;
     let terminalTs: number | undefined;
+    let cancelledElapsedMs: number | undefined;
     let assistantTs: number | undefined;
     let inputTokens = 0;
     let outputTokens = 0;
@@ -1876,7 +2098,10 @@ export function applyTurnCollapse(
     let hasTurnError = false;
     for (let i = start + 1; i <= end; i++) {
       const item = items[i]!;
-      const isStep = isHideableStep(item, i === answerIdx);
+      const isStep = isHideableStep(
+        item,
+        i >= answerStartIdx && i <= answerIdx,
+      );
       if (isStep) {
         hiddenCount++;
       }
@@ -1893,6 +2118,24 @@ export function applyTurnCollapse(
       ) {
         // Compact mode folds thinking into tool summaries; count it too.
         thinkingCount += item.message.thoughts.length;
+      }
+      if (
+        item.type === 'message' &&
+        item.message.role === 'system' &&
+        item.message.source === 'prompt_cancelled'
+      ) {
+        const data = item.message.data;
+        const elapsed =
+          data && typeof data === 'object' && 'elapsedMs' in data
+            ? data.elapsedMs
+            : undefined;
+        if (
+          typeof elapsed === 'number' &&
+          Number.isFinite(elapsed) &&
+          elapsed >= 0
+        ) {
+          cancelledElapsedMs = elapsed;
+        }
       }
       const terminalTimestamp = terminalTurnTimestamp(item);
       if (terminalTimestamp !== undefined) {
@@ -1933,11 +2176,12 @@ export function applyTurnCollapse(
         : undefined;
     const lastStepTs = terminalTs ?? assistantTs;
     const elapsedMs =
-      promptTs !== undefined &&
+      cancelledElapsedMs ??
+      (promptTs !== undefined &&
       lastStepTs !== undefined &&
       lastStepTs >= promptTs
         ? lastStepTs - promptTs
-        : undefined;
+        : undefined);
     const hasMetrics =
       hasUsage || elapsedMs !== undefined || liveStartedAt !== undefined;
 
@@ -1953,7 +2197,8 @@ export function applyTurnCollapse(
     // turn is incomplete; otherwise it collapses once a newer turn starts. A
     // step-less turn (e.g. a plain "hi" reply) has nothing to fold, so it stays
     // expanded and shows a chevron-less metrics line. An explicit user toggle
-    // always wins.
+    // always wins; a turn whose tail was shown before pagination finished its
+    // head stays open so that content never vanishes mid-read.
     const shouldStayOpen =
       isActiveTurn ||
       hasActiveAgent ||
@@ -1967,7 +2212,9 @@ export function applyTurnCollapse(
         ? true
         : overrides.has(turnId)
           ? (overrides.get(turnId) as boolean)
-          : shouldStayOpen;
+          : paginatedExpanded?.has(turnId)
+            ? true
+            : shouldStayOpen;
     const collapsed = !expanded;
     // Push the user message
     result.push({
@@ -2033,7 +2280,8 @@ export function applyTurnCollapse(
         });
         continue;
       }
-      if (!isHideableStep(item, i === answerIdx)) result.push(item);
+      if (!isHideableStep(item, i >= answerStartIdx && i <= answerIdx))
+        result.push(item);
     }
   }
 
@@ -2041,34 +2289,36 @@ export function applyTurnCollapse(
 }
 
 /**
- * Locate a display item by message id, falling back to the tool call id for
- * tool groups that were merged (compact mode) or grouped (parallel agents)
- * under another message's id.
+ * Locate a tool by call id when available because compacting or splitting can
+ * move it under a different message id. Otherwise locate the message itself.
  */
 export function findDisplayItemIndex(
   items: readonly DisplayItem[],
   messageId: string,
   callId?: string,
 ): number {
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    if (item.type === 'message') {
-      if (item.message.id === messageId) return i;
+  if (callId) {
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
       if (
-        callId &&
-        item.message.role === 'tool_group' &&
-        item.message.tools.some((tool) => toolContainsCallId(tool, callId))
+        (item.type === 'message' &&
+          item.message.role === 'tool_group' &&
+          item.message.tools.some((tool) =>
+            toolContainsCallId(tool, callId),
+          )) ||
+        (item.type === 'parallel_agents' &&
+          item.agents.some((agent) => toolContainsCallId(agent, callId)))
       ) {
         return i;
       }
-    } else if (
-      item.type === 'parallel_agents' &&
-      callId &&
-      item.agents.some((agent) => toolContainsCallId(agent, callId))
-    ) {
+    }
+    return -1;
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type === 'message' && item.message.id === messageId) {
       return i;
-    } else if (item.type === 'turn_outputs') {
-      continue;
     }
   }
   return -1;
@@ -2081,12 +2331,10 @@ function displayItemMatchesLocateTarget(
   if (!target) return false;
   const callId = target.callId;
   if (item.type === 'message') {
-    if (item.message.id === target.messageId) return true;
-    return (
-      !!callId &&
-      item.message.role === 'tool_group' &&
-      item.message.tools.some((tool) => toolContainsCallId(tool, callId))
-    );
+    return callId
+      ? item.message.role === 'tool_group' &&
+          item.message.tools.some((tool) => toolContainsCallId(tool, callId))
+      : item.message.id === target.messageId;
   }
   if (item.type === 'parallel_agents') {
     return (
@@ -2097,12 +2345,43 @@ function displayItemMatchesLocateTarget(
   return false;
 }
 
+function displayItemSourceBlockIds(
+  item: DisplayItem | undefined,
+  messages: readonly Message[],
+): string | undefined {
+  if (!item) return undefined;
+  if (item.type === 'message') return item.message.sourceBlockIds?.join(',');
+  const sources = messages.filter((message) => {
+    if (item.type === 'parallel_agents') {
+      return (
+        message.role === 'tool_group' &&
+        item.agents.some((agent) =>
+          message.tools.some((tool) => toolContainsCallId(tool, agent.callId)),
+        )
+      );
+    }
+    return (
+      message.id ===
+      (item.type === 'turn_outputs' ? item.turnId : item.turnCollapse.turnId)
+    );
+  });
+  return (
+    sources.flatMap((message) => message.sourceBlockIds ?? []).join(',') ||
+    undefined
+  );
+}
+
 export interface MessageListHandle {
   /**
    * Scroll the transcript so the given message is visible and briefly
    * highlight it. Returns false when the message is not in the list.
    */
   scrollToMessage: (messageId: string, callId?: string) => boolean;
+  /** 定位持久化历史搜索结果；调用方可取消仍在加载的选择。 */
+  scrollToSearchHit?: (
+    hit: import('../daemon/session/turn-navigation-store').ConversationSearchHit,
+    isCurrent?: () => boolean,
+  ) => Promise<boolean | 'cancelled'>;
   /** Resume bottom-follow mode and scroll to the latest output. */
   scrollToBottom: (behavior?: ScrollBehavior) => void;
 }
@@ -2116,7 +2395,6 @@ const FOLLOW_BOTTOM_THRESHOLD_PX = 30;
 const LOAD_OLDER_HISTORY_THRESHOLD_PX = 160;
 const OLDER_HISTORY_ANCHOR_WAIT_FRAMES = 30;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
-const SESSION_TIMELINE_MIN_VISIBLE_ENTRIES = 4;
 
 export function shouldUseVirtualScroll(
   totalCount: number,
@@ -2146,7 +2424,7 @@ type Translate = (
 ) => string;
 
 function durationMetricText(elapsedMs: number | undefined): string {
-  return elapsedMs !== undefined && elapsedMs > 0
+  return elapsedMs !== undefined && elapsedMs >= 0
     ? formatDuration(elapsedMs)
     : '';
 }
@@ -2367,7 +2645,9 @@ const SessionTimeline = memo(function SessionTimeline({
   currentRange,
   hidden,
   onSelect,
+  action,
 }: {
+  action?: ReactNode;
   entries: readonly SessionTimelineEntry[];
   currentTurnId: string | null;
   currentRange: SessionTimelineRange | null;
@@ -2637,6 +2917,7 @@ const SessionTimeline = memo(function SessionTimeline({
             })}
           </ol>
         </div>
+        {action}
         {tooltip &&
           typeof document !== 'undefined' &&
           createPortal(
@@ -2727,11 +3008,16 @@ export const MessageList = memo(
   forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
+      frozenViewport = false,
+      sessionKey,
       terminalBackgroundShellTaskIds,
       pendingApproval,
       onShowContextDetail,
       onImagePreview,
       onAttachmentPreview,
+      onInsightReportOpen,
+      onEditUserMessage,
+      onSubmitUserMessageEdit,
       loadingTranscript,
       catchingUp,
       hasOlderHistory = false,
@@ -2754,6 +3040,7 @@ export const MessageList = memo(
       autoScrollTailIntoView = false,
       bottomOverlayInset = 0,
       hideSessionTimeline = false,
+      timelineAction,
       hideFirstUserMessage = false,
       firstTurnMetrics,
       includeSubagentToolUsageInMetrics = true,
@@ -2765,19 +3052,45 @@ export const MessageList = memo(
       onCanScrollToBottomChange,
       turnFileChanges,
       turnArtifacts,
+      sourceEntries,
+      sourceSessionId,
+      mcpAppSessionId = sourceSessionId,
+      onSourceOpen,
       turnScheduledTasks,
       onReviewChanges,
       onOpenArtifact,
       onOpenScheduledTask,
       onTurnOutputOpen,
+      onToolResultOpen,
       onError,
       generateContent,
     },
     ref,
   ) {
+    const frozenViewportRef = useRef(frozenViewport);
+    frozenViewportRef.current = frozenViewport;
     const { t } = useI18n();
     const transcriptRenderMode = useTranscriptRenderMode();
     const compactMode = useContext(CompactModeContext);
+    const editableUserTurn = useMemo(() => {
+      const turnIndexById = new Map<string, number>();
+      let lastId: string | undefined;
+      let turnIndex = 0;
+      for (const message of messages) {
+        if (message.role !== 'user') continue;
+        turnIndexById.set(message.id, turnIndex);
+        lastId = message.id;
+        turnIndex += 1;
+      }
+      return { lastId, turnIndexById };
+    }, [messages]);
+    const historicalEdgeTurns = useMemo(() => {
+      if (!frozenViewport) return undefined;
+      const ids = [...editableUserTurn.turnIndexById.keys()];
+      return new Set(
+        ids.filter((_, index) => index === 0 || index === ids.length - 1),
+      );
+    }, [editableUserTurn, frozenViewport]);
     // Render-phase caches below are reusable only against this post-commit
     // identity. An abandoned render cannot advance it, so its cache writes are
     // rejected by the next committed render.
@@ -2798,6 +3111,21 @@ export const MessageList = memo(
         }
       | undefined
     >(undefined);
+    // Rows an idle render found still carrying a streaming flag stay settled
+    // when the session responds again, but only while their content matches
+    // the recorded signature — a stale replay row never grows, so growth
+    // releases the id and lets a genuinely live row that reused it stream
+    // again. Advanced only post-commit — render-phase writes go to the
+    // pending ref.
+    const settledStaleMessagesRef = useRef<SettledStaleMessages | undefined>(
+      undefined,
+    );
+    const pendingSettledMessagesRef = useRef<SettledStaleMessages | undefined>(
+      undefined,
+    );
+    const settledStaleCopiesRef = useRef<WeakMap<Message, Message> | undefined>(
+      undefined,
+    );
     const mergedMessages = useMemo(() => {
       const cached = mergedMessagesCache.current;
       const tail = messages[messages.length - 1];
@@ -2817,20 +3145,134 @@ export const MessageList = memo(
         } else if (tail?.role === 'thinking') {
           value = compactMode
             ? updateCompactStreamingThinkingTail(cached.value, tail)
-            : messages;
+            : splitStandaloneToolGroups(messages);
         }
       }
-      value ??= compactMode
-        ? mergeCompactToolGroups(messages, pendingApproval)
-        : messages;
+      if (!value) {
+        const standaloneTools = splitStandaloneToolGroups(messages);
+        value = compactMode
+          ? mergeCompactToolGroups(standaloneTools, pendingApproval)
+          : standaloneTools;
+      }
       mergedMessagesCache.current = {
         sourceMessages: messages,
         compactMode,
         pendingApproval,
         value,
       };
-      return value;
-    }, [compactMode, messages, pendingApproval, streamingTailContentOnly]);
+      // A restored replay can retain streaming flags on assistant/thinking
+      // text after the daemon has already reported the whole session idle,
+      // and nothing repairs them at the source. Idle renders settle those
+      // flags for display — stale tool statuses are not covered — and record
+      // the settled ids so responding renders keep them settled instead of
+      // reviving them until the next idle render. The cache keeps the
+      // unsettled array so the compact thinking-tail patcher can still find
+      // the streaming flag it patches on.
+      const settleCopyCache = (settledStaleCopiesRef.current ??= new WeakMap());
+      const committedLatch = settledStaleMessagesRef.current;
+      const settledIds =
+        committedLatch !== undefined && committedLatch.sessionKey === sessionKey
+          ? committedLatch.ids
+          : undefined;
+      if (isResponding) {
+        // Only the branch that produced a pending latch may promote it; a
+        // discarded idle render's write must not leak into this commit.
+        pendingSettledMessagesRef.current = undefined;
+        if (!settledIds?.size) return value;
+        let surviving: Map<string, string> | undefined;
+        let changed = false;
+        const settled = value.map((message) => {
+          // A latched aggregated group also latches its first member's id so
+          // the row stays settled when a pending approval force-expands the
+          // run; keep that entry alive while the group is present.
+          const memberId = summaryRunFirstMemberId(message.id);
+          if (memberId !== undefined) {
+            const memberSignature = settledIds.get(memberId);
+            if (memberSignature !== undefined) {
+              (surviving ??= new Map()).set(memberId, memberSignature);
+            }
+          }
+          // The standalone first member of a latched group re-aggregates once
+          // the pending approval resolves; keep the group entry alive too.
+          const groupSignature = settledIds.get(summaryRunId(message.id));
+          if (groupSignature !== undefined) {
+            (surviving ??= new Map()).set(
+              summaryRunId(message.id),
+              groupSignature,
+            );
+          }
+          const signature = settledIds.get(message.id);
+          if (signature === undefined) return message;
+          if (staleStreamingContentSignature(message) !== signature) {
+            // The content moved past the settle point: this row is genuinely
+            // live, not stale — release the id and let it stream.
+            return message;
+          }
+          (surviving ??= new Map()).set(message.id, signature);
+          changed = true;
+          return settleStaleStreamingMessageCached(settleCopyCache, message);
+        });
+        // Release and prune post-commit: rows no longer present and rows
+        // whose content changed drop out of the latch.
+        if ((surviving?.size ?? 0) !== settledIds.size) {
+          pendingSettledMessagesRef.current = {
+            sessionKey,
+            ids: surviving ?? new Map(),
+          };
+        }
+        return changed ? settled : value;
+      }
+      let stale: Map<string, string> | undefined;
+      const settled = value.map((message) => {
+        const next = settleStaleStreamingMessageCached(
+          settleCopyCache,
+          message,
+        );
+        if (next !== message) {
+          const signature = staleStreamingContentSignature(message);
+          if (signature !== undefined) {
+            (stale ??= new Map()).set(message.id, signature);
+            // The aggregated group's synthetic id dissolves when a pending
+            // approval force-expands the run; latch the first member's id too
+            // so its standalone re-emission stays settled.
+            const memberId = summaryRunFirstMemberId(message.id);
+            const firstThought =
+              message.role === 'tool_group'
+                ? message.thoughts?.[0]?.content
+                : undefined;
+            if (memberId !== undefined && firstThought !== undefined) {
+              stale.set(memberId, firstThought);
+            }
+            if (message.role === 'thinking') {
+              stale.set(
+                summaryRunId(message.id),
+                JSON.stringify([message.content]),
+              );
+            }
+          }
+        }
+        return next;
+      });
+      if (!stale) return value;
+      pendingSettledMessagesRef.current = {
+        sessionKey,
+        ids: new Map([...(settledIds ?? []), ...stale]),
+      };
+      return settled;
+    }, [
+      compactMode,
+      isResponding,
+      messages,
+      pendingApproval,
+      sessionKey,
+      streamingTailContentOnly,
+    ]);
+    useLayoutEffect(() => {
+      const pending = pendingSettledMessagesRef.current;
+      if (!pending) return;
+      settledStaleMessagesRef.current = pending;
+      pendingSettledMessagesRef.current = undefined;
+    }, [mergedMessages]);
     const displayItemsCache = useRef<
       | {
           sourceMessages: readonly Message[];
@@ -3148,8 +3590,11 @@ export const MessageList = memo(
       }
       return { key: null };
     }, [backgroundSummaryGraceActive, displayItems]);
-    const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
-      useState(false);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const isSessionTimelineVisible = useChatNavigationVisible(
+      containerRef,
+      !hideSessionTimeline,
+    );
     const [automaticallyExpandedAgentKeys, setAutomaticallyExpandedAgentKeys] =
       useState<ReadonlySet<string>>(() => new Set());
     const handleAutomaticAgentExpansionChange = useCallback(
@@ -3169,8 +3614,7 @@ export const MessageList = memo(
       t: typeof t;
       entries: SessionTimelineEntry[];
     } | null>(null);
-    // Signature + entries are O(transcript text); only pay for them while the
-    // rail can actually show (container >= 1160px — never on mobile).
+    // Signature + entries are O(transcript text); only pay while the rail can show.
     const sessionTimelineEntries = useMemo(() => {
       if (!isSessionTimelineVisible) return EMPTY_SESSION_TIMELINE_ENTRIES;
       const signature = getSessionTimelineSignature(mergedMessages);
@@ -3257,17 +3701,139 @@ export const MessageList = memo(
     // (collapsed once complete). `displayItems` stays the full, pre-collapse
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
-    const { collapseCompletedTurns } = useWebShellCustomization();
+    const { collapseCompletedTurns, sourceReferences, assistantFeedback } =
+      useWebShellCustomization();
+    // `sourceSessionId` is the transcript's own session, which is what a mark
+    // belongs to.
+    const {
+      ratings: assistantFeedbackRatings,
+      rate: rateAssistantFeedback,
+      ratingForTurn: assistantFeedbackRatingForTurn,
+    } = useAssistantFeedback(sourceSessionId);
+    // A turn's mark is keyed by the daemon-stamped prompt id, which a replay
+    // only carries on the prompt's own (turn-head) block — see
+    // `shouldOfferAssistantFeedback` and the adapter's prompt-id pass.
+    const assistantFeedbackHeadById = useMemo(() => {
+      const heads = new Map<string, Message>();
+      for (const message of messages) {
+        if (isTurnStartMessage(message)) heads.set(message.id, message);
+      }
+      return heads;
+    }, [messages]);
+    const assistantFeedbackEnabled = shouldOfferAssistantFeedback({
+      renderMode: transcriptRenderMode,
+      sessionId: sourceSessionId,
+      options: assistantFeedback,
+    });
+    // Kept in a ref so a host passing the options object inline does not
+    // invalidate the handler (and therefore every rendered message) per render.
+    const assistantFeedbackOptionsRef = useRef(assistantFeedback);
+    assistantFeedbackOptionsRef.current = assistantFeedback;
+    const messagesRef = useRef(messages);
+    messagesRef.current = messages;
+    const handleAssistantFeedbackRate = useCallback(
+      (
+        promptId: string,
+        turnId: string,
+        rating: WebShellAssistantFeedbackRating | null,
+      ) => {
+        const previousRating = assistantFeedbackRatingForTurn(promptId);
+        rateAssistantFeedback(promptId, rating);
+        const onRate = assistantFeedbackOptionsRef.current?.onRate;
+        if (!onRate) return;
+        notifyAssistantFeedback(onRate, {
+          rating,
+          previousRating,
+          sessionId: sourceSessionId,
+          promptId,
+          userMessage: feedbackUserMessageOf(messagesRef.current, turnId),
+        });
+      },
+      [assistantFeedbackRatingForTurn, rateAssistantFeedback, sourceSessionId],
+    );
+    const sourcesByTurnCache = useRef<
+      | {
+          sourceMessages: readonly Message[];
+          dependencies: readonly unknown[];
+          value: ReadonlyMap<string, readonly WebShellSource[]>;
+        }
+      | undefined
+    >(undefined);
+    const sourcesByTurn = useMemo(() => {
+      const dependencies = [
+        sourceEntries,
+        workspaceCwd,
+        sourceSessionId,
+        sourceReferences,
+      ] as const;
+      const cached = sourcesByTurnCache.current;
+      return streamingTailContentOnly &&
+        isResponding &&
+        cached &&
+        cached.sourceMessages === previousMessagesRef.current &&
+        sameIdentities(cached.dependencies, dependencies)
+        ? cached.value
+        : getSourcesByTurn(
+            messages,
+            sourceEntries ?? [],
+            workspaceCwd,
+            sourceSessionId,
+            sourceReferences,
+          );
+    }, [
+      messages,
+      sourceEntries,
+      workspaceCwd,
+      sourceSessionId,
+      sourceReferences,
+      streamingTailContentOnly,
+      isResponding,
+    ]);
+    useLayoutEffect(() => {
+      // Keep StrictMode replays and abandoned renders out of the cache.
+      sourcesByTurnCache.current = {
+        sourceMessages: messages,
+        dependencies: [
+          sourceEntries,
+          workspaceCwd,
+          sourceSessionId,
+          sourceReferences,
+        ],
+        value: sourcesByTurn,
+      };
+    }, [
+      messages,
+      sourceEntries,
+      workspaceCwd,
+      sourceSessionId,
+      sourceReferences,
+      sourcesByTurn,
+    ]);
     const collapseEnabled = collapseCompletedTurns ?? true;
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>
     >(() => new Map());
+    // Turns kept expanded despite being complete. Two sources: pagination
+    // split-turn detection (tail was on screen before the user prompt
+    // arrived), and the anchor fallback (a turn collapsed while a history
+    // anchor sat on it). Entries persist until the user toggles the turn or
+    // the screen is cleared.
+    const [paginatedExpandedTurns, setPaginatedExpandedTurns] = useState<
+      ReadonlySet<string>
+    >(() => new Set());
+    // Pending split-turn detection snapshots keyed by load generation: a load
+    // can resolve SDK-side before its page commits to the transcript, letting
+    // a next load enqueue its own snapshot before the earlier page lands.
+    const pendingPaginationTurnCompares = useRef(
+      new Map<number, { ids: Set<string>; resolved: boolean }>(),
+    );
     const [turnLayoutPending, startTurnLayoutTransition] = useTransition();
     const turnLayoutTransitionStarted = useRef(false);
     const turnLayoutRowTops = useRef(new Map<string, number>());
     const turnLayoutAnimationTimer = useRef<number | undefined>(undefined);
     const turnLayoutAnimations = useRef<Animation[]>([]);
     const shouldFollow = useRef(true);
+    if (frozenViewport) shouldFollow.current = false;
     const followPausedByUserRef = useRef(false);
     const userScrollIntentUntil = useRef(0);
     const lastScrollTop = useRef(0);
@@ -3275,6 +3841,9 @@ export const MessageList = memo(
     const olderHistoryLoadGeneration = useRef(0);
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
+    const locateScrollTimer = useRef<ReturnType<typeof setTimeout> | null>(
+      null,
+    );
     const pendingBottomFollowAfterCooldown = useRef(false);
     const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
@@ -3297,7 +3866,6 @@ export const MessageList = memo(
     const pendingFollowRecheckFrame = useRef<number | undefined>(undefined);
     const pendingOverflowFrame = useRef<number | undefined>(undefined);
     catchingUpRef.current = catchingUp;
-    const containerRef = useRef<HTMLDivElement>(null);
     const olderHistoryRetryBlocked = useRef(false);
     const olderHistoryAnchorFrame = useRef<number | undefined>(undefined);
     const olderHistoryAnchorWaitFrame = useRef<number | undefined>(undefined);
@@ -3316,7 +3884,8 @@ export const MessageList = memo(
     const transcriptBlockCountRef = useRef(transcriptBlockCount);
     const transcriptReloadPausedRef = useRef(transcriptReloadPaused);
     transcriptBlockCountRef.current = transcriptBlockCount;
-    transcriptReloadPausedRef.current = transcriptReloadPaused;
+    transcriptReloadPausedRef.current =
+      transcriptReloadPaused || frozenViewport;
     const lastUnderfillAutoLoad = useRef<{
       loader: typeof onLoadOlderHistory;
       totalVirtualSize: number;
@@ -3337,10 +3906,33 @@ export const MessageList = memo(
     useLayoutEffect(() => {
       mergedMessageCountRef.current = mergedMessages.length;
     }, [mergedMessages.length]);
+    const rawMessagesRef = useRef(messages);
+    useLayoutEffect(() => {
+      rawMessagesRef.current = messages;
+    }, [messages]);
     const [
       suppressOlderHistoryLoadingStatus,
       setSuppressOlderHistoryLoadingStatus,
     ] = useState(false);
+
+    // A direct session switch never renders empty messages (the provider
+    // batches the store reset and the replay into one notification), so the
+    // /clear reset never runs for it. Block ids are per-session ordinals, so
+    // every session-scoped state must drop when the displayed session
+    // changes: stale keep-open and snapshot entries would collide with the
+    // new session's reused ids, and an old anchor would restore the previous
+    // session's scroll metrics into the new transcript.
+    const [trackedSessionKey, setTrackedSessionKey] = useState(sessionKey);
+    if (trackedSessionKey !== sessionKey) {
+      setTrackedSessionKey(sessionKey);
+      pendingPaginationTurnCompares.current.clear();
+      olderHistoryLoadGeneration.current += 1;
+      olderHistoryLoadInFlight.current = false;
+      olderHistoryRetryBlocked.current = false;
+      setOlderHistoryAnchor(null);
+      setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
+      setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
+    }
 
     useEffect(() => {
       if (!hasOlderHistory) {
@@ -3371,6 +3963,7 @@ export const MessageList = memo(
 
     const setShouldFollow = useCallback(
       (value: boolean) => {
+        if (frozenViewportRef.current) value = false;
         if (shouldFollow.current === value) return;
         shouldFollow.current = value;
         scheduleScrollOverflowReport();
@@ -3390,6 +3983,7 @@ export const MessageList = memo(
     const visibleItems = useMemo(() => {
       reusedVisibleStreamingTailRef.current = false;
       const dependencies = [
+        historicalEdgeTurns,
         collapseOverrides,
         isResponding,
         activeTurnStartedAt,
@@ -3408,6 +4002,7 @@ export const MessageList = memo(
         turnFileChanges,
         turnArtifacts,
         turnScheduledTasks,
+        paginatedExpandedTurns,
       ] as const;
       const cached = visibleItemsCache.current;
       const currentTail = displayItems[displayItems.length - 1];
@@ -3446,7 +4041,7 @@ export const MessageList = memo(
           }
         }
       }
-      const collapsedItems = applyTurnCollapse(displayItems, {
+      const turnItems = applyTurnCollapse(displayItems, {
         overrides: collapseOverrides,
         isResponding,
         activeTurnStartedAt,
@@ -3459,8 +4054,26 @@ export const MessageList = memo(
         automaticallyExpandedAgentKeys,
         pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
         includeSubagentToolUsageInMetrics,
+        paginatedExpanded: historicalEdgeTurns
+          ? new Set([...paginatedExpandedTurns, ...historicalEdgeTurns])
+          : paginatedExpandedTurns,
         enabled: collapseEnabled,
       });
+      const collapsedItems = historicalEdgeTurns
+        ? turnItems.map((item) => {
+            if (
+              !('turnCollapse' in item) ||
+              !item.turnCollapse ||
+              !historicalEdgeTurns.has(item.turnCollapse.turnId)
+            )
+              return item;
+            const { turnId, collapsed, hiddenCount } = item.turnCollapse;
+            return {
+              ...item,
+              turnCollapse: { turnId, collapsed, hiddenCount },
+            };
+          })
+        : turnItems;
       let metricsApplied = false;
       const itemsWithMetrics = firstTurnMetrics
         ? collapsedItems.map((item) => {
@@ -3528,6 +4141,7 @@ export const MessageList = memo(
       unmatchedCompletionGraceExpired,
       orderedSummaryGraceExpired,
       collapseEnabled,
+      historicalEdgeTurns,
       hideFirstUserMessage,
       firstTurnMetrics,
       includeSubagentToolUsageInMetrics,
@@ -3539,6 +4153,7 @@ export const MessageList = memo(
       turnFileChanges,
       turnArtifacts,
       turnScheduledTasks,
+      paginatedExpandedTurns,
     ]);
     const virtualizerItems =
       visibleItemsCache.current?.sourceMessages === messages
@@ -3572,30 +4187,6 @@ export const MessageList = memo(
 
     const hasEnoughSessionTimelineEntries =
       sessionTimelineEntries.length >= SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
-
-    useLayoutEffect(() => {
-      if (hideSessionTimeline) {
-        setIsSessionTimelineVisible((prev) => (prev ? false : prev));
-        return;
-      }
-
-      const el = containerRef.current;
-      if (!el) return;
-
-      const updateVisibility = () => {
-        const width = el.getBoundingClientRect().width;
-        const nextVisible = width >= 1160;
-        setIsSessionTimelineVisible((prev) =>
-          prev === nextVisible ? prev : nextVisible,
-        );
-      };
-
-      updateVisibility();
-      if (typeof ResizeObserver === 'undefined') return;
-      const observer = new ResizeObserver(updateVisibility);
-      observer.observe(el);
-      return () => observer.disconnect();
-    }, [hideSessionTimeline]);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
     //
@@ -3848,6 +4439,15 @@ export const MessageList = memo(
           });
         turnLayoutTransitionStarted.current = true;
         startTurnLayoutTransition(() => {
+          // An explicit toggle is the user's own decision: it wins over the
+          // pagination keep-open and returns the turn to normal collapse
+          // semantics.
+          setPaginatedExpandedTurns((prev) => {
+            if (!prev.has(turnId)) return prev;
+            const next = new Set(prev);
+            next.delete(turnId);
+            return next;
+          });
           setCollapseOverrides((prev) => {
             const next = new Map(prev);
             next.set(turnId, nextExpanded);
@@ -3926,7 +4526,7 @@ export const MessageList = memo(
       (event: ReactMouseEvent<HTMLDivElement>) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
-        if (!target.closest('[aria-expanded]')) return;
+        if (!target.closest('[aria-expanded], summary')) return;
         followPausedByUserRef.current = true;
         setShouldFollow(false);
         scheduleFollowRecheck();
@@ -3972,6 +4572,7 @@ export const MessageList = memo(
     // Rule 6: skip if content doesn't overflow (no scrollbar).
     const scrollToBottom = useCallback(
       (behavior: ScrollBehavior = 'auto') => {
+        if (frozenViewportRef.current) return;
         const el = getScrollElement();
         if (!el) return;
         if (el.scrollHeight <= el.clientHeight) return;
@@ -4069,6 +4670,40 @@ export const MessageList = memo(
         olderHistoryAnchor.rowKey &&
         !hasVisibleRowKey(olderHistoryAnchor.rowKey)
       ) {
+        // The anchor row can vanish because its turn collapsed while the page
+        // was loading (a turn completed by pagination). Re-expand that turn so
+        // the anchor can be restored instead of dropping the reader's position.
+        const anchorTurnId = turnIdOfMessageRow(
+          rawMessagesRef.current,
+          olderHistoryAnchor.rowKey,
+        );
+        if (
+          anchorTurnId !== undefined &&
+          isTurnCollapsedInVisibleItems(visibleItems, anchorTurnId)
+        ) {
+          // Re-expanding only helps when it can actually take effect: an
+          // explicit user collapse override wins over the keep-open, and a
+          // turn already marked keep-open yet still hidden cannot be helped.
+          // Fall through and drop the anchor in those cases, or pagination
+          // state stays pinned in-flight forever (every later load bails at
+          // the in-flight guard).
+          if (
+            collapseOverrides.get(anchorTurnId) !== false &&
+            !paginatedExpandedTurns.has(anchorTurnId)
+          ) {
+            setPaginatedExpandedTurns((prev) =>
+              prev.has(anchorTurnId) ? prev : new Set(prev).add(anchorTurnId),
+            );
+            // A page extending the turn's aggregated run re-keys the captured
+            // row, so anchor on the turn's user row instead: the re-expanded
+            // turn always renders it, and the restore path then adjusts the
+            // scroll position rather than dropping the anchor.
+            setOlderHistoryAnchor((anchor) =>
+              anchor ? { ...anchor, rowKey: `msg:${anchorTurnId}` } : anchor,
+            );
+            return;
+          }
+        }
         if (
           olderHistoryAnchor.generation === olderHistoryLoadGeneration.current
         ) {
@@ -4163,6 +4798,8 @@ export const MessageList = memo(
       mergedMessages.length,
       olderHistoryAnchor,
       visibleItems,
+      collapseOverrides,
+      paginatedExpandedTurns,
     ]);
     const virtualItems = virtualizer.getVirtualItems();
     const totalVirtualSize = virtualizer.getTotalSize();
@@ -4261,6 +4898,10 @@ export const MessageList = memo(
 
     useEffect(
       () => () => {
+        if (locateScrollTimer.current !== null) {
+          clearTimeout(locateScrollTimer.current);
+          locateScrollTimer.current = null;
+        }
         if (sessionTimelineFrame.current !== null) {
           cancelAnimationFrame(sessionTimelineFrame.current);
           sessionTimelineFrame.current = null;
@@ -4308,7 +4949,15 @@ export const MessageList = memo(
         const gen = scrollCooldownCount.current;
         scrollCooldown.current = true;
         if (useVirtualScroll) {
-          virtualizer.scrollToIndex(rowIndex, { align: 'center' });
+          if (frozenViewportRef.current) {
+            // The viewport restores its own pixel anchor; index reconciliation
+            // would keep recentering it after a later user scroll.
+            const offset = virtualizer.getOffsetForIndex(rowIndex, 'center');
+            if (offset && containerRef.current)
+              containerRef.current.scrollTop = offset[0];
+          } else {
+            virtualizer.scrollToIndex(rowIndex, { align: 'center' });
+          }
         } else {
           containerRef.current
             ?.querySelector(`[data-index="${rowIndex}"]`)
@@ -4316,7 +4965,11 @@ export const MessageList = memo(
         }
         // Release once the scroll has settled (the virtualizer may re-scroll
         // a frame or two later after measuring the target row).
-        setTimeout(() => {
+        if (locateScrollTimer.current !== null) {
+          clearTimeout(locateScrollTimer.current);
+        }
+        locateScrollTimer.current = setTimeout(() => {
+          locateScrollTimer.current = null;
           if (scrollCooldownCount.current === gen) {
             scrollCooldown.current = false;
             scheduleSessionTimelineRangeUpdate();
@@ -4517,7 +5170,20 @@ export const MessageList = memo(
               : {})),
         });
         try {
+          // Remember which messages were on screen before the page arrives so
+          // a turn the daemon split across pages (tail shown first, head
+          // completing later) can be detected and kept expanded.
+          pendingPaginationTurnCompares.current.set(generation, {
+            ids: new Set(rawMessagesRef.current.map((message) => message.id)),
+            resolved: false,
+          });
           await onLoadOlderHistory(force ? { force: true } : undefined);
+          // The snapshot belongs to this load regardless of anchor state: a
+          // superseding anchor drop bumps the generation mid-flight and would
+          // otherwise orphan the entry unresolved at the FIFO head, wedging
+          // every later split-turn detection.
+          const compare = pendingPaginationTurnCompares.current.get(generation);
+          if (compare) compare.resolved = true;
           if (generation === olderHistoryLoadGeneration.current) {
             setOlderHistoryAnchor((anchor) =>
               anchor?.generation === generation
@@ -4526,6 +5192,9 @@ export const MessageList = memo(
             );
           }
         } catch {
+          // A failed load commits no page, so its snapshot is always safe to
+          // drop, including when the load was superseded mid-flight.
+          pendingPaginationTurnCompares.current.delete(generation);
           if (generation === olderHistoryLoadGeneration.current) {
             olderHistoryRetryBlocked.current = true;
             olderHistoryLoadInFlight.current = false;
@@ -4552,6 +5221,86 @@ export const MessageList = memo(
     const retryOlderHistory = useCallback(() => {
       void loadOlderHistory(true, true);
     }, [loadOlderHistory]);
+
+    // After a pagination page commits, mark turns whose user prompt just
+    // arrived while their tail was already on screen (the daemon split the
+    // turn across pages). `applyTurnCollapse` keeps those expanded so the
+    // content the user is reading never silently collapses.
+    useLayoutEffect(() => {
+      const pending = pendingPaginationTurnCompares.current;
+      if (pending.size === 0) return;
+      // Skip locally-injected messages (recap ids `local-*`): /recap re-pins
+      // them at index 0 on every render and pagination cannot move them, so
+      // they never reflect a page landing and would pin the head-change check
+      // forever, wedging split-turn detection for the rest of the session.
+      const first = messages.find(
+        (message) => !message?.id.startsWith('local-'),
+      );
+      if (!first) return;
+      const oldest = pending.entries().next().value;
+      if (!oldest) return;
+      const [generation, compare] = oldest;
+      // A page prepends older messages at the head; live messages that land
+      // while the fetch is in flight append at the tail. Wait for the head to
+      // change so a mid-flight live update cannot consume the snapshot before
+      // the page commits (which would silently skip the split-turn detection).
+      // Compare raw message ids, not the compact-mode aggregate ids: a page
+      // that extends an aggregated run re-keys the synthetic summary id, but
+      // the run members keep their daemon ids.
+      if (compare.ids.has(first.id)) return;
+      const newTurnIds: string[] = [];
+      for (let i = 0; i < messages.length; i++) {
+        const message = messages[i];
+        if (
+          !message ||
+          !isTurnStartMessage(message) ||
+          compare.ids.has(message.id)
+        ) {
+          continue;
+        }
+        let tailShown = false;
+        for (let j = i + 1; j < messages.length; j++) {
+          const next = messages[j];
+          if (isTurnStartMessage(next)) break;
+          if (compare.ids.has(next.id)) {
+            tailShown = true;
+            break;
+          }
+        }
+        if (tailShown) newTurnIds.push(message.id);
+      }
+      if (newTurnIds.length === 0) {
+        // A changed head while the load is resolved is the page landing, so
+        // consume the snapshot even when it completed no split turn —
+        // otherwise every later transcript update rescans it for the rest of
+        // the session. While the load is still in flight a head change is
+        // not the page (a transcript reload or session/branch switch);
+        // discarding the snapshot there would let the page commit that
+        // follows silently skip detection — the split turn collapses again,
+        // the bug this code exists to fix.
+        if (!compare.resolved) return;
+      } else {
+        setPaginatedExpandedTurns((prev) => {
+          let next: Set<string> | null = null;
+          for (const id of newTurnIds) {
+            if (!prev.has(id)) {
+              next ??= new Set(prev);
+              next.add(id);
+            }
+          }
+          return next ?? prev;
+        });
+      }
+      pending.delete(generation);
+      // The page that just committed is visible now: fold its ids into any
+      // newer pending snapshot so that load's detection still recognizes the
+      // tail a mid-turn page boundary showed.
+      for (const remaining of pending.values()) {
+        for (const message of messages) {
+          if (message) remaining.ids.add(message.id);
+        }
+      }
+    }, [messages]);
 
     useEffect(() => {
       const pendingGeneration = pendingOlderHistoryTopLoad.current;
@@ -4821,7 +5570,14 @@ export const MessageList = memo(
         pendingBottomFollowAfterCooldown.current = false;
         setShouldFollow(true);
         pendingScrollRef.current = null;
+        // Drop the in-flight pagination snapshots too: without this a stale
+        // pre-clear snapshot survives into the next session and can mislabel
+        // a complete turn as keep-open (block ids are per-session ordinals).
+        pendingPaginationTurnCompares.current.clear();
+        settledStaleMessagesRef.current = undefined;
+        pendingSettledMessagesRef.current = undefined;
         setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
+        setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
       }
     }, [messages.length, setShouldFollow]);
 
@@ -5062,6 +5818,7 @@ export const MessageList = memo(
                 changes={displayItem.changes}
                 turnId={displayItem.turnId}
                 artifacts={displayItem.artifacts}
+                sourceSessionId={sourceSessionId}
                 scheduledTasks={displayItem.scheduledTasks}
                 workspaceCwd={workspaceCwd}
                 onOpenRequest={onTurnOutputOpen}
@@ -5093,7 +5850,8 @@ export const MessageList = memo(
             | undefined;
           if (
             displayItem.message.role === 'assistant' &&
-            finalAssistantTurnId
+            finalAssistantTurnId &&
+            !frozenViewport
           ) {
             assistantTurnFooterInfo = {
               turnId: finalAssistantTurnId,
@@ -5105,18 +5863,79 @@ export const MessageList = memo(
               },
             };
           }
+          const feedbackHead = finalAssistantTurnId
+            ? assistantFeedbackHeadById.get(finalAssistantTurnId)
+            : undefined;
+          // A live turn stamps the answer's own block while a replayed turn
+          // only stamps the prompt's; both carry the same value.
+          const feedbackPromptId =
+            displayItem.message.promptId ?? feedbackHead?.promptId;
           const branchRecordId =
             displayItem.message.role === 'assistant'
               ? displayItem.message.branchRecordId
+              : undefined;
+          const editableUserContent =
+            displayItem.message.role === 'user'
+              ? displayItem.message.content
+              : undefined;
+          // Only the newest user turn can be edited, and only while the
+          // transcript still holds the turn the rewind would target.
+          const userMessageEditTarget =
+            editableUserContent !== undefined &&
+            displayItem.message.id === editableUserTurn.lastId &&
+            !isResponding &&
+            !hasOlderHistory &&
+            !historyCapacityReached
+              ? {
+                  turnIndex:
+                    editableUserTurn.turnIndexById.get(
+                      displayItem.message.id,
+                    ) ?? 0,
+                  content: editableUserContent,
+                }
               : undefined;
 
           return (
             <MessageItem
               message={displayItem.message}
+              onLocateBackgroundSource={
+                displayItem.message.role === 'system' &&
+                displayItem.message.source ===
+                  'background_notification_turn_started' &&
+                displayItem.message.backgroundTurn?.toolUseId &&
+                findDisplayItemIndex(
+                  displayItems,
+                  '',
+                  displayItem.message.backgroundTurn.toolUseId,
+                ) >= 0
+                  ? scrollToMessage
+                  : undefined
+              }
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
+              onTurnOutputOpen={onTurnOutputOpen}
+              onToolResultOpen={onToolResultOpen}
+              onInsightReportOpen={onInsightReportOpen}
+              onEditUserMessage={
+                onEditUserMessage && userMessageEditTarget
+                  ? () =>
+                      onEditUserMessage(
+                        userMessageEditTarget.turnIndex,
+                        userMessageEditTarget.content,
+                      )
+                  : undefined
+              }
+              onSubmitUserMessageEdit={
+                onSubmitUserMessageEdit && userMessageEditTarget
+                  ? (content) =>
+                      onSubmitUserMessageEdit(
+                        userMessageEditTarget.turnIndex,
+                        content,
+                      )
+                  : undefined
+              }
               workspaceCwd={workspaceCwd}
               showRetryHint={showRetryHint}
               onRetryClick={onRetryClick}
@@ -5136,11 +5955,29 @@ export const MessageList = memo(
                 !isResponding &&
                 branchRecordId !== undefined
               }
+              assistantFeedbackTurnId={
+                assistantFeedbackEnabled ? finalAssistantTurnId : undefined
+              }
+              assistantFeedbackPromptId={
+                assistantFeedbackEnabled ? feedbackPromptId : undefined
+              }
+              assistantFeedbackRating={
+                assistantFeedbackEnabled && feedbackPromptId
+                  ? assistantFeedbackRatings[feedbackPromptId]
+                  : undefined
+              }
+              onAssistantFeedbackRate={handleAssistantFeedbackRate}
               isLocateFlashing={displayItemMatchesLocateTarget(
                 displayItem,
                 flashTarget,
               )}
               assistantTurnFooterInfo={assistantTurnFooterInfo}
+              turnSources={
+                finalAssistantTurnId
+                  ? sourcesByTurn.get(finalAssistantTurnId)
+                  : undefined
+              }
+              onSourceOpen={onSourceOpen}
               generateContent={generateContent}
             />
           );
@@ -5175,13 +6012,26 @@ export const MessageList = memo(
         transcriptRenderMode,
         handleAutomaticAgentExpansionChange,
         onShowContextDetail,
+        displayItems,
+        scrollToMessage,
         onImagePreview,
         onAttachmentPreview,
+        onInsightReportOpen,
+        onEditUserMessage,
+        onSubmitUserMessageEdit,
+        editableUserTurn,
+        hasOlderHistory,
+        historyCapacityReached,
         generateContent,
         headerOffset,
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
+        assistantFeedbackEnabled,
+        assistantFeedbackHeadById,
+        assistantFeedbackRatings,
+        handleAssistantFeedbackRate,
+        frozenViewport,
         workspaceCwd,
         showRetryHint,
         onRetryClick,
@@ -5189,10 +6039,14 @@ export const MessageList = memo(
         onRetryFailedPrompt,
         onBranchSession,
         handleToggleCollapse,
+        sourceSessionId,
         onOpenArtifact,
         onOpenScheduledTask,
         onReviewChanges,
         onTurnOutputOpen,
+        onToolResultOpen,
+        sourcesByTurn,
+        onSourceOpen,
         onError,
       ],
     );
@@ -5253,99 +6107,112 @@ export const MessageList = memo(
     }, [autoScrollContentSignal, scheduleScrollOverflowReport, totalCount]);
 
     return (
-      <div
-        ref={containerRef}
-        className={joinClassNames(
-          styles.list,
-          hasHeader && centerWelcomeHeader
-            ? styles.listWithWelcomeHeader
-            : undefined,
-        )}
-        data-web-shell-message-list
-        onClickCapture={handleDisclosureClickCapture}
-      >
-        {showLoadingSkeleton && (
-          <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
-        )}
-        {loadingOlderHistory &&
-          !showLoadingSkeleton &&
-          !suppressOlderHistoryLoadingStatus && (
+      <McpAppSessionContext.Provider value={mcpAppSessionId}>
+        <div
+          ref={containerRef}
+          className={joinClassNames(
+            styles.list,
+            hasHeader && centerWelcomeHeader
+              ? styles.listWithWelcomeHeader
+              : undefined,
+          )}
+          data-web-shell-message-list
+          onClickCapture={handleDisclosureClickCapture}
+        >
+          {showLoadingSkeleton && (
+            <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+          )}
+          {loadingOlderHistory &&
+            !showLoadingSkeleton &&
+            !suppressOlderHistoryLoadingStatus && (
+              <div className={styles.historyStatus} role="status">
+                {t('history.loadingEarlier')}
+              </div>
+            )}
+          {historyCapacityReached && !showLoadingSkeleton && (
             <div className={styles.historyStatus} role="status">
-              {t('history.loadingEarlier')}
+              {t('history.capacityReached')}
             </div>
           )}
-        {historyCapacityReached && !showLoadingSkeleton && (
-          <div className={styles.historyStatus} role="status">
-            {t('history.capacityReached')}
-          </div>
-        )}
-        {historyPaginationError &&
-          !showLoadingSkeleton &&
-          !historyCapacityReached && (
-            <div className={styles.historyStatus}>
-              <span role="status">{t('history.paginationError')}</span>
-              {onLoadOlderHistory && (
-                <button
-                  type="button"
-                  className={styles.historyRetryButton}
-                  onClick={retryOlderHistory}
-                >
-                  {t('history.retry')}
-                </button>
-              )}
-            </div>
-          )}
-        <SessionTimeline
-          entries={sessionTimelineEntries}
-          currentTurnId={currentTimelineTurnId}
-          currentRange={sessionTimelineRange}
-          hidden={!isSessionTimelineVisible || !hasEnoughSessionTimelineEntries}
-          onSelect={scrollToMessage}
-        />
-        {useVirtualScroll ? (
-          <div ref={virtualizer.containerRef} className={styles.virtualSizer}>
-            {virtualItems.map((virtualRow) => (
-              <div
-                key={virtualRow.key}
-                data-index={virtualRow.index}
-                ref={measureVirtualRow}
-                className={joinClassNames(
-                  styles.virtualRow,
-                  getRowClassName(
-                    visibleItems[virtualRow.index - headerOffset],
-                  ),
+          {historyPaginationError &&
+            !showLoadingSkeleton &&
+            !historyCapacityReached && (
+              <div className={styles.historyStatus}>
+                <span role="status">{t('history.paginationError')}</span>
+                {onLoadOlderHistory && (
+                  <button
+                    type="button"
+                    className={styles.historyRetryButton}
+                    onClick={retryOlderHistory}
+                  >
+                    {t('history.retry')}
+                  </button>
                 )}
-                data-message-row-key={String(getItemKey(virtualRow.index))}
-                data-web-shell-message-row
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                }}
-              >
-                {renderVirtualItem(virtualRow.index)}
               </div>
-            ))}
-          </div>
-        ) : (
-          Array.from({ length: totalCount }, (_, index) => {
-            const key = getItemKey(index);
-            const item = visibleItems[index - headerOffset];
-            return (
-              <div
-                key={key}
-                data-index={index}
-                className={getRowClassName(item)}
-                data-message-row-key={String(key)}
-                data-web-shell-message-row
-              >
-                {renderVirtualItem(index)}
-              </div>
-            );
-          })
-        )}
-      </div>
+            )}
+          <SessionTimeline
+            action={timelineAction}
+            entries={sessionTimelineEntries}
+            currentTurnId={currentTimelineTurnId}
+            currentRange={sessionTimelineRange}
+            hidden={
+              !isSessionTimelineVisible || !hasEnoughSessionTimelineEntries
+            }
+            onSelect={scrollToMessage}
+          />
+          {useVirtualScroll ? (
+            <div ref={virtualizer.containerRef} className={styles.virtualSizer}>
+              {virtualItems.map((virtualRow) => (
+                <div
+                  key={virtualRow.key}
+                  data-index={virtualRow.index}
+                  ref={measureVirtualRow}
+                  className={joinClassNames(
+                    styles.virtualRow,
+                    getRowClassName(
+                      visibleItems[virtualRow.index - headerOffset],
+                    ),
+                  )}
+                  data-message-row-key={String(getItemKey(virtualRow.index))}
+                  data-source-block-ids={displayItemSourceBlockIds(
+                    visibleItems[virtualRow.index - headerOffset],
+                    messages,
+                  )}
+                  data-web-shell-message-row
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                  }}
+                >
+                  {renderVirtualItem(virtualRow.index)}
+                </div>
+              ))}
+            </div>
+          ) : (
+            Array.from({ length: totalCount }, (_, index) => {
+              const key = getItemKey(index);
+              const item = visibleItems[index - headerOffset];
+              return (
+                <div
+                  key={key}
+                  data-index={index}
+                  className={getRowClassName(item)}
+                  data-message-row-key={String(key)}
+                  data-source-block-ids={displayItemSourceBlockIds(
+                    item,
+                    messages,
+                  )}
+                  data-web-shell-message-row
+                >
+                  {renderVirtualItem(index)}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </McpAppSessionContext.Provider>
     );
   }),
 );

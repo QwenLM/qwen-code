@@ -43,7 +43,7 @@ describe('classifyPath', () => {
     const paths = [
       'packages/channels/qqbot/src/events.test.ts',
       'src/foo.spec.tsx',
-      'packages/webui/src/__tests__/App.tsx',
+      'packages/browser-ui/src/__tests__/App.tsx',
       'integration-tests/foo.ts',
       'pkg/server/handler_test.go',
       'app/tests/test_views.py',
@@ -56,7 +56,7 @@ describe('classifyPath', () => {
   it('recognises generated and vendored files', () => {
     const paths = [
       'package-lock.json',
-      'packages/desktop-shell/bun.lock',
+      'packages/desktop/bun.lock',
       'packages/vscode-ide-companion/NOTICES.txt',
       'dist/bundle.min.js',
       'vendor/lib.go',

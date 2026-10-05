@@ -30,6 +30,15 @@ export const moonshotProvider: ProviderConfig = {
   models: [
     {
       id: 'kimi-k3',
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          efforts: ['low', 'high', 'max'],
+          defaultEffort: 'max',
+          canDisable: false,
+          disableField: 'reasoning_effort',
+        },
+      },
       contextWindowSize: 1000000,
       // K3 always thinks: the API exposes `reasoning_effort` but no way to
       // turn thinking off, so never emit a disable shape on the wire.
@@ -38,20 +47,42 @@ export const moonshotProvider: ProviderConfig = {
     },
     {
       id: 'kimi-k2.7-code',
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          toggleOnly: true,
+          canDisable: false,
+          disableField: 'thinking',
+        },
+      },
       contextWindowSize: 262144,
-      enableThinking: true,
       modalities: { image: true, video: true },
+      thinkingMandatory: true,
     },
     {
       id: 'kimi-k2.7-code-highspeed',
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          toggleOnly: true,
+          canDisable: false,
+          disableField: 'thinking',
+        },
+      },
       contextWindowSize: 262144,
-      enableThinking: true,
       modalities: { image: true, video: true },
+      thinkingMandatory: true,
     },
     {
       id: 'kimi-k2.6',
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          toggleOnly: true,
+          disableField: 'thinking',
+        },
+      },
       contextWindowSize: 262144,
-      enableThinking: true,
       modalities: { image: true, video: true },
     },
   ],

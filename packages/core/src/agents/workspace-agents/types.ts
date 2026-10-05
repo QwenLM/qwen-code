@@ -1,0 +1,566 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * @fileoverview Types for durable workspace agent identities that
+ * collaborate on a shared thread.
+ *
+ * The distinction from Agent Team: a teammate dies with its leader. A workspace
+ * agent persists independently and resumes a task-scoped top-level session when
+ * addressed, so its work survives the originating conversation.
+ */
+
+/** Author id used for messages a person wrote. Never a valid agent id. */
+export const HUMAN_AUTHOR_ID = 'user';
+
+export const AGENTS_SCHEMA_VERSION = 1;
+export const AGENT_HOSTS_SCHEMA_VERSION = 1;
+export const LOCAL_AGENT_RUNTIME_ID = 'local';
+
+export interface AgentHost {
+  id: string;
+  name: string;
+  secretHash: string;
+  workspaceCwd: string;
+  providers: string[];
+  createdAt: number;
+  lastSeenAt?: number;
+}
+
+export type AgentHostView = Omit<AgentHost, 'secretHash'>;
+
+export interface AgentHostEnrollment {
+  tokenHash: string;
+  expiresAt: number;
+}
+
+export interface AgentHostsFile {
+  schemaVersion: typeof AGENT_HOSTS_SCHEMA_VERSION;
+  hosts: AgentHost[];
+  enrollment?: AgentHostEnrollment;
+}
+
+/**
+ * One external caller's permission to call one agent.
+ *
+ * Per agent, never per daemon: opening agent A says nothing about agent B, and
+ * a grant in one direction confers nothing in the other. The secret is stored
+ * only as a digest and never travels in a thread, a prompt, a tool argument
+ * or a log line.
+ */
+export interface A2AGrant {
+  callerId: string;
+  agentId: string;
+  secretHash: string;
+  createdAt: number;
+  /** Absent means it does not expire on its own; revocation still applies. */
+  expiresAt?: number;
+}
+
+export interface AgentWorkspaceState {
+  schemaVersion: typeof AGENTS_SCHEMA_VERSION;
+  workspaceId: string;
+  hostSessionId?: string;
+  nextRunSequence: number;
+  /** External callers allowed in, and to which agent. Absent means none. */
+  callerGrants?: A2AGrant[];
+}
+
+export interface WorkspaceAgentsFile {
+  schemaVersion: typeof AGENTS_SCHEMA_VERSION;
+  agents: WorkspaceAgent[];
+}
+
+/** A program a runtime can run an agent with. */
+export type AgentProgram = 'qwen' | 'codex' | 'claude';
+
+/**
+ * How a host names each program in its advertised `providers`. The one table
+ * the host, the daemon's validation and pickup all read.
+ */
+export const AGENT_PROGRAM_LABELS: Readonly<Record<AgentProgram, string>> = {
+  qwen: 'Qwen Code ACP',
+  codex: 'Codex CLI',
+  claude: 'Claude Code ACP',
+};
+
+export function isAgentProgram(value: unknown): value is AgentProgram {
+  return (
+    typeof value === 'string' &&
+    Object.prototype.hasOwnProperty.call(AGENT_PROGRAM_LABELS, value)
+  );
+}
+
+export function hostOffersProgram(
+  host: { providers: readonly string[] },
+  program: AgentProgram,
+): boolean {
+  return host.providers.includes(AGENT_PROGRAM_LABELS[program]);
+}
+
+/**
+ * The coordinator's pinned answer for a Host credential it will not accept.
+ *
+ * A Host clears its stored credential and re-joins only on this exact body;
+ * every other 401 — the bearer gate while the runtime is still starting, or
+ * the routes being unmounted — is worth a retry. Both halves read this
+ * constant so the coupling is a compile error rather than a string match.
+ */
+export const AGENT_HOST_CREDENTIAL_REJECTED = 'Invalid Agent Host credential.';
+
+export type WorkspaceAgentExecution =
+  | { mode: 'local' }
+  | {
+      mode: 'managed-host';
+      hostIds: string[];
+      /** The program to run on the host; the host's default when absent. */
+      provider?: AgentProgram;
+    };
+
+/**
+ * A durable agent identity, scoped to one workspace.
+ *
+ * Identity instructions, model and scheduling policy live here. `agentType`
+ * optionally supplies a reusable base definition; an Agent created in the
+ * primary flow needs no second definition record.
+ */
+export interface WorkspaceAgent {
+  /** Stable id. Never reused, never derived from the name. */
+  id: string;
+  /**
+   * Display name and the token people and agents type after `@`. Unique
+   * within a workspace, case-insensitively — mention routing has to be
+   * unambiguous, and two agents named `Review` and `review` would make it a
+   * coin flip.
+   */
+  name: string;
+  /** Display and peer-discovery summary; never grants execution authority. */
+  description?: string;
+  /** Hex colour (`#rrggbb`) for UI attribution. */
+  color?: string;
+  /** Optional existing definition supplying a base persona. */
+  agentType?: string;
+  /** Model override; absent inherits the workspace default. */
+  model?: string;
+  /**
+   * What this identity is told on top of its definition's prompt.
+   *
+   * Appended to the optional base definition at boot, so editing the Agent
+   * reaches its next turn rather than only its next spawn.
+   *
+   * It cannot widen anything. The read-only capability boundary is derived
+   * from the definition and applied after this, so instructions change what an
+   * agent is for and never what it may do.
+   */
+  instructions?: string;
+  /**
+   * How many runs may wait for this agent across all threads before further
+   * mentions are refused. Absent means {@link DEFAULT_QUEUE_LIMIT}.
+   *
+   * Distinct from {@link maxConcurrentRuns}, which bounds how many threads
+   * this agent works at once. This bounds how much may pile up behind those.
+   * Refusing at the limit makes the agent's real throughput visible instead of
+   * accruing a backlog nobody reaches.
+   */
+  queueLimit?: number;
+  /**
+   * Absent or `true` = can be addressed. `false` keeps the identity and its
+   * history but stops it taking new work, matching how a disabled scheduled
+   * task stays on disk.
+   */
+  enabled?: boolean;
+  createdAt: number;
+  /**
+   * Set when a person deletes this agent. The entry stays so every post it
+   * made keeps its author — those posts are evidence other agents reasoned
+   * from — but it stops being addressable and reads `offline`.
+   */
+  retiredAt?: number;
+  /**
+   * How many task-scoped sessions this agent may run at once. Absent means 1.
+   * Distinct from {@link queueLimit}, which bounds how much may wait.
+   */
+  maxConcurrentRuns?: number;
+  /** Where this workspace-scoped identity may execute. Absent means local. */
+  execution?: WorkspaceAgentExecution;
+}
+
+/**
+ * Lifecycle of a unit of work.
+ *
+ * `blocked` is how an agent asks a person for something: it posts the question,
+ * sets this, and ends its run rather than holding its body and budget open
+ * while it waits. `done` is deliberately a human's call — an agent may push a
+ * thread to `in_review`, never past it.
+ */
+export type ThreadStatus =
+  | 'open'
+  | 'in_progress'
+  | 'blocked'
+  | 'in_review'
+  | 'done'
+  | 'cancelled';
+
+/**
+ * Statuses after which a thread takes no further work.
+ *
+ * A predicate rather than a comparison at each site because there are seven of
+ * them — dispatch admission, candidate selection, recovery, close handling,
+ * assignment and status resolution — and every one of them meant "this thread
+ * is over", not "someone pressed done". Adding `cancelled` as a second literal
+ * at each would have been seven chances to miss one, and the one missed would
+ * have kept dispatching work for a task its caller had already cancelled.
+ */
+const TERMINAL_THREAD_STATUSES: ReadonlySet<ThreadStatus> = new Set([
+  'done',
+  'cancelled',
+]);
+
+export function isThreadTerminal(status: ThreadStatus): boolean {
+  return TERMINAL_THREAD_STATUSES.has(status);
+}
+
+/**
+ * How urgently a thread wants a turn, highest first.
+ *
+ * Four levels is what an ordering needs: one above normal for
+ * "before the queue", one for "soon", the default, and one for "whenever".
+ */
+export type ThreadPriority = 'urgent' | 'high' | 'normal' | 'low';
+
+/** Priorities in dispatch order. Index is the rank; lower goes first. */
+export const THREAD_PRIORITY_ORDER: readonly ThreadPriority[] = [
+  'urgent',
+  'high',
+  'normal',
+  'low',
+];
+
+export const DEFAULT_THREAD_PRIORITY: ThreadPriority = 'normal';
+
+/**
+ * Dispatch rank of a thread's priority. An absent priority ranks as the
+ * default, so a thread written before this field existed keeps its place
+ * rather than sinking or jumping the queue.
+ */
+export function threadPriorityRank(priority?: ThreadPriority): number {
+  const rank = THREAD_PRIORITY_ORDER.indexOf(
+    priority ?? DEFAULT_THREAD_PRIORITY,
+  );
+  return rank === -1
+    ? THREAD_PRIORITY_ORDER.indexOf(DEFAULT_THREAD_PRIORITY)
+    : rank;
+}
+
+/**
+ * One post on a thread. Append-only: an agent's turn is evidence, and
+ * rewriting it would let a later run change what an earlier one is recorded
+ * as having said.
+ */
+export interface ThreadMessage {
+  id: string;
+  sequence: number;
+  authorKind: 'human' | 'agent' | 'system';
+  /** {@link HUMAN_AUTHOR_ID} or the id of the agent that posted. */
+  from: string;
+  authorNameSnapshot: string;
+  sourceRunId?: string;
+  triggerKind?: string;
+  text: string;
+  /** Agent ids resolved from `@name` tokens at post time, in order. */
+  mentions: string[];
+  outcomes: MessageOutcome[];
+  at: number;
+  /** Idempotency key for a cross-thread outbox event. */
+  originEventId?: string;
+}
+
+export type MessageOutcomeKind = 'dispatch' | 'coalesce' | 'skip';
+
+export interface MessageOutcome {
+  targetAgentId?: string;
+  targetAgentName?: string;
+  kind: MessageOutcomeKind;
+  reason?: string;
+  runId?: string;
+  into?: 'queued' | 'running';
+}
+
+export type ThreadRunStatus =
+  | 'queued'
+  | 'running'
+  | 'finishing'
+  | 'cancelling'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+/** One Host's temporary hold on a run. */
+export interface RunLease {
+  hostId: string;
+  /** Minted fresh on every acquisition; never reused across attempts. */
+  leaseId: string;
+  /** The run attempt this lease is for. A later attempt invalidates it. */
+  attempt: number;
+  expiresAt: number;
+  acquiredAt: number;
+}
+
+/**
+ * How a run ended.
+ *
+ * `unclosed` is a kind an agent's turn records, not the absence of one. `stranded`
+ * is the only member the system writes on the agent's behalf: it marks a run
+ * that was live when the collaboration opt-in went away, so recovery must not
+ * treat it as a crash and revive it. A stranded run waits for a person, who
+ * decides whether to re-raise the work or drop it — the system does neither.
+ */
+export type RunCloseKind =
+  | 'waiting'
+  | 'blocked'
+  | 'review'
+  | 'unclosed'
+  | 'stranded';
+
+export interface RunUsageRound {
+  attempt: number;
+  round: number;
+  tokens: number;
+}
+
+/**
+ * One agent turn against one thread.
+ *
+ * `sessionId` links this run to the agent's transcript for this thread. Several
+ * runs on the same thread resume that session; work on another thread cannot.
+ */
+export interface ThreadRun {
+  progress?: {
+    attempt: number;
+    sequence: number;
+    receivedAt: number;
+    activityAt: number;
+    stage: string;
+    detail: string;
+    outputText?: string;
+    thoughtText?: string;
+    /** A tool call waiting for a person; kept so a reloaded page can answer it. */
+    permission?: {
+      requestId: string;
+      title: string;
+      options: Array<{ optionId: string; name: string; kind?: string }>;
+    };
+    /** The turn's latest tool calls, oldest first. */
+    steps?: Array<{
+      id: string;
+      title: string;
+      status: 'running' | 'done' | 'failed';
+    }>;
+  };
+  id: string;
+  agentId: string;
+  /** Bound task session. Absent until the dispatcher starts it. */
+  sessionId?: string;
+  status: ThreadRunStatus;
+  /**
+   * Messages this run was told to answer. More than one when a further message
+   * arrived while the run was queued, or while it was executing this same
+   * thread — both coalesce rather than booking a second run.
+   */
+  triggerMessageIds: string[];
+  acceptedMessageIds: string[];
+  consumedMessageIds: string[];
+  contextThroughSequence?: number;
+  closeKind?: RunCloseKind;
+  closeAcknowledgedAtSequence?: number;
+  finalMessageId?: string;
+  /** Written with terminal settlement only when a Host result was accepted. */
+  hostResultReceipt?: {
+    attempt: number;
+    leaseId: string;
+    digest: string;
+  };
+  usageByRound: RunUsageRound[];
+  /**
+   * The task session's cumulative token total when this run started. The delta
+   * keeps a later turn from charging earlier turns on the same thread twice.
+   */
+  usageBaselineTokens?: number;
+  failureStage?: string;
+  /**
+   * The outbound Host currently holding this run, if any.
+   *
+   * A lease rather than an assignment: a Host on the far side of a NAT can
+   * vanish without saying so, and work has to become available again without
+   * a person intervening. What makes that safe is that re-leasing mints a new
+   * `leaseId` and the attempt moves on, so the vanished worker's late write is
+   * refused rather than overwriting whoever picked the work up next.
+   */
+  lease?: RunLease;
+  /** Workspace-wide FIFO key. */
+  queueSequence: number;
+  /**
+   * How many times this run has been started. A run revived after a stall or a
+   * daemon restart is on attempt 2; a second failure is terminal.
+   */
+  attempts: number;
+  /** Diagnostic wall clock only; never a FIFO key. */
+  queuedAt: number;
+  startedAt?: number;
+  endedAt?: number;
+  error?: string;
+}
+
+/**
+ * Provenance of a thread raised by an external A2A caller.
+ *
+ * Lives on the thread rather than in an index of its own so there is one
+ * source of truth: an index would be a second write, and a second write is a
+ * thing that can disagree with the first about whether work was accepted.
+ * Lookup by `key` is a scan, which costs the same as the other store scans and
+ * cannot go stale.
+ */
+export interface ExternalIntake {
+  /**
+   * `externalRequestKey(callerId, targetAgentId, messageId)`. Written in the
+   * same transaction that accepts the work — a key written afterwards cannot
+   * answer whether a retry arriving mid-acceptance is the same request.
+   */
+  key: string;
+  /** Authenticated caller, from the transport. Scopes every read back. */
+  callerId: string;
+  targetAgentId: string;
+  /** `Message.messageId` as the caller minted it. */
+  messageId: string;
+  /**
+   * Digest of the submitted content. The protocol lets a caller reuse an id;
+   * this is what turns "same key, different content" into a refusal instead of
+   * a silent overwrite of work already accepted.
+   */
+  contentHash: string;
+  receivedAt: number;
+  /** First terminal reply published to the caller; local follow-ups cannot reopen it. */
+  result?: {
+    state: 'TASK_STATE_COMPLETED' | 'TASK_STATE_FAILED' | 'TASK_STATE_CANCELED';
+    at: number;
+    answer?: string;
+  };
+}
+
+/**
+ * A unit of work several agents and people share.
+ *
+ * Stored one file per thread under the per-project runtime dir — not the
+ * working tree. Thread text is written by agents and fed to other agents, so
+ * it is a prompt-injection surface by construction; keeping it out of the
+ * repo means it is never committed, pulled, or reviewed as if it were code.
+ */
+export interface Thread {
+  schemaVersion: typeof AGENTS_SCHEMA_VERSION;
+  id: string;
+  title: string;
+  body: string;
+  /**
+   * What "done" means for this thread, in the author's words.
+   *
+   * Separate from `body` because it is the one part an agent is checked
+   * against: it goes into the turn envelope as the standard to meet, and a
+   * review hand-back reports against it. A body says what to do; this says
+   * when to stop.
+   */
+  acceptanceCriteria?: string;
+  status: ThreadStatus;
+  /**
+   * Dispatch order within one agent's queue. Absent means the default.
+   */
+  priority?: ThreadPriority;
+  /** Agent that owns the thread when no message names someone explicitly. */
+  assigneeAgentId?: string;
+  /** Set when an external A2A caller raised this thread; see {@link ExternalIntake}. */
+  externalIntake?: ExternalIntake;
+  createdAt: number;
+  /** {@link HUMAN_AUTHOR_ID} or an agent id. */
+  createdBy: string;
+  /** Set when an agent split this thread out of another one. */
+  parentThreadId?: string;
+  /**
+   * Root of this thread tree. Equal to `id` for a root thread. Token spend is
+   * charged there so splitting work cannot mint more money.
+   */
+  rootThreadId: string;
+  messages: ThreadMessage[];
+  runs: ThreadRun[];
+  nextMessageSequence: number;
+  deliveryByAgent: Record<string, AgentDelivery>;
+  outbox: ThreadEvent[];
+  /**
+   * Agent-triggered deliveries on this thread since its last human post. A
+   * delivery into a running agent counts too; otherwise two live agents could
+   * ping-pong without booking another run. Local scope keeps a human reply on
+   * one sub-thread from resetting an unrelated sibling loop.
+   */
+  autoTurnsUsed: number;
+  /**
+   * Derived cache of tokens spent by this thread's runs. Admission calculates
+   * the tree total from every run instead of trusting this field. Unlike the
+   * turn counter it is not reset by a human post.
+   */
+  tokensUsed: number;
+  /**
+   * Tokens spent by runs that retention has since dropped. Folded in before a
+   * run is trimmed, so the tree budget still counts what those runs spent.
+   */
+  trimmedTokens?: number;
+}
+
+export interface AgentDelivery {
+  committedThroughSequence: number;
+}
+
+export type ThreadEventKind = 'parent_report';
+export type ThreadEventStatus = 'pending' | 'acknowledged';
+
+export interface ThreadEvent {
+  id: string;
+  kind: ThreadEventKind;
+  causedByRunId?: string;
+  payload: Record<string, unknown>;
+  status: ThreadEventStatus;
+  attempts: number;
+  createdAt: number;
+}
+
+/** Default cap on runs waiting for one agent across all threads. */
+export const DEFAULT_QUEUE_LIMIT = 5;
+
+/**
+ * Default cap on consecutive agent-triggered deliveries on one thread. Chosen to
+ * allow a real hand-off chain (delegate → work → report → follow-up) while
+ * still stopping a two-agent loop within a few turns.
+ */
+export const DEFAULT_THREAD_AUTO_TURN_BUDGET = 12;
+
+/**
+ * Default cap on tokens spent by one thread tree.
+ *
+ * There is deliberately no wall-clock gate beside these two. An earlier
+ * revision had one, measured from first dispatch, which would have refused a
+ * thread opened on Monday and revisited on Tuesday: elapsed time is not cost.
+ * A run that hangs is the stall sweeper's problem, not the budget's.
+ */
+export const DEFAULT_THREAD_TOKEN_BUDGET = 1_000_000;
+
+/** Recent-post retention target; referenced and idempotency records are retained. */
+export const MAX_THREAD_MESSAGES = 500;
+
+/** Recent-run retention target; live and unresolved runs are retained. */
+export const MAX_THREAD_RUNS = 200;
+
+/**
+ * Acknowledged outbox events kept for audit. Pending events are always kept;
+ * an acknowledged one is never replayed, so dropping older ones is safe.
+ */
+export const MAX_ACKNOWLEDGED_OUTBOX = 50;

@@ -8,15 +8,9 @@ import { type MutableRefObject, useCallback } from 'react';
 import { type DOMElement } from 'ink';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useMouseEvents } from '../../hooks/useMouseEvents.js';
+import { useContextMenu } from '../../context-menu/ContextMenuContext.js';
 import { type MouseEvent } from '../../utils/mouse.js';
-import {
-  measureElementPosition,
-  layoutRowForEvent,
-} from '../../utils/measure-element-position.js';
-import {
-  findItemAtLayoutRow,
-  type VisibleItemRect,
-} from '../../utils/list-mouse.js';
+import { findElementAtMouseEvent } from '../../utils/mouse-hit.js';
 
 export interface RowMouseControllerProps {
   /** Outer list container node — bounds interactions horizontally. */
@@ -66,42 +60,20 @@ export function RowMouseController({
   onSelectIndex,
 }: RowMouseControllerProps): null {
   const { rows: terminalHeight } = useTerminalSize();
+  // Quiet while the context menu owns the pointer so a click on the menu
+  // overlay can't also select a list row underneath it.
+  const { menu: contextMenu } = useContextMenu();
 
   const resolveIndex = useCallback(
-    (event: MouseEvent): number | null => {
-      const container = containerRef.current;
-      if (!container) return null;
-
-      // Ignore interactions outside the list's columns so a click elsewhere on
-      // the same terminal row doesn't hijack a selection.
-      const containerRect = measureElementPosition(container);
-      const col0 = event.col - 1;
-      if (
-        containerRect.width > 0 &&
-        (col0 < containerRect.x ||
-          col0 >= containerRect.x + containerRect.width)
-      ) {
-        return null;
-      }
-
-      const layoutRow = layoutRowForEvent(container, event.row, terminalHeight);
-
-      const rects: VisibleItemRect[] = [];
-      const nodes = itemRefs.current;
-      for (let visiblePos = 0; visiblePos < nodes.length; visiblePos++) {
-        const node = nodes[visiblePos];
-        if (!node) continue;
-        const rect = measureElementPosition(node);
-        if (rect.height <= 0) continue;
-        rects.push({
-          index: scrollOffset + visiblePos,
-          top: rect.y,
-          height: rect.height,
-        });
-      }
-
-      return findItemAtLayoutRow(rects, layoutRow);
-    },
+    (event: MouseEvent): number | null =>
+      findElementAtMouseEvent(
+        containerRef.current,
+        itemRefs.current,
+        event,
+        terminalHeight,
+        'row',
+        scrollOffset,
+      ),
     [containerRef, itemRefs, scrollOffset, terminalHeight],
   );
 
@@ -121,7 +93,10 @@ export function RowMouseController({
     [resolveIndex, isDisabled, onHoverIndex, onSelectIndex],
   );
 
-  useMouseEvents(handleMouse, { isActive: true, tracking: 'any' });
+  useMouseEvents(handleMouse, {
+    isActive: contextMenu === null,
+    tracking: 'any',
+  });
 
   return null;
 }

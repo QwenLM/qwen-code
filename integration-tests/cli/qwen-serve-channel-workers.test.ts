@@ -28,6 +28,10 @@ const REPO_ROOT = path.resolve(__dirname, '../..');
 const CLI_BIN =
   process.env['TEST_CLI_PATH'] ?? path.join(REPO_ROOT, 'dist', 'cli.js');
 const TOKEN = 'multi-workspace-channel-test-token';
+// The 10s production handshake budget is a desktop budget, not a shared-runner
+// one: macOS E2E shards died on it in #11030 and reddened again in #11034.
+// Match qwen-serve-routes.test.ts.
+const ACP_INITIALIZE_TIMEOUT_MS = 60_000;
 
 let daemon: ChildProcess | undefined;
 let primaryServer: MockServerHandle | undefined;
@@ -168,6 +172,7 @@ async function stopDaemon(child: ChildProcess | undefined): Promise<void> {
 
 async function waitForRunningWorkers(
   baseUrl: string,
+  expectedWorkers = 2,
 ): Promise<ChannelWorkersStatus> {
   const deadline = Date.now() + 15_000;
   let lastStatus: ChannelWorkersStatus | undefined;
@@ -179,7 +184,7 @@ async function waitForRunningWorkers(
     lastStatus = (await response.json()) as ChannelWorkersStatus;
     const workers = lastStatus.runtime?.channelWorkers ?? [];
     if (
-      workers.length === 2 &&
+      workers.length === expectedWorkers &&
       workers.every((worker) => worker.state === 'running')
     ) {
       return lastStatus;
@@ -261,6 +266,7 @@ describe('qwen serve multi-workspace channel workers', () => {
           serverWsUrl: primaryServer.wsUrl,
           senderPolicy: 'open',
           sessionScope: 'user',
+          multiSession: true,
           cwd: workspace,
         },
       },
@@ -270,6 +276,7 @@ describe('qwen serve multi-workspace channel workers', () => {
       QWEN_HOME: qwenHome,
       QWEN_RUNTIME_DIR: runtimeDir,
       QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
+      SANDBOX_MOUNTS: REPO_ROOT,
       OPENAI_API_KEY: 'fake-key',
       OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
       OPENAI_MODEL: 'fake-model',
@@ -290,6 +297,8 @@ describe('qwen serve multi-workspace channel workers', () => {
           TOKEN,
           '--workspace',
           workspace,
+          '--initialize-timeout-ms',
+          String(ACP_INITIALIZE_TIMEOUT_MS),
         ],
         { stdio: ['ignore', 'pipe', 'pipe'], env },
       );
@@ -332,6 +341,34 @@ describe('qwen serve multi-workspace channel workers', () => {
       ],
     });
 
+    const aliceTarget = { senderId: 'alice', chatId: 'group-1' };
+    const bobTarget = { senderId: 'bob', chatId: 'group-1' };
+    await expect(
+      primaryServer.sendMessage('/session new review', aliceTarget),
+    ).resolves.toContain('Created and selected task "review"');
+    await expect(
+      primaryServer.sendMessage('/session new review', bobTarget),
+    ).resolves.toContain('Created and selected task "review"');
+    await expect(
+      primaryServer.sendMessage('/sessions all', aliceTarget),
+    ).resolves.toContain('* review (open, shared)');
+
+    await expect(
+      primaryServer.sendMessage('/session close review', aliceTarget),
+    ).resolves.toContain('No task is selected');
+    await expect(
+      primaryServer.sendMessage('/sessions', aliceTarget),
+    ).resolves.toBe('No open named tasks.');
+    await expect(
+      primaryServer.sendMessage('/sessions', bobTarget),
+    ).resolves.toContain('* review (open, shared)');
+    await expect(
+      primaryServer.sendMessage('/session use review', aliceTarget),
+    ).resolves.toContain('Selected task "review"');
+    await expect(
+      primaryServer.sendMessage('/session current', aliceTarget),
+    ).resolves.toContain('Current task: review');
+
     const same = await fetch(`${baseUrl}/workspace/channel`, {
       method: 'PUT',
       headers: authHeaders,
@@ -367,6 +404,23 @@ describe('qwen serve multi-workspace channel workers', () => {
       selection: null,
       workers: [],
     });
+
+    const enableAfterRestart = await fetch(`${baseUrl}/workspace/channel`, {
+      method: 'PUT',
+      headers: authHeaders,
+      body: JSON.stringify({
+        selection: { mode: 'names', names: ['runtime'] },
+      }),
+    });
+    expect(enableAfterRestart.status).toBe(201);
+    await primaryServer.waitForConnection(15_000);
+    await waitForRunningControl(baseUrl);
+    await expect(
+      primaryServer.sendMessage('/session use review', aliceTarget),
+    ).resolves.toContain('Selected task "review"');
+    await expect(
+      primaryServer.sendMessage('/session use review', bobTarget),
+    ).resolves.toContain('Selected task "review"');
   }, 60_000);
 
   it('returns partial startup failures from control and daemon status', async () => {
@@ -425,6 +479,8 @@ describe('qwen serve multi-workspace channel workers', () => {
         TOKEN,
         '--workspace',
         workspace,
+        '--initialize-timeout-ms',
+        String(ACP_INITIALIZE_TIMEOUT_MS),
       ],
       {
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -553,6 +609,8 @@ describe('qwen serve multi-workspace channel workers', () => {
         TOKEN,
         '--workspace',
         workspace,
+        '--initialize-timeout-ms',
+        String(ACP_INITIALIZE_TIMEOUT_MS),
       ],
       {
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -688,6 +746,8 @@ describe('qwen serve multi-workspace channel workers', () => {
         'primary',
         '--channel',
         'secondary',
+        '--initialize-timeout-ms',
+        String(ACP_INITIALIZE_TIMEOUT_MS),
       ],
       {
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -735,6 +795,240 @@ describe('qwen serve multi-workspace channel workers', () => {
         }),
       ]),
     );
+    expect(daemon.exitCode).toBeNull();
+  }, 45_000);
+
+  it("restores each workspace's own serve.channels on a flagless boot", async () => {
+    testRoot = realpathSync(
+      mkdtempSync(path.join(tmpdir(), 'qwen-serve-channel-restore-')),
+    );
+    const qwenHome = path.join(testRoot, 'qwen-home');
+    const runtimeDir = path.join(testRoot, 'runtime');
+    const primaryWorkspace = path.join(testRoot, 'primary');
+    const secondaryWorkspace = path.join(testRoot, 'secondary');
+    mkdirSync(primaryWorkspace);
+    mkdirSync(secondaryWorkspace);
+    mkdirSync(runtimeDir);
+
+    primaryServer = await createMockServer({ httpPort: 0, wsPort: 0 });
+    secondaryServer = await createMockServer({ httpPort: 0, wsPort: 0 });
+
+    const extensionDir = path.join(qwenHome, 'extensions');
+    mkdirSync(extensionDir, { recursive: true });
+    symlinkSync(
+      path.join(REPO_ROOT, 'packages', 'channels', 'plugin-example'),
+      path.join(extensionDir, 'qwen-channel-plugin-example'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    writeJson(path.join(qwenHome, 'settings.json'), {
+      security: { folderTrust: { enabled: true } },
+    });
+    const trustedFoldersPath = path.join(qwenHome, 'trustedFolders.json');
+    writeJson(trustedFoldersPath, {
+      [primaryWorkspace]: 'TRUST_FOLDER',
+      [secondaryWorkspace]: 'TRUST_FOLDER',
+    });
+    // Each workspace asks for its own channel the way the management API
+    // persists it, and the daemon starts with no --channel at all.
+    writeJson(path.join(primaryWorkspace, '.qwen', 'settings.json'), {
+      channels: {
+        primary: {
+          type: 'plugin-example',
+          serverWsUrl: primaryServer.wsUrl,
+          senderPolicy: 'open',
+          sessionScope: 'user',
+          cwd: primaryWorkspace,
+        },
+      },
+      serve: { channels: ['primary'] },
+    });
+    writeJson(path.join(secondaryWorkspace, '.qwen', 'settings.json'), {
+      channels: {
+        secondary: {
+          type: 'plugin-example',
+          serverWsUrl: secondaryServer.wsUrl,
+          senderPolicy: 'open',
+          sessionScope: 'user',
+          cwd: secondaryWorkspace,
+        },
+      },
+      serve: { channels: ['secondary'] },
+    });
+
+    daemon = spawn(
+      process.execPath,
+      [
+        CLI_BIN,
+        'serve',
+        '--hostname',
+        '127.0.0.1',
+        '--port',
+        '0',
+        '--no-web',
+        '--token',
+        TOKEN,
+        '--workspace',
+        primaryWorkspace,
+        '--workspace',
+        secondaryWorkspace,
+        '--initialize-timeout-ms',
+        String(ACP_INITIALIZE_TIMEOUT_MS),
+      ],
+      {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          QWEN_HOME: qwenHome,
+          QWEN_RUNTIME_DIR: runtimeDir,
+          QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
+          OPENAI_API_KEY: 'fake-key',
+          OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
+          OPENAI_MODEL: 'fake-model',
+          QWEN_MODEL: 'fake-model',
+        },
+      },
+    );
+
+    const port = await waitForListening(daemon);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await fetch(`${baseUrl}/health`);
+
+    try {
+      await Promise.all([
+        primaryServer.waitForConnection(15_000),
+        secondaryServer.waitForConnection(15_000),
+      ]);
+    } catch (error) {
+      throw new Error(
+        `restored workers did not connect (daemon exitCode=${daemon.exitCode}, signal=${daemon.signalCode})`,
+        { cause: error },
+      );
+    }
+
+    const status = await waitForRunningWorkers(baseUrl);
+    expect(status.runtime?.channelWorkers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          workspaceCwd: primaryWorkspace,
+          state: 'running',
+          channels: ['primary'],
+        }),
+        expect.objectContaining({
+          workspaceCwd: secondaryWorkspace,
+          state: 'running',
+          channels: ['secondary'],
+        }),
+      ]),
+    );
+    expect(daemon.exitCode).toBeNull();
+  }, 45_000);
+  it('restores a workspace registered after boot from its own serve.channels', async () => {
+    testRoot = realpathSync(
+      mkdtempSync(path.join(tmpdir(), 'qwen-serve-channel-late-')),
+    );
+    const qwenHome = path.join(testRoot, 'qwen-home');
+    const runtimeDir = path.join(testRoot, 'runtime');
+    const primaryWorkspace = path.join(testRoot, 'primary');
+    const secondaryWorkspace = path.join(testRoot, 'secondary');
+    mkdirSync(primaryWorkspace);
+    mkdirSync(secondaryWorkspace);
+    mkdirSync(runtimeDir);
+
+    secondaryServer = await createMockServer({ httpPort: 0, wsPort: 0 });
+
+    const extensionDir = path.join(qwenHome, 'extensions');
+    mkdirSync(extensionDir, { recursive: true });
+    symlinkSync(
+      path.join(REPO_ROOT, 'packages', 'channels', 'plugin-example'),
+      path.join(extensionDir, 'qwen-channel-plugin-example'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    writeJson(path.join(qwenHome, 'settings.json'), {
+      security: { folderTrust: { enabled: true } },
+    });
+    const trustedFoldersPath = path.join(qwenHome, 'trustedFolders.json');
+    writeJson(trustedFoldersPath, {
+      [primaryWorkspace]: 'TRUST_FOLDER',
+      [secondaryWorkspace]: 'TRUST_FOLDER',
+    });
+    // The daemon boots knowing only the primary workspace, which hosts no
+    // channels at all; the secondary workspace arrives through the API.
+    writeJson(path.join(secondaryWorkspace, '.qwen', 'settings.json'), {
+      channels: {
+        late: {
+          type: 'plugin-example',
+          serverWsUrl: secondaryServer.wsUrl,
+          senderPolicy: 'open',
+          sessionScope: 'user',
+          cwd: secondaryWorkspace,
+        },
+      },
+      serve: { channels: ['late'] },
+    });
+
+    daemon = spawn(
+      process.execPath,
+      [
+        CLI_BIN,
+        'serve',
+        '--hostname',
+        '127.0.0.1',
+        '--port',
+        '0',
+        '--no-web',
+        '--token',
+        TOKEN,
+        '--workspace',
+        primaryWorkspace,
+        '--initialize-timeout-ms',
+        String(ACP_INITIALIZE_TIMEOUT_MS),
+      ],
+      {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          QWEN_HOME: qwenHome,
+          QWEN_RUNTIME_DIR: runtimeDir,
+          QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
+          OPENAI_API_KEY: 'fake-key',
+          OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
+          OPENAI_MODEL: 'fake-model',
+          QWEN_MODEL: 'fake-model',
+        },
+      },
+    );
+
+    const port = await waitForListening(daemon);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await fetch(`${baseUrl}/health`);
+
+    const registered = await fetch(`${baseUrl}/workspaces`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ cwd: secondaryWorkspace }),
+    });
+    expect(registered.status).toBe(201);
+
+    try {
+      await secondaryServer.waitForConnection(15_000);
+    } catch (error) {
+      throw new Error(
+        `late workspace worker did not connect (daemon exitCode=${daemon.exitCode}, signal=${daemon.signalCode})`,
+        { cause: error },
+      );
+    }
+
+    const status = await waitForRunningWorkers(baseUrl, 1);
+    expect(status.runtime?.channelWorkers).toEqual([
+      expect.objectContaining({
+        workspaceCwd: secondaryWorkspace,
+        state: 'running',
+        channels: ['late'],
+      }),
+    ]);
     expect(daemon.exitCode).toBeNull();
   }, 45_000);
 });

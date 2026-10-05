@@ -83,9 +83,31 @@ class TeamDeleteInvocation extends BaseToolInvocation<
     // we delete it — leaving an orphan dir that wedges the team
     // name on the next `team_create`. Sweep once more after a
     // short delay to catch the race.
-    await deleteTeamDirs(teamName);
+    //
+    // Filesystem errors (EACCES, EIO, etc.) must NOT prevent the
+    // state-reset tail below — otherwise the session is left
+    // permanently in a "team active" state with no recovery. Each
+    // sweep is wrapped separately so a first-sweep failure cannot
+    // skip the delayed second sweep (the race-catcher above). A
+    // failure is surfaced only if the FINAL sweep still fails: if
+    // the retry succeeds the directories are gone and deletion
+    // genuinely completed.
+    let fsCleanupError: unknown;
+    try {
+      await deleteTeamDirs(teamName);
+    } catch (err) {
+      debug.warn('First cleanup sweep failed; retrying after delay:', err);
+    }
     await new Promise((r) => setTimeout(r, 250));
-    await deleteTeamDirs(teamName);
+    try {
+      await deleteTeamDirs(teamName);
+    } catch (err) {
+      fsCleanupError = err;
+      debug.warn(
+        'Filesystem cleanup failed; resetting team state anyway:',
+        err,
+      );
+    }
 
     // Drop this team's in-process inbox locks now that its inboxes are
     // gone, so the lock map doesn't retain a dead Mutex per inbox for
@@ -96,6 +118,20 @@ class TeamDeleteInvocation extends BaseToolInvocation<
     this.config.setTeamManager(null);
     this.config.setTeamContext(null);
     unregisterLeader();
+
+    if (fsCleanupError) {
+      // State was reset so the session is not wedged, but the cleanup
+      // failure must NOT be converted into a complete-success claim —
+      // directories may remain on disk (issue #10210).
+      const detail =
+        fsCleanupError instanceof Error
+          ? fsCleanupError.message
+          : String(fsCleanupError);
+      const msg =
+        `Team "${teamName}" was torn down, but filesystem cleanup ` +
+        `failed: ${detail}. Team directories may remain on disk.`;
+      return { llmContent: msg, returnDisplay: msg, error: { message: msg } };
+    }
 
     const display: TeamResultDisplay = {
       type: 'team_result',

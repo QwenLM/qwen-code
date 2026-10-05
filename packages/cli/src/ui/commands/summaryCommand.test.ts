@@ -34,7 +34,7 @@ const makeContext = (projectRoot: string): CommandContext => {
   };
   const config = {
     getProjectRoot: () => projectRoot,
-    getGeminiClient: () => ({ getChat: () => chat }),
+    getLlmClient: () => ({ getChat: () => chat }),
     getModel: () => 'test-model',
   };
   return createMockCommandContext({
@@ -578,7 +578,7 @@ describe('summaryCommand custom export path', () => {
     };
     const config = {
       getProjectRoot: () => projectRoot,
-      getGeminiClient: () => ({ getChat: () => chat }),
+      getLlmClient: () => ({ getChat: () => chat }),
       getModel: () => 'test-model',
     };
     const context = createMockCommandContext({

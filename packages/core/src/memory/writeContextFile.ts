@@ -14,7 +14,7 @@ import {
 } from 'async-mutex';
 import { Storage } from '../config/storage.js';
 import {
-  getCurrentGeminiMdFilename,
+  getCurrentMemoryFilename,
   MEMORY_SECTION_HEADER,
 } from '../utils/memory-constants.js';
 
@@ -232,15 +232,15 @@ function resolveContextFilePath(
   scope: WriteContextFileScope,
   projectRoot: string,
 ): string {
-  // Honor `setGeminiMdFilename()` overrides so POST writes to the same
+  // Honor `setMemoryFilename()` overrides so POST writes to the same
   // file GET surfaces. With the prior `DEFAULT_CONTEXT_FILENAME` hard-
   // code, a deployment that switched the context filename to
   // `AGENTS.md` would have GET listing the new file while POST kept
   // appending to a stale `QWEN.md` — clients then observed "I just
   // wrote content but it's missing from /workspace/memory". Mirrors the
-  // discovery path's `getAllGeminiMdFilenames()` usage in
+  // discovery path's `getAllMemoryFilenames()` usage in
   // `workspace-memory.ts:collectWorkspaceMemoryStatus`.
-  const filename = getCurrentGeminiMdFilename();
+  const filename = getCurrentMemoryFilename();
   if (scope === 'workspace') {
     return path.join(projectRoot, filename);
   }

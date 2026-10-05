@@ -24,7 +24,7 @@ let listWorkspaceSessionsPage: ReturnType<typeof vi.fn>;
 // mock would re-fire the load effect on every render (infinite loop).
 let client: { listWorkspaceSessionsPage: ReturnType<typeof vi.fn> };
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => ({ client, capabilities }),
 }));
 

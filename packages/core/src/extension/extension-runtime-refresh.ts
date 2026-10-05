@@ -28,7 +28,7 @@ export async function refreshExtensionRuntime(
 
   // MCP servers must settle first — skills and subagents may depend on the
   // updated MCP tool list for their own refresh (e.g. SkillTool.refreshSkills()
-  // rebuilds the model-facing tool description and updates geminiClient's tool
+  // rebuilds the model-facing tool description and updates llmClient's tool
   // list). A failure here is user-visible because extension MCP tools will be
   // unavailable, so let callers surface it.
   await config.reinitializeMcpServers(config.getSettingsMcpServers());

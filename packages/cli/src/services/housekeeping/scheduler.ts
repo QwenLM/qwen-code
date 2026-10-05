@@ -13,10 +13,13 @@ import {
   createDebugLogger,
   getSubagentsRootDir,
   resolveOpenAILogDir,
+  sessionIdContext,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import { isValidSessionId } from '../../config/session-id.js';
 import { DEFAULT_OPENAI_LOG_RETENTION_DAYS } from '../../config/settingsSchema.js';
 import {
+  cleanupOldDebugLogs,
   cleanupOldFileHistoryBackups,
   cleanupOldOpenAILogs,
   cleanupOldSubagentTranscripts,
@@ -47,6 +50,19 @@ const NON_INTERACTIVE_STOP_GRACE_MS = 250;
 const FILE_HISTORY_MARKER = '.file-history-cleanup';
 const SUBAGENT_MARKER = '.subagent-cleanup';
 const OPENAI_LOGS_MARKER = '.openai-logs-cleanup';
+const DEBUG_LOGS_MARKER = '.debug-logs-cleanup';
+
+// ACP binds two fixed non-UUID session-id contexts whose debug logs land in
+// the same sweep directory: sessionIdContext.run('workspace-mcp-discovery')
+// and the 'transcript-replay' fallback (acpAgent.ts). Those stems fail
+// isValidSessionId, and each is one fixed-name file appended across every
+// run with no rotation — so they would grow unbounded in exactly the
+// directory this pass keeps bounded. Sweep them by name; the mtime cutoff
+// already protects a file still being appended to.
+const PSEUDO_DEBUG_SESSION_STEMS: ReadonlySet<string> = new Set([
+  'transcript-replay',
+  'workspace-mcp-discovery',
+]);
 
 let started = false;
 
@@ -99,7 +115,10 @@ async function getFirstPassDelay(
   settings: LoadedSettings,
 ): Promise<number> {
   const qwenDir = Storage.getGlobalQwenDir();
-  const markerPaths = [join(qwenDir, FILE_HISTORY_MARKER)];
+  const markerPaths = [
+    join(qwenDir, FILE_HISTORY_MARKER),
+    getDebugLogsMarkerPath(qwenDir, Storage.getGlobalDebugDir()),
+  ];
   const openaiTarget = getOpenAILogCleanupTarget(config, settings);
   if (openaiTarget) {
     markerPaths.push(getOpenAILogsMarkerPath(qwenDir, openaiTarget.logDir));
@@ -136,6 +155,14 @@ function getOpenAILogsMarkerPath(qwenDir: string, logDir: string): string {
     .digest('hex')
     .slice(0, 16);
   return join(qwenDir, `${OPENAI_LOGS_MARKER}-${logDirKey}`);
+}
+
+function getDebugLogsMarkerPath(qwenDir: string, debugDir: string): string {
+  const debugDirKey = createHash('sha256')
+    .update(debugDir)
+    .digest('hex')
+    .slice(0, 16);
+  return join(qwenDir, `${DEBUG_LOGS_MARKER}-${debugDirKey}`);
 }
 
 interface OpenAILogCleanupTarget {
@@ -193,27 +220,29 @@ export function startNonInteractiveOpenAILogHousekeeping(
 ): void {
   if (nonInteractiveStopping) return;
 
-  try {
-    const target = getOpenAILogCleanupTarget(config, settings);
-    if (!target || nonInteractiveJobs.has(target.logDir)) return;
+  sessionIdContext.exit(() => {
+    try {
+      const target = getOpenAILogCleanupTarget(config, settings);
+      if (!target || nonInteractiveJobs.has(target.logDir)) return;
 
-    const markerPath = getOpenAILogsMarkerPath(
-      Storage.getGlobalQwenDir(),
-      target.logDir,
-    );
-    const job: NonInteractiveOpenAILogJob = {
-      target,
-      markerPath,
-      queued: false,
-    };
-    nonInteractiveJobs.set(target.logDir, job);
-    enqueueNonInteractiveJob(job);
-  } catch (err) {
-    debugLogger.error(
-      'failed to start non-interactive OpenAI log cleanup; skipping',
-      err,
-    );
-  }
+      const markerPath = getOpenAILogsMarkerPath(
+        Storage.getGlobalQwenDir(),
+        target.logDir,
+      );
+      const job: NonInteractiveOpenAILogJob = {
+        target,
+        markerPath,
+        queued: false,
+      };
+      nonInteractiveJobs.set(target.logDir, job);
+      enqueueNonInteractiveJob(job);
+    } catch (err) {
+      debugLogger.error(
+        'failed to start non-interactive OpenAI log cleanup; skipping',
+        err,
+      );
+    }
+  });
 }
 
 export function stopNonInteractiveOpenAILogHousekeeping(): Promise<void> {
@@ -269,6 +298,16 @@ async function drainNonInteractiveQueue(): Promise<void> {
     const abortController = new AbortController();
     activeNonInteractiveAbortController = abortController;
 
+    // No sessionIdContext.exit here: every path into this drain — the
+    // start-side kick, the .finally re-kick, and the retry timers — already
+    // runs context-free because startNonInteractiveOpenAILogHousekeeping
+    // exits the context around enqueue and the worker start, and timers
+    // registered inside that scope inherit it. A second wrapper here was
+    // unreachable defensive code no test could pin (recorded in #9930's
+    // round-4 review); the single tested choke point is the start-side
+    // sessionIdContext.exit in startNonInteractiveOpenAILogHousekeeping. Any
+    // NEW way into this drain must enter through that exited scope, or it
+    // will start propagating a session id into process-scoped housekeeping.
     try {
       const result = await runOpenAILogCleanup(
         job.target,
@@ -452,6 +491,38 @@ async function runHousekeeping(
     },
   );
 
+  // Session debug logs (`~/.qwen/debug/<sessionId>.txt`) accumulate one file
+  // per session whenever QWEN_DEBUG_LOG_FILE is enabled. Sweep alongside
+  // file-history using the same cutoff; the sweeper skips the `latest` symlink
+  // and the size-rotated `daemon/` subdir. Runs unconditionally so residue
+  // from earlier debugging sessions is cleaned even when logging is now off.
+  // Interactive sessions only: the sole caller startBackgroundHousekeeping is
+  // gated on config.isInteractive(), so headless/ACP/serve processes never
+  // sweep (and per-workspace runtime dirs are never resolved here). The
+  // shared ~/.qwen/debug backlog is self-healing — the next interactive run
+  // in the same runtime dir sweeps it. Non-interactive coverage is a
+  // recorded follow-up (the #8860 → #8893 precedent).
+  const debugLogsMarkerPath = getDebugLogsMarkerPath(
+    qwenDir,
+    Storage.getGlobalDebugDir(),
+  );
+  await runThrottledOnce(
+    {
+      name: 'debug-logs-cleanup',
+      markerPath: debugLogsMarkerPath,
+      lockPath: debugLogsMarkerPath + '.lock',
+    },
+    async () => {
+      const r = await cleanupOldDebugLogs({
+        cutoffDate: cutoff,
+        excludeSessionIds: new Set([currentSessionId]),
+        isValidSessionId: (v) =>
+          isValidSessionId(v) || PSEUDO_DEBUG_SESSION_STEMS.has(v),
+      });
+      debugLogger.debug(`debug-logs: removed=${r.removed} errors=${r.errors}`);
+    },
+  );
+
   // Subagent transcripts live per-project under <projectDir>/subagents/.
   // Throttle per-project without writing marker dotfiles into the user's
   // checkout. Guard the access: real Config always exposes storage; the
@@ -518,5 +589,6 @@ export const _getFirstPassDelayForTesting = getFirstPassDelay;
 export const _runHousekeepingForTesting = runHousekeeping;
 export const _runPassForTesting = runPass;
 export const _FILE_HISTORY_MARKER_FOR_TESTING = FILE_HISTORY_MARKER;
+export const _getDebugLogsMarkerPathForTesting = getDebugLogsMarkerPath;
 export const _getSubagentMarkerPathForTesting = getSubagentMarkerPath;
 export const _getOpenAILogsMarkerPathForTesting = getOpenAILogsMarkerPath;

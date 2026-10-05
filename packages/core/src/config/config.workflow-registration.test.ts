@@ -76,7 +76,7 @@ vi.mock('../ide/ide-client.js', () => ({
   },
 }));
 vi.mock('../utils/memory-constants.js', () => ({
-  setGeminiMdFilename: vi.fn(),
+  setMemoryFilename: vi.fn(),
 }));
 
 import * as fs from 'node:fs';
@@ -185,5 +185,17 @@ describe('Workflow anti-recursion guard', () => {
       '../agents/runtime/agent-core.js'
     );
     expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.TODO_WRITE)).toBe(true);
+  });
+
+  it('memory recall tools are in EXCLUDED_TOOLS_FOR_SUBAGENTS', async () => {
+    const { EXCLUDED_TOOLS_FOR_SUBAGENTS } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SEARCH_MEMORY)).toBe(
+      true,
+    );
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.MANAGE_MEMORY)).toBe(
+      true,
+    );
   });
 });

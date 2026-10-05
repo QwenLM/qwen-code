@@ -10,6 +10,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   rename,
   rm,
   symlink,
@@ -68,6 +69,7 @@ vi.mock(
 const cleanup: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
@@ -101,7 +103,10 @@ describe('Live conversation workspace root', () => {
     expect(first.canonicalRoot).toBe(realpathSync.native(expected));
     const stats = await lstat(expected);
     expect(stats.isDirectory()).toBe(true);
-    expect(first).toMatchObject({ device: stats.dev, inode: stats.ino });
+    expect(first).toMatchObject({
+      device: stats.dev,
+      inode: Number.isSafeInteger(stats.ino) && stats.ino > 0 ? stats.ino : 0,
+    });
     if (process.platform !== 'win32') {
       expect(stats.mode & 0o077).toBe(0);
     }
@@ -165,13 +170,22 @@ describe('Live conversation workspace root', () => {
     }
   });
 
-  it('revalidates both canonical identity and the configured path', async () => {
+  it('revalidates both canonical identity and the configured path', async (ctx) => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });
     const identity = await workspace.getRoot();
 
+    // Both revalidations return the SAME object and skip the inode whenever
+    // `inodeVerifiable` is false on both sides, so they hold on a host with
+    // unverifiable inodes — gate them away and a mutant returning a fresh
+    // object goes undetected there. Only the swap below needs a real inode.
     expect(await workspace.revalidate()).toBe(identity);
     expect(await revalidateConversationRoot(identity)).toBe(identity);
+
+    if (!identity.inodeVerifiable) {
+      ctx.skip();
+      return;
+    }
 
     await rename(identity.configuredRoot, `${identity.configuredRoot}-old`);
     await mkdir(identity.configuredRoot, { mode: 0o700 });
@@ -179,7 +193,7 @@ describe('Live conversation workspace root', () => {
     await expect(workspace.revalidate()).rejects.toThrow(/identity changed/);
   });
 
-  it('preserves Live filesystem errors while standalone keeps root scope', async () => {
+  it('preserves Live filesystem errors while standalone keeps root scope', async (ctx) => {
     const liveHome = await tempHome();
     const liveWorkspace = new ConversationWorkspace({ homeDir: liveHome });
     const liveRoot = await liveWorkspace.getRoot();
@@ -193,6 +207,10 @@ describe('Live conversation workspace root', () => {
       homeDir: standaloneHome,
     });
     const standaloneRoot = await standaloneWorkspace.getRoot();
+    if (!standaloneRoot.inodeVerifiable) {
+      ctx.skip();
+      return;
+    }
     await rename(
       standaloneRoot.configuredRoot,
       `${standaloneRoot.configuredRoot}-old`,
@@ -379,6 +397,7 @@ describe('Live conversation workspace root', () => {
     const created = await workspace.ensureStandaloneDirectory('standalone');
     expect(created.status).toBe('created');
     if (created.status !== 'created') throw new Error('expected creation');
+    if (created.identity.inode === 0) return;
 
     await expect(
       workspace.inspectStandaloneDirectory('standalone', created.identity),
@@ -423,7 +442,9 @@ describe('Live conversation workspace root', () => {
     expect(ensured.identity.canonicalPath).toBe(
       prepared.identity.canonicalPath,
     );
-    expect(ensured.identity.inode).not.toBe(prepared.identity.inode);
+    if (prepared.identity.inode !== 0) {
+      expect(ensured.identity.inode).not.toBe(prepared.identity.inode);
+    }
   });
 
   it('returns the raced inspection when a concurrent creator wins the ensure race', async () => {
@@ -529,5 +550,192 @@ describe('Live conversation workspace root', () => {
       throw new Error('expected compromised');
     }
     expect(ensured.error).toBe(racedError);
+  });
+
+  it('stages and restores the exact standalone directory identity', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+    await writeFile(
+      join(prepared.identity.canonicalPath, 'transient.txt'),
+      'keep during staging',
+    );
+
+    const staged = await workspace.stageStandaloneDirectory(
+      'standalone',
+      prepared.identity,
+    );
+
+    expect(staged.name).toBe(`${prepared.identity.name}.deleting`);
+    expect(staged.canonicalPath).toBe(
+      `${prepared.identity.canonicalPath}.deleting`,
+    );
+    expect(staged).toMatchObject({
+      storageSessionId: prepared.identity.storageSessionId,
+      device: prepared.identity.device,
+      inode: prepared.identity.inode,
+    });
+    await expect(
+      workspace.inspectStandaloneDeletionPaths('standalone', prepared.identity),
+    ).resolves.toMatchObject({ status: 'staged' });
+
+    const restored = await workspace.restoreStagedStandaloneDirectory(
+      'standalone',
+      prepared.identity,
+    );
+    expect(restored).toMatchObject({
+      name: prepared.identity.name,
+      canonicalPath: prepared.identity.canonicalPath,
+      device: prepared.identity.device,
+      inode: prepared.identity.inode,
+    });
+    await expect(
+      lstat(join(restored.canonicalPath, 'transient.txt')),
+    ).resolves.toMatchObject({ size: 19 });
+  });
+
+  it('reconstructs only internally consistent deletion expectations', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+
+    await expect(
+      workspace.createStandaloneDeletionExpectation('standalone', {
+        device: prepared.identity.device,
+        inode: prepared.identity.inode,
+        inodeVerifiable: prepared.identity.inode !== 0,
+      }),
+    ).resolves.toEqual(prepared.identity);
+    await expect(
+      workspace.createStandaloneDeletionExpectation('standalone', {
+        device: prepared.identity.device,
+        inode: 0,
+        inodeVerifiable: true,
+      }),
+    ).rejects.toMatchObject({
+      name: 'ConversationDirectoryIdentityError',
+      reason: 'unexpected_identity',
+    });
+  });
+
+  it('removes only a matching staged standalone directory', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+    await mkdir(join(prepared.identity.canonicalPath, 'nested'), {
+      mode: 0o700,
+    });
+    await writeFile(
+      join(prepared.identity.canonicalPath, 'nested', 'remove.txt'),
+      'remove',
+    );
+    const staged = await workspace.stageStandaloneDirectory(
+      'standalone',
+      prepared.identity,
+    );
+
+    await workspace.removeStagedStandaloneDirectory(
+      'standalone',
+      prepared.identity,
+    );
+
+    await expect(lstat(staged.canonicalPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(
+      (await lstat((await workspace.getRoot()).canonicalRoot)).isDirectory(),
+    ).toBe(true);
+  });
+
+  it('surfaces root directory sync failures', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const root = await workspace.getRoot();
+    const probe = await open(root.canonicalRoot, 'r');
+    const prototype = Object.getPrototypeOf(probe) as {
+      sync(): Promise<void>;
+    };
+    await probe.close();
+    const syncError = Object.assign(new Error('root sync failed'), {
+      code: 'EIO',
+    });
+    vi.spyOn(prototype, 'sync').mockRejectedValueOnce(syncError);
+
+    await expect(workspace.confirmStandaloneRootDurability(root)).rejects.toBe(
+      syncError,
+    );
+  });
+
+  it('rejects a root whose inode verifiability changed', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const root = await workspace.getRoot();
+    const changedRoot = root.inodeVerifiable
+      ? { ...root, inode: 0, inodeVerifiable: false }
+      : { ...root, inode: 1, inodeVerifiable: true };
+
+    await expect(
+      workspace.confirmStandaloneRootDurability(changedRoot),
+    ).rejects.toBeInstanceOf(ConversationDirectoryIdentityError);
+  });
+
+  it('does not treat root inspection failures as unsupported Windows sync', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const root = await workspace.getRoot();
+    const probe = await open(root.canonicalRoot, 'r');
+    const prototype = Object.getPrototypeOf(probe) as {
+      stat(): ReturnType<typeof probe.stat>;
+    };
+    await probe.close();
+    const statError = Object.assign(new Error('root stat failed'), {
+      code: 'EACCES',
+    });
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    vi.spyOn(prototype, 'stat').mockRejectedValueOnce(statError);
+
+    await expect(workspace.confirmStandaloneRootDurability(root)).rejects.toBe(
+      statError,
+    );
+  });
+
+  it('fails closed when both normal and staged deletion paths exist', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+    await mkdir(`${prepared.identity.canonicalPath}.deleting`, { mode: 0o700 });
+
+    const inspected = await workspace.inspectStandaloneDeletionPaths(
+      'standalone',
+      prepared.identity,
+    );
+
+    expect(inspected.status).toBe('compromised');
+    if (inspected.status !== 'compromised') {
+      throw new Error('expected compromised');
+    }
+    expect(inspected.error.reason).toBe('unexpected_identity');
+  });
+
+  it('rejects a replacement directory during deletion staging', async (ctx) => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+    if (prepared.identity.inode === 0) {
+      ctx.skip();
+      return;
+    }
+    await rename(
+      prepared.identity.canonicalPath,
+      `${prepared.identity.canonicalPath}.preserved`,
+    );
+    await mkdir(prepared.identity.canonicalPath, { mode: 0o700 });
+
+    await expect(
+      workspace.stageStandaloneDirectory('standalone', prepared.identity),
+    ).rejects.toMatchObject({
+      name: 'ConversationDirectoryIdentityError',
+      reason: 'unexpected_identity',
+    });
   });
 });

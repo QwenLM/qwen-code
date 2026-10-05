@@ -4,5 +4,10 @@
     "composite": true,
     "rootDir": "./src",
     "tsBuildInfoFile": "./dist/tsconfig.reference.tsbuildinfo"
-  }
+  },
+  // The paths entry inherited from tsconfig.json resolves core subpath imports
+  // to core sources; in a composite tsc --build graph that file belongs to
+  // the core project, so it must be referenced here (mirrors
+  // packages/acp-bridge/tsconfig.json) or the build fails TS6059/TS6307.
+  "references": [{ "path": "../core" }]
 }

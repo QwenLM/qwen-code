@@ -117,7 +117,7 @@ def test_build_cli_arguments_maps_all_consolidated_options() -> None:
     assert args[args.index("--fallback-model") + 1] == "qwen-plus,qwen-turbo"
     assert "--proxy" in args
     assert args[args.index("--proxy") + 1] == "http://proxy:8080"
-    assert "--sandbox" in args
+    assert "--sandbox=true" in args
     assert "--safe-mode" in args
     assert "--insecure" in args
     assert "--worktree" in args
@@ -125,6 +125,14 @@ def test_build_cli_arguments_maps_all_consolidated_options() -> None:
     assert args[args.index("--disabled-slash-commands") + 1] == "/init,/vim"
     assert "--custom-flag" in args
     assert args[args.index("--custom-flag") + 1] == "value"
+
+
+def test_automatic_sandbox_keeps_text_extra_args_separate() -> None:
+    args = build_cli_arguments(
+        QueryOptions(sandbox=True, extra_args=["explain the parser"])
+    )
+
+    assert args[-2:] == ["--sandbox=true", "explain the parser"]
 
 
 def test_prepare_spawn_info_uses_runtime_for_python_scripts(tmp_path: Path) -> None:
@@ -145,6 +153,56 @@ def test_prepare_spawn_info_uses_node_for_javascript_files(tmp_path: Path) -> No
 
     assert spawn_info.command == "node"
     assert spawn_info.args == [str(script_path.resolve())]
+
+
+@pytest.mark.asyncio
+async def test_transport_reads_stream_json_lines_larger_than_64_kib(
+    tmp_path: Path,
+) -> None:
+    script_path = tmp_path / "large-stream-json.py"
+    script_path.write_text(
+        "import json\n"
+        "message = {\n"
+        '    "type": "user",\n'
+        f'    "uuid": "{VALID_UUID}",\n'
+        '    "session_id": "223e4567-e89b-12d3-a456-426614174000",\n'
+        '    "parent_tool_use_id": None,\n'
+        '    "message": {\n'
+        '        "role": "user",\n'
+        '        "content": [{\n'
+        '            "type": "tool_result",\n'
+        '            "tool_use_id": "test-tool-call",\n'
+        '            "content": "x" * (128 * 1024),\n'
+        '            "is_error": False,\n'
+        "        }],\n"
+        "    },\n"
+        "}\n"
+        "print(json.dumps(message))\n",
+        encoding="utf-8",
+    )
+
+    transport_module = __import__(
+        "qwen_code_sdk.transport",
+        fromlist=["ProcessTransport"],
+    )
+    transport = transport_module.ProcessTransport(
+        QueryOptions(
+            path_to_qwen_executable=str(script_path),
+            timeout=TimeoutOptions(),
+        )
+    )
+
+    await transport.start()
+    try:
+        messages = [message async for message in transport.read_messages()]
+    finally:
+        await transport.close()
+
+    assert len(messages) == 1
+    assert messages[0]["type"] == "user"
+    tool_result = messages[0]["message"]["content"][0]
+    assert tool_result["type"] == "tool_result"
+    assert tool_result["content"] == "x" * (128 * 1024)
 
 
 def test_prepare_spawn_info_keeps_plain_command_names() -> None:

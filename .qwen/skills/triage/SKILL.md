@@ -48,9 +48,13 @@ gh label list --repo "$REPO" --limit 200
   defined in this skill's files. If a concern about scale or scope arises, raise it
   as a question in the Stage 1 comment — never as a block or CHANGES_REQUESTED.
   The escalation criteria are those defined in `references/pr-workflow.md`
-  (Stage 0, Stage 1b, and Stage 1c). Escalation means notifying the
+  (Stage 0, Stage 1-pre, Stage 1b, and Stage 1c). Escalation means notifying the
   maintainer, not rejecting the PR, except where Stage 0 Tier 1 explicitly
-  prescribes a `CHANGES_REQUESTED` review for large core refactors.
+  prescribes a `CHANGES_REQUESTED` review for large core refactors, where
+  Stage 1-pre prescribes a `CHANGES_REQUESTED` review for a linked issue
+  closed as not planned or a remaining delta against a merged fix, or where
+  Stage 1-pre prescribes closing a default-branch PR whose entire diff is
+  fully subsumed by a merged fix for its linked issue.
 - ⛔ **Never execute PR-derived code.** The review is static. Do not run
   `npm`/`node`/`npx`/interpreters/build/test commands against a tree containing
   the PR's changes; do not `gh pr checkout`, `git apply` the diff, or run any

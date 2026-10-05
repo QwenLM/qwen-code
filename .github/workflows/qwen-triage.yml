@@ -729,6 +729,9 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          # vars.QWEN_TRIAGE_EFFORT sets model.reasoningEffort in `settings`
+          # below (low|medium|high|xhigh|max; the CLI has no flag). Unset, it
+          # renders "", which the CLI ignores — the provider default.
           # Pin the action's unconditional global reinstall to the version
           # this job already runs. Left at `latest`, the action installs with
           # --prefer-offline and resolves the dist-tag from the runner's
@@ -788,6 +791,9 @@ jobs:
           # are also checked against the write_file path rules.
           settings: |-
             {
+              "model": {
+                "reasoningEffort": "${{ vars.QWEN_TRIAGE_EFFORT }}"
+              },
               "tools": {
                 "core": [
                   "run_shell_command",
@@ -942,6 +948,30 @@ jobs:
             fi
             exit 1
           fi
+          # A non-empty response is not necessarily a triage: on an API error
+          # the stream-json adapter appends the formatted error LAST
+          # (BaseJsonOutputAdapter appendText), optionally followed by
+          # rate-limit guidance. Run 33070765162 (triage for #10285) answered
+          # with a bare 268-char "[API Error: Connection error. ...]" that
+          # this step passed as success, so nothing retried or alerted. Strip
+          # the known suffixes, right-trim, then fail on the trailing shape --
+          # a real summary that merely quotes an API error mid-prose keeps
+          # writing afterwards and stays green. Same pattern as
+          # qwen-code-pr-review.yml.
+          BODY="${RESPONSE}"
+          for S in \
+            'Possible quota limitations in place or slow response times detected. Please wait and try again later.' \
+            'Please wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method' \
+            'Please wait and try again later. To increase your limits, request a quota increase through Vertex, or switch to another /auth method'; do
+            BODY="${BODY%"$S"}"
+          done
+          BODY="${BODY%"${BODY##*[![:space:]]}"}"
+          case "${BODY}" in
+            *"[API Error: "*"]")
+              echo "::error title=Triage aborted by an API error::The model API returned an error instead of a triage, so no triage was posted. This is infrastructure, not this issue -- re-run the failed job."
+              exit 1
+              ;;
+          esac
           echo "Triage response received (${#RESPONSE} chars)."
 
       - name: 'Notify silent triage re-run'
@@ -958,6 +988,27 @@ jobs:
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
+          # A close at/after the trigger is a terminal action of THIS run:
+          # Stage 1-pre closes a duplicate PR without leaving a review, and
+          # the review-list check below cannot tell that apart from a re-run
+          # that did nothing — it would announce on the just-closed PR that
+          # the re-run "did not" review it, and the ::warning would dispatch
+          # a human to a correctly-handled run. Read the PR's own state and
+          # exit quietly; a close BEFORE the trigger keeps the old behaviour,
+          # because this run still owes its summary. A failed `gh pr view`
+          # is not fatal: the review-list check below then decides, as before.
+          if PR_STATE="$(
+               gh pr view "$NUMBER" --repo "$GITHUB_REPOSITORY" --json state,closedAt
+             )" &&
+             CLOSED_SINCE_TRIGGER="$(
+               printf '%s' "$PR_STATE" |
+                 jq -r --arg since "$TRIGGERED_AT" \
+                   '.closedAt != null and .closedAt >= $since'
+             )" &&
+             [ "$CLOSED_SINCE_TRIGGER" = true ]; then
+            echo "PR closed at/after the trigger comment; no re-run summary needed."
+            exit 0
+          fi
           HAS_REVIEW=false
           HEAD_SHA=''
           # unknown until both the review list and the head SHA are readable
@@ -1281,23 +1332,27 @@ jobs:
           ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
           fetch-depth: 1
 
-      - name: 'Clear stale npm cache'
+      - name: 'Clear stale pnpm store'
         if: "steps.pr.outputs.decision == 'run'"
-        run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
+        run: 'rm -rf "$RUNNER_TEMP/pnpm-store"'
 
-      - name: 'Restore npm cache'
-        id: 'npm-cache'
+      - name: 'Restore pnpm store'
+        id: 'pnpm-store'
         if: "steps.pr.outputs.decision == 'run'"
         # restore-only: no post-save, so PR code cannot write to the shared cache
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
-          path: '${{ runner.temp }}/npm-cache'
-          key: "npm-ci-${{ hashFiles('package-lock.json') }}"
-          restore-keys: 'npm-ci-'
+          path: '${{ runner.temp }}/pnpm-store'
+          key: "pnpm-store-triage-${{ hashFiles('pnpm-lock.yaml') }}"
+          restore-keys: 'pnpm-store-triage-'
 
-      - name: 'Report npm cache hit'
+      - name: 'Report pnpm store hit'
         if: "steps.pr.outputs.decision == 'run'"
-        run: 'echo "npm cache: hit=${{ steps.npm-cache.outputs.cache-hit }} key=${{ steps.npm-cache.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+        run: 'echo "pnpm store: hit=${{ steps.pnpm-store.outputs.cache-hit }} key=${{ steps.pnpm-store.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+
+      - name: 'Bootstrap pnpm'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'runuser -u node -- corepack pnpm --version'
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -1310,17 +1365,17 @@ jobs:
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
           mkdir -p "$RUNNER_TEMP/tmux-results"
           chown -R node:node "$GITHUB_WORKSPACE"
-          # Make the npm cache readable+writable by the build user so
-          # `npm ci --prefer-offline --cache …` can use it without
-          # touching the Actions cache API (whose credentials were
+          # Make the pnpm store readable+writable by the build user so
+          # `pnpm install --prefer-offline --store-dir …` can use it
+          # without touching the Actions cache API (whose credentials were
           # stripped above).
-          mkdir -p "$RUNNER_TEMP/npm-cache"
-          chown -R node:node "$RUNNER_TEMP/npm-cache"
+          mkdir -p "$RUNNER_TEMP/pnpm-store"
+          chown -R node:node "$RUNNER_TEMP/pnpm-store"
           prepare_log="$RUNNER_TEMP/tmux-results/prepare.log"
 
           set +e
           {
-            # Retried once for the same reason as the verify lane: npm can
+            # Retried once for the same reason as the verify lane: an install can
             # exec a dependency's binary before its own write is closed and
             # take an ETXTBSY that has nothing to do with the PR, and this
             # lane blames the PR for any install failure. Unconditional, so
@@ -1328,19 +1383,22 @@ jobs:
             # build stays single-shot: compile errors are deterministic.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
+              printf '%s\n' '$ corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only --store-dir "$RUNNER_TEMP/pnpm-store"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-                npm ci --prefer-offline --no-audit --progress=false \
-                --cache "$RUNNER_TEMP/npm-cache"
+                corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only \
+                --store-dir "$RUNNER_TEMP/pnpm-store"
               install_status=$?
               if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
                 break
               fi
-              printf '\n%s\n' "npm ci failed with exit code ${install_status}; retrying once."
+              printf '\n%s\n' "pnpm install failed with exit code ${install_status}; retrying once."
+              # pnpm install, unlike npm ci, keeps an existing node_modules;
+              # clear it so the retry cannot inherit a half-written file.
+              find . -name node_modules -type d -prune -exec rm -rf {} +
               install_attempt=$((install_attempt + 1))
             done
             if [ "$install_status" -ne 0 ]; then
-              printf '\n%s\n' "npm ci failed with exit code ${install_status} after ${install_attempt} attempts."
+              printf '\n%s\n' "pnpm install failed with exit code ${install_status} after ${install_attempt} attempts."
             else
               printf '\n%s\n' '$ npm run build'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
@@ -1356,7 +1414,7 @@ jobs:
           if [ "${install_status:-0}" -ne 0 ]; then
             echo "verdict=fail" >> "$GITHUB_OUTPUT"
             echo "failure_phase=install" >> "$GITHUB_OUTPUT"
-            echo "::error::npm ci failed; reporting a tmux fail verdict instead of an infrastructure failure."
+            echo "::error::pnpm install failed; reporting a tmux fail verdict instead of an infrastructure failure."
             exit 0
           fi
           if [ "${build_status:-0}" -ne 0 ]; then
@@ -1388,7 +1446,7 @@ jobs:
             exit 1
           fi
 
-          # `npm ci`/`npm run build` ran the PR's lifecycle scripts as `node`
+          # `pnpm install`/`npm run build` ran the PR's lifecycle scripts as `node`
           # in the previous step. A detached postinstall child can outlive that
           # step and the one-shot sweep below — re-planting a `*-tmux-*`
           # artifact dir after the sweep runs, or tampering with the agent's
@@ -1424,7 +1482,7 @@ jobs:
             exit 1
           fi
 
-          # `npm ci`/`npm run build` just ran the PR's lifecycle scripts, which
+          # `pnpm install`/`npm run build` just ran the PR's lifecycle scripts, which
           # can plant a `tmp/<name>-tmux-<ts>/` directory holding a report.md
           # and a transcript. The collector below globs `*-tmux-*` and the
           # publisher takes the first match, so a planted dir can supply the
@@ -1997,7 +2055,7 @@ jobs:
             PREPARE_ATTEMPTS=''
             case "$PREPARE_FAILURE_PHASE" in
               install)
-                PREPARE_COMMAND='npm ci'
+                PREPARE_COMMAND='pnpm install'
                 # Retried once in the prepare step; see the verify lane.
                 PREPARE_ATTEMPTS=' twice in a row'
                 ;;
@@ -2398,9 +2456,9 @@ jobs:
               # the registry name as npmjs, so
               # `https://registry.npmjs.org.evil.com/pkg.tgz` would pass —
               # and the tarball's own postinstall never appears in the diff.
-              hit="$(grep -E '^\+' "$diff_file" | grep -E '"resolved"[[:space:]]*:[[:space:]]*"http' | grep -Ev '"resolved"[[:space:]]*:[[:space:]]*"https://registry\.npmjs\.org/' | head -1 || true)"
+              hit="$(grep -E '^\+' "$diff_file" | grep -E '"resolved"[[:space:]]*:[[:space:]]*"http|(tarball|repo):[[:space:]]*[^[:alnum:]]?https?://' | grep -Ev '"resolved"[[:space:]]*:[[:space:]]*"https://registry\.npmjs\.org/|(tarball|repo):[[:space:]]*[^[:alnum:]]?https://registry\.npmjs\.org/' | head -1 || true)"
               [ -n "$hit" ] && add_reason 'a dependency resolves outside registry.npmjs.org'
-              hit="$(grep -E '^\+\+\+ b/(.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml)$|^rename to (.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml)$' "$diff_file" | head -1 || true)"
+              hit="$(grep -E '^\+\+\+ b/(.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml|pnpm-workspace\.yaml|\.pnpmfile\.mjs)$|^rename to (.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml|pnpm-workspace\.yaml|\.pnpmfile\.mjs)$' "$diff_file" | head -1 || true)"
               [ -n "$hit" ] && add_reason 'the diff modifies package-manager configuration'
               hit="$(grep -E '^\+' "$diff_file" | grep -Ev '"(integrity|resolved)"' | awk '{ for (i = 1; i <= NF; i++) if (length($i) >= 600) { print; exit } }' || true)"
               [ -n "$hit" ] && add_reason 'the diff adds long opaque single-line content'
@@ -2545,7 +2603,11 @@ jobs:
         if: "steps.pr.outputs.decision == 'run'"
         run: |-
           set -euo pipefail
-          apt-get install -y --no-install-recommends util-linux
+          # zip pairs with the base image's unzip so the install-script archive
+          # suite runs instead of throwing at collection: its CI-host guard
+          # hard-fails when CI=true and either binary is missing, and
+          # node:22-bookworm ships unzip but not zip.
+          apt-get install -y --no-install-recommends util-linux zip
 
           # Run the global install from RUNNER_TEMP: the persistent workspace
           # still holds the PREVIOUS run's checked-out tree at this point, and
@@ -2833,7 +2895,7 @@ jobs:
       # The flakiness gate (#9125) re-runs the PR's changed test files and
       # compares outcomes across identical rounds. The file list is recorded
       # HERE — before the workspace is handed to the build user — because
-      # after `npm ci` a PR lifecycle script owns .git and could rewrite the
+      # after `pnpm install` a PR lifecycle script owns .git and could rewrite the
       # diff to hide a test file from the gate. The list lives root-owned in
       # RUNNER_TEMP, so the gate later runs exactly what was recorded. This
       # pin is honesty, not a security boundary: the gate's verdict can only
@@ -3054,23 +3116,23 @@ jobs:
           rm -f "$GATE_HOME/files-all"
           echo "Recorded $(tr -cd '\0' < "$GATE_HOME/files" | wc -c) changed test file(s) for the flakiness gate."
 
-      - name: 'Clear stale npm cache'
+      - name: 'Clear stale pnpm store'
         if: "steps.pr.outputs.decision == 'run'"
-        run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
+        run: 'rm -rf "$RUNNER_TEMP/pnpm-store"'
 
-      - name: 'Restore npm cache'
-        id: 'npm-cache'
+      - name: 'Restore pnpm store'
+        id: 'pnpm-store'
         if: "steps.pr.outputs.decision == 'run'"
         # restore-only: no post-save, so PR code cannot write to the shared cache
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
-          path: '${{ runner.temp }}/npm-cache'
-          key: "npm-ci-${{ hashFiles('package-lock.json') }}"
-          restore-keys: 'npm-ci-'
+          path: '${{ runner.temp }}/pnpm-store'
+          key: "pnpm-store-triage-${{ hashFiles('pnpm-lock.yaml') }}"
+          restore-keys: 'pnpm-store-triage-'
 
-      - name: 'Report npm cache hit'
+      - name: 'Report pnpm store hit'
         if: "steps.pr.outputs.decision == 'run'"
-        run: 'echo "npm cache: hit=${{ steps.npm-cache.outputs.cache-hit }} key=${{ steps.npm-cache.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+        run: 'echo "pnpm store: hit=${{ steps.pnpm-store.outputs.cache-hit }} key=${{ steps.pnpm-store.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -3090,23 +3152,23 @@ jobs:
           rm -f "$RUNNER_TEMP/verify-chromium-path"
           mkdir -p "$RUNNER_TEMP/verify-results"
           chown -R node:node "$GITHUB_WORKSPACE"
-          # Make the npm cache readable+writable by the build user so
-          # `npm ci --prefer-offline --cache …` can use it without
-          # touching the Actions cache API (whose credentials were
+          # Make the pnpm store readable+writable by the build user so
+          # `pnpm install --prefer-offline --store-dir …` can use it
+          # without touching the Actions cache API (whose credentials were
           # stripped above).
-          mkdir -p "$RUNNER_TEMP/npm-cache"
-          chown -R node:node "$RUNNER_TEMP/npm-cache"
+          mkdir -p "$RUNNER_TEMP/pnpm-store"
+          chown -R node:node "$RUNNER_TEMP/pnpm-store"
           prepare_log="$RUNNER_TEMP/verify-results/prepare.log"
 
           set +e
           {
-            # `npm ci` can die on a race that has nothing to do with the PR:
-            # npm writes a dependency's binary and that package's install
-            # script execs it before the write is closed, so Linux answers
-            # ETXTBSY. Observed on esbuild in run 30319209722, which turned
-            # it into a `fail` verdict against a PR that never touched the
-            # dependency. One clean retry absorbs that class — `npm ci`
-            # removes node_modules before installing, so the second attempt
+            # The install can die on a race that has nothing to do with the
+            # PR: a dependency's binary is written and that package's
+            # install script execs it before the write is closed, so Linux
+            # answers ETXTBSY. Observed on esbuild under npm in run
+            # 30319209722, which turned it into a `fail` verdict against a PR
+            # that never touched the dependency. One clean retry absorbs that
+            # class — node_modules is cleared before the second attempt, so it
             # cannot inherit the half-written file.
             #
             # Unconditional by design. Gating the retry on the log would
@@ -3119,19 +3181,22 @@ jobs:
             # would only double the cost of an honest failure.
             install_attempt=1
             while :; do
-              printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false --cache "$RUNNER_TEMP/npm-cache"'
+              printf '%s\n' '$ corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only --store-dir "$RUNNER_TEMP/pnpm-store"'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-                npm ci --prefer-offline --no-audit --progress=false \
-                --cache "$RUNNER_TEMP/npm-cache"
+                corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only \
+                --store-dir "$RUNNER_TEMP/pnpm-store"
               install_status=$?
               if [ "$install_status" -eq 0 ] || [ "$install_attempt" -ge 2 ]; then
                 break
               fi
-              printf '\n%s\n' "npm ci failed with exit code ${install_status}; retrying once."
+              printf '\n%s\n' "pnpm install failed with exit code ${install_status}; retrying once."
+              # pnpm install, unlike npm ci, keeps an existing node_modules;
+              # clear it so the retry cannot inherit a half-written file.
+              find . -name node_modules -type d -prune -exec rm -rf {} +
               install_attempt=$((install_attempt + 1))
             done
             if [ "$install_status" -ne 0 ]; then
-              printf '\n%s\n' "npm ci failed with exit code ${install_status} after ${install_attempt} attempts."
+              printf '\n%s\n' "pnpm install failed with exit code ${install_status} after ${install_attempt} attempts."
             else
               printf '\n%s\n' '$ npm run build'
               runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
@@ -3167,10 +3232,10 @@ jobs:
           if [ "${install_status:-0}" -ne 0 ]; then
             if registry_unreachable; then
               echo "verdict=infra-error" >> "$GITHUB_OUTPUT"
-              echo "::error::npm ci failed (exit ${install_status}) and the registry is unreachable from this runner; reporting infrastructure."
+              echo "::error::pnpm install failed (exit ${install_status}) and the registry is unreachable from this runner; reporting infrastructure."
             else
               echo "verdict=fail" >> "$GITHUB_OUTPUT"
-              echo "::error::npm ci failed (exit ${install_status})."
+              echo "::error::pnpm install failed (exit ${install_status})."
             fi
             echo "failure_phase=install" >> "$GITHUB_OUTPUT"
             exit 0
@@ -3502,7 +3567,7 @@ jobs:
           has_vitest_config() {
             # Mirror vitest's own resolution: it accepts vitest.config AND
             # vite.config in six extensions. A narrower probe skips runnable
-            # packages (packages/webui's only config is vite.config.ts).
+            # packages (some packages only have vite.config.ts).
             local n e
             for n in vitest.config vite.config; do
               for e in ts mts cts js mjs cjs; do
@@ -3559,13 +3624,9 @@ jobs:
                 group_dirs+=('.')
                 group_cmds+=("node --test $(printf '%q' "./$f")")
                 ;;
-              packages/desktop/*|docs-site/*)
-                # Outside the npm-workspace install set (root workspaces
-                # exclude packages/desktop; docs-site is standalone), so the
-                # gate's vitest can never collect them — and desktop's
-                # nested apps each carry a package.json plus a BUILD
-                # vite.config.ts that would otherwise fool the generic
-                # resolver into treating bun-family tests as runnable.
+              docs-site/*)
+                # Outside the npm-workspace install set (docs-site is
+                # standalone), so the gate's vitest can never collect it.
                 add_skip "$f" 'outside the npm-workspace install set (unsupported runner family), skipped'
                 ;;
               *)
@@ -3579,9 +3640,9 @@ jobs:
                 fi
                 pkg="$OWNING_PKG_DIR"
                 if ! has_vitest_config "$pkg"; then
-                  # e.g. packages/desktop runs `bun test` — an unsupported
-                  # runner family stays explicitly out of scope rather than
-                  # being mis-run through vitest.
+                  # A package whose tests use an unsupported runner family
+                  # stays explicitly out of scope rather than being mis-run
+                  # through vitest.
                   add_skip "$f" "owning package ${pkg} has no vitest config (unsupported runner family), skipped"
                   continue
                 fi
@@ -3709,7 +3770,7 @@ jobs:
               # reset leaves file i seeing what files 1..i-1 left THIS
               # round — residue, staged mutations, HOME state — and round
               # 1 must sample the same restored tree as rounds 2..N (PR
-              # lifecycle scripts, npm ci/build run as node, may have
+              # lifecycle scripts, pnpm install/build run as node, may have
               # mutated the tree since the list was recorded).
               reset_round_state
               reset_rc=$?
@@ -3906,17 +3967,22 @@ jobs:
         run: |-
           set -uo pipefail
           # Download the browser binary for the Playwright package the
-          # capture harness actually imports. This lockfile has TWO
-          # Playwright trees: terminal-capture.ts imports `playwright`, but
-          # node_modules/.bin/playwright is @playwright/test's CLI, which
-          # pins a different chromium revision — so `npx playwright install`
-          # would download a browser the harness cannot launch. Resolve the
-          # CLI from the harness's own directory: require.resolve runs the
-          # same algorithm as its `from 'playwright'` import, so the binary
-          # matches the lockfile even if npm's hoist layout changes (nothing
-          # pins playwright to the root node_modules). cli.js is not in the
-          # package's exports map, so resolve the exported package.json and
-          # join. Runs as node so the tree is agent-readable without chmod.
+          # capture harness actually imports. Root `playwright` and Web
+          # Shell's `@playwright/test` carry the same exact pin, and
+          # `npm run check:lockfile` fails if the two manifests or their
+          # resolved trees drift apart, so both of those CLIs install the
+          # same chromium revision. The parity stops there: a transitive
+          # dependency of packages/mobile-mcp hoists an older
+          # `playwright-core` to the root, and its own bin pins an older
+          # revision. Resolve the CLI from the harness's own directory
+          # rather than assuming a hoist location anyway: require.resolve
+          # runs the same algorithm as the harness's `from 'playwright'`
+          # import, so the binary keeps matching the imported package if
+          # npm's hoist layout changes, if a workspace later nests its own
+          # copy, or if that parity check is ever bypassed. cli.js is not in
+          # the package's exports map, so resolve the exported package.json
+          # and join. Runs as node so the tree is agent-readable without
+          # chmod.
           # Best-effort: failure degrades to a text-only report.
           PW_PATH="${RUNNER_TEMP:?}/pw-browsers"
           mkdir -p "$PW_PATH"
@@ -3960,7 +4026,7 @@ jobs:
           fi
 
           # ── Re-establish the trust boundary after the PR's own code ran ──
-          # `npm ci`/`npm run build` executed PR-authored lifecycle scripts as
+          # `pnpm install`/`npm run build` executed PR-authored lifecycle scripts as
           # `node`. Everything below undoes what those could have left behind,
           # in order, BEFORE the agent starts.
 
@@ -4034,7 +4100,7 @@ jobs:
           mkdir -p "$AGENT_HOME"
           chown node:node "$AGENT_HOME"
 
-          # 5. Same for the upload staging dir: it is flushed before npm ci,
+          # 5. Same for the upload staging dir: it is flushed before pnpm install,
           #    but the lifecycle scripts that ran since could have planted
           #    files there too, and everything in it is uploaded verbatim.
           #    Recreate it empty (prepare.log is re-copied below if present).
@@ -4939,8 +5005,8 @@ jobs:
           echo "Workspace wiped after external code (deny-by-default cleanup for the next pool job)." >> "$GITHUB_STEP_SUMMARY"
 
   # Post the verification report back to the PR. Runs on a clean GitHub-hosted
-  # runner with the write PAT and never checks out PR code, so the write
-  # credential is isolated from the untrusted-code execution in verify above —
+  # runner with the write PAT and only checks out trusted base-repo publisher
+  # scripts, so credentials stay isolated from untrusted execution above —
   # the same split as publish-tmux. Unlike publish-tmux it also reports the
   # skip/na cases: /verify is always an explicit request, so silence would
   # read as a lost run.
@@ -4962,31 +5028,82 @@ jobs:
     # inherit the 360-minute default and a hung gh call could hold a hosted
     # runner for six hours.
     timeout-minutes: 10
-    # Checks out nothing and runs no repository code (base-repo YAML events),
-    # so the persistent ECS pool is safe.
-    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # This job carries OSS credentials, so it must stay isolated from the
+    # persistent runner pool that executes untrusted PR code.
+    runs-on: 'ubuntu-latest'
     permissions:
+      contents: 'read'
       pull-requests: 'write'
     steps:
-      - name: 'Restore workspace ownership'
-        if: "${{ runner.environment == 'self-hosted' }}"
-        run: |-
-          set -uo pipefail
-          RUNNER_UID="$(id -u)"
-          RUNNER_GID="$(id -g)"
-          if [ "$RUNNER_UID" != "0" ]; then
-            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; artifact download may fail on leftover root-owned files"
-          fi
-          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover read-only files"
+      # Sparse — the uploader, its helper dependency, and the root
+      # package.json that marks the uploader's `.js` as ESM (without it the
+      # uploader only parses on the Node versions that infer module syntax,
+      # and this job pins no Node).
+      - name: 'Checkout the OSS publisher scripts'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          # Pin the trusted ref explicitly: publish-verify only runs under
+          # issue_comment events (needs: verify), where github.sha is the
+          # default-branch head — never a PR merge ref. The pin makes
+          # "never PR code" a property of this step instead of an inference
+          # from the event's default resolution.
+          ref: '${{ github.sha }}'
+          sparse-checkout: |-
+            /package.json
+            scripts/upload-aliyun-oss-assets.js
+            scripts/release-script-utils.js
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
 
-      # The publish job runs on the persistent ECS pool and downloads into
-      # a WORKSPACE-relative directory, which the runner does not clean
-      # between jobs: without this, a previous run's (possibly a different
-      # PR's) flake-gate.log survives and the publisher — which treats the
-      # file's presence as proof THIS run staged it — embeds it as this
-      # run's evidence. The verify side already applies the same rm-first
-      # rule to its own $RUNNER_TEMP tree.
+      - name: 'Install ossutil'
+        id: 'install-ossutil'
+        # Evidence hosting is best-effort; the report still posts as text if
+        # the client cannot be installed.
+        continue-on-error: true
+        env:
+          OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
+          OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
+        run: |-
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          # Retry, unlike the release syncs: a red run there is simply rerun,
+          # but a CDN blip here costs this PR its evidence images. The
+          # worst-case budget stays inside the 10-minute job cap: 3 attempts
+          # x 120s max-time + 2 x 2s delays ≈ 6.1 minutes (an unreachable
+          # mirror fails the connect-timeout long before that).
+          curl -fsSL --retry 2 --retry-delay 2 --retry-all-errors \
+            --connect-timeout 10 --max-time 120 "$OSSUTIL_URL" -o "$tmp_dir/ossutil.zip"
+          echo "$OSSUTIL_SHA256  $tmp_dir/ossutil.zip" | sha256sum -c -
+          unzip -q "$tmp_dir/ossutil.zip" -d "$tmp_dir"
+          ossutil_path="$(find "$tmp_dir" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
+          [ -n "$ossutil_path" ] || { echo '::error::ossutil binary not found'; exit 1; }
+          chmod +x "$ossutil_path"
+          install -m 0755 "$ossutil_path" "$RUNNER_TEMP/ossutil"
+          "$RUNNER_TEMP/ossutil" >/dev/null
+
+      - name: 'Configure Aliyun OSS credentials'
+        if: "${{ steps.install-ossutil.outcome == 'success' }}"
+        continue-on-error: true
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
+          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |-
+          set -euo pipefail
+          if [ -z "$ALIYUN_OSS_ACCESS_KEY_ID" ] || [ -z "$ALIYUN_OSS_ACCESS_KEY_SECRET" ]; then
+            echo '::error::Missing Aliyun OSS credentials.'
+            exit 1
+          fi
+          "$RUNNER_TEMP/ossutil" config -e "$ALIYUN_OSS_ENDPOINT" -i "$ALIYUN_OSS_ACCESS_KEY_ID" -k "$ALIYUN_OSS_ACCESS_KEY_SECRET" -L EN -c "$RUNNER_TEMP/.ossutilconfig"
+
+      # Belt-and-braces against a stale download directory. The job moved to
+      # an ephemeral hosted runner (and checkout cleans the workspace first),
+      # so nothing should survive between runs — but the publisher treats the
+      # presence of a file like flake-gate.log as proof THIS run staged it,
+      # and that inference must not silently start embedding another PR's
+      # evidence if this job is ever moved back onto the persistent pool.
+      # The verify side applies the same rm-first rule to its $RUNNER_TEMP.
       - name: 'Clear stale downloaded results'
         run: 'rm -rf verify-results'
 
@@ -5017,6 +5134,25 @@ jobs:
           VERIFY_RESULT: '${{ needs.verify.result }}'
           DOWNLOAD_OUTCOME: '${{ steps.download.outcome }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          OSSUTIL_INSTALL_OUTCOME: '${{ steps.install-ossutil.outcome }}'
+          # PR evidence is untrusted, PR-derived content, so it gets its own
+          # bucket knob: set ALIYUN_OSS_PR_ASSETS_BUCKET to move it off the
+          # bucket that also serves release, desktop, and live-host downloads.
+          # Unset, it falls back to the shared bucket — today's behaviour.
+          # The default public URL is derived from the resolved bucket so that
+          # overriding only one of the two vars cannot post comment links
+          # that 404 against (or show stale objects from) the other bucket.
+          # A cross-region ALIYUN_OSS_ENDPOINT override must also override
+          # ALIYUN_OSS_PUBLIC_BASE_URL because the default host pins Hangzhou.
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PR_ASSETS_PUBLIC_BASE_URL || (vars.ALIYUN_OSS_PR_ASSETS_BUCKET == '' && vars.ALIYUN_OSS_PUBLIC_BASE_URL) || format('https://{0}.oss-cn-hangzhou.aliyuncs.com', vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets') }}"
+          # A stalled upload must not burn this job's 10-minute cap and take
+          # the whole report with it: bound every ossutil attempt so the
+          # uploader exhausts its retries and degrades to a text-only report
+          # instead of hanging one black-hole socket until the job dies.
+          # Worst case is one image's 3 attempts x 120s + backoffs ≈ 6.1 min
+          # (the uploader stops at the first image that fails all attempts).
+          OSS_UPLOAD_ATTEMPT_TIMEOUT_MS: '120000'
         # shellcheck disable=SC2016
         run: |-
           set -euo pipefail
@@ -5321,21 +5457,19 @@ jobs:
             printf '\n'
           }
 
-          # Host the agent's evidence images (if any) on a per-PR branch
-          # (pr-assets/<N>-verify, matching hand-run convention) and build
-          # a markdown section referencing them. Image bytes come from a run
+          # Host the agent's evidence images (if any) on Aliyun OSS and build a
+          # markdown section referencing them. Image bytes come from a run
           # that executed PR code: inert but untrusted, so filenames pass a
           # strict allowlist, count/size are capped (8 files, <2 MB each; the
           # find predicates enforce both), and any failure degrades to a
           # text-only comment rather than blocking the report. The
-          # VERIFY_ASSETS_REMOTE override exists as a test seam only.
+          # VERIFY_ASSETS_UPLOADER override exists as a test seam only.
           EVIDENCE_SECTION=''
           collect_and_host_evidence() {
             local imgs=() f base safe seen=' ' hosted=0 total=0 skipped=0
-            local dest_dir="verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
-            local assets_branch="pr-assets/${PR_NUMBER}-verify"
-            local clone_dir="${RUNNER_TEMP:-/tmp}/pr-assets"
-            local remote="${VERIFY_ASSETS_REMOTE:-https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git}"
+            local prefix="pr-assets/verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
+            local stage_dir="${RUNNER_TEMP:-/tmp}/verify-assets-stage"
+            local uploader="${VERIFY_ASSETS_UPLOADER:-scripts/upload-aliyun-oss-assets.js}"
             # `|| true` on every find: the artifact download is
             # continue-on-error, so verify-results may not exist at all, and
             # a bare non-zero find under `pipefail` would abort the step
@@ -5352,19 +5486,8 @@ jobs:
               EVIDENCE_SECTION="_${total} evidence image(s) were produced but none passed the hosting caps (8 images, ≤2 MB each); see the run artifacts._"$'\n\n'
               return 0
             fi
-            rm -rf "$clone_dir"
-            if ! git clone -q --depth 1 --branch "$assets_branch" "$remote" "$clone_dir" 2>/dev/null; then
-              rm -rf "$clone_dir"
-              mkdir -p "$clone_dir"
-              git -C "$clone_dir" init -q
-              git -C "$clone_dir" checkout -q --orphan "$assets_branch"
-              git -C "$clone_dir" remote add origin "$remote"
-            fi
-            # Rebase in the racing-push retry needs a committer identity, so
-            # set it once on the clone instead of per-command -c flags.
-            git -C "$clone_dir" config user.name 'qwen-code-ci-bot'
-            git -C "$clone_dir" config user.email 'qwen-code-ci-bot@users.noreply.github.com'
-            mkdir -p "$clone_dir/$dest_dir"
+            rm -rf "$stage_dir"
+            mkdir -p "$stage_dir"
             for f in "${imgs[@]}"; do
               base="$(basename "$f")"
               safe="$(printf '%s' "$base" | tr -cd 'a-zA-Z0-9._-' | head -c 80)"
@@ -5377,10 +5500,14 @@ jobs:
               # Two artifact dirs can sanitize to the same name; the second
               # copy would silently overwrite the first and render twice.
               case "$seen" in *" $safe "*) continue ;; esac
-              # Extension is attacker-choosable; the magic bytes are what
-              # raw.githubusercontent.com will actually serve. PNG only.
+              # Extension is attacker-choosable, and it is the enforcement
+              # point for what OSS serves: ossutil derives the object's
+              # Content-Type from the key's extension, so the .png allowlist
+              # above is what keeps these hosted as an image type. This
+              # magic-byte check then verifies the bytes actually match the
+              # claimed type. PNG only.
               [ "$(head -c 8 "$f" | od -An -tx1 | tr -d ' \n')" = '89504e470d0a1a0a' ] || continue
-              cp "$f" "$clone_dir/$dest_dir/$safe" || continue
+              cp "$f" "$stage_dir/$safe" || continue
               seen="${seen}${safe} "
               hosted=$((hosted + 1))
             done
@@ -5389,26 +5516,55 @@ jobs:
               EVIDENCE_SECTION="_${total} evidence image(s) were produced but none passed the hosting checks (PNG magic, unique sanitized name, ≤2 MB, max 8); see the run artifacts._"$'\n\n'
               return 0
             fi
-            if ! (
-              cd "$clone_dir" &&
-              git add "$dest_dir" &&
-              git commit -q -m "verify evidence for PR #${PR_NUMBER} (run ${GITHUB_RUN_ID})" &&
-              {
-                git push -q origin "HEAD:$assets_branch" 2>/dev/null ||
-                {
-                  # One retry after a racing push from another assets job.
-                  git pull -q --rebase origin "$assets_branch" 2>/dev/null &&
-                  git push -q origin "HEAD:$assets_branch" 2>/dev/null
-                }
-              }
-            ); then
-              echo "::warning::Failed to push evidence images; posting a text-only report." >&2
+            local upload_cmd=()
+            local upload_path="${PATH}"
+            local trusted_bin=''
+            if [ -n "${VERIFY_ASSETS_UPLOADER:-}" ]; then
+              upload_cmd=("$uploader")
+            elif [ "${OSSUTIL_INSTALL_OUTCOME:-}" = 'success' ] &&
+                 [ -f "${RUNNER_TEMP:-/tmp}/.ossutilconfig" ]; then
+              # Resolve node under the inherited PATH, never through the
+              # shared temp dir, and run ossutil from a fresh job-private
+              # copy of the sha256-verified binary installed above instead
+              # of resolving it through $RUNNER_TEMP (PATH hijack shape).
+              # Not exploitable on today's ephemeral ubuntu-latest runner,
+              # but the shape must not regress if this job ever moves to a
+              # persistent pool.
+              local node_bin
+              node_bin="$(command -v node || true)"
+              upload_cmd=("$node_bin" "$uploader")
+              trusted_bin="$(mktemp -d || true)"
+              if [ -n "$trusted_bin" ]; then
+                install -m 0755 "${RUNNER_TEMP:-/tmp}/ossutil" "$trusted_bin/ossutil" 2>/dev/null || true
+                upload_path="$trusted_bin"
+              fi
+            else
+              # The install and configure steps are continue-on-error, so a
+              # failure there renders green; say which precondition is missing
+              # instead of burning three retry backoffs per image on an
+              # uploader that cannot possibly authenticate.
+              echo "::warning::OSS publishing unavailable (ossutil=$([ -x "${RUNNER_TEMP:-/tmp}/ossutil" ] && echo ok || echo MISSING), config=$([ -f "${RUNNER_TEMP:-/tmp}/.ossutilconfig" ] && echo ok || echo MISSING)); posting a text-only report." >&2
               EVIDENCE_SECTION=''
               return 0
             fi
-            local raw_base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${assets_branch}/${dest_dir}"
+            if ! PATH="$upload_path" "${upload_cmd[@]}" \
+              --bucket "$ALIYUN_OSS_BUCKET" \
+              --config "${RUNNER_TEMP:-/tmp}/.ossutilconfig" \
+              --prefix "$prefix" \
+              "$stage_dir"/*.png; then
+              if [ -n "$trusted_bin" ]; then rm -rf "$trusted_bin"; fi
+              # Report the local preconditions so a tooling/credential gap
+              # (the install/config steps are continue-on-error and render
+              # green when they fail) is distinguishable from a transient
+              # upload blip without trawling three steps of logs.
+              echo "::warning::Failed to upload evidence images (ossutil=$([ -x "${RUNNER_TEMP:-/tmp}/ossutil" ] && echo ok || echo MISSING), config=$([ -f "${RUNNER_TEMP:-/tmp}/.ossutilconfig" ] && echo ok || echo MISSING)); posting a text-only report." >&2
+              EVIDENCE_SECTION=''
+              return 0
+            fi
+            if [ -n "$trusted_bin" ]; then rm -rf "$trusted_bin"; fi
+            local raw_base="${ALIYUN_OSS_PUBLIC_BASE_URL%/}/${prefix}"
             EVIDENCE_SECTION=$'### Evidence images\n\n'
-            for f in "$clone_dir/$dest_dir"/*.png; do
+            for f in "$stage_dir"/*.png; do
               [ -f "$f" ] || continue
               safe="$(basename "$f")"
               EVIDENCE_SECTION+="![${safe%.png}](${raw_base}/${safe})"$'\n\n'
@@ -5545,7 +5701,7 @@ jobs:
             PREPARE_ATTEMPTS_ZH=''
             case "$PREPARE_FAILURE_PHASE" in
               install)
-                PREPARE_COMMAND='npm ci'
+                PREPARE_COMMAND='pnpm install'
                 # The prepare step retries the install once, so reaching
                 # this phase means two consecutive failures. Say so: the
                 # sentence below blames the PR for it, and "failed twice in
@@ -5562,7 +5718,7 @@ jobs:
                 echo "::warning::Unrecognized prepare failure phase: ${UNKNOWN_PREPARE_PHASE}"
                 ;;
             esac
-            # infra-error can now arise from exactly one condition: npm ci
+            # infra-error can now arise from exactly one condition: pnpm install
             # failed AND the registry was unreachable from the runner (the
             # log-pattern classifier is gone, and build failures are always
             # `fail`). The copy must name that condition and nothing else —
@@ -5853,3 +6009,7 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY_FILE" >/dev/null
           fi
           echo "Posted verification result to PR #${PR_NUMBER} (verdict=${VERDICT}, agent=${AGENT_VERDICT:-none})." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Cleanup Aliyun OSS credentials'
+        if: '${{ always() }}'
+        run: 'rm -f "$RUNNER_TEMP/.ossutilconfig"'

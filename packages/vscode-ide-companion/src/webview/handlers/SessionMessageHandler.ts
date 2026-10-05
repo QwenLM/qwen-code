@@ -10,6 +10,7 @@ import * as fsp from 'fs/promises';
 import { pathToFileURL } from 'node:url';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
+import type { Conversation } from '../../services/conversationStore.js';
 import {
   getDisplayableImageMimeType,
   MAX_IMAGE_SIZE,
@@ -23,7 +24,7 @@ import {
 } from '../utils/imageHandler.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
-import { stripZeroWidthSpaces } from '@qwen-code/webui';
+import { stripZeroWidthSpaces } from '../../utils/inputPlaceholder.js';
 import {
   exportSessionToFile,
   parseExportSlashCommand,
@@ -33,6 +34,40 @@ import {
   DISCONTINUED_MESSAGES,
   isDiscontinuedModel,
 } from '../utils/discontinuedModel.js';
+import type { InlineFilePayload } from '../../types/webviewMessageTypes.js';
+
+const INLINE_FILE_ATTRIBUTE_ESCAPES: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&apos;',
+};
+
+function escapeInlineFileAttribute(value: string): string {
+  return value.replace(
+    /[&<>"']/g,
+    (character) => INLINE_FILE_ATTRIBUTE_ESCAPES[character] ?? character,
+  );
+}
+
+function appendInlineFiles(
+  promptText: string,
+  inlineFiles: readonly InlineFilePayload[],
+): string {
+  if (inlineFiles.length === 0) {
+    return promptText;
+  }
+
+  const fileBlocks = inlineFiles
+    .map(
+      (file) =>
+        `<attached_file name="${escapeInlineFileAttribute(file.name)}" media_type="${escapeInlineFileAttribute(file.mediaType)}">\n${file.text}\n</attached_file>`,
+    )
+    .join('\n\n');
+
+  return promptText.length > 0 ? `${promptText}\n\n${fileBlocks}` : fileBlocks;
+}
 
 function formatExportSuccessMessage(
   formatLabel: string,
@@ -57,6 +92,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
   canHandle(messageType: string): boolean {
     return [
       'sendMessage',
+      'editMessage',
+      'exportSession',
       'newQwenSession',
       'switchQwenSession',
       'getQwenSessions',
@@ -105,6 +142,41 @@ export class SessionMessageHandler extends BaseMessageHandler {
               }
             | undefined,
           data?.attachments as ImageAttachment[] | undefined,
+          data?.inlineFiles as InlineFilePayload[] | undefined,
+        );
+        break;
+
+      case 'editMessage':
+        await this.handleSendMessage(
+          (data?.text as string) || '',
+          data?.context as
+            | Array<{
+                type: string;
+                name: string;
+                value: string;
+                startLine?: number;
+                endLine?: number;
+                isImage?: boolean;
+              }>
+            | undefined,
+          data?.fileContext as
+            | {
+                fileName: string;
+                filePath: string;
+                startLine?: number;
+                endLine?: number;
+              }
+            | undefined,
+          data?.attachments as ImageAttachment[] | undefined,
+          data?.inlineFiles as InlineFilePayload[] | undefined,
+          data?.targetTurnIndex as number | undefined,
+        );
+        break;
+
+      case 'exportSession':
+        await this.handleWebShellExport(
+          (data?.text as string) || '',
+          (data?.sessionId as string) || undefined,
         );
         break;
 
@@ -212,6 +284,67 @@ export class SessionMessageHandler extends BaseMessageHandler {
    */
   resetStreamContent(): void {
     this.currentStreamContent = '';
+  }
+
+  private async captureConversationSnapshot(
+    conversationId: string | null,
+  ): Promise<Conversation | null> {
+    if (!conversationId) return null;
+
+    const conversation =
+      await this.conversationStore.getConversation(conversationId);
+    if (conversation) {
+      return {
+        ...conversation,
+        messages: conversation.messages.map((message) => ({ ...message })),
+      };
+    }
+
+    const getSessionMessages = (
+      this.agentManager as {
+        getSessionMessages?: (sessionId: string) => Promise<ChatMessage[]>;
+      }
+    ).getSessionMessages;
+    if (!getSessionMessages) return null;
+
+    const messages = await getSessionMessages.call(
+      this.agentManager,
+      conversationId,
+    );
+    if (messages.length === 0) return null;
+
+    const timestamps = messages.map((message) => message.timestamp);
+    const recoveredConversation: Conversation = {
+      id: conversationId,
+      title: messages.find((message) => message.role === 'user')?.content ?? '',
+      messages: messages.map((message) => ({ ...message })),
+      createdAt: Math.min(...timestamps),
+      updatedAt: Math.max(...timestamps),
+    };
+    await this.conversationStore.upsertConversation(recoveredConversation);
+    return recoveredConversation;
+  }
+
+  private async restoreConversationSnapshot(
+    snapshot: Conversation | null,
+  ): Promise<void> {
+    if (!snapshot) return;
+
+    const restored = await this.conversationStore.replaceMessages(
+      snapshot.id,
+      snapshot.messages,
+    );
+    if (!restored) {
+      logger.warn(
+        '[SessionMessageHandler] Failed to restore conversation snapshot; conversation not found:',
+        snapshot.id,
+      );
+    }
+    this.updateCurrentConversationId(snapshot.id);
+    this.sendToWebView({
+      type: 'conversationLoaded',
+      data: { ...snapshot, restoreTranscript: true },
+    });
   }
 
   /**
@@ -334,17 +467,49 @@ export class SessionMessageHandler extends BaseMessageHandler {
       );
     }
 
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    return workspaceFolder?.uri.fsPath || process.cwd();
+    const fsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!fsPath) return process.cwd();
+    try {
+      // `fs/promises` realpath is documented to use the same semantics as
+      // `fs.realpath.native()`: it calls the realpath(3) binding directly, not
+      // the JS component walker that `fs.realpath` uses and that echoes the
+      // caller's casing on case-insensitive volumes (APFS/NTFS). That is the
+      // spelling `canonicalizeWorkspace` in
+      // packages/acp-bridge/src/workspacePaths.ts canonicalizes to, and the one
+      // the transcript bucket is hashed from.
+      return await fsp.realpath(fsPath);
+    } catch (error) {
+      // A workspace folder that stops resolving while the window stays open
+      // (deleted or renamed from a terminal, a removed worktree, an unmounted
+      // volume, a dangling symlink) must not block the export. For a
+      // non-symlinked folder whose spelling already matches the on-disk casing,
+      // the raw spelling IS the canonical one, so the transcript bucket under
+      // `~/.qwen/tmp/<getProjectHash(cwd)>/chats` still matches. The daemon
+      // hashes the *canonicalized* workspace (packages/cli/src/serve/server.ts),
+      // so two spellings do not: a case-variant on a case-insensitive volume
+      // (`getProjectHash` lowercases only on win32) and any alias in a symlinked
+      // folder that has stopped resolving both hash to a bucket the daemon never
+      // wrote. There the export fails the way it did before this branch existed
+      // — `loadSession` misses and `exportSessionToFile` throws "No active
+      // session found to export." before it ever reaches the save dialog.
+      // Only ENOENT falls back; EACCES/EIO/ELOOP keep propagating so transient
+      // I/O failures are not hidden, matching `canonicalizeWorkspace` in
+      // packages/acp-bridge/src/workspacePaths.ts.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      return fsPath;
+    }
   }
 
   private async handleExportCommand(
     format: SessionExportFormat,
+    explicitSessionId?: string,
   ): Promise<void> {
     // Prefer the active ACP session id. The local conversation id may still be
     // a webview-only `conv_*` placeholder after starting a fresh session.
     const sessionId =
-      this.agentManager.currentSessionId ?? this.currentConversationId;
+      explicitSessionId ??
+      this.agentManager.currentSessionId ??
+      this.currentConversationId;
     if (!sessionId) {
       const errorMsg = 'No active session found to export.';
       this.sendToWebView({
@@ -377,12 +542,36 @@ export class SessionMessageHandler extends BaseMessageHandler {
           localOnly: true,
         },
       });
+      this.sendToWebView({
+        type: 'exportCompleted',
+        data: {
+          format: formatLabel,
+          filename: result.filename,
+          filePath: result.uri.fsPath,
+        },
+      });
     } catch (error) {
       const errorMsg = this.getErrorMessage(error);
       logger.error('[SessionMessageHandler] Failed to export session:', error);
       this.sendToWebView({
         type: 'error',
         data: { message: `Failed to export session: ${errorMsg}` },
+      });
+    }
+  }
+
+  private async handleWebShellExport(
+    text: string,
+    sessionId?: string,
+  ): Promise<void> {
+    try {
+      const format = parseExportSlashCommand(text);
+      if (!format) return;
+      await this.handleExportCommand(format, sessionId);
+    } catch (error) {
+      this.sendToWebView({
+        type: 'error',
+        data: { message: this.getErrorMessage(error) },
       });
     }
   }
@@ -407,6 +596,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
       endLine?: number;
     },
     attachments?: ImageAttachment[],
+    inlineFiles?: InlineFilePayload[],
+    editTargetTurnIndex?: number,
   ): Promise<void> {
     logger.log('[SessionMessageHandler] handleSendMessage called', {
       textLength: text.length,
@@ -417,7 +608,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
     // or model-selector interactions clear the input but still trigger a submit.
     const trimmedText = stripZeroWidthSpaces(text).trim();
     const hasAttachments = (attachments?.length ?? 0) > 0;
-    if (!trimmedText && !hasAttachments) {
+    const hasInlineFiles = (inlineFiles?.length ?? 0) > 0;
+    if (!trimmedText && !hasAttachments && !hasInlineFiles) {
       logger.warn('[SessionMessageHandler] Ignoring empty message');
       return;
     }
@@ -471,6 +663,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
     }
     promptText = formattedText;
+    promptText = appendInlineFiles(promptText, inlineFiles ?? []);
     displayText = updatedDisplayText;
 
     if (hasAttachments && !trimmedText && savedImageCount === 0) {
@@ -529,22 +722,91 @@ export class SessionMessageHandler extends BaseMessageHandler {
       return;
     }
 
+    let editRestoreSnapshot: Conversation | null = null;
+    let editStoreMutationApplied = false;
+    let editAcpMutationApplied = false;
+    let editAcpHistorySnapshot: unknown[] | null = null;
+
+    if (editTargetTurnIndex !== undefined) {
+      if (!Number.isInteger(editTargetTurnIndex) || editTargetTurnIndex < 0) {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Invalid message edit target.' },
+        });
+        return;
+      }
+      if (!this.agentManager.isConnected) {
+        await this.promptAuth(
+          'You need to configure your provider to use Qwen Code.',
+        );
+        return;
+      }
+
+      try {
+        editRestoreSnapshot = await this.captureConversationSnapshot(
+          this.currentConversationId,
+        );
+        if (editRestoreSnapshot) {
+          const truncated = await this.conversationStore.truncateFromUserTurn(
+            this.currentConversationId,
+            editTargetTurnIndex,
+          );
+          if (!truncated) {
+            throw new Error('Conversation not found for edit target.');
+          }
+          editStoreMutationApplied = true;
+        }
+
+        const rewindResult =
+          await this.agentManager.rewindSession(editTargetTurnIndex);
+        editAcpHistorySnapshot = rewindResult?.historyBeforeRewind ?? null;
+        editAcpMutationApplied = true;
+        const retainedConversation =
+          await this.conversationStore.getConversation(
+            this.currentConversationId,
+          );
+        this.sendToWebView({
+          type: 'conversationRewound',
+          data: {
+            targetTurnIndex: editTargetTurnIndex,
+            sessionId: this.agentManager.currentSessionId,
+            messages: retainedConversation?.messages ?? [],
+          },
+        });
+      } catch (error) {
+        if (editAcpMutationApplied && editAcpHistorySnapshot) {
+          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
+        }
+        if (editStoreMutationApplied) {
+          await this.restoreConversationSnapshot(editRestoreSnapshot);
+        }
+        const errorMsg = this.getErrorMessage(error);
+        vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+        this.sendToWebView({ type: 'error', data: { message: errorMsg } });
+        return;
+      }
+    }
+
     // Check if this is the first message
     let isFirstMessage = false;
-    try {
-      const conversation = await this.conversationStore.getConversation(
-        this.currentConversationId,
-      );
-      isFirstMessage = !conversation || conversation.messages.length === 0;
-    } catch (error) {
-      logger.error(
-        '[SessionMessageHandler] Failed to check conversation:',
-        error,
-      );
+    if (editTargetTurnIndex !== undefined) {
+      isFirstMessage = editTargetTurnIndex === 0;
+    } else {
+      try {
+        const conversation = await this.conversationStore.getConversation(
+          this.currentConversationId,
+        );
+        isFirstMessage = !conversation || conversation.messages.length === 0;
+      } catch (error) {
+        logger.error(
+          '[SessionMessageHandler] Failed to check conversation:',
+          error,
+        );
+      }
     }
 
     // Generate title for first message, but only if it hasn't been set yet
-    if (isFirstMessage && !this.isTitleSet) {
+    if (isFirstMessage && (!this.isTitleSet || editTargetTurnIndex === 0)) {
       this.sendToWebView({
         type: 'sessionTitleUpdated',
         data: {
@@ -573,8 +835,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
         error,
       );
 
+      if (editAcpMutationApplied && editAcpHistorySnapshot) {
+        await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
+      }
+      if (editStoreMutationApplied) {
+        await this.restoreConversationSnapshot(editRestoreSnapshot);
+      }
+
       const errorMsg = this.getErrorMessage(error);
-      vscode.window.showErrorMessage(`Failed to send message: ${errorMsg}`);
+      vscode.window.showErrorMessage(
+        `${editTargetTurnIndex === undefined ? 'Failed to send' : 'Failed to edit'} message: ${errorMsg}`,
+      );
       this.sendToWebView({
         type: 'error',
         data: { message: errorMsg },
@@ -760,6 +1031,13 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
     } catch (error) {
       logger.error('[SessionMessageHandler] Error sending message:', error);
+
+      if (editAcpMutationApplied && editAcpHistorySnapshot) {
+        await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
+      }
+      if (editStoreMutationApplied) {
+        await this.restoreConversationSnapshot(editRestoreSnapshot);
+      }
 
       const err = error as unknown as Error;
       // Safely convert error to string

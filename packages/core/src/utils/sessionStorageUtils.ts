@@ -11,27 +11,18 @@
  * file reading for fast session metadata access on large JSONL files.
  */
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import * as path from 'node:path';
+import { getProjectHash } from './paths.js';
+import {
+  _recoverObjectsFromLine,
+  parseLineTolerantWithIntegrity,
+} from './jsonl-utils.js';
+import { openSyncNoFollow } from './no-follow-open.js';
 
 /** Size of the head/tail buffer for lite metadata reads (64KB). */
 export const LITE_READ_BUF_SIZE = 64 * 1024;
-
-/**
- * Flags used when opening session files for metadata reads. `O_NOFOLLOW`
- * refuses to follow symlinks — defense in depth so a symlink planted in
- * `~/.qwen/tmp/<hash>/chats/` (by another local user or an extension with
- * filesystem access) can't redirect a metadata read to an unrelated file.
- * Falls back to plain read-only when the flag isn't available (e.g. Windows
- * doesn't expose O_NOFOLLOW; the constant is `undefined` there).
- *
- * Computed lazily so tests that stub out `fs` don't blow up at module-init
- * time trying to read `fs.constants.O_RDONLY`.
- */
-function getReadOpenFlags(): number {
-  const constants = fs.constants;
-  if (!constants) return 0;
-  return (constants.O_RDONLY ?? 0) | (constants.O_NOFOLLOW ?? 0);
-}
 
 function readLatestTailIfGrown(
   fd: number,
@@ -219,6 +210,280 @@ export function extractLastJsonStringFields(
 }
 
 /**
+ * The outcome of scanning for a field on the LAST line carrying a marker.
+ * Distinguishes "the newest record omits this field" from "no such record
+ * was in view" — a difference `extractLastJsonStringField` erases, because
+ * it keeps looking at older lines until some line does carry the field.
+ */
+export interface LastMatchingLineField {
+  /** A line containing the marker was found in the scanned text. */
+  matched: boolean;
+  /** The field's value on that line — `undefined` when the line omits it. */
+  value: string | undefined;
+}
+
+export type MatchingRecordFieldReader = (
+  record: unknown,
+) => LastMatchingLineField;
+
+/**
+ * Outcome of {@link readLastMatchingLineFieldSync}. A miss is not one thing:
+ * only `absent` proves the record does not exist, and callers that would
+ * otherwise fall back to a weaker source need to tell the three apart.
+ */
+export type LastMatchingLineScan =
+  | { matched: true; value: string | undefined }
+  | {
+      matched: false;
+      /**
+       * - `absent` — the whole file was scanned and carries no such line.
+       * - `out-of-window` — the file is larger than the scan window and the
+       *   line is not in the tail; a newer record may exist out of reach.
+       * - `unreadable` — the file could not be stat'ed, opened, or read.
+       */
+      reason: 'absent' | 'out-of-window' | 'unreadable';
+    };
+
+/**
+ * Reads `key` from the LAST line containing `lineContains`, instead of the
+ * last occurrence of `key` across every matching line.
+ *
+ * For lifecycle records this is the only correct reading. A record set where
+ * a later entry legitimately drops the field — a `goal_state` record for a
+ * cleared Goal carries `goal: null` and no `objective` — must not be read as
+ * "the field is still whatever the previous record said". `matched: true`
+ * with `value: undefined` is that answer, and it is different from
+ * `matched: false`, which means no such record was in view at all.
+ * A crash-truncated line that starts the field but never closes its string is
+ * skipped; a well-formed matching line that omits the field remains decisive.
+ *
+ * A leading partial line contributes only a complete suffix record. Its
+ * truncated outer record cannot win, but a later record glued onto that
+ * prefix remains recoverable.
+ *
+ * `readRecordField` lets lifecycle callers interpret complete candidates
+ * with their authoritative parser. When that parser is present, a malformed
+ * newest marker is decisive and cannot expose an older lifecycle value.
+ */
+export function extractJsonStringFieldFromLastMatchingLine(
+  text: string,
+  lineContains: string,
+  key: string,
+  wholeLines = false,
+  recordMatches?: (record: unknown) => boolean,
+  readRecordField?: MatchingRecordFieldReader,
+): LastMatchingLineField {
+  const canStartRecoveredSuffix = (line: string, recordStart: number) => {
+    const previous = line.slice(0, recordStart).trimEnd().at(-1);
+    if (previous === '[' || previous === ',' || previous === ':') return false;
+
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = 0; i < recordStart; i++) {
+      const char = line[i];
+      if (escape) {
+        escape = false;
+      } else if (inString) {
+        if (char === '\\') escape = true;
+        else if (char === '"') inString = false;
+      } else if (char === '"') {
+        inString = true;
+      } else if (char === '{' || char === '[') {
+        depth++;
+      } else if (char === '}' || char === ']') {
+        depth = Math.max(0, depth - 1);
+      }
+    }
+    return inString || depth === 0;
+  };
+
+  const readParsedRecord = (
+    parsed: unknown,
+    record: string,
+  ): LastMatchingLineField | undefined => {
+    if (readRecordField) {
+      const field = readRecordField(parsed);
+      return field.matched ? field : undefined;
+    }
+    if (recordMatches && !recordMatches(parsed)) return undefined;
+    return {
+      matched: true,
+      value: extractJsonStringField(record, key),
+    };
+  };
+
+  let searchFrom = text.length;
+  while (searchFrom > 0) {
+    const hit = text.lastIndexOf(lineContains, searchFrom - 1);
+    if (hit < 0) break;
+    const lineStart = text.lastIndexOf('\n', hit) + 1;
+    const eol = text.indexOf('\n', hit);
+    const line = text.slice(lineStart, eol < 0 ? text.length : eol);
+    const leadingPartial = !wholeLines && lineStart === 0;
+    if (!leadingPartial) {
+      try {
+        const parsed = JSON.parse(line);
+        const field = readParsedRecord(parsed, line);
+        if (field) return field;
+        searchFrom = lineStart;
+        continue;
+      } catch {
+        // Recover complete records from a malformed physical line below.
+      }
+    }
+
+    let markerOffset = line.lastIndexOf(lineContains);
+    let authoritativeMarkerOffset = markerOffset;
+    while (markerOffset >= 0) {
+      const recordStart = line.lastIndexOf('{', markerOffset);
+      if (recordStart >= 0 && canStartRecoveredSuffix(line, recordStart)) {
+        try {
+          const parsed = JSON.parse(line.slice(recordStart));
+          const record = JSON.stringify(parsed);
+          if (record.includes(lineContains)) {
+            const field = readParsedRecord(parsed, record);
+            if (field) return field;
+          }
+        } catch {
+          // The marker does not belong to a complete suffix record.
+        }
+      }
+      markerOffset =
+        markerOffset === 0
+          ? -1
+          : line.lastIndexOf(lineContains, markerOffset - 1);
+    }
+
+    if (!leadingPartial) {
+      const recovered = _recoverObjectsFromLine<unknown>(line);
+      for (let i = recovered.length - 1; i >= 0; i--) {
+        const parsed = recovered[i];
+        const record = JSON.stringify(parsed);
+        if (record.includes(lineContains)) {
+          if (readRecordField) {
+            const recordOffset = line.lastIndexOf(record);
+            if (
+              recordOffset < 0 ||
+              recordOffset + record.lastIndexOf(lineContains) !==
+                authoritativeMarkerOffset
+            ) {
+              continue;
+            }
+          }
+          const field = readParsedRecord(parsed, record);
+          if (field) return field;
+          if (readRecordField) {
+            authoritativeMarkerOffset = line.lastIndexOf(
+              lineContains,
+              authoritativeMarkerOffset - 1,
+            );
+          }
+        }
+      }
+    }
+
+    if (readRecordField) {
+      return { matched: true, value: undefined };
+    }
+
+    searchFrom = lineStart;
+  }
+  return { matched: false, value: undefined };
+}
+
+/**
+ * File-level counterpart of
+ * {@link extractJsonStringFieldFromLastMatchingLine}: reads the marker's
+ * last line from the tail window only.
+ *
+ * There is deliberately no head-window fallback. {@link
+ * readLastJsonStringFieldSync} can fall back because a title read only ever
+ * gets *staler*, never wrong: the head copy of a title is a title the
+ * session really had. A lifecycle field is different — a head-window hit on
+ * a file larger than the window means an unknown number of later records,
+ * including the one that cleared the state, are unreadable, so the value
+ * cannot be trusted. `reason: 'absent'` reports that the scan saw the whole
+ * file, which is what lets a caller tell "no such record exists" from "no
+ * such record was reachable".
+ *
+ * Worst-case I/O: 1 × LITE_READ_BUF_SIZE per file (plus one re-read when a
+ * concurrent writer grows the file, matching the sibling reader's bound).
+ */
+export function readLastMatchingLineFieldSync(
+  filePath: string,
+  lineContains: string,
+  key: string,
+  scratchBuffer?: Buffer,
+  recordMatches?: (record: unknown) => boolean,
+  readRecordField?: MatchingRecordFieldReader,
+): LastMatchingLineScan {
+  let fd: number | undefined;
+  try {
+    const stats = fs.statSync(filePath);
+    const fileSize = stats.size;
+    if (fileSize === 0) return { matched: false, reason: 'absent' };
+
+    fd = openSyncNoFollow(filePath);
+    const buffer =
+      scratchBuffer && scratchBuffer.length >= LITE_READ_BUF_SIZE
+        ? scratchBuffer
+        : Buffer.alloc(LITE_READ_BUF_SIZE);
+
+    const scanTail = (tail: {
+      text: string;
+      size: number;
+    }): LastMatchingLineScan => {
+      const hit = extractJsonStringFieldFromLastMatchingLine(
+        tail.text,
+        lineContains,
+        key,
+        tail.size <= LITE_READ_BUF_SIZE,
+        recordMatches,
+        readRecordField,
+      );
+      if (hit.matched) return { matched: true, value: hit.value };
+      return tail.size <= LITE_READ_BUF_SIZE
+        ? { matched: false, reason: 'absent' }
+        : { matched: false, reason: 'out-of-window' };
+    };
+
+    const firstTail = readLatestTailIfGrown(fd, 0, buffer);
+    if (!firstTail) return { matched: false, reason: 'unreadable' };
+    const fromTail = scanTail(firstTail);
+    if (fromTail.matched) return fromTail;
+
+    // A concurrent writer may have appended a newer lifecycle record between
+    // the stat and the read; one bounded re-read catches it.
+    const grownTail = readLatestTailIfGrown(fd, firstTail.size, buffer);
+    if (grownTail) {
+      const fromGrownTail = scanTail(grownTail);
+      if (fromGrownTail.matched) return fromGrownTail;
+      if (
+        fromTail.reason === 'absent' &&
+        fromGrownTail.reason === 'out-of-window' &&
+        grownTail.size - firstTail.size <= LITE_READ_BUF_SIZE
+      ) {
+        return { matched: false, reason: 'absent' };
+      }
+      return fromGrownTail;
+    }
+
+    return fromTail;
+  } catch {
+    return { matched: false, reason: 'unreadable' };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // best-effort: the result is already decided
+      }
+    }
+  }
+}
+
+/**
  * Like extractJsonStringField but finds the LAST occurrence.
  * Useful for fields that are appended (customTitle, aiTitle, etc.)
  * where the most recent entry should win.
@@ -315,7 +580,11 @@ export function readLastJsonStringFieldSync(
     const fileSize = stats.size;
     if (fileSize === 0) return undefined;
 
-    fd = fs.openSync(filePath, getReadOpenFlags());
+    // O_NOFOLLOW (or the compensating identity check where the flag does
+    // not exist, e.g. Windows) refuses a symlink planted over the session
+    // file — defense in depth so a planted link can't redirect a metadata
+    // read to an unrelated file (#8227).
+    fd = openSyncNoFollow(filePath);
 
     // Phase 1: tail window — fast path. This is where every well-behaved
     // session keeps its current title (ChatRecordingService re-anchors
@@ -418,7 +687,11 @@ export function readLastJsonStringFieldsSync(
     const fileSize = stats.size;
     if (fileSize === 0) return emptyResult;
 
-    fd = fs.openSync(filePath, getReadOpenFlags());
+    // O_NOFOLLOW (or the compensating identity check where the flag does
+    // not exist, e.g. Windows) refuses a symlink planted over the session
+    // file — defense in depth so a planted link can't redirect a metadata
+    // read to an unrelated file (#8227).
+    fd = openSyncNoFollow(filePath);
 
     // Phase 1: tail window fast path. See the single-field variant for
     // the head-or-tail invariant and buffer-pool semantics.
@@ -504,4 +777,415 @@ export function readSessionTitleInfoFromFileSync(
   const source =
     rawSource === 'auto' || rawSource === 'manual' ? rawSource : undefined;
   return { title, source };
+}
+
+/**
+ * The Managed session key for a locally stored session.
+ *
+ * The key addresses both the log's records and the resource bodies they
+ * reference, so the writer and every reader must derive it identically -- a
+ * second derivation that disagreed would leave published bodies unreadable.
+ * Structurally a `ManagedSessionKey`, defined here so `utils/` stays a leaf.
+ */
+export function localManagedSessionKey(
+  projectRoot: string,
+  sessionId: string,
+): { tenantId: string; workspaceId: string; sessionId: string } {
+  return {
+    tenantId: 'local',
+    workspaceId: getProjectHash(projectRoot),
+    sessionId,
+  };
+}
+
+/**
+ * Session-owned Managed resources live beside the session under the controlled
+ * runtime base directory. Defined here so `utils/` stays a leaf layer and the
+ * resource store and this reader cannot drift apart.
+ */
+export function managedSessionResourceRoot(
+  runtimeBaseDir: string,
+  sessionId: string,
+): string {
+  if (!isSinglePathSegment(sessionId)) {
+    throw new Error('sessionId must be a single path segment.');
+  }
+  return path.join(runtimeBaseDir, 'resources', sessionId);
+}
+
+/**
+ * Checked directly rather than through `path.basename` so the guard holds even
+ * where `node:path` is stubbed, and so it cannot be weakened by a platform's
+ * separator handling.
+ */
+export function isSinglePathSegment(value: string): boolean {
+  return (
+    value.length > 0 && !/[/\\]/.test(value) && value !== '.' && value !== '..'
+  );
+}
+
+const MANAGED_HEADER_MARKER = '"subtype":"managed_session_header_v1"';
+const EXECUTION_ENGINE_SUBTYPE = 'session_execution_engine';
+const MANAGED_METADATA_MARKER = '"domain":"session_metadata"';
+const MANAGED_SOURCE_MARKER = '"domain":"session_source"';
+
+function lastLineContaining(text: string, marker: string): string | undefined {
+  const lines = text.split('\n');
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (lines[index].includes(marker)) return lines[index];
+  }
+  return undefined;
+}
+
+function lastCommittedDomainLine(
+  text: string,
+  marker: string,
+): string | undefined {
+  const lines = text.split('\n');
+  lines.pop();
+  let committed: { firstSequence: number; lastSequence: number } | undefined;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index];
+    const record = JSON.parse(line) as {
+      subtype?: string;
+      managedSession?: {
+        firstSequence?: number;
+        lastSequence?: number;
+        eventCount?: number;
+        sequence?: number;
+        kind?: string;
+      };
+    };
+    const body = record.managedSession;
+    if (record.subtype === 'managed_session_commit_v1') {
+      const first = body?.firstSequence;
+      const last = body?.lastSequence;
+      committed =
+        Number.isSafeInteger(first) &&
+        Number.isSafeInteger(last) &&
+        first! > 0 &&
+        last! >= first! &&
+        body?.eventCount === last! - first! + 1
+          ? { firstSequence: first!, lastSequence: last! }
+          : undefined;
+    } else if (
+      committed !== undefined &&
+      record.subtype === 'managed_session_event_v1' &&
+      body?.kind === 'domain.committed' &&
+      Number.isSafeInteger(body.sequence) &&
+      body.sequence! >= committed.firstSequence &&
+      body.sequence! <= committed.lastSequence &&
+      line.includes(marker)
+    ) {
+      return line;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * True when the transcript carries a Managed Session header.
+ *
+ * A positive identification, unlike the execution-engine reader, which reports
+ * `unavailable` for any transcript with a completeness diagnostic and so cannot
+ * gate legacy-only operations without regressing legacy sessions.
+ */
+export function isManagedSessionTranscriptSync(
+  filePath: string,
+  scratchBuffer?: Buffer,
+): boolean {
+  return (
+    readTranscriptHeadSync(filePath, scratchBuffer)?.includes(
+      MANAGED_HEADER_MARKER,
+    ) === true
+  );
+}
+
+/**
+ * True when the transcript positively identifies as owned by the Managed
+ * engine: it carries the Managed Session header, or an execution-engine owner
+ * record naming `managed`. A Managed owner is written before anything else,
+ * so the head window holds it.
+ *
+ * Lines are parsed the way the owner reader parses them, so an owner record
+ * that parses whole counts even when another record shares its line. A line
+ * is parsed only when it could name the owner subtype: literally, or through a
+ * `\u` escape, the only JSON escape that can spell its letters and
+ * underscores.
+ *
+ * Gates executing, recording, renaming and forking a session with Legacy.
+ * Operations that depend on the Managed Session log format use
+ * {@link isManagedSessionTranscriptSync}: an owner record alone is no log.
+ */
+export function isManagedExecutionTranscriptSync(filePath: string): boolean {
+  return readManagedExecutionEvidenceSync(filePath) === true;
+}
+
+/**
+ * The evidence {@link isManagedExecutionTranscriptSync} looks for, telling a
+ * transcript whose head cannot be read (`undefined`) apart from one that is
+ * missing or empty (`false`).
+ */
+export function readManagedExecutionEvidenceSync(
+  filePath: string,
+): boolean | undefined {
+  let head: string;
+  try {
+    head = readTranscriptHeadOrThrowSync(filePath);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? false
+      : undefined;
+  }
+  return (
+    head.includes(MANAGED_HEADER_MARKER) ||
+    head
+      .split('\n')
+      .some(
+        (line) =>
+          (line.includes(EXECUTION_ENGINE_SUBTYPE) || line.includes('\\u')) &&
+          parseLineTolerantWithIntegrity(line, filePath).records.some(
+            isManagedOwnerRecord,
+          ),
+      )
+  );
+}
+
+/**
+ * True for a parsed transcript record that names the Managed engine as the
+ * owner: a system record of the execution-engine subtype whose payload
+ * engine is `managed`. It is the one definition of that positive evidence.
+ * The owner reader validates owner records more strictly and reports one it
+ * rejects as unavailable, never as Legacy.
+ */
+export function isManagedOwnerRecord(record: unknown): boolean {
+  if (!record || typeof record !== 'object') return false;
+  const { type, subtype, systemPayload } = record as Record<string, unknown>;
+  return (
+    type === 'system' &&
+    subtype === EXECUTION_ENGINE_SUBTYPE &&
+    !!systemPayload &&
+    typeof systemPayload === 'object' &&
+    (systemPayload as Record<string, unknown>)['engine'] === 'managed'
+  );
+}
+
+function readTranscriptHeadSync(
+  filePath: string,
+  scratchBuffer?: Buffer,
+): string | undefined {
+  try {
+    const head = readTranscriptHeadOrThrowSync(filePath, scratchBuffer);
+    return head === '' ? undefined : head;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The head window, or `''` for an empty transcript; throws when unreadable. */
+function readTranscriptHeadOrThrowSync(
+  filePath: string,
+  scratchBuffer?: Buffer,
+): string {
+  let fd: number | undefined;
+  try {
+    const fileSize = fs.statSync(filePath).size;
+    if (fileSize === 0) return '';
+    fd = openSyncNoFollow(filePath);
+    const buffer =
+      scratchBuffer && scratchBuffer.length >= LITE_READ_BUF_SIZE
+        ? scratchBuffer
+        : Buffer.alloc(LITE_READ_BUF_SIZE);
+    const length = Math.min(fileSize, LITE_READ_BUF_SIZE);
+    const read = fs.readSync(fd, buffer, 0, length, 0);
+    return buffer.toString('utf-8', 0, read);
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+}
+
+/**
+ * Managed sessions keep their title in a committed `session_metadata` domain
+ * record whose body lives in the resource store, so the legacy scan for a
+ * `custom_title` record finds nothing and would report a blank title.
+ *
+ * Returns `undefined` when the transcript is not Managed, so the caller falls
+ * back to the legacy reader. Returns `{}` for a Managed session that was never
+ * renamed, which genuinely has no custom title. Display stays tolerant: an
+ * unreadable body yields `{}` rather than throwing into the session list.
+ *
+ * Like the legacy reader this only scans the tail and head windows, so a rename
+ * buried in the middle of a very long log is not found.
+ */
+export function readManagedSessionTitleInfoSync(
+  filePath: string,
+  runtimeBaseDir: string,
+  scratchBuffer?: Buffer,
+): { title?: string; source?: 'auto' | 'manual' } | undefined {
+  const found = readManagedDomainBodySync(
+    filePath,
+    runtimeBaseDir,
+    MANAGED_METADATA_MARKER,
+    scratchBuffer,
+  );
+  if (found === undefined) return undefined;
+  const body = found.body as
+    | { title?: unknown; titleSource?: unknown }
+    | undefined;
+  if (typeof body?.title !== 'string' || body.title.length === 0) return {};
+  const source =
+    body.titleSource === 'auto' || body.titleSource === 'manual'
+      ? body.titleSource
+      : undefined;
+  return { title: body.title, source };
+}
+
+/**
+ * The source a Managed session was created from, read the same way as its
+ * title: the record lives in a committed `session_source` domain body, so the
+ * legacy scan for a `session_source` line finds nothing.
+ *
+ * Returns `undefined` when the transcript is not Managed, so the caller falls
+ * back to the legacy reader, and `{}` for a Managed session with no source.
+ */
+export function readManagedSessionSourceSync(
+  filePath: string,
+  runtimeBaseDir: string,
+  scratchBuffer?: Buffer,
+): { sourceType?: string; sourceId?: string } | undefined {
+  const found = readManagedDomainBodySync(
+    filePath,
+    runtimeBaseDir,
+    MANAGED_SOURCE_MARKER,
+    scratchBuffer,
+  );
+  if (found === undefined) return undefined;
+  const payload = (
+    found.body as
+      | {
+          record?: {
+            systemPayload?: { sourceType?: unknown; sourceId?: unknown };
+          };
+        }
+      | undefined
+  )?.record?.systemPayload;
+  if (
+    typeof payload?.sourceType !== 'string' ||
+    payload.sourceType.length === 0
+  )
+    return {};
+  return {
+    sourceType: payload.sourceType,
+    ...(typeof payload.sourceId === 'string'
+      ? { sourceId: payload.sourceId }
+      : {}),
+  };
+}
+
+/**
+ * Locates the newest committed record for a domain marker and reads its body.
+ *
+ * `undefined` means the transcript carries no Managed header, which is how the
+ * callers tell "not Managed, use the legacy reader" apart from "Managed with
+ * nothing to report" (`{}`). Display stays tolerant: an unreadable body is the
+ * latter rather than a throw into the session list.
+ *
+ * Like the legacy readers this only scans the tail and head windows, so a
+ * record buried in the middle of a very long log is not found.
+ */
+function readManagedDomainBodySync(
+  filePath: string,
+  runtimeBaseDir: string,
+  marker: string,
+  scratchBuffer?: Buffer,
+): { body?: unknown } | undefined {
+  let fd: number | undefined;
+  try {
+    const fileSize = fs.statSync(filePath).size;
+    if (fileSize === 0) return undefined;
+    fd = openSyncNoFollow(filePath);
+
+    const buffer =
+      scratchBuffer && scratchBuffer.length >= LITE_READ_BUF_SIZE
+        ? scratchBuffer
+        : Buffer.alloc(LITE_READ_BUF_SIZE);
+
+    const headLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
+    const headBytes = fs.readSync(fd, buffer, 0, headLength, 0);
+    const headText = buffer.toString('utf-8', 0, headBytes);
+    const headerLine = lastLineContaining(headText, MANAGED_HEADER_MARKER);
+    if (headerLine === undefined) return undefined;
+
+    /* The recorded identity, not the file name, decides where the resources
+       live. */
+    const header = JSON.parse(headerLine) as {
+      managedSession?: { sessionKey?: { sessionId?: unknown } };
+    };
+    const recordedId = header.managedSession?.sessionKey?.sessionId;
+    if (typeof recordedId !== 'string' || recordedId.length === 0) return {};
+    const resourceRoot = managedSessionResourceRoot(runtimeBaseDir, recordedId);
+
+    let line = undefined as string | undefined;
+    const tailLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
+    const tailOffset = fileSize - tailLength;
+    if (tailOffset > 0) {
+      const tailBytes = fs.readSync(fd, buffer, 0, tailLength, tailOffset);
+      const tailText = buffer.toString('utf-8', 0, tailBytes);
+      line = lastCommittedDomainLine(
+        tailText.slice(tailText.indexOf('\n') + 1),
+        marker,
+      );
+    }
+    line ??= lastCommittedDomainLine(headText, marker);
+    if (line === undefined) return {};
+
+    const record = JSON.parse(line) as {
+      managedSession?: {
+        payload?: {
+          recordRef?: {
+            kind?: unknown;
+            resourceId?: unknown;
+            byteLength?: unknown;
+            digest?: unknown;
+          };
+        };
+      };
+    };
+    const ref = record.managedSession?.payload?.recordRef;
+    if (typeof ref?.kind !== 'string' || typeof ref.resourceId !== 'string') {
+      return {};
+    }
+    if (
+      !isSinglePathSegment(ref.kind) ||
+      !isSinglePathSegment(ref.resourceId)
+    ) {
+      return {};
+    }
+    const bytes = fs.readFileSync(
+      path.join(resourceRoot, ref.kind, ref.resourceId),
+    );
+    if (
+      bytes.byteLength !== ref.byteLength ||
+      createHash('sha256').update(bytes).digest('hex') !== ref.digest
+    ) {
+      return {};
+    }
+    return { body: JSON.parse(bytes.toString('utf8')) as unknown };
+  } catch {
+    return {};
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
 }

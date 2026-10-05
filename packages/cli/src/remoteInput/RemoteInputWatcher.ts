@@ -15,7 +15,7 @@ import {
   watchFile,
 } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/debugLogger';
 
 const debugLogger = createDebugLogger('REMOTE_INPUT');
 
@@ -74,7 +74,7 @@ export class RemoteInputWatcher {
 
   /**
    * Register the TUI's submit function. Called from AppContainer
-   * once useGeminiStream's submitQuery is available.
+   * once useLlmStream's submitQuery is available.
    */
   setSubmitFn(fn: SubmitFn): void {
     this.submitFn = fn;

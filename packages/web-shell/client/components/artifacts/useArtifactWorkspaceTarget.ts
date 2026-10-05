@@ -7,7 +7,7 @@ import {
   useWorkspaceActions,
   type DaemonFileStat,
   type DaemonWorkspaceActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useEffect, useMemo, useRef } from 'react';
 
 export type ArtifactWorkspaceActions = Pick<
@@ -143,13 +143,13 @@ export function useArtifactWorkspaceTarget(
       return current;
     };
     return {
-      async readWorkspaceFile(filePath) {
+      async readWorkspaceFile(filePath, opts) {
         const current = requireOwner();
         const result = await (current.primary
-          ? primaryActions.readWorkspaceFile(filePath)
+          ? primaryActions.readWorkspaceFile(filePath, opts)
           : workspace.client
               .workspaceByCwd(current.cwd)
-              .readWorkspaceFile(filePath));
+              .readWorkspaceFile(filePath, opts));
         requireOwner();
         return result;
       },

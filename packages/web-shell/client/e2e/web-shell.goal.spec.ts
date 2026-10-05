@@ -15,7 +15,9 @@ test('creates a Goal directly from a new task before any chat', async ({
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
   await page.goto('/');
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
 
   await submitComposer(page, '/goal start without a prior chat message');
   await expect
@@ -153,7 +155,9 @@ async function gotoSession(
   daemon: MockDaemonController,
 ): Promise<void> {
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   const connection = await daemon.sse.waitForConnection(scenario.sessionId);
   await daemon.sendEvent(
     replayCompleteEvent({ sessionId: connection.sessionId, replayedCount: 0 }),
@@ -191,4 +195,76 @@ async function capture(
   name: string,
 ): Promise<void> {
   await page.screenshot({ path: testInfo.outputPath(name), fullPage: true });
+}
+
+for (const viewport of [
+  { width: 1280, height: 720 },
+  { width: 320, height: 568 },
+  { width: 844, height: 390 },
+]) {
+  test(`goal approval keeps actions stable while reading ${viewport.width}x${viewport.height}`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize(viewport);
+    const scenario = createWebShellDaemonScenario();
+    const daemon = await installScenario(page, scenario, testInfo);
+    await gotoSession(page, scenario, daemon);
+    const objective = `Outcome: Review all open PRs. Done when: ${'Each PR has evidence. '.repeat(100)}Must not: Push or comment. Budget: 20 turns. On block: Report missing access. Context: Preserve this exact text.`;
+    const content = `Replace the paused Goal and start working toward this objective?\n\n${objective}`;
+    await daemon.sendEvent({
+      id: 10,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'goal-review',
+        sessionId: scenario.sessionId,
+        toolCall: {
+          toolCallId: 'goal-review',
+          title: `Propose Goal: ${objective}`,
+          kind: 'other',
+          rawInput: { objective },
+          _meta: { toolName: 'propose_goal' },
+          content: [
+            { type: 'content', content: { type: 'text', text: content } },
+          ],
+        },
+        options: [
+          { optionId: 'allow_once', label: 'Allow once', kind: 'allow_once' },
+          { optionId: 'reject_once', label: 'Reject', kind: 'reject_once' },
+        ],
+      },
+    });
+    const card = page.locator('[data-web-shell-goal-approval]');
+    await expect(card).toBeVisible();
+    const approve = card.getByRole('radio', { name: 'Set goal and continue' });
+    const beforeCard = await card.boundingBox();
+    const beforeButton = await approve.boundingBox();
+    expect(beforeCard).not.toBeNull();
+    expect(beforeButton).not.toBeNull();
+    expect(beforeButton!.y).toBeGreaterThanOrEqual(beforeCard!.y);
+    expect(beforeButton!.y + beforeButton!.height).toBeLessThanOrEqual(
+      Math.min(viewport.height, beforeCard!.y + beforeCard!.height),
+    );
+    await card.getByRole('tabpanel').hover();
+    expect(await card.boundingBox()).toEqual(beforeCard);
+    expect(await approve.boundingBox()).toEqual(beforeButton);
+    await page.mouse.move(0, 0);
+    expect(await card.boundingBox()).toEqual(beforeCard);
+    await card.getByRole('tab', { name: 'Full content' }).click();
+    const reading = card.getByRole('tabpanel');
+    expect(await reading.textContent()).toBe(content);
+    await reading.hover();
+    await page.mouse.wheel(0, 800);
+    await expect
+      .poll(() => reading.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
+    expect(await card.boundingBox()).toEqual(beforeCard);
+    expect(await approve.boundingBox()).toEqual(beforeButton);
+    expect(daemon.permissionRequests()).toHaveLength(0);
+    await approve.click();
+    await expect.poll(() => daemon.permissionRequests().length).toBe(1);
+    expect(daemon.permissionRequests()[0].body).toEqual({
+      outcome: { outcome: 'selected', optionId: 'allow_once' },
+    });
+  });
 }

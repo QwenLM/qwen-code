@@ -39,7 +39,7 @@ function GitBranchIcon() {
 /** Tone of the compact badge dot, by descending severity. */
 type BadgeTone = 'error' | 'warning' | 'accent';
 
-interface DerivedStatus {
+export interface DerivedStatus {
   detached: boolean;
   staged: number;
   unstaged: number;
@@ -52,7 +52,12 @@ interface DerivedStatus {
   dirty: boolean;
 }
 
-function deriveStatus(status?: DaemonWorkspaceGitStatus): DerivedStatus {
+/**
+ * Normalise a (possibly v1, possibly absent) status into zero-defaulted
+ * counters. Shared with the branch picker so both surfaces read the same
+ * numbers from the same object.
+ */
+export function deriveStatus(status?: DaemonWorkspaceGitStatus): DerivedStatus {
   const staged = status?.staged ?? 0;
   const unstaged = status?.unstaged ?? 0;
   const untracked = status?.untracked ?? 0;
@@ -73,8 +78,22 @@ function deriveStatus(status?: DaemonWorkspaceGitStatus): DerivedStatus {
   };
 }
 
-/** Compact badge tone for the icon-only (compact) chip; null when clean. */
-function badgeTone(s: DerivedStatus): BadgeTone | null {
+/**
+ * True once the daemon has actually computed the enriched (v2) fields;
+ * `computedAt` is stamped only on that path, so its absence means the counters
+ * above are defaults rather than a clean tree.
+ */
+export function hasComputedTreeSummary(
+  status?: DaemonWorkspaceGitStatus,
+): boolean {
+  return status?.computedAt !== undefined;
+}
+
+/**
+ * Severity tone for a status dot. The compact chip's badge and the sidebar
+ * details row both read it; null when there is nothing to flag.
+ */
+export function gitBranchBadgeTone(s: DerivedStatus): BadgeTone | null {
   if (s.conflicted > 0) return 'error';
   if (s.operation) return 'warning';
   if (s.detached) return 'warning';
@@ -84,7 +103,7 @@ function badgeTone(s: DerivedStatus): BadgeTone | null {
 
 type TranslateFn = ReturnType<typeof useI18n>['t'];
 
-function statusPhrases(s: DerivedStatus, t: TranslateFn): string[] {
+export function gitStatusPhrases(s: DerivedStatus, t: TranslateFn): string[] {
   const phrases: string[] = [];
   if (s.operation) phrases.push(t(`git.operation.${s.operation}`));
   if (s.detached) phrases.push(t('git.detached'));
@@ -109,11 +128,11 @@ export function gitBranchAriaLabel(
   status: DaemonWorkspaceGitStatus | undefined,
   t: TranslateFn,
 ): string {
-  const phrases = statusPhrases(deriveStatus(status), t);
+  const phrases = gitStatusPhrases(deriveStatus(status), t);
   if (phrases.length > 0) {
     return `${t('git.currentBranch', { branch })} — ${phrases.join(', ')}`;
   }
-  return status?.computedAt !== undefined
+  return hasComputedTreeSummary(status)
     ? `${t('git.currentBranch', { branch })} — ${t('git.clean')}`
     : t('git.currentBranch', { branch });
 }
@@ -137,7 +156,7 @@ export function GitBranchChipContent({
 }) {
   const { t } = useI18n();
   const s = deriveStatus(status);
-  const tone = badgeTone(s);
+  const tone = gitBranchBadgeTone(s);
   return (
     <>
       <span className={styles.gitBranchIconWrap}>
@@ -209,7 +228,7 @@ export function GitBranchIndicator({
 
   // Localized state phrases drive both the accessible label and the tooltip,
   // so the two never drift apart.
-  const phrases = statusPhrases(s, t);
+  const phrases = gitStatusPhrases(s, t);
   const ariaLabel = gitBranchAriaLabel(branch, status, t);
 
   const chipClassName = `${styles.gitBranchChip} ${
@@ -269,7 +288,7 @@ export function GitBranchIndicator({
                   {phrase}
                 </div>
               ))
-            ) : status?.computedAt !== undefined ? (
+            ) : hasComputedTreeSummary(status) ? (
               <div className={styles.gitBranchTooltipRow}>{t('git.clean')}</div>
             ) : null}
           </div>

@@ -29,25 +29,25 @@ export const LOCAL_CONTEXT_FILENAME = 'QWEN.local.md';
 export const MEMORY_SECTION_HEADER = '## Qwen Added Memories';
 
 // This variable will hold the currently configured filename for context files.
-// It defaults to include both QWEN.md and AGENTS.md but can be overridden by setGeminiMdFilename.
+// It defaults to include both QWEN.md and AGENTS.md but can be overridden by setMemoryFilename.
 // QWEN.md is first to maintain backward compatibility (used by /init command tool).
-let currentGeminiMdFilename: string | string[] = [
+let currentMemoryFilename: string | string[] = [
   DEFAULT_CONTEXT_FILENAME,
   AGENT_CONTEXT_FILENAME,
 ];
 
-export function setGeminiMdFilename(newFilename: string | string[]): void {
+export function setMemoryFilename(newFilename: string | string[]): void {
   if (Array.isArray(newFilename)) {
     if (newFilename.length > 0) {
-      currentGeminiMdFilename = newFilename.map((name) => name.trim());
+      currentMemoryFilename = newFilename.map((name) => name.trim());
     }
   } else if (newFilename && newFilename.trim() !== '') {
-    currentGeminiMdFilename = newFilename.trim();
+    currentMemoryFilename = newFilename.trim();
   }
 }
 
-export function getCurrentGeminiMdFilename(): string {
-  if (Array.isArray(currentGeminiMdFilename)) {
+export function getCurrentMemoryFilename(): string {
+  if (Array.isArray(currentMemoryFilename)) {
     //   (qwen-latest critical, addresses divergence
     // with daemon's `extractContextFilename`): skip empty / whitespace
     // entries so callers that pass `[' ', 'AGENTS.md']` get
@@ -56,7 +56,7 @@ export function getCurrentGeminiMdFilename(): string {
     // process-global picker disagreed on the same input — daemon
     // parent would write `AGENTS.md` while the ACP child would read
     // `''`, leaving the init'd file orphaned.
-    for (const entry of currentGeminiMdFilename) {
+    for (const entry of currentMemoryFilename) {
       if (typeof entry === 'string' && entry.trim() !== '') {
         return entry.trim();
       }
@@ -65,12 +65,21 @@ export function getCurrentGeminiMdFilename(): string {
     // than return `undefined` (callers expect a non-empty string).
     return DEFAULT_CONTEXT_FILENAME;
   }
-  return currentGeminiMdFilename;
+  return currentMemoryFilename;
 }
 
-export function getAllGeminiMdFilenames(): string[] {
-  if (Array.isArray(currentGeminiMdFilename)) {
-    return currentGeminiMdFilename;
+export function getAllMemoryFilenames(): string[] {
+  if (Array.isArray(currentMemoryFilename)) {
+    return currentMemoryFilename;
   }
-  return [currentGeminiMdFilename];
+  return [currentMemoryFilename];
 }
+
+/** @deprecated Use `setMemoryFilename`; retained until a future major release. */
+export const setGeminiMdFilename = setMemoryFilename;
+
+/** @deprecated Use `getCurrentMemoryFilename`; retained until a future major release. */
+export const getCurrentGeminiMdFilename = getCurrentMemoryFilename;
+
+/** @deprecated Use `getAllMemoryFilenames`; retained until a future major release. */
+export const getAllGeminiMdFilenames = getAllMemoryFilenames;

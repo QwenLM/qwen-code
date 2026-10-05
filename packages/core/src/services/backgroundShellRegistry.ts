@@ -23,6 +23,7 @@ import * as fs from 'node:fs';
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { openSyncNoFollow } from '../utils/no-follow-open.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import {
   isBidiControlChar,
@@ -61,7 +62,10 @@ type OutputTailResult =
 function readOutputTail(outputFile: string): OutputTailResult {
   let fd: number | undefined;
   try {
-    fd = fs.openSync(outputFile, getReadOutputOpenFlags());
+    // O_NOFOLLOW (or the compensating identity check where the flag does
+    // not exist, e.g. Windows) refuses a symlink planted over the output
+    // file, so the tail can never be read through it (#8227).
+    fd = openSyncNoFollow(outputFile);
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size <= 0) return undefined;
 
@@ -105,11 +109,6 @@ function readOutputTail(outputFile: string): OutputTailResult {
       }
     }
   }
-}
-
-function getReadOutputOpenFlags(): number {
-  const constants = fs.constants;
-  return (constants?.O_RDONLY ?? 0) | (constants?.O_NOFOLLOW ?? 0);
 }
 
 function truncateCommandForModel(command: string): {
@@ -260,6 +259,25 @@ export class BackgroundShellRegistry {
     cb: BackgroundShellNotificationCallback | undefined,
   ): void {
     this.notificationCallback = cb;
+    // Best-effort replay for a transient unbind of THIS instance. No in-tree
+    // caller rebinds a registry that already holds entries — Session and the
+    // TUI hook each bind once against their own Config's fresh registry — so
+    // this serves out-of-tree consumers of the exported class. The terminal
+    // retention cap bounds what can be replayed.
+    if (!cb) return;
+    const replayableEntries = Array.from(this.entries.values())
+      .filter((entry) => entry.status !== 'running' && !entry.notified)
+      .sort(
+        (a, b) =>
+          (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) ||
+          a.startTime - b.startTime,
+      );
+    for (const entry of replayableEntries) {
+      debugLogger.debug(
+        `Redelivering retained terminal notification for shell ${entry.shellId}`,
+      );
+      this.emitNotification(entry);
+    }
   }
 
   /**
@@ -477,14 +495,15 @@ export class BackgroundShellRegistry {
 
   private emitNotification(entry: ShellTask): void {
     if (entry.notified) return;
-    entry.notified = true;
 
     if (!this.notificationCallback) {
       debugLogger.debug(
-        `Notification dropped for shell ${entry.shellId}: no callback registered`,
+        `Notification left eligible for shell ${entry.shellId}: no callback registered`,
       );
       return;
     }
+
+    entry.notified = true;
 
     const statusText =
       entry.status === 'completed'
@@ -543,7 +562,10 @@ export class BackgroundShellRegistry {
     try {
       this.notificationCallback(displayText, xmlParts.join('\n'), meta);
     } catch (error) {
-      debugLogger.error('Failed to emit shell notification:', error);
+      debugLogger.error(
+        `Failed to emit shell notification for shell ${entry.shellId}:`,
+        error,
+      );
     }
   }
 
@@ -604,6 +626,10 @@ export class BackgroundShellRegistry {
     for (const entry of Array.from(this.entries.values())) {
       if (entry.status !== 'running') continue;
       this.settleAsCancelled(entry, endTime);
+      // Suppressed, not deferred: marking the entry notified is what keeps a
+      // later rebind from replaying a shutdown cancellation, and matches the
+      // sibling registries' `abortAll({ notify: false })` handling.
+      entry.notified = true;
       lastCancelled = entry;
     }
     if (!lastCancelled) return;

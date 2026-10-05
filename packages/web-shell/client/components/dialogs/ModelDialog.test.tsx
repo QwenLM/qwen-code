@@ -12,7 +12,7 @@ if (!Element.prototype.scrollIntoView) {
 }
 
 // ModelDialog only reads `useConnection()`; models/current come in via props here.
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => ({}),
 }));
 
@@ -80,6 +80,68 @@ describe('ModelDialog current marker', () => {
 });
 
 describe('ModelDialog keyboard confirmation', () => {
+  it('keeps the exact ACP route when confirming a fast model', () => {
+    const onSelect = vi.fn();
+    const models = [
+      { id: 'qwen-route:v1:a', baseModelId: 'shared', label: 'Endpoint A' },
+      { id: 'qwen-route:v1:b', baseModelId: 'shared', label: 'Endpoint B' },
+    ];
+    mount(
+      <ModelDialog
+        mode="fast"
+        onSelect={onSelect}
+        models={models}
+        currentModelId="qwen-route:v1:b"
+      />,
+    );
+    act(() =>
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })),
+    );
+    expect(onSelect).toHaveBeenCalledWith('qwen-route:v1:b');
+  });
+
+  it('does not replace an unresolved fast-model pin on Enter', () => {
+    const onSelect = vi.fn();
+    mount(
+      <ModelDialog
+        mode="fast"
+        onSelect={onSelect}
+        models={[{ id: 'qwen-route:v1:a', baseModelId: 'shared' }]}
+        currentModelId={'openai:shared\0https://removed.example/v1'}
+      />,
+    );
+    act(() =>
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })),
+    );
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { currentModelId: 'removed', models: [{ id: '', name: 'Use main model' }] },
+    { currentModelId: 'current', models: [], loading: true },
+    {
+      currentModelId: 'current',
+      models: [],
+      error: new Error('Cannot load models'),
+    },
+  ])(
+    'does not reset an advisor selection when it cannot be resolved: %j',
+    (props) => {
+      const onSelect = vi.fn();
+      mount(<ModelDialog mode="advisor" onSelect={onSelect} {...props} />);
+      act(() =>
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }),
+        ),
+      );
+      expect(onSelect).not.toHaveBeenCalled();
+      expect(
+        container!
+          .querySelector('[role="listbox"]')
+          ?.getAttribute('aria-activedescendant'),
+      ).toBeNull();
+    },
+  );
   it('confirms the highlighted model on Enter', () => {
     const onSelect = vi.fn();
     const models = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];

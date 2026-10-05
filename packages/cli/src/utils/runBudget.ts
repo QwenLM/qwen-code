@@ -22,6 +22,12 @@
  * reason so the caller can emit a structured error envelope.
  */
 
+import {
+  GOAL_MAX_ACTIVE_MINUTES_CAP,
+  GOAL_MAX_TURNS_CAP,
+  GOAL_TOKEN_BUDGET_CAP,
+} from '@qwen-code/qwen-code-core';
+
 export type BudgetKind = 'wall-time' | 'tool-calls';
 
 export interface BudgetExceeded {
@@ -179,6 +185,83 @@ export function validateMaxWallTimeSetting(value: number): number {
     );
   }
   return value;
+}
+
+export function validateGoalTokenBudget(value: unknown): number {
+  if (value === -1) return -1;
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(
+      `model.goalTokenBudget must be a finite number; got ${String(value)}.`,
+    );
+  }
+  if (!Number.isInteger(value)) {
+    throw new Error(
+      `model.goalTokenBudget must be an integer (or -1 for unlimited); got ${value}.`,
+    );
+  }
+  if (value <= 0) {
+    throw new Error(
+      `model.goalTokenBudget must be > 0 (or -1 for unlimited); got ${value}. Use -1 to disable, not 0.`,
+    );
+  }
+  if (value > GOAL_TOKEN_BUDGET_CAP) {
+    throw new Error(
+      `model.goalTokenBudget ${value} exceeds the supported ceiling (${GOAL_TOKEN_BUDGET_CAP}). Use a smaller value or -1 for unlimited.`,
+    );
+  }
+  return value;
+}
+
+/**
+ * Shared shape for the two Goal cadence settings: `-1` opts out, anything
+ * else must be a positive integer inside its cap. Rejecting at startup rather
+ * than normalizing means a typo surfaces as a message instead of a Goal that
+ * silently runs with no ceiling.
+ */
+function validateGoalCadenceSetting(
+  key: 'model.goalMaxTurns' | 'model.goalMaxActiveMinutes',
+  unit: string,
+  cap: number,
+  value: unknown,
+): number {
+  if (value === -1) return -1;
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`${key} must be a finite number; got ${String(value)}.`);
+  }
+  if (!Number.isInteger(value)) {
+    throw new Error(
+      `${key} must be an integer number of ${unit} (or -1 for no ceiling); got ${value}.`,
+    );
+  }
+  if (value <= 0) {
+    throw new Error(
+      `${key} must be > 0 (or -1 for no ceiling); got ${value}. Use -1 to disable, not 0.`,
+    );
+  }
+  if (value > cap) {
+    throw new Error(
+      `${key} ${value} exceeds the supported ceiling (${cap} ${unit}). Use a smaller value or -1 for no ceiling.`,
+    );
+  }
+  return value;
+}
+
+export function validateGoalMaxTurns(value: unknown): number {
+  return validateGoalCadenceSetting(
+    'model.goalMaxTurns',
+    'turns',
+    GOAL_MAX_TURNS_CAP,
+    value,
+  );
+}
+
+export function validateGoalMaxActiveMinutes(value: unknown): number {
+  return validateGoalCadenceSetting(
+    'model.goalMaxActiveMinutes',
+    'minutes',
+    GOAL_MAX_ACTIVE_MINUTES_CAP,
+    value,
+  );
 }
 
 /**

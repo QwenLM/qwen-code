@@ -5,7 +5,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { Config, ApprovalMode } from '../config/config.js';
+import { Config, ApprovalMode, deriveConfig } from '../config/config.js';
+import type { ConfigParameters } from '../config/config.js';
 import { SubagentManager } from './subagent-manager.js';
 import type { SubagentConfig } from './types.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -14,16 +15,9 @@ import { ReadFileTool } from '../tools/read-file.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 
 /**
- * Companion to `tools/agent/agent-override.test.ts`. Same regression:
- * Object.create(parent) by itself is not enough to isolate a subagent's
- * core tools from the parent's bound `EditTool` / `WriteFileTool` /
- * `ReadFileTool`. The subagent path (which flows through
- * `SubagentManager.createAgentHeadless` →
- * `buildSubagentContextOverride`) must rebuild the tool registry on
- * the override Config so bound tools resolve `this.config` to the
- * subagent rather than the parent — otherwise mutations executed via
- * the bound tool reach the parent's FileReadCache and silently weaken
- * prior-read enforcement.
+ * Companion to `tools/agent/agent-override.test.ts`. A derived child must
+ * rebuild core tools so Edit/Write/Read resolve its child-local cache rather
+ * than the parent's recorded reads.
  */
 describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', () => {
   // Bare mode keeps the registry small (ReadFile / Edit / Shell only) and
@@ -37,82 +31,73 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
     bareMode: true,
   };
 
-  // The method is `private`. Cast via `unknown` to invoke it directly —
-  // testing through the public `createAgentHeadless` pathway would also
-  // work but pulls in a much larger graph (file IO, hooks, etc.).
-  async function callBuildOverride(
-    manager: SubagentManager,
-    base: Config,
-    config?: Partial<SubagentConfig>,
-  ): Promise<Config> {
-    const fn = (
-      manager as unknown as {
-        buildSubagentContextOverride: (
-          b: Config,
-          c: SubagentConfig,
-        ) => Promise<{
-          context: Config;
-          cleanup?: () => Promise<void>;
-        }>;
-      }
-    ).buildSubagentContextOverride.bind(manager);
-    const fullConfig: SubagentConfig = {
-      name: 'test-agent',
-      description: 'test',
-      systemPrompt: '',
-      level: 'session',
-      ...config,
-    };
-    const result = await fn(base, fullConfig);
-    return result.context;
-  }
-
-  it('returns a Config whose registry is distinct from the parent and binds Edit/Read to the override', async () => {
-    const parent = new Config(baseParams);
+  /** A bare-mode parent Config with its own tool registry installed. */
+  async function createParent(extra: Partial<ConfigParameters> = {}) {
+    const parent = new Config({ ...baseParams, ...extra });
     const parentRegistry = await parent.createToolRegistry(undefined, {
       skipDiscovery: true,
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (parent as any).toolRegistry = parentRegistry;
+    return { parent, parentRegistry };
+  }
 
-    const manager = new SubagentManager(parent);
+  // The method is `private`. Cast via `unknown` to invoke it directly —
+  // testing through the public `createAgentHeadless` pathway would also
+  // work but pulls in a much larger graph (file IO, hooks, etc.).
+  // Builds the child context over `base` with a `SubagentManager(parent)`.
+  async function buildChild(
+    parent: Config,
+    base: Config = parent,
+    config?: Partial<SubagentConfig>,
+  ): Promise<Config> {
+    const manager = new SubagentManager(parent) as unknown as {
+      buildSubagentContextOverride(
+        b: Config,
+        c: SubagentConfig,
+      ): Promise<{ context: Config }>;
+    };
+    const result = await manager.buildSubagentContextOverride(base, {
+      name: 'test-agent',
+      description: 'test',
+      systemPrompt: '',
+      level: 'session',
+      ...config,
+    });
+    return result.context;
+  }
 
-    const child = await callBuildOverride(manager, parent);
+  /** The Config a registry tool was constructed with. */
+  const boundConfigOf = (tool: unknown) => (tool as { config: Config }).config;
+  const ensureEdit = (config: Config) =>
+    config.getToolRegistry().ensureTool(ToolNames.EDIT);
+
+  it('returns a Config whose registry is distinct from the parent and binds Edit/Read to the override', async () => {
+    const { parent, parentRegistry } = await createParent();
+    const child = await buildChild(parent);
 
     expect(child).not.toBe(parent);
     expect(child.getToolRegistry()).not.toBe(parentRegistry);
 
-    const childEdit = await child.getToolRegistry().ensureTool(ToolNames.EDIT);
+    const childEdit = await ensureEdit(child);
     const childRead = await child
       .getToolRegistry()
       .ensureTool(ToolNames.READ_FILE);
 
     expect(childEdit).toBeInstanceOf(EditTool);
     expect(childRead).toBeInstanceOf(ReadFileTool);
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((childEdit as any).config).toBe(child);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((childRead as any).config).toBe(child);
+    expect(boundConfigOf(childEdit)).toBe(child);
+    expect(boundConfigOf(childRead)).toBe(child);
 
     // The bound tool's FileReadCache must be the child's, not the parent's.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const boundConfig = (childEdit as any).config as Config;
+    const boundConfig = boundConfigOf(childEdit);
     expect(boundConfig.getFileReadCache()).toBe(child.getFileReadCache());
     expect(boundConfig.getFileReadCache()).not.toBe(parent.getFileReadCache());
   });
 
   it('parent and child caches are independent', async () => {
-    const parent = new Config(baseParams);
-    const parentRegistry = await parent.createToolRegistry(undefined, {
-      skipDiscovery: true,
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (parent as any).toolRegistry = parentRegistry;
-
-    const manager = new SubagentManager(parent);
-
-    const child = await callBuildOverride(manager, parent);
+    const { parent } = await createParent();
+    const child = await buildChild(parent);
 
     // Record a read on parent. Child must not see it.
     const fakeStats = {
@@ -121,7 +106,6 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
       mtimeMs: 1_000_000,
       size: 42,
     } as unknown as import('node:fs').Stats;
-
     parent.getFileReadCache().recordRead('/tmp/parent.ts', fakeStats, {
       full: true,
       cacheable: true,
@@ -131,78 +115,33 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
     expect(child.getFileReadCache().size()).toBe(0);
   });
 
-  it('skips rebuild and inherits registry via prototype when an upstream wrapper has already rebuilt the registry (real-world chained-override case)', async () => {
-    // This mirrors the real-world flow: agent.ts wraps the parent in
-    // `createApprovalModeOverride` (which builds R1 on the wrapper),
-    // then passes that wrapper — sometimes wrapped one more level in
-    // `bgConfig = Object.create(agentConfig)` for the background path —
-    // through `createAgentHeadless` → `buildSubagentContextOverride`.
-    // We do NOT want the second layer to build a redundant R2 — that
-    // would (a) waste work, (b) leak listeners on every later
-    // AgentTool/SkillTool factory invocation, and (c) split the cache
-    // so client-level clears target an empty R2 cache while the bound
-    // tools (still in R1) keep using R1's.
-    //
-    // Detection is via the `TOOL_REGISTRY_REBUILT` symbol marker that
-    // `createApprovalModeOverride` sets on its return value; Symbol
-    // property lookup walks the prototype chain so even an Object.create
-    // wrapper above the rebuilt Config is correctly recognised as
-    // having an upstream rebuild.
-    const parent = new Config(baseParams);
-    const parentRegistry = await parent.createToolRegistry(undefined, {
-      skipDiscovery: true,
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (parent as any).toolRegistry = parentRegistry;
-
+  it('skips rebuild and inherits registry when an upstream derived wrapper already rebuilt it', async () => {
+    const { parent } = await createParent();
     // Layer 1: actual createApprovalModeOverride (sets the marker).
     const { config: upstreamWrapper } = await createApprovalModeOverride(
       parent,
       ApprovalMode.AUTO_EDIT,
     );
     const upstreamRegistry = upstreamWrapper.getToolRegistry();
+    // Layer 2: add the background prompt policy through the factory.
+    const bgWrapper = deriveConfig(upstreamWrapper, {
+      getShouldAvoidPermissionPrompts: () => true,
+    });
 
-    // Layer 2: simulate `bgConfig = Object.create(agentConfig)` from
-    // the background path — own properties added on this layer should
-    // not hide the marker on the prototype.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bgWrapper = Object.create(upstreamWrapper) as any;
-    bgWrapper.getShouldAvoidPermissionPrompts = () => true;
+    const child = await buildChild(parent, bgWrapper as Config);
 
-    const manager = new SubagentManager(parent);
-
-    const child = await callBuildOverride(manager, bgWrapper as Config);
-
-    // child is still a distinct instance (Object.create) so the
-    // FileReadCache lazy-init still works, but its registry must
-    // resolve via the prototype back to upstreamRegistry — we did not
-    // build a new one.
+    // The child is distinct, but the rebuilt registry remains inherited from
+    // the approval profile so no duplicate registry lifecycle is created.
     expect(child).not.toBe(bgWrapper);
     expect(child.getToolRegistry()).toBe(upstreamRegistry);
-
-    // Critically: tools the model later instantiates from the registry
-    // are bound to upstreamWrapper, NOT the second-layer child. That
-    // is what the optimization is for — the bound tool still resolves
-    // `this.config.getFileReadCache()` to upstreamWrapper's cache,
-    // which is the cache the rest of the subagent execution actually
-    // uses.
-    const childEdit = await child.getToolRegistry().ensureTool(ToolNames.EDIT);
+    const childEdit = await ensureEdit(child);
     expect(childEdit).toBeInstanceOf(EditTool);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((childEdit as any).config).toBe(upstreamWrapper);
+    expect(boundConfigOf(childEdit)).toBe(upstreamWrapper);
   });
 
   it('the override approval mode (inherited via prototype) still resolves via the override Config', async () => {
-    const parent = new Config(baseParams);
-    const parentRegistry = await parent.createToolRegistry(undefined, {
-      skipDiscovery: true,
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (parent as any).toolRegistry = parentRegistry;
-
-    const manager = new SubagentManager(parent);
-
-    const child = await callBuildOverride(manager, parent);
+    const { parent } = await createParent();
+    const child = await buildChild(parent);
 
     // Child has no own getApprovalMode; falls through prototype to parent.
     // Verify mutating parent's mode via setter is observed by child.
@@ -210,20 +149,13 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
     expect(child.getApprovalMode()).toBe(ApprovalMode.AUTO_EDIT);
 
     // And the bound EditTool sees the same mode.
-    const childEdit = await child.getToolRegistry().ensureTool(ToolNames.EDIT);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const boundConfig = (childEdit as any).config as Config;
+    const boundConfig = boundConfigOf(await ensureEdit(child));
     expect(boundConfig.getApprovalMode()).toBe(ApprovalMode.AUTO_EDIT);
   });
 
   describe('per-agent mcpServers override', () => {
     it('exposes session + agent servers via getMcpServers, with agent winning on key collision', async () => {
-      const parent = new Config(baseParams);
-      const parentRegistry = await parent.createToolRegistry(undefined, {
-        skipDiscovery: true,
-      });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (parent as any).toolRegistry = parentRegistry;
+      const { parent } = await createParent();
       // Pre-seed a session-level MCP server so the merge has something to
       // shadow. addMcpServers must be called before initialization, which
       // bareMode skips for us.
@@ -232,8 +164,7 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
         shared: { type: 'stdio', command: 'session-version' } as never,
       });
 
-      const manager = new SubagentManager(parent);
-      const child = await callBuildOverride(manager, parent, {
+      const child = await buildChild(parent, parent, {
         mcpServers: {
           'agent-only': { type: 'stdio', command: 'node-b' },
           shared: { type: 'stdio', command: 'agent-version' },
@@ -257,19 +188,81 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
     });
 
     it('leaves getMcpServers untouched when no per-agent servers are declared', async () => {
-      const parent = new Config(baseParams);
-      const parentRegistry = await parent.createToolRegistry(undefined, {
-        skipDiscovery: true,
-      });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (parent as any).toolRegistry = parentRegistry;
+      const { parent } = await createParent();
       parent.addMcpServers({
         'session-only': { type: 'stdio', command: 'node' } as never,
       });
-      const manager = new SubagentManager(parent);
-      const child = await callBuildOverride(manager, parent);
+      const child = await buildChild(parent);
       // Child has no own getMcpServers; prototype resolves to parent's.
       expect(child.getMcpServers()).toEqual(parent.getMcpServers());
+    });
+  });
+
+  describe('Session Workflow revision write-through', () => {
+    async function createWorkflowParent(): Promise<Config> {
+      const { parent } = await createParent({ sessionWorkflowEnabled: true });
+      parent.setSessionWorkflowPlanRevision({
+        planId: 'plan-approved',
+        sourceCallId: 'call-approved',
+        todoIds: ['a', 'b', 'c'],
+      });
+      expect(parent.isSessionWorkflowTodoContextActive()).toBe(true);
+      return parent;
+    }
+
+    it('routes revision mutations from a subagent context wrapper to the base Config', async () => {
+      const parent = await createWorkflowParent();
+      const child = await buildChild(parent);
+
+      // A divergent todo_write inside the subagent holds the wrapper as
+      // this.config and clears the approved revision. The prototype
+      // implementation assigns this.sessionWorkflowPlanRevision, which
+      // without a shim lands as an own property on the wrapper and never
+      // reaches the session-global base Config.
+      child.clearSessionWorkflowPlanRevision();
+      expect(parent.getSessionWorkflowPlanRevision()).toBeUndefined();
+      expect(parent.isSessionWorkflowTodoContextActive()).toBe(false);
+
+      // And a bind through the wrapper lands on the base too.
+      child.setSessionWorkflowPlanRevision({
+        planId: 'plan-child',
+        sourceCallId: 'call-child',
+        todoIds: ['d'],
+      });
+      expect(parent.getSessionWorkflowPlanRevision()?.planId).toBe(
+        'plan-child',
+      );
+    });
+
+    it('writes through the full chained override stack (approval override + background wrapper)', async () => {
+      // Real-world launch stack: agent.ts wraps the parent in
+      // createApprovalModeOverride, the background path wraps that in
+      // Object.create(agentConfig), and createAgentHeadless wraps again via
+      // buildSubagentContextOverride. Every layer must forward revision
+      // mutations down to the base Config.
+      const parent = await createWorkflowParent();
+      const { config: upstreamWrapper } = await createApprovalModeOverride(
+        parent,
+        ApprovalMode.AUTO_EDIT,
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const bgWrapper = Object.create(upstreamWrapper) as any;
+      bgWrapper.getShouldAvoidPermissionPrompts = () => true;
+
+      const child = await buildChild(parent, bgWrapper as Config);
+
+      child.clearSessionWorkflowPlanRevision();
+      expect(parent.getSessionWorkflowPlanRevision()).toBeUndefined();
+      expect(parent.isSessionWorkflowTodoContextActive()).toBe(false);
+
+      child.setSessionWorkflowPlanRevision({
+        planId: 'plan-chained',
+        sourceCallId: 'call-chained',
+        todoIds: ['x', 'y'],
+      });
+      expect(parent.getSessionWorkflowPlanRevision()?.planId).toBe(
+        'plan-chained',
+      );
     });
   });
 });

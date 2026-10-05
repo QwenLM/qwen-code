@@ -9,13 +9,17 @@ export {
   normalizeDaemonEvent,
   getSessionUpdatePayload,
 } from './normalizer.js';
-export { createDaemonToolPreview } from './toolPreview.js';
+export {
+  createDaemonToolPreview,
+  createDaemonToolResultPreview,
+} from './toolPreview.js';
 export {
   appendLocalUserTranscriptMessage,
   createDaemonTranscriptState,
   estimateDaemonTranscriptBlockBytes,
   formatBlockTimestamp,
   isSubagentChildBlock,
+  isTaskExecutionMode,
   isTrimmedPermissionBlockId,
   isTrimmedToolBlockId,
   rebuildDaemonTranscriptBlockIndex,
@@ -57,6 +61,7 @@ export type {
 } from './conformance.js';
 export {
   extractContentPart,
+  extractTranscriptTiming,
   getOutputText,
   isSensitiveKey as isDaemonUiSensitiveKey,
   redactSensitiveFields as redactDaemonUiSensitiveFields,
@@ -73,15 +78,20 @@ export {
 export type { DaemonUiContentPart } from './utils.js';
 export type {
   DaemonShellTranscriptBlock,
+  DaemonTranscriptTimingMeta,
   DaemonUserShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonInputAnnotation,
   DaemonInputReference,
   DaemonInputReferenceAnnotation,
+  DaemonResourceLink,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
   DaemonToolPreview,
+  DaemonToolResultPreview,
+  DaemonTodoListPreview,
+  DaemonTranscriptTodoItem,
   DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
   DaemonTranscriptBlockChangeSummary,
@@ -93,6 +103,7 @@ export type {
   DaemonTranscriptState,
   DaemonTranscriptStore,
   DaemonTranscriptTruncationDetail,
+  DaemonTurnUsage,
   DaemonUnrecognizedDiagnostic,
   DaemonUnrecognizedDiagnosticReason,
   // Chat-stream events
@@ -110,10 +121,12 @@ export type {
   DaemonUiShellOutputEvent,
   DaemonUiStatusEvent,
   DaemonUiTextEvent,
+  DaemonUiUserResourceLinkEvent,
   DaemonUiToolUpdateEvent,
   DaemonUiToolProvenance,
   // Session-meta events
   DaemonUiSessionMetadataChangedEvent,
+  DaemonUiSessionSourceChangedEvent,
   DaemonUiSessionApprovalModeChangedEvent,
   DaemonUiSessionAvailableCommandsEvent,
   DaemonUiStateResyncRequiredEvent,

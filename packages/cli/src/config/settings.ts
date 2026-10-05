@@ -11,6 +11,7 @@ import process from 'node:process';
 import {
   FatalConfigError,
   getErrorMessage,
+  isValidAdvisorMaxUses,
   Storage,
   createDebugLogger,
   stripRuntimeSnapshotPrefix,
@@ -20,6 +21,13 @@ import type {
   McpServerScope,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
+import {
+  parseExecutionSandboxSettings,
+  readBareModeOperatorSettings,
+  readOperatorSandboxSettings,
+  selectOperatorExecutionSandbox,
+  stripUtf8Bom,
+} from './execution-sandbox-settings.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { hasOwnModelProviders } from './modelProvidersScope.js';
 import {
@@ -29,10 +37,13 @@ import {
   type SettingDefinition,
   getSettingsSchema,
 } from './settingsSchema.js';
-import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
+import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
   setNestedPropertySafe,
+  WORKSPACE_NON_OVERRIDING_SETTINGS,
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_RESTRICTED_SETTINGS,
+  WORKSPACE_TIGHTEN_ONLY_SETTINGS,
 } from './settingsUtils.js';
 import { customDeepMerge, type MergeStrategy } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
@@ -44,6 +55,7 @@ import {
 import {
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
+  SETTINGS_DIRECTORY_NAME,
   getHomeEnvFallbackVars,
   loadEnvironment,
   preResolveHomeEnvOverrides,
@@ -53,9 +65,12 @@ import {
   DEFAULT_LIGHT_THEME_NAME,
 } from './default-theme-names.js';
 import {
+  getGlobalQwenDirLite,
   getSystemDefaultsPath,
   getSystemSettingsPath,
+  spawnedEnvironmentView,
 } from './storage-paths-lite.js';
+import { readConfigFile } from './read-config-file.js';
 
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
@@ -117,6 +132,17 @@ export const SETTINGS_VERSION_KEY = '$version';
  *   tools.exclude  → permissions.deny  (block tools)
  *   tools.core     → permissions.allow (only listed tools enabled)
  *                    + permissions.deny with a wildcard deny-all if needed
+ *
+ * DELIBERATELY UNWIRED — nothing calls this, and settings.md documents the
+ * legacy keys as "not automatically migrated; still honoured at startup".
+ * Do not wire it up as written: the `tools.core` → `permissions.allow` arm
+ * below encodes exactly the conflation #10075 was reported for and #10098
+ * removed. `permissions.allow` is pure auto-approval and cannot restrict
+ * registration, so that arm would delete a user's `tools.core` allowlist
+ * and silently replace it with a no-op. A real migration maps `tools.core`
+ * to `tools.eager` (defer unlisted tools) or `permissions.deny` (remove
+ * them) — see the migration table in
+ * docs/users/configuration/settings.md.
  *
  * Returns the updated settings object, or null if no migration is needed.
  */
@@ -366,6 +392,12 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
   // the strip that produces it.
   const workspaceFile = loadedSettings.forScope(SettingScope.Workspace);
   if (workspaceFile.rawJson !== undefined) {
+    for (const key of WORKSPACE_RESTRICTED_ROOT_SETTINGS) {
+      if (workspaceFile.originalSettings[key] === undefined) continue;
+      warningSet.add(
+        `Warning: ${key} in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+      );
+    }
     for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
       const sectionValue = workspaceFile.originalSettings[section] as
         | Record<string, unknown>
@@ -375,6 +407,54 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
         `Warning: ${section}.${key} in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
       );
     }
+    for (const ref of WORKSPACE_NON_OVERRIDING_SETTINGS) {
+      if (!isSettingDefined(workspaceFile.originalSettings, ref)) continue;
+      const definingScope = [
+        SettingScope.System,
+        SettingScope.User,
+        SettingScope.SystemDefaults,
+      ].find((scope) =>
+        isSettingDefined(loadedSettings.forScope(scope).originalSettings, ref),
+      );
+      if (definingScope === undefined) continue;
+      warningSet.add(
+        `Warning: ${ref.section}.${ref.key} in workspace settings (${workspaceFile.path}) is ignored because ${definingScope} scope settings also set it. A workspace value is honored only when no User, System, or SystemDefaults scope sets this setting.`,
+      );
+    }
+    // Tighten-only keys: the same verdict the merge applied, so the
+    // warning and the strip cannot disagree about a value. A value that
+    // merely repeats what is already in force is dropped without a
+    // warning — it lost nothing.
+    for (const entry of WORKSPACE_TIGHTEN_ONLY_SETTINGS) {
+      const verdict = tightenOnlyVerdict(entry, workspaceFile.settings, {
+        system: loadedSettings.system.settings,
+        systemDefaults: loadedSettings.systemDefaults.settings,
+        user: loadedSettings.user.settings,
+      });
+      if (verdict === undefined || verdict.kept) continue;
+      const key = `${entry.section}.${entry.key}`;
+      if (verdict.reason === 'system-sets') {
+        warningSet.add(
+          `Warning: ${key} in workspace settings (${workspaceFile.path}) is ignored because System scope settings also set it.`,
+        );
+      } else if (verdict.reason === 'looser') {
+        warningSet.add(
+          `Warning: ${key} in workspace settings (${workspaceFile.path}) is ignored because it would loosen the ${verdict.against} value. A workspace may only make this setting stricter.`,
+        );
+      }
+    }
+  }
+  // Core falls back to unlimited for an invalid value instead of refusing to
+  // start; say so, since the user asked for a limit.
+  const advisorMaxUses: unknown = loadedSettings.merged.advisorMaxUses;
+  if (
+    advisorMaxUses !== undefined &&
+    advisorMaxUses !== null &&
+    !isValidAdvisorMaxUses(advisorMaxUses)
+  ) {
+    warningSet.add(
+      `Warning: advisorMaxUses must be a non-negative integer (0 means unlimited); ignoring ${JSON.stringify(advisorMaxUses)}. Advisor consultations are not limited in this session.`,
+    );
   }
   return [...warningSet];
 }
@@ -403,22 +483,144 @@ function tagMcpServerScope(
   return { ...settings, mcpServers: tagged };
 }
 
+type SettingKeyRef = {
+  readonly section: keyof Settings;
+  readonly key: string;
+};
+
+function isSettingDefined(
+  settings: Settings,
+  { section, key }: SettingKeyRef,
+): boolean {
+  const sectionValue = settings[section] as Record<string, unknown> | undefined;
+  return sectionValue?.[key] !== undefined;
+}
+
 /**
- * Strip the workspace-restricted settings before merging so a repository
- * cannot opt the user into those capabilities. Returns a shallow copy, and
- * the input unchanged when it carries none of them.
+ * Return `settings` without the given keys. Returns a shallow copy, and the
+ * input unchanged when it carries none of them.
  */
-function stripWorkspaceRestrictedSettings(settings: Settings): Settings {
+function stripSettingKeys(
+  settings: Settings,
+  keys: Iterable<SettingKeyRef>,
+): Settings {
   let stripped: Settings | undefined;
-  for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
+  for (const { section, key } of keys) {
     const source = (stripped ?? settings)[section] as
       | Record<string, unknown>
       | undefined;
     if (source?.[key] === undefined) continue;
-    const { [key]: _restricted, ...rest } = source;
+    const { [key]: _removed, ...rest } = source;
     stripped = { ...(stripped ?? settings), [section]: rest } as Settings;
   }
   return stripped ?? settings;
+}
+
+/**
+ * Strip the workspace-restricted settings before merging so a repository
+ * cannot opt the user into those capabilities.
+ */
+function stripWorkspaceRestrictedSettings(settings: Settings): Settings {
+  let stripped = settings;
+  for (const key of WORKSPACE_RESTRICTED_ROOT_SETTINGS) {
+    if (stripped[key] === undefined) continue;
+    const { [key]: _restricted, ...rest } = stripped;
+    stripped = rest as Settings;
+  }
+  return stripSettingKeys(stripped, WORKSPACE_RESTRICTED_SETTINGS);
+}
+
+/**
+ * Drop the workspace's WORKSPACE_NON_OVERRIDING_SETTINGS values that a
+ * higher scope also defines. A repository may narrow where its own HTTP
+ * hooks send data, but it must never replace a whitelist the user or
+ * platform configured: an empty whitelist means "allow all", so a replaced
+ * list is a widened one.
+ */
+function stripWorkspaceOverrides(
+  workspace: Settings,
+  higherScopes: readonly Settings[],
+): Settings {
+  return stripSettingKeys(
+    workspace,
+    WORKSPACE_NON_OVERRIDING_SETTINGS.filter((ref) =>
+      higherScopes.some((scope) => isSettingDefined(scope, ref)),
+    ),
+  );
+}
+
+type TightenOnlyEntry = (typeof WORKSPACE_TIGHTEN_ONLY_SETTINGS)[number];
+
+type TightenOnlyVerdict =
+  | { kept: true }
+  | { kept: false; reason: 'system-sets' }
+  | {
+      kept: false;
+      reason: 'looser';
+      against: 'User' | 'SystemDefaults' | 'default';
+    }
+  | { kept: false; reason: 'same' };
+
+/**
+ * Decide one tighten-only key for a workspace, or `undefined` when the
+ * workspace does not set it.
+ *
+ * System wins outright, as it does for every setting. Otherwise the
+ * workspace value is compared against the value that would be in force
+ * without it — User's when User sets the key, since User overrides
+ * SystemDefaults in the merge, else SystemDefaults', else the feature's
+ * default. Strictly stricter is kept; equal is dropped silently; looser is
+ * dropped with a warning. Comparing against the stricter of User and
+ * SystemDefaults instead would call a workspace value "equal" to a
+ * SystemDefaults value that User already loosened, and drop the one
+ * tightening that would have taken effect.
+ */
+function tightenOnlyVerdict(
+  entry: TightenOnlyEntry,
+  workspace: Settings,
+  scopes: { system: Settings; systemDefaults: Settings; user: Settings },
+): TightenOnlyVerdict | undefined {
+  const read = (settings: Settings): unknown =>
+    (settings[entry.section] as Record<string, unknown> | undefined)?.[
+      entry.key
+    ];
+  const candidate = read(workspace);
+  if (candidate === undefined) return undefined;
+  if (read(scopes.system) !== undefined) {
+    return { kept: false, reason: 'system-sets' };
+  }
+  const userValue = read(scopes.user);
+  const systemDefaultsValue = read(scopes.systemDefaults);
+  const against: 'User' | 'SystemDefaults' | 'default' =
+    userValue !== undefined
+      ? 'User'
+      : systemDefaultsValue !== undefined
+        ? 'SystemDefaults'
+        : 'default';
+  const baseline = entry.strictness(
+    userValue !== undefined ? userValue : systemDefaultsValue,
+  );
+  const rank = entry.strictness(candidate);
+  if (rank > baseline) return { kept: true };
+  if (rank === baseline) return { kept: false, reason: 'same' };
+  return { kept: false, reason: 'looser', against };
+}
+
+/**
+ * Drop the workspace's tighten-only values that would not make the
+ * setting stricter than the operator scopes already have it.
+ */
+function stripWorkspaceLoosenings(
+  workspace: Settings,
+  scopes: { system: Settings; systemDefaults: Settings; user: Settings },
+): Settings {
+  return stripSettingKeys(
+    workspace,
+    WORKSPACE_TIGHTEN_ONLY_SETTINGS.filter((entry) => {
+      const verdict = tightenOnlyVerdict(entry, workspace, scopes);
+      return verdict !== undefined && !verdict.kept;
+    }),
+  );
 }
 
 function mergeSettings(
@@ -430,7 +632,14 @@ function mergeSettings(
 ): Settings {
   const safeWorkspace = isTrusted
     ? tagMcpServerScope(
-        stripWorkspaceRestrictedSettings(workspace),
+        stripWorkspaceLoosenings(
+          stripWorkspaceOverrides(stripWorkspaceRestrictedSettings(workspace), [
+            systemDefaults,
+            user,
+            system,
+          ]),
+          { system, systemDefaults, user },
+        ),
         'workspace',
       )
     : ({} as Settings);
@@ -441,7 +650,7 @@ function mergeSettings(
   // 2. User Settings
   // 3. Workspace Settings
   // 4. System Settings (as overrides)
-  return customDeepMerge(
+  const merged = customDeepMerge(
     getMergeStrategyForPath,
     {}, // Start with an empty object
     systemDefaults,
@@ -449,6 +658,76 @@ function mergeSettings(
     safeWorkspace,
     tagMcpServerScope(system, 'system'),
   ) as Settings;
+  const operatorMem0 = [systemDefaults, user, system].reduce<
+    NonNullable<Settings['memory']>['mem0'] | null
+  >(
+    (selected, scope) =>
+      scope.memory === null
+        ? null
+        : scope.memory?.mem0 !== undefined
+          ? scope.memory.mem0
+          : selected,
+    undefined,
+  );
+  if (operatorMem0 === null) {
+    if (merged.memory && typeof merged.memory === 'object') {
+      delete merged.memory.mem0;
+    }
+  } else if (operatorMem0 !== undefined) {
+    const memory = merged.memory;
+    const operatorMemory = customDeepMerge(
+      getMergeStrategyForPath,
+      ...[systemDefaults, user, system]
+        .filter((scope) => scope.memory !== undefined)
+        .map((scope) => ({ memory: scope.memory })),
+    )['memory'] as Settings['memory'];
+    merged.memory = {
+      ...(operatorMemory && typeof operatorMemory === 'object'
+        ? operatorMemory
+        : {}),
+      ...(memory && typeof memory === 'object' && !Array.isArray(memory)
+        ? memory
+        : {}),
+      mem0: operatorMem0,
+    };
+    const operatorExternalContext =
+      tagMcpServerScope(system, 'system').mcpServers?.['external-context'] ??
+      user.mcpServers?.['external-context'] ??
+      systemDefaults.mcpServers?.['external-context'];
+    if (operatorExternalContext) {
+      merged.mcpServers = {
+        ...merged.mcpServers,
+        'external-context': operatorExternalContext,
+      };
+    }
+  }
+  const executionSandbox = selectOperatorExecutionSandbox(
+    systemDefaults,
+    user,
+    system,
+  );
+  const legacySandbox = [systemDefaults, user, system].reduce<
+    NonNullable<Settings['tools']>['sandbox']
+  >((current, scope) => scope.tools?.sandbox ?? current, undefined);
+  // Restore the complete operator object even if a project replaced `tools`
+  // with null, a scalar, or an array during the ordinary settings merge.
+  if (executionSandbox) {
+    const tools = merged.tools;
+    merged.tools = {
+      ...(tools && typeof tools === 'object' && !Array.isArray(tools)
+        ? tools
+        : {}),
+      executionSandbox,
+    };
+    if (legacySandbox === undefined) {
+      delete merged.tools.sandbox;
+    } else {
+      merged.tools.sandbox = legacySandbox;
+    }
+  } else if (merged.tools && typeof merged.tools === 'object') {
+    delete merged.tools.executionSandbox;
+  }
+  return merged;
 }
 
 export class LoadedSettings {
@@ -595,20 +874,31 @@ export class LoadedSettings {
     this._merged = this.computeMergedSettings();
   }
 
-  reloadScopeFromDisk(scope: SettingScope): void {
+  reloadScopeFromDisk(scope: SettingScope): boolean {
     const file = this.forScope(scope);
+    if (scope === SettingScope.Workspace && !this.workspaceSettingsActive) {
+      file.settings = {};
+      file.originalSettings = {};
+      file.rawJson = undefined;
+      this._merged = this.computeMergedSettings();
+      return true;
+    }
+    let reloaded = false;
     try {
       if (!fs.existsSync(file.path)) {
         file.settings = {};
         file.originalSettings = {};
         file.rawJson = undefined;
         this._merged = this.computeMergedSettings();
-        return;
+        return true;
       }
 
       const content = fs.readFileSync(file.path, 'utf-8');
-      const parsed = JSON.parse(stripJsonComments(content));
+      const parsed = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        if (scope !== SettingScope.Workspace) {
+          parseExecutionSandboxSettings(parsed.tools?.executionSandbox);
+        }
         const resolved = resolveEnvVarsInObject(
           parsed as Settings,
           getHomeEnvFallbackVars((message) => debugLogger.warn(message)),
@@ -616,6 +906,11 @@ export class LoadedSettings {
         file.settings = resolved;
         file.originalSettings = structuredClone(parsed) as Settings;
         file.rawJson = content;
+        reloaded = true;
+      } else {
+        debugLogger.warn(
+          `reloadScopeFromDisk(${scope}): settings file is not a JSON object, keeping previous settings`,
+        );
       }
     } catch (err) {
       debugLogger.warn(
@@ -623,6 +918,48 @@ export class LoadedSettings {
       );
     }
     this._merged = this.computeMergedSettings();
+    return reloaded;
+  }
+
+  reloadScopesFromDiskAtomically(scopes: readonly SettingScope[]): boolean {
+    const snapshots = scopes.map((scope) => {
+      const file = this.forScope(scope);
+      return {
+        file,
+        settings: structuredClone(file.settings),
+        originalSettings: structuredClone(file.originalSettings),
+        rawJson: file.rawJson,
+      };
+    });
+    const reloaded = scopes.map((scope) => this.reloadScopeFromDisk(scope));
+    if (reloaded.every(Boolean)) return true;
+
+    for (const snapshot of snapshots) {
+      snapshot.file.settings = snapshot.settings;
+      snapshot.file.originalSettings = snapshot.originalSettings;
+      snapshot.file.rawJson = snapshot.rawJson;
+    }
+    this._merged = this.computeMergedSettings();
+    return false;
+  }
+
+  /**
+   * Get system-scope hooks: the SystemDefaults and System settings files,
+   * merged with the same strategy as the full merge (each `hooks.<Event>` list
+   * is concatenated), SystemDefaults first. Administrator configuration is not
+   * gated by folder trust, exactly like user hooks. Returns undefined, not an
+   * empty object, when neither file configures hooks, so callers can tell a
+   * scope with no data apart from one with data.
+   */
+  getSystemHooks(): Record<string, unknown> | undefined {
+    const merged = customDeepMerge(
+      getMergeStrategyForPath,
+      {},
+      { hooks: this.systemDefaults.settings.hooks ?? {} },
+      { hooks: this.system.settings.hooks ?? {} },
+    ) as Settings;
+    const hooks = merged.hooks;
+    return hooks && Object.keys(hooks).length > 0 ? hooks : undefined;
   }
 
   /**
@@ -651,6 +988,22 @@ export class LoadedSettings {
  * Used in stream-json mode where settings are ignored.
  */
 export function createMinimalSettings(): LoadedSettings {
+  const operator = readBareModeOperatorSettings();
+  const executionSandbox = parseExecutionSandboxSettings(
+    operator.tools?.executionSandbox,
+  );
+  const legacy = operator.tools?.sandbox;
+  const operatorSettings: Settings = {
+    ...(executionSandbox || legacy === 'bwrap'
+      ? {
+          tools: {
+            executionSandbox,
+            sandbox: legacy as boolean | string | undefined,
+          },
+        }
+      : {}),
+    ...(operator.privacy ? { privacy: operator.privacy } : {}),
+  };
   const emptySettingsFile: SettingsFile = {
     path: '',
     settings: {},
@@ -658,7 +1011,11 @@ export function createMinimalSettings(): LoadedSettings {
     rawJson: '{}',
   };
   return new LoadedSettings(
-    emptySettingsFile,
+    {
+      ...emptySettingsFile,
+      settings: operatorSettings,
+      originalSettings: operatorSettings,
+    },
     emptySettingsFile,
     emptySettingsFile,
     emptySettingsFile,
@@ -723,6 +1080,12 @@ export interface LoadSettingsOptions {
   skipLoadEnvironment?: boolean;
   skipWorkspaceSettings?: boolean;
   workspaceTrusted?: boolean;
+  /**
+   * Throw on invalid workspace-scope JSON instead of recovering it. Recovery
+   * rewrites the file to `{}`, which a caller polling a setting would read as
+   * the user having turned it off — and the rewrite makes that permanent.
+   */
+  preserveInvalidWorkspaceSettings?: boolean;
 }
 
 export function loadSettings(
@@ -733,27 +1096,90 @@ export function loadSettings(
     typeof consumeCorruptionEnvVars === 'object'
       ? consumeCorruptionEnvVars
       : { consumeCorruptionEnvVars };
+  return readSettingsLayers(workspaceDir, opts);
+}
+
+/**
+ * Reads every settings layer with the merge, migration, trust and variable
+ * rules of `loadSettings`, but writes nothing: no migration, version
+ * normalization, backup, corruption recovery or environment change. A layer
+ * that cannot be read whole, is not a JSON object or carries a version this
+ * build cannot migrate throws, where `loadSettings` repairs, skips or accepts
+ * some of these. `environment` locates the user and system files and is the
+ * only source for `${VAR}` placeholders; without one, nothing is read. It is
+ * read as a spawned session host receives it, and one that the host would not
+ * receive as it is throws.
+ */
+export function readSettingsSnapshot(
+  workspaceDir: string,
+  options: {
+    environment: Readonly<NodeJS.ProcessEnv>;
+    workspaceTrusted: boolean;
+  },
+): LoadedSettings {
+  const { environment } = options;
+  if (typeof environment !== 'object' || environment === null) {
+    throw new TypeError('A settings snapshot needs an environment.');
+  }
+  return readSettingsLayers(
+    workspaceDir,
+    {
+      consumeCorruptionEnvVars: false,
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: !options.workspaceTrusted,
+      workspaceTrusted: options.workspaceTrusted,
+    },
+    { environment },
+  );
+}
+
+/**
+ * The real path of the home directory, as settings loading resolves it to tell
+ * whether the workspace is the home directory. Throws when it cannot be
+ * resolved, for example because it does not exist.
+ */
+export function resolveHomeDirectory(home: string = homedir()): string {
+  return fs.realpathSync(path.resolve(home));
+}
+
+function readSettingsLayers(
+  workspaceDir: string,
+  opts: LoadSettingsOptions,
+  snapshotOf?: { readonly environment: Readonly<NodeJS.ProcessEnv> },
+): LoadedSettings {
+  // A snapshot reads through the given environment and writes nothing. Every
+  // step below that writes a file or `process.env` must be skipped when
+  // `snapshot` is set; the snapshot tests compare the whole tree to hold it.
+  const snapshot = snapshotOf !== undefined;
+  const snapshotEnvironment = snapshotOf?.environment;
   // Apply any QWEN_HOME / QWEN_RUNTIME_DIR set in user-level `.env` files
   // BEFORE any code reads a path derived from them. After this call, the
   // lazy `getUserSettingsPath()` / `Storage.getGlobalQwenDir()` getters
   // return the post-bootstrap value.
-  preResolveHomeEnvOverrides();
-  const userSettingsPath = getUserSettingsPath();
-  const qwenHomeRedirectWarning =
-    detectQwenHomeRedirectWithoutMigration(userSettingsPath);
+  if (!snapshot) preResolveHomeEnvOverrides();
+  // A malformed operator file cannot silently reset a confinement policy.
+  // Validate literals before environment substitution and corruption recovery.
+  const operatorSandbox = snapshot
+    ? undefined
+    : readOperatorSandboxSettings().tools?.executionSandbox;
+  const userSettingsPath = snapshot
+    ? path.join(getGlobalQwenDirLite(snapshotEnvironment), 'settings.json')
+    : getUserSettingsPath();
+  const qwenHomeRedirectWarning = snapshot
+    ? null
+    : detectQwenHomeRedirectWithoutMigration(userSettingsPath);
 
   let systemSettings: Settings = {};
   let systemDefaultSettings: Settings = {};
   let userSettings: Settings = {};
   let workspaceSettings: Settings = {};
   const settingsErrors: SettingsError[] = [];
-  const systemSettingsPath = getSystemSettingsPath();
-  const systemDefaultsPath = getSystemDefaultsPath();
+  const systemSettingsPath = getSystemSettingsPath(snapshotEnvironment);
+  const systemDefaultsPath = getSystemDefaultsPath(snapshotEnvironment);
   const migratedInMemoryScopes = new Set<SettingScope>();
 
   // Resolve paths to their canonical representation to handle symlinks
   const resolvedWorkspaceDir = path.resolve(workspaceDir);
-  const resolvedHomeDir = path.resolve(homedir());
 
   let realWorkspaceDir = resolvedWorkspaceDir;
   try {
@@ -764,7 +1190,7 @@ export function loadSettings(
   }
 
   // We expect homedir to always exist and be resolvable.
-  const realHomeDir = fs.realpathSync(resolvedHomeDir);
+  const realHomeDir = resolveHomeDirectory();
 
   const workspaceSettingsPath = new Storage(
     workspaceDir,
@@ -781,8 +1207,12 @@ export function loadSettings(
     wasRecovered?: boolean;
   } => {
     try {
-      if (fs.existsSync(filePath)) {
-        const content = fs.readFileSync(filePath, 'utf-8');
+      const content = snapshot
+        ? readConfigFile(filePath)
+        : fs.existsSync(filePath)
+          ? fs.readFileSync(filePath, 'utf-8')
+          : undefined;
+      if (content !== undefined) {
         let rawSettings: unknown;
         // Carry corruption state through to the final return so it
         // can be attached after the migration pipeline runs.
@@ -791,62 +1221,120 @@ export function loadSettings(
         let recoveredFromEnvVar: boolean | null = null;
 
         try {
-          rawSettings = JSON.parse(stripJsonComments(content));
+          rawSettings = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
         } catch (parseError: unknown) {
-          // ===== JSON parse failed — enter corruption recovery =====
-          // Strategy: save corrupted file as .corrupted → reset to empty →
-          // show dialog in UI. Never crash due to a corrupted settings file.
-          //
-          // Note: there is no on-disk `.orig` backup to recover from. Writes go
-          // through `writeWithBackupSync`, which uses `.orig` only as an
-          // in-flight safety net and removes it on success — so it never
-          // lingers in the user's directory (see writeWithBackup.ts).
-
-          // Step 1: copy corrupted file to .corrupted for reference
-          // MUST guarantee .corrupted exists so onExit can restore it.
-          // Use copy (not rename) — the file must stay on disk so that
-          // child processes spawned by relaunchAppInChildProcess() can
-          // enter the existsSync block where env-var propagation is checked.
+          if (
+            snapshot ||
+            scope !== SettingScope.Workspace ||
+            operatorSandbox ||
+            opts.preserveInvalidWorkspaceSettings
+          )
+            throw parseError;
+          // Workspace-only recovery preserves a copy for the existing dialog.
           debugLogger.warn(
-            `Settings file ${filePath} has invalid JSON (${getErrorMessage(parseError)}). Resetting to empty settings.`,
+            `Workspace settings ${filePath} have invalid JSON (${getErrorMessage(parseError)}).`,
           );
-
+          let original: fs.Stats;
           try {
-            fs.copyFileSync(filePath, corruptedPath);
-            corruptedSaved = true;
+            if (
+              fs.existsSync(corruptedPath) &&
+              fs.realpathSync(filePath) === fs.realpathSync(corruptedPath)
+            )
+              throw new Error(
+                'The corruption copy resolves to the original settings file.',
+              );
+            original = fs.lstatSync(filePath);
+            if (
+              !original.isFile() ||
+              original.nlink !== 1 ||
+              fs.realpathSync(filePath) !==
+                path.join(
+                  realWorkspaceDir,
+                  SETTINGS_DIRECTORY_NAME,
+                  'settings.json',
+                )
+            )
+              throw new Error(
+                'Linked Workspace settings cannot be recovered automatically; repair the original file.',
+              );
+            const source = fs.openSync(
+              filePath,
+              fs.constants.O_RDONLY |
+                fs.constants.O_NOFOLLOW |
+                fs.constants.O_NONBLOCK,
+            );
+            try {
+              const opened = fs.fstatSync(source);
+              if (
+                !opened.isFile() ||
+                opened.nlink !== 1 ||
+                opened.dev !== original.dev ||
+                opened.ino !== original.ino
+              )
+                throw new Error(
+                  'Workspace settings changed before preservation.',
+                );
+              const bytes = fs.readFileSync(source);
+              fs.rmSync(corruptedPath, { force: true });
+              const copy = fs.openSync(
+                corruptedPath,
+                'wx',
+                original.mode & 0o777,
+              );
+              try {
+                fs.fchmodSync(copy, original.mode & 0o777);
+                fs.writeFileSync(copy, bytes);
+              } finally {
+                fs.closeSync(copy);
+              }
+            } finally {
+              fs.closeSync(source);
+            }
           } catch (copyError) {
-            debugLogger.warn(
-              `Failed to copy corrupted file: ${getErrorMessage(copyError)}`,
+            throw new Error(
+              `Cannot preserve malformed workspace settings ${filePath}: ${getErrorMessage(copyError)}`,
             );
           }
-
-          // Step 2: no recoverable content — start with empty settings
-          if (!rawSettings) {
-            const warningMsg = `Settings file ${filePath} has invalid JSON. Your settings have been reset.`;
-            debugLogger.warn(warningMsg);
-            if (corruptedSaved) {
-              // Clear the original file so the settings UI shows empty settings
-              // instead of the corrupted content.
-              try {
-                fs.writeFileSync(filePath, '{}', 'utf-8');
-              } catch {
-                /* ignore — settings are already empty in memory */
-              }
+          try {
+            const target = fs.openSync(
+              filePath,
+              fs.constants.O_WRONLY |
+                fs.constants.O_NOFOLLOW |
+                fs.constants.O_NONBLOCK,
+            );
+            try {
+              const opened = fs.fstatSync(target);
+              if (
+                !opened.isFile() ||
+                opened.nlink !== 1 ||
+                opened.dev !== original.dev ||
+                opened.ino !== original.ino
+              )
+                throw new Error('Workspace settings changed before reset.');
+              fs.ftruncateSync(target, 0);
+              fs.writeFileSync(target, '{}', 'utf-8');
+            } finally {
+              fs.closeSync(target);
             }
-            return {
-              settings: {},
-              migrationWarnings: [],
-              corruptedPath: corruptedSaved ? corruptedPath : undefined,
-              wasRecovered: false,
-            };
+          } catch (writeError) {
+            debugLogger.warn(
+              `Could not reset malformed workspace settings ${filePath}: ${getErrorMessage(writeError)}. Using empty Workspace settings; the preserved copy is ${corruptedPath}.`,
+            );
           }
+          return {
+            settings: {},
+            migrationWarnings: [],
+            corruptedPath,
+            wasRecovered: false,
+          };
         }
 
         // Propagate corruption state from parent process via env vars.
         // relaunchAppInChildProcess() spawns a child that re-reads
         // settings.json (already valid after parent recovered it). The
         // env vars preserve the corruption marker across the boundary.
-        // Only apply to user scope since that's where corruption is detected.
+        // Operator settings never enter this flow; only the matching Workspace
+        // backup can be offered for restoration.
         // Clear env vars after reading so subsequent loadSettings calls
         // don't re-trigger this path.
         const envCorruptedPath = process.env[ENV_CORRUPTED_PATH];
@@ -854,7 +1342,11 @@ export function loadSettings(
           (opts.consumeCorruptionEnvVars ?? true) &&
           envCorruptedPath &&
           envCorruptedPath === corruptedPath &&
-          scope === SettingScope.User
+          scope === SettingScope.Workspace &&
+          !snapshot &&
+          !operatorSandbox &&
+          !opts.preserveInvalidWorkspaceSettings &&
+          fs.existsSync(corruptedPath)
         ) {
           corruptedSaved = true;
           recoveredFromEnvVar = process.env[ENV_WAS_RECOVERED] === '1';
@@ -874,6 +1366,11 @@ export function loadSettings(
           return { settings: {} };
         }
 
+        if (scope !== SettingScope.Workspace) {
+          parseExecutionSandboxSettings(
+            (rawSettings as Settings).tools?.executionSandbox,
+          );
+        }
         let settingsObject = rawSettings as Record<string, unknown>;
         const hasVersionKey = SETTINGS_VERSION_KEY in settingsObject;
         const versionValue = settingsObject[SETTINGS_VERSION_KEY];
@@ -881,9 +1378,20 @@ export function loadSettings(
           hasVersionKey && typeof versionValue !== 'number';
         const hasLegacyNumericVersion =
           typeof versionValue === 'number' && versionValue < SETTINGS_VERSION;
+        if (
+          snapshot &&
+          hasVersionKey &&
+          !(Number.isInteger(versionValue) && (versionValue as number) >= 1)
+        ) {
+          throw new Error(
+            `Settings file has an unsupported ${SETTINGS_VERSION_KEY}.`,
+          );
+        }
         let migrationWarnings: string[] | undefined;
 
         const persistSettingsObject = (warningPrefix: string) => {
+          if (snapshot) return;
+          if (operatorSandbox && scope === SettingScope.Workspace) return;
           try {
             // Use sync mode to remove deprecated keys (zombie key prevention)
             // while preserving comments and formatting from the original file.
@@ -906,7 +1414,7 @@ export function loadSettings(
 
         // Execute migrations even on recovered settings — the migrated data
         // must persist. The disk-write branches below (version normalization)
-        // are guarded by !corruptedSaved to avoid creating .orig backups
+        // are guarded by !corruptedSaved to avoid creating recovery copies
         // of freshly-reset settings.
         if (needsMigration(settingsObject)) {
           const migrationResult = runMigrations(settingsObject, scope);
@@ -937,9 +1445,17 @@ export function loadSettings(
           // Normalize it to current version to avoid repeated startup work.
           // Skip if we just recovered from corruption — the next startup will
           // handle normalization, avoiding an unnecessary writeWithBackupSync
-          // that would create a .orig file from the freshly reset settings.
+          // that would back up the freshly reset settings.
           settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
           persistSettingsObject('Error normalizing settings version on disk');
+        }
+        if (
+          snapshot &&
+          settingsObject[SETTINGS_VERSION_KEY] !== SETTINGS_VERSION
+        ) {
+          throw new Error(
+            `Settings file has an unsupported ${SETTINGS_VERSION_KEY}.`,
+          );
         }
 
         // Attach corruption state propagated from the parent via env vars.
@@ -970,11 +1486,7 @@ export function loadSettings(
   );
   const userResult = loadAndMigrate(userSettingsPath, SettingScope.User);
 
-  let workspaceResult: {
-    settings: Settings;
-    rawJson?: string;
-    migrationWarnings?: string[];
-  } = {
+  let workspaceResult: ReturnType<typeof loadAndMigrate> = {
     settings: {} as Settings,
     rawJson: undefined,
   };
@@ -999,21 +1511,32 @@ export function loadSettings(
   // effective precedence is: process.env > home .env > unresolved placeholder.
   // The resolver checks customEnv before process.env, but since customEnv
   // never contains a process.env key, process.env always wins.
-  const homeEnvFallback = getHomeEnvFallbackVars((message) =>
-    debugLogger.warn(message),
-  );
+  // A snapshot environment is the environment of the session hosts it
+  // describes and carries the user-level `.env` values its runtime applied, so
+  // it is the only source, read as a host spawned with it sees it.
+  const homeEnvFallback = snapshotOf
+    ? spawnedEnvironmentView(snapshotOf.environment)
+    : getHomeEnvFallbackVars((message) => debugLogger.warn(message));
+  const resolveOptions = { processEnvFallback: !snapshot };
   systemSettings = resolveEnvVarsInObject(
     systemResult.settings,
     homeEnvFallback,
+    resolveOptions,
   );
   systemDefaultSettings = resolveEnvVarsInObject(
     systemDefaultsResult.settings,
     homeEnvFallback,
+    resolveOptions,
   );
-  userSettings = resolveEnvVarsInObject(userResult.settings, homeEnvFallback);
+  userSettings = resolveEnvVarsInObject(
+    userResult.settings,
+    homeEnvFallback,
+    resolveOptions,
+  );
   workspaceSettings = resolveEnvVarsInObject(
     workspaceResult.settings,
     homeEnvFallback,
+    resolveOptions,
   );
 
   // Support legacy theme names
@@ -1028,12 +1551,18 @@ export function loadSettings(
     workspaceSettings.ui.theme = DEFAULT_DARK_THEME_NAME;
   }
 
-  // For the initial trust check, we can only use user and system settings.
+  // For the initial trust check we can only use the scopes that do not need
+  // the decision being computed. `system-defaults` participates so an operator
+  // enabling `security.folderTrust` there reaches the same "trust enabled"
+  // answer the final merged settings (and `loadCliConfig`'s `trustedFolder`)
+  // use; the workspace scope stays out, since a workspace file that only a
+  // trusted workspace may contribute cannot decide its own trust.
   const initialTrustCheckSettings = customDeepMerge(
     getMergeStrategyForPath,
     {},
-    systemSettings,
+    systemDefaultSettings,
     userSettings,
+    systemSettings,
   );
   const isTrusted =
     opts.workspaceTrusted ??
@@ -1042,7 +1571,7 @@ export function loadSettings(
       undefined,
       realWorkspaceDir,
     ).isTrusted ??
-    true;
+    false;
 
   // Create a temporary merged settings object to pass to loadEnvironment.
   const tempMergedSettings = mergeSettings(
@@ -1107,8 +1636,8 @@ export function loadSettings(
     isTrusted,
     migratedInMemoryScopes,
     allMigrationWarnings,
-    userResult.corruptedPath,
-    userResult.wasRecovered ?? false,
+    workspaceResult.corruptedPath,
+    workspaceResult.wasRecovered ?? false,
     workspaceSettingsActive,
   );
 }

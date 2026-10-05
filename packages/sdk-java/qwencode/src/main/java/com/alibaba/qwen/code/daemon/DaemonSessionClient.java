@@ -689,9 +689,11 @@ public final class DaemonSessionClient implements AutoCloseable {
                     try {
                         body = readSseError(response, deadline);
                     } catch (DaemonProtocolException e) {
+                        awaitPriorStreamClose(deadline);
                         throw indeterminate("SSE error response was malformed", e);
                     } catch (DaemonTransportException e) {
                         if (!RETRYABLE_SSE_STATUS.contains(statusCode)) {
+                            awaitPriorStreamClose(deadline);
                             throw indeterminate("SSE failed with HTTP "
                                     + statusCode, e);
                         }
@@ -709,6 +711,10 @@ public final class DaemonSessionClient implements AutoCloseable {
                                         : new DaemonHttpException(
                                                 "GET /session/:id/events",
                                                 statusCode, body);
+                        // Finish tearing down the SSE stream before the
+                        // caller detaches. Java 11's HttpClient can reset
+                        // the next request if this close is still in flight.
+                        awaitPriorStreamClose(deadline);
                         throw indeterminate("SSE failed with HTTP "
                                 + statusCode, responseFailure);
                     }
@@ -1031,7 +1037,7 @@ public final class DaemonSessionClient implements AutoCloseable {
         }
     }
 
-    private static DaemonEvent parseEvent(SseReader.Frame frame) {
+    static DaemonEvent parseEvent(SseReader.Frame frame) {
         Map<String, Object> envelope = JsonSupport.parseObject(frame.getData(),
                 "SSE data");
         int version = JsonSupport.requiredInt(envelope, "v", "SSE envelope");
@@ -1062,7 +1068,7 @@ public final class DaemonSessionClient implements AutoCloseable {
                 metadata == null ? Collections.emptyMap() : metadata);
     }
 
-    private static void validateSseHeaders(HttpHeaders headers) {
+    static void validateSseHeaders(HttpHeaders headers) {
         String contentType = headers.firstValue("Content-Type").orElse("");
         String mediaType = contentType.split(";", 2)[0].trim();
         if (!"text/event-stream".equalsIgnoreCase(mediaType)) {

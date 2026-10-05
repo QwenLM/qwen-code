@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import {
   _resetRipgrepUtilsCachesForTest,
@@ -25,6 +25,26 @@ vi.mock('node:child_process', () => ({
   execFile: childProcessMock.execFile,
 }));
 
+const fsPromisesMock = vi.hoisted(() => ({
+  stat: vi.fn(),
+  chmod: vi.fn(),
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    stat: fsPromisesMock.stat,
+    chmod: fsPromisesMock.chmod,
+    // The module under test uses the default import shape.
+    default: {
+      ...actual,
+      stat: fsPromisesMock.stat,
+      chmod: fsPromisesMock.chmod,
+    },
+  };
+});
+
 type RipgrepTestError = Error & {
   code?: string | number | undefined | null;
   signal?: string | null;
@@ -37,14 +57,20 @@ function createExecError(
   return Object.assign(new Error(message), props);
 }
 
-function mockRipgrepAttempt(options: {
+type RipgrepAttempt = {
   error?: RipgrepTestError;
   stdout?: string;
   stderr?: string;
   spawnError?: RipgrepTestError;
   order?: 'callback-only' | 'error-only' | 'callback-then-error';
-}): void {
-  childProcessMock.execFile.mockImplementationOnce(
+};
+
+const execFile = childProcessMock.execFile;
+
+function mockRipgrepAttempt(options: RipgrepAttempt): void {
+  const { error = null, stdout = '', stderr = '', spawnError } = options;
+  const order = options.order ?? 'callback-only';
+  execFile.mockImplementationOnce(
     (
       _command: string,
       _args: string[],
@@ -56,18 +82,9 @@ function mockRipgrepAttempt(options: {
       ) => void,
     ) => {
       const child = new EventEmitter();
-      const order = options.order ?? 'callback-only';
       queueMicrotask(() => {
-        if (order !== 'error-only') {
-          callback(
-            options.error ?? null,
-            options.stdout ?? '',
-            options.stderr ?? '',
-          );
-        }
-        if (options.spawnError) {
-          child.emit('error', options.spawnError);
-        }
+        if (order !== 'error-only') callback(error, stdout, stderr);
+        if (spawnError) child.emit('error', spawnError);
       });
       return child;
     },
@@ -83,13 +100,53 @@ vi.mock('./shell-utils.js', () => ({
   isCommandAvailable: vi.fn(),
 }));
 
+// Stubs whether the bundled binary exists (left alone when omitted) and
+// whether `rg` is on PATH.
+function stubInstall(opts: { builtin?: boolean; system: boolean }) {
+  if (opts.builtin !== undefined) {
+    vi.mocked(fileExists).mockResolvedValue(opts.builtin);
+  }
+  vi.mocked(isCommandAvailable).mockReturnValue({
+    available: opts.system,
+    error: undefined,
+  });
+}
+
+const exitError = (code: number) => createExecError('Command failed', { code });
+const timeoutError = () =>
+  createExecError('Command timed out', { signal: 'SIGTERM' });
+const abortError = () =>
+  Object.assign(createExecError('The operation was aborted'), {
+    name: 'AbortError',
+  });
+const abortedSignal = () => {
+  const controller = new AbortController();
+  controller.abort();
+  return controller.signal;
+};
+const jsonArgs = () => ['--json', '--threads', '4', '.'];
+// What the single-thread EAGAIN retry must run instead of jsonArgs().
+const oneThreadArgs = ['--json', '--threads', '1', '.'];
+const THREAD_EAGAIN_STDERR =
+  'rg: failed to create worker thread: Resource temporarily unavailable (os error 11)\n';
+const onBuiltin = (recovery: Record<string, unknown>) => ({
+  selectionMode: 'builtin',
+  ...recovery,
+});
+
 describe('ripgrepUtils', () => {
   beforeEach(() => {
     _resetRipgrepUtilsCachesForTest();
     vi.mocked(fileExists).mockReset();
     vi.mocked(execCommand).mockReset();
     vi.mocked(isCommandAvailable).mockReset();
-    childProcessMock.execFile.mockReset();
+    execFile.mockReset();
+    fsPromisesMock.stat.mockReset();
+    fsPromisesMock.chmod.mockReset();
+    // Default to the source-tree state (0755) so tests that are not about the
+    // exec-bit heal keep selecting the bundled binary as before.
+    fsPromisesMock.stat.mockResolvedValue({ mode: 0o100755 });
+    fsPromisesMock.chmod.mockResolvedValue(undefined);
     vi.mocked(execCommand).mockResolvedValue({
       stdout: 'ripgrep 14.1.0\n',
       stderr: '',
@@ -98,103 +155,54 @@ describe('ripgrepUtils', () => {
   });
 
   describe('getBuiltinRipgrep', () => {
+    const { platform: originalPlatform, arch: originalArch } = process;
+    const setPlatform = (platform: string, arch: string) => {
+      Object.defineProperty(process, 'platform', { value: platform });
+      Object.defineProperty(process, 'arch', { value: arch });
+    };
+    afterEach(() => setPlatform(originalPlatform, originalArch));
+
     it('should return path with .exe extension on Windows', () => {
-      const originalPlatform = process.platform;
-      const originalArch = process.arch;
-
-      // Mock Windows x64
-      Object.defineProperty(process, 'platform', { value: 'win32' });
-      Object.defineProperty(process, 'arch', { value: 'x64' });
-
+      setPlatform('win32', 'x64');
       const rgPath = getBuiltinRipgrep();
 
       expect(rgPath).toContain('x64-win32');
       expect(rgPath).toContain('rg.exe');
       expect(rgPath).toContain(path.join('vendor', 'ripgrep'));
-
-      // Restore original values
-      Object.defineProperty(process, 'platform', { value: originalPlatform });
-      Object.defineProperty(process, 'arch', { value: originalArch });
     });
 
     it('should return path without .exe extension on macOS', () => {
-      const originalPlatform = process.platform;
-      const originalArch = process.arch;
-
-      // Mock macOS arm64
-      Object.defineProperty(process, 'platform', { value: 'darwin' });
-      Object.defineProperty(process, 'arch', { value: 'arm64' });
-
+      setPlatform('darwin', 'arm64');
       const rgPath = getBuiltinRipgrep();
 
       expect(rgPath).toContain('arm64-darwin');
       expect(rgPath).toContain('rg');
       expect(rgPath).not.toContain('.exe');
       expect(rgPath).toContain(path.join('vendor', 'ripgrep'));
-
-      // Restore original values
-      Object.defineProperty(process, 'platform', { value: originalPlatform });
-      Object.defineProperty(process, 'arch', { value: originalArch });
     });
 
     it('should return path without .exe extension on Linux', () => {
-      const originalPlatform = process.platform;
-      const originalArch = process.arch;
-
-      // Mock Linux x64
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      Object.defineProperty(process, 'arch', { value: 'x64' });
-
+      setPlatform('linux', 'x64');
       const rgPath = getBuiltinRipgrep();
 
       expect(rgPath).toContain('x64-linux');
       expect(rgPath).toContain('rg');
       expect(rgPath).not.toContain('.exe');
       expect(rgPath).toContain(path.join('vendor', 'ripgrep'));
-
-      // Restore original values
-      Object.defineProperty(process, 'platform', { value: originalPlatform });
-      Object.defineProperty(process, 'arch', { value: originalArch });
     });
 
     it('should return null for unsupported platform', () => {
-      const originalPlatform = process.platform;
-      const originalArch = process.arch;
-
-      // Mock unsupported platform
-      Object.defineProperty(process, 'platform', { value: 'freebsd' });
-      Object.defineProperty(process, 'arch', { value: 'x64' });
-
+      setPlatform('freebsd', 'x64');
       expect(getBuiltinRipgrep()).toBeNull();
-
-      // Restore original values
-      Object.defineProperty(process, 'platform', { value: originalPlatform });
-      Object.defineProperty(process, 'arch', { value: originalArch });
     });
 
     it('should return null for unsupported architecture', () => {
-      const originalPlatform = process.platform;
-      const originalArch = process.arch;
-
-      // Mock unsupported architecture
-      Object.defineProperty(process, 'platform', { value: 'darwin' });
-      Object.defineProperty(process, 'arch', { value: 'ia32' });
-
+      setPlatform('darwin', 'ia32');
       expect(getBuiltinRipgrep()).toBeNull();
-
-      // Restore original values
-      Object.defineProperty(process, 'platform', { value: originalPlatform });
-      Object.defineProperty(process, 'arch', { value: originalArch });
     });
 
     it('should handle all supported platform/arch combinations', () => {
-      const originalPlatform = process.platform;
-      const originalArch = process.arch;
-
-      const combinations: Array<{
-        platform: string;
-        arch: string;
-      }> = [
+      const combinations: Array<{ platform: string; arch: string }> = [
         { platform: 'darwin', arch: 'x64' },
         { platform: 'darwin', arch: 'arm64' },
         { platform: 'linux', arch: 'x64' },
@@ -203,31 +211,18 @@ describe('ripgrepUtils', () => {
       ];
 
       combinations.forEach(({ platform, arch }) => {
-        Object.defineProperty(process, 'platform', { value: platform });
-        Object.defineProperty(process, 'arch', { value: arch });
-
-        const rgPath = getBuiltinRipgrep();
+        setPlatform(platform, arch);
         const binaryName = platform === 'win32' ? 'rg.exe' : 'rg';
-        const expectedPathSegment = path.join(
-          `${arch}-${platform}`,
-          binaryName,
+        expect(getBuiltinRipgrep()).toContain(
+          path.join(`${arch}-${platform}`, binaryName),
         );
-        expect(rgPath).toContain(expectedPathSegment);
       });
-
-      // Restore original values
-      Object.defineProperty(process, 'platform', { value: originalPlatform });
-      Object.defineProperty(process, 'arch', { value: originalArch });
     });
   });
 
   describe('resolveRipgrep', () => {
     it('keeps builtin and system selections cached separately', async () => {
-      vi.mocked(fileExists).mockResolvedValue(true);
-      vi.mocked(isCommandAvailable).mockReturnValue({
-        available: true,
-        error: undefined,
-      });
+      stubInstall({ builtin: true, system: true });
 
       await expect(resolveRipgrep(true)).resolves.toMatchObject({
         mode: 'builtin',
@@ -239,11 +234,7 @@ describe('ripgrepUtils', () => {
     });
 
     it('falls back to system ripgrep when builtin is enabled but unavailable', async () => {
-      vi.mocked(fileExists).mockResolvedValue(false);
-      vi.mocked(isCommandAvailable).mockReturnValue({
-        available: true,
-        error: undefined,
-      });
+      stubInstall({ builtin: false, system: true });
 
       await expect(resolveRipgrep(true)).resolves.toEqual({
         mode: 'system',
@@ -252,319 +243,300 @@ describe('ripgrepUtils', () => {
     });
   });
 
+  // A published tarball ships every `vendor/ripgrep/*/rg` as 0644 (#12679),
+  // so the bundled binary cannot be spawned until something restores the bit.
+  describe('bundled ripgrep exec bit', () => {
+    const originalPlatform = process.platform;
+    const originalArch = process.arch;
+
+    function stubPlatform(platform: string, arch: string): void {
+      Object.defineProperty(process, 'platform', { value: platform });
+      Object.defineProperty(process, 'arch', { value: arch });
+    }
+
+    afterEach(() => {
+      stubPlatform(originalPlatform, originalArch);
+    });
+
+    it('restores a missing exec bit before selecting the bundled binary', async () => {
+      stubPlatform('linux', 'x64');
+      vi.mocked(fileExists).mockResolvedValue(true);
+      fsPromisesMock.stat.mockResolvedValue({ mode: 0o100644 });
+
+      const bundledPath = getBuiltinRipgrep();
+      await expect(resolveRipgrep(true)).resolves.toEqual({
+        mode: 'builtin',
+        command: bundledPath,
+      });
+
+      expect(fsPromisesMock.stat).toHaveBeenCalledWith(bundledPath);
+      expect(fsPromisesMock.chmod).toHaveBeenCalledWith(bundledPath, 0o755);
+    });
+
+    it('leaves an already executable bundled binary alone', async () => {
+      stubPlatform('linux', 'x64');
+      vi.mocked(fileExists).mockResolvedValue(true);
+
+      await expect(resolveRipgrep(true)).resolves.toMatchObject({
+        mode: 'builtin',
+      });
+
+      expect(fsPromisesMock.chmod).not.toHaveBeenCalled();
+    });
+
+    it('probes the bundled binary once, not on every search', async () => {
+      stubPlatform('linux', 'x64');
+      vi.mocked(fileExists).mockResolvedValue(true);
+      fsPromisesMock.stat.mockResolvedValue({ mode: 0o100644 });
+
+      await resolveRipgrep(true);
+      await resolveRipgrep(true);
+
+      expect(fsPromisesMock.stat).toHaveBeenCalledTimes(1);
+      expect(fsPromisesMock.chmod).toHaveBeenCalledTimes(1);
+    });
+
+    it('still falls back to system rg when the install cannot be healed', async () => {
+      stubPlatform('linux', 'x64');
+      vi.mocked(fileExists).mockResolvedValue(true);
+      fsPromisesMock.stat.mockResolvedValue({ mode: 0o100644 });
+      fsPromisesMock.chmod.mockRejectedValue(
+        createExecError('chmod EPERM', { code: 'EPERM' }),
+      );
+      vi.mocked(isCommandAvailable).mockReturnValue({
+        available: true,
+        error: undefined,
+      });
+      vi.mocked(execCommand).mockImplementation(async (command: string) => {
+        if (command !== 'rg') {
+          throw createExecError(`spawn ${command} EACCES`, { code: 'EACCES' });
+        }
+        return { stdout: 'ripgrep 14.1.1', stderr: '', code: 0 };
+      });
+
+      await expect(canUseRipgrep(true)).resolves.toBe(true);
+    });
+
+    it('skips the heal on Windows, where mode bits are synthesized', async () => {
+      stubPlatform('win32', 'x64');
+      vi.mocked(fileExists).mockResolvedValue(true);
+
+      await expect(resolveRipgrep(true)).resolves.toMatchObject({
+        mode: 'builtin',
+      });
+
+      expect(fsPromisesMock.stat).not.toHaveBeenCalled();
+      expect(fsPromisesMock.chmod).not.toHaveBeenCalled();
+    });
+  });
+
   describe('runRipgrep', () => {
     beforeEach(() => {
       vi.mocked(fileExists).mockResolvedValue(true);
     });
 
+    // A thread-EAGAIN first attempt (stderr given) followed by a clean retry.
+    const mockEagainThenSuccess = (stderr: string) => {
+      mockRipgrepAttempt({ error: exitError(2), stderr });
+      mockRipgrepAttempt({ stdout: 'file.ts:1:needle\n' });
+    };
+    const retriedWithOneThread = () => ({
+      stdout: 'file.ts:1:needle\n',
+      incomplete: false,
+      recovery: onBuiltin({
+        retryTriggered: true,
+        retrySucceeded: true,
+        failureKind: 'eagain',
+      }),
+    });
+
     it('treats exit code 1 with empty stdout and stderr as no matches', async () => {
-      mockRipgrepAttempt({
-        error: createExecError('Command failed', { code: 1 }),
-      });
+      mockRipgrepAttempt({ error: exitError(1) });
 
-      const result = await runRipgrep(['--threads', '4']);
-
-      expect(result).toEqual({
+      expect(await runRipgrep(['--threads', '4'])).toEqual({
         stdout: '',
         incomplete: false,
-        recovery: {
-          selectionMode: 'builtin',
-          retryTriggered: false,
-        },
+        recovery: onBuiltin({ retryTriggered: false }),
       });
     });
 
     it('does not treat exit code 1 with stderr as no matches', async () => {
-      const error = createExecError('Command failed', { code: 1 });
+      const error = exitError(1);
       mockRipgrepAttempt({
         error,
         stderr: 'rg: ./secret: Permission denied\n',
       });
 
-      const result = await runRipgrep(['--threads', '4']);
-
-      expect(result).toMatchObject({
+      expect(await runRipgrep(['--threads', '4'])).toMatchObject({
         stdout: '',
         incomplete: false,
         error,
-        recovery: {
-          selectionMode: 'builtin',
-          retryTriggered: false,
-          failureKind: 'exit',
-        },
+        recovery: onBuiltin({ retryTriggered: false, failureKind: 'exit' }),
       });
     });
 
     it('treats exit code 1 with json summary on stdout as no matches', async () => {
       const summary = '{"data":{"stats":{"matches":0}},"type":"summary"}\n';
-      mockRipgrepAttempt({
-        error: createExecError('Command failed', { code: 1 }),
-        stdout: summary,
-      });
+      mockRipgrepAttempt({ error: exitError(1), stdout: summary });
 
-      const result = await runRipgrep(['--threads', '4']);
-
-      expect(result).toEqual({
+      expect(await runRipgrep(['--threads', '4'])).toEqual({
         stdout: summary,
         incomplete: false,
-        recovery: {
-          selectionMode: 'builtin',
-          retryTriggered: false,
-        },
+        recovery: onBuiltin({ retryTriggered: false }),
       });
     });
 
     it('treats exit code 1 with both stdout and stderr as an exit error', async () => {
-      const error = createExecError('Command failed', { code: 1 });
+      const error = exitError(1);
       mockRipgrepAttempt({
         error,
         stdout: 'file.ts:1:match\n',
         stderr: 'rg: ./restricted: Permission denied\n',
       });
 
-      const result = await runRipgrep(['--threads', '4']);
-
-      expect(result).toMatchObject({
+      expect(await runRipgrep(['--threads', '4'])).toMatchObject({
         stdout: 'file.ts:1:match\n',
         incomplete: true,
         error,
-        recovery: {
-          selectionMode: 'builtin',
-          retryTriggered: false,
-          failureKind: 'exit',
-        },
+        recovery: onBuiltin({ retryTriggered: false, failureKind: 'exit' }),
       });
     });
 
     it('retries a confirmed internal thread EAGAIN with one thread', async () => {
-      mockRipgrepAttempt({
-        error: createExecError('Command failed', { code: 2 }),
-        stderr:
-          'rg: failed to create worker thread: Resource temporarily unavailable (os error 11)\n',
-      });
-      mockRipgrepAttempt({
-        stdout: 'file.ts:1:needle\n',
-      });
+      mockEagainThenSuccess(THREAD_EAGAIN_STDERR);
 
-      const args = ['--json', '--threads', '4', '.'];
+      const args = jsonArgs();
       const result = await runRipgrep(args);
 
-      expect(childProcessMock.execFile).toHaveBeenCalledTimes(2);
-      expect(childProcessMock.execFile.mock.calls[1][1]).toEqual([
-        '--json',
-        '--threads',
-        '1',
-        '.',
-      ]);
+      expect(execFile).toHaveBeenCalledTimes(2);
+      expect(execFile.mock.calls[1][1]).toEqual(oneThreadArgs);
       expect(args).toEqual(['--json', '--threads', '4', '.']);
-      expect(result).toEqual({
-        stdout: 'file.ts:1:needle\n',
-        incomplete: false,
-        recovery: {
-          selectionMode: 'builtin',
-          retryTriggered: true,
-          retrySucceeded: true,
-          failureKind: 'eagain',
-        },
-      });
+      expect(result).toEqual(retriedWithOneThread());
     });
 
     it('returns the retry failure when the single-thread retry also fails', async () => {
-      const retryError = createExecError('Command failed', { code: 2 });
-      mockRipgrepAttempt({
-        error: createExecError('Command failed', { code: 2 }),
-        stderr:
-          'rg: failed to create worker thread: Resource temporarily unavailable (os error 11)\n',
-      });
+      const retryError = exitError(2);
+      mockRipgrepAttempt({ error: exitError(2), stderr: THREAD_EAGAIN_STDERR });
       mockRipgrepAttempt({
         error: retryError,
         stderr: 'rg: regex parse error\n',
       });
 
-      const result = await runRipgrep(['--json', '--threads', '4', '.']);
+      const result = await runRipgrep(jsonArgs());
 
-      expect(childProcessMock.execFile).toHaveBeenCalledTimes(2);
+      expect(execFile).toHaveBeenCalledTimes(2);
       expect(result).toMatchObject({
         stdout: '',
         incomplete: false,
         error: retryError,
-        recovery: {
-          selectionMode: 'builtin',
+        recovery: onBuiltin({
           retryTriggered: true,
           retrySucceeded: false,
           failureKind: 'exit',
-        },
+        }),
       });
     });
 
     it('marks retry result as incomplete when retry produces partial output', async () => {
+      mockRipgrepAttempt({ error: exitError(2), stderr: THREAD_EAGAIN_STDERR });
       mockRipgrepAttempt({
-        error: createExecError('Command failed', { code: 2 }),
-        stderr:
-          'rg: failed to create worker thread: Resource temporarily unavailable (os error 11)\n',
-      });
-      const retryError = createExecError('Command timed out', {
-        signal: 'SIGTERM',
-      });
-      mockRipgrepAttempt({
-        error: retryError,
+        error: timeoutError(),
         stdout: 'file.ts:1:partial\nfile.ts:2:incomplete-line',
       });
 
-      const result = await runRipgrep(['--json', '--threads', '4', '.']);
+      const result = await runRipgrep(jsonArgs());
 
       expect(result).toMatchObject({
         incomplete: true,
-        recovery: {
-          selectionMode: 'builtin',
+        recovery: onBuiltin({
           retryTriggered: true,
           retrySucceeded: false,
           failureKind: 'timeout',
-        },
+        }),
       });
       expect(result.stdout).toBe('file.ts:1:partial');
     });
 
     it('does not retry a spawn EAGAIN because ripgrep never started', async () => {
       const error = createExecError('spawn EAGAIN', { code: 'EAGAIN' });
-      mockRipgrepAttempt({
-        spawnError: error,
-        order: 'error-only',
-      });
+      mockRipgrepAttempt({ spawnError: error, order: 'error-only' });
 
-      const result = await runRipgrep(['--json', '--threads', '4', '.']);
+      const result = await runRipgrep(jsonArgs());
 
-      expect(childProcessMock.execFile).toHaveBeenCalledTimes(1);
+      expect(execFile).toHaveBeenCalledTimes(1);
       expect(result).toMatchObject({
         stdout: '',
         incomplete: false,
         error,
-        recovery: {
-          selectionMode: 'builtin',
-          retryTriggered: false,
-          failureKind: 'spawn',
-        },
+        recovery: onBuiltin({ retryTriggered: false, failureKind: 'spawn' }),
       });
     });
 
     it('does not retry canceled execution even when stderr mentions thread EAGAIN', async () => {
-      const controller = new AbortController();
-      controller.abort();
-      const error = Object.assign(
-        createExecError('The operation was aborted'),
-        {
-          name: 'AbortError',
-        },
-      );
-      mockRipgrepAttempt({
-        error,
-        stderr:
-          'rg: failed to create worker thread: Resource temporarily unavailable (os error 11)\n',
-      });
+      const error = abortError();
+      mockRipgrepAttempt({ error, stderr: THREAD_EAGAIN_STDERR });
 
-      const result = await runRipgrep(
-        ['--json', '--threads', '4', '.'],
-        controller.signal,
-      );
+      const result = await runRipgrep(jsonArgs(), abortedSignal());
 
-      expect(childProcessMock.execFile).toHaveBeenCalledTimes(1);
+      expect(execFile).toHaveBeenCalledTimes(1);
       expect(result).toMatchObject({
         stdout: '',
         incomplete: false,
         error,
-        recovery: {
-          selectionMode: 'builtin',
-          retryTriggered: false,
-        },
+        recovery: onBuiltin({ retryTriggered: false }),
       });
       expect(result.recovery.failureKind).toBeUndefined();
     });
 
     it('marks canceled execution with partial stdout as incomplete and drops the last line', async () => {
-      const controller = new AbortController();
-      controller.abort();
-      const error = Object.assign(
-        createExecError('The operation was aborted'),
-        { name: 'AbortError' },
-      );
+      const error = abortError();
       mockRipgrepAttempt({
         error,
         stdout: 'file.ts:1:complete\nfile.ts:2:partial',
-        stderr:
-          'rg: failed to create worker thread: Resource temporarily unavailable (os error 11)\n',
+        stderr: THREAD_EAGAIN_STDERR,
       });
 
-      const result = await runRipgrep(
-        ['--json', '--threads', '4', '.'],
-        controller.signal,
-      );
+      const result = await runRipgrep(jsonArgs(), abortedSignal());
 
       expect(result).toMatchObject({
         stdout: 'file.ts:1:complete',
         incomplete: true,
         error,
-        recovery: {
-          selectionMode: 'builtin',
-          retryTriggered: false,
-        },
+        recovery: onBuiltin({ retryTriggered: false }),
       });
       expect(result.recovery.failureKind).toBeUndefined();
     });
 
     it('does not retry unconfirmed resource unavailable text', async () => {
-      const error = createExecError('Command failed', { code: 2 });
+      const error = exitError(2);
       mockRipgrepAttempt({
         error,
         stderr: 'rg: Resource temporarily unavailable\n',
       });
 
-      const result = await runRipgrep(['--json', '--threads', '4', '.']);
+      const result = await runRipgrep(jsonArgs());
 
-      expect(childProcessMock.execFile).toHaveBeenCalledTimes(1);
+      expect(execFile).toHaveBeenCalledTimes(1);
       expect(result).toMatchObject({
         stdout: '',
         incomplete: false,
         error,
-        recovery: {
-          selectionMode: 'builtin',
-          retryTriggered: false,
-          failureKind: 'exit',
-        },
+        recovery: onBuiltin({ retryTriggered: false, failureKind: 'exit' }),
       });
     });
 
     it('retries os error 11 as a short EAGAIN marker', async () => {
-      mockRipgrepAttempt({
-        error: createExecError('Command failed', { code: 2 }),
-        stderr: 'rg: os error 11\n',
-      });
-      mockRipgrepAttempt({
-        stdout: 'file.ts:1:needle\n',
-      });
+      mockEagainThenSuccess('rg: os error 11\n');
 
-      const result = await runRipgrep(['--json', '--threads', '4', '.']);
+      const result = await runRipgrep(jsonArgs());
 
-      expect(childProcessMock.execFile).toHaveBeenCalledTimes(2);
-      expect(childProcessMock.execFile.mock.calls[1][1]).toEqual([
-        '--json',
-        '--threads',
-        '1',
-        '.',
-      ]);
-      expect(result).toEqual({
-        stdout: 'file.ts:1:needle\n',
-        incomplete: false,
-        recovery: {
-          selectionMode: 'builtin',
-          retryTriggered: true,
-          retrySucceeded: true,
-          failureKind: 'eagain',
-        },
-      });
+      expect(execFile).toHaveBeenCalledTimes(2);
+      expect(execFile.mock.calls[1][1]).toEqual(oneThreadArgs);
+      expect(result).toEqual(retriedWithOneThread());
     });
 
     it('does not retry when the expected --threads 4 pair is absent', async () => {
-      const error = createExecError('Command failed', { code: 2 });
+      const error = exitError(2);
       mockRipgrepAttempt({
         error,
         stderr: 'rg: worker thread failed: Resource temporarily unavailable\n',
@@ -572,78 +544,56 @@ describe('ripgrepUtils', () => {
 
       const result = await runRipgrep(['--json', '.']);
 
-      expect(childProcessMock.execFile).toHaveBeenCalledTimes(1);
+      expect(execFile).toHaveBeenCalledTimes(1);
       expect(result).toMatchObject({
         error,
-        recovery: {
-          selectionMode: 'builtin',
-          retryTriggered: false,
-          failureKind: 'eagain',
-        },
+        recovery: onBuiltin({ retryTriggered: false, failureKind: 'eagain' }),
       });
     });
 
-    it('removes the potentially incomplete last line after timeout', async () => {
-      const error = createExecError('Command timed out', {
-        signal: 'SIGTERM',
-      });
+    // A failure that cut the output short: the possibly incomplete last line
+    // is dropped and the result is flagged.
+    async function expectPartialOutputDropped(
+      error: RipgrepTestError,
+      failureKind: string,
+    ) {
       mockRipgrepAttempt({
         error,
         stdout: 'file.ts:1:complete\nfile.ts:2:partial',
       });
 
-      const result = await runRipgrep(['--threads', '4']);
-
-      expect(result).toMatchObject({
+      expect(await runRipgrep(['--threads', '4'])).toMatchObject({
         stdout: 'file.ts:1:complete',
         incomplete: true,
         error,
-        recovery: {
-          selectionMode: 'builtin',
-          retryTriggered: false,
-          failureKind: 'timeout',
-        },
+        recovery: onBuiltin({ retryTriggered: false, failureKind }),
       });
+    }
+
+    it('removes the potentially incomplete last line after timeout', async () => {
+      await expectPartialOutputDropped(timeoutError(), 'timeout');
     });
 
     it('classifies maxBuffer output as incomplete', async () => {
       const error = createExecError('stdout maxBuffer length exceeded', {
         code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
       });
-      mockRipgrepAttempt({
-        error,
-        stdout: 'file.ts:1:complete\nfile.ts:2:partial',
-      });
-
-      const result = await runRipgrep(['--threads', '4']);
-
-      expect(result).toMatchObject({
-        stdout: 'file.ts:1:complete',
-        incomplete: true,
-        error,
-        recovery: {
-          selectionMode: 'builtin',
-          retryTriggered: false,
-          failureKind: 'max_buffer',
-        },
-      });
+      await expectPartialOutputDropped(error, 'max_buffer');
     });
 
     it('settles one attempt once when callback and error event both arrive', async () => {
       mockRipgrepAttempt({
-        error: createExecError('Command failed', { code: 2 }),
+        error: exitError(2),
         stderr:
           'rg: failed to spawn worker threads: Resource temporarily unavailable (os error 11)\n',
         spawnError: createExecError('late spawn error', { code: 'EAGAIN' }),
         order: 'callback-then-error',
       });
-      mockRipgrepAttempt({
-        stdout: 'file.ts:1:needle\n',
-      });
+      mockRipgrepAttempt({ stdout: 'file.ts:1:needle\n' });
 
-      const result = await runRipgrep(['--json', '--threads', '4', '.']);
+      const result = await runRipgrep(jsonArgs());
 
-      expect(childProcessMock.execFile).toHaveBeenCalledTimes(2);
+      expect(execFile).toHaveBeenCalledTimes(2);
       expect(result.recovery).toMatchObject({
         retryTriggered: true,
         retrySucceeded: true,
@@ -656,11 +606,7 @@ describe('ripgrepUtils', () => {
     // A bundled binary that exists but dies on exec, e.g. arm64 kernels with
     // 64K pages (#2676).
     const builtinFailsSystemWorks = () => {
-      vi.mocked(fileExists).mockResolvedValue(true);
-      vi.mocked(isCommandAvailable).mockReturnValue({
-        available: true,
-        error: undefined,
-      });
+      stubInstall({ builtin: true, system: true });
       vi.mocked(execCommand).mockImplementation(async (command: string) => {
         if (command !== 'rg') {
           throw new Error(`Command failed: ${command} --version`);
@@ -686,11 +632,7 @@ describe('ripgrepUtils', () => {
     });
 
     it('reports the bundled failure when system rg is unusable too', async () => {
-      vi.mocked(fileExists).mockResolvedValue(true);
-      vi.mocked(isCommandAvailable).mockReturnValue({
-        available: true,
-        error: undefined,
-      });
+      stubInstall({ builtin: true, system: true });
       vi.mocked(execCommand).mockImplementation(async (command: string) => {
         throw new Error(
           command === 'rg' ? 'system rg broken' : 'bundled rg broken',
@@ -727,25 +669,17 @@ describe('ripgrepUtils', () => {
 
     it('lets runRipgrep fall back instead of throwing', async () => {
       builtinFailsSystemWorks();
-      mockRipgrepAttempt({
-        stdout: 'ripgrep 14.1.1\n',
-      });
+      mockRipgrepAttempt({ stdout: 'ripgrep 14.1.1\n' });
 
       await expect(runRipgrep(['--version'])).resolves.toMatchObject({
         stdout: 'ripgrep 14.1.1\n',
-        recovery: {
-          selectionMode: 'system',
-        },
+        recovery: { selectionMode: 'system' },
       });
-      expect(childProcessMock.execFile.mock.calls[0][0]).toBe('rg');
+      expect(execFile.mock.calls[0][0]).toBe('rg');
     });
 
     it('reports the bundled failure when no system rg is installed', async () => {
-      vi.mocked(fileExists).mockResolvedValue(true);
-      vi.mocked(isCommandAvailable).mockReturnValue({
-        available: false,
-        error: undefined,
-      });
+      stubInstall({ builtin: true, system: false });
       vi.mocked(execCommand).mockRejectedValue(new Error('bundled rg broken'));
 
       // Bundled binary fails and there is no system rg to fall back to.
@@ -753,21 +687,13 @@ describe('ripgrepUtils', () => {
     });
 
     it('returns false when neither bundled nor system rg is available', async () => {
-      vi.mocked(fileExists).mockResolvedValue(false);
-      vi.mocked(isCommandAvailable).mockReturnValue({
-        available: false,
-        error: undefined,
-      });
+      stubInstall({ builtin: false, system: false });
 
       await expect(canUseRipgrep(true)).resolves.toBe(false);
     });
 
     it('rejects a system rg that does not identify itself as ripgrep', async () => {
-      vi.mocked(fileExists).mockResolvedValue(true);
-      vi.mocked(isCommandAvailable).mockReturnValue({
-        available: true,
-        error: undefined,
-      });
+      stubInstall({ builtin: true, system: true });
       vi.mocked(execCommand).mockImplementation(async (command: string) => {
         if (command !== 'rg') {
           throw new Error('bundled rg broken');
@@ -780,10 +706,7 @@ describe('ripgrepUtils', () => {
     });
 
     it('never probes the bundled binary when useBuiltin is false (#5361)', async () => {
-      vi.mocked(isCommandAvailable).mockReturnValue({
-        available: true,
-        error: undefined,
-      });
+      stubInstall({ system: true });
       vi.mocked(execCommand).mockRejectedValue(new Error('system rg broken'));
 
       await expect(canUseRipgrep(false)).rejects.toThrow('system rg broken');

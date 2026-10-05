@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { DaemonHttpError, type DaemonClient } from './DaemonClient.js';
+import type { DaemonClient } from './DaemonClient.js';
+import { DaemonHttpError } from './DaemonHttpError.js';
 import type { DaemonAuthProviderId, DaemonDeviceFlowState } from './types.js';
 
 /**

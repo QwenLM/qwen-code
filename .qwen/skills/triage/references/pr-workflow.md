@@ -21,15 +21,19 @@ COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/stage
 
 **Terminal gate exception:** if any terminal exit triggers (Stage 0 core
 module hard block, Stage 1a template failure, Stage 1b problem-does-not-exist,
-or Stage 1c direction escalation), submit exactly one `CHANGES_REQUESTED`
-review and stop. Do not also post or update a Stage 1 issue comment, and do not
-continue to Stage 2, Stage 3, or approval.
+Stage 1c direction escalation, or Stage 1-pre's two request-changes exits —
+linked issue closed as not planned, or a remaining delta against a merged
+fix), submit exactly one `CHANGES_REQUESTED` review and stop. Do not also post
+or update a Stage 1 issue comment, and do not continue to Stage 2, Stage 3, or
+approval. The Stage 1-pre duplicate-close exit is different: it posts the
+terminal `stage=1-pre` comment and closes the PR instead of submitting a
+review.
 
 **Re-runs:** if the triage runs again on the same PR, update each comment in place. **Resolve the comment id by its stage marker AT PATCH TIME — never from memory, list position, or an earlier stage's bookkeeping.** On a re-run the thread holds four or more bot comments whose list order is not the stage order, and a wrong id silently overwrites another stage's comment (observed on a real re-run: the stage=3 comment clobbered with stage=1 content mid-run). The author filter matters too — the marker is public text anyone can paste into a comment, and the bot PAT may be able to edit other users' comments:
 
 ```bash
 BOT_LOGIN=$(gh api user --jq '.login')
-stage_comment_id() { # $1 = stage number (1, 2, 3) or "status"
+stage_comment_id() { # $1 = stage number (1, 2, 3), "1-pre", or "status"
   gh api "repos/$REPO/issues/$PR_NUMBER/comments" --method GET --paginate -F per_page=100 |
     jq -rs --arg bot "$BOT_LOGIN" --arg m "<!-- qwen-triage stage=$1 -->" \
       '[.[][] | select(.user.login == $bot) | select(.body | startswith($m))] | last | .id // empty'
@@ -75,7 +79,7 @@ Every staged comment (Stage 1 gate-pass, Stage 2, Stage 3) ends with the signatu
 <sub>Reviewed at `<HEAD_SHA>` · re-run with `@qwen-code /triage`</sub>
 ```
 
-**If `HEAD_SHA` comes back empty** (API failure or a null `headRefOid`): **fail closed.** Do not PATCH an existing staged comment — the update rewrites the whole body, so a dropped footer erases the previously valid `Reviewed at` line just as an empty-backtick footer would. Retry the capture, or leave the prior comment (with its footer) untouched until a full OID is available; only a brand-new post that never had a footer may go out without one. Terminal-gate reviews (Stage 1a/1b/1c, submitted via `gh pr review --request-changes`) use the signature only — no footer; they reject before a real review pass.
+**If `HEAD_SHA` comes back empty** (API failure or a null `headRefOid`): **fail closed.** Do not PATCH an existing staged comment — the update rewrites the whole body, so a dropped footer erases the previously valid `Reviewed at` line just as an empty-backtick footer would. Retry the capture, or leave the prior comment (with its footer) untouched until a full OID is available; only a brand-new post that never had a footer may go out without one. Terminal-gate reviews (Stage 1-pre request-changes exits and Stage 1a/1b/1c, submitted via `gh pr review --request-changes`) use the signature only — no footer; they reject before a real review pass.
 
 **Approval:** the approve step runs **after** the Stage 3 comment. Comment first, then approve **pinned to the reviewed commit** — `gh pr review --approve` does not bind to a SHA, so a force-push in the check-then-act gap would approve unseen code. Use the reviews API with `commit_id` instead, which records the approval against the exact commit you reviewed (branch protection that requires approval of the latest push then won't count it if the head moved):
 
@@ -146,6 +150,190 @@ enter_worktree(name: "triage")
 Save the `worktreePath`. All `read_file`, `grep_search`, `glob` calls below must use it as root. `gh` commands do not need it.
 
 This is the most important stage — catch problems before anyone spends time reviewing code.
+
+**1-pre. Duplicate / already-fixed check (run before the template check):**
+
+A PR opened after its linked issue was already fixed stays open forever — no
+other gate looks at the linked issue's state. Check it deterministically
+before investing in a review. Scope note: the gate executes inside the
+triage agent session, so it covers healthy runs only — a run whose agent
+cannot reach the model produces no triage at all; that failure shape belongs
+to the workflow's response check, not here.
+
+**Default-branch scope.** Run 1-pre only when the PR targets the default
+branch:
+
+```bash
+BASE_REF=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefName --jq '.baseRefName')
+DEFAULT_BRANCH=$(gh repo view "$REPO" --json defaultBranchRef --jq '.defaultBranchRef.name')
+```
+
+- `BASE_REF` != `DEFAULT_BRANCH` (e.g. a backport to a `release/*` branch) →
+  skip 1-pre and proceed to 1a: such PRs legitimately carry changes that
+  already exist on the default branch, so the subsumption check below cannot
+  judge them.
+
+**Linked issues.** Read them from GitHub's own closing-reference parser — it
+understands all nine closing-keyword forms (`close`/`closes`/`closed`,
+`fix`/`fixes`/`fixed`, `resolve`/`resolves`/`resolved`), URL references, and
+cross-repo references; a keyword grep misses most of them. Keep only same-repo
+references: issue numbers restart at 1 in every repository, so a cross-repo
+`Fixes other-org/other-repo#42` resolved against this repo silently returns
+this repo's unrelated issue #42, and every lookup below is scoped to this
+repo — cross-repo closing references are skipped (this gate can only judge
+duplicates against this repo's issues):
+
+```bash
+ISSUES=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json closingIssuesReferences |
+  jq -r --arg repo "$REPO" '.closingIssuesReferences[]
+    | select((.repository.owner.login + "/" + .repository.name) == $repo)
+    | .number' | sort -u)
+```
+
+The parser is not intent-aware — prose like "resolves #123's closer" links
+#123 too, so an accidental prose mention can pull an unrelated issue into
+`ISSUES`. There is no deterministic intent check: the linkage decides WHICH
+issues the branches below read, and they then act on those issues' states.
+The blast radius stays bounded — the only irreversible act (close)
+additionally requires this PR's diff to be fully subsumed by the default
+branch, which is true only when the change is already landed, so an
+accidental linkage can at worst reach a visible, reversible request-changes
+review or a maintainer escalation, never a substantively wrong close.
+
+```bash
+# Record each linked issue's state; $N feeds the closer query below. The loop
+# only collects states — it never acts per issue, so a mix of OPEN and CLOSED
+# issues gets exactly one outcome from the precedence rule below.
+for N in $ISSUES; do
+  SR=$(gh issue view "$N" --repo "$REPO" --json state,stateReason \
+    --jq '.state + " " + (.stateReason // "")')
+  # "OPEN" -> contributes nothing; "CLOSED NOT_PLANNED" -> request changes,
+  # stop; "CLOSED COMPLETED" -> run the closer query below with this $N
+done
+```
+
+These branches are checked with a fixed precedence — any closed-as-not-planned
+first, then any closed-as-completed, and only when no issue is closed does the
+run proceed to 1a — so mixed states have exactly one outcome. An OPEN issue
+never short-circuits a CLOSED one: `fixes #101 and fixes #102` with #101 open
+and #102 closed-as-completed runs the closer query for #102, it does not
+proceed to 1a.
+
+- No linked issues, or every linked issue **open** → proceed to 1a.
+- Any linked issue **closed as not planned** → the fix target was rejected:
+  submit exactly one `CHANGES_REQUESTED` review asking them to reach
+  agreement in the issue first (bilingual body whose first line is the
+  `<!-- qwen-triage stage=1-pre -->` marker, @mention the author), and stop:
+
+```bash
+gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stage-1pre-not-planned.md
+```
+
+- Any linked issue **closed as completed** → find what closed it (GraphQL —
+  the REST timeline's `closed` event carries no reliable closer reference):
+
+```bash
+gh api graphql -f query='
+  query($owner: String!, $name: String!, $n: Int!) {
+    repository(owner: $owner, name: $name) {
+      issue(number: $n) {
+        timelineItems(last: 20, itemTypes: [CLOSED_EVENT]) {
+          nodes {
+            ... on ClosedEvent {
+              closer {
+                ... on PullRequest { number state merged }
+                ... on Commit { oid }
+              }
+            }
+          }
+        }
+      }
+    }
+  }' -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F n="$N" \
+  --jq '.data.repository.issue.timelineItems.nodes // [] | last | .closer | select(. != null and .number != null) | "\(.number) \(.merged)"'
+```
+
+Only the LAST (most recent) close event counts — earlier closes belong to
+reopen cycles and their closers are stale. If the query fails or emits
+nothing (the number is a PR, not an issue; the issue does not exist; the
+latest close was manual), treat the closer as unresolved.
+
+- Closed by a **merged PR** → compare this PR's production diff (exclude
+  test/generated files per the Stage 0 size rules) against the default
+  branch (`$DEFAULT_BRANCH` — this PR's base, per the scope check above):
+  - **Fully subsumed** — applying this PR's ENTIRE diff to the default
+    branch would change nothing: every production line this PR adds already
+    exists there, AND every production line this PR deletes is already
+    absent there. URL-encode the path with
+    `PATH_ENCODED=$(jq -rn --arg value "<path>" '$value | @uri')`, then read
+    each file as raw bytes via
+    `gh api -H "Accept: application/vnd.github.raw+json" --method GET "repos/$REPO/contents/$PATH_ENCODED" -f ref="$DEFAULT_BRANCH"`;
+    the default JSON representation leaves `content` empty for files at or
+    above 1 MiB. A 404 from this encoded-path request means the file is absent
+    — apply the predicates above to that known state. If any other raw fetch fails, subsumption is
+    unverified: never close; flag it in the Stage 1 comment and escalate to
+    the maintainer. A diff
+    with NO production changes (e.g. tests-only) is never fully subsumed —
+    any file it adds outside the production set is itself a remaining
+    delta. → post the terminal comment below, then close the PR. This is
+    the ONLY place triage closes a PR.
+  - **Any remaining delta** — everything else: an added production line
+    that is missing there, a deleted production line that still exists
+    there, or any non-production addition → submit exactly one
+    `CHANGES_REQUESTED` review: name the merged PR, name the remaining
+    delta, ask the author to rebase onto the default branch and reduce the
+    PR to that delta (bilingual body whose first line is the
+    `<!-- qwen-triage stage=1-pre -->` marker, @mention the author). Stop:
+
+```bash
+gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stage-1pre-remaining-delta.md
+```
+
+- Closed manually (no close commit) or the closer cannot be resolved →
+  never close on ambiguity: flag it in the Stage 1 comment and escalate to
+  the maintainer.
+
+**Reopen guard.** The close below is the gate's only irreversible act, and an
+explicit `@qwen-code /triage` re-run executes every stage again — including
+on a PR a maintainer reopened after this very close. On a reopened PR all
+inputs re-derive identically (the issue is still closed as completed, the
+closer is still merged, the diff is unchanged), so without a guard the gate
+would re-close against the maintainer's deliberate reopen, and keep
+re-closing on every later re-run. Check before posting and closing:
+
+```bash
+PRIOR_1PRE=$(stage_comment_id 1-pre)
+```
+
+The duplicate-close exit is the only Stage 1-pre path that posts a
+`stage=1-pre` issue comment (the two request-changes exits post reviews
+only). If the PR is OPEN and `PRIOR_1PRE` is non-empty, a duplicate close
+already happened and a human reopened the PR: do not post or close again —
+flag the reopen in the Stage 1 comment and escalate to the maintainer. The
+deliberate reopen means the duplicate judgment needs human eyes, and this
+guard is what keeps that judgment from being overridden on the next run.
+
+```bash
+cat > /tmp/stage-1pre-duplicate.md <<'EOF'
+<!-- qwen-triage stage=1-pre -->
+
+The linked issue #N was already fixed by #M, and every production change in
+this PR is already on the default branch — closing as a duplicate of #M. If
+something here is NOT covered by #M, say so and this can be reopened.
+
+<details>
+<summary>中文说明</summary>
+
+关联 issue #N 已由 #M 修复，本 PR 的生产代码改动均已存在于默认分支，
+现作为 #M 的重复 PR 关闭。如本 PR 有 #M 未覆盖的内容，请说明，可以重新打开。
+
+</details>
+
+— _Qwen Code · qwen3.7-max_
+EOF
+gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/stage-1pre-duplicate.md
+gh pr close "$PR_NUMBER" --repo "$REPO"
+```
 
 **1a. Template check:**
 
@@ -301,6 +489,8 @@ Risk: <if Stage 1e matched, list the high-risk paths and recommended review dept
 
 Save this comment's ID. Terminal exits — stop here if any applies:
 
+- Duplicate of a merged fix, no remaining delta (Stage 1-pre) → closed.
+- Duplicate with remaining delta, or issue closed as not planned (Stage 1-pre) → request changes, stopped.
 - Core module hard block (Stage 0) → rejected, do not proceed.
 - Template failure (Stage 1a) → stopped.
 - Problem does not exist (Stage 1b) → request changes, do not proceed to Stage 2.
@@ -709,14 +899,89 @@ Reflection shows it shouldn't merge — request changes immediately, citing the 
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "Needs some rethinking — see my notes above. 🙏"
 ```
 
-Genuinely unsure, or `GUARD` blocked approval — **don't approve or reject**, but **never defer silently**. Post an explicit defer comment that:
+Genuinely unsure, or `GUARD` blocked approval — **don't approve or reject**, but **never defer silently**. Resolve who owns the call, assign the PR to them, and post an explicit defer comment that:
 
 1. States you are escalating to the maintainer.
 2. Names the specific reason(s) for uncertainty — what you cannot resolve from the diff, tests, and PR description.
-3. @mentions the maintainer (use `$QWEN_MAINTAINER_HANDLE` if set, or the most recent human reviewer).
+3. @mentions that maintainer.
+
+Resolve the maintainer deterministically — never eyeball it. `$QWEN_MAINTAINER_HANDLE` wins when set; otherwise the same owner map and load/rotation logic as issue assignment picks one accountable owner from the PR's labels. The resolver prints one login or nothing, and nothing means "fall through", never "guess":
 
 ```bash
-gh pr comment "$PR_NUMBER" --repo "$REPO" --body "⏸️ Deferring to @$QWEN_MAINTAINER_HANDLE — <reason>. Needs a human call on this one."
+MAINTAINER="${QWEN_MAINTAINER_HANDLE:-}"
+if [ -z "$MAINTAINER" ]; then
+  MAINTAINER=$(REPO="${REPO:-}" PR_NUMBER="${PR_NUMBER:-}" node --input-type=module <<'EOF' 2>/dev/null
+import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { loadPolicy, matchArea, openIssueCount, pickOwner } from './.github/scripts/assign-issue-owner.mjs';
+
+const gh = (args) => {
+  const r = spawnSync('gh', args, { encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(r.stderr.trim() || 'gh failed');
+  return r.stdout.trim();
+};
+
+// No lane exports REPO: the triage agent step exports REPOSITORY and Actions
+// always provides GITHUB_REPOSITORY, so fall through the skill's documented
+// resolve chain. The number arrives as PR_NUMBER or ISSUE_NUMBER depending
+// on the lane. Empty/unset values fall through the || chain.
+const repo = process.env.REPO || process.env.REPOSITORY || process.env.GITHUB_REPOSITORY;
+const prNumber = process.env.PR_NUMBER || process.env.ISSUE_NUMBER;
+const pr = JSON.parse(gh(['pr', 'view', prNumber, '--repo', repo, '--json', 'author,labels']));
+const policy = loadPolicy(readFileSync('.github/issue-owners.json', 'utf8'));
+const area = matchArea(policy, pr);
+if (!area) process.exit(0);
+
+const canWrite = (login) => {
+  try {
+    return ['admin', 'maintain', 'write'].includes(
+      gh(['api', 'repos/' + repo + '/collaborators/' + login + '/permission', '--jq', '.permission']),
+    );
+  } catch {
+    return false;
+  }
+};
+// A null author means the account was deleted — nobody to exclude, and
+// dereferencing it would throw, letting 2>/dev/null silently bypass the
+// deterministic resolver (the jq fallback below already defends this shape).
+const authorLogin = pr.author?.login?.toLowerCase() ?? '';
+const eligible = area.owners.filter(
+  (owner) => owner.toLowerCase() !== authorLogin && canWrite(owner),
+);
+if (eligible.length === 0) process.exit(0);
+
+// Same load metric as issue assignment — reuse the exported counter instead
+// of re-implementing it, so the two assignment paths cannot drift.
+const load = new Map(
+  eligible.map((owner) => [owner, openIssueCount(repo, owner)]),
+);
+console.log(pickOwner(eligible, load, Number(prNumber)));
+EOF
+  )
+fi
+if [ -z "$MAINTAINER" ]; then
+  # Last resort: the most recent human reviewer, if any. latestReviews is
+  # not recency-sorted and bot accounts submit formal reviews here, so
+  # drop null authors first (a deleted account exports as "author": null,
+  # and one null login piped into endswith() aborts the whole filter,
+  # emptying the mention even when a live human reviewer exists), then
+  # filter the bot-suffix logins and order by submittedAt before taking
+  # the last — otherwise a defer escalation @mentions a bot and notifies
+  # nobody.
+  MAINTAINER=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json latestReviews \
+    --jq '[.latestReviews[] | select(.author.login != null) | select((.author.login | (endswith("[bot]") or endswith("-bot"))) | not)] | sort_by(.submittedAt) | last | .author.login // empty')
+fi
+if [ -n "$MAINTAINER" ]; then
+  # Put the PR in their Assigned filter — a stronger signal than the mention
+  # alone. Best-effort: a failed assign must never block the defer comment.
+  gh pr edit "$PR_NUMBER" --repo "$REPO" --add-assignee "$MAINTAINER" || true
+fi
+```
+
+The heredoc resolves the repository as `REPO` → `REPOSITORY` → `GITHUB_REPOSITORY` and the PR number as `PR_NUMBER` → `ISSUE_NUMBER` (first set wins; the invocation line above passes the session's shell variables through, because an unexported variable never reaches the node child process and `2>/dev/null` would swallow the failure), and it resolves its relative import against the repository root, so run it from the workspace root like every other step here. If nothing resolves — no handle set, no area label on the PR, no eligible owner, no human reviewer — post the comment without an @mention rather than guessing a login.
+
+```bash
+gh pr comment "$PR_NUMBER" --repo "$REPO" --body "⏸️ Deferring to @<MAINTAINER> — <reason>. Needs a human call on this one."
 ```
 
 A defer without an explicit comment is invisible — the maintainer won't know they're needed.

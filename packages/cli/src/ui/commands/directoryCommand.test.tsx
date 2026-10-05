@@ -76,7 +76,7 @@ describe('directoryCommand', () => {
     mockConfig = {
       getWorkspaceContext: () => mockWorkspaceContext,
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         addDirectoryContext: vi.fn(),
       }),
       getWorkingDir: () => '/test/dir',
@@ -87,7 +87,7 @@ describe('directoryCommand', () => {
       getExtensionContextFilePaths: () => [],
       getFileFilteringOptions: () => ({ ignore: [], include: [] }),
       setUserMemory: vi.fn(),
-      setGeminiMdFileCount: vi.fn(),
+      setMemoryFileCount: vi.fn(),
     } as unknown as Config;
 
     mockContext = {
@@ -259,11 +259,15 @@ describe('directoryCommand', () => {
         projectRoot: '/test/dir',
       });
       mockConfig.shouldLoadMemoryFromIncludeDirectories = () => true;
+      const extensionRuleSources = [
+        { name: 'charts', dir: '/ext/charts/rules' },
+      ];
+      mockConfig.getExtensionRuleSources = () => extensionRuleSources;
       mockConfig.getFolderTrust = vi.fn().mockReturnValue(true);
       mockConfig.getContextRuleExcludes = vi.fn().mockReturnValue([]);
       mockConfig.setContextFilePaths = vi.fn();
       mockConfig.setConditionalRulesRegistry = vi.fn();
-      mockContext.ui.setGeminiMdFileCount = vi.fn();
+      mockContext.ui.setMemoryFileCount = vi.fn();
 
       if (!addCommand?.action) throw new Error('No action');
       await addCommand.action(
@@ -281,6 +285,7 @@ describe('directoryCommand', () => {
         true,
         'tree',
         expect.anything(),
+        expect.objectContaining({ extensionRuleSources }),
       );
       expect(mockConfig.setUserMemory).toHaveBeenCalledWith('reloaded memory');
       expect(mockConfig.setContextFilePaths).toHaveBeenCalledWith([
@@ -450,11 +455,11 @@ describe('directoryCommand', () => {
     });
 
     it('should warn when gemini.addDirectoryContext throws', async () => {
-      vi.mocked(mockConfig.getGeminiClient).mockReturnValue({
+      vi.mocked(mockConfig.getLlmClient).mockReturnValue({
         addDirectoryContext: vi
           .fn()
           .mockRejectedValue(new Error('gemini unavailable')),
-      } as unknown as ReturnType<typeof mockConfig.getGeminiClient>);
+      } as unknown as ReturnType<typeof mockConfig.getLlmClient>);
       const newPath = path.normalize('/home/user/new-project');
       if (!addCommand?.action) throw new Error('No action');
       const result = await addCommand.action(mockContext, newPath);

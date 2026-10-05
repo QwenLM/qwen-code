@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { formatExecutionSandbox } from '../utils/execution-sandbox-display.js';
 import type React from 'react';
 import { type RefObject, useRef } from 'react';
 import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
@@ -22,7 +23,7 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVimModeState } from '../contexts/VimModeContext.js';
-import { GeminiSpinner } from './GeminiRespondingSpinner.js';
+import { Spinner } from './RespondingSpinner.js';
 import {
   GoalPill,
   isLiveGoalSnapshot,
@@ -80,15 +81,17 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
     showAutoAcceptIndicator: uiState.showAutoAcceptIndicator,
   };
 
-  // Determine sandbox info from environment
+  const executionSandbox = formatExecutionSandbox(config);
+  // Legacy whole-CLI backends still use their inherited marker.
   const sandboxEnv = process.env['SANDBOX'];
-  const sandboxInfo = sandboxEnv
-    ? sandboxEnv === 'sandbox-exec'
-      ? 'seatbelt'
-      : sandboxEnv.startsWith('qwen-code')
-        ? 'docker'
-        : sandboxEnv
-    : null;
+  const sandboxInfo =
+    !executionSandbox && sandboxEnv
+      ? sandboxEnv === 'sandbox-exec'
+        ? 'seatbelt'
+        : sandboxEnv.startsWith('qwen-code')
+          ? 'docker'
+          : sandboxEnv
+      : null;
 
   // Check if debug mode is enabled
   const debugMode = config.getDebugMode();
@@ -129,11 +132,11 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
     <ShellModeIndicator />
   ) : configInitMessage ? (
     <Text color={theme.text.secondary}>
-      <GeminiSpinner /> {configInitMessage}
+      <Spinner /> {configInitMessage}
     </Text>
   ) : uiState.startupIdeConnectionStatus.state === 'connecting' ? (
     <Text color={theme.text.secondary}>
-      <GeminiSpinner /> {t('IDE connecting... context may be unavailable')}
+      <Spinner /> {t('IDE connecting... context may be unavailable')}
     </Text>
   ) : uiState.startupIdeConnectionStatus.state === 'failed' ? (
     <Text color={theme.status.warning}>
@@ -228,6 +231,11 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
         flexShrink={isNarrow ? 0 : 1}
         minWidth={0}
       >
+        {executionSandbox && (
+          <Text color={theme.text.secondary} wrap="wrap">
+            {executionSandbox}
+          </Text>
+        )}
         {statusLineLines.length > 0 &&
           !uiState.ctrlCPressedOnce &&
           !uiState.ctrlDPressedOnce && (

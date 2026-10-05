@@ -34,3 +34,17 @@ export const formatMemoryUsage = (bytes: number): string => {
   }
   return `${(bytes / BYTES_PER_GB).toFixed(2)} GB`;
 };
+
+const JSON_TAG_CHARACTER_ESCAPES: Record<string, string> = {
+  '<': '\\u003c',
+  '>': '\\u003e',
+  '&': '\\u0026',
+};
+
+/**
+ * Escapes JSON tag boundary characters before embedding stringified data in a
+ * pseudo-XML, HTML, or script envelope. The escaped JSON parses back to the
+ * same value while preventing untrusted strings from closing surrounding tags.
+ */
+export const escapeJsonTagCharacters = (json: string): string =>
+  json.replace(/[<>&]/g, (character) => JSON_TAG_CHARACTER_ESCAPES[character]);

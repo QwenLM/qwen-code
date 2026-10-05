@@ -19,24 +19,31 @@ import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import {
+  DEADLINE_ENV,
   budgetStopEntry,
   budgetStopEntryZh,
   roundCapStopEntry,
   roundCapStopEntryZh,
   writeBudgetStop,
+  clearRoundStamps,
+  stampRound,
   writeRoundCapStop,
 } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { BRIEFS } from './lib/agent-briefs.js';
+import { buildSelectionIdentity } from './lib/selection.js';
 import {
+  LEDGER_MAX_CLOSED,
   LEDGER_MAX_FILE,
   LEDGER_MAX_ID,
   LEDGER_MAX_ROUND,
+  LEDGER_MAX_TITLE,
   LEDGER_MAX_VOLUME,
   parseLedger,
   serializeLedger,
 } from './lib/ledger.js';
-import { countInlineFindings } from './lib/inline-counts.js';
+import { countInlineFindings, readClaimHead } from './lib/inline-counts.js';
+import * as coverageModule from './lib/coverage.js';
 import {
   aboveChurnBar,
   CHURN_MIN_FRESH,
@@ -44,7 +51,7 @@ import {
   churnCensusOf,
   composeReview,
   nonConvergenceCritical,
-  deferrableSuggestionsInline,
+  deferrableFindingsInline,
   draftedFindingsOf,
   floorEnforcedReroute,
   isNonDiffDimensionGap,
@@ -60,6 +67,11 @@ import {
   type ComposeReviewResult,
   type DeferredEntry,
   type PrBodyFetcher,
+  FIXED_BY_MAX,
+  INLINE_SUGGESTIONS_CLAUSE,
+  DOWNGRADE_REASON_MAX_CHARS,
+  bodyCriticalClaim,
+  escapeTagOpeners,
 } from './compose-review.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -100,6 +112,7 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
   };
 });
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 const runComposeReviewCommand = (argv: unknown): Promise<void> =>
   Promise.resolve(composeReviewCommand.handler(argv as never) as void);
@@ -165,7 +178,15 @@ function plan(
     host?: string;
     /** The head fetch-pr resolved — the ledger marker's incremental anchor. */
     fetchedSha?: string;
-    incremental?: { since: string; effective: boolean };
+    /** The base the capture ran over — the marker's continuity stamp. */
+    mergeBaseSha?: string;
+    incremental?: {
+      since: string;
+      effective: boolean;
+      posture?: string;
+      postureCause?: string;
+      scope?: unknown;
+    };
     reviewModelId?: string;
   } = {},
 ): string {
@@ -175,6 +196,9 @@ function plan(
     JSON.stringify({
       diffPathAbsolute: DIFF,
       ...(opts.fetchedSha === undefined ? {} : { fetchedSha: opts.fetchedSha }),
+      ...(opts.mergeBaseSha === undefined
+        ? {}
+        : { mergeBaseSha: opts.mergeBaseSha }),
       ...(opts.reviewModelId === undefined
         ? {}
         : { reviewModelId: opts.reviewModelId }),
@@ -468,7 +492,14 @@ function coveredPlan(
     prNumber?: string | number;
     host?: string;
     fetchedSha?: string;
-    incremental?: { since: string; effective: boolean };
+    mergeBaseSha?: string;
+    incremental?: {
+      since: string;
+      effective: boolean;
+      posture?: string;
+      postureCause?: string;
+      scope?: unknown;
+    };
     reviewModelId?: string;
   } = {},
 ): string {
@@ -479,6 +510,13 @@ function coveredPlan(
   recordBuilt(p, 2);
   recordMatrix(p);
   recordStep45(p, step45Keys);
+  // The counter-frame audit (6d) is a whole-diff role in both topologies at
+  // high effort, gated on the PR identity: a plan naming the PR owes its
+  // record like Agent 0's. Where it is not required (no PR named, or medium
+  // effort) the extra record is inert.
+  if (planOpts.effort !== 'medium') {
+    recordStep45(p, ['6d']);
+  }
   // A plan naming the PR owes the roster's issue-fidelity agent (Agent 0)
   // too; without its records the plan caps with `unreviewed-dimension`, and
   // a verdict assertion over it is decided by the cap, not by the counts.
@@ -506,6 +544,17 @@ function coveredWithLedger(prev: Record<string, unknown>): string {
     JSON.stringify(prev),
   );
   return p;
+}
+
+/**
+ * The raw `rec` array inside the body's ledger marker. `parseLedger` is
+ * deliberately blind to it (write-only telemetry for the workflow consumer),
+ * so the tests read the serialized JSON exactly the way that consumer does.
+ */
+function markerRec(body: string): string[] | undefined {
+  const m = /<!-- qwen-review-ledger (.*?) -->/.exec(body);
+  if (!m) return undefined;
+  return (JSON.parse(m[1]) as { rec?: string[] }).rec;
 }
 
 /** Agents given the diff, that never opened it — and said so at length. */
@@ -552,6 +601,159 @@ function base(overrides: Partial<ComposeReviewInput>): ComposeReviewInput {
     ...overrides,
   };
 }
+
+describe('focused navigation publishing', () => {
+  function focusedPlan(verified = false, reviewed = true): string {
+    const p = plan({
+      step45: false,
+      effort: 'high',
+      ownerRepo: 'QwenLM/qwen-code',
+      prNumber: 11426,
+      fetchedSha: 'a'.repeat(40),
+      reviewModelId: 'fixture-model@1a2b3c4d',
+    });
+    const captured = JSON.parse(readFileSync(p, 'utf8'));
+    Object.assign(captured, {
+      reviewProfile: 'docs-nav',
+      srcDiffLines: 13,
+      fullSrcDiffLines: 13,
+      diffLines: 13,
+      files: [
+        {
+          path: 'docs/developers/_meta.ts',
+          kind: 'source',
+          removedLines: 3,
+          heavy: false,
+        },
+      ],
+      chunks: [
+        {
+          id: 1,
+          startLine: 1,
+          endLine: 13,
+          files: [{ path: 'docs/developers/_meta.ts', newStart: 1, newEnd: 9 }],
+        },
+      ],
+    });
+    writeFileSync(p, JSON.stringify(captured));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    if (reviewed) {
+      const brief = briefPath(p, 'docs-nav');
+      const launch = `read_file(file_path="${brief}")\nread_file(file_path="${DIFF}", offset=0, limit=13)`;
+      mkdirSync(promptRecordDir(p), { recursive: true });
+      writeFileSync(brief, 'Review the navigation diff.');
+      writeFileSync(join(promptRecordDir(p), 'docs-nav.txt'), launch);
+      transcript('docs-nav', launch, { toolCalls: 2, range: [0, 13] });
+    }
+    if (verified) recordStep45(p, ['verify']);
+    return p;
+  }
+
+  it.each([
+    {
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      verified: false,
+      event: 'COMMENT',
+    },
+    {
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      verified: true,
+      event: 'COMMENT',
+    },
+    {
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      verified: true,
+      event: 'REQUEST_CHANGES',
+    },
+    {
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      verified: false,
+      event: 'COMMENT',
+    },
+  ])(
+    'publishes $event for C=$criticalsInline S=$suggestionsInline verified=$verified without a full-review anchor',
+    ({ verified, event, ...counts }) => {
+      const r = composeReview({
+        ...counts,
+        planPath: focusedPlan(verified),
+        env: ENV,
+        modelId: MODEL,
+      });
+      expect(r.event).toBe(event);
+      expect(r.body).toContain(
+        'Not reviewed: the full review and reverse audit',
+      );
+      expect(r.body).toContain('cannot certify Approve');
+      expect(r.remediation.join('\n')).not.toContain('--role reverse-audit');
+      expect(r.cappedBy).not.toContain('chunk-nobody-read');
+      expect(r.remediation.join('\n')).not.toContain('--roster');
+      const ledger = parseLedger(r.body);
+      expect(ledger).not.toBeNull();
+      for (const field of ['sha', 'model', 'closed'])
+        expect(ledger).not.toHaveProperty(field);
+      if (counts.criticalsInline > 0) {
+        expect(r.cappedBy.includes('criticals-unverified')).toBe(!verified);
+      }
+    },
+  );
+
+  it('still requires the focused reviewer to read the diff', () => {
+    const r = composeReview({
+      planPath: focusedPlan(false, false),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.remediation.join('\n')).toContain('--roster');
+  });
+
+  it('caps a verified-blocker focused round at Comment while the findings file carries a tag', () => {
+    // The profile runs no Step 5, so the tag backstop is the ONLY machine
+    // check that an unruled candidate never posts as a verified blocker —
+    // SKILL Step 4 passes the cumulative findings file as findingsPath.
+    const r = composeReview({
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      planPath: focusedPlan(true),
+      findingsPath: findingsFile(TAGGED),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+  });
+
+  it('does not read the by-design anchor withhold as a stopped chain', () => {
+    // Round 2 of a navigation-only PR recovers a marker with a round and no
+    // sha: every focused round withholds the anchor by design (its disclosed
+    // gap caps the verdict), so the mechanism-health note must stay silent —
+    // reporting it would re-post a false malfunction on every round.
+    writeFileSync(
+      join(dir, 'qwen-review-pr-11426-prev-ledger.json'),
+      JSON.stringify({ round: 1, posted: 0, fresh: 0, findings: [] }),
+    );
+    const r = composeReview({
+      planPath: focusedPlan(false),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.health).toBeUndefined();
+    expect(r.body).not.toContain('did not close cleanly');
+    const ledger = parseLedger(r.body);
+    expect(ledger).not.toBeNull();
+    for (const field of ['sha', 'model', 'closed'])
+      expect(ledger).not.toHaveProperty(field);
+  });
+});
 
 describe('composeReview — the C/S table', () => {
   it('C=0, S=0 → APPROVE with the LGTM body', () => {
@@ -688,6 +890,282 @@ describe('composeReview — the C/S table', () => {
     );
     expect(off.body).not.toContain('via Qwen Code /review');
     expect(off.body).toContain('still unknown');
+  });
+
+  it('attribution off: a forged footer wrapped in comment grammar strips from every verbatim exit', () => {
+    // The attribution strips match on the DISPLAYED projection, which
+    // drops an HTML comment whole — so a footer wrapped as `<!-- _— … -->`
+    // passed the fixpoint untouched, and neutralizing the comment grammar
+    // AFTERWARDS materialized it as visible text in the one mode that
+    // exists to post none (pre-neutralization the wrapper rendered as
+    // nothing). The grammar goes inert FIRST now, at all three exits —
+    // one order, `quotedProse` (the ledger title's twin is pinned beside
+    // the other ledger-title tests).
+    const wrapped = '<!-- _— qwen3-max via Qwen Code /review (v1.2.3)_ -->';
+    const r = composeReview(
+      {
+        planPath: plan(),
+        modelId: 'm',
+        bodyCriticals: [`whole-PR blocker X ${wrapped}`],
+        cannotTellCriticals: [`a.ts:12 — could not confirm ${wrapped}`],
+        suggestionsDroppedAsDuplicates: [
+          `R2-1 stale guard — already reported ${wrapped}`,
+        ],
+      },
+      '0.21.2',
+      false,
+    );
+    expect(r.body).not.toContain('via Qwen Code /review');
+    expect(r.body).not.toContain('qwen3-max');
+    expect(r.body).toContain('whole-PR blocker X');
+    expect(r.body).toContain('could not confirm');
+    expect(r.body).toContain('- R2-1 stale guard — already reported');
+  });
+
+  it('no model-text channel can open a raw HTML element over the rest of the body (#9940 review, round 30 reverse audit)', () => {
+    // A list item bounds a `<details>` at its `</li>`, but NOT a RAWTEXT
+    // element — `<textarea>`, `<style>`, `<script>` run to a close tag
+    // that never comes and take the footer with them. The disclosure
+    // paragraphs are not even list items.
+    for (const tag of ['details', 'textarea', 'style', 'script']) {
+      for (const field of [
+        'cannotTellCriticals',
+        'suggestionsDroppedAsDuplicates',
+        'unreviewedDimensions',
+        'uncoverableChunks',
+      ]) {
+        const r = composeReview(
+          {
+            planPath: plan(),
+            modelId: 'm',
+            bodyCriticals: ['a real blocker nobody should lose'],
+            [field]: [`the fold's <${tag}> element is left open`],
+          } as unknown as ComposeReviewInput,
+          '0.21.2',
+          true,
+        );
+        expect(r.body).not.toContain(`<${tag}>`);
+        expect(r.body).toContain(`&lt;${tag}`);
+        expect(r.body).toContain('a real blocker nobody should lose');
+        expect(r.body).toContain('via Qwen Code /review');
+      }
+    }
+    // A backticked tag still reads as code in every one of them.
+    for (const field of [
+      'cannotTellCriticals',
+      'suggestionsDroppedAsDuplicates',
+      'unreviewedDimensions',
+    ]) {
+      const r = composeReview(
+        {
+          planPath: plan(),
+          modelId: 'm',
+          [field]: ['`<details>` stays'],
+        } as unknown as ComposeReviewInput,
+        '0.21.2',
+        true,
+      );
+      expect(r.body).toContain('`<details>` stays');
+    }
+  });
+
+  it('a downgrade reason too big for the budget does not evict the shorter ones after it (#9940 review, round 30 reverse audit)', () => {
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          // Four fit (1606 of 2000); the fifth would overrun, the short
+          // one after it still fits.
+          downgradeReasons: [
+            ...Array.from({ length: 5 }, (_, i) =>
+              String.fromCharCode(97 + i).repeat(400),
+            ),
+            'self-PR',
+          ],
+        },
+      }),
+    );
+    expect(r.body).toContain('self-PR');
+  });
+
+  it('a model-written blocker cannot open a raw HTML element over the rest of the body (#9940 review, round 30)', () => {
+    // One ordinary sentence of review prose naming a tag without
+    // backticks: the entry is a top-level paragraph, so the unclosed
+    // element swallowed every later paragraph — the second blocker and
+    // the footer among them. Per entry is the right unit: a code span
+    // cannot cross the blank line between two entries.
+    for (const attribution of [true, false]) {
+      const r = composeReview(
+        {
+          planPath: plan(),
+          modelId: 'm',
+          bodyCriticals: [
+            "the fold's <details> element is left open when the cut lands inside it",
+            'second blocker nobody would see',
+          ],
+        },
+        '0.21.2',
+        attribution,
+      );
+      expect(r.body).toContain('&lt;details');
+      expect(r.body).not.toContain("fold's <details>");
+      expect(r.body).toContain('second blocker nobody would see');
+      // A backticked tag in blocker prose still reads as code.
+      const span = composeReview(
+        {
+          planPath: plan(),
+          modelId: 'm',
+          bodyCriticals: ['`<details>` stays'],
+        },
+        '0.21.2',
+        attribution,
+      );
+      expect(span.body).toContain('`<details>` stays');
+    }
+  });
+
+  it('attribution on: a comment-wrapped forged footer strips like an unwrapped one — only the canonical footer posts', () => {
+    // Ingest's trailing strip ran while the wrapper still hid the footer;
+    // the exit re-runs it on the neutralized text, so the forged model
+    // name never posts above the canonical footer.
+    const wrapped = '<!-- _— qwen3-max via Qwen Code /review (v1.2.3)_ -->';
+    const r = composeReview(
+      base({
+        bodyCriticals: [`whole-PR blocker X ${wrapped}`],
+        cannotTellCriticals: [`a.ts:12 — could not confirm ${wrapped}`],
+        suggestionsDroppedAsDuplicates: [
+          `R2-1 stale guard — already reported ${wrapped}`,
+        ],
+      }),
+      '0.21.2',
+    );
+    expect(r.body).not.toContain('qwen3-max');
+    expect(r.body.split('via Qwen Code /review').length - 1).toBe(1);
+    expect(
+      r.body.endsWith(`_— ${MODEL} via Qwen Code /review (v0.21.2)_`),
+    ).toBe(true);
+    expect(r.body).toContain('**[Critical]** whole-PR blocker X');
+    expect(r.body).toContain('- R2-1 stale guard — already reported');
+  });
+
+  it('attribution off: a transcribed marker line in a duplicates entry still drops, never posts as words', () => {
+    // Duplicates entries are transcribed from earlier rounds' posted
+    // findings, and an attribution-off post ends on its own marker line.
+    // The marker-line strip is the one strip that acts on comment grammar
+    // itself — it runs BEFORE the grammar goes inert, or the line would
+    // post as the visible words `qwen-review suggestion` instead of
+    // dropping as it always has.
+    const r = composeReview(
+      base({
+        suggestionsDroppedAsDuplicates: [
+          'R1-2 loose pins — already reported (comment 42)\n\n<!-- qwen-review suggestion -->',
+        ],
+      }),
+      '0.21.2',
+      false,
+    );
+    expect(r.body).toContain(
+      '- R1-2 loose pins — already reported (comment 42)',
+    );
+    expect(r.body).not.toContain('qwen-review suggestion');
+  });
+
+  it('attribution off: comment grammar the strip chain splices back together goes inert at every verbatim exit', () => {
+    // The grammar strip runs before the chain, and the chain's removals
+    // SPLICE: cutting two footer spans out of `<!-‹span›- … --‹span›>`
+    // joins `<!-` to `- … --` to `>` and re-forms a live comment the
+    // strip never saw (no delimiter existed when it ran). The exits
+    // repeat neutralize-then-strip to a fixpoint, so what the chain
+    // re-forms goes inert on the next pass — the quoted text survives
+    // readable, and the raw body keeps exactly as many live markers as
+    // the round's own list warrants: none on a listless round, one when a
+    // Suggestion was deferred.
+    const MARKER = '<!-- qwen-review-deferred -->';
+    const span = '_— qwen3-max via Qwen Code /review (v1.2.3)_';
+    const spliced = `stale guard <!-${span}- qwen-review-deferred --${span}> re-checked`;
+    const nit: DeferredEntry = {
+      file: 'a.ts',
+      line: 1,
+      source: 'review',
+      severity: 'Suggestion',
+      title: 'nit',
+    };
+    for (const deferred of [false, true]) {
+      const r = composeReview(
+        base({
+          severityFloor: 'critical',
+          bodyCriticals: [spliced],
+          cannotTellCriticals: [spliced],
+          suggestionsDroppedAsDuplicates: [spliced],
+          ...(deferred ? { deferredSuggestions: [nit] } : {}),
+        }),
+        '0.21.2',
+        false,
+      );
+      expect(r.body.split(MARKER).length - 1).toBe(deferred ? 1 : 0);
+      // The canonical marker is the body's only live comment grammar.
+      expect((r.body.match(/<!--/g) ?? []).length).toBe(deferred ? 1 : 0);
+      expect((r.body.match(/-->/g) ?? []).length).toBe(deferred ? 1 : 0);
+      expect(r.body).not.toContain('qwen3-max');
+      expect(r.body).not.toContain('via Qwen Code /review');
+      // Three quoted copies survive as prose, plus the canonical marker.
+      expect((r.body.match(/qwen-review-deferred/g) ?? []).length).toBe(
+        deferred ? 4 : 3,
+      );
+      expect(r.body).toContain('stale guard');
+      expect(r.body).toContain('re-checked');
+    }
+  });
+
+  it('attribution off: a footer the grammar strip would join back together strips too', () => {
+    // The converse splice: neutralization JOINS. `via Qwen<!-‹span›-Code
+    // /review` strips to `via Qwen<!--Code /review`, which neutralizes to
+    // the footer phrase the chain has already finished looking for. A
+    // trailing grammar strip alone (the obvious one-line patch for the
+    // splice above) trades the forged marker for a forged footer in the
+    // one mode that exists to post none. The outer footer's middle runs
+    // past the span strip's 400-char cap so the outer opener cannot eat
+    // the inner span first; the uncapped trailing strip catches the joined
+    // footer on the pass after neutralization exposes it.
+    const span = '_— qwen3-max via Qwen Code /review (v1.2.3)_';
+    const joined = `still leaking _— ${'x'.repeat(420)} via Qwen<!-${span}-Code /review (v1.2.3)_`;
+    const r = composeReview(
+      base({
+        bodyCriticals: [joined],
+        cannotTellCriticals: [joined],
+        suggestionsDroppedAsDuplicates: [joined],
+      }),
+      '0.21.2',
+      false,
+    );
+    expect(r.body).not.toContain('via Qwen Code /review');
+    expect(r.body).not.toContain('qwen3-max');
+    expect(r.body).not.toContain('<!--');
+    expect((r.body.match(/still leaking/g) ?? []).length).toBe(3);
+  });
+
+  it('refuses an entry held up only by a footer that comment grammar had split', () => {
+    // The gate projects through the exit's closure as well as through the
+    // chain as written: as written, `_— … via Qwen<!-‹span›-Code /review_`
+    // strips to `_— … via Qwen<!--Code /review_` and renders the visible
+    // words `_— … via Qwen`; at the exit the joined footer strips whole
+    // and the entry posts as nothing — an empty body Critical that still
+    // counts toward REQUEST_CHANGES, the shape this gate exists to refuse.
+    const span = '_— qwen3-max via Qwen Code /review (v1.2.3)_';
+    const joined = `_— ${'x'.repeat(420)} via Qwen<!-${span}-Code /review (v1.2.3)_`;
+    for (const attribution of [true, false]) {
+      expect(() =>
+        composeReview(base({ bodyCriticals: [joined] }), '0.21.2', attribution),
+      ).toThrow(/renders as nothing/);
+      expect(() =>
+        composeReview(
+          base({ cannotTellCriticals: [joined] }),
+          '0.21.2',
+          attribution,
+        ),
+      ).toThrow(/renders as nothing/);
+    }
   });
 
   it('refuses a body Critical that renders as nothing', () => {
@@ -972,7 +1450,8 @@ describe('composeReview — the low-signal Approve disclosure', () => {
     const r = composeReview(base({}));
     expect(r.event).toBe('APPROVE');
     expect(r.body).toBe(`No issues found. LGTM! ✅\n\n${FOOTER}`);
-    // The fixture's roster: two chunk agents plus the test matrix.
+    // The fixture's roster: two chunk agents plus the test matrix (no PR
+    // identity in this plan, so no counter-frame audit).
     expect(r.lowSignal).toEqual({ agents: 3, srcDiffLines: 5000 });
     expect(verdictLine(r)).toBe(
       'Verdict: Approve — low signal: none of the 3 review agents reported ' +
@@ -1208,6 +1687,9 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     );
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('cannot-tell-existing-critical');
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('Unresolved, please confirm:');
     expect(r.body).toContain('**[Critical]** SKILL.md:35');
     expect(r.body).not.toContain('no blockers');
@@ -1351,7 +1833,8 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // prefix filter must not let it swallow a DIFFERENT reverse-audit scope
     // reported with its own reason — a whiffed chunk from the rounds that
     // DID run is exactly what a partially-run audit still owes the author.
-    const plan = coveredPlan();
+    // han: the caller-prose zh assertion below needs the Chinese half rendered.
+    const plan = coveredPlan(['verify', 'reverse-audit'], { han: true });
     writeBudgetStop(
       plan,
       {
@@ -1361,19 +1844,30 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
       },
       3,
     );
-    const r = composeReview(
-      base({
-        planPath: plan,
-        unreviewedDimensions: [
-          "reverse audit — chunk 2's auditor returned nothing substantive twice",
-        ],
-      }),
-    );
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would overwrite the han-stamped plan.
+    const r = composeReview({
+      planPath: plan,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: [
+        "reverse audit — chunk 2's auditor returned nothing substantive twice",
+      ],
+    });
     expect(r.body).toContain(
       'Not reviewed: reverse audit — stopped before round 3 by the review time budget.',
     );
     expect(r.body).toContain(
       "Not reviewed: reverse audit — chunk 2's auditor returned nothing substantive twice.",
+    );
+    // Caller prose is untranslatable by construction, and the Chinese half
+    // SAYS so — an unmarked all-English sentence under 中文说明 read as a
+    // broken translation (#10567's posted body). The payload keeps its own
+    // English full stop.
+    expect(r.body).toContain(
+      "未审查（原文为英文）：reverse audit — chunk 2's auditor returned nothing substantive twice.",
     );
     // The marker's own disclosure still renders exactly once.
     expect(r.body.split('review time budget').length - 1).toBe(1);
@@ -1412,9 +1906,11 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // marker with zero reverse-audit records must not suppress the not-built
     // gap the way a time-budget stop does: the cap gate refuses only
     // `round > cap`, so the gap's FIX (rebuild `--round 1`) is admitted, and
-    // a local run has no deadline to refuse it at all. Reading the marker
-    // cause-blind would silently drop both the gap and its rebuild
-    // remediation for a run that audited nothing.
+    // a run whose wall still holds — this one has no wall at all — has
+    // nothing to refuse it either. Reading the marker cause-blind would
+    // silently drop both the gap and its rebuild remediation for a run that
+    // audited nothing. (The sibling below is the one exception: a wall that
+    // has since closed refuses the rebuild too.)
     const plan = coveredPlan([]); // no reverse-audit ran — the not-built shape
     writeRoundCapStop(plan, 3, 4);
     const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
@@ -1422,6 +1918,166 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     expect(r.event).toBe('COMMENT');
     expect(r.body).toContain('reverse-audit round cap of 3');
     // …but the not-built gap and its rebuild remediation are still owed.
+    expect(r.remediation.join(' ')).toContain('reverse audit:');
+  });
+
+  it('a round-cap stop beside a closed wall waives the rebuild FIX but keeps the not-built gap', () => {
+    // Same shape, but the plan carries a wall the gate can no longer admit
+    // a round under (the trigger is `remaining < reserve + round`, which
+    // opens before the wall itself closes): the remediation `--round 1`
+    // would meet the budget gate's refusal as deterministically as a
+    // time-budget stop's, so naming it is a FIX that cannot run. A 3600s
+    // wall is below what `--deadline` records — a hand-written or pre-rule
+    // plan — which is fine for the arithmetic under test.
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 3600,
+        deadlineSource: 'default',
+      }),
+    );
+    // Captured two hours ago: the hour-long wall is spent. Backdating the
+    // plan keeps every record and the marker below newer than it.
+    const captured = new Date(Date.now() - 2 * 3600 * 1000);
+    utimesSync(plan, captured, captured);
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    // The FIX is waived; the disclosure is NOT — a run that burned its wall
+    // without building an auditor still says so in the body, beside the
+    // round-cap line that would otherwise imply rounds ran, and its scope
+    // stays unproven.
+    expect(r.body).toContain('no auditor was launched');
+    expect(r.scopeUnproven).toBe(true);
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+  });
+
+  it('a closed wall waives every unrunnable FIX — rebuild, verify shard and `[unverified]` relaunch — and keeps both disclosures', () => {
+    // No stop marker at all: a 3600s wall captured 3000s ago (600s left,
+    // under the 1200s compose floor), findings to post, no verifier and no
+    // auditor ever built. The rebuild and the verify build would both exit
+    // 4 at the gates, so neither FIX is owed — but the two gaps are, and
+    // the unverified findings still cap the verdict.
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 3600,
+        deadlineSource: 'default',
+      }),
+    );
+    const captured = new Date(Date.now() - 3000 * 1000);
+    utimesSync(plan, captured, captured);
+    // A Critical to post, so the verifier is owed and its FIX is ruled on
+    // — and a findings file still carrying `[unverified]` tags, whose
+    // relaunch FIX is a verify build the same floor refuses.
+    const r = composeReview({
+      planPath: plan,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      findingsPath: findingsFile(TAGGED),
+    });
+    expect(r.event).toBe('COMMENT');
+    // With a finding to post the two gaps merge into one sentence with two
+    // subjects (COMBINED_STEP45_GAP): both disclosures reach the body.
+    expect(r.body).toContain(
+      'neither the verifier nor the reverse auditor was launched',
+    );
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+    expect(r.remediation.join(' ')).not.toContain('verification:');
+    expect(r.remediation.join(' ')).not.toContain('findings still tagged');
+    // Withheld FIXes are named beside the FIX lines, never in the body.
+    expect(r.waivedFixes.map((w) => w.split(':')[0])).toEqual([
+      'reverse audit',
+      'verification',
+      'findings still tagged `— [unverified]`',
+    ]);
+    expect(r.waivedFixes[2]).toMatch(
+      /the relaunch FIX is withheld — the plan's wall is at or under the compose floor \((?:10|9\.9) minutes of the wall left, floor 20 minutes\)/,
+    );
+    expect(r.body).not.toContain('withheld');
+  });
+
+  it('a round-cap stop is priced like the gate would price the rebuild — from the round stamps, not a flat constant', () => {
+    // ~6,900s remain on a 14,400s flag wall (reserve 4,800). A flat 1,800s
+    // round price would say the rebuild fits (6,900 ≥ 6,600) and keep the
+    // remediation; the gate itself prices from the stamps, and the waiver
+    // takes the least any `--round <k>` could be priced at: `--round 1`
+    // excludes nothing and keeps the costliest closed span (4,450s, rounds
+    // 2→3, with round 3 long enough ago that nothing is in flight),
+    // `--round 3` leaves round 2's span open to now (7,450s), and
+    // `--round 2` prices only round 3's open span (3,000s) — the least,
+    // 3,000s, is still refused (6,900 < 7,800). The waiver must agree with
+    // the gate, or it names a FIX that cannot run. The flat price stays on
+    // its admitting side for 300s of wall clock after the fixture is
+    // dated, so the discrimination does not depend on the test's own
+    // runtime.
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 14400,
+        deadlineSource: 'flag',
+      }),
+    );
+    const now = Date.now();
+    const captured = new Date(now - 7500 * 1000);
+    utimesSync(plan, captured, captured);
+    stampRound(plan, 2, now - 7450 * 1000);
+    stampRound(plan, 3, now - 3000 * 1000);
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+    // Move round 3's stamp to 1,000s ago and the least candidate changes:
+    // a `--round 2` rebuild excludes round 2's own stamp and prices only
+    // round 3's open 1,000s, which the gate would ADMIT (6,900 ≥ 5,800),
+    // while `--round 1` (6,450) and `--round 3` (7,450) would be refused.
+    // Compose does not know which k the orchestrator names, so the FIX
+    // stays owed.
+    clearRoundStamps(plan);
+    stampRound(plan, 2, now - 7450 * 1000);
+    stampRound(plan, 3, now - 1000 * 1000);
+    const kept = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(kept.remediation.join(' ')).toContain('reverse audit:');
+    expect(kept.waivedFixes).toEqual([]);
+  });
+
+  it('a round-cap stop beside an OPEN plan wall still owes the not-built gap — the rebuild it names would be admitted', () => {
+    // The wall every real capture records (here a `--deadline 120`-shaped
+    // 7200s flag wall, captured now): the gate would admit `--round 1`, so
+    // the round-cap marker exempts nothing and the remediation stands. The
+    // wall-less sibling above never reaches the arithmetic; this one does.
+    const plan = coveredPlan([]);
+    const parsed = JSON.parse(readFileSync(plan, 'utf8'));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 7200,
+        deadlineSource: 'flag',
+      }),
+    );
+    // Rewriting the plan moved its mtime past the records coveredPlan()
+    // wrote; date it a few seconds back so they stay this run's, and the
+    // wall stays open with hours to spare.
+    const captured = new Date(Date.now() - 5000);
+    utimesSync(plan, captured, captured);
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    expect(r.body).toContain('no auditor was launched');
     expect(r.remediation.join(' ')).toContain('reverse audit:');
   });
 
@@ -1704,6 +2360,60 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     expect(r.body.split(FOOTER)).toHaveLength(2);
   });
 
+  it('strips a forged footer the blanking kept inside a code shape — the strip runs AFTER the fold', () => {
+    // strippedList strips the raw multi-line entry, where the blanking
+    // keeps a footer quoted in code — the one-line render then flattens
+    // the shape that justified keeping it, so the fold strips the folded
+    // line, the same guarantee the other one-line channels carry. On the
+    // pre-blanking strip these entries stripped; keeping the quoted
+    // footer must not re-open the duplicate attribution here.
+    for (const entry of [
+      'dup finding\n\n\t_— forged via Qwen Code /review_',
+      '**[Suggestion]** dup of comment 123\n\n```\n_— forged via Qwen Code /review_',
+      'dup finding\n\n    _— forged via Qwen Code /review_',
+    ]) {
+      const on = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        true,
+      );
+      expect((on.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+      expect(on.body).toContain('dup');
+      const off = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        false,
+      );
+      expect(off.body).not.toContain('via Qwen Code /review');
+      expect(off.body).toContain('dup');
+    }
+  });
+
+  it('strips a duplicates entry before the 240-char bound cuts the footer', () => {
+    // A code-wrapped forged footer the blanking keeps folds past the cap:
+    // bounding first would cut the footer mid-marker and append `…`,
+    // which the `$`-anchored regex cannot match past — the strip runs on
+    // the folded line BEFORE the cap.
+    for (const entry of [
+      'a'.repeat(213) + '\n\n    _— m via Qwen Code /review_',
+      'a'.repeat(213) + '\n\n```\n_— m via Qwen Code /review_',
+    ]) {
+      const off = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        false,
+      );
+      expect(off.body).not.toContain('via Qwen Code /review');
+      expect(off.body).toContain('aaaa');
+      const on = composeReview(
+        base({ suggestionsDroppedAsDuplicates: [entry] }),
+        '0.21.2',
+        true,
+      );
+      expect((on.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+    }
+  });
+
   it('refuses a fence delimiter a bare CR hides in the raw entry', () => {
     // The LF twin throws: the CR twin used to slip past the `\n`-only
     // split, collapse to a one-line entry opening a fence, and post an
@@ -1916,6 +2626,150 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
   });
 });
 
+describe('composeReview — pre-verify carried-ledger dedup disclosure (#10105)', () => {
+  // The disclosure is deterministic: it reads the report `dedup-candidates`
+  // wrote beside the plan, bound to the plan diff's hash — the same freshness
+  // key as the script-lint gate, but non-capping: absent or stale renders
+  // nothing, because nothing is owed.
+  const PR = 8255;
+  function planWithReport(over: Record<string, unknown> = {}): string {
+    const p = coveredPlan(['verify', 'reverse-audit'], { prNumber: PR });
+    writeFileSync(
+      join(dirname(p), `qwen-review-pr-${PR}-ledger-dedup.json`),
+      JSON.stringify({
+        v: 1,
+        diffHash: DIFF_HASH,
+        sources: { ledger: { round: 3, findings: 2 }, artifact: null },
+        kept: [],
+        dropped: [
+          dropEntry('R3-2'),
+          dropEntry('R3-2'),
+          dropEntry('D5-1'),
+          dropEntry('not-an-id'),
+        ],
+        droppedCount: 4,
+        note: '',
+        ...over,
+      }),
+    );
+    return p;
+  }
+  const dropEntry = (matchedId: string) => ({
+    file: 'src/a.ts',
+    line: 42,
+    title: 'a re-derived claim',
+    severity: 'Suggestion',
+    matchedId,
+    matchedTitle: 'the carried claim',
+    via: 'posted',
+  });
+
+  // Not base(): its planPath default runs coveredPlan() again on the same
+  // path and would overwrite the pr-numbered plan the report name derives
+  // from (same trap the Chinese-fold duplicate test names).
+  function input(
+    planPath: string,
+    over: Partial<ComposeReviewInput> = {},
+  ): ComposeReviewInput {
+    return {
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      ...over,
+    };
+  }
+
+  it('renders the set-aside count with the validated ids only', () => {
+    const r = composeReview(input(planWithReport()));
+    // Beside the disclosure, "No issues found" would be a lie — the
+    // reviewers derived those candidates; the round set them aside.
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('No blocking issues. LGTM!');
+    expect(r.body).not.toContain('No issues found');
+    expect(r.body).toContain(
+      "4 candidate finding(s) this round's reviewers re-derived matched entries already carried on this PR and were set aside before verification (R3-2 ×2, D5-1)",
+    );
+    // The shapeless id is counted but never quoted — the titles stay in the
+    // report; only ids the two shape tests vouch for reach the posted body.
+    expect(r.body).not.toContain('not-an-id');
+    // Not low signal: the reviewers DID report findings — this round set
+    // them aside as carried. The fixture's srcDiffLines already exceed the
+    // threshold, so the carve-out is the only thing keeping the false
+    // "none of the N review agents reported a finding" claim out of the
+    // verdict line, the composed JSON and the archived report.
+    expect(r.lowSignal).toBeNull();
+  });
+
+  it('caps the quoted ids at twelve and names the overflow count', () => {
+    const drops = Array.from({ length: 14 }, (_, i) =>
+      dropEntry(`R3-${i + 1}`),
+    );
+    const r = composeReview(
+      input(planWithReport({ dropped: drops, droppedCount: drops.length })),
+    );
+    expect(r.body).toContain(
+      '(R3-1, R3-2, R3-3, R3-4, R3-5, R3-6, R3-7, R3-8, R3-9, R3-10, R3-11, R3-12, +2 more)',
+    );
+    expect(r.body).not.toContain('R3-13');
+    // Exactly at the cap there is no overflow suffix — no ", +0 more".
+    const atCap = drops.slice(0, 12);
+    const r2 = composeReview(
+      input(planWithReport({ dropped: atCap, droppedCount: atCap.length })),
+    );
+    expect(r2.body).toContain(
+      '(R3-1, R3-2, R3-3, R3-4, R3-5, R3-6, R3-7, R3-8, R3-9, R3-10, R3-11, R3-12)',
+    );
+    expect(r2.body).not.toContain('more)');
+  });
+
+  it('a dedup-only APPROVE keeps its paragraph break before the disclosure', () => {
+    const r = composeReview(input(planWithReport()));
+    // The separator ternary's dedup arm is the only thing standing between
+    // the verdict sentence and a wall-of-text weld on this branch.
+    expect(r.body).toContain(
+      'No blocking issues. LGTM! ✅\n\n4 candidate finding(s)',
+    );
+  });
+
+  it('the set-aside disclosure trims on its own rank, never as the deferral list', () => {
+    // A round that set candidates aside, has zero posture deferrals (an
+    // all-Critical shape), and overflows the body budget: every trim
+    // surface keys on the rank that went, so the notice must name the
+    // disclosure itself — not a "deferred-findings list" that does not
+    // exist — and the archived `bodyTrim.deferralList` pointer must stay
+    // false. The blocker is far past the budget, so the body lands on the
+    // truncation path, exactly the shape the round-1 probe measured.
+    const r = composeReview(
+      input(planWithReport(), { bodyCriticals: ['B'.repeat(60_000)] }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(65536);
+    expect(r.body).toContain('the carried-ledger dedup disclosure did not fit');
+    expect(r.body).not.toContain('the deferred-findings list');
+    expect(r.bodyTrim.deferralList).toBe(false);
+    expect(r.bodyTrim.sections).toBeGreaterThan(0);
+  });
+
+  it('renders on a blocking event too — the drop happened either way', () => {
+    const r = composeReview(input(planWithReport(), { criticalsInline: 1 }));
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('set aside before verification');
+  });
+
+  it('renders nothing off a stale report — its diffHash is another round’s', () => {
+    const r = composeReview(
+      input(planWithReport({ diffHash: 'another-diff' })),
+    );
+    expect(r.body).not.toContain('set aside before verification');
+  });
+
+  it('renders nothing when no report exists', () => {
+    const r = composeReview(base({}));
+    expect(r.body).not.toContain('set aside before verification');
+  });
+});
+
 describe('composeReview — presubmit downgrades', () => {
   it('downgradeApprove turns a clean APPROVE into COMMENT with the downgrade sentence', () => {
     const r = composeReview(
@@ -1953,6 +2807,58 @@ describe('composeReview — presubmit downgrades', () => {
     expect(r.downgradedFrom).toBe('Approve');
     expect(r.body).toContain('⚠️ Downgraded from Approve to Comment: self-PR.');
     expect(verdictLine(r)).toContain('a presubmit check failed');
+  });
+
+  it("the downgrade sentence escapes over the JOIN — an odd backtick run in one reason cannot free the next reason's tag opener (#9940 review, round 30)", () => {
+    // The reasons render as ONE paragraph, so backtick runs pair across
+    // the `; `. Escaped per reason, `<details>` sat inside a code span of
+    // its own fragment and was left live; joined, the run re-paired the
+    // other way and the opener went out unescaped — one `<details>` in a
+    // top-level paragraph folds every later paragraph (the blockers, the
+    // disclosures, the footer) into a collapsed triangle.
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['CI failing: `build', 'head drift in `<details>`'],
+        },
+      }),
+    );
+    expect(r.body).toContain('⚠️ Downgraded from Request changes to Comment');
+    expect(r.body).toContain('&lt;details');
+    expect(r.body).not.toContain('<details');
+    // A reason whose span pairs within itself keeps its `<` — the escape
+    // reads the spans the render reads, not one span rule per fragment.
+    const paired = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['head drift in `<details>`', 'self-PR'],
+        },
+      }),
+    );
+    expect(paired.body).toContain('`<details>`');
+    // The 2000-point total is charged against the string that POSTS: the
+    // escape's `&lt;` expansion happens over the join, so pricing the
+    // fragments let the posted run overrun the budget by ~41%.
+    const many = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          // Openers OUTSIDE any code span: each `<` grows to `&lt;` when
+          // the join is escaped, which pricing the fragments never saw.
+          downgradeReasons: Array.from({ length: 8 }, () => '<a>'.repeat(120)),
+        },
+      }),
+    );
+    const run = /Downgraded from Request changes to Comment: ([^\n]*)\./.exec(
+      many.body,
+    );
+    expect(run).not.toBeNull();
+    expect([...run![1]!].length).toBeLessThanOrEqual(2000);
   });
 
   it('a downgraded Approve never certifies "no blockers" in the same body (the downgrade names failing CI two clauses earlier)', () => {
@@ -1999,7 +2905,7 @@ describe('composeReview — presubmit downgrades', () => {
     expect(r.body).not.toContain('Downgraded');
   });
 
-  it('self-PR downgrade of an RC keeps the body Criticals after the downgrade sentence (round-3 bug: the only copy of a blocker vanished)', () => {
+  it('self-PR downgrade of an RC exposes a leading Critical header and keeps the body Criticals after the downgrade sentence (round-3 bug: the only copy of a blocker vanished)', () => {
     const r = composeReview(
       base({
         bodyCriticals: ['unmappable blocker'],
@@ -2011,11 +2917,32 @@ describe('composeReview — presubmit downgrades', () => {
     );
     expect(r.event).toBe('COMMENT');
     expect(r.downgraded).toBe(true);
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('⚠️ Downgraded from Request changes to Comment');
     expect(r.body).toContain('**[Critical]** unmappable blocker');
     const sentenceIdx = r.body.indexOf('Downgraded');
     const blockerIdx = r.body.indexOf('unmappable blocker');
     expect(sentenceIdx).toBeLessThan(blockerIdx);
+  });
+
+  it('self-PR downgrade with attribution off keeps the body Critical without a visible Critical header', () => {
+    const r = composeReview(
+      base({
+        bodyCriticals: ['unmappable blocker'],
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['self-PR'],
+        },
+      }),
+      '0.21.2',
+      false,
+    );
+
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('unmappable blocker');
+    expect(r.body).not.toContain('**[Critical]**');
   });
 
   it('body Criticals never leak into a plain COMMENT that was not downgraded from RC', () => {
@@ -2132,6 +3059,597 @@ describe('composeReview — RC carries every applicable disclosure (no clause sq
   });
 });
 
+describe('composeReview — the fix-audit round-shape disclosure (#10104)', () => {
+  const POSTURE = {
+    since: 'a'.repeat(40),
+    effective: true,
+    posture: 'critical',
+    postureCause: 'round',
+    scope: {
+      anchor: 'a'.repeat(40),
+      deltaFiles: ['src/a.ts'],
+      interaction: [
+        {
+          path: 'src/b.ts',
+          importsChanged: ['src/a.ts'],
+        },
+      ],
+    },
+  };
+
+  // `base()`'s own default `planPath: coveredPlan()` runs at call time and
+  // rewrites the shared plan.json AFTER an override argument was evaluated —
+  // so the posture'd plan must be written after `base()` returns, or the
+  // test silently measures the default plan.
+  function rcInput(
+    incremental: Record<string, unknown>,
+  ): ReturnType<typeof base> {
+    const input = base({ criticalsInline: 1 });
+    input.planPath = coveredPlan(['verify', 'reverse-audit'], {
+      incremental: incremental as never,
+    });
+    return input;
+  }
+
+  it('the plan posture is a floor-resolution arm: a context-unavailable round still defers (#10104)', () => {
+    // The adversarial shape: capture ran the narrow fix-audit round off the
+    // side file, then pr-context failed and compose runs context-unavailable
+    // — the two auto arms disengage, but the plan's own posture record must
+    // keep the posting bar aligned with the shape the round already ran.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 1;
+    input.contextUnavailable = true;
+    // The verdict's resolved default, as the state carries it in a real
+    // run; the enforcement reading is deliberately strict on an ABSENT
+    // floor and must stay so.
+    input.severityFloor = 'auto';
+    input.draftedComments = [
+      { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+    ];
+    const r = composeReview(input);
+    // The Suggestion was rerouted into the deferral list, not posted inline.
+    expect(r.floorEnforced).toEqual([0]);
+    expect(r.body).toContain(
+      'Findings below Critical were recorded and deferred, never posted — ' +
+        'except pre-confirmed `[build]`/`[test]`/`[probe]` findings, which ' +
+        'stay inline at any floor.',
+    );
+    // The plan's posture record IS the deferral licence here: the round's
+    // shape was already spent on the critical resolution, so the licence
+    // block may not flag the very deferral the floor arm enforced — no
+    // unlicensed warning in the body, no false cap on the verdict.
+    expect(r.cappedBy).not.toContain('unlicensed-deferral');
+    expect(r.body).not.toContain('without a posture licence');
+  });
+
+  it('the plan arm licenses a deferral on a round-1 compose with the side file lost (#10104)', () => {
+    // The sibling state: the same postured plan, but the side file was
+    // rewritten between capture and compose, so `prevRound` recovers 0 and
+    // the context IS available. The plan arm still resolves the floor (it
+    // carries no round gate), so the licence block's round-1 doubt arm must
+    // not stamp the ONLY cap — a false cap here flips the composed event and
+    // withholds the incremental anchor over a licensed deferral.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 1;
+    input.severityFloor = 'auto';
+    input.draftedComments = [
+      { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+    ];
+    const r = composeReview(input);
+    expect(r.floorEnforced).toEqual([0]);
+    expect(r.cappedBy).not.toContain('unlicensed-deferral');
+    expect(r.body).not.toContain('without a posture licence');
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('an ABSENT floor beside the plan record licences a model-side deferral (#10136)', () => {
+    // The fix-audit round whose compose state omits `severityFloor` —
+    // reachable because the field is model-written and omission is
+    // fail-closed. The model deferred its drafted Suggestion exactly as
+    // the shape intends; the licence chain's unknown-floor arm used to
+    // fire before consulting the plan record, capping the verdict over a
+    // deferral the posture itself produced. The record IS the licence:
+    // the round's shape was spent on the critical resolution. The two
+    // sibling doubt arms already consult it; the unknown-floor arm now
+    // does too.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 0;
+    input.deferredSuggestions = [
+      {
+        file: 'src/a.ts',
+        line: 3,
+        source: 'review',
+        severity: 'Suggestion',
+        title: 'untested guard',
+      },
+    ];
+    const r = composeReview(input);
+    expect(r.cappedBy).not.toContain('unlicensed-deferral');
+    expect(r.body).not.toContain('without a posture licence');
+    expect(r.deferredCount).toBe(1);
+    // The same body carries the deferral list, and deferral IS the floor's
+    // withholding in this module's terminology — so the open-floor sentence
+    // may not assert the unqualified no-withholding universal the very same
+    // body falsifies; it says the backstop moved nothing and routes the
+    // deferrals to the posture (#10136).
+    expect(r.body).toContain('Deferred under the convergence posture');
+    expect(r.body).toContain('resolved OPEN at compose time');
+    // …and it says WHICH reading resolved open (#10136 R23-1). The two
+    // diverge on exactly this state — an absent floor record beside a
+    // postured plan — so the unqualified claim contradicted the marker's
+    // own `floor: c` and the mechanism-health note in the same body.
+    expect(r.body).toContain(
+      "The posting floor's ENFORCEMENT reading resolved OPEN",
+    );
+    expect(r.body).not.toContain('The posting floor itself resolved OPEN');
+    // …and where only the plan record licenses the floor, the body says so
+    // (#10136 round 23): the plan is CLI-written content behind a
+    // MODEL-written path, and a round that states the coverage it gave up
+    // states what vouched the posting side of the same posture.
+    expect(r.body).toContain(
+      "The licence for that floor is the capture's own plan record",
+    );
+    // The cause clause names the ABSENT record — never the operator, never
+    // an unreadable value (#10136): folding the three causes into one
+    // must red here.
+    expect(r.body).toContain(
+      '(the floor record was absent, and the enforcement reading fails open)',
+    );
+    expect(r.body).not.toContain('the operator turned the posture off');
+    expect(r.body).not.toContain('no finding was withheld by a floor');
+    expect(r.body).toContain('routed by the convergence posture');
+  });
+
+  it('an ABSENT floor beside the plan record claims no deferral beside its inline Suggestion (#10104)', () => {
+    // The default config writes no `severityFloor` ("omit what does not
+    // apply"). The REPORTING reading folds absence to `auto` and the plan
+    // arm resolves critical, but the ENFORCEMENT reading stays strict and
+    // moves nothing — so the body must not claim a deferral beside the very
+    // Suggestion it posts inline.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 1;
+    input.draftedComments = [
+      { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+    ];
+    const r = composeReview(input);
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).not.toContain('recorded and deferred, never posted');
+    expect(r.body).toContain('resolved OPEN at compose time');
+  });
+
+  it('a scope the brief builder rejects engages neither the floor arm nor the disclosure (#10104)', () => {
+    // `incrementalScopeOf` degrades to full scope on a both-empty scope and
+    // on a delta list carrying a non-string element; the shape readers must
+    // read the same plan as no fix-audit round, or the floor defers and the
+    // body discloses a shape the full roster never ran.
+    for (const scope of [
+      { anchor: 'a'.repeat(40), deltaFiles: [], interaction: [] },
+      {
+        anchor: 'a'.repeat(40),
+        deltaFiles: ['src/a.ts', 42],
+        interaction: [],
+      },
+    ]) {
+      const input = rcInput({ ...POSTURE, scope });
+      input.criticalsInline = 0;
+      input.suggestionsInline = 1;
+      input.contextUnavailable = true;
+      input.severityFloor = 'auto';
+      input.draftedComments = [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+      ];
+      const r = composeReview(input);
+      expect(r.floorEnforced).toEqual([]);
+      expect(r.body).not.toContain('fix-audit round');
+    }
+  });
+
+  it('a drifted floor beside the plan record never claims the operator turned the posture off (#10104)', () => {
+    // The compose state is model-written: a present-but-unrecognisable
+    // floor value ('blocker', a spelling drift, '') is NOT an operator
+    // decision — the open-floor sentence must say the value cannot be
+    // read, not assert a posture-off the operator never made. The cast
+    // simulates the transcribed drift the typed field cannot carry.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 1;
+    input.severityFloor = 'blocker' as unknown as 'auto';
+    input.draftedComments = [
+      { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+    ];
+    const r = composeReview(input);
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).toContain('resolved OPEN at compose time');
+    expect(r.body).not.toContain('the operator turned the posture off');
+    expect(r.body).toContain('a floor value this module cannot read');
+  });
+
+  it('an explicit `suggestion` floor beats a stale plan posture, and the body says the floor was open', () => {
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 1;
+    input.severityFloor = 'suggestion';
+    input.draftedComments = [
+      { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+    ];
+    const r = composeReview(input);
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).toContain('resolved OPEN at compose time');
+    expect(r.body).not.toContain('recorded and deferred, never posted');
+  });
+
+  it('a deterministic Suggestion stays inline at an engaged floor, and the sentence says so (#10104)', () => {
+    // `floorEnforcedReroute` leaves a `[test]`-tagged Suggestion inline at
+    // ANY floor — so the engaged sentence in the same body may not assert
+    // the unqualified universal that the very same body falsifies.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 1;
+    input.severityFloor = 'auto';
+    input.draftedComments = [
+      {
+        path: 'src/a.ts',
+        line: 3,
+        body: '**[Suggestion]** [test] mutation survivor on the retry guard',
+      },
+    ];
+    const r = composeReview(input);
+    expect(r.floorEnforced).toEqual([]);
+    // Beside an EMPTY deferral list the sentence may not claim findings
+    // "were recorded and deferred" (#10136): it names the deterministic
+    // exemption as the only sub-Critical finding and claims no deferral.
+    expect(r.body).toContain(
+      'nothing was deferred this round; the only Suggestions the floor leaves inline are pre-confirmed',
+    );
+    expect(r.body).toContain('stay inline at any floor');
+    expect(r.body).not.toContain('were recorded and deferred');
+  });
+
+  it('an RC body owns the reduced shape, cause and interaction clause', () => {
+    const r = composeReview(rcInput(POSTURE));
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain(
+      'fix-audit round under the critical posting posture',
+    );
+    expect(r.body).toContain('engaged by the round schedule');
+    expect(r.body).toContain(
+      'covered the commits since the previous round plus their import-seam interaction files',
+    );
+    // The wave sentence states the scheduler's INCLUSION rule (#10136
+    // R12-2) — true of delta ∪ non-dry ∪ stale-dry ∪ no-history on every
+    // wave, engaged narrowing or not — never the past-tense "only delta
+    // territories and chunks whose previous wave yielded".
+    expect(r.body).toContain(
+      'non-delta chunks the previous waves could not certify dry',
+    );
+    expect(r.body).toContain(
+      're-launched delta territories under the ordinary retirement rules (a twice-dry one only on its cold-check rounds)',
+    );
+    expect(r.body).toContain(
+      'a yield, an uncertified receipt, or no audit history keeps a chunk in the wave; a dry receipt returns it to the ordinary retirement rules when it shares its launch with a yield or uncertified receipt — rounds 1 and 2, the convergence pair, are one launch — was built on the same findings-list bytes as one, was built before one came back, or ran in a different session from some earlier return that was not dry, or beside one no session stamped',
+    );
+    expect(r.body).not.toContain('chunks whose previous wave yielded');
+  });
+
+  it('the Chinese half carries the same shape, rule, cause, interaction clause and licence tail', () => {
+    // The zh twin of every round-shape string, rendered through the same
+    // bilingual switch the posted body uses (a Han-description PR).
+    const hanInput = (
+      incremental: Record<string, unknown>,
+    ): ReturnType<typeof base> => {
+      const input = base({ criticalsInline: 1 });
+      input.planPath = coveredPlan(['verify', 'reverse-audit'], {
+        han: true,
+        incremental: incremental as never,
+      });
+      return input;
+    };
+    const r = composeReview(hanInput(POSTURE));
+    expect(r.body).toContain('<details>\n<summary>中文说明</summary>');
+    expect(r.body).toContain(
+      '轮次形态：本次 re-review 以 critical 发布姿态下的 fix-audit 轮运行',
+    );
+    expect(r.body).toContain('由轮次日程触发');
+    expect(r.body).toContain(
+      '领地扇出只覆盖上一轮以来的 commits 及其 import 接缝 interaction 文件',
+    );
+    expect(r.body).toContain('此前各波未能证实干燥的非 delta chunk');
+    expect(r.body).toContain(
+      '按普通退役规则重发 delta 领地（两次干燥的只在其冷检轮重发）',
+    );
+    expect(r.body).toContain(
+      '出过发现、收据未认证或无审计历史，都会让 chunk 留在波内；干燥收据若与出过发现或未认证的收据属于同一次启动',
+    );
+    expect(r.body).toContain(
+      '使用字节完全相同的发现清单，或构建于这类收据返回之前，',
+    );
+    expect(r.body).toContain(
+      '又或与此前某个非干燥返回不在同一个会话里（或该返回没有会话戳），则该 chunk 回到普通退役规则',
+    );
+    expect(r.body).not.toContain('上一波出过发现的 chunk');
+
+    // The zh engaged arms: a Critical-only deferral list names the
+    // axes-Critical shape, never a below-Critical deferral (R16-1).
+    const critOnly = hanInput(POSTURE);
+    critOnly.criticalsInline = 0;
+    critOnly.severityFloor = 'critical';
+    critOnly.deferredSuggestions = [
+      {
+        file: 'src/a.ts',
+        line: 3,
+        source: 'review',
+        severity: 'Critical',
+        direction: 'fails-closed',
+        baseline: 'new-surface',
+        title: 'sparse checkout wedges the incremental round',
+      },
+    ];
+    const rc = composeReview(critOnly);
+    expect(rc.body).toContain(
+      '下方延后的发现都是按其轴向延后的 Critical（新表面上的 fails-closed）——本轮没有任何低于 Critical 的发现被扣留。',
+    );
+    expect(rc.body).not.toContain('低于 Critical 的发现只记录延后');
+    critOnly.deferredSuggestions.push({
+      file: 'src/a.ts',
+      line: 9,
+      source: 'review',
+      severity: 'Suggestion',
+      title: 'nit',
+    });
+    const mixed = composeReview(critOnly);
+    expect(mixed.body).toContain('低于 Critical 的发现只记录延后');
+    expect(mixed.body).not.toContain('按其轴向延后的 Critical（新表面');
+
+    const explicit = composeReview(
+      hanInput({ ...POSTURE, postureCause: 'explicit' }),
+    );
+    expect(explicit.body).toContain('由操作者显式设置的 critical 下限触发');
+
+    const off = hanInput(POSTURE);
+    off.criticalsInline = 0;
+    off.severityFloor = 'suggestion';
+    off.deferredSuggestions = [
+      {
+        file: 'src/a.ts',
+        line: 3,
+        source: 'review',
+        severity: 'Suggestion',
+        title: 'untested guard',
+      },
+    ];
+    const r2 = composeReview(off);
+    expect(r2.body).toContain('没有姿态授权（操作者关闭了该姿态）');
+    expect(r2.body).not.toContain('由收敛姿态路由');
+    // The auto-floor twin routes the same deferrals to the posture — the
+    // zh open tail's other arm, asserted positively, not by absence.
+    // An ABSENT floor: the enforcement reading fails open, the plan record
+    // licenses the list, and the open tail routes it to the posture.
+    const routed = hanInput(POSTURE);
+    routed.criticalsInline = 0;
+    delete routed.severityFloor;
+    routed.deferredSuggestions = off.deferredSuggestions;
+    const r3 = composeReview(routed);
+    expect(r3.body).toContain('（下限记录缺失，强制读取按开放放行）');
+    expect(r3.body).toContain(
+      '机械兜底未移动任何内容——下方列出的延后由收敛姿态路由',
+    );
+    expect(r3.body).not.toContain('没有姿态授权');
+
+    const none = composeReview(
+      hanInput({ ...POSTURE, scope: { ...POSTURE.scope, interaction: [] } }),
+    );
+    expect(none.body).toContain('（没有仍然干净的 importer 重新进入范围）');
+  });
+
+  it('renders the explicit-floor cause by name', () => {
+    const r = composeReview(rcInput({ ...POSTURE, postureCause: 'explicit' }));
+    expect(r.body).toContain('engaged by the operator-set critical floor');
+  });
+
+  it('an engaged floor whose only deferrals are axes-Criticals claims no below-Critical deferral (#10136 R16-1)', () => {
+    // Both channels reach the state: a fails-closed new-surface Critical
+    // the model routed into the deferral channel, and one the reroute
+    // moved. The merged list then holds NO finding below Critical, and the
+    // engaged sentence may not say findings below Critical were deferred.
+    const critical = {
+      file: 'src/a.ts',
+      line: 3,
+      source: 'review' as const,
+      severity: 'Critical' as const,
+      direction: 'fails-closed' as const,
+      baseline: 'new-surface' as const,
+      title: 'sparse checkout wedges the incremental round',
+    };
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.severityFloor = 'critical';
+    input.deferredSuggestions = [critical];
+    const r = composeReview(input);
+    expect(r.deferredCount).toBe(1);
+    expect(r.body).toContain(
+      'Critical(s) among them are deferred by their axes',
+    );
+    expect(r.body).not.toContain(
+      'Findings below Critical were recorded and deferred',
+    );
+    expect(r.body).toContain(
+      'The deferred findings below are Criticals deferred by their axes (fails-closed on new surface) — nothing below Critical was withheld this round.',
+    );
+    // The reroute channel: a drafted tagged Critical the backstop moves.
+    const moved = rcInput(POSTURE);
+    moved.criticalsInline = 1;
+    moved.severityFloor = 'critical';
+    moved.draftedComments = [
+      {
+        path: 'src/a.ts',
+        line: 3,
+        body: '**[Critical]** [fails-closed] [new-surface] sparse checkout wedges the incremental round',
+      },
+    ];
+    const r2 = composeReview(moved);
+    expect(r2.floorEnforced).toEqual([0]);
+    expect(r2.body).not.toContain(
+      'Findings below Critical were recorded and deferred',
+    );
+    expect(r2.body).toContain('nothing below Critical was withheld this round');
+    // One Suggestion beside the Critical restores the below-Critical claim.
+    input.deferredSuggestions = [
+      critical,
+      {
+        file: 'src/a.ts',
+        line: 9,
+        source: 'review',
+        severity: 'Suggestion',
+        title: 'nit',
+      },
+    ];
+    const r3 = composeReview(input);
+    expect(r3.body).toContain(
+      'Findings below Critical were recorded and deferred',
+    );
+    expect(r3.body).not.toContain('nothing below Critical was withheld');
+  });
+
+  it('claims interaction files only when the scope has some (#10136)', () => {
+    const r = composeReview(
+      rcInput({ ...POSTURE, scope: { ...POSTURE.scope, interaction: [] } }),
+    );
+    expect(r.body).toContain(
+      'covered the commits since the previous round (no still-clean importer re-entered the scope)',
+    );
+    expect(r.body).not.toContain('import-seam interaction files');
+  });
+
+  it('counts an interaction file only on an entry the briefs would render — one admission (#10136)', () => {
+    // An entry with no surviving edge is one `incrementalScopeOf` drops; it
+    // must not be counted in the body either, or the disclosure counts a
+    // reduction on a file no brief described.
+    const r = composeReview(
+      rcInput({
+        ...POSTURE,
+        scope: {
+          ...POSTURE.scope,
+          interaction: [
+            {
+              path: 'src/b.ts',
+              importsChanged: [],
+            },
+            {
+              path: '',
+              importsChanged: ['src/a.ts'],
+            },
+          ],
+        },
+      }),
+    );
+    expect(r.body).not.toContain('plus their import-seam interaction files');
+    expect(r.body).toContain('no still-clean importer re-entered the scope');
+  });
+
+  it('an approving fix-audit round still owns its reduced shape (#10136 R1-6)', () => {
+    // The common successful fix round: no new Critical, the survivors
+    // deferred — composes through the APPROVE branch, and the body must
+    // carry the round-shape disclosure there too.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.severityFloor = 'critical';
+    input.deferredSuggestions = [
+      {
+        file: 'src/a.ts',
+        line: 3,
+        source: 'review',
+        severity: 'Suggestion',
+        title: 'untested guard',
+      },
+    ];
+    const r = composeReview(input);
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('No blocking issues');
+    expect(r.body).toContain(
+      'fix-audit round under the critical posting posture',
+    );
+    expect(r.body).toContain('recorded and deferred, never posted');
+  });
+
+  it('an engaged floor beside an empty deferral list claims no deferral (#10136)', () => {
+    const input = rcInput(POSTURE);
+    input.severityFloor = 'critical';
+    const r = composeReview(input);
+    expect(r.body).toContain('nothing below Critical reached it this round');
+    expect(r.body).not.toContain('were recorded and deferred');
+  });
+
+  it('an explicit suggestion floor beside a postured plan and a deferral list: the deferrals are unlicensed, never posture-routed (#10136 R13-1)', () => {
+    // The boundary state the licence chain and the open-arm tail must
+    // agree on: the operator turned the posture off, the plan still
+    // records one, and the model deferred anyway. The licence caps the
+    // verdict as unlicensed-deferral; the tail may not attribute the same
+    // deferrals to the posture the operator disabled.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.severityFloor = 'suggestion';
+    input.deferredSuggestions = [
+      {
+        file: 'src/a.ts',
+        line: 3,
+        source: 'review',
+        severity: 'Suggestion',
+        title: 'untested guard',
+      },
+    ];
+    const r = composeReview(input);
+    expect(r.cappedBy).toContain('unlicensed-deferral');
+    expect(r.body).toContain('the operator turned the posture off');
+    expect(r.body).toContain('deferred without a posture licence');
+    expect(r.body).toContain('carry no posture licence');
+    expect(r.body).not.toContain('routed by the convergence posture');
+    // The SAME state with an `auto` floor routes them to the posture —
+    // the plan record is the licence there.
+    input.severityFloor = 'auto';
+    const auto = composeReview(input);
+    expect(auto.cappedBy).not.toContain('unlicensed-deferral');
+    expect(auto.body).not.toContain('carry no posture licence');
+  });
+
+  it('renders the flat-trend cause by name', () => {
+    const r = composeReview(
+      rcInput({ ...POSTURE, postureCause: 'flat-trend' }),
+    );
+    expect(r.body).toContain('engaged by the flat first-time-finding trend');
+  });
+
+  it('says nothing on a plan without the posture', () => {
+    const r = composeReview(
+      rcInput({ since: 'a'.repeat(40), effective: true }),
+    );
+    expect(r.body).not.toContain('fix-audit round');
+  });
+
+  it('a malformed posture block silences the disclosure, never crashes', () => {
+    const r = composeReview(rcInput({ ...POSTURE, scope: 'garbled' }));
+    expect(r.body).not.toContain('fix-audit round');
+    // …at the same bar the roster's reader applies (`isFixAuditRound`): a
+    // scope-shaped object missing its anchor or delta list is a plan the
+    // roster ran FULL, and neither the floor arm nor the disclosure may
+    // describe a fix-audit round nobody ran.
+    const r2 = composeReview(
+      rcInput({ ...POSTURE, scope: { anchor: '', deltaFiles: ['a.ts'] } }),
+    );
+    expect(r2.body).not.toContain('fix-audit round');
+    const r3 = composeReview(
+      rcInput({
+        ...POSTURE,
+        scope: { anchor: 'a'.repeat(40), deltaFiles: 'garbled' },
+      }),
+    );
+    expect(r3.body).not.toContain('fix-audit round');
+  });
+});
+
 describe('composeReview — not-reviewed entries that carry their own reason', () => {
   it('renders the entry verbatim instead of appending the whiff sentence (Agent 0 issue-fetch failure)', () => {
     const r = composeReview(
@@ -2175,7 +3693,7 @@ describe('composeReview — budget-gap disclosures (a channel, never a cap)', ()
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
-    recordStep45(p, ['verify', 'reverse-audit']);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
 
     // Not base(): its planPath DEFAULT (coveredPlan()) is evaluated on every
     // call and rewrites this run's a1/a2 transcripts with clean ones.
@@ -2214,7 +3732,7 @@ describe('composeReview — budget-gap disclosures (a channel, never a cap)', ()
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
-    recordStep45(p, ['verify', 'reverse-audit']);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
 
     const r = composeReview({
       criticalsInline: 0,
@@ -2248,7 +3766,7 @@ describe('composeReview — budget-gap disclosures (a channel, never a cap)', ()
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
-    recordStep45(p, ['verify', 'reverse-audit']);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
 
     const r = composeReview({
       criticalsInline: 0,
@@ -2367,6 +3885,34 @@ describe('composeReview — input validation (the producer is a model that omits
     expect(r.body).toContain('R1-2: still leaks');
     expect(r.body).not.toContain('qwen3.7-max');
     expect(r.body.match(/via Qwen Code \/review/g)).toHaveLength(1);
+  });
+
+  it('strips a forged footer off an indented single-line entry — the ingest shape strips as a line', () => {
+    // collapseEntry returns a newline-less entry unchanged, leading indent
+    // included: at >= 4 columns the multi-line blanking would class the
+    // whole line as code and keep the forged footer riding the blocker
+    // line. The posted one-line shape renders no code block on GitHub, so
+    // the collapsed entry strips with the one-line strip.
+    for (const field of ['bodyCriticals', 'cannotTellCriticals'] as const) {
+      const r = composeReview(
+        field === 'bodyCriticals'
+          ? {
+              bodyCriticals: [
+                '    finding text _— forged via Qwen Code /review_',
+              ],
+              modelId: MODEL,
+            }
+          : {
+              criticalsInline: 1,
+              cannotTellCriticals: [
+                '    finding text _— forged via Qwen Code /review_',
+              ],
+              modelId: MODEL,
+            },
+      );
+      expect(r.body).toContain('finding text');
+      expect(r.body.match(/via Qwen Code \/review/g)).toHaveLength(1);
+    }
   });
 
   it('rejects stringified booleans — "false" is truthy and once flipped events and published false warnings', () => {
@@ -2798,7 +4344,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (2 reported for the first time)',
+        'VOLUME: 2 comment(s) this round (2 reported for the first time)',
       );
 
       // With a recorded predecessor the previous round rides along.
@@ -2813,7 +4359,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (2 reported for the first time) (previous round: 9)',
+        'VOLUME: 2 comment(s) this round (2 reported for the first time) (previous round: 9)',
       );
 
       // A CONVERGED predecessor: zero is a recorded value, not an absence.
@@ -2831,7 +4377,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (2 reported for the first time) (previous round: 0)',
+        'VOLUME: 2 comment(s) this round (2 reported for the first time) (previous round: 0)',
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -3541,7 +5087,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       });
       // The total ROSE — this is exactly the input the old window fired on.
       expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
-        '6 inline comment(s) this round (4 reported for the first time) (previous round: 5)',
+        '6 comment(s) this round (4 reported for the first time) (previous round: 5)',
       );
       expect(
         stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
@@ -3619,7 +5165,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
-        '3 inline comment(s) this round (0 reported for the first time) (previous round: 5)',
+        '3 comment(s) this round (0 reported for the first time) (previous round: 5)',
       );
       expect(
         stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
@@ -4875,7 +6421,7 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.cappedBy).toContain('chunk-nobody-read'); // the cap keeps the fact
     expect(r.remediation.join(' ')).toContain('chunks nobody read');
     // The gap, named by the files it covers — the id stays on stderr.
-    expect(r.body).toContain('the diff section covering src/a.ts');
+    expect(r.body).toContain('the diff section covering `src/a.ts`');
     expect(r.body).not.toMatch(/chunk \d/);
     // …but only under its cause: no second sentence restating the consequence.
     expect(r.body).not.toContain('no agent reported covering');
@@ -5051,6 +6597,14 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.body).toContain(
       '启动 prompt 为它指定了 diff 中的行，但它从未打开',
     );
+    // The Chinese half names the agent the same quoted, truncated way. With
+    // no `subjectZh` it falls back to the PUBLIC subject, never to the raw
+    // label: that is launch-prompt prose, and printed bare its `@mentions`
+    // and links go live on the PR page.
+    expect(r.body).toContain(
+      '未审查：`"This PR narrows the daemon-marker check from a truthy test…"`',
+    );
+    expect(r.body).not.toContain('未审查：This PR narrows');
   });
 
   it('keeps long agent labels distinct when their first word matches', () => {
@@ -5219,6 +6773,90 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.body).not.toMatch(/agent-prompt|--roster|--chunk/);
     expect(r.body).not.toContain('.brief.md');
     expect(r.body).toContain('never opened its brief, so it reviewed without');
+  });
+
+  it('the handler prints a withheld FIX as a NOTE line beside the FIX lines, before the verdict, never to stdout', async () => {
+    // Step 5 never built, on a 3600s wall captured 3000s ago: the rebuild
+    // FIX is withheld by the wall, and the command says so where the
+    // orchestrator reads — a disclosed gap with no FIX is never silent.
+    const p = plan({ step45: false });
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...parsed,
+        deadlineSeconds: 3600,
+        deadlineSource: 'default',
+      }),
+    );
+    const captured = new Date(Date.now() - 3000 * 1000);
+    utimesSync(p, captured, captured);
+    const input = join(dir, 'input.json');
+    writeFileSync(
+      input,
+      JSON.stringify({
+        planPath: p,
+        modelId: MODEL,
+        findingsPath: findingsFile(TAGGED),
+      }),
+    );
+    const commentsPath = join(dir, 'comments.json');
+    writeFileSync(commentsPath, '[]', 'utf8');
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    const prevEpoch = process.env[DEADLINE_ENV];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    delete process.env[DEADLINE_ENV];
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      vi.mocked(writeStdoutLine).mockClear();
+      await runComposeReviewCommand({ input, comments: commentsPath });
+      const stderr = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]));
+      const noteIdx = stderr.findIndex((l) =>
+        l.startsWith('NOTE: reverse audit: the rebuild FIX is withheld'),
+      );
+      const verdictIdx = stderr.findIndex((l) => l.startsWith('Verdict:'));
+      expect(noteIdx).toBeGreaterThanOrEqual(0);
+      expect(verdictIdx).toBeGreaterThan(noteIdx);
+      expect(stderr.some((l) => l.startsWith('FIX: reverse audit:'))).toBe(
+        false,
+      );
+      // The `[unverified]` relaunch is a verify build the same floor
+      // refuses: withheld and explained too, never printed as a FIX
+      // beside a NOTE that says the builder would refuse it.
+      expect(
+        stderr.some((l) => l.startsWith('FIX: findings still tagged')),
+      ).toBe(false);
+      expect(
+        stderr.some((l) =>
+          l.startsWith(
+            'NOTE: findings still tagged `— [unverified]`: the relaunch FIX is withheld',
+          ),
+        ),
+      ).toBe(true);
+      const stdout = vi
+        .mocked(writeStdoutLine)
+        .mock.calls.map((c) => String(c[0]))
+        .join('\n');
+      expect(stdout).not.toContain('NOTE: ');
+      const parsedOut = JSON.parse(stdout) as { waivedFixes?: string[] };
+      expect(parsedOut.waivedFixes?.length).toBe(2);
+    } finally {
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+      if (prevEpoch === undefined) delete process.env[DEADLINE_ENV];
+      else process.env[DEADLINE_ENV] = prevEpoch;
+    }
   });
 
   it('the handler prints every FIX to stderr, before the verdict, never to stdout', async () => {
@@ -5504,6 +7142,9 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     });
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('criticals-unverified');
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
   });
 
@@ -5529,6 +7170,9 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(r.downgradedFrom).toBeNull();
     expect(r.cappedBy).toContain('findings-unverified-at-compose');
     expect(r.cappedBy).not.toContain('criticals-unverified');
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
   });
 
@@ -5693,6 +7337,469 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
   });
 });
 
+describe('a record for a chunk the plan does not carry', () => {
+  // A record launched as `chunk 9 of 12` over a plan carrying chunks 1 and 2,
+  // both read. Its disclosures arrive as `chunk 9`, and the body collapses
+  // `chunk <id>` subjects into the author's units AGAINST THIS PLAN — so it
+  // told the author that 1 of their diff's 2 sections went unreviewed,
+  // beside a coverage report counting both as read.
+  const PHRASE = 'an agent launched for a chunk this plan does not carry';
+  const onDiff = (): string =>
+    'You are reviewing chunk 9 of 12.\n' +
+    `read_file(file_path="${DIFF}", offset=800, limit=100)`;
+
+  // `coveredPlan()` lays its own transcripts down, so it runs only when the
+  // test did not build a plan of its own.
+  const compose = (over: Record<string, unknown> = {}) =>
+    composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      env: ENV,
+      modelId: MODEL,
+      ...over,
+      planPath: (over['planPath'] as string | undefined) ?? coveredPlan(),
+    });
+
+  // The arms of the coverage walk that disclose a chunk agent each name it
+  // `chunk <id>`, and they all reach the body through the one collapse — so
+  // each is driven here. `launch` runs before the plan is written; `stale`
+  // after, for the two arms that need a prompt record an earlier capture at
+  // this plan path left behind (`goodPrompt(9)` as its `chunk-9.txt`).
+  interface Arm {
+    launch: () => void;
+    stale?: boolean;
+    reason: RegExp;
+  }
+  const arms: Array<[string, Arm]> = [
+    [
+      'ran on a prompt nothing built',
+      {
+        launch: () =>
+          transcript('stale9', onDiff(), {
+            toolCalls: 1,
+            range: [800, 100],
+            text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+          }),
+        reason: /ran on a prompt the run wrote itself/,
+      },
+    ],
+    [
+      'made no tool call',
+      {
+        launch: () => transcript('stale9', onDiff()),
+        reason: /made no tool call/,
+      },
+    ],
+    [
+      'was launched blind',
+      {
+        launch: () =>
+          transcript('stale9', 'The changes are in chunk 9 of 12.', {
+            toolCalls: 1,
+          }),
+        reason: /never named the diff|could not have read/,
+      },
+    ],
+    [
+      'never opened the diff it was pointed at',
+      {
+        launch: () =>
+          transcript('stale9', goodPrompt(9), {
+            toolCalls: 1,
+            toolPath: join(dir, 'elsewhere.ts'),
+          }),
+        stale: true,
+        reason: /pointed at diff lines it never opened/,
+      },
+    ],
+    [
+      'was launched on a rewrite of a leftover prompt',
+      {
+        launch: () =>
+          // Reworded INSIDE the built text: a launch that merely appends to
+          // it still contains it verbatim, and is no rewrite.
+          transcript('stale9', goodPrompt(9).replace('reviewing', 'skimming'), {
+            toolCalls: 1,
+            range: [800, 100],
+            opens: [],
+          }),
+        stale: true,
+        reason: /not the one the CLI built/,
+      },
+    ],
+  ];
+
+  it.each(arms)(
+    'is not counted as a section of this diff when it %s',
+    (_arm, { launch, stale, reason }) => {
+      launch();
+      const p = coveredPlan();
+      if (stale) recordBuilt(p, 9);
+      const r = compose({ planPath: p });
+      expect(r.body).toMatch(reason);
+      expect(r.body).not.toContain("of the diff's 2 sections");
+      expect(r.body).not.toContain('the entire diff');
+      expect(r.body).toContain(PHRASE);
+      // The CLI does not mint the run's chunk id into the PR page.
+      expect(r.body).not.toContain('chunk 9');
+      // Still disclosed, and still capping.
+      expect(r.cappedBy).toContain('unreviewed-dimension');
+      expect(r.event).not.toBe('APPROVE');
+    },
+  );
+
+  const DECLARED =
+    'Not reviewed: a line of the diff that no read can reach — reported by ' +
+    'an agent launched for a chunk this plan does not carry.';
+
+  it('still says a line could not be read, in the scenario this PR is about', () => {
+    // No prompt was ever built for a chunk 9, so the record is ALSO a
+    // rewritten launch — and the body keeps one reason per subject, the first.
+    // Disclosed under the same subject, the declaration lost to it: the gate
+    // held, and the PR page no longer said any line went unread.
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose();
+    expect(r.body).toContain(DECLARED);
+    expect(r.body).toMatch(/ran on a prompt the run wrote itself/);
+    // The cap main raised for it, by the name main raised it under.
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+    expect(r.event).not.toBe('APPROVE');
+  });
+
+  it('still withholds the Approve over a stale declarer nothing else discloses', () => {
+    // Launched verbatim from a prompt an earlier capture left behind, so it
+    // is no rewritten launch — the declaration is its only disclosure. It
+    // read this diff and reported a line it could not reach; chunk 2's
+    // credit does not show anyone did. Counted as a phantom section, main
+    // capped this run; dropped with the phantom, it approved.
+    transcript('stale9', goodPrompt(9), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const p = coveredPlan();
+    recordBuilt(p, 9);
+    const r = compose({ planPath: p });
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.cappedBy).toEqual(['uncoverable-chunk']);
+    // Everything an `uncoverable` entry moves, this moves: the reading is in
+    // doubt, so no incremental anchor is certified, and the opener says gaps
+    // were disclosed. Here the declaration is the ONLY thing that can.
+    expect(r.scopeUnproven).toBe(true);
+    expect(r.body).toContain('Partially reviewed');
+    expect(r.body).toContain(DECLARED);
+    expect(r.body).not.toContain("of the diff's 2 sections");
+    expect(r.body).not.toContain('chunk 9');
+  });
+
+  it('says it once when the caller relays the same declaration', () => {
+    // The skill tells the orchestrator to carry every `Uncoverable:` return
+    // into the verdict, so the relay is the compliant path, not a corner.
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ uncoverableChunks: ['chunk 9'] });
+    expect(r.body.split(DECLARED)).toHaveLength(2);
+    expect(r.body).not.toContain('chunk 9');
+    expect(r.body).not.toContain("of the diff's 2 sections");
+    // …and no subject-less sentence is left where the relayed entry was.
+    expect(r.body).not.toMatch(/Not reviewed:\s+—/);
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+  });
+
+  it('says it once when the relay names the file, and keeps the richer one', () => {
+    // The form the skill's own example gives for `uncoverableChunks`. Main
+    // keeps the caller's entry and does not add the walk's bare one beside
+    // it; the same here — the file is what the author can act on.
+    transcript('stale9', goodPrompt(9), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const p = coveredPlan(undefined, { han: true });
+    recordBuilt(p, 9);
+    const r = compose({
+      planPath: p,
+      uncoverableChunks: ['chunk 9', 'chunk 9 (src/big.min.js)'],
+    });
+    expect(r.body).toContain(
+      'Not reviewed: chunk 9 (src/big.min.js) — a line there exceeds the read limit.',
+    );
+    expect(r.body).not.toContain('no read can reach');
+    expect(r.body).not.toContain('任何读取都无法到达');
+    expect(r.body.split('exceeds the read limit')).toHaveLength(2);
+    expect(r.cappedBy).toEqual(['uncoverable-chunk']);
+  });
+
+  it('counts the declaration sentence by chunk too, and only what is unsaid', () => {
+    // Two records share id 9 and both declare; a third declares 10; the
+    // caller relays 10 with its file. One chunk is left for the sentence.
+    const declares = (id: string, n: number): void =>
+      transcript(
+        id,
+        `You are reviewing chunk ${n} of 12.\n` +
+          `read_file(file_path="${DIFF}", offset=${n * 90}, limit=90)`,
+        {
+          toolCalls: 1,
+          range: [n * 90, 90],
+          text: `Uncoverable: chunk ${n} — line exceeds the read limit`,
+        },
+      );
+    declares('stale9a', 9);
+    declares('stale9b', 9);
+    declares('stale10', 10);
+    const both = compose();
+    expect(both.body).toContain(
+      'reported by agents launched for 2 chunks this plan does not carry.',
+    );
+
+    const one = compose({ uncoverableChunks: ['chunk 10 (src/other.ts)'] });
+    expect(one.body).toContain(
+      'reported by an agent launched for a chunk this plan does not carry.',
+    );
+    expect(one.body).toContain('chunk 10 (src/other.ts) — a line there');
+  });
+
+  it('takes only `chunk <id>` and `chunk <id> <more>` for a relay of it', () => {
+    // The same prefix rule the planned ids get (`startsWith(prefix + ' ')`):
+    // `chunk 9(src/x.ts)` is the caller's prose, not a relay the CLI can
+    // vouch for, so both statements stand — as they do on main.
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ uncoverableChunks: ['chunk 9(src/x.ts)'] });
+    expect(r.body).toContain('chunk 9(src/x.ts) — a line there exceeds');
+    expect(r.body).toContain(DECLARED);
+  });
+
+  it('keeps every richer relay, and stands down only for the ids they name', () => {
+    const declares = (id: string, n: number): void =>
+      transcript(
+        id,
+        `You are reviewing chunk ${n} of 12.\n` +
+          `read_file(file_path="${DIFF}", offset=${n * 90}, limit=90)`,
+        {
+          toolCalls: 1,
+          range: [n * 90, 90],
+          text: `Uncoverable: chunk ${n} — line exceeds the read limit`,
+        },
+      );
+    declares('stale9', 9);
+    declares('stale10', 10);
+    // Both ids relayed with their files, one of them twice over: every
+    // entry is kept, and no sentence of the CLI's is left to say.
+    const r = compose({
+      uncoverableChunks: [
+        'chunk 10 (src/b.min.js)',
+        'chunk 9 (src/x.min.js)',
+        'chunk 9 (src/y.min.js)',
+      ],
+    });
+    expect(r.body).toContain(
+      'chunk 10 (src/b.min.js), chunk 9 (src/x.min.js), chunk 9 (src/y.min.js) — a line there',
+    );
+    expect(r.body).not.toContain('no read can reach');
+  });
+
+  it('does not take a trailing space for a richer relay', () => {
+    // `chunk 9 ` names no file: kept as the caller's words, it would leave
+    // "a line THERE" pointing at a chunk this plan does not have.
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ uncoverableChunks: ['chunk 9 '] });
+    expect(r.body).toContain(DECLARED);
+  });
+
+  it('leaves the caller\u2019s own prose exactly as main rendered it', () => {
+    // Planned-only input: nothing here is this change's to touch, repeats
+    // included.
+    const r = compose({
+      uncoverableChunks: ['chunk 2 (src/b.ts)', 'chunk 2 (src/b.ts)'],
+    });
+    expect(r.body).toContain(
+      'Not reviewed: chunk 2 (src/b.ts), chunk 2 (src/b.ts) — a line there exceeds the read limit.',
+    );
+  });
+
+  it('does not swallow a relayed id that is not the one declared', () => {
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ uncoverableChunks: ['chunk 10', 'chunk 10'] });
+    // The caller's only statement about chunk 10 — kept, and said once.
+    expect(r.body).toContain('chunk 10 — a line there exceeds the read limit');
+    expect(r.body).not.toContain('chunk 10, chunk 10');
+    expect(r.body).toContain(DECLARED);
+  });
+
+  it('does not swallow a relayed id the walk did NOT find declared', () => {
+    // An idle record for the same id discloses something else entirely; the
+    // caller's entry is then the only statement of an unreadable line.
+    transcript('stale9', onDiff());
+    const r = compose({ uncoverableChunks: ['chunk 9'] });
+    expect(r.body).toContain('chunk 9 — a line there exceeds the read limit');
+    expect(r.body).toContain(PHRASE);
+  });
+
+  it('says the declaration in Chinese too', () => {
+    transcript('stale9', onDiff(), {
+      toolCalls: 1,
+      range: [800, 100],
+      text: 'Uncoverable: chunk 9 — line exceeds the read limit',
+    });
+    const r = compose({ planPath: coveredPlan(undefined, { han: true }) });
+    expect(r.body).toContain(
+      '未审查：diff 中有一行超出单次读取上限、任何读取都无法到达——由一个被指派到当前 plan 中不存在的 chunk 的 agent 报告。',
+    );
+  });
+
+  it('counts several of them in the phrase, by chunk, in both languages', () => {
+    // Not `an agent … (×2)`, which is how other repeated subjects render —
+    // and by chunk, not by record: disclosures are kept one per subject, so
+    // records that share an id arrive here as one.
+    transcript('stale9', onDiff());
+    transcript(
+      'stale10',
+      'You are reviewing chunk 10 of 12.\n' +
+        `read_file(file_path="${DIFF}", offset=900, limit=100)`,
+    );
+    const r = compose({ planPath: coveredPlan(undefined, { han: true }) });
+    expect(r.body).toContain(
+      'agents launched for 2 chunks this plan does not carry',
+    );
+    expect(r.body).toContain(
+      '被指派到当前 plan 中不存在的 2 个 chunk 的 agent',
+    );
+    expect(r.body).not.toContain('×2');
+  });
+
+  it('still collapses a planned chunk into the units the author reads', () => {
+    // The control: only an id the plan does not carry leaves the collapse.
+    // Chunk 2's one agent made no tool call, so the same arm fires for an id
+    // the plan DOES carry.
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2));
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
+    const r = compose({ planPath: p });
+    expect(r.body).toMatch(/made no tool call/);
+    expect(r.body).toMatch(
+      /the diff section covering|of the diff's 2 sections/,
+    );
+    expect(r.body).not.toContain(PHRASE);
+  });
+
+  it('renders a caller-relayed bare id the plan lacks as the caller wrote it', () => {
+    const r = compose({ uncoverableChunks: ['chunk 9'] });
+    expect(r.body).not.toContain("of the diff's 2 sections");
+    expect(r.body).toContain('chunk 9');
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+  });
+
+  it('keeps counting a caller-relayed bare id when there is no plan to ask', () => {
+    // With no chunk table nothing can be called foreign to it: the entry
+    // renders through the counting fallback exactly as it always has.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      env: ENV,
+      modelId: MODEL,
+      uncoverableChunks: ['chunk 5'],
+    });
+    expect(r.body).toContain('1 section of the diff');
+    expect(r.body).not.toContain('chunk 5');
+  });
+
+  it('names it in Chinese too, for an author who writes Chinese', () => {
+    transcript('stale9', onDiff());
+    const r = compose({ planPath: coveredPlan(undefined, { han: true }) });
+    expect(r.body).toContain('一个被指派到当前 plan 中不存在的 chunk 的 agent');
+    expect(r.body).not.toContain('diff 2 个片段中的 1 个');
+  });
+
+  it('still counts a caller-relayed bare id the plan does carry', () => {
+    const r = compose({ uncoverableChunks: ['chunk 2'] });
+    expect(r.body).not.toContain('chunk 2');
+    expect(r.cappedBy).toContain('uncoverable-chunk');
+  });
+});
+
+describe('the coverage-failure arms keep their own messages', () => {
+  const compose = (p: string) =>
+    composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+
+  it('names a partition failure as the coverage check\u2019s own defect', () => {
+    // Outcomes that do not partition the plan are a defect in coverage.ts.
+    // Folded into the generic arm, an operator handed "the plan could not be
+    // used" goes to re-capture a diff that was never the problem.
+    // A Chinese-writing author's plan, so the zh half of the arm renders too.
+    const p = coveredPlan(undefined, { han: true });
+    const spy = vi
+      .spyOn(coverageModule, 'coverageFromTranscripts')
+      .mockImplementation(() => {
+        throw new coverageModule.ChunkPartitionError(
+          'chunk 2 is both covered and missing',
+        );
+      });
+    try {
+      const r = compose(p);
+      expect(r.body).toContain('the coverage check contradicted its own plan');
+      expect(r.body).toContain('chunk 2 is both covered and missing');
+      expect(r.body).not.toContain('the plan could not be used');
+      expect(r.body).toContain('覆盖率检查与其自身的 plan 相矛盾');
+      expect(r.body).not.toContain('plan 无法使用');
+      // Fail-closed, like its two siblings: a run that cannot show what it
+      // read has not shown it read anything.
+      expect(r.cappedBy).toContain('unreviewed-dimension');
+      expect(r.event).not.toBe('APPROVE');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps the unusable-plan message for an unusable plan', () => {
+    // The control: the new arm must not have taken the generic one's input.
+    const p = coveredPlan(undefined, { han: true });
+    const spy = vi
+      .spyOn(coverageModule, 'coverageFromTranscripts')
+      .mockImplementation(() => {
+        throw new Error('coverage: plan.json has no chunks[]');
+      });
+    try {
+      const r = compose(p);
+      expect(r.body).toContain('the plan could not be used');
+      expect(r.body).not.toContain('contradicted its own plan');
+      // …in the Chinese half as well.
+      expect(r.body).toContain('plan 无法使用');
+      expect(r.body).not.toContain('覆盖率检查与其自身的 plan 相矛盾');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 // `verdictLine` is what Step 6 prints — the one place a verdict exists for the
 // user. It had no test, and a review of this change found the reason to want one.
 describe('verdictLine — the terminal verdict, and its dangling colon', () => {
@@ -5704,11 +7811,14 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       cappedBy: [],
       downgraded: false,
       floorEnforced: [],
+      floorEnforcedEntries: [],
       postedInline: 0,
       postedFresh: 0,
       downgradedFrom: null,
       remediation: [],
+      waivedFixes: [],
       deferredCount: 0,
+      fixedFindings: [],
       bodyTrim: {
         sections: 0,
         deferralList: false,
@@ -5825,6 +7935,1489 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
   });
 });
 
+// `fixedFindings` decides nothing in the verdict — a fixed entry weighs
+// nothing by its absence from every findings channel — but it rides the
+// result for `submit`'s thread lifecycle, so the boundary validates its
+// shape: one acceptance table for the state JSON and the artifact read-back.
+describe('composeReview — fixedFindings', () => {
+  it('passes valid rulings through, unchanged by the verdict', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [
+          { id: 'R1-2', by: 'the guard rewrite' },
+          { id: 'R2-7' },
+        ],
+      }),
+    );
+    expect(r.event).toBe('APPROVE');
+    expect(r.fixedFindings).toEqual([
+      { id: 'R1-2', by: 'the guard rewrite' },
+      { id: 'R2-7' },
+    ]);
+  });
+
+  it('reads absent and null as no rulings', () => {
+    expect(composeReview(base({})).fixedFindings).toEqual([]);
+    expect(
+      composeReview(base({ fixedFindings: null as never })).fixedFindings,
+    ).toEqual([]);
+  });
+
+  it('trims and caps `by` — the clause becomes a one-line PR reply', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [{ id: 'R1-2', by: `  ${'x'.repeat(300)}  ` }],
+      }),
+    );
+    expect(r.fixedFindings[0]!.by).toHaveLength(240);
+  });
+
+  it('caps `by` by code point — the cut never orphans a surrogate pair', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [{ id: 'R1-2', by: `${'x'.repeat(239)}😀tail` }],
+      }),
+    );
+    const by = r.fixedFindings[0]!.by!;
+    expect([...by]).toHaveLength(240);
+    expect(by.endsWith('😀')).toBe(true);
+  });
+
+  it('refuses a non-array field', () => {
+    expect(() =>
+      composeReview(base({ fixedFindings: 'R1-2' as never })),
+    ).toThrow(/`fixedFindings` must be an array/);
+  });
+
+  it('refuses an entry with no ledger id — a ruling must name what it retires', () => {
+    for (const id of [
+      'not-a-ledger-id',
+      'R1-2 extra',
+      '',
+      42,
+      undefined,
+      // The serializer's bounds beside its shape (#9940 review, round
+      // 14): an over-long id is one the normalizer would cut (a cut id
+      // is a different id), a round of 0 or past LEDGER_MAX_ROUND names
+      // an entry no ledger can hold — `isLedgerFinding` refuses all of
+      // them, so a ruling naming one could never retire a real entry.
+      'R1-' + '9'.repeat(30),
+      'R0-1',
+      'R999999-1',
+      // Non-canonical spellings the shape tolerates but no entry carries:
+      // every join is raw-string equality, so `R01-2` retires nothing and
+      // slips past the two-way refusal beside a still-standing `R1-2`
+      // (#9940 review, round 25).
+      'R01-2',
+      'R1-02',
+      'R1-0',
+    ] as const) {
+      // A leading-zero spelling of a real shape is refused with the
+      // canonical spelling named; every other shape with the bounds.
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id } as never] })),
+      ).toThrow(/carries no ledger id|spells its id non-canonically/);
+    }
+  });
+
+  it('refuses a `by` that is not one non-empty line', () => {
+    expect(() =>
+      composeReview(base({ fixedFindings: [{ id: 'R1-2', by: '' }] })),
+    ).toThrow(/ONE non-empty line/);
+    expect(() =>
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: 'line one\nline two' }] }),
+      ),
+    ).toThrow(/ONE non-empty line/);
+    expect(() =>
+      composeReview(base({ fixedFindings: [{ id: 'R1-2', by: 7 as never }] })),
+    ).toThrow(/ONE non-empty line/);
+    // U+2028 and U+2029 are line breaks to the reader that matters: jq's
+    // `[^\n]` admits them, so a `by` carrying one made the census read the
+    // posted note as a note while this side read it as a finding (#9940
+    // review, round 31 reverse audit).
+    for (const brk of ['\u2028', '\u2029']) {
+      expect(() =>
+        composeReview(
+          base({ fixedFindings: [{ id: 'R1-2', by: `one${brk}two` }] }),
+        ),
+      ).toThrow(/ONE non-empty line/);
+    }
+  });
+
+  it('strips a severity marker off a `by` the indentation would have hidden (#9940 review, round 31 reverse audit)', () => {
+    // `severityOf` reads no marker off an indented line — it is code
+    // there — but the cap takes `prose.trim()` and the reply builder trims
+    // again, so the indentation is gone by the time it posts and the
+    // marker went out live under attribution on.
+    for (const lead of ['    ', '\t', ' \t ']) {
+      const r = composeReview(
+        base({
+          fixedFindings: [
+            { id: 'R1-2', by: `${lead}**[Critical]** the auth check` },
+          ],
+        }),
+      );
+      expect(r.fixedFindings).toEqual([{ id: 'R1-2', by: 'the auth check' }]);
+    }
+  });
+
+  it('refuses a `by` that renders as nothing — the reply must say what fixed it (#9940 review, round 14)', () => {
+    // A comment-only clause, and a Cf run `.trim()` keeps: either posts
+    // `R<id> fixed by` with no visible account, on the thread the same
+    // pass resolves — the body-Criticals boundary already refuses the
+    // identical texts through the same renders-as-nothing rule.
+    expect(() =>
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '<!-- the guard rewrite -->' }],
+        }),
+      ),
+    ).toThrow(/ONE non-empty line/);
+    expect(() =>
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: '\u200b'.repeat(3) }] }),
+      ),
+    ).toThrow(/ONE non-empty line/);
+    // Residue AHEAD of visible text stays admitted, like everywhere else.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '<!-- x --> the guard rewrite' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2', by: '<!-- x --> the guard rewrite' }]);
+  });
+
+  it('refuses a `by` the EXIT strips to nothing — a bare severity marker (#9940 review, round 21)', () => {
+    // `submit` posts the reply through the attribution-off strip chain
+    // and the footer strip, so the gate projects through the same exit
+    // closure the body-Criticals boundary uses (`rendersAsNothingAtExit`):
+    // a bare marker renders as prose to the plain test and as nothing at
+    // the exit — under attribution off the reply posted bare `R1-2 fixed`
+    // beside a resolve, under attribution on the machine marker posted
+    // verbatim.
+    for (const by of ['**[Critical]**', '**[Suggestion]**: ']) {
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by }] })),
+      ).toThrow(/ONE non-empty line/);
+    }
+  });
+
+  it('refuses a `by` carrying the comment-marker grammar or an unterminated comment; strips a leading severity marker (#9940 review, audit)', () => {
+    // The marker grammar would end the attribution-off reply and make
+    // presubmit read the fixed ruling as a posted finding carrying its
+    // id — a re-post carrier for the id the ruling retires.
+    expect(() =>
+      composeReview(
+        base({
+          fixedFindings: [
+            { id: 'R1-2', by: 'the rewrite <!-- qwen-review critical -->' },
+          ],
+        }),
+      ),
+    ).toThrow(/comment-marker grammar/);
+    // An unterminated comment swallows the footer appended after the clause.
+    expect(() =>
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: 'the real parser <!--' }] }),
+      ),
+    ).toThrow(/never closes/);
+    // A balanced comment beside visible text is still admitted.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: 'the <!-- note --> real parser' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2', by: 'the <!-- note --> real parser' }]);
+    // `by` is prose: a leading severity marker is machine grammar the reply
+    // would post verbatim under attribution on — stripped, like every
+    // posted body strips it; a marker-only clause still refuses.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '**[Critical]** the real parser' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2', by: 'the real parser' }]);
+  });
+
+  it('renders the clause-less body variant beside the body whenever the opener carries the inline-Suggestions clause (#9940 review, audit 3)', () => {
+    const withSuggestion = composeReview(base({ suggestionsInline: 1 }));
+    expect(withSuggestion.body).toContain(INLINE_SUGGESTIONS_CLAUSE.en);
+    expect(withSuggestion.bodyWithoutInlineClause).toBeDefined();
+    expect(withSuggestion.bodyWithoutInlineClause).not.toContain(
+      INLINE_SUGGESTIONS_CLAUSE.en,
+    );
+    expect(withSuggestion.bodyWithoutInlineClause).not.toContain(
+      INLINE_SUGGESTIONS_CLAUSE.zh,
+    );
+    // The variant differs from the body by the clause alone.
+    expect(
+      withSuggestion.body
+        .replace(` ${INLINE_SUGGESTIONS_CLAUSE.en}`, '')
+        .replace(` ${INLINE_SUGGESTIONS_CLAUSE.zh}`, '')
+        .replace(`${INLINE_SUGGESTIONS_CLAUSE.en} `, '')
+        .replace(`${INLINE_SUGGESTIONS_CLAUSE.zh} `, ''),
+    ).toBe(withSuggestion.bodyWithoutInlineClause);
+    expect(composeReview(base({})).bodyWithoutInlineClause).toBeUndefined();
+  });
+
+  it('the clause-less variant is the body minus the clause at EVERY budget rung — one render decides both (#9940 review, audit 4)', () => {
+    let sawFold = false;
+    for (const size of [1000, 32384, 32390, 32400, 63706, 64740, 65000]) {
+      // `base()` rewrites the plan file; the Han plan must be written AFTER.
+      const input = base({
+        suggestionsInline: 1,
+        criticalsInline: 1,
+        bodyCriticals: ['C'.repeat(size)],
+        presubmit: { downgradeRequestChanges: true, downgradeReasons: ['x'] },
+      });
+      input.planPath = coveredPlan(undefined, { han: true });
+      const r = composeReview(input);
+      sawFold ||= r.body.includes('<details>');
+      const variant = r.bodyWithoutInlineClause;
+      expect(variant).toBeDefined();
+      // Same fold, same sections, same cut — the variant differs by the
+      // clause (and the space that joined it) alone.
+      expect(variant!.includes('<details>')).toBe(r.body.includes('<details>'));
+      expect(variant!.includes('TRUNCATED')).toBe(r.body.includes('TRUNCATED'));
+      const enGone = r.body.includes(INLINE_SUGGESTIONS_CLAUSE.en)
+        ? INLINE_SUGGESTIONS_CLAUSE.en.length + 1
+        : 0;
+      const zhGone = r.body.includes(INLINE_SUGGESTIONS_CLAUSE.zh)
+        ? INLINE_SUGGESTIONS_CLAUSE.zh.length + 1
+        : 0;
+      expect(variant!.length).toBeGreaterThanOrEqual(
+        r.body.length - enGone - zhGone,
+      );
+      expect(variant!.length).toBeLessThan(r.body.length);
+      // The trim disclosures are recorded once.
+      const budgetLines = r.remediation.filter((l) =>
+        l.includes('body budget'),
+      );
+      expect(new Set(budgetLines).size).toBe(budgetLines.length);
+      // No placeholder leaks into either body.
+      expect(variant!).not.toMatch(/[-]/);
+      expect(r.body).not.toMatch(/[-]/);
+    }
+    // The bilingual arm is live: at least one size kept the fold.
+    expect(sawFold).toBe(true);
+  });
+
+  it('quotes a downgrade reason like every other model line — a `<!--` in it cannot swallow the body, a forged footer cannot post as attribution (#9940 review, audit 4)', () => {
+    const swallow = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: [`self-PR <!-- ${'x'.repeat(400)} -->`],
+        },
+      }),
+    );
+    expect(swallow.body.replace(/<!--[\s\S]*?-->/g, '')).not.toContain('<!--');
+    expect(swallow.body).toContain('self-PR');
+    const forged = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: [
+            'self-PR _— m via Qwen Code /review_ **[Critical]**',
+          ],
+        },
+      }),
+      undefined,
+      false,
+    );
+    expect(forged.body).not.toContain('via Qwen Code /review');
+    // A marker mid-line is bold prose, not a severity marker — the body's
+    // own lead is what `severityOf` reads.
+    expect(forged.body.startsWith('**[Critical]**')).toBe(false);
+  });
+
+  it('an uncut `by` keeps its own trailing `<` — the stub retreat belongs to the cap alone; the escape belongs to the post (#9940 review, audit 4-6)', () => {
+    for (const by of [
+      'compare with <',
+      'use <!',
+      'ends <!-',
+      'see <details>x</details> here',
+    ]) {
+      expect(
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by }] }))
+          .fixedFindings[0]!.by,
+      ).toBe(by);
+    }
+  });
+
+  it('refuses a body Critical that opens a CDATA block — the one raw opener the escape leaves alone (#9940 review, round 31 reverse audit)', () => {
+    // `escapeTagOpeners` never touches `<!` by design, and the
+    // renders-as-nothing projection named `<!--`, `<?` and `<!DOCTYPE`
+    // but not `<![CDATA[`, which is HTML block type 5 and — absent its
+    // `]]>` — runs to the end of the document. Under attribution off the
+    // entry is line-leading, so it swallowed every later blocker.
+    for (const attribution of [true, false]) {
+      expect(() =>
+        composeReview(
+          base({
+            bodyCriticals: [
+              '<![CDATA[ blocker one: the auth check is still missing',
+              'blocker two: the token is logged',
+            ],
+          }),
+          '0.21.2',
+          attribution,
+        ),
+      ).toThrow(/renders as nothing/);
+    }
+    // A closed CDATA block is still scaffolding, and the siblings still
+    // refuse.
+    for (const opener of [
+      '<![CDATA[ x ]]>',
+      '<!DOCTYPE html>',
+      '<?php echo 1 ?>',
+      '<!-- x -->',
+    ]) {
+      expect(() => composeReview(base({ bodyCriticals: [opener] }))).toThrow(
+        /renders as nothing/,
+      );
+    }
+  });
+
+  it("a construct's own backticks are not span delimiters — leftmost-first, the way CommonMark resolves them (#9940 review, round 31 reverse audit)", () => {
+    // Code spans, autolinks and raw HTML have the SAME precedence and are
+    // resolved leftmost-first, so a construct that starts earlier consumes
+    // the backtick inside it. Scanning for spans first and for `<` second
+    // read that backtick as a delimiter, and the phantom span sheltered a
+    // live RAWTEXT opener over the rest of the body.
+    for (const [text, escaped] of [
+      ['<ht:`> <textarea> `', '<ht:`> &lt;textarea> `'],
+      ['<a`b@x.test> <textarea> `', '<a`b@x.test> &lt;textarea> `'],
+      // The `<!` family carries the same rule — MID-LINE, where the
+      // construct exists at all. At the start of a line's content the
+      // opener is escaped first (the HTML-block cell below), which
+      // dissolves the construct and hands its backticks back to the span
+      // rule; the renderer agrees, so both readings stay safe.
+      // `<!A` + a backtick is NOT a declaration — cmark-gfm forms one only
+      // for `<!` + UPPERCASE letters + whitespace — so the construct does
+      // not exist, the two backticks pair, and the tag between them is
+      // code. Escaping it wrote a literal `&lt;` into a code span, which a
+      // reader sees verbatim (#9940 review, round 10 reverse audit).
+      ['x <!A`> <textarea> `', 'x <!A`> <textarea> `'],
+      ['x <![CDATA[`]]> <textarea> `', 'x <![CDATA[`]]> &lt;textarea> `'],
+      ['x <!-- ` --> <textarea> `', 'x <!-- ` --> &lt;textarea> `'],
+      [
+        'the retry helper at <http://x.test/`> and <textarea> ` never clears it',
+        'the retry helper at <http://x.test/`> and &lt;textarea> ` never clears it',
+      ],
+      // …and the other direction: a span that starts FIRST consumes the
+      // autolink inside it, and the tag after the span is still escaped.
+      ['`<http://x/` and <b>', '`<http://x/` and &lt;b>'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // End to end: the second blocker and the footer survive.
+    const r = composeReview(
+      base({
+        bodyCriticals: [
+          'the retry helper at <http://x.test/`> and <textarea> ` never clears it',
+          'the auth check is still missing',
+        ],
+      }),
+    );
+    expect(r.body).toContain('&lt;textarea');
+    expect(r.body).toContain('the auth check is still missing');
+    expect(r.body).toContain('via Qwen Code /review');
+  });
+
+  it('never reads `<?` as an autolink — `?` is a legal e-mail local part, the block rule is not (#9940 review, round 31 reverse audit)', () => {
+    expect(escapeTagOpeners('<?x@y.test> the auth check is missing')).toBe(
+      '&lt;?x@y.test> the auth check is missing',
+    );
+    // A real e-mail autolink is still one.
+    expect(escapeTagOpeners('mail <dev@example.com> now')).toBe(
+      'mail <dev@example.com> now',
+    );
+  });
+
+  it('folds a disclosure part before escaping it — a line ending of ANY kind, or the per-line escape invents a span (#9940 review, round 31 reverse audit)', () => {
+    // `collapseEntry` used to fold on LF only, so a lone interior CR
+    // reached the escape as two lines: a backtick on each paired into a
+    // span the renderer never forms, and the `<details>` between them went
+    // out live over the rest of the body.
+    for (const brk of ['\r', '\n', '\r\n']) {
+      for (const field of ['unreviewedDimensions', 'uncoverableChunks']) {
+        const r = composeReview(
+          {
+            planPath: plan(),
+            modelId: 'm',
+            bodyCriticals: ['a real blocker'],
+            [field]: [`a \` b${brk}c \` <details> \` d`],
+          } as unknown as ComposeReviewInput,
+          '0.21.2',
+          true,
+        );
+        expect(r.body).toContain('&lt;details');
+        expect(r.body).not.toContain('<details');
+        expect(r.body).toContain('a real blocker');
+        expect(r.body).toContain('via Qwen Code /review');
+      }
+    }
+    // The Chinese half interpolates the same model text and is escaped and
+    // folded on the same terms — the fold's own `<details>` is the only
+    // raw one the bilingual body may carry.
+    for (const brk of ['\r', '\n']) {
+      const bi = composeReview(
+        {
+          planPath: plan({ han: true }),
+          modelId: 'm',
+          bodyCriticals: ['a real blocker'],
+          unreviewedDimensions: [`a \` b${brk}c \` <textarea> \` d`],
+        } as unknown as ComposeReviewInput,
+        '0.21.2',
+        true,
+      );
+      expect(bi.body).toContain('<details>\n<summary>中文说明</summary>');
+      expect(bi.body).toContain('&lt;textarea');
+      expect(bi.body).not.toContain('<textarea');
+      expect((bi.body.match(/<details>/g) ?? []).length).toBe(1);
+    }
+  });
+
+  it('escapeTagOpeners — tag openers go inert; code spans, autolinks, comparisons and comment grammar stay (#9940 review, audit 5 and 6)', () => {
+    for (const [text, escaped] of [
+      ['see <details>x</details> here', 'see &lt;details>x&lt;/details> here'],
+      ['a < b and b > c', 'a < b and b > c'],
+      ['use <! and <!-', 'use <! and <!-'],
+      [
+        'typed the map as `Map<string, number>`',
+        'typed the map as `Map<string, number>`',
+      ],
+      ['check ``a<b` `` first', 'check ``a<b` `` first'],
+      [
+        'see <https://ci.example/run/1> and <mailto:a@b.co>',
+        'see <https://ci.example/run/1> and <mailto:a@b.co>',
+      ],
+      ['mail <dev@example.com>', 'mail <dev@example.com>'],
+      ['<?php echo 1 ?> and </div>', '&lt;?php echo 1 ?> and &lt;/div>'],
+      ['`unclosed <b>', '`unclosed &lt;b>'],
+      // A 4-run opener with no 4-run closer is literal — the tag between
+      // it and a 3-run pair is raw HTML and goes inert (CommonMark 6.1).
+      [
+        'repro: ````md <details> ``` more',
+        'repro: ````md &lt;details> ``` more',
+      ],
+      ['````md <b>x</b>```` done <i>', '````md <b>x</b>```` done &lt;i>'],
+      ['a ``x` <b>y</b> `` z <b>', 'a ``x` <b>y</b> `` z &lt;b>'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // Linear on a hundred thousand characters of runs and openers.
+    for (const text of [
+      '`x`<a'.repeat(20000),
+      '` '.repeat(50000),
+      '`<a`x` '.repeat(14000),
+      '``'.concat('`x`'.repeat(30000)),
+      // 800k unpaired runs: ~0.2 s scanning the `<` positions once,
+      // ~8 s re-scanning to the end of the line per run (#9940 review,
+      // round 31 reverse audit measured 1.9 s at half this length).
+      '` '.repeat(800000),
+      '<a '.concat('` '.repeat(800000)),
+      // The unterminated-opener shapes the `skipsFrom` memo exists for: a
+      // per-opener search ran to the end of the line each time, and the
+      // backtick corpus above never touches it (measured 4 minutes on the
+      // first of these without the memo, #9940 review, round 31 reverse
+      // audit).
+      '<!--'.repeat(200000),
+      '<![CDATA['.repeat(100000),
+      '<!A'.repeat(200000),
+    ]) {
+      const t0 = performance.now();
+      escapeTagOpeners(text);
+      // The duration IS the property here, so it keeps asserting on the
+      // shared pool at a multiple that a quadratic regression still
+      // overruns (measured 0.18 s linear against 7.6 s quadratic).
+      expectWithinLatencyBudget(performance.now() - t0, 2000, {
+        poolMultiplier: 20,
+      });
+    }
+    // The transform is ONE LINE AT A TIME — every channel folds to a line
+    // before it gets here (`ingestEntryList` for the entry channels, the
+    // `\s+` normalisation for downgrade reasons, `collapseEntry` for the
+    // `Not reviewed:` disclosures, compose's refusal of a line break in
+    // `by`), so there is no block structure to model and none is
+    // modelled. Per-line is NOT a safe fallback for a multi-line string —
+    // it PAIRS backticks the renderer keeps apart and so escapes LESS (the
+    // fold cell above is exactly that shape letting a `<details>` out).
+    // The rows below are the shapes where the second line's runs do not
+    // pair, which is why escaping still happens in them (#9940 review,
+    // round 31 reverse audit).
+    for (const [text, escaped] of [
+      ['`<details>\n\nfoo` bar', '`&lt;details>\n\nfoo` bar'],
+      ['`<details>\nfoo` bar', '`&lt;details>\nfoo` bar'],
+      ['`<details>\r\rfoo` bar', '`&lt;details>\r\rfoo` bar'],
+      ['- a ` b\n- c <textarea> ` d', '- a ` b\n- c &lt;textarea> ` d'],
+      ['# h ` x\np <details> ` q', '# h ` x\np &lt;details> ` q'],
+      [
+        'The `foo callback returns early.\n<details> and `bar` too\n\nrest',
+        'The `foo callback returns early.\n&lt;details> and `bar` too\n\nrest',
+      ],
+      ['`\n<details>`', '`\n&lt;details>`'],
+      ['<?x ?>\n\t<details> tail', '&lt;?x ?>\n\t&lt;details> tail'],
+      ['x\n\n    <indented>\n\ny <z>', 'x\n\n    &lt;indented>\n\ny &lt;z>'],
+      // The line terminators themselves are preserved exactly.
+      ['a <b>\r\nc <d>\re <f>\ng', 'a &lt;b>\r\nc &lt;d>\re &lt;f>\ng'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // Backslash escapes run BEFORE the code-span rule and take exactly one
+    // backtick: the run OPENS as the `n - 1` left over (nothing at n = 1)
+    // and CLOSES at its full `n`, because escapes do not work inside a
+    // span. Skipping such a run outright let an opener reach past it;
+    // treating it as ordinary made a span CommonMark ends earlier — both
+    // sheltered a live element (#9940 review, round 31 reverse audits).
+    for (const [text, escaped] of [
+      ['`foo\\`bar<details>`', '`foo\\`bar&lt;details>`'],
+      [
+        'The literal is `a\\`b<details>` — note the backslash.',
+        'The literal is `a\\`b&lt;details>` — note the backslash.',
+      ],
+      ['\\``x`y``<details>`', '\\``x`y``&lt;details>`'],
+      ['a \\\\`<b>` c', 'a \\\\`<b>` c'],
+      [
+        'write \\` then <textarea> then ` here',
+        'write \\` then &lt;textarea> then ` here',
+      ],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // A `<!` at the START of a line's CONTENT opens a CommonMark HTML
+    // BLOCK — type 2 (`<!--`), type 4 (`<!` + a letter), type 5
+    // (`<![CDATA[`) — and a block is passed through RAW: the inline phase
+    // never runs inside it, so the code span and the backslash escape
+    // this pass reads to decide an opener is inert are not there. A body
+    // Critical posted under `review.attribution: false` IS a top-level
+    // line, and `formatCannotTell`/the duplicate list put their text at a
+    // list item's content start, so all three channels could open one
+    // (#9940 review, round 31 reverse audit). Every other block opener is
+    // a `<` whose next character this pass already escapes.
+    for (const [text, escaped] of [
+      ['<!D> y `<details>` z', '&lt;!D> y `<details>` z'],
+      ['<!D> y \\<details> z', '&lt;!D> y \\<details> z'],
+      ['<!DOCTYPE html> `<details>` x', '&lt;!DOCTYPE html> `<details>` x'],
+      ['<![CDATA[]]>`<details>`', '&lt;![CDATA[]]>`<details>`'],
+      ['<!A`> <textarea> `', '&lt;!A`> <textarea> `'],
+      ['<![CDATA[`]]> <textarea> `', '&lt;![CDATA[`]]> <textarea> `'],
+      ['<!-- ` --> <textarea> `', '&lt;!-- ` --> <textarea> `'],
+      // The rest of the line is RESCANNED — the arm escapes one `<` and
+      // hands the remainder back to the inline pass. Returning the
+      // remainder unscanned left every later opener live, and every other
+      // row here has an already-inert tail, so this is the row that says
+      // the recursion happens (#9940 review, round 31 reverse audit).
+      ['<!D> y <details> z', '&lt;!D> y &lt;details> z'],
+      [
+        '<!DOCTYPE html> and <textarea> then prose',
+        '&lt;!DOCTYPE html> and &lt;textarea> then prose',
+      ],
+      // cmark strips a BOM at DOCUMENT position 0, which turns a `<!`
+      // behind it into a line-leading HTML block while a raw read sees it
+      // mid-line. Escaping it costs nothing anywhere else.
+      [
+        '\ufeff<!ENTITY <details> is open',
+        '\ufeff&lt;!ENTITY &lt;details> is open',
+      ],
+      // Container prefixes are part of the line, not of its content.
+      ['  - <!D> y `<details>` z', '  - &lt;!D> y `<details>` z'],
+      ['> <!D> `<details>` q', '> &lt;!D> `<details>` q'],
+      ['1. <!D> `<details>` q', '1. &lt;!D> `<details>` q'],
+      ['> - <!D> `<details>` q', '> - &lt;!D> `<details>` q'],
+      // …and a prefix drawn from anything else means the `<!` is mid-line
+      // and opens no block, so the construct stands and its own backticks
+      // are not delimiters.
+      ['x <!D> y `<details>` z', 'x <!D> y `<details>` z'],
+      [
+        '**[Critical]** <!D> y `<details>` z',
+        '**[Critical]** <!D> y `<details>` z',
+      ],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // A `<!` construct that never terminates ON THIS LINE is not a
+    // construct: CommonMark leaves the text as text, so what follows it is
+    // LIVE. Skipping to the end of the line on the strength of an opener
+    // alone let a `<details>` out of four channels at once — both Critical
+    // lists, the duplicate-drop list and a ruling note's `by` (#9940
+    // review, round 31 reverse audit).
+    for (const [text, escaped] of [
+      ['x <![CDATA[ y <details> z', 'x <![CDATA[ y &lt;details> z'],
+      ['x <!-- y <details> z', 'x <!-- y &lt;details> z'],
+      ['x <!A y <details z', 'x <!A y &lt;details z'],
+      // Terminated, so the construct really does consume the opener: a
+      // declaration ends at the FIRST `>`, which is `<details>`'s own.
+      ['x <!A y <details> z', 'x <!A y <details> z'],
+      ['x <![CDATA[ y ]]> <details> z', 'x <![CDATA[ y ]]> &lt;details> z'],
+      ['x <!--<details>--> <b>', 'x <!--<details>--> &lt;b>'],
+      // `<!-->` and `<!--->` close on their own dashes, so the search for
+      // the terminator starts at `i + 2` — from `i + 4` it ran past them.
+      ['x <!--> <details> y', 'x <!--> &lt;details> y'],
+      ['x <!---> <details> y', 'x <!---> &lt;details> y'],
+      // The abbreviated comment ends at index 4; a later `-->` on the same
+      // line is a different token, and reaching it swallowed the opener
+      // between the two.
+      ['x <!--> <details> --> y', 'x <!--> &lt;details> --> y'],
+      ['x <!---> <details> --> y', 'x <!---> &lt;details> --> y'],
+      // A backslash-escaped `<` opens nothing — no comment, no
+      // declaration, no autolink — and is inert already. Reading it as a
+      // construct start skipped the rest of the line (same round).
+      ['x \\<!a<details> y', 'x \\<!a&lt;details> y'],
+      // Even backslashes, so the `<` is live — but `<!a` is lowercase and
+      // carries no whitespace, so cmark-gfm forms no declaration and the
+      // `<details>` behind it is a REAL element. This row asserted the
+      // opposite, which is to say it pinned a live `<details>` (#9940
+      // review, round 10 reverse audit).
+      ['x \\\\<!a<details> y', 'x \\\\<!a&lt;details> y'],
+      ['\\<https://x.test/> <b>', '\\<https://x.test/> &lt;b>'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // The rows round 31 named as its acceptance criterion: a fence that
+    // interrupts a paragraph, and a fenced block between the two halves of
+    // a would-be span. Per line neither pairs, so the opener after them is
+    // escaped.
+    for (const [text, escaped] of [
+      ['a ` x\n~~~\n`\n~~~\n<b> and ` y', 'a ` x\n~~~\n`\n~~~\n&lt;b> and ` y'],
+      [
+        'x `a\n```\ncode\n```\n\ny <details> `b',
+        'x `a\n```\ncode\n```\n\ny &lt;details> `b',
+      ],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // The `<!` family and the GFM autolink literal, decided against
+    // cmark-gfm (GitHub's own renderer) and an HTML5 parser rather than
+    // against the CommonMark prose: what the renderer FORMS and what the
+    // HTML parser HIDES are two different spans, and the escape owes the
+    // INTERSECTION. Eight of these rows post a live `<details>` under the
+    // spec-prose reading — the one container GitHub's tagfilter does not
+    // neutralise, so it folds every later blocker and the footer into
+    // itself (#9940 review, round 10 reverse audit).
+    for (const [text, escaped] of [
+      // A CDATA section is passed through raw, but the HTML parser closes
+      // the bogus comment at the FIRST `>`; everything after it is live.
+      [
+        'the fixture <![CDATA[ if (a > b) <details> ]]> is wrong',
+        'the fixture <![CDATA[ if (a > b) &lt;details> ]]> is wrong',
+      ],
+      // A comment also closes at `--!>`, earlier than its `-->`.
+      [
+        'it writes <!-- open --!> then <details> --> here',
+        'it writes <!-- open --!> then &lt;details> --> here',
+      ],
+      // …but `--!>` alone forms nothing: without a `-->` cmark reads the
+      // text as literal, so the rule is "require `-->`, then end at the
+      // earlier of the two", not "end at `--!>`".
+      [
+        'it writes <!-- open <details> --!> here',
+        'it writes <!-- open &lt;details> --!> here',
+      ],
+      // The comment text may not END with `-`, so `--->` is no terminator
+      // and the construct does not form.
+      [
+        'it writes <!--<details>---> here',
+        'it writes <!--&lt;details>---> here',
+      ],
+      // `<!-->` and `<!--->` close on their own dashes.
+      [
+        'a <!--> <details> b <!---> <div> c',
+        'a <!--> &lt;details> b <!---> &lt;div> c',
+      ],
+      // An inline declaration is `<!`, letters, WHITESPACE, `[^>]*`, `>`.
+      // Without the whitespace cmark forms nothing.
+      [
+        'the DTD line <!ENTITY<details> is open',
+        'the DTD line <!ENTITY&lt;details> is open',
+      ],
+      // …and the letters must be UPPERCASE.
+      [
+        'the DTD line <!entity <details> is open',
+        'the DTD line <!entity &lt;details> is open',
+      ],
+      // ONE line-wide flag: an unterminated `<!--` makes cmark read a
+      // LATER `<![CDATA[` — and a later `<!X ` — as literal text too, so a
+      // memo per construct let the second one be skipped and the tag
+      // inside it went out live. The `>` has to sit BEHIND the tag for the
+      // row to tell the two apart: in front of it, the bogus comment ends
+      // before the tag either way.
+      [
+        'x <!-- open <![CDATA[ a <details> b > c ]]> y',
+        'x <!-- open <![CDATA[ a &lt;details> b > c ]]> y',
+      ],
+      ['z <!---<!A <div> q', 'z <!---<!A &lt;div> q'],
+      // …and with no failed construct in front of it the same CDATA DOES
+      // form, and its bogus comment really does hide the tag. (Guard.)
+      [
+        'x <![CDATA[ a <details> b > c ]]> y',
+        'x <![CDATA[ a <details> b > c ]]> y',
+      ],
+      [
+        'x <!-- open <![CDATA[ a > b <details> ]]> y',
+        'x <!-- open <![CDATA[ a > b &lt;details> ]]> y',
+      ],
+      // A GFM autolink literal is an INLINE construct resolved
+      // leftmost-first, and it runs PAST a backtick: the code span this
+      // pass believed in never forms.
+      [
+        'the spec at https://x.test/api`<details>` is wrong',
+        'the spec at https://x.test/api`&lt;details>` is wrong',
+      ],
+      // The same run swallows a backslash escape.
+      [
+        'the spec at https://x.test/api\\<details> is wrong',
+        'the spec at https://x.test/api\\&lt;details> is wrong',
+      ],
+      // The run is consumed to WHITESPACE, not to the `<` that ends it in
+      // the renderer: escaping that `<` makes it `&lt;`, which is not a
+      // `<` any more, so on the POSTED text the URL keeps going.
+      [
+        'see www.z.test/a<details>b and stop',
+        'see www.z.test/a&lt;details>b and stop',
+      ],
+      // An ASCII letter in front means there is no literal at all, so the
+      // backticks DO pair and the tag is code.
+      [
+        'see xhttp://q.test/`<details>` and stop',
+        'see xhttp://q.test/`<details>` and stop',
+      ],
+      // A code span that OPENS BEFORE the URL still wins the race — which
+      // is why the link start is a scan event and not a mask applied ahead
+      // of the pass.
+      [
+        'see `http://x.test/<details>` and stop',
+        'see `http://x.test/<details>` and stop',
+      ],
+      // A CDATA section with no `]]>` is not a construct at all.
+      ['x <![CDATA[ y <details> z', 'x <![CDATA[ y &lt;details> z'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // cmark-gfm's own grammars, not approximations of them: what the
+    // renderer FORMS, what the HTML parser HIDES and what the renderer's own
+    // code-span scanner PAIRS are three different questions, and guessing any
+    // of them wrong in EITHER direction posts a live element — believing in a
+    // construct the renderer does not form steals a backtick from the
+    // delimiter pool and shifts every later pairing (#9940 review, round 11
+    // reverse audit).
+    for (const [text, escaped] of [
+      // cmark's CDATA scanner is
+      //   "<![CDATA[" ( [^\]] | "]" [^\]] | "]]" [^>] )* "]]>"
+      // and NOT "is there a `]]>` later". An array index inside the section
+      // puts a third `]` in front of the terminator, so it does not form.
+      [
+        'the fixture <![CDATA[<details>arr[0]]]> is mis-parsed',
+        'the fixture <![CDATA[&lt;details>arr[0]]]> is mis-parsed',
+      ],
+      // …and five brackets DO form one again (k ≡ 2 mod 3). (Guard: reddens
+      // if the grammar is approximated by "the character before `]]>` is not
+      // a `]`".)
+      ['x <![CDATA[<details>]]]]]> y', 'x <![CDATA[<details>]]]]]> y'],
+      // `ftp://` is a GFM autolink literal too, and all three schemes are
+      // matched case-INSENSITIVELY.
+      [
+        'the spec at ftp://x.test/api`<details>` is wrong',
+        'the spec at ftp://x.test/api`&lt;details>` is wrong',
+      ],
+      [
+        'the spec at HTTP://x.test/api\\<details> is wrong',
+        'the spec at HTTP://x.test/api\\&lt;details> is wrong',
+      ],
+      // `www.` is NOT. (Guard: reddens if the schemes are written as one
+      // `/…/i` regex, which would also match `WWW.`.)
+      [
+        'see WWW.z.test/`<details>` and stop',
+        'see WWW.z.test/`<details>` and stop',
+      ],
+      // The block phase strips block-quote markers before the inline phase
+      // runs, so the boundary a `www.` literal is tested against is the one
+      // before the line's CONTENT: `>www.z.test/p` links and eats the
+      // backslash behind it, `-www.z.test/p` does not link at all.
+      ['>www.z.test/p\\<details> here', '>www.z.test/p\\&lt;details> here'],
+      ['>>www.z.test/p\\<details>', '>>www.z.test/p\\&lt;details>'],
+      ['-www.z.test/p\\<details>', '-www.z.test/p\\<details>'],
+      // `http://` with no domain is no link, so the `<!--` inside what this
+      // pass used to treat as a URL run is a real construct again, it fails,
+      // and it poisons the `<!X ` that follows.
+      [
+        'x http://<!--q <!D d<details> is the bug',
+        'x http://<!--q <!D d&lt;details> is the bug',
+      ],
+      // The part of a CDATA section's RAW span the HTML parser has stopped
+      // hiding (first `>` … `]]>`) is RAW TEXT: no backtick in it is a
+      // delimiter, so the code span this pass believed in never formed.
+      [
+        'the fixture <![CDATA[cmd > out `x]]> and the <details> wrapper` is wrong',
+        'the fixture <![CDATA[cmd > out `x]]> and the &lt;details> wrapper` is wrong',
+      ],
+      // The same tail exists on a comment closed at `--!>`.
+      [
+        'it writes <!-- a --!>` --> <details>` there',
+        'it writes <!-- a --!>` --> &lt;details>` there',
+      ],
+      // …and the HTML tokenizer's comment-end is not cmark's: it closes at
+      // the first `-->` SUBSTRING, with no mod-3 arithmetic. (Guard.)
+      ['c<!-----><details>--> here', 'c<!----->&lt;details>--> here'],
+      // Only a failed COMMENT poisons the `<!` family in cmark. Poisoning on
+      // a failed declaration too REFUSED a comment cmark still formed, and
+      // the refused construct's backticks rejoined the delimiter pool.
+      [
+        'the DTD <!A<!--`--> and <details>` is open',
+        'the DTD <!A<!--`--> and &lt;details>` is open',
+      ],
+      [
+        'the DTD <!--`--> and <details>` is open',
+        'the DTD <!--`--> and &lt;details>` is open',
+      ],
+      // cmark validates the domain: the first character after `://` must be
+      // alphanumeric, and a `_` in either of the last two labels refuses it.
+      [
+        'see http://` `<details>` and stop',
+        'see http://` `&lt;details>` and stop',
+      ],
+      [
+        'the host http://a_b.c` `<details>` is wrong',
+        'the host http://a_b.c` `&lt;details>` is wrong',
+      ],
+      // Three labels put the `_` out of reach and the link forms. (Guard:
+      // reddens if the rule is written as "no `_` at all".)
+      [
+        'the host http://a_b.c.d`<details>` is wrong',
+        'the host http://a_b.c.d`&lt;details>` is wrong',
+      ],
+      // An unmatched `[` suppresses the literal — a STACK, not the preceding
+      // character — and a closed `[]` clears it.
+      [
+        'see [http://y.test/` `<details>` and stop',
+        'see [http://y.test/` `&lt;details>` and stop',
+      ],
+      [
+        'see [x] http://y.test/`<details>` and stop',
+        'see [x] http://y.test/`&lt;details>` and stop',
+      ],
+      // cmark's code-span scanner carries a memo a SUCCESSFUL scan
+      // overwrites, so the spans it forms are a strict SUBSET of the spec's.
+      // The leading unmatched run arms it; one backtick instead of two and it
+      // never arms.
+      ['a ``b` `c`<details>` here', 'a ``b` `c`&lt;details>` here'],
+      ['a `b` `c`<details>` here', 'a `b` `c`&lt;details>` here'],
+      // MAXBACKTICKS is 80: cmark refuses to open a span on a longer run,
+      // so the tag between two runs of 81 is NOT in a span and is live,
+      // while at 80 it is code.
+      [
+        `a ${'`'.repeat(81)}<details>${'`'.repeat(81)} here`,
+        `a ${'`'.repeat(81)}&lt;details>${'`'.repeat(81)} here`,
+      ],
+      [
+        `a ${'`'.repeat(80)}<details>${'`'.repeat(80)} here`,
+        `a ${'`'.repeat(80)}<details>${'`'.repeat(80)} here`,
+      ],
+      // Autolinks are tried BEFORE the `<!` family, as cmark does: `!` and
+      // `-` are legal e-mail local-part characters, so `<!--@t>` is a mailto
+      // autolink and the comment never forms.
+      ['`<!--@t><div>--> here', '`<!--@t>&lt;div>--> here'],
+      // An inline link's DESTINATION is raw characters, so a backtick in it
+      // is not a delimiter either.
+      ['see [x](a`b) <details>` here', 'see [x](a`b) &lt;details>` here'],
+      // A reference link's LABEL is not: MEASURED against cmark-gfm, a
+      // backtick inside `[a`b][c]`, `[x][a`b]`, `[a`b]` or a link
+      // reference definition's own label is an ordinary code-span
+      // delimiter, and the tag it pairs over is code. Ordinary text is
+      // what this pass already reads them as, so nothing special is
+      // needed — the rows are here because two audits reasoned the other
+      // way and neither could build a counterexample (#9940 review,
+      // rounds 11 and 12).
+      ['see [a`b][c] and <details>` here', 'see [a`b][c] and <details>` here'],
+      ['see [x][a`b] <details>` here', 'see [x][a`b] <details>` here'],
+      ['see [a`b] <details>` here', 'see [a`b] <details>` here'],
+      ['[a`b]: /u <details>` here', '[a`b]: /u <details>` here'],
+      // …and the `_` rule reaches the LAST label too, not only the one
+      // before it: `http://a.b_c` does not link, so the backticks pair and
+      // the tag between them is live.
+      [
+        'the host http://a.b_c` `<details>` is wrong',
+        'the host http://a.b_c` `&lt;details>` is wrong',
+      ],
+      // Only a failed COMMENT poisons the family — a failed CDATA must not,
+      // or the comment behind it is refused and its backticks rejoin the
+      // delimiter pool.
+      [
+        'z <![CDATA[x <!--`--> and <details>` is open',
+        'z <![CDATA[x <!--`--> and &lt;details>` is open',
+      ],
+      // A `<!--` in a construct's RAW TAIL is an HTML comment that runs to
+      // the END OF THE DOCUMENT: it leaks no element at all, so an
+      // element scan misses it, and it takes every later blocker and the
+      // footer with it.
+      [
+        'x <![CDATA[a><!--]]> and the auth check',
+        'x <![CDATA[a>&lt;!--]]> and the auth check',
+      ],
+      // The URL run ends where cmark ends it — space, tab, LF, CR or `<` —
+      // and NOT at `\s`: thirteen further characters (U+00A0, U+3000,
+      // U+2028, U+FEFF, U+000B…) cut the run short while the renderer's ran
+      // on, and the text past the cut was read as ordinary inline while
+      // cmark was still carrying it as a raw URL.
+      [
+        'pre www.z.test/p\u3000\\<select> post',
+        'pre www.z.test/p\u3000\\&lt;select> post',
+      ],
+      [
+        'pre www.z.test/p\v`<select>` post',
+        'pre www.z.test/p\v`&lt;select>` post',
+      ],
+      [
+        'see [](a\u3000``)<summary>`` here',
+        'see [](a\u3000``)&lt;summary>`` here',
+      ],
+      // …and a space really does end it, so the backslash past it is a
+      // real escape and needs none of ours. (Guard.)
+      [
+        'see www.z.test/p q\\<details> and stop',
+        'see www.z.test/p q\\<details> and stop',
+      ],
+      // The `www.` alternative of the link-start regex, in the second-order
+      // shape that pins it: the literal eats the delimiter in front of the
+      // tag, so without it the tag goes out live.
+      [
+        'see www.z.test/`<details>` and stop',
+        'see www.z.test/`&lt;details>` and stop',
+      ],
+      [
+        'see www.z.test/\\<details> and stop',
+        'see www.z.test/\\&lt;details> and stop',
+      ],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+    // A link reference definition's angle-bracket destination survives —
+    // the autolink skip is context-free.
+    expect(escapeTagOpeners('[a]: <http://x.test/p>')).toBe(
+      '[a]: <http://x.test/p>',
+    );
+    // One row of a table is not a table: with no delimiter row the pipes
+    // are text, the backticks pair, and the tag between them is code.
+    expect(escapeTagOpeners('| ` c1 | <script>bad()</script> ` |')).toBe(
+      '| ` c1 | <script>bad()</script> ` |',
+    );
+  });
+
+  it('every model-written channel reaches the escape as ONE line — the invariant the per-line escape rests on (#9940 review, round 12 reverse audit)', () => {
+    // `escapeTagOpeners` models CommonMark INLINE structure only. That is
+    // correct exactly while every channel folds its text to ONE LINE before
+    // posting it — and the fold is not one primitive. `collapseEntry` and
+    // `collapseToLine` carry the entry, disclosure and duplicate-drop
+    // legs; the downgrade reasons have their own `\s+` pass; the deferral
+    // leg is held TWICE, by a `collapse` pass and by `mdField`'s
+    // line-ending strip (lib/md-field.ts), and either alone holds it —
+    // MEASURED: break only one and the row is still folded; the bare CR
+    // reaches the POSTED LINE only with both broken. Two more legs are
+    // held twice: cannot-tell by `collapseEntry` AND `collapseToLine`, and
+    // the RELOCATION exit THREE times — `collapseToLine` at
+    // `toDeferredEntries` and again inside `boundDeferredLine`, then
+    // `mdField`. Breaking any two of the three still leaves it folded.
+    //
+    // So THREE rows cannot redden on a SINGLE-site regression — a property
+    // of the code, not a gap here — and the other five do redden on theirs
+    // (all eight measured). Do not read a double-held row as a sentinel
+    // for its own folds; it is here for the channel, not for them.
+    //
+    // The two rows asserted inert as a CODE SPAN get there differently.
+    // The deferral LIST line is `- ${mdField(entry)}` and never reaches
+    // `escapeTagOpeners` at all; the relocation line does reach it, and
+    // comes back unchanged because the escape reads `mdField`'s backtick
+    // span correctly. The fold is what all eight share, and it is what
+    // this case is about.
+    //
+    // Three producers push into `bodyCriticals` AFTER `ingestEntryList`
+    // has run, and that is how a channel gets missed: `scriptLintGate`'s
+    // push, which for a while did not fold; a Critical deferral's
+    // RELOCATION exit, which a `Suggestion` row never reaches (armed
+    // below); and the non-convergence Critical, which is this module's own
+    // fixed prose and carries no line break to fold. The gate's push is
+    // the one this case does not arm — it needs a report fixture beside
+    // the plan — and it is pinned by `folds its own entry`. A producer
+    // outside these still owes a case.
+    const multiline = [
+      'the retry helper\n<div class="w"> and `x\nnever clears it',
+      'the retry helper\r\n<div class="w"> and `x\r\nnever clears it',
+      'the retry helper\r<div class="w"> and `x\rnever clears it',
+    ];
+    const carries = (body: string, where: string, escapes = true) => {
+      // Split on `\n` ONLY, so a surviving bare `\r` stays INSIDE the
+      // matched line where the next assertion can see it. Splitting on the
+      // folds' own set here would consume the very break under test, and
+      // counting lines proves nothing on its own: the filter keeps the
+      // entry's first physical line whatever happened to the rest.
+      const lines = body
+        .split('\n')
+        .filter(
+          (l) =>
+            l.includes('retry helper') && !l.includes('qwen-review-ledger'),
+        );
+      expect([where, lines.length]).toEqual([where, 1]);
+      // The head and the TAIL of the entry on the SAME line, and no break
+      // left inside it. That is the fold, stated as the reader sees it: an
+      // LF that survives puts the tail on another line, a bare CR that
+      // survives stays in this one — and the per-line escape then decides
+      // each half on its own and can post a tag the renderer holds live
+      // (compose-review.ts records that happening). `&amp;lt;` was asserted
+      // here before and could not fail: the escape only ever writes
+      // `&lt;`, so the only body that trips it is one a model wrote with
+      // those characters already in it.
+      expect([where, lines[0]!.includes('never clears it')]).toEqual([
+        where,
+        true,
+      ]);
+      expect([where, /[\r\n]/.test(lines[0]!)]).toEqual([where, false]);
+      // Inert by ESCAPE on the prose channels; the deferral line is a code
+      // span, where the renderer already holds the tag and an escape would
+      // show the reader a literal `&lt;`.
+      expect([
+        where,
+        escapes
+          ? lines[0]!.includes('&lt;div class="w">')
+          : /^[^`]*`[^`]*<div class="w">[^`]*`[^`]*$/.test(lines[0]!),
+      ]).toEqual([where, true]);
+    };
+    for (const text of multiline) {
+      carries(
+        composeReview(base({ bodyCriticals: [text, 'blocker two'] })).body,
+        'bodyCriticals',
+      );
+      carries(
+        composeReview(base({ cannotTellCriticals: [text] })).body,
+        'cannotTellCriticals',
+      );
+      carries(
+        composeReview(
+          base({
+            suggestionsInline: 1,
+            suggestionsDroppedAsDuplicates: [text],
+          }),
+        ).body,
+        'suggestionsDroppedAsDuplicates',
+      );
+      carries(
+        composeReview(base({ uncoverableChunks: [text] })).body,
+        'uncoverableChunks',
+      );
+      carries(
+        composeReview(base({ unreviewedDimensions: [text] })).body,
+        'unreviewedDimensions',
+      );
+      carries(
+        composeReview(
+          base({
+            criticalsInline: 1,
+            presubmit: {
+              downgradeRequestChanges: true,
+              downgradeReasons: [text],
+            },
+          }),
+        ).body,
+        'downgradeReasons',
+      );
+      carries(
+        composeReview(
+          base({
+            suggestionsInline: 1,
+            deferredSuggestions: [
+              {
+                file: 'a.ts',
+                line: 1,
+                source: 'review',
+                severity: 'Suggestion',
+                title: text,
+              },
+            ],
+          }),
+        ).body,
+        'deferredSuggestions',
+        false,
+      );
+      // The deferral channel has a SECOND exit: a Critical relocates into
+      // `bodyCriticals` — another producer that joins after
+      // `ingestEntryList` has run, and the one this case would otherwise
+      // miss, since a `Suggestion` never reaches it.
+      carries(
+        composeReview(
+          base({
+            suggestionsInline: 1,
+            deferredSuggestions: [
+              {
+                file: 'a.ts',
+                line: 1,
+                source: 'review',
+                severity: 'Critical',
+                title: text,
+              },
+            ],
+          }),
+        ).body,
+        'deferredSuggestions (relocated)',
+        false,
+      );
+      // A ruling note's `by` does not fold — it REFUSES, because the note
+      // is one posted line and a folded `by` would misquote the author.
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by: text }] })),
+      ).toThrow(/must be ONE non-empty line/);
+    }
+    // A quoted FENCE is refused rather than folded on the two Critical
+    // channels: folding it would join the delimiters onto one line and
+    // silently change what the author quoted.
+    const fenced =
+      'the retry helper\n```\n<div class="w">\n```\nnever clears it';
+    for (const input of [
+      { bodyCriticals: [fenced, 'blocker two'] },
+      { cannotTellCriticals: [fenced] },
+    ]) {
+      expect(() => composeReview(base(input))).toThrow(
+        /quotes a code fence its one-line render cannot carry/,
+      );
+    }
+  });
+
+  it('a raw `<![CDATA[ … > … <details> … ]]>` does not fold the rest of the body away (#9940 review, round 10 reverse audit)', () => {
+    // The unit rows pin the escape; this pins what the escape is FOR. The
+    // HTML parser closes the bogus comment at the first `>`, so under the
+    // spec-prose reading the `<details>` was a live element and the second
+    // blocker and the footer rendered INSIDE its fold.
+    for (const attribution of [true, false]) {
+      const r = composeReview(
+        base({
+          bodyCriticals: [
+            'the XML fixture <![CDATA[ if (a > b) <details> ]]> is mis-parsed',
+            'blocker two: the token is logged in plaintext',
+          ],
+        }),
+        '0.21.2',
+        attribution,
+      );
+      expect(r.body).toContain('&lt;details');
+      expect(r.body).not.toContain('<details> ]]>');
+      expect(r.body).toContain('blocker two: the token is logged in plaintext');
+    }
+  });
+
+  it('opensUnclosedComment — the linear form agrees with the closed-comment-removal reference on generated grammar (#9940 review, audit 4)', () => {
+    // Closed comments are MASKED, not deleted: deleting joined `<!` to a
+    // following `-->` into grammar no renderer sees.
+    const reference = (text: string): boolean =>
+      text
+        .replace(/<!--(?:>|->|[\s\S]*?-->)/g, (m) => ' '.repeat(m.length))
+        .includes('<!--');
+    // Reached through the gate: a refused `by` is one the reference refuses.
+    const linear = (text: string): boolean => {
+      try {
+        composeReview(
+          base({ fixedFindings: [{ id: 'R1-2', by: `a ${text} z` }] }),
+        );
+        return false;
+      } catch (e) {
+        return /never closes/.test(String(e));
+      }
+    };
+    let seed = 20260905;
+    const rand = (): number => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    const atoms = ['<!--', '-->', '<!', '--', '>', '-', 'a', ' '];
+    for (let i = 0; i < 300; i++) {
+      const len = 1 + Math.floor(rand() * 6);
+      const text = Array.from(
+        { length: len },
+        () => atoms[Math.floor(rand() * atoms.length)]!,
+      ).join('');
+      expect({ text, unclosed: linear(text) }).toEqual({
+        text,
+        unclosed: reference(`a ${text} z`),
+      });
+    }
+  });
+
+  it('bodyCriticalClaim and the ledger builder read the one-line entry channel through ONE head — indentation is not a block there (#9940 review, round 28)', () => {
+    for (const entry of [
+      '    R1-2: the guard is still missing',
+      '**[Critical]**:\n\n    R1-2: code',
+      '**[Critical]**: R1-2: the guard',
+    ]) {
+      expect(bodyCriticalClaim(entry).id).toBe('R1-2');
+      expect(
+        buildLedger(5, [], [entry], { ids: new Set(['R1-2']), complete: true })
+          .findings[0]!.id,
+      ).toBe('R1-2');
+    }
+    // The one-line entry posts trimmed: indented four columns it rendered
+    // as code inside its list item.
+    const r = composeReview(
+      base({ bodyCriticals: ['    R1-2: the guard is still missing'] }),
+    );
+    expect(r.body).toContain('R1-2: the guard is still missing');
+    expect(r.body).not.toContain('    R1-2: the guard');
+  });
+
+  it('caps the downgrade-reason LIST too, disclosing what it left out, and makes tag openers inert (#9940 review, audit 5)', () => {
+    const many = composeReview(
+      base({
+        criticalsInline: 1,
+        suggestionsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: Array.from(
+            { length: 300 },
+            (_, i) => `r${i} ${'w'.repeat(390)}`,
+          ),
+        },
+      }),
+    );
+    expect(many.bodyTrim.truncated).toBe(false);
+    expect(many.body).toContain(INLINE_SUGGESTIONS_CLAUSE.en);
+    expect(many.body).not.toContain('r299 ');
+    expect(
+      many.remediation.some((l) => /downgrade reasons: \d+ of 300/.test(l)),
+    ).toBe(true);
+    const html = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: [
+            `${'x'.repeat(360)}<details><summary>s</summary>hidden hidden hidden hidden</details> more`,
+          ],
+        },
+      }),
+    );
+    expect(html.body).not.toContain('<details><summary>');
+    expect(html.body).toContain('&lt;details>');
+  });
+
+  it('a downgrade reason is one line of prose — a fence or `<!DOCTYPE` in it cannot reach a line start (#9940 review, audit 6)', () => {
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: [
+            'x\n```\ncode',
+            'y\n<!DOCTYPE z',
+            'w\n\n# heading',
+          ],
+        },
+      }),
+    );
+    // `<!` is comment/declaration grammar the escape leaves alone; mid-line
+    // and unclosed it is literal text.
+    expect(r.body).toContain('x ``` code; y <!DOCTYPE z; w # heading');
+    expect(r.body).not.toMatch(/^```/m);
+    expect(r.body).not.toMatch(/^# heading/m);
+  });
+
+  it('reasons past the list budget are disclosed only where the sentence renders (#9940 review, audit 6)', () => {
+    const kept = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeApprove: true,
+          downgradeReasons: [
+            ...Array.from({ length: 5 }, () => 'r'.repeat(400)),
+            'f',
+          ],
+        },
+      }),
+    );
+    expect(kept.event).toBe('REQUEST_CHANGES');
+    expect(kept.remediation.some((l) => l.includes('downgrade reasons'))).toBe(
+      false,
+    );
+    // Downgraded, everything fitting: nothing to disclose either.
+    const fits = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['a', 'b'],
+        },
+      }),
+    );
+    expect(fits.downgraded).toBe(true);
+    expect(fits.remediation.some((l) => l.includes('downgrade reasons'))).toBe(
+      false,
+    );
+  });
+
+  it('`<!-->` and `<!--->` are empty comments, not unclosed openers (#9940 review, audit 5)', () => {
+    for (const by of ['fixed via <!--> retry', 'fixed via <!---> retry']) {
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by }] })),
+      ).not.toThrow();
+    }
+  });
+
+  it('caps a downgrade reason at DOWNGRADE_REASON_MAX_CHARS code points, disclosing the cut (#9940 review, audit 3)', () => {
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['r'.repeat(DOWNGRADE_REASON_MAX_CHARS + 500)],
+        },
+      }),
+    );
+    expect(r.body).toContain(`${'r'.repeat(DOWNGRADE_REASON_MAX_CHARS)}…`);
+    expect(r.body).not.toContain('r'.repeat(DOWNGRADE_REASON_MAX_CHARS + 1));
+  });
+
+  it('refuses a `by` whose attribution-off EXIT would post the marker grammar — the gate reads the exit projection too (#9940 review, audit 2)', () => {
+    // A forged footer span splitting `<!-` from `- qwen-review …` carries
+    // no marker as written; the exit's footer-span strip joins the two
+    // halves and the posted reply read as a finding carrying its id.
+    expect(() =>
+      composeReview(
+        base({
+          fixedFindings: [
+            {
+              id: 'R1-2',
+              by: 'x <!-_— model via Qwen Code /review (v1)_- qwen-review critical -->',
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/comment-marker grammar/);
+    // A non-canonical id spelling is refused with a message naming the
+    // canonical one.
+    expect(() =>
+      composeReview(base({ fixedFindings: [{ id: 'R02-3' }] })),
+    ).toThrow(/write R2-3/);
+    // A cap landing inside `<!--` leaves no `<!-` stub either.
+    const r = composeReview(
+      base({
+        fixedFindings: [{ id: 'R1-2', by: `${'x'.repeat(237)} <!-- c -->` }],
+      }),
+    );
+    expect(r.fixedFindings[0]!.by).toBe('x'.repeat(237));
+    // A cap cut landing right after `qwen-review` inside a comment the
+    // gate passed (`<!-- qwen-reviewer -->` carries no marker) would leave
+    // the marker's opening on the attribution-off exit — the capped
+    // clause degrades to a by-less ruling.
+    const tail = '<!-_— model via Qwen Code /review (v1)_- qwen-review';
+    const capped = composeReview(
+      base({
+        fixedFindings: [
+          {
+            id: 'R1-2',
+            by: `${'x'.repeat(FIXED_BY_MAX - [...tail].length - 1)} ${tail}er -->`,
+          },
+        ],
+      }),
+    );
+    expect(capped.fixedFindings).toEqual([{ id: 'R1-2' }]);
+  });
+
+  it('the unclosed-comment gate reads openers, not counts — `--> <!--` is refused; a cap leaves no `<` stub (#9940 review, audit 3)', () => {
+    for (const by of [
+      'the switch to the real parser --> <!-- see thread',
+      '<!-- a --> b --> <!-- c',
+    ]) {
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by }] })),
+      ).toThrow(/never closes/);
+    }
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: `${'a'.repeat(239)}<!-- b -->` }],
+        }),
+      ).fixedFindings[0]!.by,
+    ).toBe('a'.repeat(239));
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [
+            { id: 'R1-2', by: `x --> ${'a'.repeat(230)}<!-- b -->` },
+          ],
+        }),
+      ).fixedFindings[0]!.by,
+    ).toBe(`x --> ${'a'.repeat(230)}`);
+  });
+
+  it('a cap that lands inside a comment retreats to before it — no dangling `<!--` (#9940 review, audit)', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [
+          { id: 'R1-2', by: `the rewrite <!-- ${'c'.repeat(300)} --> landed` },
+        ],
+      }),
+    );
+    expect(r.fixedFindings).toEqual([{ id: 'R1-2', by: 'the rewrite' }]);
+  });
+
+  it('degrades a `by` whose visible tail sits past the cap to a by-less ruling (#9940 review, round 21)', () => {
+    // The gate ran on the clause as written — visible `fixed it` at the
+    // end — and the cap then cut exactly that tail off, leaving forty
+    // complete `&nbsp;` entities: the invisible-only reply the gate
+    // refuses. The cut is the tool's, not the model's, so the ruling
+    // degrades to the by-less form (`R<id> fixed`) instead of refusing.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '&nbsp;'.repeat(40) + 'fixed it' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2' }]);
+    // A long comment ahead of the text slices into an UNTERMINATED
+    // comment — the same invisible-only shape.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [
+            { id: 'R1-2', by: `<!-- ${'c'.repeat(250)} --> the guard rewrite` },
+          ],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2' }]);
+    // The ordinary cap keeps a visible clause, capped (the sibling cells
+    // above pin the length and the code-point cut).
+    expect(
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: 'x'.repeat(300) }] }),
+      ).fixedFindings[0]!.by,
+    ).toHaveLength(240);
+  });
+
+  it('refuses a non-object entry', () => {
+    expect(() =>
+      composeReview(base({ fixedFindings: ['R1-2'] as never })),
+    ).toThrow(/is not an object/);
+  });
+
+  it('keeps the FIRST ruling per id — a duplicate would reply and resolve twice', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [
+          { id: 'R1-2', by: 'the guard rewrite' },
+          { id: 'R1-2', by: 'the revert' },
+          { id: 'R2-7' },
+        ],
+      }),
+    );
+    expect(r.fixedFindings).toEqual([
+      { id: 'R1-2', by: 'the guard rewrite' },
+      { id: 'R2-7' },
+    ]);
+  });
+});
+
 describe('describeChunkGap — chunk ids leave in the author units', () => {
   const planned = [
     { id: 1, files: ['src/a.ts'] },
@@ -5840,15 +9433,17 @@ describe('describeChunkGap — chunk ids leave in the author units', () => {
     });
   });
 
-  it('names the files of a narrow gap — sorted by id, deduped', () => {
+  it('names the files of a narrow gap — sorted by id, deduped, inert', () => {
+    // Files ride mdField: git permits `<!--` in a filename, and the gap
+    // phrase lands in the raw body the marker readers scan.
     expect(describeChunkGap([2], planned)).toEqual({
-      phrase: 'the diff section covering src/b.ts, src/c.ts',
-      phraseZh: '涉及 src/b.ts、src/c.ts 的 diff 片段',
+      phrase: 'the diff section covering `src/b.ts`, `src/c.ts`',
+      phraseZh: '涉及 `src/b.ts`、`src/c.ts` 的 diff 片段',
       plural: false,
     });
     expect(describeChunkGap([3, 1], planned)).toEqual({
-      phrase: 'the diff sections covering src/a.ts, src/d.ts',
-      phraseZh: '涉及 src/a.ts、src/d.ts 的 diff 片段',
+      phrase: 'the diff sections covering `src/a.ts`, `src/d.ts`',
+      phraseZh: '涉及 `src/a.ts`、`src/d.ts` 的 diff 片段',
       plural: true,
     });
     // A subject disclosed twice is one gap.
@@ -5938,6 +9533,8 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
 
   it('translates the disclosures — role phrase and Not-reviewed frame', () => {
     // test-matrix required and never built → one role gap, both languages.
+    // (The plan carries no PR identity, so 6d is not owed and the matrix is
+    // the ONLY gap the test is about — there is nothing to record for it.)
     const p = plan({ han: true });
     transcript('a1', goodPrompt(1), { toolCalls: 3 });
     transcript('a2', goodPrompt(2), { toolCalls: 2 });
@@ -6171,7 +9768,7 @@ describe('a standing gate Critical enters the posting set exactly once (#9526)',
   // re-derives the same Critical from the report. `buildLedger` keys by
   // claimed id and the regenerated copy claims none, so it minted a second
   // id beside the carried one and the pair compounded every round.
-  function gateFixture() {
+  function gateFixture(code = 'SC2086') {
     const dir = mkdtempSync(join(tmpdir(), 'compose-gate-once-'));
     const diffPath = join(dir, 'the.diff');
     writeFileSync(
@@ -6202,7 +9799,7 @@ describe('a standing gate Critical enters the posting set exactly once (#9526)',
             findings: [
               {
                 line: 1,
-                code: 'SC2086',
+                code,
                 level: 'info',
                 message: 'quote the variable',
                 inDiff: true,
@@ -6221,6 +9818,30 @@ describe('a standing gate Critical enters the posting set exactly once (#9526)',
     );
     return { dir, planPath };
   }
+
+  it('folds its own entry — this channel joins bodyCriticals after the shared fold has run (#9940 review, round 31 reverse audit)', () => {
+    // `f.line` and `f.code` are interpolated RAW out of a side file the
+    // review agent can rewrite, and `structurallyValidReport` only checks
+    // plain-objectness. Unfolded, a fenced block in `code` reached the
+    // per-line escape as several lines and the reader saw a literal
+    // `&amp;lt;` inside the fence.
+    const { dir, planPath } = gateFixture(
+      'SC1\n```\n<div class="w">\n```\nrest',
+    );
+    try {
+      const line = scriptLintGate(planPath).criticals[0]!;
+      expect(line).not.toMatch(/[\r\n\u2028\u2029]/);
+      expect(line).toContain('SC1 ``` <div class="w"> ``` rest');
+      // One line in, one line out — and on one line the two fence runs are
+      // an ordinary code span, which is what makes the `<` between them
+      // inert without an escape. Unfolded they opened a real fenced
+      // block, and the escape inside it rendered a literal `&amp;lt;` to
+      // the reader.
+      expect(escapeTagOpeners(line)).toBe(line);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('does not compound the work-list or the body across rounds', () => {
     const { dir, planPath } = gateFixture();
@@ -6487,8 +10108,38 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.criticals).toEqual([]);
     expect(g.unreviewed).toEqual([]);
     expect(g.disclosed).toHaveLength(1);
-    expect(g.disclosed[0]).toContain('.github/workflows/ci.yml');
-    expect(g.disclosed[0]).toContain('source mapping not yet supported');
+    expect(g.disclosed[0].en).toContain('.github/workflows/ci.yml');
+    expect(g.disclosed[0].en).toContain('source mapping not yet supported');
+    // No "the executable-script lint" prefix: the body wraps this in a
+    // sentence that already opens "Not linted:", and the prefix rendered as
+    // "Not linted: the executable-script lint" — a lint not linted.
+    expect(g.disclosed[0].en).not.toContain('executable-script lint');
+    // No `reasonZh` in this report — the Chinese half falls back to the
+    // English reason rather than dropping the sentence.
+    expect(g.disclosed[0].zh).toContain('source mapping not yet supported');
+  });
+
+  it('a deferred entry with a reasonZh renders it in the Chinese half', () => {
+    const p = writePlan({
+      files: [{ path: '.github/workflows/ci.yml', kind: 'source' }],
+    });
+    writeReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+          reasonZh: '尚未支持源映射',
+        },
+      ],
+    });
+    const g = scriptLintGate(p);
+    expect(g.disclosed).toHaveLength(1);
+    expect(g.disclosed[0].en).toContain('source mapping not yet supported');
+    expect(g.disclosed[0].zh).toContain('尚未支持源映射');
+    expect(g.disclosed[0].zh).not.toContain('source mapping not yet supported');
+    // Both halves still carry the code-span path.
+    expect(g.disclosed[0].zh).toContain('.github/workflows/ci.yml');
   });
 
   it('ignores a cosmetic (style) or pre-existing (inDiff:false) finding', () => {
@@ -6541,12 +10192,110 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     });
     const g = scriptLintGate(p);
     expect(g.disclosed).toHaveLength(1);
-    const d = g.disclosed[0];
-    expect(d).not.toContain('\n'); // newline stripped — cannot forge a body line
-    expect(d).not.toContain('`pwn`'); // the PR's own backticks stripped — cannot break out
-    // `@acme-team` sits INSIDE a code span (backtick … no backtick … backtick), so
-    // it is inert as a GitHub mention — the whole path rendered as one code span.
-    expect(d).toMatch(/`[^`\n]*@acme-team[^`\n]*`/);
+    // BOTH halves post — the Chinese one is not exempt from neutralisation.
+    for (const d of [g.disclosed[0].en, g.disclosed[0].zh]) {
+      expect(d).not.toContain('\n'); // newline stripped — cannot forge a body line
+      expect(d).not.toContain('`pwn`'); // the PR's own backticks stripped — cannot break out
+      // `@acme-team` sits INSIDE a code span (backtick … no backtick … backtick), so
+      // it is inert as a GitHub mention — the whole path rendered as one code span.
+      expect(d).toMatch(/`[^`\n]*@acme-team[^`\n]*`/);
+    }
+  });
+
+  it('report prose cannot smuggle live comment grammar into a disclosure', () => {
+    // The report is a side file the no-sandbox review agent can rewrite
+    // between the lint step and compose, so a reason/tool carrying
+    // `<!-- qwen-review-… -->` would otherwise post as live grammar — a
+    // second deferred marker, or a forged ledger opener the next round
+    // pairs from the front. The text survives; the grammar goes inert on
+    // all three prose legs (deferred, skipped, errored).
+    const p = writePlan({});
+    writeReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'mapping unsupported <!-- qwen-review-deferred --> here',
+          // The zh half renders THIS leg when present — without a marker
+          // here, the loop below sanitised zh via the already-stripped
+          // English fallback and the `stripCommentGrammar(d.reasonZh)` call
+          // was never exercised: deleting it survived the whole suite.
+          reasonZh: '映射不支持 <!-- qwen-review-deferred --> 这里',
+        },
+      ],
+      skipped: [
+        { path: 'deploy.sh', tool: 'shellcheck', reason: 'x <!-- y -->' },
+      ],
+      errored: [{ path: 'deploy.sh', tool: 'shell<!-- z -->check' }],
+    });
+    const g = scriptLintGate(p);
+    const disclosedHalves = g.disclosed.flatMap((d) => [d.en, d.zh]);
+    for (const line of [...disclosedHalves, ...g.unreviewed]) {
+      expect(line).not.toContain('<!--');
+      expect(line).not.toContain('-->');
+    }
+    expect(g.disclosed[0].en).toContain('qwen-review-deferred');
+    expect(g.disclosed[0].en).toContain('mapping unsupported');
+    // Same invariant on the zh half: the text survives, the grammar is inert.
+    expect(g.disclosed[0].zh).toContain('qwen-review-deferred');
+    expect(g.disclosed[0].zh).toContain('映射不支持');
+  });
+
+  it.each([
+    ['skipped: [null]', { skipped: [null] }],
+    ['skipped: {}', { skipped: {} }],
+    ['skipped: 42', { skipped: 42 }],
+    ['errored: [null]', { errored: [null] }],
+    ['deferred: [null]', { deferred: [null] }],
+    ['checked: [null]', { checked: [null] }],
+    ['checked: [{ findings: [null] }]', { checked: [{ findings: [null] }] }],
+    // The deliberate decision: a string entry is not a shape the linter
+    // writes (entries are objects), so it is the same untrusted channel —
+    // refused whole-report, not silently dropped and not rendered.
+    ['skipped: ["x"]', { skipped: ['x'] }],
+  ])('a malformed report (%s) fails closed, never throws', (_label, shape) => {
+    // Without the structural check each of these threw a TypeError inside
+    // the loops and lost the whole round, blockers included.
+    const p = writePlan({});
+    writeReport(shape as Record<string, unknown>);
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.disclosed).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('malformed');
+  });
+
+  it('a null report root fails closed too — the diffHash check never dereferences it', () => {
+    const p = writePlan({});
+    writeFileSync(join(dir, 'qwen-review-script-lint.json'), 'null');
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('malformed');
+  });
+
+  it('renders a non-string or missing report field inertly — never a throw', () => {
+    // The report is read with `JSON.parse(...) as ScriptLintReport` and no
+    // runtime validation, and it is a side file the review agent can
+    // rewrite: a non-string `reason` in skipped[]/deferred[] or a
+    // non-string or missing `tool` in errored[] must degrade to rendered
+    // prose like every other malformed shape in this module — never a
+    // TypeError, because a thrown compose loses the whole round, Criticals
+    // included.
+    const p = writePlan({});
+    writeReport({
+      skipped: [{ path: 'deploy.sh', tool: 'shellcheck', reason: 42 }],
+      errored: [{ path: 'deploy.sh' }],
+      deferred: [
+        { path: 'ci.yml', tool: 'actionlint', reason: { why: 'deferred' } },
+      ],
+    });
+    const g = scriptLintGate(p);
+    expect(g.unreviewed).toHaveLength(2);
+    expect(g.disclosed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('42');
+    expect(g.unreviewed[1]).toContain('undefined errored');
+    expect(g.disclosed[0].en).toContain('[object Object]');
   });
 
   it('reports an errored checker as unreviewed (fail closed)', () => {
@@ -6634,8 +10383,9 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
   // verifier (['reverse-audit']) to prove a finding stands with none.
   function gateReadyPlan(
     step45Keys: string[] = ['verify', 'reverse-audit'],
+    planOpts: Parameters<typeof coveredPlan>[1] = {},
   ): string {
-    const p = coveredPlan(step45Keys);
+    const p = coveredPlan(step45Keys, planOpts);
     const planObj = JSON.parse(readFileSync(p, 'utf8'));
     planObj.worktreePath = '.qwen/tmp/review-pr-1';
     writeFileSync(p, JSON.stringify(planObj));
@@ -6787,7 +10537,9 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     // but MUST be surfaced in the body so the reader knows that shell went unlinted.
     // The gate reads the report as the sole authority, so the deferral is disclosed
     // from the report itself; the plan stays fully covered so the Approve stands.
-    const p = gateReadyPlan();
+    // han: the Chinese half only renders for a han-audience PR, and this test
+    // pins that half's sentence too.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], { han: true });
     writeGateReport({
       deferred: [
         {
@@ -6805,10 +10557,58 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
       modelId: MODEL,
     });
     expect(r.event).toBe('APPROVE');
-    expect(r.body).toContain('.github/workflows/ci.yml');
-    expect(r.body).toContain('source mapping not yet supported');
+    // The whole composed sentence, both halves — pinned against the stutter
+    // #10567's posted body carried ("Not linted: the executable-script lint —
+    // … — not linted"): the wrapper says "Not linted" once, then path and
+    // reason, nothing else.
+    expect(r.body).toContain(
+      'Not linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported.',
+    );
+    expect(r.body).toContain(
+      '未检查（工具限制，非阻断）：`.github/workflows/ci.yml`——source mapping not yet supported。',
+    );
     // the clean-approve copy is still there — the disclosure augments, it doesn't replace
     expect(r.body).toContain('No issues found. LGTM! ✅');
+  });
+
+  it('two deferred entries join per language, the reasonZh branch rendered whole', () => {
+    // Every other deferred fixture holds ONE entry, and a one-element join
+    // emits no separator — so the en '; ' join, the zh full-width '；' join
+    // and the reasonZh-carrying branch (the primary case: every report the
+    // current CLI writes carries `reasonZh`) were pinned by nothing; the
+    // single-entry test above reaches only the English-fallback branch. Two
+    // entries, one translated and one not, pin both composed sentences
+    // whole, separators included.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], { han: true });
+    writeGateReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+          reasonZh: '尚未支持源映射',
+        },
+        {
+          path: '.github/workflows/release.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+        },
+      ],
+    });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain(
+      'Not linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported; `.github/workflows/release.yml` — source mapping not yet supported.',
+    );
+    expect(r.body).toContain(
+      '未检查（工具限制，非阻断）：`.github/workflows/ci.yml`——尚未支持源映射；`.github/workflows/release.yml`——source mapping not yet supported。',
+    );
   });
 });
 
@@ -6993,6 +10793,27 @@ describe('buildLedger', () => {
     ]);
   });
 
+  it('records the minted id per drafted comment, aligned by index (#9940)', () => {
+    // `draftedIds` is the stamp `submit` applies before posting: the id at
+    // a marked slot equals the ledger entry's id, an unmarked slot stays
+    // undefined, and a carried id reads through unchanged.
+    const l = buildLedger(
+      3,
+      [
+        { path: 'src/a.ts', line: 12, body: '**[Critical]** double free' },
+        { path: 'src/x.ts', line: 1, body: 'no marker — not a finding' },
+        {
+          path: 'src/b.ts',
+          line: 4,
+          body: '**[Suggestion]** R1-2: still stands',
+        },
+      ],
+      [],
+    );
+    expect(l.draftedIds).toEqual(['R3-1', undefined, 'R1-2']);
+    expect(l.findings.map((f) => f.id)).toEqual(['R3-1', 'R1-2']);
+  });
+
   it('flags the real file spelled like a stand-in, not the stand-in', () => {
     // The flag marks the EXCEPTION, so the routine stand-ins cost the marker
     // no bytes — it rides through every rung of the shed cascade, where the
@@ -7127,6 +10948,24 @@ describe('buildLedger', () => {
     expect(l.findings[0]?.title).toBe('still leaking');
   });
 
+  it('reads a carried id through render-nothing residue in a body Critical too', () => {
+    // The body leg strips through the attribution-off fixpoint before the
+    // id read, and that chain must leave the residue INVISIBLE for the
+    // anchor to step over it: neutralizing comment grammar inside the
+    // chain turned `<!-- x -->` into the visible words ` x ` ahead of the
+    // id, which then read as fresh prose — the finding renumbered to R2-1
+    // with `x  R1-2: …` as its title, while the posted item still said
+    // R1-2. Neutralization belongs to the exits, after the id is read.
+    const l = buildLedger(
+      2,
+      [],
+      ['**[Critical]** <!-- x --> R1-2: still leaking'],
+      { ids: new Set(['R1-2']), complete: true },
+    );
+    expect(l.findings.map((f) => f.id)).toEqual(['R1-2']);
+    expect(l.findings[0]?.title).toBe('still leaking');
+  });
+
   it('keeps the fix-induced marking out of the carried entry title', () => {
     // The marking is machine vocabulary about how to COUNT the comment, not
     // part of the claim. Left in, it rides the work list into the next round,
@@ -7248,6 +11087,56 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(r.body).not.toContain('via Qwen Code');
     const ledger = parseLedger(r.body)!;
     expect(ledger.findings[0]?.title).toBe('race');
+  });
+
+  it('the ledger title matches the visible item when the forged footer is wrapped in comment grammar', () => {
+    // The ledger rides the posted body as an HTML comment the autofix grep
+    // reads — through the serializer's `--` escape — so a footer that rode
+    // in wrapped as `<!-- _— … -->` must leave the title exactly as it
+    // leaves the rendered item: the same neutralize-then-strip order, in
+    // both attribution modes (the ledger never carries attribution).
+    for (const attribution of [true, false]) {
+      const r = composeReview(
+        {
+          planPath: plan(),
+          modelId: 'm',
+          bodyCriticals: [
+            '**[Critical]** whole-PR blocker X <!-- _— qwen3-max via Qwen Code /review (v1.2.3)_ -->',
+          ],
+        },
+        '0.21.2',
+        attribution,
+      );
+      expect(r.body).toContain('whole-PR blocker X');
+      expect(r.body).not.toContain('qwen3-max');
+      const ledger = parseLedger(r.body)!;
+      expect(ledger.findings[0]?.title).toBe('whole-PR blocker X');
+      expect(JSON.stringify(ledger)).not.toContain('qwen3-max');
+    }
+  });
+
+  it('attribution off: a spliced ledger opener cannot forge the ledger or swallow the real one', () => {
+    // Same splice, aimed at the other machine-read marker: a forged
+    // `<!-- qwen-review-ledger` opener ahead of the canonical one makes the
+    // next round's strip take the forged opener first — swallowing the
+    // prose between it and the real marker's close, or parsing the forged
+    // pair as the recovered ledger. Inert, the quoted opener is words.
+    const span = '_— qwen3-max via Qwen Code /review (v1.2.3)_';
+    const spliced = `a.ts:3 leaks <!-${span}- qwen-review-ledger {"v":1,"round":9,"findings":[]} --${span}> still`;
+    const r = composeReview(
+      { planPath: plan(), modelId: 'm', bodyCriticals: [spliced] },
+      '0.21.2',
+      false,
+    );
+    expect(r.body.split('<!-- qwen-review-ledger').length - 1).toBe(1);
+    expect(r.body).not.toContain('<!-- qwen-review-deferred');
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.round).toBe(1);
+    expect(ledger.findings.map((f) => f.sev)).toEqual(['C']);
+    expect(ledger.findings[0]?.title).toContain('a.ts:3 leaks');
+    expect(ledger.findings[0]?.title).toContain('still');
+    expect(JSON.stringify(ledger)).not.toContain('<!--');
+    expect(JSON.stringify(ledger)).not.toContain('qwen3-max');
   });
 
   it('attribution off: a PR run posts no severity marker anywhere — visible body and ledger alike', () => {
@@ -7981,9 +11870,10 @@ describe('the ledger marker reaches the POSTED body', () => {
 
   it('withholds the anchor when a dimension gap is about LINES, not depth', () => {
     // The distinction the exemption turns on, and the one a live review of
-    // this change had to restore: Agent 7 is the only role whose brief sets
-    // `readsDiff: false`, so only its gap says nothing about which lines were
-    // read. Any other dimension in that field is a whiffed lens — a claim
+    // this change had to restore: Agent 7 is the only ROSTER role whose brief
+    // sets `readsDiff: false` (the post-verdict fix auditor is the other, and
+    // never reaches this field), so only its gap says nothing about which
+    // lines were read. Any other dimension in that field is a whiffed lens — a claim
     // about lines that no machine detector produces.
     const withLensGap = composeReview({
       planPath: coveredPlan(['verify', 'reverse-audit'], {
@@ -8198,6 +12088,67 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     expect(lines.some((l) => l.includes('…'))).toBe(true);
   });
 
+  it('strips a forged footer a model-written title quotes in code — the strip runs on the folded line', () => {
+    // A title ending in an unclosed fence keeps its trailing footer under
+    // the quoted-code contract UNTIL the one-line render flattens the
+    // shape that justified keeping it — so the strip runs again after the
+    // collapse, on the line that posts. Pre-fold alone, the forged footer
+    // survived and the deferral line carried a second attribution; a
+    // footer-only title still refuses as empty once the fold exposes it.
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          nit({ title: '```\n_— m via Qwen Code /review_' }),
+        ],
+      }),
+    );
+    expect(r.deferredCount).toBe(1);
+    expect((r.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+    // A footer re-wrapped across a soft break displays rejoined, so the
+    // fold runs BEFORE the second strip: the unfolded title shows two
+    // footer-less lines and keeps both halves.
+    const split = composeReview(
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          nit({
+            file: 'b.ts',
+            line: 2,
+            title: 'x _— m via\nQwen Code /review_',
+          }),
+        ],
+      }),
+    );
+    expect((split.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+    expect(() =>
+      composeReview(
+        base({
+          severityFloor: 'critical',
+          deferredSuggestions: [nit({ title: FOOTER })],
+        }),
+      ),
+    ).toThrow(/non-empty file and title/);
+  });
+
+  it('strips a forged footer a title quotes behind an unclosed fence and an unterminated opener', () => {
+    // The multi-line strip keeps the footer — it sits inside an unclosed
+    // fence — and the fold puts the quoted `<!--` on the footer's line,
+    // where a swallowing projection hid it. The folded line is one
+    // paragraph on GitHub, so the opener is literal and the footer renders
+    // as prose: it must strip.
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          nit({ title: '```\n<!-- x\n\n_— m via Qwen Code /review_' }),
+        ],
+      }),
+    );
+    expect(r.deferredCount).toBe(1);
+    expect((r.body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+  });
+
   it('exactly at the line cap, the verdict line does not claim truncation', () => {
     const entries = Array.from({ length: 20 }, (_, i) =>
       nit({ file: `f${i}.ts`, title: `n${i}` }),
@@ -8224,7 +12175,7 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     expect(r.lowSignal).toBeNull();
     expect(r.deferredCount).toBe(1);
     expect(verdictLine(r)).toBe(
-      'Verdict: Approve — 1 non-Critical finding(s) deferred under the convergence posture (listed in the body)',
+      'Verdict: Approve — 1 finding(s) deferred under the convergence posture (listed in the body)',
     );
   });
 
@@ -8501,6 +12452,182 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     expect(r.event).toBe('APPROVE');
     expect(r.body).toContain('convergence posture (round 3, not a blocker)');
   });
+
+  it('the deferral list opens with a locatable marker — exactly once, and never without the list', () => {
+    // Later tooling (an agent collecting deferred Suggestions across
+    // rounds) greps the marker, not the prose heading a rewording could
+    // move. It rides the list's own fragment, so a budget trim drops the
+    // pointer with the list (the trim suite pins that), and a listless
+    // round carries no marker at all.
+    const MARKER = '<!-- qwen-review-deferred -->';
+    const r = composeReview(
+      base({ severityFloor: 'critical', deferredSuggestions: [nit()] }),
+    );
+    expect(r.body.split(MARKER).length - 1).toBe(1);
+    expect(r.body).toContain(
+      `${MARKER}\n\nDeferred under the convergence posture`,
+    );
+    const listless = composeReview(base({ severityFloor: 'critical' }));
+    expect(listless.body).not.toContain(MARKER);
+  });
+
+  it('a finding quoting the marker literal cannot forge a second anchor', () => {
+    // The collector contract is the occurrence heading the canonical
+    // heading — but the prose exits quote model-written findings verbatim,
+    // and any review of a PR that TOUCHES this marker can carry the literal
+    // into a body that also defers a Suggestion (this marker's own PR was
+    // the live instance). The verbatim exits — bodyCriticals, duplicates,
+    // cannot-tell — neutralize comment grammar on the way in, in BOTH
+    // attribution modes (on the attribution-off leg the wrapper is the
+    // only protection the bodyCriticals exit has), so the quoted copy
+    // survives as readable prose while the raw body keeps exactly one
+    // live marker.
+    const MARKER = '<!-- qwen-review-deferred -->';
+    const forged = `the deferral marker ${MARKER} must survive quoting`;
+    for (const attribution of [true, false]) {
+      const r = composeReview(
+        base({
+          severityFloor: 'critical',
+          bodyCriticals: [forged],
+          suggestionsDroppedAsDuplicates: [forged],
+          cannotTellCriticals: [forged],
+          deferredSuggestions: [nit()],
+        }),
+        '0.21.2',
+        attribution,
+      );
+      expect(r.body.split(MARKER).length - 1).toBe(1);
+      expect(r.body).toContain(
+        `${MARKER}\n\nDeferred under the convergence posture`,
+      );
+      // The quoted copies survive as prose — delimiters inert, text intact.
+      expect((r.body.match(/qwen-review-deferred/g) ?? []).length).toBe(4);
+    }
+  });
+
+  it('the not-reviewed disclosures cannot smuggle the marker through either', () => {
+    // The disclosure sentences interpolated caller prose and PR-controlled
+    // filenames raw: a dimension entry or a force-committed filename
+    // carrying the literal anchored the collector at a disclosure line
+    // ahead of the deferral list. Both legs land inert now, the lone live
+    // marker still heading the list.
+    const MARKER = '<!-- qwen-review-deferred -->';
+    const located = (body: string): void => {
+      expect(body.split(MARKER).length - 1).toBe(1);
+      expect(body).toContain(
+        `${MARKER}\n\nDeferred under the convergence posture`,
+      );
+    };
+    // A fork-committed filename in an unread chunk — git permits `<!--`
+    // in a path, and the gap phrase names the chunk's files. Same shape
+    // as the gap-phrase suite: chunk 1 built but never launched, chunk 2
+    // reviewed properly, so the disclosure names chunk 1's file. Runs
+    // FIRST: base()'s coveredPlan() below lays down transcripts that
+    // would certify this plan's chunks if they were already on disk.
+    const forgedFile = `docs/${MARKER}.md`;
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 5000,
+        diffLines: 5000,
+        files: [
+          { path: forgedFile, kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: [
+          {
+            id: 1,
+            startLine: 1,
+            endLine: 100,
+            files: [{ path: forgedFile, newStart: 1, newEnd: 80 }],
+          },
+          {
+            id: 2,
+            startLine: 101,
+            endLine: 200,
+            files: [{ path: 'src/b.ts', newStart: 1, newEnd: 90 }],
+          },
+        ],
+      }),
+    );
+    const stamp = new Date(2020, 0, 1);
+    utimesSync(p, stamp, stamp);
+    recordStep45(p);
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const viaChunk = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'critical',
+      deferredSuggestions: [nit()],
+    });
+    located(viaChunk.body);
+    expect(viaChunk.body).toContain('the diff section covering');
+    expect((viaChunk.body.match(/qwen-review-deferred/g) ?? []).length).toBe(2);
+    // Two caller dimensions in one compose: an explained entry (rides the
+    // per-entry push) and a bare one (rides the whiffed join) — each must
+    // land inert on its own exit.
+    const viaDimension = composeReview(
+      base({
+        severityFloor: 'critical',
+        unreviewedDimensions: [
+          `reverse-audit — ${MARKER}`,
+          `security ${MARKER}`,
+        ],
+        deferredSuggestions: [nit()],
+      }),
+    );
+    located(viaDimension.body);
+    // The neutralised copies stay readable in the disclosures.
+    expect(viaDimension.body).toContain('Not reviewed: reverse-audit');
+    expect(viaDimension.body).toContain('Not reviewed: security');
+    expect(
+      (viaDimension.body.match(/qwen-review-deferred/g) ?? []).length,
+    ).toBe(3);
+    // A coverage reason interpolating an error message: the grouped
+    // byReason push quotes the reason raw no more. The unreadable-
+    // transcripts shape interpolates the project dir into the reason.
+    const pReason = plan();
+    const viaReason = composeReview({
+      planPath: pReason,
+      env: {
+        QWEN_CODE_PROJECT_DIR: join(dir, `nowhere ${MARKER}`),
+        QWEN_CODE_SESSION_ID: 'S1',
+      },
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'critical',
+      deferredSuggestions: [nit()],
+    });
+    located(viaReason.body);
+    // The error text fans out over several disclosure reasons; every copy
+    // lands inert — the live count alone is the invariant.
+    expect(
+      (viaReason.body.match(/qwen-review-deferred/g) ?? []).length,
+    ).toBeGreaterThanOrEqual(2);
+    // The read-limit exit renders caller-named uncoverable chunks through
+    // `callerShown` — the fourth disclosure exit hardened this round, and
+    // the only one no leg above feeds a forged marker through.
+    const viaReadLimit = composeReview(
+      base({
+        severityFloor: 'critical',
+        uncoverableChunks: [`chunk 5 (docs/${MARKER}.md)`],
+        deferredSuggestions: [nit()],
+      }),
+    );
+    located(viaReadLimit.body);
+    // The neutralised copy stays readable in the disclosure.
+    expect(viaReadLimit.body).toContain('Not reviewed: chunk 5');
+    expect(
+      (viaReadLimit.body.match(/qwen-review-deferred/g) ?? []).length,
+    ).toBe(2);
+  });
 });
 
 describe("composeReview — the composed body fits GitHub's limit", () => {
@@ -8562,6 +12689,9 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // The blocker survives whole; the deferral display is gone, counted.
     expect(r.body).toContain(blocker);
     expect(r.body).not.toContain('Deferred under the convergence posture');
+    // The locator marker rides the trimmed fragment — a pointer never
+    // outlives the list it points at.
+    expect(r.body).not.toContain('<!-- qwen-review-deferred -->');
     expect(r.body).toContain('(1 section(s))');
     expect(r.body).toContain('the deferred-findings list did not fit');
     // The operator gets the same fact on stderr, not only the PR page.
@@ -8612,7 +12742,7 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     // list survived, so it is pinned whole, like every sibling verdict
     // string in this file.
     expect(verdictLine(r)).toContain(
-      '3 non-Critical finding(s) deferred under the convergence posture ' +
+      '3 finding(s) deferred under the convergence posture ' +
         '(trimmed from the body to fit GitHub’s limit — whole in the ' +
         'findings artifact)',
     );
@@ -8760,6 +12890,9 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     });
     expect(r.event).toBe('COMMENT');
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('Downgraded from Request changes');
   });
 
@@ -9530,6 +13663,16 @@ describe('composeReview — the findings file tag check', () => {
     expect(r.baseEvent).toBe('APPROVE');
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    // No wall on this plan: the relaunch FIX is owed, and nothing is
+    // withheld — the compose floor waives it only on a wall it refuses.
+    expect(
+      r.remediation.some((fix) =>
+        fix.startsWith(
+          'findings still tagged `— [unverified]`: relaunch the verifier',
+        ),
+      ),
+    ).toBe(true);
+    expect(r.waivedFixes).toEqual([]);
     expect(r.body).toContain(
       '1 finding(s) still carried the `— [unverified]` tag when the loop ' +
         'ended',
@@ -9756,7 +13899,7 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
-    recordStep45(p, ['verify', 'reverse-audit']);
+    recordStep45(p, ['verify', 'reverse-audit', '6d']);
     const r = composeReview({
       criticalsInline: 0,
       suggestionsInline: 0,
@@ -10098,7 +14241,9 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     const wrapped = `comment 102 (b.ts) — body\n${' '.repeat(80_000)}truncated`;
     const t0 = performance.now();
     const r = composeReview(base({ cannotTellCriticals: [flat, wrapped] }));
-    expect(performance.now() - t0).toBeLessThan(2000);
+    expectWithinLatencyBudget(performance.now() - t0, 2000, {
+      poolMultiplier: 10,
+    });
     // 160k of model prose used to reach the body budget's last-resort
     // truncation; the per-entry char cap this account now shares bounds it
     // upstream of the budget instead, which is the better place for it. So
@@ -10992,7 +15137,7 @@ describe('floor enforcement — the posture, as code', () => {
     // its basis for deferredSuggestions.length would overclaim "2 moved"
     // here.
     const line = verdictLine(r);
-    expect(line).toContain('2 non-Critical finding(s) deferred');
+    expect(line).toContain('2 finding(s) deferred');
     expect(line).toContain('1 of those moved by CLI floor enforcement');
     expect(r.body).toContain(
       '1 Suggestion(s) were drafted inline past the resolved critical posting floor',
@@ -12541,6 +16686,35 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     expect(r.body).not.toContain('Convergence:');
     expect(r.recommendations).toBeUndefined();
+    expect(markerRec(r.body)).toBeUndefined();
+  });
+
+  it('republishes the matched codes in the ledger marker, off the same derivation (#10107)', () => {
+    // The marker is the one surface an OUTSIDE consumer can reach — the
+    // takeover loop reads the posted review body, not the composed result —
+    // and the codes it carries must be the SAME set the result carries and
+    // the paragraph renders from, or the loop would wire actions to a round
+    // the human-readable half does not describe.
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 1,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    const codes = (r.recommendations ?? []).map((x) => x.code);
+    expect(codes.length).toBeGreaterThan(0);
+    expect(markerRec(r.body)).toEqual(codes);
   });
 
   it('discloses a posture that is engaged in name and not in effect', () => {
@@ -13073,6 +17247,30 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     ],
     ['a truncated work list', {}, { dropped: 3 }],
     ['a pure-foreign work list', {}, { foreign: true }],
+    ['an anonymously adopted work list', {}, { anonymousAdoption: true }],
+    [
+      'a re-post the work list cannot place',
+      {
+        // `auto` licences the deferral channel at round 5 — an ABSENT floor
+        // beside a non-empty list caps with `unlicensed-deferral`, and the
+        // cap leg would withhold the ending instead of the leg under test.
+        severityFloor: 'auto' as const,
+        deferredSuggestions: [
+          {
+            file: 'src/a.ts',
+            line: 5,
+            source: 'review',
+            severity: 'Suggestion',
+            title: 'the claim, restated without its id',
+          } as DeferredEntry,
+        ],
+      },
+      {
+        findings: [
+          { id: 'R2-1', sev: 'C', file: 'src/a.ts', title: 'the claim' },
+        ],
+      },
+    ],
   ])('withholds land-and-defer over %s', (_label, inputOver, sideOver) => {
     // Each arm starts from the shape that DOES offer the ending and flips
     // exactly one leg, so the assertion measures that leg and not a sibling
@@ -13187,6 +17385,1085 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).toContain('The rate of new findings is not falling.');
     expect(r.body).toContain('already resolve to a critical posting floor');
     expect(r.body).not.toContain('--severity-floor critical');
+  });
+
+  // The successor chain (#9905) through the path GitHub receives: the side
+  // file carries the previous round's minted closures, this round closes
+  // another same-file Critical and posts a fresh one — the note names the
+  // subsystem and the chain on the body, and the marker carries this
+  // round's closures forward. These run over COVERED plans: the mint now
+  // obeys the fail-closed predicate the anchor applies, so a round that
+  // cannot show it read the diff mints nothing — a bare plan here would
+  // hide every leg behind that one.
+  const coveredPrev = (prev: Record<string, unknown>) =>
+    coveredWithLedger({ v: 1, ...prev });
+
+  it('emits the divergence note on the #9659 rebound shape, and carries the closures forward', () => {
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/mechanism.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(r.body).toContain('⚠️ Divergence:');
+    expect(r.body).toContain('`src/mechanism.ts`');
+    expect(r.body).toContain('`R9-1 → R10-2 → R11-1`');
+    expect(r.body).toContain("raising the pattern with the mechanism's owner");
+    expect((r.recommendations ?? []).map((x) => x.code)).toContain(
+      'successor-chain',
+    );
+    // Advisory only: the verdict and its caps are untouched, and the
+    // marker carries both closure generations for the next round's check —
+    // this round's own mint only, no carry-forward of the older one.
+    expect(r.cappedBy.every((c) => !c.includes('divergence'))).toBe(true);
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/mechanism.ts' },
+    ]);
+  });
+
+  it("discloses the fresh generation's identity gap on the divergence note", () => {
+    // The chain's new generation carries ids THIS round stamped — the
+    // fresh scan admits no carried id by construction — and a re-voice of
+    // a still-open claim whose readback lost its carried id is textually
+    // indistinguishable from a new Critical: the shape a blanket
+    // suppression cannot separate from the legitimate rebound. The note
+    // discloses the gap instead of asserting the generation is new.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/mechanism.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(r.body).toContain('⚠️ Divergence:');
+    expect(r.body).toContain(
+      "the chain's newest generation carries ids stamped this round",
+    );
+  });
+
+  it('stays silent on the first rebound — one closure generation is normal', () => {
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(r.body).not.toContain('⚠️ Divergence:');
+    // …but the closure IS recorded, so the next rebound can see it.
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/mechanism.ts' },
+    ]);
+  });
+
+  it('mints no closures over a truncated previous list', () => {
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+        dropped: 2,
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(r.body).not.toContain('⚠️ Divergence:');
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+  });
+
+  it('mints no closures on a cannot-tell round — absence is a DECLINED ruling', () => {
+    // The mint's honesty legs, leg one: a round that publicly answered
+    // "cannot tell" on a Critical declined to rule on it — the id is absent
+    // from the posting set by construction, but absence there is not
+    // "ruled fixed". The sibling `openCriticals` gate withholds the same
+    // inference under the same state, and the anchor's fail-closed
+    // predicate — which this round engages via its cap — subsumes the leg
+    // at the marker and the diagnosis.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+      cannotTellCriticals: [
+        'R10-2 — the claim could not be verified either way',
+      ],
+    });
+    expect(r.cappedBy).toContain('cannot-tell-existing-critical');
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+  });
+
+  it('mints no closures on a context-unavailable round — nothing was re-read', () => {
+    // Leg two: a diff-only round could not re-read the context the previous
+    // work list was ruled under, so a vanished id is not a ruling there
+    // either — the same state the sibling gate cites `cannot-tell` beside.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      contextUnavailable: true,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(r.cappedBy).toContain('context-unavailable');
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+  });
+
+  it('mints no closures on a fail-closed round — absence may be unread territory', () => {
+    // The anchor's fail-closed predicate binds the mint too: a closure is
+    // the inference "ruled fixed", and a round that cannot show it READ the
+    // whole diff cannot support that inference — the vanished id may be
+    // sitting in the territory nobody re-read. cappedBy/scopeUnproven are
+    // only known after the body is composed, so the gate applies where they
+    // are known — at the diagnosis and at the marker — which is where this
+    // assertion meets it. The bare plan this describe writes proves no
+    // coverage, which is exactly the unproven-scope shape.
+    sideFile({
+      round: 10,
+      findings: [
+        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+      ],
+      closed: [{ r: 10, id: 'R9-1', f: 'src/mechanism.ts' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(r.scopeUnproven).toBe(true);
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+    // …and the chain's THIS-round generation is gated with it: closedPrev
+    // alone never fires the note.
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints no closures over a PURE-FOREIGN previous list', () => {
+    // Leg three (#9526): a list recovered from another account's marker,
+    // NOT merged over this account's own, is a stranger's — its unreposted
+    // Criticals are not rulings this account made, and minting closures
+    // over them seeds the sentinel with a lineage this loop never produced.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        foreign: true,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+  });
+
+  it('still mints closures over a MERGED foreign list — the union keeps own entries', () => {
+    // The leg's other edge: a MERGED list protects this account's own
+    // certified entries under their own ids — the round re-rules them entry
+    // by entry, so a vanished one WAS ruled. Over-tightening the leg to
+    // `foreign !== true` would disarm the mint on exactly the merged rounds
+    // the union exists to protect.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        foreign: true,
+        merged: true,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/mechanism.ts' },
+    ]);
+  });
+
+  it('mints no closures over an ANONYMOUSLY ADOPTED previous list', () => {
+    // The pure-foreign honesty leg reads `foreign` off the side file's
+    // stamp — but the anonymous whole-write persists a stranger's adopted
+    // list `foreign: false` (an UNKNOWN identity is not a foreign author,
+    // deliberate for the disclosure caveat). The mint is a second consumer
+    // of that stamp the rationale never addressed: recovered under a
+    // `getCurrentUser()` blip with no readable side file, a stranger's
+    // Criticals walk through the mint as own, and the positional diff mints
+    // closures over entries this round never engaged — where absence means
+    // "never ruled on", not "ruled fixed". The persist seam records the
+    // unverifiable adoption machine-readably, and this leg reads it like
+    // pure-foreign.
+    const adopted = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        anonymousAdoption: true,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(parseLedger(adopted.body)?.closed).toBeUndefined();
+    // Control: the identical list WITHOUT the adoption stamp mints as
+    // before — the leg reads the recorded adoption, not a shape every
+    // pre-telemetry predecessor also has.
+    const own = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(parseLedger(own.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/mechanism.ts' },
+    ]);
+  });
+
+  it('mints no closure for a standing claim re-minted under a fresh id', () => {
+    // Claim identity, not id identity. A re-post that loses its carried id
+    // in the readback — the gate's regenerated blockers render path-first
+    // with no id (#9526's renumbering walk), a model re-post can drop it —
+    // gets a FRESH id in the build: round 10 posted the claim as R10-1,
+    // round 11 re-voices it as R11-1, and R10-1 is absent from the posting
+    // set. Read absent-by-id alone, the claim mints a closure every round
+    // of its life, in the very body that re-posts it open. The mint joins
+    // on the locator projection instead, sees the claim still standing in
+    // the SAME build, and stays silent.
+    const r = composeReview({
+      planPath: coveredWithLedger({
+        v: 1,
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/f.ts',
+            title: 'the standing claim',
+          },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        {
+          path: 'src/f.ts',
+          line: 3,
+          body: '**[Critical]** the standing claim',
+        },
+      ],
+    });
+    // The claim IS on the work list again — under this round's fresh id …
+    const marker = parseLedger(r.body)!;
+    expect(
+      marker.findings.some(
+        (f) => f.id === 'R11-1' && f.title === 'the standing claim',
+      ),
+    ).toBe(true);
+    // … so it is NOT closed.
+    expect(marker.closed).toBeUndefined();
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints no closure for a standing claim whose locator outruns the title cap', () => {
+    // The cap-stage half of the claim-identity join: the PREVIOUS side's
+    // titles were sliced to LEDGER_MAX_TITLE at write time, so a claim
+    // whose locator exceeds the cap must be projected from the SAME
+    // capped form this round — projecting the uncapped build title misses
+    // the capped previous one, and the claim mints a closure in the very
+    // body that re-posts it. This is the gate blocker's shape — the script
+    // lint gate renders `path:line CODE — message [lint]`, and a deep
+    // path's locator prefix alone outruns the cap — reproduced here over
+    // a covered round, where the mint is not fail-closed and the join
+    // alone decides.
+    const longClaim = `claim whose locator outruns the cap ${'x'.repeat(60)}`;
+    expect(longClaim.length).toBeGreaterThan(LEDGER_MAX_TITLE);
+    const r = composeReview({
+      planPath: coveredWithLedger({
+        v: 1,
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: longClaim },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/f.ts', line: 3, body: `**[Critical]** ${longClaim}` },
+      ],
+    });
+    expect(r.cappedBy).toEqual([]);
+    // The claim IS on the work list again — its title carrying the same
+    // write-time cap the previous marker's did …
+    const marker = parseLedger(r.body)!;
+    expect(
+      marker.findings.some(
+        (f) => f.title === longClaim.slice(0, LEDGER_MAX_TITLE),
+      ),
+    ).toBe(true);
+    // … so it is NOT closed.
+    expect(marker.closed).toBeUndefined();
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints no closure for a claim re-filed through the deferral channel', () => {
+    // Same hazard class as the gate blocker, other channel: the typed
+    // deferral channel carries no id field, and a re-file whose title
+    // carries no readable id leaves the round unable to PROVE which claim
+    // the entry re-posts — it may be the vanished sibling, it may be the
+    // standing one. A closure is the inference "ruled fixed", and doubt
+    // defeats it: the mint withholds every closure the round cannot
+    // certify, rather than text-matching the entry against the previous
+    // list shape by shape. The id-carrying siblings below are the shape
+    // that still mints beside a re-file.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/auth.ts', title: 'auth bypass' },
+          { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/auth.ts',
+          line: 88,
+          source: 'test',
+          severity: 'Critical',
+          title: 'auth bypass',
+        },
+      ],
+    });
+    const marker = parseLedger(r.body)!;
+    // The re-filed claim rides the work list, fresh-stamped ...
+    expect(marker.findings.some((f) => f.sev === 'C')).toBe(true);
+    // ... and the re-file's title carries NO readable id, so the round
+    // cannot prove which claim the entry re-posts — the mint fails closed
+    // for the whole round, withholding even the truly vanished sibling.
+    expect(marker.closed).toBeUndefined();
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints no closure for a long claim re-filed under its carried id through the deferral channel', () => {
+    // The typed-channel join's projection symmetry, same root as the reroute
+    // arm: a re-filed deferral title can CARRY the id, so a window taken
+    // BEFORE the id is stripped is short by the prefix — the previous
+    // list's id-less, write-capped locator never meets it, and the
+    // still-standing claim mints a closure in the body that re-posts it.
+    // The lead again puts the dash across the cap boundary, so the entry
+    // side must cap BEFORE locating, the serializer's order.
+    const lead = `the re-filed claim ${'x'.repeat(LEDGER_MAX_TITLE - 21)}`;
+    expect(lead).toHaveLength(LEDGER_MAX_TITLE - 2);
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/auth.ts',
+            title: `${lead} — the original wording`,
+          },
+          { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/auth.ts',
+          line: 88,
+          source: 'test',
+          severity: 'Critical',
+          title: `R10-1: ${lead} — re-filed under the channel`,
+        },
+      ],
+    });
+    const marker = parseLedger(r.body)!;
+    // The re-filed claim rides the work list, fresh-stamped …
+    expect(marker.findings.some((f) => f.sev === 'C')).toBe(true);
+    // … so its still-standing original mints no closure — while a truly
+    // vanished same-file Critical beside it still does.
+    expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/auth.ts' }]);
+  });
+
+  it('reads a SOURCE tag before the id on the deferral channel — the re-post join is the head-slot read (#9940 review, round 15)', () => {
+    // The join reads the id through the head-slot tokeniser's own id
+    // (`readClaimHead(title).id`), so a title leading with a source tag
+    // (`[probe] R10-1: …`) still names the claim it re-posts; the anchored
+    // read over `.stripped` kept the source tag at position 0 and saw no
+    // id — `repostUnidentified` then withheld EVERY closure of the round,
+    // the truly vanished sibling included. The axis-tag twin below cannot
+    // pin this: axis tags are stripped from `.stripped`, source tags are
+    // not.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: 'sparse wedge' },
+          { id: 'R10-2', sev: 'C', file: 'src/other.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/f.ts',
+          line: 8,
+          source: 'probe',
+          severity: 'Critical',
+          title: '[probe] R10-1: sparse wedge',
+        },
+      ],
+    });
+    const marker = parseLedger(r.body)!;
+    expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/other.ts' }]);
+  });
+
+  it('mints no closure for a Critical re-voiced as a floor-stripped Suggestion', () => {
+    // The floor reroute strips a drafted Suggestion that RE-VOICES a
+    // previous Critical back to the deferral channel: the claim leaves the
+    // posting set by construction, never reaches the build, and is absent
+    // from `input.deferredSuggestions` — every join the mint has on it is
+    // blind, and the absence mints a closure in the very body whose
+    // deferral list still carries the claim. The reroute output must fold
+    // into the standing-claim join like the typed channel does.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: 'claim X' },
+          { id: 'R10-2', sev: 'C', file: 'src/f.ts', title: 'claim Y' },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/f.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      severityFloor: 'critical',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/f.ts', line: 5, body: '**[Critical]** gen 3' },
+        {
+          path: 'src/f.ts',
+          line: 5,
+          body: '**[Suggestion]** R10-1: claim X — now looks minor',
+        },
+      ],
+    });
+    // The reroute fired — the claim is gone from the posting set …
+    expect(r.floorEnforced).toEqual([1]);
+    expect(r.body).toContain('src/f.ts:5');
+    // … and still it mints no closure, while the genuinely vanished
+    // same-file Critical beside it does.
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/f.ts' },
+    ]);
+    // The sentinel's lineage is exactly the true one — the re-voiced claim
+    // is NOT in the chain's second generation.
+    expect(r.body).toContain('R9-1 → R10-2 → R11-1');
+    expect(r.body).not.toContain('R10-1/R10-2');
+  });
+
+  it('mints no closure for a long claim re-voiced as a floor-stripped Suggestion', () => {
+    // The reroute join's projection symmetry, at the boundary: the rerouted
+    // entry's title CARRIES the id (`R10-1: …`) by construction, so a window
+    // taken BEFORE the id is stripped is short by the prefix — the previous
+    // list's id-less, write-capped locator never meets it, and the
+    // still-standing claim mints a closure in the very body whose deferral
+    // line still carries it. The lead is chosen so the dash also straddles
+    // the cap boundary: the stored title's window ends mid-dash, so the
+    // entry side must cap BEFORE locating — the serializer's order — or the
+    // two windows disagree again at exactly this lead length.
+    const lead = `the re-voiced claim ${'x'.repeat(LEDGER_MAX_TITLE - 22)}`;
+    expect(lead).toHaveLength(LEDGER_MAX_TITLE - 2);
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/f.ts',
+            title: `${lead} — the original wording`,
+          },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/f.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      severityFloor: 'critical',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/f.ts', line: 5, body: '**[Critical]** gen 2' },
+        {
+          path: 'src/f.ts',
+          line: 5,
+          body: `**[Suggestion]** R10-1: ${lead} — now looks minor`,
+        },
+      ],
+    });
+    // The reroute fired — the claim is gone from the posting set …
+    expect(r.floorEnforced).toEqual([1]);
+    // … and still it mints no closure …
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+    // … and the sentinel carries no fabricated lineage for it: the false
+    // closure would have fired the chain over the round-10 generation.
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  // R4-1: the closure mint's claim-identity defense was an unbounded
+  // text-matching surface — one hand-rolled projection per re-posting
+  // channel, and the space of re-post shapes (moved paths, dash-less
+  // bodies, severity changes) cannot be enumerated and closed one entrance
+  // at a time. The class fix joins on EXPLICIT IDENTITY — the carried id a
+  // re-post channel's title may bear — and fails closed where the channel
+  // bears none: the round cannot prove what an id-less entry re-posts, so
+  // it certifies nothing. The witnesses below pin each demonstrated
+  // entrance, id-less (fail closed) and id-carrying (the exact join).
+
+  it('fails closed for a moved-path re-file the deferral channel carries without an id', () => {
+    // Entrance one: the relocated join keyed on (file, claim), so a claim
+    // re-filed at a MOVED path slipped every conjunct and minted a closure
+    // over the very body re-posting it open. The id-less re-file proves
+    // nothing about which claim it carries — neither one closes.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/auth.ts', title: 'auth bypass' },
+          { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/auth.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/moved/auth.ts',
+          line: 12,
+          source: 'test',
+          severity: 'Critical',
+          title: 'auth bypass',
+        },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+    // The fabricated closure would have fired the chain one link later —
+    // the sentinel reads the marker this round writes.
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints the vanished closure beside a moved-path re-file that carries its id', () => {
+    // The same entrance with identity PROVEN: the re-filed entry bears the
+    // original id, the mint joins on the id set, and the moved path costs
+    // nothing — while the truly vanished sibling still closes.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/auth.ts', title: 'auth bypass' },
+          { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/moved/auth.ts',
+          line: 12,
+          source: 'test',
+          severity: 'Critical',
+          title: 'R10-1: auth bypass',
+        },
+      ],
+    });
+    const marker = parseLedger(r.body)!;
+    expect(marker.findings.some((f) => f.sev === 'C')).toBe(true);
+    expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/auth.ts' }]);
+  });
+
+  it('fails closed for a dash-less claim re-voiced as a floor-stripped Suggestion', () => {
+    // Entrance two: the reroute join projected the WHOLE marker-stripped
+    // body collapsed to one line while the previous side projected only
+    // the claim line, so a dash-less claim line never met. The re-voice
+    // bears no id and the round cannot tell it from any vanished claim —
+    // nothing closes, and no fabricated lineage fires in the same round.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/f.ts',
+            title: 'dashless claim text',
+          },
+          { id: 'R10-2', sev: 'C', file: 'src/f.ts', title: 'claim Y' },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/f.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      severityFloor: 'critical',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/f.ts', line: 5, body: '**[Critical]** gen 3' },
+        {
+          path: 'src/f.ts',
+          line: 5,
+          body:
+            '**[Suggestion]** dashless claim text\n\n' +
+            'Failure scenario: it still fails.\n' +
+            'Suggested fix: do the other thing.',
+        },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([1]);
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints the vanished closure beside a dash-less re-voice that carries its id', () => {
+    // The same entrance with identity proven: the rerouted body leads with
+    // the carried id, so the claim stands by the id set no matter how the
+    // rest of the body collapses — and the true lineage is the only one
+    // the sentinel names.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/f.ts',
+            title: 'dashless claim text',
+          },
+          { id: 'R10-2', sev: 'C', file: 'src/f.ts', title: 'claim Y' },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/f.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      severityFloor: 'critical',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/f.ts', line: 5, body: '**[Critical]** gen 3' },
+        {
+          path: 'src/f.ts',
+          line: 5,
+          body:
+            '**[Suggestion]** R10-1: dashless claim text\n\n' +
+            'Failure scenario: it still fails.\n' +
+            'Suggested fix: do the other thing.',
+        },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([1]);
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/f.ts' },
+    ]);
+    expect(r.body).toContain('R9-1 → R10-2 → R11-1');
+    expect(r.body).not.toContain('R10-1/R10-2');
+  });
+
+  it('fails closed for a previous Critical re-voiced by a Suggestion-severity deferral entry', () => {
+    // Entrance three: the typed-deferral join filtered severity Critical
+    // before keying, so a Suggestion-severity entry re-voicing a previous
+    // Critical — the convergence-posture deferral flow — was invisible.
+    // Id-less, the round cannot tell which claim the entry carries, and
+    // the mint withholds everything.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: 'claim X' },
+          { id: 'R10-2', sev: 'C', file: 'src/f.ts', title: 'claim Y' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/f.ts',
+          line: 5,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'claim X',
+        },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+  });
+
+  it('mints the vanished closure beside a Suggestion-severity re-voice that carries its id', () => {
+    // The same entrance with identity proven — severity is irrelevant to
+    // the id join: a re-voice stands under whichever severity re-voices
+    // it, and only the truly vanished sibling closes.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: 'claim X' },
+          { id: 'R10-2', sev: 'C', file: 'src/f.ts', title: 'claim Y' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/f.ts',
+          line: 5,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'R10-1: claim X',
+        },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/f.ts' },
+    ]);
+  });
+
+  it('fails closed for a deferral re-file whose carried id is absent from the previous list', () => {
+    // The id join's membership leg: an entry bearing an id the recovered
+    // previous list never held — a renumbered or re-minted id — proves
+    // nothing about which claim it re-posts, and shields nothing: the
+    // still-standing claim it actually re-posts is absent from
+    // `postedIds`, from `repostedIds` (wrong id), and from
+    // `standingClaims`, so it mints a closure in the very round that
+    // re-posts it open. `buildLedger`'s `isCarry` applies exactly this
+    // membership test to the same class of model-written ids, calling a
+    // non-member a stray; the re-post join now agrees. The mint's gate
+    // already requires `carriedWorkList.complete`, so absence from the
+    // previous id space is provable whenever the mint runs.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/auth.ts',
+            title: 'auth bypass in the login flow',
+          },
+          { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/auth.ts',
+          line: 88,
+          source: 'test',
+          severity: 'Critical',
+          title: 'R11-1: auth bypass',
+        },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints the vanished closure beside a deferral re-file carrying a listed id', () => {
+    // The membership leg's control arm: an id the previous list DID hold
+    // still joins — the re-filed claim stands by it, and only the truly
+    // vanished sibling closes.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/auth.ts',
+            title: 'auth bypass in the login flow',
+          },
+          { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/auth.ts',
+          line: 88,
+          source: 'test',
+          severity: 'Critical',
+          title: 'R10-1: auth bypass in the login flow',
+        },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/auth.ts' },
+    ]);
+  });
+
+  it("names no re-minted re-post as the chain's fresh generation", () => {
+    // The fresh side's mirror of the mint's claim-identity join: a re-post
+    // whose readback lost the carried id is stamped with a FRESH id in the
+    // build, and the chain's fresh scan keyed on the id alone counts the
+    // still-standing claim as a new Critical — firing the divergence note
+    // over a claim the same body's work list says never left.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/f.ts', title: 'gen 2' },
+          {
+            id: 'R10-3',
+            sev: 'C',
+            file: 'src/f.ts',
+            title: 'the standing claim',
+          },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/f.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        {
+          path: 'src/f.ts',
+          line: 9,
+          body: '**[Critical]** the standing claim',
+        },
+      ],
+    });
+    // The marker's mint already defends the standing claim …
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/f.ts' },
+    ]);
+    // … and the chain reads the same evidence: its "fresh" generation is a
+    // re-mint, so the note stays silent.
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints no closure for a same-id re-post whose wording drifted', () => {
+    // The id-exact conjunct the locator joins cannot replace: a re-post
+    // that CARRIES its id keeps it in the build, but a redrafted claim
+    // line projects to a DIFFERENT locator — the claim-identity joins
+    // miss it, and only the id check keeps the still-standing entry out
+    // of the closures.
+    const r = composeReview({
+      planPath: coveredWithLedger({
+        v: 1,
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: 'claim Y' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        {
+          path: 'src/f.ts',
+          line: 3,
+          body: '**[Critical]** R10-1: claim Y, restated with new wording',
+        },
+      ],
+    });
+    const marker = parseLedger(r.body)!;
+    expect(marker.findings.some((f) => f.id === 'R10-1')).toBe(true);
+    expect(marker.closed).toBeUndefined();
+  });
+
+  it('mints a closure only for the Critical half of a mixed work list', () => {
+    // Suggestions are not tracked — Critical churn is the signal. Every
+    // sibling fixture's work list is Critical-only, which left the mint's
+    // `f.sev === 'C'` conjunct unwitnessed: a fixed Suggestion, or a
+    // `--severity-floor critical` round that moved one out of the posting
+    // set, would mint a closure, and two such rounds plus a fresh
+    // same-file Critical would fire the note over Suggestion churn.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+          { id: 'R10-3', sev: 'S', file: 'src/mechanism.ts', title: 'polish' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/mechanism.ts' },
+    ]);
+  });
+
+  it('mints nothing when only the Suggestion vanishes, and no note fires', () => {
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+          { id: 'R10-3', sev: 'S', file: 'src/mechanism.ts', title: 'polish' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        {
+          path: 'src/mechanism.ts',
+          line: 9,
+          body: '**[Critical]** R10-2: gen 2',
+        },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('caps a planted side-file closure list, keeping the NEWEST entries', () => {
+    // The side file is the same untrusted shape arriving by another route —
+    // and the route a planted `qwen-review-pr-<n>-prev-ledger.json` takes,
+    // bypassing the serializer's write-side cap. The read applies the count
+    // cap like its two siblings, or an unbounded valid `closed` array flows
+    // into the chain join and builds unbounded id arrays in the diagnosis.
+    // Sixty planted entries, cap fifty: the chain's first generation shows
+    // six ids and names the forty-four the cap shed — not the uncapped
+    // fifty-four. And WHICH fifty: the NEWEST — an oldest-kept cap renders
+    // the very same tail while shedding the end the chain exists to read.
+    const closed = Array.from({ length: LEDGER_MAX_CLOSED + 10 }, (_, i) => ({
+      r: 10,
+      id: `R9-${i}`,
+      f: 'src/a.ts',
+    }));
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [{ id: 'R10-1', sev: 'C', file: 'src/a.ts', title: 'x' }],
+        closed,
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 9, body: '**[Critical]** again' },
+      ],
+    });
+    expect(r.body).toContain('⚠️ Divergence:');
+    expect(r.body).toContain('… (+44)');
+    expect(r.body).not.toContain('… (+54)');
+    // The rendered ids themselves pin the keeping-the-NEWEST direction:
+    // `R9-10` is the first survivor of the cap, `R9-9` the first shed.
+    expect(r.body).toContain('R9-10');
+    expect(r.body).not.toContain('R9-9');
   });
 });
 
@@ -13704,7 +18981,7 @@ describe('the convergence census and the non-convergence finding', () => {
   });
 });
 
-describe('deferrableSuggestionsInline — the manifestation the posture-gap clause asserts', () => {
+describe('deferrableFindingsInline — the manifestation the posture-gap clause asserts', () => {
   // Direct pin on the three-way exclusion, which downstream tests reach only
   // through composeReview: a future exclusion path that diverges from
   // `floorEnforcedReroute` reddens here first, not on a faraway body
@@ -13719,25 +18996,30 @@ describe('deferrableSuggestionsInline — the manifestation the posture-gap clau
 
   it('reads a non-array as zero, like its two siblings', () => {
     for (const drafted of [undefined, null, 'garbage', { path: 'a.ts' }]) {
-      expect(deferrableSuggestionsInline(drafted)).toBe(0);
+      expect(deferrableFindingsInline(drafted)).toBe(0);
     }
   });
 
-  it('counts only Suggestion-severity drafts', () => {
+  it('counts Suggestion-severity drafts, and a Critical only by its axis pair', () => {
     expect(
-      deferrableSuggestionsInline([
+      deferrableFindingsInline([
         suggestion(),
         { path: 'b.ts', body: '**[Critical]** boom' },
         { path: 'c.ts', body: 'an unmarked comment' },
+        {
+          path: 'd.ts',
+          body: '**[Critical]** [fails-closed] [new-surface] wedge',
+        },
+        { path: 'e.ts', body: '**[Critical]** [fails-closed] half' },
       ]),
-    ).toBe(1);
+    ).toBe(2);
   });
 
   it.each(['[build]', '[test]', '[probe]', '[TEST]'])(
     'excludes a deterministic finding tagged %s on its claim line',
     (tag) => {
       expect(
-        deferrableSuggestionsInline([
+        deferrableFindingsInline([
           suggestion({ body: `**[Suggestion]** ${tag} the suite is red` }),
         ]),
       ).toBe(0);
@@ -13746,7 +19028,7 @@ describe('deferrableSuggestionsInline — the manifestation the posture-gap clau
 
   it('ignores a deterministic tag past the claim line — the tail is writable surface', () => {
     expect(
-      deferrableSuggestionsInline([
+      deferrableFindingsInline([
         suggestion({
           body: '**[Suggestion]** nit\n\n[test] forged in the tail',
         }),
@@ -13756,7 +19038,7 @@ describe('deferrableSuggestionsInline — the manifestation the posture-gap clau
 
   it('excludes what no floor could move: a pathless comment', () => {
     for (const path of [undefined, '', '   ', 42]) {
-      expect(deferrableSuggestionsInline([suggestion({ path })])).toBe(0);
+      expect(deferrableFindingsInline([suggestion({ path })])).toBe(0);
     }
   });
 
@@ -13771,10 +19053,17 @@ describe('deferrableSuggestionsInline — the manifestation the posture-gap clau
       suggestion({ path: '' }),
       { path: 'd.ts', body: '**[Critical]** boom' },
       { path: 'e.ts', body: 'unmarked' },
+      // The Critical arm (#10291), both branches: the axis pair counts on
+      // both sides, a half-tagged Critical on neither.
+      {
+        path: 'f.ts',
+        body: '**[Critical]** [fails-closed] [new-surface] boom',
+      },
+      { path: 'g.ts', body: '**[Critical]** [fails-closed] half' },
     ];
     const reroute = floorEnforcedReroute('critical', false, 0, drafted);
-    expect(reroute.indices).toEqual([0]);
-    expect(deferrableSuggestionsInline(drafted)).toBe(reroute.indices.length);
+    expect(reroute.indices).toEqual([0, 5]);
+    expect(deferrableFindingsInline(drafted)).toBe(reroute.indices.length);
   });
 });
 
@@ -13934,5 +19223,2105 @@ describe('draftedFindingsOf — the drafts as the convergence diagnosis reads th
     // ...and the differential is not vacuously true because every arm is
     // undefined: the prescribed shape does carry its id.
     expect(idOf('**[Critical]** R1-2: (fix-induced) x')).toBe('R1-2');
+  });
+});
+
+describe('composeReview — the decided-stop re-rule', () => {
+  let cwd0: string;
+  beforeEach(() => {
+    cwd0 = process.cwd();
+    process.chdir(dir);
+    // A sidecar stamped by one test must not vouch for the next: the fence
+    // now binds every stop compose (run id or not), so a leftover stamp is
+    // cross-test state.
+    for (const stem of ['local', 'other']) {
+      rmSync(join(dir, `.qwen/tmp/qwen-review-${stem}-stop.json`), {
+        force: true,
+      });
+    }
+  });
+  afterEach(() => {
+    process.chdir(cwd0);
+  });
+
+  function stopPlan(
+    opts: {
+      stop?: boolean;
+      ledger?: unknown[];
+      name?: string;
+      reason?: string;
+      cacheFile?: string;
+      supersededPaths?: string[];
+      prNumber?: number;
+      /** `false` leaves the sidecar to the test — the fence-shape tests. */
+      sidecar?: boolean;
+    } = {},
+  ): string {
+    const cachePath = join(dir, `review-cache-${opts.name ?? 'default'}.json`);
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        findings: opts.ledger ?? [
+          {
+            id: 'R1-1',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
+          {
+            id: 'R1-2',
+            severity: 'Critical',
+            status: 'fixed',
+            title: 'the patched hole',
+          },
+          {
+            id: 'R1-3',
+            severity: 'Suggestion',
+            status: 'open',
+            title: 'the open suggestion',
+          },
+        ],
+      }),
+    );
+    const p = join(dir, `stop-plan-${opts.name ?? 'default'}.json`);
+    writeFileSync(
+      p,
+      JSON.stringify({
+        chunks: [],
+        files: [],
+        diffLines: 0,
+        srcDiffLines: 0,
+        skippedFiles: [],
+        target: 'local',
+        cachePath: opts.cacheFile ?? cachePath,
+        ...(opts.prNumber !== undefined ? { prNumber: opts.prNumber } : {}),
+        ...(opts.supersededPaths
+          ? {
+              incremental: {
+                scope: { supersededPaths: opts.supersededPaths },
+              },
+            }
+          : {}),
+        ...(opts.stop === false
+          ? {}
+          : {
+              nothingToReview: {
+                reason: opts.reason ?? 'unchanged-since-last-round',
+              },
+            }),
+      }),
+    );
+    // The capture always leaves its sidecar beside a decided stop — the
+    // fence requires it with or without a published run id — so the plan
+    // fixture stamps the matching one (run-id-less, the interactive shape)
+    // unless the test owns the stamp itself.
+    if (opts.sidecar !== false && opts.stop !== false) {
+      stampStopSidecar({
+        name: opts.name,
+        reason: opts.reason,
+        cacheFile: opts.cacheFile,
+        supersededPaths: opts.supersededPaths,
+      });
+    }
+    return p;
+  }
+
+  function reRule(over: Record<string, unknown> = {}) {
+    return composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      env: ENV,
+      modelId: MODEL,
+      stopReRule: {
+        dispositions: [{ id: 'R1-1', ruling: 'still-stands' }],
+      },
+      bodyCriticals: ['R1-1: the mechanism still fires — re-read at HEAD'],
+      // Built ONLY when the test does not bring its own: the default plan
+      // stamps the default sidecar, which would overwrite the stamp a
+      // caller-built plan (or the test itself) just wrote.
+      ...('planPath' in over ? {} : { planPath: stopPlan() }),
+      ...over,
+    });
+  }
+
+  function stampStopSidecar(
+    opts: {
+      name?: string;
+      reason?: string;
+      /** Omitted entirely when not given — the interactive capture's shape. */
+      runId?: string;
+      target?: string;
+      cacheFile?: string;
+      supersededPaths?: string[];
+    } = {},
+  ): string {
+    const cachePath =
+      opts.cacheFile === ''
+        ? null
+        : (opts.cacheFile ??
+          join(dir, `review-cache-${opts.name ?? 'default'}.json`));
+    let findingsHash: string | null = null;
+    try {
+      if (cachePath !== null) {
+        findingsHash = createHash('sha256')
+          .update(readFileSync(cachePath))
+          .digest('hex');
+      }
+    } catch {
+      // A cache that does not exist stamps null — the fence re-hashes.
+    }
+    mkdirSync(join(dir, '.qwen/tmp'), { recursive: true });
+    const sidecarPath = join(
+      dir,
+      `.qwen/tmp/qwen-review-${opts.target ?? 'local'}-stop.json`,
+    );
+    const reason = opts.reason ?? 'unchanged-since-last-round';
+    writeFileSync(
+      sidecarPath,
+      JSON.stringify({
+        reason,
+        ...(opts.runId !== undefined ? { runId: opts.runId } : {}),
+        cachePath,
+        findingsHash,
+        // The capture stamps the split on every scope-emptied stop — the
+        // fence fails closed on its absence for that reason.
+        ...(reason === 'scope-emptied'
+          ? { supersededPaths: opts.supersededPaths ?? [] }
+          : {}),
+      }),
+    );
+    return sidecarPath;
+  }
+
+  it('composes REQUEST_CHANGES from a standing re-rule, floors skipped', () => {
+    const r = reRule();
+    expect(r.event).toBe('REQUEEST_CHANGES'.replace('EE', 'E'));
+    expect(r.body).toContain('Decided-stop re-rule');
+    expect(r.cappedBy).not.toContain('chunk-nobody-read');
+  });
+
+  it('a re-rule that cleared every blocker COMMENTS, never approves', () => {
+    // A `fixed` ruling is licensed only under clean-tree — the judged stop —
+    // so the cleared shape rides one; over the deduced stops the same
+    // disposition is refused below.
+    const r = reRule({
+      planPath: stopPlan({ name: 'cleared', reason: 'clean-tree' }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+      bodyCriticals: [],
+    });
+    expect(r.event).toBe('COMMENT');
+    // The opener may not certify a review that never ran: the cleared
+    // stop's COMMENT once opened 'Reviewed — no blockers.' two paragraphs
+    // above its own 'no review agents ran this round' disclosure.
+    expect(r.body).not.toContain('Reviewed — no blockers.');
+    expect(r.body).not.toMatch(/^Reviewed\./);
+    expect(r.body).toContain(
+      'Re-rule of standing findings — no new review ran.',
+    );
+  });
+
+  it('refuses a full-round plan wearing the flag', () => {
+    expect(() =>
+      reRule({ planPath: stopPlan({ stop: false, name: 'full' }) }),
+    ).toThrow(/no nothingToReview decision/);
+  });
+
+  it('renders the round-kind disclosure on its own line, never under "Not linted"', () => {
+    // The disclosure used to ride gateDisclosed, whose only renderer wraps
+    // every entry in "Not linted (tool limitation…)" — a round kind is not
+    // a linting gap.
+    const r = reRule();
+    expect(r.body).toContain('Decided-stop re-rule');
+    expect(r.body).not.toMatch(/Not linted[^\n]*Decided-stop re-rule/);
+  });
+
+  it('says why a cleared stop is a Comment — no dangling colon', () => {
+    // The stop demotion is the one APPROVE→COMMENT mover with empty
+    // cappedBy and no presubmit downgrade; joining the empty reason list
+    // printed 'an Approve was NOT available: ' over nothing.
+    const r = reRule({
+      planPath: stopPlan({ name: 'cleared-line', reason: 'clean-tree' }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+      bodyCriticals: [],
+    });
+    const line = verdictLine(r);
+    expect(line).toContain('reviews nothing new');
+    expect(line).not.toMatch(/NOT available:\s*$/);
+  });
+
+  it('binds a padded-id cache and its dispositions to the canonical claim id (#9940 review, round 28)', () => {
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'padded',
+        ledger: [
+          {
+            id: 'R01-1',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
+        ],
+      }),
+      stopReRule: { dispositions: [{ id: 'R01-1', ruling: 'still-stands' }] },
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    // Two spellings of one id are one disposition — refused as a duplicate.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'padded-dup' }),
+        stopReRule: {
+          dispositions: [
+            { id: 'R1-1', ruling: 'still-stands' },
+            { id: 'R01-1', ruling: 'still-stands' },
+          ],
+        },
+      }),
+    ).toThrow(/duplicate disposition for R01-1 \(R1-1\)/);
+  });
+
+  it('refuses a decided-stop plan composed WITHOUT stopReRule', () => {
+    // The mirror of the forged-flag refusal above: a stop plan walked
+    // through the regular floors would compose a non-blocking artifact,
+    // and `run.ts` reads any composed artifact as this round's completion
+    // — exit 0 over the ledger's standing blockers.
+    expect(() =>
+      composeReview({
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        planPath: stopPlan({ name: 'no-rerule' }),
+        env: ENV,
+        modelId: MODEL,
+      }),
+    ).toThrow(/composes only through its re-rule/);
+  });
+
+  it('refuses a null stopReRule with the designed refusal', () => {
+    expect(() => reRule({ stopReRule: null })).toThrow(
+      /must be an object carrying dispositions/,
+    );
+  });
+
+  it('refuses a ledger carrying two rows under one id', () => {
+    // Two open Criticals under ONE id collapse the set-based completeness
+    // check and the last-wins title/file maps into one disposition — the
+    // real blocker leaves the verdict lineage through its filler twin. A
+    // repeated id is an unreadable baseline like any other shape drift.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'dup-id',
+          ledger: [
+            {
+              id: 'R2-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'real blocker citing a.ts',
+            },
+            {
+              id: 'R2-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'filler citing b.ts',
+            },
+          ],
+        }),
+        stopReRule: { dispositions: [{ id: 'R2-1', ruling: 'still-stands' }] },
+        bodyCriticals: ['R2-1: filler citing b.ts'],
+      }),
+    ).toThrow(/ledger the plan names cannot be read/);
+  });
+
+  it('refuses the model-written census on a stop re-rule — no minted blocker', () => {
+    // No agents ran, so nothing this round could have measured a
+    // fresh/induced split — yet a supplied census satisfied the
+    // fresh <= reported cross-check through the carried-id re-assertions
+    // the grant itself proves are NOT fresh, and minted the
+    // non-convergence blocker over a round that measured nothing. Refused
+    // like the round-0 and context-unavailable unmeasurable states: the
+    // streak carries.
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, findings: [], round: 2, churnRounds: 1 }),
+    );
+    const ledger = [1, 2, 3, 4].map((i) => ({
+      id: `R1-${i}`,
+      severity: 'Critical',
+      status: 'open',
+      title: `standing blocker ${i}`,
+    }));
+    const r = reRule({
+      planPath: stopPlan({ name: 'census', ledger, prNumber: 8255 }),
+      stopReRule: {
+        dispositions: ledger.map((e) => ({ id: e.id, ruling: 'still-stands' })),
+      },
+      bodyCriticals: ledger.map((e) => `${e.id}: ${e.title}`),
+      convergence: { fresh: 4, induced: 2 },
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).not.toContain('is not converging');
+  });
+
+  it('refuses a ledger row whose status drifts from the vocabulary', () => {
+    // `status: 'oppn'` used to skip the row silently — the baseline shrank
+    // below what the ledger really held, the completeness check passed
+    // over the shrunken set, and the blocker never re-asserted. A drifted
+    // status is an unreadable baseline, exactly like a drifted severity.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'status-drift',
+          ledger: [{ id: 'R1-1', severity: 'Critical', status: 'oppn' }],
+        }),
+        stopReRule: { dispositions: [] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/ledger the plan names cannot be read/);
+  });
+
+  it('refuses a Critical riding the deferral channel on a stop re-rule', () => {
+    // The floor's reroute moved a drafted Critical out of the inline set
+    // BEFORE the grant read the count, and the moved entry posted in the
+    // deferral list without ever reaching the body↔disposition bind. Both
+    // deferred legs — the reroute's and the model's own — are refused: on
+    // a stop round nothing new was reviewed, so a deferral-channel
+    // Critical can only be an unbound claim.
+    expect(() =>
+      reRule({
+        severityFloor: 'critical',
+        draftedComments: [
+          {
+            path: 'src/new.ts',
+            line: 3,
+            body: '**[Critical]** [fails-closed] [new-surface] a brand-new blocker',
+          },
+        ],
+        criticalsInline: 1,
+      }),
+    ).toThrow(/a Critical rides the deferral channel/);
+    expect(() =>
+      reRule({
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          {
+            file: 'src/new.ts',
+            line: 3,
+            source: 'review',
+            severity: 'Critical',
+            direction: 'fails-closed',
+            baseline: 'new-surface',
+            title: 'a deferred blocker the bind cannot reach',
+          },
+        ],
+      }),
+    ).toThrow(/a Critical rides the deferral channel/);
+  });
+
+  it('does not let an unvouched relocated re-assertion’s source defeat the softening', () => {
+    // The relocated-leg twin of the tagged-unvouched test above: a
+    // title-less ledger entry re-asserted through the deferral channel
+    // with a deterministic `source` kept its deterministic credit, and an
+    // unverified blocker posted as an unsoftened REQUEST_CHANGES.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'reloc-unvouched',
+        ledger: [{ id: 'R1-1', severity: 'Critical', status: 'open' }],
+      }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'still-stands' }] },
+      bodyCriticals: [],
+      deferredSuggestions: [
+        {
+          file: 'src/wedge.ts',
+          line: 12,
+          source: 'test',
+          severity: 'Critical',
+          title: 'R1-1: the claim nobody recorded a title for',
+        },
+      ],
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('binds the relocated leg’s COLLAPSED title — a multi-line tail cannot smuggle', () => {
+    // First line matches the recorded claim verbatim; the tail carries a
+    // brand-new claim. A first-line-only readback passed it and the ledger
+    // builder recorded only line 1, so no future round would ever rule on
+    // the tail.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'reloc-tail',
+          reason: 'clean-tree',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+          ],
+        }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'still-stands' }] },
+        bodyCriticals: [],
+        deferredSuggestions: [
+          {
+            file: 'src/wedge.ts',
+            line: 12,
+            source: 'review',
+            severity: 'Critical',
+            title:
+              'R1-1: the mechanism still fires — re-read at HEAD\n\nA brand-new claim nobody verified',
+          },
+        ],
+      }),
+    ).toThrow(/re-asserted with content that departs/);
+  });
+
+  it('keeps a granted stop’s REQUEST_CHANGES past a presubmit downgrade flag', () => {
+    // No presubmit ran on a stop round (no agents did), so the flag can
+    // only be stale or forged — it was the one softening channel the grant
+    // did not machine-check, and it moved a certified-standing blocker to
+    // COMMENT under `--fail-on request-changes`.
+    const r = reRule({
+      presubmit: { downgradeRequestChanges: true, reasons: [] },
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.downgraded).toBe(false);
+  });
+
+  it('refuses when an open ledger Critical has no disposition', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'two-open',
+          ledger: [
+            { id: 'R1-1', severity: 'Critical', status: 'open' },
+            { id: 'R2-9', severity: 'Critical', status: 'open' },
+          ],
+        }),
+      }),
+    ).toThrow(/R2-9 has no disposition/);
+  });
+
+  it('refuses a disposition that matches no open ledger Critical', () => {
+    expect(() =>
+      reRule({
+        stopReRule: {
+          dispositions: [
+            { id: 'R1-1', ruling: 'still-stands' },
+            { id: 'R9-9', ruling: 'fixed' },
+          ],
+        },
+      }),
+    ).toThrow(/R9-9 matches no open ledger Critical/);
+  });
+
+  it('refuses still-stands without its body Critical, and fixed with one', () => {
+    const cleared = () =>
+      stopPlan({ name: 'body-check', reason: 'clean-tree' });
+    expect(() => reRule({ planPath: cleared(), bodyCriticals: [] })).toThrow(
+      /still-stands but no body Critical/,
+    );
+    expect(() =>
+      reRule({
+        planPath: cleared(),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+      }),
+    ).toThrow(/ruled fixed yet a body Critical/);
+  });
+
+  it('honours the runId fence when a parent published one', () => {
+    const env = { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' };
+    const planPath = stopPlan({ sidecar: false });
+    expect(() => reRule({ env, planPath })).toThrow(/no stop sidecar/);
+    // A run-id-less stamp is not this run's stamp either.
+    stampStopSidecar({});
+    expect(() => reRule({ env, planPath })).toThrow(/no stop sidecar/);
+    stampStopSidecar({ runId: 'run-X' });
+    const r = reRule({ env, planPath });
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('binds the sidecar with no published run id — the interactive fence', () => {
+    // No run id waives only the run-id equality: the sidecar itself, its
+    // reason, cache path, and findings hash still bind. Skipping the fence
+    // outright left every interactive grant gated by nothing but
+    // model-supplied inputs — a hand-authored plan + ledger with no capture
+    // behind them composed a floor-exempt verdict.
+    const planPath = stopPlan({ sidecar: false });
+    expect(() => reRule({ planPath })).toThrow(/no stop sidecar/);
+    // A stamp for a departed reason does not vouch either.
+    stampStopSidecar({ reason: 'clean-tree' });
+    expect(() => reRule({ planPath })).toThrow(/records reason/);
+    // The capture's own stamp binds — a stamped run id is ignored here.
+    stampStopSidecar({ runId: 'run-ELSEWHERE' });
+    expect(reRule({ planPath }).event).toBe('REQUEST_CHANGES');
+    stampStopSidecar({});
+    expect(reRule({ planPath }).event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a fixed ruling under unchanged-since-last-round — a byte-identical tree can only still-stand', () => {
+    expect(() =>
+      reRule({
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/R1-1 is ruled fixed under unchanged-since-last-round/);
+  });
+
+  it('refuses a fixed ruling under scope-emptied, admits superseded', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'emptied', reason: 'scope-emptied' }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/R1-1 is ruled fixed under scope-emptied/);
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'emptied-ok',
+        reason: 'scope-emptied',
+        ledger: [
+          {
+            id: 'R1-1',
+            severity: 'Critical',
+            status: 'open',
+            file: 'src/gone.ts',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
+        ],
+        supersededPaths: ['src/gone.ts'],
+      }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+      bodyCriticals: [],
+    });
+    expect(r.event).toBe('COMMENT');
+  });
+
+  it('machine-checks a superseded deduction against the published split', () => {
+    // `scope-emptied` licences `superseded` as a DEDUCED ruling, and the
+    // deduction's input is the capture's `supersededPaths`: a superseded
+    // whose cited file is still live — or whose row records no file at all
+    // — is a judgement wearing a deduction's licence, and retires a live
+    // blocker silently.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'emptied-live-file',
+          reason: 'scope-emptied',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              file: 'src/live.ts',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+          ],
+          supersededPaths: [],
+        }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/not in the plan's supersededPaths/);
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'emptied-no-file',
+          reason: 'scope-emptied',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+          ],
+          supersededPaths: ['src/gone.ts'],
+        }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/the ledger records no file for it/);
+  });
+
+  it('does not let an unvouched re-assertion’s tag defeat the unverified softening', () => {
+    // A title-less ledger entry binds on id alone; its re-assertion is
+    // unvouched, and on a granted stop no tool ran this round — so a
+    // `[test]` substring on it is prose, not provenance, and may not feed
+    // the deterministic exception that keeps a Request changes hard.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'tagged-unvouched',
+        ledger: [{ id: 'R1-1', severity: 'Critical', status: 'open' }],
+      }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'still-stands' }] },
+      bodyCriticals: ['R1-1: [test] the claim'],
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('keeps a vouched re-assertion’s deterministic tag', () => {
+    // The exception stays for entries the ledger's recorded title vouched
+    // for: they re-assert findings a full round verified, tag and all.
+    const title = '[test] the mechanism still fires — re-read at HEAD';
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'tagged-vouched',
+        ledger: [{ id: 'R1-1', severity: 'Critical', status: 'open', title }],
+      }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'still-stands' }] },
+      bodyCriticals: [`R1-1: ${title}`],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses an unknown stop reason — the grant fails closed', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'odd', reason: 'model-invented' }),
+      }),
+    ).toThrow(/unknown stop reason/);
+  });
+
+  it('a still-stands re-assertion composes when a fixed sibling id prefixes it', () => {
+    // The old substring check matched `R1-1` inside `R1-10: …` and threw
+    // 'ruled fixed yet a body Critical still carries its id' on this fully
+    // compliant re-rule — every retry unsatisfiable. Per-entry id binding
+    // reads each entry's OWN leading token.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'prefix',
+        reason: 'clean-tree',
+        ledger: [
+          { id: 'R1-1', severity: 'Critical', status: 'open' },
+          {
+            id: 'R1-10',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
+        ],
+      }),
+      stopReRule: {
+        dispositions: [
+          { id: 'R1-1', ruling: 'fixed' },
+          { id: 'R1-10', ruling: 'still-stands' },
+        ],
+      },
+      bodyCriticals: ['R1-10: the mechanism still fires — re-read at HEAD'],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a still-stands id present only inside another entry’s prose', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'prose',
+          reason: 'clean-tree',
+          ledger: [
+            { id: 'R2-5', severity: 'Critical', status: 'open' },
+            { id: 'R3-7', severity: 'Critical', status: 'open' },
+          ],
+        }),
+        stopReRule: {
+          dispositions: [
+            { id: 'R2-5', ruling: 'still-stands' },
+            { id: 'R3-7', ruling: 'still-stands' },
+          ],
+        },
+        bodyCriticals: ['R3-7: the gap remains — see R2-5 for context'],
+      }),
+    ).toThrow(/R2-5 is ruled still-stands but no body Critical/);
+  });
+
+  it('refuses a relocated Critical titled with an id ruled fixed', () => {
+    // The deferral channel's Criticals are relocated into the FINAL body
+    // set, so the cross-check must see them too: one titled with an id the
+    // re-rule judged fixed is exactly the blocker the grant would post
+    // against its own ruling.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'reloc', reason: 'clean-tree' }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+        bodyCriticals: [],
+        deferredSuggestions: [
+          {
+            file: 'src/wedge.ts',
+            line: 12,
+            source: 'review',
+            severity: 'Critical',
+            title: 'R1-1: the blocker the deferral channel carried',
+          },
+        ],
+      }),
+    ).toThrow(/R1-1 is ruled fixed yet a body Critical/);
+  });
+
+  it('refuses an invented body Critical carrying no ledger id', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'invented',
+          reason: 'clean-tree',
+          ledger: [{ id: 'R1-1', severity: 'Critical', status: 'fixed' }],
+        }),
+        stopReRule: { dispositions: [] },
+        bodyCriticals: ['a brand-new blocker no round ever ruled on'],
+      }),
+    ).toThrow(/must carry exactly one still-stands ledger id/);
+  });
+
+  it('refuses two body entries re-asserting one still-stands id', () => {
+    // Both entries verbatim-match the recorded title, so the content
+    // binding admits them and the COUNT check is what refuses: two
+    // re-assertions of one still-stands ruling would post the blocker
+    // twice.
+    expect(() =>
+      reRule({
+        bodyCriticals: [
+          'R1-1: the mechanism still fires — re-read at HEAD',
+          'R1-1: the mechanism still fires — re-read at HEAD',
+        ],
+      }),
+    ).toThrow(/exactly one body Critical/);
+  });
+
+  it('refuses inline Criticals on a granted stop round', () => {
+    expect(() => reRule({ criticalsInline: 1 })).toThrow(
+      /inline Criticals cannot ride a stop re-rule/,
+    );
+  });
+
+  it('refuses a (fix-induced) marking riding a stop re-rule', () => {
+    // The marking says NEW work under an old id; a stop re-rule posts only
+    // re-assertions of verified findings — nothing was reviewed this round
+    // that could have induced a fix-induced defect.
+    expect(() =>
+      reRule({
+        bodyCriticals: [
+          'R1-1 (fix-induced): the mechanism still fires — re-read at HEAD',
+        ],
+      }),
+    ).toThrow(/carries the \(fix-induced\) marking/);
+  });
+
+  it('refuses a plan whose supersededPaths depart from the stamped split', () => {
+    // The fence bound reason/cache/hash but not the split — a plan edited
+    // AFTER the capture stamped could blanket-supersede a live blocker
+    // through the one ruling channel the fence did not bind.
+    const planPath = stopPlan({
+      name: 'forged-split',
+      reason: 'scope-emptied',
+      ledger: [
+        {
+          id: 'R1-1',
+          severity: 'Critical',
+          status: 'open',
+          file: 'src/live.ts',
+          title: 'the mechanism still fires — re-read at HEAD',
+        },
+      ],
+      supersededPaths: [],
+    });
+    // The model edits the PLAN's split after the stamp; the sidecar still
+    // certifies the empty one.
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    plan['incremental'] = { scope: { supersededPaths: ['src/live.ts'] } };
+    writeFileSync(planPath, JSON.stringify(plan));
+    expect(() =>
+      reRule({
+        planPath,
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/depart from the split the capture stamped/);
+  });
+
+  it('consumes an interactive sidecar on grant — a replay is refused', () => {
+    // #10654's interim hardening: nothing else ever reads a no-run-id
+    // sidecar, and left on disk it re-licences the same plan on a later,
+    // moved tree. Consumed only after the FULL grant — a refusal leaves it
+    // for the corrected retry — and never under a published run id, where
+    // the parent still reads it for completion.
+    const planPath = stopPlan({ name: 'consume' });
+    expect(reRule({ planPath }).event).toBe('REQUEST_CHANGES');
+    expect(() => reRule({ planPath })).toThrow(/no stop sidecar/);
+    // A refused grant leaves the sidecar in place for the retry.
+    const planPath2 = stopPlan({ name: 'consume-retry' });
+    expect(() =>
+      reRule({
+        planPath: planPath2,
+        stopReRule: { dispositions: [] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/has no disposition/);
+    expect(reRule({ planPath: planPath2 }).event).toBe('REQUEST_CHANGES');
+    // Under a published run id the sidecar stays for the parent.
+    const env = { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' };
+    const planPath3 = stopPlan({ name: 'consume-gated', sidecar: false });
+    stampStopSidecar({ name: 'consume-gated', runId: 'run-X' });
+    expect(reRule({ planPath: planPath3, env }).event).toBe('REQUEST_CHANGES');
+    expect(reRule({ planPath: planPath3, env }).event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a sidecar that parses to null with the designed refusal', () => {
+    const planPath = stopPlan({ name: 'null-sidecar', sidecar: false });
+    mkdirSync(join(dir, '.qwen/tmp'), { recursive: true });
+    writeFileSync(join(dir, '.qwen/tmp/qwen-review-local-stop.json'), 'null');
+    expect(() => reRule({ planPath })).toThrow(/no stop sidecar/);
+  });
+
+  it('refuses a cache file that APPEARED after a null-hash stamp', () => {
+    // Null is a stampable value — no cache existed at the stop — and the
+    // fence must fail closed on a file appearing since, not read it as an
+    // admitted empty baseline.
+    const missing = join(dir, 'appearing-cache.json');
+    rmSync(missing, { force: true });
+    const planPath = stopPlan({ name: 'appearing', cacheFile: missing });
+    writeFileSync(
+      missing,
+      JSON.stringify({
+        findings: [{ id: 'R9-9', severity: 'Critical', status: 'open' }],
+      }),
+    );
+    expect(() =>
+      reRule({ planPath, stopReRule: { dispositions: [] }, bodyCriticals: [] }),
+    ).toThrow(/not the ones the capture stamped/);
+  });
+
+  it('refuses a sidecar stamped by a different run', () => {
+    const planPath = stopPlan({ sidecar: false });
+    stampStopSidecar({ runId: 'run-OLD' });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' }, planPath }),
+    ).toThrow(/no stop sidecar/);
+  });
+
+  it('refuses a stamped sidecar whose stem differs from the plan’s target', () => {
+    // The fence reads the ONE sidecar the plan's target names — a stamp
+    // vouching for another target (the old family scan admitted it) must
+    // not vouch for this re-rule.
+    const planPath = stopPlan({ sidecar: false });
+    stampStopSidecar({ runId: 'run-X', target: 'other' });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' }, planPath }),
+    ).toThrow(/no stop sidecar/);
+  });
+
+  it('refuses a same-stem sidecar whose reason departs from the plan’s', () => {
+    // The licence-bearing reason is the capture's: a plan claiming a
+    // wider-licencing reason than the sidecar recorded must not ride it.
+    const planPath = stopPlan({ sidecar: false });
+    stampStopSidecar({ runId: 'run-X', reason: 'clean-tree' });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' }, planPath }),
+    ).toThrow(/records reason/);
+  });
+
+  it('refuses a sidecar naming a different cache than the plan', () => {
+    const planPath = stopPlan({ sidecar: false });
+    stampStopSidecar({
+      runId: 'run-X',
+      cacheFile: join(dir, 'another-cache.json'),
+    });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' }, planPath }),
+    ).toThrow(/names a different cache/);
+  });
+
+  it('refuses when the ledger moved between capture and compose', () => {
+    const env = { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' };
+    const planPath = stopPlan({ name: 'moved' });
+    stampStopSidecar({ name: 'moved', runId: 'run-X' });
+    // Control: the untouched ledger composes.
+    expect(reRule({ env, planPath }).event).toBe('REQUEST_CHANGES');
+    // Tamper: a phantom open Critical appended after the stamp.
+    const cachePath = join(dir, 'review-cache-moved.json');
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as {
+      findings: unknown[];
+    };
+    cache.findings.push({
+      id: 'R9-9',
+      severity: 'Critical',
+      status: 'open',
+      title: 'phantom',
+    });
+    writeFileSync(cachePath, JSON.stringify(cache));
+    expect(() => reRule({ env, planPath })).toThrow(
+      /not the ones the capture stamped/,
+    );
+  });
+
+  it('refuses a plan carrying no usable target under a published run id', () => {
+    const planPath = stopPlan({ name: 'no-target' });
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    delete plan['target'];
+    writeFileSync(planPath, JSON.stringify(plan));
+    stampStopSidecar({ name: 'no-target', runId: 'run-X' });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' }, planPath }),
+    ).toThrow(/no usable target/);
+  });
+
+  it('refuses a superseded ruling that re-asserts its body Critical', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'superseded-body', reason: 'clean-tree' }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+      }),
+    ).toThrow(/R1-1 is ruled superseded yet a body Critical/);
+  });
+
+  it('refuses when the plan names no readable ledger', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'no-cache', cacheFile: '' }),
+      }),
+    ).toThrow(/ledger the plan names cannot be read/);
+  });
+
+  it('treats a cache that does not exist as an empty ledger, not an unreadable one', () => {
+    // A decided stop whose round never cached anything composes its
+    // no-event verdict over zero entries; the fence's findings hash binds
+    // the absence on the run-fenced path.
+    const planPath = stopPlan({
+      name: 'gone-cache',
+      cacheFile: join(dir, 'no-such-cache.json'),
+    });
+    expect(() => reRule({ planPath })).toThrow(
+      /R1-1 matches no open ledger Critical/,
+    );
+    const r = reRule({
+      planPath,
+      stopReRule: { dispositions: [] },
+      bodyCriticals: [],
+    });
+    expect(r.event).toBe('COMMENT');
+  });
+
+  it('refuses a duplicate disposition for one id', () => {
+    expect(() =>
+      reRule({
+        stopReRule: {
+          dispositions: [
+            { id: 'R1-1', ruling: 'still-stands' },
+            { id: 'R1-1', ruling: 'fixed' },
+          ],
+        },
+      }),
+    ).toThrow(/duplicate disposition for R1-1/);
+  });
+
+  it('refuses a cache whose findings field is present but not an array', () => {
+    // A parseable cache with a non-array `findings` is a baseline that
+    // could not be read, not an empty ledger: over it the completeness
+    // check would certify a ruling set of nothing.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'findings-not-array',
+          ledger: 'R1-1 open' as unknown as unknown[],
+        }),
+      }),
+    ).toThrow(/ledger the plan names cannot be read/);
+  });
+
+  it('refuses a ledger holding an entry that violates the schema', () => {
+    // The cache is model-written, so a drifting entry is an unreadable
+    // baseline, never a row to skip: skipping would shrink the open set
+    // below what the ledger really holds, and the grant would issue over
+    // Criticals it could not enumerate.
+    const drifts: unknown[][] = [
+      [{ id: 'R2-1', severity: 'critical', status: 'open' }],
+      [{ id: 'R2-1', severity: 'Critical' }],
+      [null],
+    ];
+    drifts.forEach((ledger, i) => {
+      expect(() =>
+        reRule({
+          planPath: stopPlan({ name: `schema-drift-${i}`, ledger }),
+        }),
+      ).toThrow(/ledger the plan names cannot be read/);
+    });
+  });
+
+  it('refuses a still-stands re-assertion whose content departs from the recorded title', () => {
+    // The id alone would let a brand-new claim wear a verified id's
+    // exemption; the content the ledger recorded under the id is the
+    // contract a re-assertion is bound by.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'fabricated',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+          ],
+        }),
+        bodyCriticals: ['R1-1: a brand-new claim nobody ever verified'],
+      }),
+    ).toThrow(/re-asserted with content that departs/);
+  });
+
+  it('a re-assertion the ledger recorded no title for loses the verify-floor exemption', () => {
+    // No recorded content to bind against — the re-assertion cannot be
+    // SHOWN, so its Critical rides the regular floor: disclosed, not
+    // blocking.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'untitled',
+        ledger: [{ id: 'R1-1', severity: 'Critical', status: 'open' }],
+      }),
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('refuses a prototype-chain stop reason with the designed refusal', () => {
+    // A model-written reason indexes the ruling table: a prototype key
+    // must fail closed as an UNKNOWN reason, not crash on the prototype's
+    // members.
+    for (const reason of [
+      '__proto__',
+      'constructor',
+      'toString',
+      'hasOwnProperty',
+    ]) {
+      expect(() =>
+        reRule({ planPath: stopPlan({ name: `proto-${reason}`, reason }) }),
+      ).toThrow(/unknown stop reason/);
+    }
+  });
+
+  it('composes a stop round holding two still-standing Criticals', () => {
+    // The shape the grant exists for — open Criticals accumulate across
+    // rounds and every one re-asserts. N=1 alone would let a
+    // first-entry-only binding loop ship green.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'two-standing',
+        ledger: [
+          {
+            id: 'R1-1',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
+          {
+            id: 'R2-5',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the second gap remains',
+          },
+        ],
+      }),
+      stopReRule: {
+        dispositions: [
+          { id: 'R1-1', ruling: 'still-stands' },
+          { id: 'R2-5', ruling: 'still-stands' },
+        ],
+      },
+      bodyCriticals: [
+        'R1-1: the mechanism still fires — re-read at HEAD',
+        'R2-5: the second gap remains',
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('R1-1');
+    expect(r.body).toContain('R2-5');
+  });
+
+  it('binds a re-assertion that opens with invisible residue', () => {
+    // The leading strip is what lets a ZWSP/BOM-class residue bind at
+    // all: without it the id readback fails and the grant refuses a
+    // valid re-rule.
+    const r = reRule({
+      bodyCriticals: [
+        '\u200bR1-1: the mechanism still fires — re-read at HEAD',
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a superseded ruling under unchanged-since-last-round', () => {
+    // A byte-identical tree replaced nothing, so `superseded` is a
+    // forged disposition there — the licence table's refusal cell.
+    expect(() =>
+      reRule({
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/R1-1 is ruled superseded under unchanged-since-last-round/);
+  });
+
+  it('checks the per-reason licence for every disposition, not only the first', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'emptied-two',
+          reason: 'scope-emptied',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+            {
+              id: 'R2-2',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the second mechanism',
+            },
+          ],
+        }),
+        stopReRule: {
+          dispositions: [
+            { id: 'R1-1', ruling: 'still-stands' },
+            { id: 'R2-2', ruling: 'fixed' },
+          ],
+        },
+        bodyCriticals: ['R1-1: the mechanism still fires — re-read at HEAD'],
+      }),
+    ).toThrow(/R2-2 is ruled fixed under scope-emptied/);
+  });
+
+  it('binds the relocated leg by content, not by id alone', () => {
+    // The deferral channel's relocated Criticals bind through the SAME
+    // content check as the ingested entries: one carrying a still-stands
+    // id with fabricated text is refused exactly like its own-leg twin.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'reloc-fabricated',
+          reason: 'clean-tree',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+          ],
+        }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'still-stands' }] },
+        bodyCriticals: [],
+        deferredSuggestions: [
+          {
+            file: 'src/wedge.ts',
+            line: 12,
+            source: 'review',
+            severity: 'Critical',
+            title: 'R1-1: a different claim entirely',
+          },
+        ],
+      }),
+    ).toThrow(/re-asserted with content that departs/);
+  });
+
+  it('refuses a cache that is not an object at all', () => {
+    // A bare-array cache file is unreadable the same way: the grant must
+    // not read it as an empty ledger. Re-stamped after the rewrite so the
+    // fence passes and the SHAPE check is what refuses.
+    const planPath = stopPlan({ name: 'not-object' });
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      cachePath: string;
+    };
+    writeFileSync(plan.cachePath, JSON.stringify([1, 2]));
+    stampStopSidecar({ name: 'not-object' });
+    expect(() => reRule({ planPath })).toThrow(
+      /ledger the plan names cannot be read/,
+    );
+  });
+});
+
+describe('Critical deferral by axes at the critical floor (#10291)', () => {
+  // The severity bit carried three decision axes, so past the convergence
+  // rounds everything that mattered still landed on the floor and the floor
+  // filtered nothing. Two of the axes now travel as fields, and the ONE
+  // combination the floor defers is `fails-closed` on `new-surface`:
+  // merging it certifies nothing false and regresses nothing. Every other
+  // Critical — the wrong-result direction, a regression, an unclassified
+  // one — posts exactly as before.
+  const crit = (over: Partial<DeferredEntry> = {}): DeferredEntry => ({
+    file: 'src/sparse.ts',
+    line: 12,
+    source: 'review',
+    severity: 'Critical',
+    direction: 'fails-closed',
+    baseline: 'new-surface',
+    title: 'sparse checkout wedges the incremental round',
+    ...over,
+  });
+  /** A covered plan at round 7 of an `auto` PR — the floor is critical. */
+  const atFloor = () => coveredWithLedger({ v: 1, round: 6, findings: [] });
+  // A function, not a literal: `ENV` is assigned per test, after collection.
+  const common = () => ({
+    env: ENV,
+    modelId: MODEL,
+    criticalsInline: 0,
+    suggestionsInline: 0,
+  });
+
+  it('defers a fails-closed, new-surface Critical — recorded, not requested, out of the work list', () => {
+    const r = composeReview({
+      ...common(),
+      planPath: atFloor(),
+      severityFloor: 'auto',
+      deferredSuggestions: [crit()],
+    });
+    // The posture's payoff on the shape #9659 oscillated on: a clean late
+    // round whose only Critical narrows a surface the base never had
+    // composes the APPROVE that ends the loop.
+    expect(r.event).toBe('APPROVE');
+    expect(r.cappedBy).toEqual([]);
+    expect(r.deferredCount).toBe(1);
+    expect(r.body).toContain('<!-- qwen-review-deferred -->');
+    // The line says what it is — a reader expects a deferral to be a
+    // Suggestion — and carries the axes that put it there.
+    expect(r.body).toContain(
+      'src/sparse.ts:12 — [review] Critical [fails-closed] [new-surface] sparse checkout wedges',
+    );
+    expect(r.body).toContain(
+      '1 Critical(s) among them are deferred by their axes',
+    );
+    expect(r.body).not.toContain('relocated from the deferral channel');
+    // Out of the work list like any deferral, and the anchor still rides.
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.findings).toEqual([]);
+    expect(ledger.sha).toBe('deadbeef00112233');
+    expect(verdictLine(r)).toContain(
+      '1 finding(s) deferred under the convergence posture',
+    );
+  });
+
+  it.each([
+    ['the wrong-result direction', { direction: 'certifies-falsely' as const }],
+    ['a regression', { baseline: 'regression' as const }],
+    ['a missing baseline', { baseline: undefined }],
+    ['an unclassified one', { direction: undefined, baseline: undefined }],
+  ])('relocates every other Critical — %s', (_label, over) => {
+    const r = composeReview({
+      ...common(),
+      planPath: atFloor(),
+      severityFloor: 'auto',
+      deferredSuggestions: [crit(over)],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.deferredCount).toBe(0);
+    expect(r.body).toContain('relocated from the deferral channel');
+    expect(parseLedger(r.body)?.findings.map((f) => f.sev)).toEqual(['C']);
+  });
+
+  // Every arm where the floor is not in effect — the age rule never defers
+  // a blocker. One test per arm: the plans share a directory, and the side
+  // file one arm writes must not be read by the round-1 arm.
+  it.each<[string, () => Partial<ComposeReviewInput>]>([
+    [
+      'round 1 under auto',
+      () => ({
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+        }),
+        severityFloor: 'auto',
+      }),
+    ],
+    [
+      'round 3 under auto — the code-age rounds',
+      () => ({
+        planPath: coveredWithLedger({ v: 1, round: 2, findings: [] }),
+        severityFloor: 'auto',
+      }),
+    ],
+    [
+      'the operator turned the posture off',
+      () => ({ planPath: atFloor(), severityFloor: 'suggestion' }),
+    ],
+    ['an absent floor', () => ({ planPath: atFloor() })],
+    [
+      'context-unavailable',
+      () => ({
+        planPath: atFloor(),
+        severityFloor: 'auto',
+        contextUnavailable: true,
+      }),
+    ],
+  ])(
+    'relocates a deferrable Critical when the floor is not in effect — %s',
+    (_label, over) => {
+      const r = composeReview({
+        ...common(),
+        deferredSuggestions: [crit()],
+        ...over(),
+      });
+      expect(r.deferredCount).toBe(0);
+      expect(r.body).toContain('relocated from the deferral channel');
+      // Relocation is salvage, never an unlicensed deferral.
+      expect(r.cappedBy).not.toContain('unlicensed-deferral');
+    },
+  );
+
+  it('an explicit critical floor licenses the deferral from round 1', () => {
+    const r = composeReview({
+      ...common(),
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      severityFloor: 'critical',
+      deferredSuggestions: [crit()],
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.deferredCount).toBe(1);
+  });
+
+  it('refuses a misspelled axis — the channel that un-posts a blocker is not guessed at', () => {
+    expect(() =>
+      composeReview(
+        base({
+          deferredSuggestions: [crit({ direction: 'fails-open' as never })],
+        }),
+      ),
+    ).toThrow(/direction must be one of certifies-falsely\|fails-closed/);
+    expect(() =>
+      composeReview(
+        base({
+          deferredSuggestions: [crit({ baseline: 'old-surface' as never })],
+        }),
+      ),
+    ).toThrow(/baseline must be one of regression\|new-surface/);
+  });
+
+  it('a deferred Critical that bears its id is a re-post, never a closure', () => {
+    // The successor-chain mint (#9905) reads absence from the work list as
+    // "ruled fixed" unless a re-post channel carries the id. A Critical the
+    // floor defers by its axes leaves the work list exactly like a
+    // Suggestion, so it must join the same way — or every deferred blocker
+    // would seed a fabricated lineage the sentinel fires on a round later.
+    const r = composeReview({
+      ...common(),
+      planPath: coveredWithLedger({
+        v: 1,
+        round: 6,
+        findings: [
+          {
+            id: 'R6-1',
+            sev: 'C',
+            file: 'src/sparse.ts',
+            title: 'sparse wedge',
+          },
+          { id: 'R6-2', sev: 'C', file: 'src/other.ts', title: 'fixed since' },
+        ],
+      }),
+      severityFloor: 'auto',
+      deferredSuggestions: [crit({ title: 'R6-1: sparse wedge' })],
+    });
+    expect(r.deferredCount).toBe(1);
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 7, id: 'R6-2', f: 'src/other.ts' },
+    ]);
+  });
+});
+
+describe('floor enforcement — the Critical arm (#10291)', () => {
+  // The backstop's Critical arm reads the claim line's axis tags the way it
+  // reads `[probe]`: the ONE combination the floor defers moves, and every
+  // untagged, half-tagged or self-contradicting Critical stays inline — the
+  // backstop never guesses a blocker out of the posting set.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'floor-axes-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = () => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255 }));
+    return p;
+  };
+  const sideFile = (round: number) =>
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round, findings: [] }),
+    );
+  const drafts = () => [
+    {
+      path: 'a.ts',
+      line: 1,
+      body: '**[Critical]** R6-1: [fails-closed] [new-surface] sparse checkout wedges the round\n\nOnly a sparse clone reaches it.',
+    },
+    {
+      path: 'b.ts',
+      line: 2,
+      body: '**[Critical]** [certifies-falsely] [new-surface] a decided stop over unread bytes',
+    },
+    {
+      path: 'c.ts',
+      line: 3,
+      body: '**[Critical]** [fails-closed] half-classified',
+    },
+    {
+      path: 'd.ts',
+      line: 4,
+      body: '**[Critical]** [fails-closed] [certifies-falsely] [new-surface] self-contradicting',
+    },
+    { path: 'e.ts', line: 5, body: '**[Critical]** untagged blocker' },
+    { path: 'f.ts', line: 6, body: '**[Suggestion]** a nit' },
+  ];
+  const compose = (over: Partial<ComposeReviewInput> = {}) =>
+    composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 5,
+      suggestionsInline: 1,
+      draftedComments: drafts(),
+      ...over,
+    });
+
+  it('moves the ONE combination the floor defers, and leaves every other Critical inline', () => {
+    const r = compose({ severityFloor: 'critical' });
+    expect(r.floorEnforced).toEqual([0, 5]);
+    expect(r.deferredCount).toBe(2);
+    expect(r.body).toContain(
+      '1 Suggestion(s) and 1 fails-closed, new-surface Critical(s) were drafted inline past the resolved critical posting floor',
+    );
+    // The moved record keeps the carried id at its head (the closure mint
+    // joins on it) and the WHOLE body, minus the tags the entry now
+    // carries as fields.
+    expect(r.body).toContain(
+      'a.ts:1 — [review] Critical [fails-closed] [new-surface] R6-1: sparse checkout wedges the round Only a sparse clone reaches it.',
+    );
+    expect(r.body).toContain(
+      '1 Critical(s) among them are deferred by their axes',
+    );
+    // The work list holds what posts, each Critical with the axes its claim
+    // line declared — and nothing else: a half-classified or contradictory
+    // claim records only what it settled.
+    expect(parseLedger(r.body)!.findings).toEqual([
+      {
+        id: 'R1-1',
+        sev: 'C',
+        d: 'c',
+        b: 'n',
+        file: 'b.ts',
+        line: 2,
+        title: 'a decided stop over unread bytes',
+      },
+      {
+        id: 'R1-2',
+        sev: 'C',
+        d: 'f',
+        file: 'c.ts',
+        line: 3,
+        title: 'half-classified',
+      },
+      {
+        id: 'R1-3',
+        sev: 'C',
+        b: 'n',
+        file: 'd.ts',
+        line: 4,
+        title: 'self-contradicting',
+      },
+      {
+        id: 'R1-4',
+        sev: 'C',
+        file: 'e.ts',
+        line: 5,
+        title: 'untagged blocker',
+      },
+    ]);
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(verdictLine(r)).toContain(
+      '2 of those moved by CLI floor enforcement',
+    );
+  });
+
+  it('leaves a tagged Critical inline before the floor engages — the tags classify, the floor decides', () => {
+    sideFile(4); // this review is round 5: the age rounds, no floor
+    const r = compose({ severityFloor: 'auto' });
+    expect(r.floorEnforced).toEqual([]);
+    // The classification still rides the work list for the next round.
+    expect(parseLedger(r.body)!.findings[0]).toMatchObject({
+      sev: 'C',
+      d: 'f',
+      b: 'n',
+      title: 'sparse checkout wedges the round',
+    });
+  });
+
+  it('a probe-confirmed Critical keeps its source when moved — no second verifier is owed', () => {
+    // A plan whose Step 4 never ran: a review-sourced deferral owes the
+    // verifier floor and caps, a probe-sourced one is pre-confirmed by its
+    // source and does not — the source the claim line declared travels
+    // with the moved record.
+    const moved = (tag: string) =>
+      composeReview({
+        planPath: coveredPlan(['reverse-audit']),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 1,
+        suggestionsInline: 0,
+        severityFloor: 'critical',
+        draftedComments: [
+          {
+            path: 'a.ts',
+            line: 1,
+            body: `**[Critical]** ${tag}[fails-closed] [new-surface] wedge`,
+          },
+        ],
+      });
+    const probe = moved('[probe] ');
+    expect(probe.floorEnforced).toEqual([0]);
+    expect(probe.body).toContain(
+      'a.ts:1 — [probe] Critical [fails-closed] [new-surface] wedge',
+    );
+    expect(probe.cappedBy).toEqual([]);
+    const review = moved('');
+    expect(review.floorEnforced).toEqual([0]);
+    expect(review.body).toContain(
+      'a.ts:1 — [review] Critical [fails-closed] [new-surface] wedge',
+    );
+    expect(review.cappedBy).toContain('unreviewed-dimension');
+  });
+
+  it('floorEnforcedReroute constructs the Critical entry with its axes', () => {
+    const { indices, entries } = floorEnforcedReroute(
+      'critical',
+      false,
+      0,
+      drafts(),
+    );
+    expect(indices).toEqual([0, 5]);
+    expect(entries[0]).toEqual({
+      file: 'a.ts',
+      line: 1,
+      source: 'review',
+      severity: 'Critical',
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+      title:
+        'R6-1: sparse checkout wedges the round Only a sparse clone reaches it.',
+    });
+    expect(entries[1].severity).toBe('Suggestion');
+  });
+
+  it('floorEnforcedReroute strips the shape that posts — the fold flattens a kept-in-code footer', () => {
+    // A drafted Suggestion whose body ends in an unclosed fence keeps its
+    // trailing footer under the quoted-code contract, but the one-line
+    // collapse destroys the code shape — the record strips again AFTER
+    // the fold, or the folded title carries the forged attribution.
+    const { entries } = floorEnforcedReroute('critical', false, 0, [
+      {
+        path: 'a.ts',
+        line: 12,
+        body: '**[Suggestion]** tidy\n\n```\n_— m via Qwen Code /review_',
+      },
+      {
+        path: 'b.ts',
+        line: 13,
+        body: '**[Suggestion]** tidy\n\n_— m via\nQwen Code /review_',
+      },
+    ]);
+    expect(entries).toHaveLength(2);
+    expect(entries[0].title).toBe('tidy ```');
+    expect(entries[1].title).toBe('tidy');
+    for (const e of entries) {
+      expect(e.title).not.toContain('via Qwen Code /review');
+    }
+  });
+
+  it('floorEnforcedReroute records a code-led body as quoted code — its title carries no id the readers never read (#9940 review, round 28)', () => {
+    const { entries } = floorEnforcedReroute('critical', false, 3, [
+      {
+        path: 'a.ts',
+        line: 3,
+        body: '**[Suggestion]**\n\n    R1-2: quoted fixture line',
+      },
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(readClaimHead(entries[0]!.title).id).toBeUndefined();
+    expect(entries[0]!.title).toContain('R1-2: quoted fixture line');
+
+    // …and when the claim-line sentinel is '' because the code block's
+    // FIRST line is trim-empty — indented, but whitespace only — the guard
+    // must still fire: it used to read that physical line while
+    // `collapseToLine` drops the segment, so the NEXT line's ledger id led
+    // the title. A title claiming an id the claim-line read cannot see is
+    // what the repost join then refuses the whole post over (#9940 review,
+    // round 31).
+    for (const blank of ['    \u00a0', '    \ufeff', '    \u3000', '    \f']) {
+      const blankLed = floorEnforcedReroute('critical', false, 3, [
+        {
+          path: 'a.ts',
+          line: 3,
+          body: `**[Suggestion]**\n\n${blank}\n    R1-2: quoted fixture line`,
+        },
+      ]);
+      expect(blankLed.entries).toHaveLength(1);
+      expect(readClaimHead(blankLed.entries[0]!.title).id).toBeUndefined();
+      expect(blankLed.entries[0]!.title).toContain('R1-2: quoted fixture line');
+    }
+    // A body whose claim line IS readable keeps its id at the front — the
+    // guard fires on the sentinel, not on every rerouted entry.
+    const readable = floorEnforcedReroute('critical', false, 3, [
+      { path: 'a.ts', line: 3, body: '**[Suggestion]** R1-2: a plain claim' },
+    ]);
+    expect(readClaimHead(readable.entries[0]!.title).id).toBe('R1-2');
+  });
+
+  it('deferrableFindingsInline counts the tagged Critical the floor would move — and only that one', () => {
+    expect(deferrableFindingsInline(drafts())).toBe(2);
+    expect(deferrableFindingsInline(drafts().slice(1, 5))).toBe(0);
+  });
+
+  it('buildLedger stamps the axes as fields and keeps them out of the title — wherever the tags sit in the head slot', () => {
+    const l = buildLedger(
+      3,
+      [
+        {
+          path: 'a.ts',
+          line: 1,
+          body: '**[Critical]** R2-1: (fix-induced) [fails-closed] [new-surface] wedge',
+        },
+        {
+          path: 'b.ts',
+          line: 2,
+          body: '**[Critical]** R2-2: [certifies-falsely] (fix-induced) lie',
+        },
+        {
+          path: 'c.ts',
+          line: 3,
+          body: '**[Suggestion]** [fails-closed] [new-surface] a tagged nit',
+        },
+      ],
+      [
+        '[regression] [certifies-falsely] body blocker',
+        // A tag past the head slot is prose: it classifies nothing and the
+        // title keeps it (#10291 review R1-19).
+        'body blocker that quotes [regression] [certifies-falsely]',
+      ],
+    );
+    expect(l.findings).toEqual([
+      {
+        id: 'R2-1',
+        sev: 'C',
+        d: 'f',
+        b: 'n',
+        file: 'a.ts',
+        line: 1,
+        title: 'wedge',
+      },
+      { id: 'R2-2', sev: 'C', d: 'c', file: 'b.ts', line: 2, title: 'lie' },
+      // Only a Critical is classified; a tagged Suggestion loses the tags
+      // and gains no field.
+      { id: 'R3-1', sev: 'S', file: 'c.ts', line: 3, title: 'a tagged nit' },
+      {
+        id: 'R3-2',
+        sev: 'C',
+        d: 'c',
+        b: 'r',
+        file: '(body)',
+        title: 'body blocker',
+      },
+      {
+        id: 'R3-3',
+        sev: 'C',
+        file: '(body)',
+        title: 'body blocker that quotes [regression] [certifies-falsely]',
+      },
+    ]);
+    // The `(fix-induced)` marking is still read behind a tag placed before
+    // it — the tags come off before the marking is anchored on.
+    expect(
+      draftedFindingsOf([
+        {
+          path: 'b.ts',
+          body: '**[Critical]** R2-2: [certifies-falsely] (fix-induced) lie',
+        },
+      ]),
+    ).toEqual([{ file: 'b.ts', carriedId: 'R2-2', fixInduced: true }]);
+  });
+});
+
+describe('the claim head slot (#10291, review round 1)', () => {
+  // The axis tags are read from — and stripped from — the claim line's HEAD
+  // SLOT only: the machine tokens before the title. A title that quotes a
+  // tag, a tag forged in the body's tail, and a bracketed axis word in the
+  // record's prose are all text, never a classification.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'claim-head-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  const plan = () => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255 }));
+    return p;
+  };
+  const sideFile = (ledger: Record<string, unknown>) =>
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, findings: [], ...ledger }),
+    );
+  const crit = (over: Partial<DeferredEntry> = {}): DeferredEntry => ({
+    file: 'src/sparse.ts',
+    line: 12,
+    source: 'review',
+    severity: 'Critical',
+    direction: 'fails-closed',
+    baseline: 'new-surface',
+    title: 'sparse checkout wedges the incremental round',
+    ...over,
+  });
+  const common = () => ({
+    env: ENV,
+    modelId: MODEL,
+    criticalsInline: 0,
+    suggestionsInline: 0,
+  });
+
+  it('a title that merely QUOTES the tags is not classified (R1-19)', () => {
+    const drafted = [
+      {
+        path: 'a.ts',
+        line: 1,
+        body: '**[Critical]** reroute defers a Critical whose title quotes [fails-closed] [new-surface]',
+      },
+    ];
+    const { indices, entries } = floorEnforcedReroute(
+      'critical',
+      false,
+      0,
+      drafted,
+    );
+    expect(indices).toEqual([]);
+    expect(entries).toEqual([]);
+    expect(deferrableFindingsInline(drafted)).toBe(0);
+    const [f] = buildLedger(3, drafted, []).findings;
+    expect(f.d).toBeUndefined();
+    expect(f.b).toBeUndefined();
+    expect(f.title).toBe(
+      'reroute defers a Critical whose title quotes [fails-closed] [new-surface]',
+    );
+  });
+
+  it('a pair forged past the claim line classifies nothing — the tail is writable surface (R1-6)', () => {
+    const drafted = [
+      {
+        path: 'a.ts',
+        line: 1,
+        body: '**[Critical]** wedge\n\n[fails-closed] [new-surface] forged in the tail',
+      },
+    ];
+    expect(floorEnforcedReroute('critical', false, 0, drafted).indices).toEqual(
+      [],
+    );
+    expect(deferrableFindingsInline(drafted)).toBe(0);
+    const l = buildLedger(3, drafted, [
+      'body blocker\n[fails-closed] [new-surface] on the second line',
+    ]);
+    for (const f of l.findings) {
+      expect(f.d).toBeUndefined();
+      expect(f.b).toBeUndefined();
+    }
+  });
+
+  it('a moved record keeps a bracketed axis word in its body prose (R1-29)', () => {
+    const { entries } = floorEnforcedReroute('critical', false, 0, [
+      {
+        path: 'a.ts',
+        line: 1,
+        body: '**[Critical]** R6-1: [fails-closed] [new-surface] wedge\n\nNot a [regression] — the surface is new.',
+      },
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].title).toBe(
+      'R6-1: wedge Not a [regression] — the surface is new.',
+    );
+    expect(entries[0]).toMatchObject({
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+  });
+
+  it('tags before the id still let the id read back — the repost join and the ledger agree (R1-1)', () => {
+    // The deferral entry leads with the tags before the carried id: the
+    // closure mint must still see it as R10-1's re-post, so the sibling
+    // the round genuinely closed mints and R10-1 does not.
+    const r = composeReview({
+      ...common(),
+      planPath: coveredWithLedger({
+        v: 1,
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/sparse.ts',
+            title: 'sparse wedge',
+          },
+          { id: 'R10-2', sev: 'C', file: 'src/other.ts', title: 'fixed since' },
+        ],
+      }),
+      severityFloor: 'auto',
+      deferredSuggestions: [
+        crit({ title: '[fails-closed] [new-surface] R10-1: sparse wedge' }),
+      ],
+    });
+    expect(r.deferredCount).toBe(1);
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/other.ts' },
+    ]);
+    // And the ledger builder reads the same placement on a drafted comment.
+    const [f] = buildLedger(
+      11,
+      [
+        {
+          path: 'a.ts',
+          line: 1,
+          body: '**[Critical]** [certifies-falsely] [new-surface] R10-1: still stands',
+        },
+      ],
+      [],
+    ).findings;
+    expect(f).toMatchObject({
+      id: 'R10-1',
+      d: 'c',
+      b: 'n',
+      title: 'still stands',
+    });
+  });
+
+  it('a half-classified relocated Critical keeps its settled axis on the line and in the marker (R1-2)', () => {
+    const r = composeReview({
+      ...common(),
+      planPath: coveredWithLedger({ v: 1, round: 6, findings: [] }),
+      severityFloor: 'auto',
+      deferredSuggestions: [
+        crit({
+          direction: 'certifies-falsely',
+          baseline: undefined,
+          title: 'R6-1: lie',
+        }),
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain(
+      '**[Critical]** `src/sparse.ts:12 — [review] Critical [certifies-falsely] R6-1: lie`',
+    );
+    const [f] = parseLedger(r.body)!.findings;
+    expect(f).toMatchObject({ sev: 'C', d: 'c' });
+    expect(f.b).toBeUndefined();
+  });
+
+  it('a mixed-class deferral list is partitioned per entry, both directions at once (R1-22)', () => {
+    const r = composeReview({
+      ...common(),
+      planPath: coveredWithLedger({ v: 1, round: 6, findings: [] }),
+      severityFloor: 'auto',
+      deferredSuggestions: [crit(), crit({ direction: 'certifies-falsely' })],
+    });
+    expect(r.deferredCount).toBe(1);
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(parseLedger(r.body)?.findings.map((f) => f.sev)).toEqual(['C']);
+    expect(r.body).toContain(
+      'Critical [fails-closed] [new-surface] sparse checkout',
+    );
+    expect(r.body).toContain('relocated from the deferral channel');
+  });
+
+  it('the signal-engaged floor licenses the deferral too — the third licence arm (R1-26)', () => {
+    // Round 5 under `auto`, ahead of the schedule, with the flat-trend
+    // streak at its bar: the floor is in effect and the Critical defers; a
+    // streak below the bar leaves the floor off and relocates it.
+    const at = (flatRounds: number) =>
+      composeReview({
+        ...common(),
+        planPath: coveredWithLedger({
+          v: 1,
+          round: 4,
+          findings: [],
+          posted: 1,
+          fresh: 1,
+          floor: 'c',
+          flatRounds,
+        }),
+        severityFloor: 'auto',
+        deferredSuggestions: [crit()],
+      });
+    const engaged = at(2);
+    expect(engaged.deferredCount).toBe(1);
+    expect(parseLedger(engaged.body)?.findings).toEqual([]);
+    const below = at(1);
+    expect(below.deferredCount).toBe(0);
+    expect(below.body).toContain('relocated from the deferral channel');
+  });
+
+  it('a deferred Critical renders ahead of the line cap, however many Suggestions moved (R1-27)', () => {
+    const drafted = Array.from({ length: 21 }, (_, i) => ({
+      path: `src/s${i}.ts`,
+      line: i + 1,
+      body: `**[Suggestion]** nit ${i}`,
+    }));
+    const r = composeReview({
+      ...common(),
+      planPath: coveredWithLedger({ v: 1, round: 6, findings: [] }),
+      severityFloor: 'auto',
+      suggestionsInline: 21,
+      draftedComments: drafted,
+      deferredSuggestions: [
+        crit({ title: 'R6-1: sparse checkout wedges the incremental round' }),
+      ],
+    });
+    expect(r.floorEnforced).toHaveLength(21);
+    expect(r.deferredCount).toBe(22);
+    const block = r.body.slice(r.body.indexOf('<!-- qwen-review-deferred -->'));
+    expect(block).toContain(
+      'src/sparse.ts:12 — [review] Critical [fails-closed] [new-surface] R6-1: sparse checkout',
+    );
+    expect(block).toContain('…and 2 more (see the run report)');
+    // The enforcement note counts what actually rendered: 19 of the 21
+    // moved Suggestions fit beside the Critical.
+    expect(r.body).toContain('19 listed, 2 more inside the overflow count');
+  });
+
+  it('the mechanism-health sentence is severity-neutral — an axes-pair Critical is a manifestation too (R1-13)', () => {
+    // The default configuration at round 6: the reporting reading folds the
+    // absent floor to `auto` and resolves critical, the enforcement
+    // backstop fails open, and the one drafted finding the floor would have
+    // deferred is a tagged Critical — no Suggestion posted at all.
+    sideFile({ round: 5, posted: 1, fresh: 1, floor: 'c' });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        {
+          path: 'a.ts',
+          line: 1,
+          body: '**[Critical]** [fails-closed] [new-surface] wedge',
+        },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).toContain('engaged in name and not in effect');
+    expect(r.body).toContain(
+      'findings the floor would have deferred posted inline anyway',
+    );
+    expect(r.body).not.toContain('Suggestion-level findings');
+    const untagged = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(untagged.body).not.toContain('engaged in name');
+  });
+});
+
+describe('the fix-induced marking behind a source tag (#10291, review round 2)', () => {
+  it('draftedFindingsOf and readClaimHead agree — the marking counts wherever it sits past the id', () => {
+    const body =
+      '**[Critical]** R3-2: [probe] (fix-induced) the fix opened a new gap';
+    expect(draftedFindingsOf([{ path: 'b.ts', body }])).toEqual([
+      { file: 'b.ts', carriedId: 'R3-2', fixInduced: true },
+    ]);
+    // And the ledger title keeps the source tag as the finding's own text.
+    expect(
+      buildLedger(4, [{ path: 'b.ts', line: 1, body }], []).findings[0],
+    ).toMatchObject({
+      id: 'R3-2',
+      title: '[probe] the fix opened a new gap',
+    });
+  });
+});
+
+describe('selection drift — report-only, end to end', () => {
+  /**
+   * `coveredPlan()` with the identity a capture command would have recorded
+   * for it, added in place and backdated again so the transcripts stay newer
+   * than the plan.
+   */
+  function coveredPlanWithIdentity(): string {
+    const p = coveredPlan();
+    const planJson = JSON.parse(readFileSync(p, 'utf8')) as {
+      chunks: Array<{ id: number; startLine: number; endLine: number }>;
+    };
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ...planJson,
+        selection: buildSelectionIdentity(
+          readFileSync(DIFF, 'utf8'),
+          planJson.chunks,
+        ),
+      }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    return p;
+  }
+
+  const compose = (p: string) =>
+    composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+
+  it('says nothing while the diff is what the plan was written over', () => {
+    const r = compose(coveredPlanWithIdentity());
+    expect(r.remediation.join(' ')).not.toContain('selection drift:');
+    expect(r.waivedFixes.join(' ')).not.toContain('selection drift:');
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('lands among the NOTEs, caps nothing, and moves neither event nor body', () => {
+    // The diff rewritten AFTER the agents ran — the failure the identity
+    // exists to catch — disclosed on the operator's channel, and wired to
+    // nothing that caps or posts.
+    const p = coveredPlanWithIdentity();
+    const before = compose(p);
+    writeFileSync(DIFF, `${readFileSync(DIFF, 'utf8')}+moved under the plan\n`);
+
+    const after = compose(p);
+    const line = after.waivedFixes.find((l) =>
+      l.startsWith('selection drift:'),
+    );
+    expect(line).toMatch(/diff file has changed/);
+    // A NOTE, not a FIX: the skill performs FIX lines as this round's
+    // repairs, and re-planning mid-round orphans the round's own evidence.
+    expect(after.remediation.join(' ')).not.toContain('selection drift');
+    expect(line).toContain('do not re-capture or re-plan mid-round');
+    // No direction: `compose-review` prints no coverage summary, and what
+    // follows its NOTE lines on stderr is VOLUME and CONVERGENCE.
+    expect(line).toContain('The coverage this round reports');
+    expect(line).not.toMatch(/coverage (below|above)/);
+    expect(after.cappedBy).toEqual([]);
+    expect(after.event).toBe('APPROVE');
+    expect(after.event).toBe(before.event);
+    expect(after.body).toBe(before.body);
   });
 });
