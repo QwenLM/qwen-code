@@ -1061,6 +1061,7 @@ describe('HTTP Managed Session store', () => {
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
+      allowInsecureHttp: true,
       fetchFn,
     });
     try {
@@ -1098,6 +1099,7 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         writerId: 'harness-a',
         writerToken: TOKEN_A,
+        allowInsecureHttp: true,
         fetchFn,
       });
       try {
@@ -1131,6 +1133,7 @@ describe('HTTP Managed Session store', () => {
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
+      allowInsecureHttp: true,
       fetchFn,
     });
     try {
@@ -1167,6 +1170,7 @@ describe('HTTP Managed Session store', () => {
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
+      allowInsecureHttp: true,
       fetchFn,
     });
     try {
@@ -1218,6 +1222,7 @@ describe('HTTP Managed Session store', () => {
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
+      allowInsecureHttp: true,
       fetchFn,
     });
     try {
@@ -1298,6 +1303,7 @@ describe('HTTP Managed Session store', () => {
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
+      allowInsecureHttp: true,
       fetchFn,
     });
     try {
@@ -1330,6 +1336,7 @@ describe('HTTP Managed Session store', () => {
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
+      allowInsecureHttp: true,
       requestTimeoutMs: 60,
       fetchFn,
     });
@@ -1373,6 +1380,7 @@ describe('HTTP Managed Session store', () => {
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
+      allowInsecureHttp: true,
       fetchFn,
     });
     try {
@@ -1411,6 +1419,7 @@ describe('HTTP Managed Session store', () => {
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
+      allowInsecureHttp: true,
       fetchFn,
     });
     try {
