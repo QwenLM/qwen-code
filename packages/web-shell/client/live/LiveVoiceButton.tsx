@@ -14,6 +14,7 @@ import {
   MonitorOffIcon,
 } from 'lucide-react';
 import type React from 'react';
+import { createPortal } from 'react-dom';
 import { useEffect, useRef, useState } from 'react';
 import type { DaemonLiveStatus } from '@qwen-code/sdk';
 import { Button } from '../components/ui/button';
@@ -91,12 +92,14 @@ function liveStateLabel(
 
 export function LiveVoiceButton({
   hideInactiveTrigger = false,
+  portalContainer,
   open,
   onOpenChange,
   onSupportedChange,
   onRequestFocusFallback,
 }: {
   hideInactiveTrigger?: boolean;
+  portalContainer?: HTMLElement | null;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   onSupportedChange?: (supported: boolean) => void;
@@ -282,26 +285,45 @@ export function LiveVoiceButton({
 
   return (
     <Dialog open={dialogOpen} onOpenChange={changeOpen}>
-      {(!hideInactiveTrigger || active) && (
-        <DialogTrigger asChild>
-          <button
-            type="button"
-            className={styles.trigger}
-            aria-label={label}
-            title={label}
-            data-active={active}
-            data-state={status?.state ?? 'unavailable'}
-            data-available={status?.available === true}
-          >
-            <LiveIcon />
-          </button>
-        </DialogTrigger>
-      )}
+      {portalContainer
+        ? createPortal(
+            <DialogTrigger asChild>
+              <Button
+                variant="ghost"
+                className="w-full justify-start gap-2"
+                data-active={active}
+              >
+                <LiveIcon />
+                {label}
+              </Button>
+            </DialogTrigger>,
+            portalContainer,
+          )
+        : (!hideInactiveTrigger || active) && (
+            <DialogTrigger asChild>
+              <button
+                type="button"
+                className={styles.trigger}
+                aria-label={label}
+                title={label}
+                data-active={active}
+                data-state={status?.state ?? 'unavailable'}
+                data-available={status?.available === true}
+              >
+                <LiveIcon />
+              </button>
+            </DialogTrigger>
+          )}
       <DialogContent
         data-web-shell-live-dialog
         className={styles.dialog}
         onCloseAutoFocus={(event) => {
-          if (hideInactiveTrigger && !active && onRequestFocusFallback) {
+          if (
+            !portalContainer &&
+            hideInactiveTrigger &&
+            !active &&
+            onRequestFocusFallback
+          ) {
             event.preventDefault();
             onRequestFocusFallback();
           }
