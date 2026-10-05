@@ -70,6 +70,13 @@ abstract class DelegatingBindingRepository implements RuntimeBindingRepository {
     }
 
     @Override
+    public RuntimeSessionRecord beginSessionRelease(
+            RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeSessionRecord expected) {
+        return delegate.beginSessionRelease(sessions, executions, expected);
+    }
+
+    @Override
     public RuntimeBindingRecord findOrCreate(RuntimeProvisionRequest request) {
         return delegate.findOrCreate(request);
     }

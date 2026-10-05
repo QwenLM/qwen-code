@@ -109,6 +109,8 @@ class HostedHarnessClientTest {
                                             .tenantId("tenant-a")
                                             .workspaceId("workspace-a")
                                             .writerId(BOOT_ID)
+                                            .writerToken("qwt1_"
+                                                    + "a".repeat(43))
                                             .leaseDuration(
                                                     Duration.ofSeconds(45))
                                             .build())
@@ -134,8 +136,82 @@ class HostedHarnessClientTest {
                 "\"workspaceId\":\"workspace-a\""));
         assertTrue(body.get().contains("\"writerId\":\"" + BOOT_ID
                 + "\""));
+        assertTrue(body.get().contains("\"writerToken\":\"qwt1_"
+                + "a".repeat(43) + "\""));
         assertTrue(body.get().contains("\"leaseDurationMs\":45000"));
         assertFalse(body.get().contains("cwd"));
+        assertThrows(IllegalArgumentException.class,
+                () -> ManagedSessionStoreConnection.builder()
+                        .baseUri(URI.create("https://store.example/"))
+                        .tenantId("tenant-a")
+                        .workspaceId("workspace-a")
+                        .writerId(BOOT_ID)
+                        .writerToken("short")
+                        .build());
+    }
+
+    @Test
+    void connectionOmitsUnsetOptionalCredentials() {
+        Map<String, Object> json = ManagedSessionStoreConnection.builder()
+                .baseUri(URI.create("https://store.example"))
+                .tenantId("tenant-a")
+                .workspaceId("workspace-a")
+                .writerId(BOOT_ID)
+                .build()
+                .toJson();
+        assertFalse(json.containsKey("writerToken"));
+        assertFalse(json.containsKey("allowInsecureHttp"));
+    }
+
+    @Test
+    void writerTokenLengthBoundsMatchTheSharedFixture() throws Exception {
+        var limits = com.alibaba.fastjson2.JSON
+                .parseObject(java.nio.file.Files.readString(locateFixture()))
+                .getJSONObject("limits");
+        int minimum = limits.getIntValue("minimumWriterTokenLength");
+        int maximum = limits.getIntValue("maximumWriterTokenLength");
+        assertTokenRejected("a".repeat(minimum - 1));
+        assertTokenAccepted("a".repeat(minimum));
+        assertTokenAccepted("a".repeat(maximum));
+        assertTokenRejected("a".repeat(maximum + 1));
+    }
+
+    private static void assertTokenAccepted(String token) {
+        ManagedSessionStoreConnection.builder()
+                .baseUri(URI.create("https://store.example"))
+                .tenantId("tenant-a")
+                .workspaceId("workspace-a")
+                .writerId(BOOT_ID)
+                .writerToken(token)
+                .build();
+    }
+
+    private static void assertTokenRejected(String token) {
+        assertThrows(IllegalArgumentException.class,
+                () -> ManagedSessionStoreConnection.builder()
+                        .baseUri(URI.create("https://store.example"))
+                        .tenantId("tenant-a")
+                        .workspaceId("workspace-a")
+                        .writerId(BOOT_ID)
+                        .writerToken(token)
+                        .build());
+    }
+
+    private static java.nio.file.Path locateFixture() {
+        java.nio.file.Path current = java.nio.file.Path
+                .of(System.getProperty("user.dir")).toAbsolutePath();
+        for (int depth = 0; depth < 6 && current != null; depth++) {
+            java.nio.file.Path candidate = current.resolve(java.nio.file.Path
+                    .of("packages", "core", "src", "managed-runtime",
+                            "contracts",
+                            "managed-session-store-v1.fixtures.json"));
+            if (java.nio.file.Files.isRegularFile(candidate)) {
+                return candidate;
+            }
+            current = current.getParent();
+        }
+        throw new AssertionError(
+                "cannot locate shared Managed Session store fixture");
     }
 
     @Test
