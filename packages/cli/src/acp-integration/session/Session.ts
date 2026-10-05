@@ -308,6 +308,7 @@ import {
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   USER_CANCEL_ABORT_REASON,
+  INTERRUPTED_PROMPT_ABORT_REASON,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
@@ -2894,7 +2895,9 @@ export class Session implements SessionContext {
         const pauseReason =
           turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
             ? GOAL_PAUSE_REASON_SESSION_DISPOSED
-            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON
+            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
+                turn.controller.signal.reason ===
+                  INTERRUPTED_PROMPT_ABORT_REASON
               ? GOAL_PAUSE_REASON_USER_INTERRUPT
               : managedSessionBlock
                 ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
@@ -2942,9 +2945,10 @@ export class Session implements SessionContext {
           }`,
         );
       }
-      const cancelledByUser =
+      const cancelledTurn =
         result?.stopReason === 'cancelled' &&
-        turn.controller.signal.reason === USER_CANCEL_ABORT_REASON;
+        (turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
+          turn.controller.signal.reason === INTERRUPTED_PROMPT_ABORT_REASON);
       // A turn preempted by a newly arrived user prompt is a handoff, not a
       // failure. `this.pendingPrompt` is the goal turn's own controller while
       // a goal turn is in flight, so a new prompt aborts it with
@@ -2962,7 +2966,7 @@ export class Session implements SessionContext {
       // update and the card, with no test able to see it.
       const pauseReason = supersededByNewPrompt
         ? undefined
-        : cancelledByUser
+        : cancelledTurn
           ? GOAL_PAUSE_REASON_USER_INTERRUPT
           : result?.stopReason === 'max_tokens'
             ? GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT
@@ -5070,7 +5074,9 @@ export class Session implements SessionContext {
           ? pendingSend.signal.reason
           : undefined;
       // Mirror the send-loop's controlled-cancellation contract: explicit
-      // user cancels and session disposal settle as `cancelled`. A
+      // user cancels, a forwarded infrastructure interruption (response
+      // close, prompt deadline, teardown) and session disposal settle as
+      // `cancelled`. A
       // successor-prompt abort does so only when the thrown error is the
       // abort itself; the send loop deliberately excludes NEW_PROMPT from
       // controlled cancellation so infrastructure failures are not hidden
@@ -5086,6 +5092,7 @@ export class Session implements SessionContext {
         !managedOutcomeUnknown &&
         (abortReason === USER_CANCEL_ABORT_REASON ||
           abortReason === SESSION_DISPOSE_ABORT_REASON ||
+          abortReason === INTERRUPTED_PROMPT_ABORT_REASON ||
           (abortReason === NEW_PROMPT_ABORT_REASON &&
             this.#isAbortError(error)));
       if (controlledAbort) {
@@ -7115,13 +7122,16 @@ export class Session implements SessionContext {
                   }
 
                   // Explicit user cancellation and session disposal are
-                  // controlled aborts. Other AbortErrors still surface so
+                  // controlled aborts, and so is the bridge's forwarded
+                  // interruption token. Other AbortErrors still surface so
                   // infrastructure failures are not hidden as cancellations.
                   const isControlledCancellation =
                     pendingSend.signal.aborted &&
                     (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
                       pendingSend.signal.reason ===
-                        SESSION_DISPOSE_ABORT_REASON);
+                        SESSION_DISPOSE_ABORT_REASON ||
+                      pendingSend.signal.reason ===
+                        INTERRUPTED_PROMPT_ABORT_REASON);
                   if (isControlledCancellation) {
                     this.todoStopGuard.suspend();
                     return { stopReason: 'cancelled' };
@@ -8256,7 +8266,8 @@ export class Session implements SessionContext {
         const isControlledCancellation =
           pendingSend.signal.aborted &&
           (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
-            pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON);
+            pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON ||
+            pendingSend.signal.reason === INTERRUPTED_PROMPT_ABORT_REASON);
         if (isControlledCancellation) {
           this.todoStopGuard.suspend();
           return {

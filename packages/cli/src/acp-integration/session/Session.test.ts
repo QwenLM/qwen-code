@@ -11382,6 +11382,30 @@ describe('Session', () => {
         },
       );
 
+      it('settles a forwarded interruption as a cancellation, not a failure', async () => {
+        const cancellation = new AbortController();
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createFailingStream('Request was aborted.', () => {
+            cancellation.abort('qwen:prompt-interrupted');
+          }),
+        );
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'unfinished' }],
+            },
+            trustedContext,
+            cancellation.signal,
+          ),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.state).toBe('cancelled');
+        expect(payload).not.toHaveProperty('cancelledAt');
+        expect(mockChat.markLastTurnCancelled).not.toHaveBeenCalled();
+      });
+
       it('records admission errors without a startedAt timestamp', async () => {
         mockConfig.assertCanStartTurn = vi
           .fn()
@@ -30919,6 +30943,55 @@ describe('Session', () => {
             kind: 'interrupted_prompt',
             canContinue: true,
           });
+        });
+
+        it('pauses a Goal turn interrupted by transport infrastructure', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'interrupted-by-transport',
+          };
+          const turnKey = `goal-runtime:${permit.turnId}`;
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          mockToolsWithTerminatingUpdateGoal();
+          let releaseRewrite!: () => void;
+          const waitForPendingRewrites = vi.fn(
+            () =>
+              new Promise<void>((resolve) => {
+                releaseRewrite = resolve;
+              }),
+          );
+          session.messageRewriter = {
+            interceptUpdate: vi.fn().mockResolvedValue(undefined),
+            flushTurn: vi.fn().mockResolvedValue(undefined),
+            waitForPendingRewrites,
+          } as unknown as Session['messageRewriter'];
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            );
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'finish the goal',
+          });
+          await vi.waitFor(() =>
+            expect(waitForPendingRewrites).toHaveBeenCalled(),
+          );
+          await session.cancelPendingPrompt('qwen:prompt-interrupted');
+          releaseRewrite();
+          await vi.waitFor(() =>
+            expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith(
+              expect.objectContaining({
+                action: 'pause',
+                reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+              }),
+            ),
+          );
+          expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
         });
 
         it('does not record a clean boundary when cancellation arrives during settlement flush', async () => {
