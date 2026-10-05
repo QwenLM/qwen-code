@@ -1828,6 +1828,9 @@ function actionIds(): string[] {
 
 async function requested(count = 1): Promise<string> {
   let requestId = '';
+  // The Action request commits first and its await_action checkpoint after
+  // it, each behind fsynced durable writes; on the coverage-enabled, shared
+  // post-merge CI runners the checkpoint lost vitest's 1s default (#13397).
   await vi.waitFor(
     async () => {
       const ids = actionIds();
@@ -1836,7 +1839,7 @@ async function requested(count = 1): Promise<string> {
       expect(session.authority.action(requestId)?.state).toBe('requested');
       expect((await checkpoint()).continuation.phase).toBe('await_action');
     },
-    { timeout: 5_000 },
+    { timeout: 10_000 },
   );
   return requestId;
 }

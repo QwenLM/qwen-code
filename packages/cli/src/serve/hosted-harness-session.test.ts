@@ -2734,7 +2734,9 @@ describe('Hosted Harness no-tool session', () => {
         response = value;
       });
       try {
-        await vi.waitFor(() => expect(configurationId).toBeDefined());
+        await vi.waitFor(() => expect(configurationId).toBeDefined(), {
+          timeout: 10_000,
+        });
         if (ending === 'cancel')
           expect(
             (
