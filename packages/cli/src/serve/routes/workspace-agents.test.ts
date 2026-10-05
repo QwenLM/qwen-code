@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import express, { type RequestHandler } from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { PROMPT_CANCEL_REASON_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import { Storage } from '@qwen-code/qwen-code-core';
 import {
   createThread,
@@ -227,7 +228,12 @@ it('cancels agent sessions before stranding runs when a workspace opts out', asy
   });
 
   await vi.waitFor(() => {
-    expect(bridge.cancelSession).toHaveBeenCalledWith('agent-session');
+    expect(bridge.cancelSession).toHaveBeenCalledWith('agent-session', {
+      sessionId: 'agent-session',
+      // Opting the workspace out is an infrastructure cancel, not user intent,
+      // so the child must not stamp the turn as user-cancelled.
+      _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+    });
   });
   expect(bridge.closeSession).toHaveBeenCalledWith('agent-session');
   await expect(readThread(workspaceCwd, created.id)).resolves.toMatchObject({
