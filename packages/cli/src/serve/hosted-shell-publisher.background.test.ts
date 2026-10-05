@@ -100,6 +100,10 @@ interface Rig {
   resources: DurableToolResultResourceStore;
   store: ToolResultSegmentStore;
   manifests: Set<ManagedSessionDurableRef>;
+  descriptor: {
+    readonly url: string;
+    readonly token: string;
+  };
 }
 
 /** An in-memory segment store behind the same durable-resource double. */
@@ -277,6 +281,7 @@ async function rig(): Promise<Rig> {
     resources,
     store: segmentStore(values),
     manifests: new Set<ManagedSessionDurableRef>(),
+    descriptor,
   };
 }
 
@@ -515,6 +520,125 @@ it('melds a monitor watch through one terminal step only after its start receipt
     stopReason: 'exited',
     run: { state: 'settled', execution: 'settled' },
   });
+});
+
+it('retries a finalize that failed once instead of caching the refusal forever', async () => {
+  const r = await rig();
+  const request = backgroundRequest(r.key, '1');
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-a',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  prepared.sink.setStarted(1);
+  await prepared.sink.write('stdout', Buffer.from('half a line\n'));
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  await prepared.sink.finish('stderr', true);
+  // One malformed finalize lands it: anything after used to re-answer
+  // that cached rejection forever, wedging this capture's terminal leg.
+  const failed = await fetch(r.descriptor.url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${r.descriptor.token}`,
+      'cache-control': 'no-store',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      operation: 'finalize',
+      executionCallId: 'execution-bg',
+      started: true,
+      failed: false,
+      process: {
+        exitCode: 'not-an-integer',
+        signal: null,
+        previewBytes: 0,
+      },
+      executionStatus: 'success',
+      responseParts: [],
+      previewTruncated: false,
+      error: null,
+    }),
+  });
+  expect(failed.status).toBeGreaterThanOrEqual(400);
+  const envelope = await prepared.sink.finalize('success', [], undefined);
+  expect(envelope.capture?.captureStatus).toBe('complete');
+  const record = parseChildRun(
+    session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
+  );
+  expect(record).toMatchObject({
+    stopReason: 'exited',
+    run: { state: 'settled', execution: 'settled' },
+  });
+});
+
+it('commits the tail an ownerless watch decoded before its record settles', async () => {
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.monitors.admit({
+    monitorId: 'monitor-tail',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'monitor-tail',
+    args: { command: 'du -sh .', description: 'du watch' },
+    maxEvents: 100,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+  });
+  await r.monitors.dispatchStarted('monitor-tail', BINDING);
+  const request = backgroundRequest(r.key, '1', true);
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'monitor-tail';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-m',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  await r.monitors.attach('monitor-tail', BINDING, { pid: 9 });
+  prepared.sink.setStarted(9);
+  // The watch ends before any observation arm registers: its decoded
+  // lines still commit — with the wake the end should raise too.
+  await prepared.sink.write('stdout', Buffer.from('last window\nvery last\n'));
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  const envelope = await prepared.sink.finalize('success', [], undefined);
+  await r.registry.accept(prepared.identity, envelope);
+  const record = parseMonitorRun(
+    session!.authority.extensionRecord('monitor_run', 'monitor-tail')!.record,
+  );
+  expect(record).toMatchObject({
+    observationSequence: 1,
+    notifiedThrough: 1,
+    stopReason: 'exited',
+    run: { state: 'settled', execution: 'settled' },
+  });
+  const wakes = session!.authority
+    .eventsInSequenceRange(1, session!.authority.committedSequence)
+    .filter((event) => event.kind === 'wake.requested');
+  expect(wakes).toHaveLength(1);
 });
 
 it('settles an unproven background end as a failure, never as an exit', async () => {

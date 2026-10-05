@@ -7,7 +7,7 @@
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
 import type { ManagedSessionInputRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import type { ManagedChildRunProcess } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
-import { monitorNotificationText } from './hosted-monitor-notification.js';
+import { buildMonitorNotificationInput } from './hosted-monitor-notification.js';
 
 // H3 of #12827: the observation loop of one admitted Monitor. The funnel
 // owns the record line; this loop owns time: stdout lines aggregate into one
@@ -298,7 +298,6 @@ export class HostedMonitorLoop {
     sequence: number,
     lines: readonly string[],
   ): Promise<ManagedSessionInputRequest> {
-    const inputId = `${this.monitorId}:notify:${sequence}`;
     const args = this.params?.args ?? {};
     const description =
       typeof args['description'] === 'string' && args['description'].trim()
@@ -306,32 +305,14 @@ export class HostedMonitorLoop {
         : typeof args['command'] === 'string'
           ? (args['command'] as string)
           : this.monitorId;
-    return {
-      inputId,
-      turnId: inputId,
-      source: 'monitor',
-      contentRef: await this.monitors.resourceStore.publish(
-        'managed-input',
-        Buffer.from(
-          JSON.stringify({
-            text: monitorNotificationText({
-              monitorId: this.monitorId,
-              toolUseId: this.params?.executionCallId ?? null,
-              description,
-              eventCount: sequence,
-              lines,
-            }),
-          }),
-          'utf8',
-        ),
-      ),
-      deadline: null,
-      admissionRef: await this.monitors.resourceStore.publish(
-        'managed-admission',
-        Buffer.from('{}', 'utf8'),
-      ),
-      wakeReason: 'input',
-    };
+    return buildMonitorNotificationInput({
+      monitorId: this.monitorId,
+      toolUseId: this.params?.executionCallId ?? null,
+      description,
+      sequence,
+      lines,
+      resourceStore: this.monitors.resourceStore,
+    });
   }
 
   private async settle(

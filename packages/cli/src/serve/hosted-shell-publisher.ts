@@ -23,6 +23,7 @@ import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
+import { buildMonitorNotificationInput } from './hosted-monitor-notification.js';
 import type { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import {
   ResourceToolResultSegmentStore,
@@ -92,6 +93,7 @@ export class HostedShellPublisher {
     private readonly assertWritable: () => Promise<void>,
     private readonly childRuns?: HostedChildRunSession,
     private readonly monitors?: HostedMonitorSession,
+    private readonly onNotification?: () => void,
   ) {}
 
   async start(): Promise<ShellPublisherDescriptor> {
@@ -355,11 +357,25 @@ export class HostedShellPublisher {
       if (entry.finalizing) return entry.finalizing;
       if (entry.background) {
         entry.finalizing = this.finalizeBackground(entry, body, String(id));
-        entry.envelope = await entry.finalizing;
+        try {
+          entry.envelope = await entry.finalizing;
+        } catch (cause) {
+          // A rejected finalize must never pin the capture: a retry after
+          // the cause resolved reads a clean settle attempt, not this
+          // permanent refusal. (attach-before-finalize exits once cached a
+          // failed stage and so wedged the shell's whole terminal leg.)
+          entry.finalizing = undefined;
+          throw cause;
+        }
         return entry.envelope;
       }
       entry.finalizing = this.finalize(entry, body);
-      entry.envelope = await entry.finalizing;
+      try {
+        entry.envelope = await entry.finalizing;
+      } catch (cause) {
+        entry.finalizing = undefined;
+        throw cause;
+      }
       return entry.envelope;
     }
     if (body['operation'] === 'accept') {
@@ -686,7 +702,7 @@ export class HostedShellPublisher {
       background.recordDomain === 'monitor_run'
         ? background.observer
         : undefined;
-    if (observer && background.recordDomain === 'monitor_run') {
+    if (background.recordDomain === 'monitor_run') {
       background.remainder += background.decoder.end();
     }
     if (observer && background.remainder.length > 0) {
@@ -701,13 +717,71 @@ export class HostedShellPublisher {
         // committed before anything can settle the record, and its
         // commit failures surface here instead of dying in the void.
         await exit;
-      } else if (evidence === null) {
-        await this.monitors?.settleFailed(executionCallId, {
-          stopReason: 'watch_failed',
-          started: true,
-        });
+      } else if (this.monitors) {
+        // An end whose observation arm never attached still commits the
+        // tail its stream already decoded: the final window lands as its
+        // own observation revision with its own wake input, and only then
+        // does the record settle. An empty end takes no observation, as
+        // the Legacy emit-at-zero shape held.
+        const record = this.monitors.record(executionCallId);
+        if (record === undefined) {
+          throw new Error(
+            `The monitor_run record for ${executionCallId} is missing.`,
+          );
+        }
+        const windowLines = background.remainder
+          .split('\n')
+          .filter((line) => line.length > 0);
+        background.remainder = '';
+        if (windowLines.length > 0) {
+          const args = JSON.parse(
+            (
+              await this.monitors.resourceStore.read(record.commandRef)
+            ).toString('utf8'),
+          ) as Record<string, unknown>;
+          const description =
+            typeof args['description'] === 'string' &&
+            args['description'].trim()
+              ? (args['description'] as string)
+              : typeof args['command'] === 'string'
+                ? (args['command'] as string)
+                : executionCallId;
+          const input = await buildMonitorNotificationInput({
+            monitorId: executionCallId,
+            toolUseId: record.run.executionCallId,
+            description,
+            sequence: record.observationSequence + 1,
+            lines: windowLines,
+            resourceStore: this.monitors.resourceStore,
+          });
+          await this.monitors.observe(
+            executionCallId,
+            { lines: windowLines },
+            { input },
+          );
+          this.onNotification?.();
+        }
+        const last =
+          windowLines.length > 0
+            ? record.observationSequence + 1
+            : record.observationSequence;
+        if (last >= record.maxEvents) {
+          await this.monitors.settleQuiet(executionCallId, 'max_events');
+        } else if (evidence === null) {
+          await this.monitors.settleFailed(executionCallId, {
+            stopReason: 'watch_failed',
+            started: true,
+          });
+        } else {
+          await this.monitors.settleQuiet(executionCallId, 'exited');
+        }
       } else {
-        await this.monitors?.settleQuiet(executionCallId, 'exited');
+        // A monitor_run capture is admitted only where its Session record
+        // exists, so a finalize without the Session handle can never
+        // settle it — refuse loudly rather than skipping the settle.
+        throw new Error(
+          `The monitor_run record for ${executionCallId} has no monitor session to settle it.`,
+        );
       }
       return envelope;
     }

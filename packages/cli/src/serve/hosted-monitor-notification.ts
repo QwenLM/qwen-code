@@ -9,6 +9,8 @@ import {
   stripDisplayControlChars,
   truncateNotificationLabel,
 } from '@qwen-code/qwen-code-core/utils/terminalSafe.js';
+import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type { ManagedSessionInputRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 
 // H3 of #12827: the task-notification envelope a Managed Monitor's wake
 // delivers to its turn, in the exact handle/tag shape the Legacy Monitor
@@ -53,4 +55,50 @@ export function monitorNotificationText(params: {
     '</task-notification>',
   );
   return parts.join('\n');
+}
+
+/**
+ * One notification input per accepted observation, exactly as the Legacy
+ * wake emitted: the envelope rides the observation revision's own
+ * transaction, and the embedded wake scheduler delivers it as an ordinary
+ * text turn. A tail window an ownerless end leaves behind commits through
+ * the same shape, not silently with the settled record.
+ */
+export async function buildMonitorNotificationInput(params: {
+  readonly monitorId: string;
+  readonly toolUseId: string | null;
+  readonly description: string;
+  readonly sequence: number;
+  readonly lines: readonly string[];
+  readonly resourceStore: {
+    publish: (kind: string, bytes: Buffer) => Promise<ManagedSessionDurableRef>;
+  };
+}): Promise<ManagedSessionInputRequest> {
+  const inputId = `${params.monitorId}:notify:${params.sequence}`;
+  return {
+    inputId,
+    turnId: inputId,
+    source: 'monitor',
+    contentRef: await params.resourceStore.publish(
+      'managed-input',
+      Buffer.from(
+        JSON.stringify({
+          text: monitorNotificationText({
+            monitorId: params.monitorId,
+            toolUseId: params.toolUseId,
+            description: params.description,
+            eventCount: params.sequence,
+            lines: params.lines,
+          }),
+        }),
+        'utf8',
+      ),
+    ),
+    deadline: null,
+    admissionRef: await params.resourceStore.publish(
+      'managed-admission',
+      Buffer.from('{}', 'utf8'),
+    ),
+    wakeReason: 'input',
+  };
 }

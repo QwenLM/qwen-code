@@ -1080,6 +1080,7 @@ export class HostedWorkspaceToolTurn {
           this.shell!.assertWritable,
           this.childRuns,
           this.monitors,
+          () => this.shell?.monitorWakeKick?.(),
         );
         this.bindingGeneration = await this.broker.registerPublisher(
           await this.publisher.start(),
