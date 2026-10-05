@@ -105,18 +105,20 @@ class ManagedActionStoreTest {
                 TENANT, sessionId, ACTION_ID,
                 "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
                         + "\"expiresAt\":9999999999999}");
-        // The first delivery of the answer failed past its retry budget.
+        // The first delivery of the answer failed past its retry budget,
+        // with the budget-exempt watermark left over from answered attempts.
         jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
                         + " session_id, operation_id, operation_kind,"
                         + " actor_digest, idempotency_key, request_digest,"
                         + " state, admission_stage, delivery_state,"
                         + " session_status_before, receipt_id, attempt_count,"
-                        + " available_at, created_at, updated_at,"
+                        + " budget_exempt_attempt, available_at, created_at,"
+                        + " updated_at,"
                         + " completed_at, action_id, response_json,"
                         + " error_code) VALUES (?, ?, 'op-action',"
                         + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
                         + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
-                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
+                        + " 'ACTIVE', 'rcpt-1', 10, 7, 0, 0, 0, 0, ?, ?,"
                         + " 'action_response_delivery_failed')",
                 TENANT, sessionId, ACTION_ID,
                 "{\"optionId\":\"allow\",\"inputRevision\":1,"
@@ -133,6 +135,10 @@ class ManagedActionStoreTest {
         assertThat(admission.operation().state()).isEqualTo("PENDING");
         assertThat(admission.operation().deliveryState()).isEqualTo("PENDING");
         assertThat(admission.operation().attemptCount()).isEqualTo(0);
+        // The watermark resets with the attempt count: the re-admitted
+        // delivery is a fresh answer whose budget must be able to terminate
+        // (review round 7, R7-3).
+        assertThat(admission.operation().budgetExemptAttempt()).isEqualTo(0);
         assertThat(admission.operation().receiptId()).isNull();
         assertThat(admission.operation().failureCode()).isNull();
         // The re-admitted row is deliverable again — no recovery path could

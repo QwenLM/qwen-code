@@ -184,11 +184,13 @@ class OperationRetryTerminalStateTest {
         }
     }
 
-    // The blocked reschedule is restricted to the shapes the recovery scan
-    // re-drives from BLOCKED: a delete admitted on an ACTIVE Session is not
-    // one of them, so its writer wait stays a pending retry.
+    // A delete admitted on an ACTIVE Session waits on the live writer like
+    // a close, and past the budget the wait is published the same way: the
+    // row reads recovery_blocked with session_close_writer_live instead of
+    // staying byte-identical to a healthy pending retry, and the recovery
+    // scan re-drives it (review round 6, R6-2).
     @Test
-    void anActiveSessionDeleteWaitsOnTheWriterAsAPendingRetry() {
+    void anActiveSessionDeletePublishesTheWriterWaitPastTheBudget() {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
@@ -214,12 +216,14 @@ class OperationRetryTerminalStateTest {
         try {
             coordinator.dispatch("tenant", "session", "op-delete");
 
-            verify(store).retryOperation(eq("tenant"), eq("session"),
-                    eq("op-delete"), anyString(), eq(1L), anyLong(),
-                    eq(true));
-            verify(store, never()).blockLifecycleOperation(anyString(),
-                    anyString(), anyString(), anyString(), anyLong(),
-                    anyString(), anyLong(), anyBoolean());
+            verify(store).blockLifecycleOperation(eq("tenant"), eq("session"),
+                    eq("op-delete"), anyString(), eq(1L),
+                    eq("session_close_writer_live"), anyLong(), eq(true));
+            verify(store, never()).retryOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyLong());
+            verify(store, never()).retryOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyLong(),
+                    anyBoolean());
             verify(store, never()).failOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyString());
         } finally {
@@ -657,10 +661,10 @@ class OperationRetryTerminalStateTest {
     }
 
     // The terminal-record fallback keeps the blocked shape for a CLOSE. The
-    // recovery scan re-drives BLOCKED rows for CLOSE and for a DELETE
-    // admitted on a closed Session, but a blocked code can only come from
-    // settle()'s workspace-close path, which the closed-Session delete never
-    // enters — so CLOSE is the only shape that needs the blocked fallback.
+    // recovery scan re-drives every blocked lifecycle shape, and a blocked
+    // code can only come from settle()'s workspace-close path, which the
+    // closed-Session delete never enters — so CLOSE is the shape that
+    // exercises the fallback.
     @Test
     void blockedCloseFallsBackToBlockedWhenTheTerminalRecordFails() {
         AgentStateStore store = mock(AgentStateStore.class);
@@ -796,8 +800,10 @@ class OperationRetryTerminalStateTest {
         coordinator.dispatch("tenant", "session", "op-action");
 
         verify(harness).resolveAction("tenant", "session", "action-1", body);
+        // The answer is recorded budget-exempt: the wait is the
+        // projection's, so it must not consume the retry budget.
         verify(sessions).retryOperation(eq("tenant"), eq("session"),
-                eq("op-action"), anyString(), eq(3L), anyLong());
+                eq("op-action"), anyString(), eq(3L), anyLong(), eq(true));
         verify(actions, never()).complete(any(), anyString(),
                 eq("action_response_delivery_failed"), any(), anyBoolean(),
                 anyLong());
@@ -842,7 +848,53 @@ class OperationRetryTerminalStateTest {
 
         verify(harness).resolveAction("tenant", "session", "action-1", body);
         verify(sessions).retryOperation(eq("tenant"), eq("session"),
-                eq("op-action"), anyString(), eq(3L), anyLong());
+                eq("op-action"), anyString(), eq(3L), anyLong(), eq(true));
+        verify(actions, never()).complete(any(), anyString(),
+                eq("action_response_delivery_failed"), any(), anyBoolean(),
+                anyLong());
+    }
+
+    // The answered fact is durable in the row's budget-exempt watermark, not
+    // a per-attempt local: when an earlier attempt was answered, a later
+    // attempt whose Harness call fails is still waiting on the projection,
+    // so it reschedules budget-exempt instead of recording a delivery
+    // failure for a decision the Harness already committed (review round 7,
+    // R7-3).
+    @Test
+    void aLaterFailureAfterAnAnsweredAttemptStaysBudgetExempt()
+            throws Exception {
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        // attemptCount == budgetExemptAttempt == 10: every attempt so far
+        // was budget-exempt, i.e. the Harness already answered.
+        OperationRecord claimed = new OperationRecord("tenant", "session",
+                "op-action", OperationKind.ACTION_RESPONSE, "digest",
+                "RUNNING", "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner",
+                3, 10, null, 10);
+        JsonNode body = actionBody();
+        when(sessions.claimOperation(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(actions.response("tenant", "session", "op-action")).thenReturn(
+                new ManagedActionStore.Response("action-1", body, null,
+                        null));
+        when(actions.find("tenant", "session", "action-1")).thenReturn(
+                Optional.of(new ManagedActionStore.Action("action-1",
+                        "requested", body, null, null)));
+        DaemonHttpException unavailable = mock(DaemonHttpException.class);
+        when(unavailable.getStatusCode()).thenReturn(503);
+        doThrow(unavailable).when(harness).resolveAction("tenant", "session",
+                "action-1", body);
+
+        ActionResponseCoordinator coordinator = new ActionResponseCoordinator(
+                sessions, actions, harness,
+                CoordinatorTestSupport.directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        coordinator.dispatch("tenant", "session", "op-action");
+
+        verify(sessions).retryOperation(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), eq(3L), anyLong(), eq(true));
         verify(actions, never()).complete(any(), anyString(),
                 eq("action_response_delivery_failed"), any(), anyBoolean(),
                 anyLong());

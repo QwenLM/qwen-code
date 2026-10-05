@@ -177,9 +177,10 @@ public interface AgentStateStore {
 
     /**
      * Retries the operation, and when {@code budgetExempt} is true records
-     * the attempt as a wait on an external condition (a live journal writer
-     * or a stale Harness view) that must not consume the terminal retry
-     * budget. The attempt count still grows, so the dispatch backoff keeps
+     * the attempt as a wait on an external condition (a live journal writer,
+     * a stale Harness view, or the projection lag after the Harness answered
+     * an action response) that must not consume the terminal retry budget.
+     * The attempt count still grows, so the dispatch backoff keeps
      * stretching.
      */
     default void retryOperation(String tenantId, String sessionId,

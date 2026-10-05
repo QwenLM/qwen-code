@@ -252,12 +252,12 @@ Session and drains its own Runtime binding.
 
 ### 4.6 Operation fields
 
-| Field             | Values                                                                                                                          |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `status`          | `pending` when admitted, `running` from the first claim, `completed` at the end, `failed` when the retry budget is spent (4.5). |
-| `admission_stage` | `java_durable`; at completion `harness_confirmed` if the Harness that held the Session acknowledged its close.                  |
-| `delivery_state`  | `pending` between attempts, `leased` during one, `confirmed` at the terminal state, `blocked` while recovery-blocked.           |
-| `receipt_id`      | An opaque `rcpt_` receipt that Java issues when the operation reaches a terminal state.                                         |
+| Field             | Values                                                                                                                                                                                                     |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`          | `pending` when admitted, `running` from the first claim, `completed` at the end, `failed` when the retry budget is spent (4.5).                                                                            |
+| `admission_stage` | `java_durable`; at completion `harness_confirmed` if the Harness that held the Session acknowledged its close.                                                                                             |
+| `delivery_state`  | `pending` between attempts, `leased` during one, `confirmed` at the terminal state, `blocked` while recovery-blocked.                                                                                      |
+| `receipt_id`      | An opaque `rcpt_` receipt that Java issues when the operation reaches a terminal state.                                                                                                                    |
 | `failure_code`    | The settle failure that spent the budget, or the code a `recovery_blocked` operation waits on: the workspace-close refusal, or `session_close_writer_live` while a Harness still holds the journal writer. |
 
 The Harness that held the Session is the one whose boot ID the Session

@@ -113,8 +113,16 @@ public class ActionResponseCoordinator {
             if (settled(op, actions.response(tenant, session, operation))) {
                 return;
             }
-            if (op.attemptCount() >= dispatch.getMaxOperationRetries()
-                    && !harnessAnswered) {
+            // The answer is durable, not per-attempt: an answered attempt
+            // reschedules budget-exempt, and the row's watermark keeps every
+            // later attempt of the same answer waiting on the projection
+            // rather than the Harness — so a mid-lag failure after an
+            // answered attempt never records action_response_delivery_failed
+            // for a decision the Harness already committed.
+            boolean answered = harnessAnswered || op.budgetExemptAttempt() > 0;
+            if (!answered
+                    && op.attemptCount() - op.budgetExemptAttempt()
+                            >= dispatch.getMaxOperationRetries()) {
                 LOG.error(
                         "Action response exhausted retries tenant={} session={} operation={} attempts={}",
                         tenant,
@@ -138,13 +146,24 @@ public class ActionResponseCoordinator {
                             dispatch.getRetryInitialDelay(),
                             dispatch.getRetryMaxDelay(),
                             op.attemptCount());
-            sessions.retryOperation(
-                    tenant,
-                    session,
-                    operation,
-                    owner,
-                    op.claimGeneration(),
-                    Math.addExact(clock.millis(), delay));
+            if (answered) {
+                sessions.retryOperation(
+                        tenant,
+                        session,
+                        operation,
+                        owner,
+                        op.claimGeneration(),
+                        Math.addExact(clock.millis(), delay),
+                        true);
+            } else {
+                sessions.retryOperation(
+                        tenant,
+                        session,
+                        operation,
+                        owner,
+                        op.claimGeneration(),
+                        Math.addExact(clock.millis(), delay));
+            }
             LOG.debug(
                     "Action response will retry operation={} failure={}",
                     operation,

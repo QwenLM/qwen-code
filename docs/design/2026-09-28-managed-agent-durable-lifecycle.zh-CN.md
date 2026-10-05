@@ -104,12 +104,12 @@ delete 不动共享 Workspace：worker 只关闭该 Session 并排空它自己�
 
 ### 4.6 operation 字段
 
-| 字段              | 取值                                                                                                 |
-| ----------------- | ---------------------------------------------------------------------------------------------------- |
-| `status`          | 受理时为 `pending`，首次认领起为 `running`，结束时为 `completed`，重试预算耗尽时为 `failed`（4.5）。 |
-| `admission_stage` | `java_durable`；完成时，如果持有该 Session 的 Harness 确认了关闭，则为 `harness_confirmed`。         |
-| `delivery_state`  | 两次尝试之间为 `pending`，尝试期间为 `leased`，到达终态时为 `confirmed`，恢复受阻时为 `blocked`。    |
-| `receipt_id`      | operation 到达终态时由 Java 签发的不透明回执 `rcpt_…`。                                              |
+| 字段              | 取值                                                                                                                                                                     |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `status`          | 受理时为 `pending`，首次认领起为 `running`，结束时为 `completed`，重试预算耗尽时为 `failed`（4.5）。                                                                     |
+| `admission_stage` | `java_durable`；完成时，如果持有该 Session 的 Harness 确认了关闭，则为 `harness_confirmed`。                                                                             |
+| `delivery_state`  | 两次尝试之间为 `pending`，尝试期间为 `leased`，到达终态时为 `confirmed`，恢复受阻时为 `blocked`。                                                                        |
+| `receipt_id`      | operation 到达终态时由 Java 签发的不透明回执 `rcpt_…`。                                                                                                                  |
 | `failure_code`    | 耗尽预算的 settle 失败原因，或 `recovery_blocked` 的 operation 正在等待的失败码：workspace 关闭拒绝，或 Harness 仍持有 journal writer 时的 `session_close_writer_live`。 |
 
 持有该 Session 的 Harness，是该 Session 所记录的 boot ID 对应的那个 Harness：Turn 分发会记录它挂接的 boot，而 rename 只在尚未记录任何 boot 时才记录，因此只经过 rename 之后，记录可能是较旧的 boot，这时 close 虽已封存，仍报告为 `java_durable`。新的 archive、删除已关闭或已归档的 Session，以及关闭或删除从未被任何 Harness 持有的 Session，完成时都保持 `java_durable`：没有任何 Harness 确认过该 Session 的任何事。Harness 因重启被替换的 Session 同样如此：新的 Harness 回答它没有持有该 Session，operation 要等旧进程的 writer 租约过期之后才完成，而那个 writer 没有被封存。V17 之前受理、迁移过来的 archive 是在活动 Session 上受理的，因此它会先关闭该 Session，可能以 `harness_confirmed` 完成（4.10）。workspace 结算被 Runtime Broker 持续拒绝的 close 在预算耗尽前处于 `recovery_blocked`，`delivery_state` 为 `blocked`，`failure_code` 为拒绝的原因。不会产生 `cancelled` 状态。预算终结的 operation 读作 `failed` 并带 `failure_code`，因此放弃与已结算的 close 总是可区分的。

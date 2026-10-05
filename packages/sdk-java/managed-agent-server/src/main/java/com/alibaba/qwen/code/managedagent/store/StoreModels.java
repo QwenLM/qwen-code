@@ -96,9 +96,11 @@ public final class StoreModels {
      * A durable lifecycle operation. {@code sessionStatusBefore} is the
      * Session status when it was admitted; only an operation admitted on an
      * active Session closes the Harness. {@code budgetExemptAttempt} is the
-     * attempt count through which failures waited on an external condition
-     * (a live journal writer, or Java's stale view of a restarted Harness)
-     * and therefore never consumed the terminal retry budget.
+     * attempt count through which attempts never consumed the terminal retry
+     * budget: failures that waited on an external condition (a live journal
+     * writer, or Java's stale view of a restarted Harness) and, for an
+     * action response, every attempt once the Harness has answered — the
+     * decision is committed then and only Java's projection lag remains.
      */
     public record OperationRecord(String tenantId, String sessionId,
             String operationId, OperationKind kind, String requestDigest,

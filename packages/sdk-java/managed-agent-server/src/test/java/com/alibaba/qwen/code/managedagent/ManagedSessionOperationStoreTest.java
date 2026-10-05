@@ -210,21 +210,50 @@ class ManagedSessionOperationStoreTest {
         assertThat(brokerBlocked.budgetExemptAttempt()).isEqualTo(3);
         assertThat(brokerBlocked.failureCode())
                 .isEqualTo("workspace_close_identity_unverified");
+
+        // A blocked DELETE is re-driven regardless of the Session status it
+        // was admitted on: a delete admitted on an ACTIVE Session waits on
+        // the same live writer and publishes the same recovery_blocked row
+        // (review round 6, R6-2).
+        String activeDeleteSession = store.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create-active-delete", "digest",
+                "qwen-code", null, null, List.of(), null).sessionId();
+        String deleteId = store.beginOperation(TENANT, activeDeleteSession,
+                OperationKind.DELETE, "", "delete", "digest").operation()
+                .operationId();
+        assertThat(operation(store, activeDeleteSession, deleteId)
+                .sessionStatusBefore()).isEqualTo("ACTIVE");
+        OperationRecord deleteClaim = store.claimOperation(TENANT,
+                activeDeleteSession, deleteId, "worker",
+                Duration.ofSeconds(30)).orElseThrow();
+        store.blockLifecycleOperation(TENANT, activeDeleteSession, deleteId,
+                "worker", deleteClaim.claimGeneration(),
+                "session_close_writer_live", 0, true);
+        assertThat(targets(store)).contains(deleteId);
+        assertThat(store.claimOperation(TENANT, activeDeleteSession,
+                deleteId, "replacement", Duration.ofSeconds(30)))
+                .isPresent();
     }
 
+    // A delete admitted on an ACTIVE Session publishes its writer wait like
+    // a close, so the recovery scan must re-drive it from BLOCKED: blocking
+    // the shape would otherwise strand it forever (review round 6, R6-2).
     @Test
-    void blockedActiveDeletionRemainsUnavailable() {
+    void blockedActiveDeletionIsRedriven() {
         ManagedAgentStore store = store();
         String sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest",
                 "qwen-code", null, null, List.of(), null).sessionId();
         var admitted = store.beginOperation(TENANT, sessionId, OperationKind.DELETE, "", "delete", "digest");
+        assertThat(admitted.operation().sessionStatusBefore()).isEqualTo("ACTIVE");
         var claim = store.claimOperation(TENANT, sessionId, admitted.operation().operationId(),
                 "worker", Duration.ofMinutes(1)).orElseThrow();
         store.blockLifecycleOperation(TENANT, sessionId, claim.operationId(), "worker", claim.claimGeneration(),
-                "workspace_close_identity_unverified", now.get());
-        assertThat(targets(store)).isEmpty();
-        assertThat(store.claimOperation(TENANT, sessionId, claim.operationId(), "replacement", Duration.ofMinutes(1))).isEmpty();
-        assertThat(operation(store, sessionId, claim.operationId()).state()).isEqualTo("RECOVERY_BLOCKED");
+                "session_close_writer_live", now.get(), true);
+        OperationRecord blocked = operation(store, sessionId, claim.operationId());
+        assertThat(blocked.state()).isEqualTo("RECOVERY_BLOCKED");
+        assertThat(targets(store)).containsExactly(claim.operationId());
+        assertThat(store.claimOperation(TENANT, sessionId, claim.operationId(), "replacement", Duration.ofMinutes(1)))
+                .isPresent();
     }
 
     private long databaseTime() {

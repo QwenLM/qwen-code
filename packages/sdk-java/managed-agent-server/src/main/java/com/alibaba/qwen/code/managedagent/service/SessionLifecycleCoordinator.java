@@ -227,23 +227,18 @@ public class SessionLifecycleCoordinator {
                     }
                 } catch (RuntimeException writeError) {
                     // The terminal record itself failed: reschedule rather
-                    // than leave the operation wedged on a spent lease. The
-                    // blocked reschedule is restricted to the shapes the
-                    // recovery scan re-drives from BLOCKED (CLOSE, and a
-                    // DELETE admitted on a closed Session); every other
-                    // shape goes back to PENDING, which is always re-driven.
-                    // A blocked code can only arise from settle()'s
-                    // workspace-close path, which the closed-Session delete
-                    // never enters, so CLOSE is the only shape that needs it
-                    // here.
+                    // than leave the operation wedged on a spent lease. A
+                    // blocked code keeps the BLOCKED reschedule — the
+                    // recovery scan re-drives every blocked lifecycle shape;
+                    // every other shape goes back to PENDING, which is
+                    // always re-driven.
                     LOG.warn("Managed Session operation terminal record"
                                     + " failed; rescheduling tenant={}"
                                     + " session={} operation={} failure={}",
                             tenantId, sessionId, operationId,
                             writeError.getMessage());
                     if (valid.get()) {
-                        if (blocked != null
-                                && claimed.kind() == OperationKind.CLOSE) {
+                        if (blocked != null) {
                             store.blockLifecycleOperation(tenantId, sessionId,
                                     operationId, owner,
                                     claimed.claimGeneration(), blocked,
@@ -262,8 +257,7 @@ public class SessionLifecycleCoordinator {
                 store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(), blocked, Math.addExact(clock.millis(), delay));
             } else if (valid.get() && writerLive
-                    && claimed.attemptCount() >= maxOperationRetries
-                    && blockedShapeRescanned(claimed)) {
+                    && claimed.attemptCount() >= maxOperationRetries) {
                 // Past the budget the writer wait is published: the row reads
                 // recovery_blocked with its code rather than a healthy
                 // pending retry, and the recovery scan still re-drives it —
@@ -310,14 +304,6 @@ public class SessionLifecycleCoordinator {
                     operation.operationId(), error.getMessage());
             return true;
         }
-    }
-
-    // The recovery scan re-drives a blocked CLOSE and a blocked DELETE
-    // admitted on a closed Session; every other shape must stay PENDING to
-    // be re-driven.
-    private boolean blockedShapeRescanned(OperationRecord operation) {
-        return operation.kind() == OperationKind.CLOSE
-                || closedSessionDeletion(operation);
     }
 
     // A delete of an already closed or archived bound Session makes zero

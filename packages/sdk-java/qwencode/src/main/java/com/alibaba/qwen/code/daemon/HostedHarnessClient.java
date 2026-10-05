@@ -232,8 +232,21 @@ public final class HostedHarnessClient implements AutoCloseable {
             // A prompt whose admission outcome was never learned (an
             // ambiguous answer, then a terminal coordinator failure) must
             // not pin the Session for every later Turn: ask the Harness,
-            // which drops the entry when nothing is running there.
-            getStatus(session);
+            // which drops the entry when nothing is running there. The
+            // probe is fail-closed — only a successful idle read clears the
+            // entry — and its own failure must not leak the probe's
+            // exception types: the dispatcher maps DaemonHttpException and
+            // DaemonProtocolException to a terminal Turn failure, while the
+            // plain busy-turn refusal below retries. A generation change
+            // still terminates the Turn.
+            try {
+                getStatus(session);
+            } catch (HostedHarnessGenerationException generationChange) {
+                throw generationChange;
+            } catch (DaemonException probeFailure) {
+                throw new DaemonException(
+                        "Hosted Harness session already has a running turn");
+            }
             existing = activePrompts.putIfAbsent(
                     session.getHarnessSessionId(), candidate);
             if (existing != null && !existing.matches(candidate)) {
