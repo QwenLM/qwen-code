@@ -1627,6 +1627,140 @@ describe('trajectory diagnostic filters', () => {
       '[data-testid="trajectory-row-request"] button',
     )!;
 
+  it('does not report results or navigate when no diagnostic filter is applied', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () => fold(container).click());
+    const filters = container.querySelector('[data-trajectory-filters]')!;
+    expect(filters.textContent).not.toContain('matching records');
+    expect(button(container, 'Next').disabled).toBe(true);
+    expect(button(container, 'Previous').disabled).toBe(true);
+    const input = inputOf(container);
+    await act(async () => {
+      button(container, 'Next').click();
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    await typeQuery(container, 'needle');
+    await act(async () => button(container, 'Clear filters').click());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    expect(filters.textContent).not.toContain('Result');
+  });
+
+  it('does not offer folding when a matching request has no visible descendants', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () => fold(container).click());
+    await typeQuery(container, 'qwen-search');
+    const request = container.querySelector(
+      '[data-testid="trajectory-row-request"]',
+    )!;
+    expect(request.textContent).not.toContain('0 records collapsed');
+    expect(request.querySelector('button')).toBeNull();
+    await act(async () => button(container, 'Clear filters').click());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('drops temporary folds when the query changes directly', async () => {
+    const container = await render(async () => page(events()));
+    await typeQuery(container, 'needle');
+    await act(async () => fold(container).click());
+    await typeQuery(container, 'Unique');
+    expect(
+      container.querySelector('[data-testid="trajectory-range-status"]')
+        ?.textContent,
+    ).toContain('including context');
+    expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+    expect(
+      container.querySelectorAll('[data-testid="trajectory-row-tool"]'),
+    ).toHaveLength(1);
+    await act(async () => button(container, 'Clear filters').click());
+    expect(
+      container.querySelector('[data-testid="trajectory-range-status"]'),
+    ).toBeNull();
+  });
+
+  it('clears filters from the inspector notice and retains the selected tool', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-tool"]')!
+        .click(),
+    );
+    await act(async () => button(container, 'View details').click());
+    await typeQuery(container, 'qwen-search');
+    const inspector = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-inspector"]',
+    )!;
+    expect(inspector.textContent).toContain('Unique needle');
+    await act(async () => button(inspector, 'Clear filters').click());
+    expect(inputOf(container).value).toBe('');
+    expect(inspector.textContent).toContain('Unique needle');
+    expect(inspector.textContent).not.toContain('does not match');
+    expect(
+      container.querySelector(
+        '[data-testid="trajectory-row-tool"][data-selected="true"]',
+      )?.textContent,
+    ).toContain('Unique needle');
+  });
+
+  it('wraps two direct matches and retains manual folds in the same query', async () => {
+    const container = await render(async () =>
+      page([
+        ...events(),
+        userText('Second turn', 'search-user-2'),
+        timingFrame(
+          {
+            kind: 'request',
+            durationMs: 500,
+            model: 'qwen-second',
+            status: 'ok',
+          },
+          'search-request-2',
+        ),
+        toolCall(
+          'search-call-2',
+          'read_file',
+          'Second needle',
+          'search-tool-2',
+        ),
+      ]),
+    );
+    await typeQuery(container, 'needle');
+    await act(async () => button(container, 'Next').click());
+    expect(container.textContent).toContain('Result 1 / 2');
+    await act(async () => fold(container).click());
+    await act(async () => button(container, 'Next').click());
+    expect(container.textContent).toContain('Result 2 / 2');
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+    await act(async () => button(container, 'Next').click());
+    expect(container.textContent).toContain('Result 1 / 2');
+    expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+    await act(async () => button(container, 'Previous').click());
+    expect(container.textContent).toContain('Result 2 / 2');
+  });
+
+  it('keeps a coverage slot mounted when refresh crosses the body budget', async () => {
+    let large = false;
+    const container = await render(async () =>
+      page([
+        userText(large ? 'x'.repeat(8193) : 'short', 'coverage-user'),
+        ...events(),
+      ]),
+    );
+    const filters = container.querySelector('[data-trajectory-filters]')!;
+    const children = filters.children.length;
+    expect(filters.textContent).not.toContain('excluded from search');
+    large = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(filters.children.length).toBe(children);
+    expect(filters.textContent).toContain('excluded from search (1 record)');
+  });
+
   it('keeps request context, restores base folding and does not resurrect temporary overrides', async () => {
     const container = await render(async () => page(events()));
     await act(async () => fold(container).click());
@@ -1798,6 +1932,16 @@ it('reveals a request when its independent filter and time contexts have an empt
       ),
     ]),
   );
+  await act(async () =>
+    container
+      .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
+      .click(),
+  );
+  await act(async () =>
+    [...container.querySelectorAll('button')]
+      .find((button) => button.textContent === 'View details')!
+      .click(),
+  );
   const input = container.querySelector<HTMLInputElement>(
     'input[type="search"]',
   )!;
@@ -1828,6 +1972,37 @@ it('reveals a request when its independent filter and time contexts have an empt
   expect(
     container.querySelector('[data-testid="trajectory-filter-empty"]'),
   ).not.toBeNull();
+  expect(
+    container.querySelector('[data-trajectory-filters]')?.textContent,
+  ).toContain('0 matching records');
+  expect(
+    [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Next',
+    )?.disabled,
+  ).toBe(true);
+  const inspector = container.querySelector(
+    '[data-testid="trajectory-inspector"]',
+  )!;
+  expect(inspector.textContent).toContain('does not match the current filters');
+  expect(inspector.textContent).not.toContain('outside the selected time');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'intersection');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  expect(
+    container.querySelector('[data-trajectory-filters] [role="status"]')
+      ?.textContent,
+  ).toBe('Result 1 / 1');
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'intersection-needle');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
   const span = container.querySelector<HTMLElement>(
     '[data-testid="trajectory-span"][data-row-key="req:intersection-request"]',
   )!;

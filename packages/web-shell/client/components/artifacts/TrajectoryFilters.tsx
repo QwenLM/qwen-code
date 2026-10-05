@@ -55,6 +55,14 @@ export function TrajectoryFilters({
 
   const active =
     draft.length > 0 || value.type !== 'all' || value.status !== 'all';
+  const appliedActive =
+    value.query.trim().length > 0 ||
+    value.type !== 'all' ||
+    value.status !== 'all';
+  const coverageText =
+    truncatedCount > 0
+      ? t('trajectory.filter.truncated', { count: truncatedCount })
+      : '';
 
   return (
     <div className={styles.filters} data-trajectory-filters="">
@@ -78,7 +86,7 @@ export function TrajectoryFilters({
             composing.current = false;
             const query = event.currentTarget.value.slice(0, 256);
             setDraft(query);
-            onChange({ ...value, query });
+            if (query !== value.query) onChange({ ...value, query });
           }}
           onKeyDown={(event) => {
             if (
@@ -154,18 +162,19 @@ export function TrajectoryFilters({
       </div>
       <div className={styles.results}>
         <span className={styles.count} role="status">
-          {t(
-            position > 0
-              ? 'trajectory.filter.position'
-              : 'trajectory.filter.count',
-            { count, position },
-          )}
+          {appliedActive &&
+            t(
+              position > 0
+                ? 'trajectory.filter.position'
+                : 'trajectory.filter.count',
+              { count, position },
+            )}
         </span>
         <Button
           type="button"
           size="xs"
           variant="ghost"
-          disabled={count === 0}
+          disabled={!appliedActive || count === 0}
           onClick={() => onNavigate(-1)}
         >
           {t('trajectory.filter.previous')}
@@ -174,7 +183,7 @@ export function TrajectoryFilters({
           type="button"
           size="xs"
           variant="ghost"
-          disabled={count === 0}
+          disabled={!appliedActive || count === 0}
           onClick={() => onNavigate(1)}
         >
           {t('trajectory.filter.next')}
@@ -193,11 +202,9 @@ export function TrajectoryFilters({
           {t('trajectory.filter.clear')}
         </Button>
       </div>
-      {truncatedCount > 0 && (
-        <p className={styles.coverage}>
-          {t('trajectory.filter.truncated', { count: truncatedCount })}
-        </p>
-      )}
+      <p className={styles.coverage} title={coverageText}>
+        {coverageText}
+      </p>
     </div>
   );
 }

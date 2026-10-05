@@ -38,7 +38,10 @@ async function mount({
     act(() => root.unmount());
     container.remove();
   });
-  const update = async (value: TrajectoryFilter) => {
+  const update = async (
+    value: TrajectoryFilter,
+    coverageCount = truncatedCount,
+  ) => {
     await act(async () =>
       root.render(
         <I18nProvider language={language}>
@@ -49,7 +52,7 @@ async function mount({
             onClear={onClear}
             count={count}
             position={position}
-            truncatedCount={truncatedCount}
+            truncatedCount={coverageCount}
           />
         </I18nProvider>,
       ),
@@ -150,12 +153,15 @@ it('updates the draft when filters are cleared externally', async () => {
 });
 
 it('disables zero-result navigation and keeps coverage visible in Chinese', async () => {
-  const { container } = await mount({
+  const { container, update } = await mount({
     count: 0,
     truncatedCount: 2,
     language: 'zh-CN',
   });
-  expect(container.textContent).toContain('匹配 0 条');
+  await update({ query: 'missing', type: 'all', status: 'all' });
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(
+    '匹配 0 条',
+  );
   expect(container.textContent).toContain(
     '部分已记录正文未纳入搜索（2 条记录）。',
   );
@@ -171,11 +177,174 @@ it('disables zero-result navigation and keeps coverage visible in Chinese', asyn
 it('derives result position from props and clears the draft on clear', async () => {
   const { container, input, onClear, update } = await mount({ position: 2 });
   await update({ query: 'read_file', type: 'tool', status: 'error' });
-  expect(container.textContent).toContain('Result 2 / 3');
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(
+    'Result 2 / 3',
+  );
+  expect(container.textContent).not.toContain('excluded from search');
   const clear = [...container.querySelectorAll('button')].find(
     (button) => button.textContent === 'Clear filters',
   )!;
   await act(async () => clear.click());
   expect(input.value).toBe('');
   expect(onClear).toHaveBeenCalledTimes(1);
+});
+
+it('keeps inactive result controls disabled and does not advertise loaded rows as matches', async () => {
+  const { container, update, onNavigate } = await mount({
+    count: 48,
+    position: 4,
+  });
+  const previous = [...container.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Previous',
+  )!;
+  const next = [...container.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Next',
+  )!;
+  expect(container.querySelector('[role="status"]')?.textContent).toBe('');
+  expect(previous.disabled).toBe(true);
+  expect(next.disabled).toBe(true);
+  await act(async () => {
+    previous.click();
+    next.click();
+  });
+  expect(onNavigate).not.toHaveBeenCalled();
+  await update({ query: '   ', type: 'all', status: 'all' });
+  expect(container.querySelector('[role="status"]')?.textContent).toBe('');
+  expect(next.disabled).toBe(true);
+});
+
+it('shows applied type and status and enables clear without query text', async () => {
+  const { container, update, onClear } = await mount();
+  const clear = [...container.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Clear filters',
+  )!;
+  expect(clear.disabled).toBe(true);
+  await update({ query: '', type: 'tool', status: 'all' });
+  expect(clear.disabled).toBe(false);
+  expect(
+    container.querySelector('[role="combobox"][aria-label="Record type"]')
+      ?.textContent,
+  ).toBe('Tools');
+  await update({ query: '', type: 'all', status: 'error' });
+  expect(clear.disabled).toBe(false);
+  expect(
+    container.querySelector('[role="combobox"][aria-label="Execution status"]')
+      ?.textContent,
+  ).toBe('Failed');
+  await act(async () => clear.click());
+  expect(onClear).toHaveBeenCalledTimes(1);
+});
+
+it('routes enabled Previous and Next buttons in the expected directions', async () => {
+  const { container, update, onNavigate } = await mount({
+    count: 3,
+    position: 2,
+  });
+  await update({ query: '', type: 'tool', status: 'all' });
+  const previous = [...container.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Previous',
+  )!;
+  const next = [...container.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Next',
+  )!;
+  expect(previous.disabled).toBe(false);
+  expect(next.disabled).toBe(false);
+  await act(async () => previous.click());
+  expect(onNavigate).toHaveBeenLastCalledWith(-1);
+  await act(async () => next.click());
+  expect(onNavigate).toHaveBeenLastCalledWith(1);
+});
+
+it('does not recommit a cancelled composition when the applied query is unchanged', async () => {
+  const { input, update, onChange } = await mount();
+  await update({ query: '配置', type: 'all', status: 'all' });
+  await act(async () => {
+    input.dispatchEvent(
+      new CompositionEvent('compositionstart', { bubbles: true }),
+    );
+    input.dispatchEvent(
+      new CompositionEvent('compositionend', { bubbles: true }),
+    );
+  });
+  expect(input.value).toBe('配置');
+  expect(onChange).not.toHaveBeenCalled();
+});
+
+it('allows clearing an IME draft without advertising it as an applied search', async () => {
+  const { container, input, onChange, onClear } = await mount();
+  await act(async () => {
+    input.dispatchEvent(
+      new CompositionEvent('compositionstart', { bubbles: true }),
+    );
+    inputText(input, '配置');
+  });
+  const clear = [...container.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Clear filters',
+  )!;
+  expect(clear.disabled).toBe(false);
+  expect(container.querySelector('[role="status"]')?.textContent).toBe('');
+  expect(onChange).not.toHaveBeenCalled();
+  await act(async () => clear.click());
+  expect(input.value).toBe('');
+  expect(onClear).toHaveBeenCalledTimes(1);
+  await act(async () =>
+    input.dispatchEvent(
+      new CompositionEvent('compositionend', { bubbles: true }),
+    ),
+  );
+  expect(onChange).not.toHaveBeenCalled();
+});
+
+it.each([
+  { keyCode: 229, isComposing: false },
+  { keyCode: 0, isComposing: true },
+])(
+  'does not navigate on an IME committing Enter after compositionend (%j)',
+  async (keyboard) => {
+    const { input, onChange, onNavigate } = await mount();
+    await act(async () => {
+      input.dispatchEvent(
+        new CompositionEvent('compositionstart', { bubbles: true }),
+      );
+      inputText(input, '配置');
+      input.dispatchEvent(
+        new CompositionEvent('compositionend', { bubbles: true, data: '配置' }),
+      );
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          ...keyboard,
+        }),
+      );
+    });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenLastCalledWith({
+      query: '配置',
+      type: 'all',
+      status: 'all',
+    });
+    expect(onNavigate).not.toHaveBeenCalled();
+  },
+);
+
+it('keeps a coverage slot mounted when truncation changes and retains its full text', async () => {
+  const { container, update } = await mount();
+  const filter = { query: '', type: 'all', status: 'all' } as const;
+  const slot = container.querySelector('p');
+  expect(slot).not.toBeNull();
+  expect(slot?.textContent).toBe('');
+  const childCount = container.querySelector(
+    '[data-trajectory-filters]',
+  )!.childElementCount;
+  await update(filter, 2);
+  expect(container.querySelector('p')).toBe(slot);
+  expect(
+    container.querySelector('[data-trajectory-filters]')!.childElementCount,
+  ).toBe(childCount);
+  expect(slot?.textContent).toContain('excluded from search');
+  expect(slot?.title).toBe(slot?.textContent);
+  await update(filter, 0);
+  expect(container.querySelector('p')).toBe(slot);
+  expect(slot?.textContent).toBe('');
 });

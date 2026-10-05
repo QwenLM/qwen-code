@@ -29,6 +29,8 @@ const WINDOW_BODY_LIMIT = 2_097_152;
 const MAX_DEPTH = 8;
 const MAX_NODES = 512;
 const TOOL_SLOT_NODES = 256;
+// Excluded URI payloads can exceed the amount of text retained in the index.
+const SOURCE_SCAN_LIMIT = 65_536;
 
 function executionStatus(
   row: TrajectoryRow,
@@ -70,10 +72,10 @@ function metadata(row: TrajectoryRow): Array<string | undefined> {
     case 'tool':
       return [
         row.block.toolName,
-        row.block.title,
         row.block.toolCallId,
         row.block.parentToolCallId,
         row.block.subagentType,
+        row.block.title,
       ];
     case 'user':
     case 'message':
@@ -120,27 +122,43 @@ export function buildTrajectorySearchIndex(
     const fields: string[] = [];
     let truncated = false;
     let remaining = METADATA_LIMIT;
+    let scanRemaining = SOURCE_SCAN_LIMIT;
     const append = (text: string) => {
-      if (/^data:/i.test(text)) return;
-      const part = text.slice(0, remaining);
-      if (/^\s*data:/i.test(part)) return;
-      if (part.length < text.length) truncated = true;
-      remaining -= part.length;
-      if (part.length > 0) fields.push(part.toLowerCase());
+      const scanned = text.slice(0, scanRemaining);
+      scanRemaining -= scanned.length;
+      if (scanned.length < text.length) truncated = true;
+      const retain = (value: string) => {
+        const part = value.slice(0, remaining);
+        if (part.length < value.length) truncated = true;
+        remaining -= part.length;
+        if (part.length > 0) fields.push(part.toLowerCase());
+      };
+      const dataUri =
+        /data:(?:[a-z0-9!#$&^_.+-]{1,128}\/[a-z0-9!#$&^_.+-]{1,128})?(?:;[^,\s;"'<>]{1,128}){0,4},[^\s"'<>)]*/gi;
+      let start = 0;
+      for (const match of scanned.matchAll(dataUri)) {
+        retain(scanned.slice(start, match.index));
+        start = match.index + match[0].length;
+      }
+      retain(scanned.slice(start));
     };
     for (const field of metadata(row)) {
       if (field !== undefined) append(field);
     }
     let rowRemaining = BODY_LIMIT;
     let rowNodes = MAX_NODES;
+    let rowScanRemaining = SOURCE_SCAN_LIMIT;
     for (const value of body(row)) {
-      const tool = row.kind === 'tool';
+      const splitSlots =
+        row.kind === 'tool' ||
+        (row.kind === 'other' && row.block.kind === 'user_shell');
       remaining = Math.min(
-        tool ? TOOL_SLOT_LIMIT : rowRemaining,
+        splitSlots ? TOOL_SLOT_LIMIT : rowRemaining,
         windowRemaining,
       );
       const allotted = remaining;
-      let nodes = tool ? TOOL_SLOT_NODES : rowNodes;
+      scanRemaining = splitSlots ? SOURCE_SCAN_LIMIT : rowScanRemaining;
+      let nodes = splitSlots ? TOOL_SLOT_NODES : rowNodes;
       const allottedNodes = nodes;
       const ancestors = new Set<object>();
       const visit = (item: unknown, depth: number) => {
@@ -181,59 +199,35 @@ export function buildTrajectorySearchIndex(
           }
         } else {
           const record = item as Record<string, unknown>;
-          const type = record['type'];
-          const typedFields =
-            typeof record['mimeType'] === 'string' &&
-            record['data'] !== undefined
-              ? ['name']
-              : type === 'text'
-                ? ['text']
-                : type === 'content'
-                  ? ['content']
-                  : type === 'diff'
-                    ? ['path', 'oldText', 'newText']
-                    : typeof type === 'string' &&
-                        [
-                          'image',
-                          'audio',
-                          'resource',
-                          'resource_link',
-                          'file',
-                          'blob',
-                          'embedded_resource',
-                          'terminal',
-                        ].includes(type)
-                      ? ['name']
-                      : undefined;
           const visitProperty = (key: string) => {
             if (nodes === 0 || remaining === 0 || depth === MAX_DEPTH) {
               truncated = true;
               return false;
             }
-            if (!typedFields) {
-              visit(key, depth + 1);
-              if (nodes === 0 || remaining === 0) {
-                truncated = true;
-                return false;
-              }
+            visit(key, depth + 1);
+            if (nodes === 0 || remaining === 0) {
+              truncated = true;
+              return false;
             }
             visit(record[key], depth + 1);
             return true;
           };
-          if (typedFields) {
-            for (const key of typedFields) {
-              if (record[key] !== undefined && !visitProperty(key)) break;
-            }
-          } else {
-            for (const key in record) {
-              if (!Object.hasOwn(record, key)) continue;
-              if (
-                ['base64', 'blob', 'inlineData', 'inline_data'].includes(key) ||
-                (key === 'data' && typeof record['mimeType'] === 'string')
-              )
-                continue;
-              if (!visitProperty(key)) break;
-            }
+          for (const key in record) {
+            if (!Object.hasOwn(record, key)) continue;
+            if (
+              [
+                'base64',
+                'blob',
+                'inlineData',
+                'inline_data',
+                'resource',
+                'mimeType',
+                'mime_type',
+              ].includes(key) ||
+              (key === 'data' && typeof record[key] === 'string')
+            )
+              continue;
+            if (!visitProperty(key)) break;
           }
         }
         ancestors.delete(item);
@@ -243,6 +237,7 @@ export function buildTrajectorySearchIndex(
       windowRemaining -= consumed;
       rowRemaining -= consumed;
       rowNodes -= allottedNodes - nodes;
+      rowScanRemaining = scanRemaining;
     }
     if (truncated) truncatedCount++;
     return {

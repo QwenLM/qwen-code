@@ -289,6 +289,186 @@ describe('filterTrajectory', () => {
 });
 
 describe('buildTrajectorySearchIndex budgets', () => {
+  it('keeps ordinary JSON fields despite content-like type names', () => {
+    const rows = [
+      tool('a', { rawInput: { type: 'file', path: '/etc/hosts-needle' } }),
+    ];
+    expect(matches(rows, { query: 'hosts-needle' })).toEqual(['a']);
+    expect(
+      matches(
+        [
+          tool('a', {
+            rawOutput: {
+              type: 'resource_link',
+              uri: 'file:///repo/link-needle',
+            },
+          }),
+        ],
+        { query: 'link-needle' },
+      ),
+    ).toEqual(['a']);
+  });
+
+  it('retains prose after SSE data frames and ordinary data prefixes', () => {
+    expect(
+      matches(
+        [tool('a', { rawOutput: 'data: {"event":"ping"}\nerror: oom-needle' })],
+        { query: 'oom-needle' },
+      ),
+    ).toEqual(['a']);
+    expect(
+      matches([text('u', '  data: the deployment failed with prompt-needle')], {
+        query: 'prompt-needle',
+      }),
+    ).toEqual(['u']);
+  });
+
+  it('excludes embedded URI payloads while retaining surrounding prose separately', () => {
+    const rows = [
+      tool('a', {
+        rawOutput:
+          'before-needle<img src="data:image/png;base64,' +
+          'A'.repeat(9000) +
+          '">after-needle',
+      }),
+    ];
+    expect(matches(rows, { query: 'after-needle' })).toEqual(['a']);
+    expect(matches(rows, { query: 'before-needle' })).toEqual(['a']);
+    expect(matches(rows, { query: 'AAAA' })).toEqual([]);
+    expect(buildTrajectorySearchIndex(trajectory(rows)).truncatedCount).toBe(0);
+    expect(
+      matches(
+        [tool('a', { rawOutput: 'before data:image/png;base64,AAAA after' })],
+        { query: 'before  after' },
+      ),
+    ).toEqual([]);
+  });
+
+  it('excludes non-base64 data URI payloads without dropping later text', () => {
+    const rows = [
+      tool('a', {
+        rawOutput: 'data:text/plain,secret-percent%20payload after-needle',
+      }),
+    ];
+    expect(matches(rows, { query: 'secret-percent' })).toEqual([]);
+    expect(matches(rows, { query: 'after-needle' })).toEqual(['a']);
+    expect(buildTrajectorySearchIndex(trajectory(rows)).truncatedCount).toBe(0);
+  });
+
+  it('limits source scanning across values, reporting unscanned prose', () => {
+    const rows = [
+      tool('a', {
+        rawOutput:
+          'data:image/png;base64,' + 'A'.repeat(100_000) + ' tail-needle',
+      }),
+    ];
+    expect(matches(rows, { query: 'AAAA' })).toEqual([]);
+    expect(matches(rows, { query: 'tail-needle' })).toEqual([]);
+    expect(buildTrajectorySearchIndex(trajectory(rows)).truncatedCount).toBe(1);
+  });
+
+  it('preserves structured data values while excluding binary string payloads', () => {
+    const rows = [
+      tool('a', {
+        rawOutput: [
+          { data: 'secret-bare' },
+          { data: { text: 'structured-needle' } },
+          { data: 'A'.repeat(5000), detail: 'after-needle' },
+        ],
+      }),
+    ];
+    expect(matches(rows, { query: 'structured-needle' })).toEqual(['a']);
+    expect(matches(rows, { query: 'after-needle' })).toEqual(['a']);
+    expect(matches(rows, { query: 'secret-bare' })).toEqual([]);
+    expect(matches(rows, { query: 'AAAA' })).toEqual([]);
+  });
+
+  it('retains call identities before spending metadata on a long title', () => {
+    const rows = [
+      tool('a', {
+        title: 'y'.repeat(3000),
+        toolCallId: 'call-needle',
+        parentToolCallId: 'parent-needle',
+        subagentType: 'code-reviewer',
+      }),
+    ];
+    for (const query of ['call-needle', 'parent-needle', 'code-reviewer'])
+      expect(matches(rows, { query })).toEqual(['a']);
+    expect(buildTrajectorySearchIndex(trajectory(rows)).truncatedCount).toBe(1);
+  });
+
+  it('reserves independent command and output slots for user shell records', () => {
+    const shell = (command: string, output: string): TrajectoryRow => ({
+      key: 's',
+      kind: 'other',
+      turnIndex: 1,
+      depth: 0,
+      block: { ...base, id: 's', kind: 'user_shell', command, text: output },
+    });
+    expect(
+      matches([shell('c'.repeat(8192), 'output-needle')], {
+        query: 'output-needle',
+      }),
+    ).toEqual(['s']);
+    expect(
+      matches([shell('command-needle', 'o'.repeat(8192))], {
+        query: 'command-needle',
+      }),
+    ).toEqual(['s']);
+    expect(
+      matches([shell('c'.repeat(4096) + 'command-tail', 'short')], {
+        query: 'command-tail',
+      }),
+    ).toEqual([]);
+  });
+
+  it('charges short bodies by consumed rather than reserved window allowance', () => {
+    const rows = Array.from({ length: 600 }, (_, i) =>
+      text(`m${i}`, 'short-body'),
+    );
+    rows.push(text('last', 'window-tail-needle'));
+    expect(matches(rows, { query: 'window-tail-needle' })).toEqual(['last']);
+    expect(buildTrajectorySearchIndex(trajectory(rows)).truncatedCount).toBe(0);
+  });
+
+  it('allocates source code units before Unicode lowercase expansion', () => {
+    const rows = [text('u', '\u0130'.repeat(8192))];
+    const index = buildTrajectorySearchIndex(trajectory(rows));
+    expect(index.rows[0].fields[1]).toBe('i\u0307'.repeat(8192));
+    expect(index.truncatedCount).toBe(0);
+  });
+
+  it('bounds actual array element reads after exhausting node and text budgets', () => {
+    for (const value of ['', 'x'.repeat(4096)]) {
+      let reads = 0;
+      const input = new Proxy(
+        Array.from({ length: 10000 }, () => value),
+        {
+          get(target, key, receiver) {
+            if (typeof key === 'string' && /^\d+$/.test(key)) reads++;
+            return Reflect.get(target, key, receiver);
+          },
+        },
+      );
+      const index = buildTrajectorySearchIndex(
+        trajectory([tool('a', { rawInput: input })]),
+      );
+      expect(reads).toBeLessThanOrEqual(value ? 1 : 255);
+      expect(index.truncatedCount).toBe(1);
+    }
+  });
+
+  it('does not let cyclic repeated text starve subsequent sibling fields', () => {
+    const cycle: Record<string, unknown> = { text: 'x'.repeat(1000) };
+    cycle['self'] = cycle;
+    expect(
+      matches(
+        [tool('a', { rawInput: { payload: cycle, tail: 'tail-needle' } })],
+        { query: 'tail-needle' },
+      ),
+    ).toEqual(['a']);
+  });
+
   it('caps metadata separately, preserving field boundaries', () => {
     const row = tool('a', {
       toolName: 'x'.repeat(2048),
@@ -399,6 +579,19 @@ describe('buildTrajectorySearchIndex budgets', () => {
       buildTrajectorySearchIndex(trajectory([tool('a', { rawInput: value })]))
         .truncatedCount,
     ).toBe(1);
+  });
+
+  it('shares the source scanning allowance across all values in a slot', () => {
+    const uri = 'data:image/png;base64,' + 'A'.repeat(30_000);
+    const rows = [
+      tool('a', {
+        rawInput: [uri, uri, uri, 'input-tail'],
+        rawOutput: 'output-present',
+      }),
+    ];
+    expect(matches(rows, { query: 'input-tail' })).toEqual([]);
+    expect(matches(rows, { query: 'output-present' })).toEqual(['a']);
+    expect(buildTrajectorySearchIndex(trajectory(rows)).truncatedCount).toBe(1);
   });
 
   it('bounds visits of sparse arrays and preserves output availability', () => {

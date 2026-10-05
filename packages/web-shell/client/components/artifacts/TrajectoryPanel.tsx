@@ -344,11 +344,14 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     filterState.loader === loadPage ? filterState.value : EMPTY_FILTER;
   const changeFilter = useCallback(
     (value: TrajectoryFilter) => {
-      setFilterState((current) => ({
-        loader: loadPage,
-        value,
-        scope: current.scope,
-      }));
+      setFilterState((current) =>
+        current.loader === loadPage &&
+        current.value.query === value.query &&
+        current.value.type === value.type &&
+        current.value.status === value.status
+          ? current
+          : { loader: loadPage, value, scope: current.scope },
+      );
     },
     [loadPage],
   );
@@ -925,7 +928,8 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
 
   const navigateResult = useCallback(
     (direction: 1 | -1, nextFilter = filter) => {
-      if (!searchIndex || !trajectory || !layout) return;
+      if (!filtering(nextFilter) || !searchIndex || !trajectory || !layout)
+        return;
       changeFilter(nextFilter);
       const keys = filterTrajectory(searchIndex, nextFilter).filter(
         (key) => !inRange || inRange.has(key),
@@ -940,23 +944,17 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           : (current + direction + keys.length) % keys.length;
       const key = keys[next]!;
       const parents = layout.ancestors.get(key) ?? [];
-      if (filtering(nextFilter)) {
-        const nextSignature = filterSignature(nextFilter, range, mode);
-        const overrides = new Map(
-          nextSignature === signature ? currentOverrides : [],
-        );
-        for (const parent of parents) overrides.set(parent, false);
-        setTemporaryFolds({
-          of: trajectory,
-          loader: loadPage,
-          signature: nextSignature,
-          overrides,
-        });
-      } else {
-        const folds = new Set(baseCollapsed);
-        for (const parent of parents) folds.delete(parent);
-        setCollapseState({ of: layout, loader: loadPage, keys: folds });
-      }
+      const nextSignature = filterSignature(nextFilter, range, mode);
+      const overrides = new Map(
+        nextSignature === signature ? currentOverrides : [],
+      );
+      for (const parent of parents) overrides.set(parent, false);
+      setTemporaryFolds({
+        of: trajectory,
+        loader: loadPage,
+        signature: nextSignature,
+        overrides,
+      });
       pendingRevealRef.current = key;
       selectRow(key, false);
     },
@@ -972,7 +970,6 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
       mode,
       signature,
       currentOverrides,
-      baseCollapsed,
       loadPage,
       selectRow,
     ],
@@ -1233,8 +1230,12 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           onChange={changeFilter}
           onNavigate={navigateResult}
           onClear={clearFilter}
-          count={resultKeys.length}
-          position={selectedKey ? resultKeys.indexOf(selectedKey) + 1 : 0}
+          count={filterActive ? resultKeys.length : 0}
+          position={
+            filterActive && selectedKey
+              ? resultKeys.indexOf(selectedKey) + 1
+              : 0
+          }
           truncatedCount={searchIndex?.truncatedCount ?? 0}
         />
       )}
@@ -1398,7 +1399,8 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
                             layout?.unresolvedParents.has(entry.key) ?? false
                           }
                           fold={
-                            layout?.groups.has(entry.key)
+                            layout?.groups.has(entry.key) &&
+                            (hiddenCounts.get(entry.key) ?? 0) > 0
                               ? {
                                   collapsed: collapsed.has(entry.key),
                                   hiddenCount: hiddenCounts.get(entry.key) ?? 0,
@@ -1516,7 +1518,7 @@ function TurnHeaderRow({
           {firstLine(prompt.block.text).slice(0, 160)}
         </span>
       )}
-      {collapsed && (
+      {collapsed && hiddenCount > 0 && (
         <span className={styles.foldCount}>
           {t('trajectory.collapsed', { count: hiddenCount })}
         </span>

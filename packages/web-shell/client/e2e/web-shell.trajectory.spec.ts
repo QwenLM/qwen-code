@@ -1532,6 +1532,37 @@ test.describe('collapsible waterfall', () => {
 });
 
 test.describe('trajectory search and filters', () => {
+  test('keeps unfiltered navigation disabled and preserves the original fold @smoke', async ({
+    page,
+  }, testInfo) => {
+    await openTrajectory(page, String(testInfo.project.use.baseURL), {
+      transcriptPage: { events: transcriptEvents(2) },
+    });
+    const filters = page.locator('[data-trajectory-filters]');
+    await expect(filters.getByRole('status')).toBeEmpty();
+    await expect(
+      filters.getByRole('button', { name: 'Next', exact: true }),
+    ).toBeDisabled();
+    const request = page.getByTestId('trajectory-row-request').first();
+    await request.getByRole('button', { name: /^Collapse/ }).click();
+    const search = page.getByRole('searchbox', {
+      name: 'Search loaded records',
+    });
+    await search.press('Enter');
+    await expect(
+      request.getByRole('button', { name: /^Expand/ }),
+    ).toBeVisible();
+    await search.fill('note-1.txt');
+    await expect(page.getByTestId('trajectory-row-tool')).toHaveCount(1);
+    await filters
+      .getByRole('button', { name: 'Clear filters', exact: true })
+      .click();
+    await expect(
+      request.getByRole('button', { name: /^Expand/ }),
+    ).toBeVisible();
+    await expect(filters.getByRole('status')).toBeEmpty();
+  });
+
   test('temporarily expands matches, navigates with input focus and restores folding @smoke', async ({
     page,
   }, testInfo) => {
@@ -1576,7 +1607,7 @@ test.describe('trajectory search and filters', () => {
     ).toBeDisabled();
   });
 
-  test('preserves hidden detail and clipboard, then overview clears only necessary filters @smoke', async ({
+  test('preserves hidden detail and clipboard, then overview clears diagnostic filters @smoke', async ({
     page,
   }, testInfo) => {
     await page
@@ -1596,6 +1627,10 @@ test.describe('trajectory search and filters', () => {
       name: 'Search loaded records',
     });
     await search.fill('qwen3.8-max');
+    await page.getByRole('combobox', { name: 'Record type' }).click();
+    await page.getByRole('option', { name: 'Requests', exact: true }).click();
+    await page.getByRole('combobox', { name: 'Execution status' }).click();
+    await page.getByRole('option', { name: 'Success', exact: true }).click();
     await expect(inspector).toContainText(
       'This record does not match the current filters.',
     );
@@ -1610,6 +1645,12 @@ test.describe('trajectory search and filters', () => {
       .locator(`[data-testid="trajectory-span"][data-row-key="${key}"]`)
       .click({ force: true });
     await expect(search).toHaveValue('');
+    await expect(
+      page.getByRole('combobox', { name: 'Record type' }),
+    ).toContainText('All types');
+    await expect(
+      page.getByRole('combobox', { name: 'Execution status' }),
+    ).toContainText('All statuses');
     await expect(
       page.locator(
         `[data-testid="trajectory-row-tool"][data-row-key="${key}"][data-selected="true"]`,

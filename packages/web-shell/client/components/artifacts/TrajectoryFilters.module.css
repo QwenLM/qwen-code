@@ -37,8 +37,12 @@
 }
 
 .coverage {
+  height: 14px;
+  line-height: 14px;
   margin: 4px 0 0;
   color: var(--muted-foreground);
   font-size: 10px;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
