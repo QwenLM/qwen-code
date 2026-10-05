@@ -19,6 +19,7 @@ import {
   readSessionAgents,
   trimTerminalRuns,
   updateSessionAgents,
+  canReuseNativeSession,
 } from './binding-store.js';
 import type { SessionAgentRun } from './contract.js';
 
@@ -153,5 +154,41 @@ describe('session agents binding store', () => {
     expect(
       await findSessionAgentBinding(projectRoot, NATIVE, 'ag_1'),
     ).toBeUndefined();
+  });
+});
+
+describe('canReuseNativeSession', () => {
+  it('keeps the cursor before any native session exists', () => {
+    expect(canReuseNativeSession({}, 'host-b', 'claude')).toBe(true);
+  });
+
+  it('keeps the cursor on the same runtime and program', () => {
+    expect(
+      canReuseNativeSession(
+        { runtimeId: 'host-a', program: 'claude' },
+        'host-a',
+        'claude',
+      ),
+    ).toBe(true);
+  });
+
+  it('drops the cursor when the agent moves to another runtime', () => {
+    expect(
+      canReuseNativeSession(
+        { runtimeId: 'host-a', program: 'claude' },
+        'host-b',
+        'claude',
+      ),
+    ).toBe(false);
+  });
+
+  it('drops the cursor when the program changes', () => {
+    expect(
+      canReuseNativeSession(
+        { runtimeId: 'host-a', program: 'claude' },
+        'host-a',
+        'codex',
+      ),
+    ).toBe(false);
   });
 });

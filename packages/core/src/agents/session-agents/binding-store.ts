@@ -130,6 +130,10 @@ function isValidBinding(value: unknown): value is SessionAgentBinding {
     typeof value['agentId'] === 'string' &&
     isOptionalString(value['nativeSessionId']) &&
     isOptionalString(value['runtimeId']) &&
+    (value['program'] === undefined ||
+      value['program'] === 'qwen' ||
+      value['program'] === 'claude' ||
+      value['program'] === 'codex') &&
     isOptionalString(value['readThroughRecordId']) &&
     (value['remotePersona'] === undefined ||
       (isRecord(value['remotePersona']) &&
@@ -406,4 +410,24 @@ export async function findSessionAgentBinding(
     };
   }
   return undefined;
+}
+
+/**
+ * Whether an agent's native session (and with it the read cursor) can be
+ * reused for a turn on `runtimeId` with `program`. A native session lives on
+ * one runtime and belongs to one program; anywhere else the agent starts a
+ * fresh session that has seen nothing, so it must be given the conversation
+ * from the start (bounded by the input budget) instead of the delta after
+ * the old cursor. A binding that never recorded a runtime has no native
+ * session yet, so the cursor stands.
+ */
+export function canReuseNativeSession(
+  binding: Pick<SessionAgentBinding, 'runtimeId' | 'program'>,
+  runtimeId: string,
+  program: SessionAgentBinding['program'],
+): boolean {
+  return (
+    (binding.runtimeId === undefined || binding.runtimeId === runtimeId) &&
+    (binding.program === undefined || binding.program === program)
+  );
 }

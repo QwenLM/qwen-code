@@ -253,6 +253,12 @@ export interface SessionAgentBinding {
   nativeSessionId?: string;
   /** Runtime the native session lives on; a resume is only valid there. */
   runtimeId?: string;
+  /**
+   * Program that created the native session. A different runtime or program
+   * means a fresh native session, and the agent is then given the
+   * conversation from the start (bounded), not the delta after the cursor.
+   */
+  program?: SessionAgentProgram;
   /** Last chat-session record uuid this agent has been given (read cursor). */
   readThroughRecordId?: string;
   /**

@@ -77,6 +77,7 @@ import {
   formatAgentMessageModelText,
 } from '@qwen-code/qwen-code-core/agents/session-agents/envelope.js';
 import {
+  canReuseNativeSession,
   isTerminalSessionAgentRunStatus,
   isValidSessionAgentsSessionId,
   listSessionAgentsSessionIds,
@@ -1090,9 +1091,18 @@ export class SessionAgentOrchestrator {
         );
         const binding = state.file.bindings[agent.id] ?? { agentId: agent.id };
         const records = await this.loadRecords(live.sessionId);
+        // A native session lives on one runtime. On a different Host the
+        // agent starts a fresh one that has seen nothing, so it gets the
+        // conversation from the start (bounded by the budget), not the delta
+        // after the old runtime's cursor.
+        const sameRuntime =
+          binding.runtimeId === hostId &&
+          canReuseNativeSession(binding, hostId, program);
         const input = buildAgentInput({
           records,
-          readThroughRecordId: binding.readThroughRecordId,
+          readThroughRecordId: sameRuntime
+            ? binding.readThroughRecordId
+            : undefined,
           trigger: {
             agentId: agent.id,
             agentName: agent.name,
@@ -1103,8 +1113,9 @@ export class SessionAgentOrchestrator {
         });
         live.lastRecordId = input.lastRecordId;
         // A native session lives on one runtime; resume only there.
-        const nativeSessionId =
-          binding.runtimeId === hostId ? binding.nativeSessionId : undefined;
+        const nativeSessionId = sameRuntime
+          ? binding.nativeSessionId
+          : undefined;
         await this.persist(state);
         this.publish(live);
         return {
@@ -1620,9 +1631,20 @@ export class SessionAgentOrchestrator {
             );
       const binding = state.file.bindings[agent.id] ?? { agentId: agent.id };
       const records = await this.loadRecords(state.sessionId);
+      // The agent's native session is reusable only on the runtime and with
+      // the program that created it. After a move (remote -> local) or a
+      // program change it starts fresh, so it gets the conversation from the
+      // start (bounded by the budget), not the delta after the old cursor.
+      const sameNativeSession = canReuseNativeSession(
+        binding,
+        LOCAL_SESSION_AGENT_RUNTIME_ID,
+        program,
+      );
       const input = buildAgentInput({
         records,
-        readThroughRecordId: binding.readThroughRecordId,
+        readThroughRecordId: sameNativeSession
+          ? binding.readThroughRecordId
+          : undefined,
         trigger: {
           agentId: agent.id,
           agentName: agent.name,
@@ -1633,6 +1655,7 @@ export class SessionAgentOrchestrator {
       });
       live.lastRecordId = input.lastRecordId;
       const resumable =
+        sameNativeSession &&
         binding.runtimeId === LOCAL_SESSION_AGENT_RUNTIME_ID
           ? binding.nativeSessionId
           : undefined;
@@ -2049,6 +2072,7 @@ export class SessionAgentOrchestrator {
     if (nativeSessionId) {
       binding.nativeSessionId = nativeSessionId;
       binding.runtimeId = runtimeId;
+      if (live.author.program) binding.program = live.author.program;
     }
     if (outcome.resumeRejected) {
       // A fresh native session holds none of the earlier conversation: drop
