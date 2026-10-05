@@ -306,7 +306,9 @@ export const useShellCommandProcessor = (
               let finalStatus = ToolCallStatus.Success;
 
               if (result.error) {
-                finalStatus = ToolCallStatus.Error;
+                finalStatus = result.aborted
+                  ? ToolCallStatus.Canceled
+                  : ToolCallStatus.Error;
                 finalOutput = `${result.error.message}\n${finalOutput}`;
               } else if (result.aborted) {
                 finalStatus = ToolCallStatus.Canceled;

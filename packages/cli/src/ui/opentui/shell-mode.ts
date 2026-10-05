@@ -153,7 +153,7 @@ export async function executeUserShell(
         let prefixText = '';
         if (res.error) {
           success = false;
-          summary = 'error';
+          summary = res.aborted ? 'cancelled' : 'error';
           prefixText = `${res.error.message}\n`;
         } else if (res.aborted) {
           success = false;

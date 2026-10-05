@@ -20,6 +20,13 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { executeUserShell } from './shell-mode.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+import { foldLiveEvent, type LiveHistoryItem } from './live-session-model.js';
+import { toolStatusMeta } from './messages.js';
+
+vi.mock('@opentui/core', () => ({
+  SyntaxStyle: { fromStyles: () => ({}) },
+  MouseButton: { LEFT: 0 },
+}));
 
 const executeMock = vi.hoisted(() => vi.fn());
 const addHistoryMock = vi.hoisted(() => vi.fn());
@@ -150,6 +157,7 @@ describe('executeUserShell', () => {
       resolveResult,
       executeArgs,
       signal: controller.signal,
+      abort: () => controller.abort(),
     };
   }
 
@@ -417,6 +425,52 @@ describe('executeUserShell', () => {
       summary: 'cancelled',
     });
   });
+
+  it.each([
+    { aborted: true, summary: 'cancelled', glyph: '-' },
+    { aborted: false, summary: 'error', glyph: 'x' },
+  ])(
+    'preserves cleanup diagnostics with aborted=$aborted as $summary',
+    async ({ aborted, summary, glyph }) => {
+      const cleanupDiagnostic = 'Process group 4242 did not stop after SIGKILL';
+      const output = 'partial command output';
+      const finalOutput = `${cleanupDiagnostic}\n${output}`;
+      const { events, done, resolveResult, abort } = setup();
+      if (aborted) abort();
+      resolveResult(
+        makeResult({
+          aborted,
+          error: new Error(cleanupDiagnostic),
+          exitCode: null,
+          output,
+        }),
+      );
+      await done;
+
+      const items = events.reduce<readonly LiveHistoryItem[]>(
+        foldLiveEvent,
+        [],
+      );
+      const tool = items.find((item) => item.kind === 'tool');
+      if (tool?.kind !== 'tool') throw new Error('no shell tool card');
+      expect(tool.output).toBe(finalOutput);
+      expect(toolStatusMeta(tool)).toMatchObject({
+        glyph,
+        strikethrough: aborted,
+      });
+      expect(tool).toMatchObject({ done: true, success: false, summary });
+      expect(events[events.length - 1]).toMatchObject({
+        type: 'tool-end',
+        success: false,
+        summary,
+      });
+      expect(addHistoryMock).toHaveBeenCalledWith(
+        llmClient,
+        'echo hello',
+        finalOutput,
+      );
+    },
+  );
 
   it('keeps card ids unique across two calls in the same millisecond', async () => {
     executeMock.mockImplementation(() =>

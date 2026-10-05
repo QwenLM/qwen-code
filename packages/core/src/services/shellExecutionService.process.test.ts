@@ -84,7 +84,7 @@ if (mode === 'descendant') {
   });
   process.on('SIGTERM', () => {
     fs.writeFileSync(directory + '/leader-term', 'TERM');
-    process.exit(0);
+    if (!scenario.startsWith('restricted-')) process.exit(0);
   });
 }
 `;
@@ -92,13 +92,16 @@ if (mode === 'descendant') {
 const driver = String.raw`
 import fs from 'node:fs';
 import path from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
 import { ShellExecutionService } from SERVICE_URL;
 
 const [directory, scenario, transport] = process.argv.slice(2);
+const realReadFileSync = fs.readFileSync;
+const modeledProcRestriction = scenario.startsWith('restricted-');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const stat = (pid) => {
   try {
-    const value = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+    const value = realReadFileSync('/proc/' + pid + '/stat', 'utf8');
     const fields = value.slice(value.lastIndexOf(')') + 2).split(' ');
     return { pid, state: fields[0], pgid: Number(fields[2]), sid: Number(fields[3]), start: fields[19] };
   } catch (error) {
@@ -148,6 +151,28 @@ try {
   if (owned.leader.pid !== handle.pid || owned.leader.pgid !== handle.pid || owned.descendant.pgid !== handle.pid || owned.descendant.sid !== owned.leader.sid) {
     throw new Error('Fixture did not form the freshly owned process group');
   }
+  if (modeledProcRestriction) {
+    // Model metadata only: the real mount, UIDs and safety reads stay unchanged.
+    fs.readFileSync = (file, ...options) => {
+      if (String(file) === '/proc/self/mountinfo') {
+        return '86 85 0:30 / /proc rw - proc proc rw,hidepid=2\n';
+      }
+      if (String(file) === '/proc/' + owned.leader.pid + '/stat') {
+        if (scenario === 'restricted-missing') {
+          throw Object.assign(new Error('Modeled missing leader identity'), { code: 'ENOENT' });
+        }
+        if (scenario === 'restricted-recycled') {
+          const value = realReadFileSync(file, ...options);
+          const boundary = value.lastIndexOf(')');
+          const fields = value.slice(boundary + 2).trim().split(/\s+/);
+          fields[19] = String(BigInt(fields[19]) + 1n);
+          return value.slice(0, boundary + 2) + fields.join(' ');
+        }
+      }
+      return realReadFileSync(file, ...options);
+    };
+    syncBuiltinESMExports();
+  }
   const started = Date.now();
   process.kill = (pid, signal = 'SIGTERM') => {
     const entries = [owned.leader, owned.descendant];
@@ -167,6 +192,8 @@ try {
   };
   if (scenario === 'promotion') {
     controller.abort({ kind: 'background', shellId: 'owned-real-process-test' });
+  } else if (scenario === 'restricted-cleanup') {
+    ShellExecutionService.cleanup();
   } else if (scenario !== 'natural') {
     controller.abort({ kind: 'cancel' });
   }
@@ -190,11 +217,15 @@ try {
     descendantRunningAtResult,
     leaderRunningAtResult,
     descendantRunningAfterCleanup: isRunning(owned.descendant),
+    leaderRunningAfterCleanup: isRunning(owned.leader),
     leaderObservedTerm: fs.existsSync(directory + '/leader-term'),
+    modeledProcRestriction,
     resultAfterMs,
     signals,
   };
 } finally {
+  fs.readFileSync = realReadFileSync;
+  syncBuiltinESMExports();
   process.kill = realKill;
   if (owned) {
     const entries = [owned.leader, owned.descendant];
@@ -214,7 +245,9 @@ interface ProcessResult {
   descendantRunningAtResult: boolean;
   leaderRunningAtResult: boolean;
   descendantRunningAfterCleanup: boolean;
+  leaderRunningAfterCleanup: boolean;
   leaderObservedTerm: boolean;
+  modeledProcRestriction: boolean;
   resultAfterMs: number;
   signals: Array<{
     pid: number;
@@ -346,6 +379,50 @@ describe.runIf(canReapDescendants)(
           result.signals.filter((entry) => entry.signal !== 0),
         ).toHaveLength(0);
       });
+
+      it.each(['cancel', 'cleanup'])(
+        'signals an authenticated group on %s despite modeled restricted metadata and reports unconfirmed cleanup',
+        async (action) => {
+          const result = await runFixture(transport, `restricted-${action}`);
+          expect(result.modeledProcRestriction).toBe(true);
+          expect(result.aborted).toBe(action === 'cancel');
+          const terms = result.signals.filter(
+            (entry) => entry.signal === 'SIGTERM',
+          );
+          const kills = result.signals.filter(
+            (entry) => entry.signal === 'SIGKILL',
+          );
+          expect(terms).toHaveLength(action === 'cancel' ? 1 : 0);
+          expect(kills).toHaveLength(1);
+          expect(kills[0].pid).toBeLessThan(-1);
+          if (action === 'cancel') {
+            expect(result.leaderObservedTerm).toBe(true);
+            expect(kills[0].pid).toBe(terms[0].pid);
+          }
+          expect(result.leaderRunningAtResult).toBe(false);
+          expect(result.descendantRunningAtResult).toBe(false);
+          expect(result.leaderRunningAfterCleanup).toBe(false);
+          expect(result.descendantRunningAfterCleanup).toBe(false);
+          expect(result.error).toMatch(/unconfirmed/i);
+        },
+      );
+
+      it.each(['missing', 'recycled'])(
+        'refuses destructive signals when leader authority is modeled %s under restricted metadata',
+        async (identity) => {
+          const result = await runFixture(transport, `restricted-${identity}`);
+          expect(result.modeledProcRestriction).toBe(true);
+          expect(result.aborted).toBe(true);
+          expect(result.error).toMatch(/identity|authenticate|refus/i);
+          expect(result.leaderRunningAtResult).toBe(true);
+          expect(result.descendantRunningAtResult).toBe(true);
+          expect(result.leaderRunningAfterCleanup).toBe(true);
+          expect(result.descendantRunningAfterCleanup).toBe(true);
+          expect(
+            result.signals.filter((entry) => entry.signal !== 0),
+          ).toHaveLength(0);
+        },
+      );
     });
   },
 );

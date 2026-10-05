@@ -18,6 +18,8 @@ interface MemberIdentity {
 const POLL_MS = 25;
 const CONFIRM_MS = 200;
 
+class InvalidProcIdentitySourceError extends Error {}
+
 function requireSupportedProcView(): void {
   const mounts = readFileSync('/proc/self/mountinfo', 'utf8')
     .trim()
@@ -25,6 +27,10 @@ function requireSupportedProcView(): void {
     .map((line) => line.split(' - ').map((part) => part.split(/\s+/)))
     .filter(([mount]) => mount[4] === '/proc');
   const [mount, filesystem] = mounts[0] ?? [];
+  if (mounts.some(([, source]) => source?.[0] && source[0] !== 'proc'))
+    throw new InvalidProcIdentitySourceError(
+      'Refusing non-proc identity source for process-group cleanup',
+    );
   if (
     mounts.length !== 1 ||
     mount?.[3] !== '/' ||
@@ -46,6 +52,7 @@ function readMember(pid: number): MemberIdentity | null {
   if (!boot) throw new Error('Linux process-start identity is unavailable');
   try {
     const raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // comm may contain spaces and ')', so fields begin after its last closing parenthesis.
     const fields = raw
       .slice(raw.lastIndexOf(')') + 1)
       .trim()
@@ -103,6 +110,7 @@ export class OwnedPosixProcessGroup {
   private promise: Promise<Error | null> | undefined;
   private resolve: ((error: Error | null) => void) | undefined;
   private signalError: Error | undefined;
+  private inspectionError: Error | undefined;
 
   constructor(private readonly pid: number) {
     if (!Number.isSafeInteger(pid) || pid <= 1) {
@@ -165,9 +173,11 @@ export class OwnedPosixProcessGroup {
         performance.now() + CONFIRM_MS,
         () =>
           this.finish(
-            new Error(`Process group ${this.pid} did not stop after SIGKILL`, {
-              cause: this.signalError,
-            }),
+            new Error(
+              this.inspectionError?.message ??
+                `Process group ${this.pid} did not stop after SIGKILL`,
+              { cause: this.signalError ?? this.inspectionError },
+            ),
           ),
         true,
       );
@@ -238,6 +248,7 @@ export class OwnedPosixProcessGroup {
 
   private inspect(): boolean {
     try {
+      this.inspectionError = undefined;
       try {
         process.kill(-this.pid, 0);
       } catch (error) {
@@ -248,30 +259,35 @@ export class OwnedPosixProcessGroup {
         }
         if (code !== 'EPERM') throw error;
       }
-      // hidepid can silently omit live members; successful reads do not prove a complete view.
-      requireSupportedProcView();
-      const witnesses = [...this.members.values()].filter((member) =>
-        sameMember(member, readMember(member.pid)),
-      );
+      const witnesses = this.readWitnesses(this.members.values());
       if (!witnesses.length) {
         throw new Error(
           `Refusing process group ${this.pid}: original member identities are gone or changed`,
         );
       }
-      const snapshot = readdirSync('/proc')
-        .filter((name) => /^\d+$/.test(name))
-        .map((name) => readMember(Number(name)))
-        .filter(
-          (member): member is MemberIdentity =>
-            member !== null &&
-            member.pgid === this.pid &&
-            member.sid === witnesses[0].sid,
-        );
+      // Visibility limits prevent confirmation, not signals authorized by a matching identity.
+      try {
+        requireSupportedProcView();
+      } catch (error) {
+        if (error instanceof InvalidProcIdentitySourceError) throw error;
+        this.noteInspectionError(error);
+      }
+      let snapshot: MemberIdentity[] = [];
+      try {
+        snapshot = readdirSync('/proc')
+          .filter((name) => /^\d+$/.test(name))
+          .map((name) => this.readObservedMember(Number(name)))
+          .filter(
+            (member): member is MemberIdentity =>
+              member !== null &&
+              member.pgid === this.pid &&
+              member.sid === witnesses[0].sid,
+          );
+      } catch (error) {
+        this.noteInspectionError(error);
+      }
       // Newly observed members are trusted only while an old identity still anchors the group.
-      const currentWitnesses = witnesses.flatMap((member) => {
-        const current = readMember(member.pid);
-        return current && sameMember(member, current) ? [current] : [];
-      });
+      const currentWitnesses = this.readWitnesses(witnesses);
       if (!currentWitnesses.length) {
         throw new Error(
           `Refusing process group ${this.pid}: ownership changed during inspection`,
@@ -279,6 +295,7 @@ export class OwnedPosixProcessGroup {
       }
       for (const member of snapshot) this.members.set(member.pid, member);
       if (
+        !this.inspectionError &&
         !snapshot.some((member) => member.running) &&
         !currentWitnesses.some((member) => member.running)
       ) {
@@ -297,26 +314,37 @@ export class OwnedPosixProcessGroup {
     }
   }
 
+  private noteInspectionError(error: unknown): void {
+    this.inspectionError ??= new Error(
+      `Cleanup unconfirmed for process group ${this.pid}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+
+  private readObservedMember(pid: number): MemberIdentity | null {
+    try {
+      return readMember(pid);
+    } catch (error) {
+      this.noteInspectionError(error);
+      return null;
+    }
+  }
+
+  private readWitnesses(members: Iterable<MemberIdentity>): MemberIdentity[] {
+    return [...members].flatMap((member) => {
+      const current = this.readObservedMember(member.pid);
+      return current && sameMember(member, current) ? [current] : [];
+    });
+  }
+
   private signal(signal: NodeJS.Signals): void {
     if (!this.inspect() || this.done || this.released) return;
-    try {
-      if (
-        ![...this.members.values()].some((member) =>
-          sameMember(member, readMember(member.pid)),
-        )
-      ) {
-        this.finish(
-          new Error(
-            `Refusing ${signal} for process group ${this.pid}: no authenticated member`,
-          ),
-        );
-        return;
-      }
-    } catch (error) {
+    if (!this.readWitnesses(this.members.values()).length) {
       this.finish(
-        new Error(`Could not authenticate process group ${this.pid}`, {
-          cause: error,
-        }),
+        new Error(
+          `Refusing ${signal} for process group ${this.pid}: no authenticated member`,
+          { cause: this.inspectionError },
+        ),
       );
       return;
     }

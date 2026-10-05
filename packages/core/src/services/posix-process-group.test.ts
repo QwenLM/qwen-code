@@ -251,7 +251,7 @@ describe('OwnedPosixProcessGroup', () => {
   });
 
   it.each([false, true])(
-    'refuses a modeled hidepid=2 view with a zombie witness and an unrecorded hidden survivor (EPERM probe: %s)',
+    'signals an owned group but does not confirm a modeled hidepid=2 view with an unrecorded hidden survivor (EPERM probe: %s)',
     async (permissionError) => {
       mountInfo = mountInfo.replace('proc rw', 'proc rw,hidepid=2');
       members.get(PGID)!.state = 'Z';
@@ -259,16 +259,18 @@ describe('OwnedPosixProcessGroup', () => {
       signalAction = (signal) => {
         if (signal === 0 && permissionError) throw errno('EPERM');
       };
-      const error = await own().cancel();
+      const completion = own().cancel();
+      await vi.advanceTimersByTimeAsync(400);
+      const error = await completion;
       expect(error).toBeInstanceOf(Error);
       expect(error?.message).toContain('Unsupported /proc visibility');
       expect(members.get(PGID + 1)!.state).toBe('S');
-      expect(signals()).toEqual([]);
+      expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
     },
   );
 
   it.each(['1', '4', 'invisible', 'ptraceable', 'unknown'])(
-    'refuses modeled hidepid=%s even with a gid exemption',
+    'refuses confirmation under modeled hidepid=%s even with a gid exemption',
     async (mode) => {
       mountInfo = mountInfo.replace(
         'proc rw',
@@ -276,13 +278,14 @@ describe('OwnedPosixProcessGroup', () => {
       );
       const owner = own();
       const completion = owner.cancel();
+      await vi.advanceTimersByTimeAsync(400);
       expect((await completion)?.message).toContain(
         'Unsupported /proc visibility',
       );
       owner.force();
       expect(owner.cancel()).toBe(completion);
       await vi.advanceTimersByTimeAsync(500);
-      expect(signals()).toEqual([]);
+      expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
       expect(vi.getTimerCount()).toBe(0);
     },
   );
@@ -301,26 +304,54 @@ describe('OwnedPosixProcessGroup', () => {
   it.each([
     '',
     '86 85 0:30 /4100 /proc rw - proc proc rw\n',
-    '86 85 0:30 / /proc rw - tmpfs tmpfs rw\n',
     '86 85 0:30 / /proc rw\n',
     '86 85 0:30 / /proc rw - proc proc rw\n87 86 0:31 / /proc rw - proc proc rw\n',
-  ])('refuses an unsupported modeled /proc mount view: %s', async (view) => {
-    mountInfo = view;
-    expect((await own().cancel())?.message).toContain(
-      'Unsupported /proc visibility',
-    );
-    expect(signals()).toEqual([]);
-  });
+  ])(
+    'does not confirm cleanup from an unsupported modeled /proc mount view: %s',
+    async (view) => {
+      mountInfo = view;
+      const completion = own().cancel();
+      await vi.advanceTimersByTimeAsync(400);
+      expect((await completion)?.message).toContain(
+        'Unsupported /proc visibility',
+      );
+      expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
+    },
+  );
 
-  it('reports unreadable mount metadata without signaling', async () => {
+  it.each([
+    '86 85 0:30 / /proc rw - tmpfs tmpfs rw\n',
+    '86 85 0:30 / /proc rw - proc proc rw\n87 86 0:31 / /proc rw - tmpfs tmpfs rw\n',
+  ])(
+    'refuses a modeled non-proc identity source even with matching records: %s',
+    async (view) => {
+      mountInfo = view;
+      const owner = own();
+      const completion = owner.cancel();
+      await vi.advanceTimersByTimeAsync(400);
+      expect(signals()).toEqual([]);
+      expect((await completion)?.message).toContain('non-proc identity source');
+      owner.force();
+      expect(owner.cancel()).toBe(completion);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(signals()).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('signals an authenticated group while reporting unreadable mount metadata', async () => {
     const readStat = read.getMockImplementation()!;
+    const mountError = errno('EACCES');
     read.mockImplementation((file: unknown) => {
-      if (file === '/proc/self/mountinfo') throw errno('EACCES');
+      if (file === '/proc/self/mountinfo') throw mountError;
       return readStat(file);
     });
-    const error = await own().cancel();
-    expect((error?.cause as NodeJS.ErrnoException).code).toBe('EACCES');
-    expect(signals()).toEqual([]);
+    const completion = own().cancel();
+    await vi.advanceTimersByTimeAsync(400);
+    const error = await completion;
+    expect(error?.message).toContain('Cleanup unconfirmed');
+    expect((error?.cause as Error).cause).toBe(mountError);
+    expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
   });
 
   it('rechecks a modeled visibility change after TERM rather than confirming an omitted survivor', async () => {
@@ -331,10 +362,56 @@ describe('OwnedPosixProcessGroup', () => {
         mountInfo = mountInfo.replace('proc rw', 'proc rw,hidepid=2');
       }
     };
-    const error = await own().cancel();
+    const completion = own().cancel();
+    await vi.advanceTimersByTimeAsync(400);
+    const error = await completion;
     expect(error?.message).toContain('Unsupported /proc visibility');
     expect(members.get(PGID + 1)!.state).toBe('S');
+    expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
+  });
+
+  it('still refuses escalation after its last identity disappears in a restricted view', async () => {
+    mountInfo = mountInfo.replace('proc rw', 'proc rw,hidepid=2');
+    list.mockReturnValue([String(PGID)]);
+    signalAction = (signal) => {
+      if (signal === 'SIGTERM') members.delete(PGID);
+    };
+    const owner = own();
+    expect(await owner.cancel()).toBeInstanceOf(Error);
+    owner.force();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(members.get(PGID + 1)!.state).toBe('S');
     expect(signals()).toEqual(['SIGTERM']);
+  });
+
+  it('learns readable descendants despite an unreadable unrelated record, while retaining confirmation uncertainty', async () => {
+    const unreadablePid = PGID + 2;
+    member(unreadablePid, { pgid: 4500, sid: 4500 });
+    const readStat = read.getMockImplementation()!;
+    read.mockImplementation((file: unknown) => {
+      if (file === `/proc/${unreadablePid}/stat`) throw errno('EACCES');
+      return readStat(file);
+    });
+    signalAction = (signal) => {
+      if (signal === 'SIGTERM') members.delete(PGID);
+      if (signal === 'SIGKILL') members.get(PGID + 1)!.state = 'Z';
+    };
+    const completion = own().cancel();
+    await vi.advanceTimersByTimeAsync(400);
+    expect((await completion)?.message).toContain('Cleanup unconfirmed');
+    expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
+    expect(members.get(unreadablePid)!.state).toBe('S');
+  });
+
+  it('confirms a stopped group when the modeled view becomes complete after KILL', async () => {
+    const completeView = mountInfo;
+    mountInfo = mountInfo.replace('proc rw', 'proc rw,hidepid=2');
+    const completion = own().cancel();
+    await vi.advanceTimersByTimeAsync(200);
+    mountInfo = completeView;
+    await vi.advanceTimersByTimeAsync(25);
+    expect(await completion).toBeNull();
+    expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
   });
 
   it('accepts terminal ESRCH without relying on a restricted view', async () => {
@@ -495,10 +572,14 @@ describe('OwnedPosixProcessGroup', () => {
     list.mockImplementation(() => {
       throw errno('EACCES');
     });
-    const error = await owner.cancel();
-    expect(error?.message).toContain('Could not inspect');
-    expect((error?.cause as NodeJS.ErrnoException).code).toBe('EACCES');
-    expect(signals()).toEqual([]);
+    const completion = owner.cancel();
+    await vi.advanceTimersByTimeAsync(400);
+    const error = await completion;
+    expect(error?.message).toContain('Cleanup unconfirmed');
+    expect(((error?.cause as Error).cause as NodeJS.ErrnoException).code).toBe(
+      'EACCES',
+    );
+    expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
   });
 
   it('refuses a group recycled during the initial process-table snapshot', async () => {
@@ -535,8 +616,10 @@ describe('OwnedPosixProcessGroup', () => {
         });
       }
     };
-    expect(await own().cancel()).toBeInstanceOf(Error);
-    expect(signals()).toEqual(['SIGTERM']);
+    const completion = own().cancel();
+    await vi.advanceTimersByTimeAsync(400);
+    expect((await completion)?.message).toContain('Cleanup unconfirmed');
+    expect(signals()).toEqual(['SIGTERM', 'SIGKILL']);
   });
 
   it('reports malformed original identity and refuses all signals', async () => {
