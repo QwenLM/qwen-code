@@ -17,6 +17,7 @@ interface SignalEntry {
   readonly final: boolean;
   readonly seq: number;
   readonly leg: SignalLeg;
+  readonly stall?: boolean;
 }
 
 class SnapshotLegError extends Error {
@@ -34,6 +35,12 @@ class SnapshotLegError extends Error {
     this.code = typeof forwarded.code === 'string' ? forwarded.code : undefined;
   }
 }
+
+// The "stream is not advancing" warning: the one stream record an
+// error-free answer may not expire. A connection that stays open but never
+// delivers is exactly the condition it describes, so only an advancing
+// stream (retire) clears it.
+class StreamStallError extends Error {}
 
 const BASE_RETRY_DELAY_MS = 3_000;
 const MAX_RETRY_DELAY_MS = 30_000;
@@ -92,6 +99,11 @@ export function useManagedSession(
   // silent dead loop next to a live summary.
   const endedRef = useRef(false);
   const seqRef = useRef(0);
+  // Synchronous mirror of the stream leg's standing terminal verdict: the
+  // proof-of-life timer reads it at fire time, which a state updater (run
+  // at React's flush) could miss when the attempt fails right after the
+  // expiry.
+  const streamVerdictMessageRef = useRef<string | undefined>(undefined);
   // Paging state: whether any older page was ever loaded, the highest id any
   // page returned (the paged region's top edge), and whether the user paged
   // all the way to the beginning.
@@ -108,6 +120,7 @@ export function useManagedSession(
     exhaustedRef.current = false;
     endedRef.current = false;
     seqRef.current = 0;
+    streamVerdictMessageRef.current = undefined;
     setLoadingOlder(false);
     setState({ sessionId, events: [], loading: Boolean(sessionId) });
     if (!sessionId) return () => abort.abort();
@@ -119,6 +132,7 @@ export function useManagedSession(
     const record = (leg: SignalLeg, error: unknown, final: boolean) => {
       if (abort.signal.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
+      if (leg === 'stream' && final) streamVerdictMessageRef.current = message;
       setState((current) => {
         const previous = current.signals?.[leg];
         // A standing terminal verdict leaves only through retire(): a
@@ -131,7 +145,13 @@ export function useManagedSession(
           loading: false,
           signals: {
             ...(current.signals ?? {}),
-            [leg]: { leg, message, final, seq: ++seqRef.current },
+            [leg]: {
+              leg,
+              message,
+              final,
+              seq: ++seqRef.current,
+              stall: error instanceof StreamStallError,
+            },
           },
         };
       });
@@ -152,6 +172,7 @@ export function useManagedSession(
     // success also restarts loops that ended terminally.
     const retire = (leg: SignalLeg) => {
       if (abort.signal.aborted) return;
+      if (leg === 'stream') streamVerdictMessageRef.current = undefined;
       setState((current) => {
         if (!current.signals?.[leg]) return current;
         const signals = { ...current.signals };
@@ -167,8 +188,24 @@ export function useManagedSession(
     // transient records on that leg are left alone.
     const expireFinal = (leg: SignalLeg) => {
       if (abort.signal.aborted) return;
+      if (leg === 'stream') streamVerdictMessageRef.current = undefined;
       setState((current) => {
         if (!current.signals?.[leg]?.final) return current;
+        const signals = { ...current.signals };
+        delete signals[leg];
+        return { ...current, signals };
+      });
+    };
+    // An error-free answer is the leg's own success evidence and expires
+    // whatever the leg had standing, terminal or transient — except the
+    // stall warning, which describes exactly that condition and so leaves
+    // only through an advancing stream (retire).
+    const expireAnswered = (leg: SignalLeg) => {
+      if (abort.signal.aborted) return;
+      if (leg === 'stream') streamVerdictMessageRef.current = undefined;
+      setState((current) => {
+        const entry = current.signals?.[leg];
+        if (!entry || entry.stall) return current;
         const signals = { ...current.signals };
         delete signals[leg];
         return { ...current, signals };
@@ -312,16 +349,24 @@ export function useManagedSession(
         let gap = false;
         let delayMs = 0;
         let delivered = false;
+        // Set when the proof-of-life timer below expires a terminal verdict
+        // while this attempt is still in flight: the removal stands only if
+        // the attempt goes on to answer error-free, so a throw restores it.
+        let expiredVerdictMessage: string | undefined;
         const connectedAt = Date.now();
         // The same duration that certifies a connection for the backoff
         // ladder below (a throw before it stretches the rung) also
-        // certifies the stream leg itself: any answer that stays
-        // error-free this long refutes a standing terminal stream verdict
-        // — even when no new frame ever arrives to retire it.
-        const proofOfLife = setTimeout(
-          () => expireFinal('stream'),
-          BASE_RETRY_DELAY_MS,
-        );
+        // certifies the stream leg itself: an answer that stays error-free
+        // this long retires the leg's records — even when no new frame ever
+        // arrives to retire them. A failed attempt is no such answer: the
+        // catch below restores a verdict this removed.
+        const proofOfLife = setTimeout(() => {
+          // Capture from the mirror synchronously: the state update runs
+          // at React's flush, which an attempt failing right after the
+          // expiry would beat to the catch.
+          expiredVerdictMessage = streamVerdictMessageRef.current;
+          expireAnswered('stream');
+        }, BASE_RETRY_DELAY_MS);
         try {
           for await (const event of provider.subscribeEvents(sessionId, {
             ...opts,
@@ -337,9 +382,13 @@ export function useManagedSession(
             lastEventId = event.id;
             gapStalls = 0;
             // A genuinely new frame is the stream certifying itself: it
-            // retires the stream leg's records. Replays and gap frames do
-            // not count — only data the loop had not seen before does.
+            // retires the stream leg's records, and the live delivery
+            // refutes whatever the transcript leg had standing. Replays and
+            // gap frames do not count — only data the loop had not seen
+            // before does.
+            expiredVerdictMessage = undefined;
             retire('stream');
+            retire('transcript');
             setState((current) => ({
               ...current,
               events: mergeManagedEvents(current.events, [event]),
@@ -357,15 +406,19 @@ export function useManagedSession(
                 // A resync that cannot advance the cursor replays its
                 // trigger identically: slow to the normal cadence, and
                 // after a few stalls surface an error instead of spinning.
-                // The stall record lives in the stream leg's own slot, so
-                // re-asserting on every stall keeps the banner up for the
-                // whole stall, and a resync that advances the cursor retires
-                // it.
+                // The stream answered and the durable read fulfilled, so a
+                // terminal stream verdict cannot survive it — expire it
+                // first, or the monotonicity guard would block the stall
+                // warning below too. The stall record lives in the stream
+                // leg's own slot, so re-asserting on every stall keeps the
+                // banner up for the whole stall, and a resync that advances
+                // the cursor retires it.
+                expireFinal('stream');
                 gapStalls += 1;
                 delayMs = BASE_RETRY_DELAY_MS;
                 if (gapStalls >= 3)
                   failed(
-                    new Error(
+                    new StreamStallError(
                       'Managed Agent event stream is not advancing; retrying',
                     ),
                     'stream',
@@ -384,8 +437,8 @@ export function useManagedSession(
           } else if (!abort.signal.aborted) {
             // An error-free completion is the stream leg's own success
             // evidence even when it carried nothing new: a standing
-            // terminal stream verdict cannot survive it.
-            expireFinal('stream');
+            // verdict or a transient failure on the leg cannot survive it.
+            expireAnswered('stream');
             // Same policy as the gap branch: a definite answer from a
             // routine summary read is recorded, never a kill for a stream
             // that is otherwise healthy; its success retires session-leg
@@ -400,6 +453,14 @@ export function useManagedSession(
           }
           failures = 0;
         } catch (error) {
+          // A failed attempt is not the success the proof-of-life timer
+          // credited: restore a terminal verdict it removed while the
+          // attempt was still failing, so the weaker write below meets the
+          // monotonicity guard and cannot permanently replace it.
+          if (expiredVerdictMessage !== undefined) {
+            stop('stream', expiredVerdictMessage);
+            expiredVerdictMessage = undefined;
+          }
           // The event log's own answer is a stream-leg verdict and is
           // recorded rather than killing the loop outright: reconnects keep
           // coming on the ladder, and an advancing resync retires it.

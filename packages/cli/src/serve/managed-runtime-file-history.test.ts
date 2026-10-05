@@ -515,6 +515,46 @@ it('rejects a relative file path that resolves outside the workspace', async () 
   expect(await readFile(path.join(workspace, 'inside'), 'utf8')).toBe('x');
 });
 
+it('rejects a relative read path that escapes the workspace, by traversal or link', async () => {
+  const runtime = randomUUID();
+  const tools = createManagedToolSet(workspace, runtime);
+  const executor = new ManagedToolExecutor(async () => tools);
+  const reference = {
+    sessionId: runtime,
+    promptId: randomUUID(),
+    callId: randomUUID(),
+    argsDigest: 'digest',
+  };
+  await writeFile(path.join(root, 'secret'), 'sensitive');
+  await writeFile(path.join(workspace, 'inside'), 'x');
+  await symlink(path.join(root, 'secret'), path.join(workspace, 'link'));
+  // Reads never pass through file history, so the executor's containment
+  // check is their only guard.
+  for (const filePath of ['../secret', 'link']) {
+    expect(
+      await executor.execute(
+        { ...reference, callId: randomUUID() },
+        'read_file',
+        { file_path: filePath },
+      ),
+    ).toMatchObject({
+      executionStatus: 'error',
+      error: {
+        message: expect.stringContaining(
+          'not within any of the registered workspace directories',
+        ),
+      },
+    });
+  }
+  expect(
+    await executor.execute(
+      { ...reference, callId: randomUUID() },
+      'read_file',
+      { file_path: 'inside' },
+    ),
+  ).toMatchObject({ executionStatus: 'success' });
+});
+
 it('admits history preparation beside async Hooks while retaining their close and undo hold', async () => {
   const runtime = 'hooks-activation-original';
   const holds = vi.fn(() => true);

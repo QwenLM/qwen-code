@@ -587,7 +587,105 @@ describe('useManagedSession', () => {
     }
   });
 
-  it('keeps a stream failure visible while the summary poll is healthy', async () => {
+  it('expires a terminal stream verdict when resyncs answer but never advance the cursor', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* () {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          yield event(1);
+          throw Object.assign(new Error('session gone'), { status: 404 });
+        }
+        yield { ...event(1), type: 'stream_gap' };
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // Every resync answers with the same head: the stream leg keeps
+      // answering, so its terminal verdict expires on the first stall, and
+      // after three consecutive stalls the stall warning is what stands.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9_100);
+      });
+      expect(subscribeCalls).toBeGreaterThanOrEqual(4);
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.stoppedLeg).toBeUndefined();
+      expect(latest?.error).toMatch(/not advancing/);
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('restores a terminal stream verdict when a reconnect fails past the proof-of-life point', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* () {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          yield event(1);
+          throw Object.assign(new Error('session gone'), { status: 404 });
+        }
+        // A slow failure: the attempt stays in flight past the
+        // proof-of-life point before rejecting.
+        await new Promise((resolve) => setTimeout(resolve, 4_000));
+        throw new TypeError('connection reset by peer');
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // Attempt 2 opens at t=3000 and rejects at t=7000 — past the +3s
+      // proof-of-life point. A failing attempt is not the success evidence
+      // the timer credited: the verdict still stands mid-attempt…
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_500);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // …and is restored the moment the slow failure lands, without the
+      // weaker transient message taking its place.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_600);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      expect(latest?.error).toBeUndefined();
+      // The next slow failure re-proves it.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(7_000);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('expires a transient stream failure on an error-free idle reconnect', async () => {
     vi.useFakeTimers();
     const restoreBackoff = deterministicBackoff();
     try {
@@ -598,11 +696,97 @@ describe('useManagedSession', () => {
       ) {
         subscribeCalls += 1;
         if (subscribeCalls === 1)
-          throw Object.assign(new Error('server busy'), { status: 500 });
-        yield event(1);
+          throw Object.assign(new Error('upstream unavailable'), {
+            status: 502,
+          });
+        yield* [];
+        // A live but idle session: the reconnect stays open and quiet.
         await new Promise((resolve) =>
           request.signal?.addEventListener('abort', resolve),
         );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBe('upstream unavailable');
+      // The reconnect opens at t=3000 and stays error-free: three seconds
+      // of proof-of-life expires the transient record it contradicts.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9_100);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.error).toBeUndefined();
+      expect(latest?.stoppedReason).toBeUndefined();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the stall warning through an idle connection that never advances', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls <= 3) {
+          yield { ...event(1), type: 'stream_gap' };
+          return;
+        }
+        // The reconnect then parks idle and error-free, so the
+        // proof-of-life point passes with the connection open.
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      // Three resyncs answer without advancing the cursor: the stall
+      // warning surfaces.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9_100);
+      });
+      expect(subscribeCalls).toBe(4);
+      expect(latest?.error).toMatch(/not advancing/);
+      // The idle error-free reconnect must not expire it: the stream still
+      // has not advanced, so the condition the warning describes holds.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_100);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a stream failure visible while the summary poll is healthy', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* () {
+        subscribeCalls += 1;
+        // The stream keeps failing: no answer ever credits the leg, so its
+        // record can leave only through the poll — which must not happen.
+        yield* [];
+        throw Object.assign(new Error('server busy'), { status: 500 });
       });
       const provider = {
         getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
@@ -3261,7 +3445,7 @@ describe('useManagedSession', () => {
     expect(latest?.olderCursor).toBe('cursor-5');
   });
 
-  it('keeps a resync verdict standing when a later page fetch fails', async () => {
+  it('keeps a resync verdict standing through a failed page fetch until the stream delivers again', async () => {
     vi.useFakeTimers();
     const restoreBackoff = deterministicBackoff();
     try {
@@ -3310,10 +3494,6 @@ describe('useManagedSession', () => {
       // terminal verdict while the stream recovers around it.
       expect(latest?.stoppedReason).toBe('history pruned');
       expect(latest?.stoppedLeg).toBe('transcript');
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(3_100);
-      });
-      expect(latest?.events.map((item) => item.id)).toEqual([5, 6, 7]);
 
       // The failed click is a weaker later failure on the same leg: the
       // standing resync verdict must not be downgraded by it.
@@ -3322,11 +3502,16 @@ describe('useManagedSession', () => {
       });
       expect(latest?.stoppedReason).toBe('history pruned');
       expect(latest?.stoppedLeg).toBe('transcript');
+
+      // The stream then recovers with a genuinely new frame and never gaps
+      // again: the live delivery retires the verdict.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(3_000);
+        await vi.advanceTimersByTimeAsync(3_100);
       });
-      expect(latest?.stoppedReason).toBe('history pruned');
-      expect(latest?.stoppedLeg).toBe('transcript');
+      expect(latest?.events.map((item) => item.id)).toEqual([5, 6, 7]);
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.stoppedLeg).toBeUndefined();
+      expect(latest?.error).toBeUndefined();
     } finally {
       restoreBackoff();
       vi.useRealTimers();
