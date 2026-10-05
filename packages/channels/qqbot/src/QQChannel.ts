@@ -187,16 +187,36 @@ interface QQStreamState {
   boundaryClearedInFlight?: 'payload' | 'residual';
   /**
    * Whether a non-boundary writer widened `sealedPre` while this entry's send
-   * was in flight: onPromptEnd's stash merge prepends the stashed `pre` to
-   * whatever the entry already carries, so the result already *contains* the
-   * `carriedSeal` that send captured. The carried-seal backstop in
-   * resealOnRebuffer must then stay out of the way — prepending again would
-   * seal the carried head twice. A flag, not an `endsWith(carriedSeal)` string
-   * test: the widened seal's text may coincide with the carried seal, and
+   * was in flight: onPromptEnd's stash merge prepends the stashed `pre` in
+   * front of whatever the entry already carries (the stash head is the OLDER
+   * text — see handOffSealedPre, "the older first"), so the result already
+   * *contains* the `carriedSeal` that send captured, as its suffix. The
+   * carried-seal backstop in resealOnRebuffer must then stay out of the way —
+   * prepending again would seal the carried head twice — and the success arm
+   * must strip exactly the delivered suffix, since only the prepended stash
+   * head is still undelivered. A flag, not a string test: the
+   * widened seal's text may coincide with the carried seal, and
    * sealClearedPayload's contract forbids comparing seal text. Cleared when a
    * flush chain starts, next to boundaryClearedInFlight.
    */
   sealWidenedInFlight?: boolean;
+  /**
+   * Length, in UTF-16 units, of the `stashed.text` prefix that onPromptEnd's
+   * in-flight stash merge prepended to `buffer`, or undefined when no such
+   * merge happened during this flight. A transiently-failed payload re-buffers
+   * *between* the two portions: the stashed head is the OLDER text (it was
+   * already sealed, and the seal's reading order puts it first), the
+   * in-flight payload is newer than that head, and any chunk that arrived
+   * after the merge is newer still. `buffer.slice(0, staleStashPrefix)` is
+   * therefore the stashed head and the remainder is the newer text, so the
+   * reconstruction is `head + payload + newer` (see rebufferAfterStashMerge).
+   * Only an explicit length can express that: the failed payload's text may
+   * contain either portion, so no comparison against the buffer can locate the
+   * boundary, and a blanket prepend or append expresses neither case. Consumed
+   * and cleared with the flight (flushAndTrack resets it, the re-buffer arms
+   * use it), exactly like sealWidenedInFlight.
+   */
+  staleStashPrefix?: number;
 }
 
 /**
@@ -1674,8 +1694,13 @@ export class QQChannel extends ChannelBase {
     // previous turn's deferred chain owned the entry, this turn's chunks went
     // to the side buffer, and a cancel never runs onResponseComplete. Merge
     // the stash into the residual buffer here — creating the state when the
-    // chain already freed it — so the branches below park and flush it. A
-    // stash is always older than the residual, so it is prepended.
+    // chain already freed it — so the branches below park and flush it.
+    //
+    // Order: the stash is always the OLDER text — it is the diverted/doomed
+    // head that precedes the window it is being merged into (onResponseChunk's
+    // drain does `held.text + chunk`, onResponseComplete prepends `held.pre`,
+    // and handOffSealedPre documents "the older first"), so both merges
+    // prepend, with or without a send in flight.
     const stashed = this.streamOrphanBuffer.get(sessionId);
     if (stashed) {
       if (stashed.turn === (this.turnCounter.get(sessionId) ?? 0)) {
@@ -1685,6 +1710,11 @@ export class QQChannel extends ChannelBase {
           state = this.createStreamState(chatId, sessionId, '', stashed.turn);
           this.streamState.set(sessionId, state);
         }
+        // Only when THIS entry owns the in-flight send does the merge touch a
+        // seal its chain is carrying; when another chain owns the session's
+        // send, this entry's seal and buffer were untouched by it and no
+        // per-flight record may be written on them.
+        const flushInFlight = this.flushingSessions.get(sessionId) === state;
         // The stash carries the diverted turn's attribution label (a
         // sub-agent/loop segment): without it the merged flush would go out
         // unattributed. An existing state's own label wins.
@@ -1701,13 +1731,23 @@ export class QQChannel extends ChannelBase {
         if (stashed.pre !== undefined) {
           state.sealedPre = stashed.pre + (state.sealedPre ?? '');
           // The merge widened the entry's seal while its send may still be in
-          // flight, and that send's carriedSeal is already inside the value
-          // above. Record it deterministically (not by comparing seal text) so
-          // the in-flight chain's re-buffer backstop does not prepend the
-          // carried head a second time.
-          if (this.flushingSessions.has(sessionId)) {
+          // flight, and that send's carriedSeal is now the widened value's
+          // suffix (the prepended stash head is the older text). Record it
+          // deterministically (not by comparing seal text) so the in-flight
+          // chain's re-buffer backstop does not prepend the carried head a
+          // second time and its success arm strips exactly the head that send
+          // delivered — leaving the prepended head, which is its only copy.
+          if (flushInFlight) {
             state.sealWidenedInFlight = true;
           }
+        }
+        if (flushInFlight) {
+          // The prepended stash head sits at the FRONT of the buffer, so the
+          // failed payload's re-buffer has to be inserted after it and before
+          // whatever chunks arrived since the merge. Record where the head
+          // ends; a later re-buffer with no room for the payload may clear the
+          // marker, and flushAndTrack clears it when the next flight starts.
+          state.staleStashPrefix = stashed.text.length;
         }
         state.buffer = stashed.text + state.buffer;
       } else {
@@ -2256,6 +2296,10 @@ export class QQChannel extends ChannelBase {
     // earlier flight would re-seal text this payload never carried.
     state.boundaryClearedInFlight = undefined;
     state.sealWidenedInFlight = undefined;
+    // Scoped to this flight too: a stash merged during the PREVIOUS flight is
+    // already part of this payload (the re-buffer arms fold it in), so its
+    // boundary marker must not reorder this flight's re-buffer.
+    state.staleStashPrefix = undefined;
     // Terminal release owed by this chain, performed in .finally() after the
     // ownership-keyed marker is cleared: releasing while the marker is still
     // set makes releaseSessionReplyAnchor's in-flight guard return early, and
@@ -2309,6 +2353,29 @@ export class QQChannel extends ChannelBase {
           state.boundaryClearedInFlight !== 'residual'
         ) {
           state.sealedPre = undefined;
+        } else if (
+          state.sealWidenedInFlight === true &&
+          state.boundaryClearedInFlight !== 'residual' &&
+          carriedSeal !== undefined &&
+          (state.sealedPre?.length ?? 0) >= carriedSeal.length
+        ) {
+          // onPromptEnd's stash merge prepended the older stash head in front
+          // of the seal this send captured, so the delivered head is the
+          // widened value's suffix: strip exactly the delivered length and keep
+          // the prepended head, which is the merged stash's only copy. The gate
+          // is the per-flight flag, not a comparison of seal text (see
+          // sealClearedPayload): the prepended head may repeat the delivered
+          // head byte for byte, and a 'residual' marker still means the seal is
+          // the undelivered residual's only copy, so it is never narrowed. The
+          // length check keeps a seal a boundary overwrote shorter than the
+          // carried one from being chopped at all.
+          // Non-null: the length test above proved the seal exists and is at
+          // least as long as the carried seal.
+          state.sealedPre =
+            state.sealedPre!.slice(
+              0,
+              state.sealedPre!.length - carriedSeal.length,
+            ) || undefined;
         }
         // #3: Guard — if session died during in-flight send, touch nothing
         // of the entry's, but do release the anchor: no later settle can run
@@ -2465,13 +2532,30 @@ export class QQChannel extends ChannelBase {
           // entry's text is abandoned with its permanent failure and must not
           // be injected into a successor's reply.
           if (payloadFoldedIntoSeal) {
-            state.sealedPre = this.sealClearedPayload(
-              buffer,
-              this.capturedResidual(state),
+            // A boundary cleared the bridge's collection, so the whole
+            // undelivered window must be re-sealed. When onPromptEnd's stash
+            // merge widened the seal during this flight, that window is the
+            // reconstruction rebufferAfterStashMerge builds from the entry —
+            // the OLDER stashed head, then this payload, then whatever
+            // accumulated since — exactly what the transient re-buffer arm
+            // seals. sealClearedPayload would instead put the payload in front
+            // of the head and drop the head with the entry. Both arms ask the
+            // same rule (sealForClearedWindow) so they cannot drift.
+            state.sealedPre = this.sealForClearedWindow(state, buffer, () =>
+              this.rebufferAfterStashMerge(state, buffer),
             );
             this.handOffSealedPre(state, sessionId);
           } else {
-            this.handOffSealedPre(state, sessionId, undefined, carriedSeal);
+            // onPromptEnd's stash merge already folded the carried head into
+            // the live seal as its suffix (sealWidenedInFlight), so passing it
+            // again would prepend the delivered head a second time in
+            // handOffSealedPre's merge. Same rule resealOnRebuffer applies.
+            this.handOffSealedPre(
+              state,
+              sessionId,
+              undefined,
+              state.sealWidenedInFlight ? undefined : carriedSeal,
+            );
           }
           if (current === state) {
             this.streamState.delete(sessionId);
@@ -2529,10 +2613,14 @@ export class QQChannel extends ChannelBase {
           // must keep its flag.
           if (current === state) {
             this.pendingStreamDelete.delete(sessionId);
-            // Prepend the failed send's text to whatever accumulated during
-            // the in-flight send (same order as the non-pending branch) so
-            // neither portion is silently dropped.
-            current.buffer = buffer + (current.buffer || '');
+            // Restore the failed send's text to the buffer in the order the
+            // seal states: the stashed head onPromptEnd merged during this
+            // flight sits at the front of the buffer and is OLDER than the
+            // payload, which in turn is older than any chunk that arrived since
+            // (see rebufferAfterStashMerge). Without a widening this is the
+            // plain prepend: the payload predates the text that accumulated
+            // during the flight.
+            current.buffer = this.rebufferAfterStashMerge(current, buffer);
             // The failed payload is buffer-resident again and must be sealed.
             // A boundary that cleared the bridge's collection while this send
             // was in flight removed the payload's whole text from fullText —
@@ -2607,7 +2695,7 @@ export class QQChannel extends ChannelBase {
           const current = this.streamState.get(sessionId);
           // #6: Identity guard — only operate on the same state reference
           if (current === state) {
-            current.buffer = buffer + (current.buffer || '');
+            current.buffer = this.rebufferAfterStashMerge(current, buffer);
             // Same re-seal and turn-ownership rule as the parked branch above
             // (see resealOnRebuffer for why the whole payload is sealed and
             // `carriedSeal` is the backstop).
@@ -3282,6 +3370,77 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
+   * Put a transiently-failed payload back on `current` in the order the seal
+   * states it in.
+   *
+   * With no stash merged during this flight the payload predates whatever
+   * accumulated while it was in flight — chunks sent to state.buffer by the
+   * bridge's fallback path, or a residual that arrived mid-send — so the plain
+   * prepend (`payload + buffer`) is correct and is what the non-widened case
+   * has always done.
+   *
+   * After onPromptEnd merged a stash while this send was flight, the buffer is
+   * `[stashed head][chunks that arrived since]`: the merge prepends the head,
+   * and every later writer appends. That head is OLDER than the failed payload
+   * (it is the seal's leading segment — see handOffSealedPre, "the older
+   * first"), so the payload belongs BETWEEN the two portions and the
+   * reconstruction is `head + payload + newer`. Reconstructing it is the whole
+   * reason `staleStashPrefix` exists: the failed payload's text may repeat
+   * either portion of the buffer, the newer text may itself begin with the
+   * payload's text, and the payload may even be empty, so no boundary can be
+   * found by comparing text. A `startsWith`/dedup test against the buffer would
+   * strip the newer text's own leading characters — dropping real reply text —
+   * so the split uses the recorded length alone and never compares strings.
+   * The marker is consumed here — the payload is folded in and the next flight
+   * must not reorder against it again (flushAndTrack also resets it).
+   *
+   * A boundary that sealed a residual of its own while the send was in flight
+   * does not change that order: captureBoundaryClear records the residual and
+   * marks the re-seal, but the residual is only the text that accumulated
+   * since the boundary — it never contains the in-flight payload, and it does
+   * not know that the head prepended in front of it is older. A plain prepend
+   * would therefore read `head + payload + newer` as `payload + head + newer`.
+   * The reconstruction above stays the same; resealOnRebuffer's boundary arm
+   * extends the widened seal to match it.
+   */
+  private rebufferAfterStashMerge(
+    current: QQStreamState,
+    payload: string,
+  ): string {
+    const afterFlight = current.buffer || '';
+    const headLength = current.staleStashPrefix;
+    // Consumed either way, ahead of both arms: the payload is folded in below
+    // and the next flight must not reorder against this merge.
+    current.staleStashPrefix = undefined;
+    if (headLength !== undefined && headLength > 0) {
+      const head = afterFlight.slice(0, headLength);
+      const newer = afterFlight.slice(headLength);
+      return head + payload + newer;
+    }
+    return payload + afterFlight;
+  }
+
+  /**
+   * The seal owed for `payload` when a boundary cleared the bridge's collection
+   * while its send was in flight. onPromptEnd's stash merge may have widened the
+   * seal during this flight; the undelivered window is then the reconstruction
+   * rebufferAfterStashMerge builds (the OLDER stashed head, then this payload,
+   * then whatever accumulated since), read lazily so the non-widened path never
+   * consumes the stash marker. Otherwise the plain payload-plus-residual seal
+   * stands. Shared by the transient re-buffer arms (resealOnRebuffer) and the
+   * permanent handoff: all describe the same window, so they must not drift.
+   */
+  private sealForClearedWindow(
+    state: QQStreamState,
+    payload: string,
+    widenedWindow: () => string,
+  ): string {
+    return state.sealWidenedInFlight === true
+      ? widenedWindow()
+      : this.sealClearedPayload(payload, this.capturedResidual(state));
+  }
+
+  /**
    * Re-seal a failed payload that a transient re-buffer puts back on `current`:
    * a boundary that cleared the bridge's collection while the send was in
    * flight removed the payload's whole text from fullText, so the entire
@@ -3292,9 +3451,10 @@ export class QQChannel extends ChannelBase {
    * reply. `carriedSeal` is the backstop for a re-seal whose boundary marker
    * was missed, but it is skipped when the seal was widened during this flight
    * (sealWidenedInFlight — onPromptEnd's stash merge already folded the carried
-   * head in, so prepending it again would seal it twice). Shared by the parked
-   * and non-parked re-buffer arms; the two must stay identical because they
-   * encode the same rule.
+   * head in as the widened seal's suffix, so prepending it again would seal it
+   * twice). Shared by the parked and non-parked re-buffer arms, and by the
+   * permanent handoff through sealForClearedWindow; they must stay identical
+   * because they encode the same rule.
    */
   private resealOnRebuffer(
     sessionId: string,
@@ -3305,9 +3465,21 @@ export class QQChannel extends ChannelBase {
   ): void {
     if (!this.ownsLiveTurn(sessionId, state)) return;
     if (state.boundaryClearedInFlight !== undefined) {
-      current.sealedPre = this.sealClearedPayload(
+      // The boundary cleared the bridge's collection, so the whole undelivered
+      // window must be re-sealed. When onPromptEnd's stash merge widened the
+      // seal during this flight, that window is exactly what
+      // rebufferAfterStashMerge just rebuilt in `current.buffer`: the older
+      // stashed head, then this payload, then the residual/whatever
+      // accumulated since. `payload + capturedResidual` would instead put the
+      // payload in front of the head and overwrite the widened head — its only
+      // copy. The permanent handoff asks the same rule. Without a widening the
+      // buffer is already `payload + residual` and the plain seal stands byte
+      // for byte. `current === state` at both call sites, so `current.buffer` is
+      // this state's reconstructed window.
+      current.sealedPre = this.sealForClearedWindow(
+        state,
         payload,
-        this.capturedResidual(state),
+        () => current.buffer || '',
       );
     } else if (
       carriedSeal !== undefined &&

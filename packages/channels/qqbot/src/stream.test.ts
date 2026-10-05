@@ -6250,62 +6250,518 @@ describe('an in-flight flush must not clear a newer seal', () => {
     expect(sentContents().at(-1)).toBe('HEADB');
   });
 
-  it('does not re-seal the carried head when onPromptEnd widened the seal in flight', async () => {
-    const ch = makeChannel({ maxFlushRetries: 2 });
-    const chp = ch as unknown as Record<string, unknown>;
-    const stateMap = chp['streamState'] as Map<
-      string,
-      {
-        buffer: string;
-        sealedPre?: string;
-        boundaryClearedInFlight?: string;
-        sealWidenedInFlight?: boolean;
+  // The reachable producer of a widened seal is handOffSealedPre: a doomed
+  // predecessor's sealed head is re-stashed tagged with the LIVE turn, and the
+  // live turn's own flush is in flight when its onPromptEnd merges that stash.
+  // The stash head is the OLDER text — handOffSealedPre documents "the older
+  // first, since the seal always covers a later buffer window" — so the merge
+  // prepends it to `sealedPre` and to `state.buffer`, and the live send's
+  // carriedSeal becomes the widened seal's SUFFIX. These scenarios drive that
+  // path through the public hooks only.
+  describe('a widened in-flight seal keeps one order and one copy', () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+      vi.useFakeTimers();
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    });
+
+    type WidenedMode = 'pending' | 'ok' | 'transient' | 'permanent';
+    type WidenedPending = {
+      resolve: (v: MockResponse) => void;
+      reject: (e: unknown) => void;
+    };
+
+    function widenedController() {
+      const attempts: Array<{ n: number; text: string; outcome: string }> = [];
+      const pending: WidenedPending[] = [];
+      let seq: WidenedMode[] = [];
+      let i = 0;
+      mockSendQQMessage.mockImplementation((...args: unknown[]) => {
+        const body = args[3] as { markdown?: { content?: string } } | undefined;
+        const text = body?.markdown?.content ?? '';
+        const mode: WidenedMode = seq[i] ?? 'ok';
+        i++;
+        attempts.push({ n: i, text, outcome: mode });
+        if (mode === 'pending') {
+          return new Promise<MockResponse>((resolve, reject) => {
+            pending.push({ resolve, reject });
+          });
+        }
+        if (mode === 'ok') return Promise.resolve(mockResponse(true));
+        if (mode === 'transient') return Promise.reject(new Error('transient'));
+        return Promise.reject(
+          new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
+        );
+      });
+      return {
+        attempts,
+        pending,
+        setSeq(...s: WidenedMode[]) {
+          seq = s;
+          i = 0;
+        },
+      };
+    }
+
+    async function settle(steps = 8) {
+      for (let k = 0; k < steps; k++) {
+        await vi.advanceTimersByTimeAsync(2000);
+        await drain();
       }
-    >;
-    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
-    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
-      string,
-      { turn: number; text: string; pre?: string }
-    >;
-    setReplyMsgId(ch, 'test-chat', 'msg-A');
-    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    }
 
-    // The live entry buffers 'R' and a boundary fires while NO flush is in
-    // flight: captureBoundaryClear seals the buffer into sealedPre and returns
-    // at its `if (!flushing) return;` before recording any in-flight marker.
-    onResponseChunk(ch, 'test-chat', 'R', 's1');
-    onResponseBoundary(ch, 'test-chat', 's1');
-    expect(stateMap.get('s1')!.sealedPre).toBe('R');
-    expect(stateMap.get('s1')!.boundaryClearedInFlight).toBeUndefined();
+    /**
+     * Reach the widening: turn 1's sealed head 'A' is re-stashed by its permanent
+     * failure tagged with turn 2, whose own sealed head 'P' is already on the
+     * wire; onPromptEnd's merge then widens the live entry to `sealedPre` 'AP'
+     * with `buffer` 'A'.
+     */
+    async function scheduleWidening(
+      c: ReturnType<typeof widenedController>,
+      opts: {
+        /** Text that arrives while the widened send is still in flight. */
+        duringFlight?: string;
+        /** Fire the boundary hook while that send is still in flight. */
+        boundaryDuringFlight?: boolean;
+      } = {},
+    ) {
+      const ch = makeChannel({ maxFlushRetries: 2 });
+      const chp = ch as unknown as Record<string, unknown>;
+      const stateMap = chp['streamState'] as Map<
+        string,
+        {
+          turn: number;
+          buffer: string;
+          sealedPre?: string;
+          sealWidenedInFlight?: boolean;
+          staleStashPrefix?: number;
+          boundaryClearedInFlight?: string;
+        }
+      >;
+      const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+        string,
+        { turn: number; text: string; pre?: string }
+      >;
 
-    // The idle flush sends 'R' carrying that seal and stays pending.
-    let rejectSend!: (e: unknown) => void;
-    mockSendQQMessage.mockReturnValueOnce(
-      new Promise<MockResponse>((_resolve, reject) => {
-        rejectSend = reject;
-      }),
-    );
-    vi.advanceTimersByTime(2000);
-    await drain();
+      setReplyMsgId(ch, 'test-chat', 'msg-A');
+      onPromptStart(ch, 'test-chat', 's1', 'msg-A'); // turn 1
+      onResponseChunk(ch, 'test-chat', 'A', 's1');
+      onResponseBoundary(ch, 'test-chat', 's1'); // turn-1 seal 'A'
+      await vi.advanceTimersByTimeAsync(2000); // send 1 'A' stays in flight
+      await drain();
 
-    // While that send is in flight, a diverted/side-buffered turn's stash —
-    // whose head the boundary sealed as 'P' — is merged by onPromptEnd. The
-    // entry's seal becomes 'P' + 'R': it already contains the carried seal 'R'.
-    orphanBuffer.set('s1', { turn: 1, text: 'P', pre: 'P' });
-    onPromptEnd(ch, 'test-chat', 's1');
-    const state = stateMap.get('s1')!;
-    expect(state.sealedPre).toBe('PR');
-    expect(state.sealWidenedInFlight).toBe(true);
-    // The in-flight flush parks the session for its chain to settle.
-    expect(pendingStreamDelete.has('s1')).toBe(true);
+      onResponseChunk(ch, 'test-chat', 'B', 's1'); // buffers during that flight
+      c.pending[0].reject(new Error('transient')); // re-buffer 'AB', retry armed
+      await drain();
+      await vi.advanceTimersByTimeAsync(2000); // send 2 'AB' stays in flight
+      await drain();
 
-    // The send fails transiently and re-buffers its payload. The carried-seal
-    // backstop must stay out of the way: 'PR' already holds the carried head
-    // exactly once, and prepending 'R' again would deliver it twice.
-    mockSendQQMessage.mockRejectedValue(new Error('transient'));
-    rejectSend(new Error('transient'));
-    await drain();
-    expect(state.sealedPre).toBe('PR');
+      onPromptStart(ch, 'test-chat', 's1', 'msg-A'); // turn 2 supersedes
+      onResponseChunk(ch, 'test-chat', 'P', 's1');
+      onResponseBoundary(ch, 'test-chat', 's1'); // turn-2 seal 'P'
+      c.pending[1].reject(new DeliveryError('RETRY_EXHAUSTED', 'permanent'));
+      await settle(2); // handoff: stash {turn 2, 'A'} in front of turn 2's 'P'
+      await vi.advanceTimersByTimeAsync(2000); // send 3 'P' stays in flight
+      await drain();
+
+      if (opts.duringFlight) {
+        onResponseChunk(ch, 'test-chat', opts.duringFlight, 's1');
+      }
+      if (opts.boundaryDuringFlight) {
+        onResponseBoundary(ch, 'test-chat', 's1');
+      }
+      onPromptEnd(ch, 'test-chat', 's1'); // merge widens the live entry
+      return { ch, chp, stateMap, orphanBuffer };
+    }
+
+    it('delivers the older predecessor head exactly once when the widened send fails permanently', async () => {
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'ok', 'ok', 'ok');
+      const { stateMap } = await scheduleWidening(c);
+
+      // The merge prepended the older head: the seal reads 'A' then the payload
+      // 'P' it already delivered, and the buffer keeps the same A-before-P order.
+      const state = stateMap.get('s1')!;
+      expect(state.sealedPre).toBe('AP');
+      expect(state.buffer).toBe('A');
+      expect(state.sealWidenedInFlight).toBe(true);
+      // Explicit marker for where the prepended head ends: the failed payload's
+      // re-buffer has to slot in after it, and no text comparison can find it.
+      expect(state.staleStashPrefix).toBe('A'.length);
+
+      // The widened payload fails PERMANENTLY. The carried 'P' is already the
+      // widened seal's suffix, so the permanent arm must not hand it off again:
+      // doing so makes handOffSealedPre prepend it a second time and the operator
+      // reads 'PAP' (head duplicated) instead of 'AP'.
+      c.pending[2].reject(new DeliveryError('RETRY_EXHAUSTED', 'permanent'));
+      await settle();
+
+      // The predecessor head rides the handoff exactly once: the duplicate the
+      // flag gate prevents ('PAP'/'APA') appears in no attempt.
+      expect(c.attempts.map((a) => a.text)).toEqual(['A', 'AB', 'P', 'AP']);
+      expect(c.attempts.some((a) => a.text === 'PAP' || a.text === 'APA')).toBe(
+        false,
+      );
+    });
+
+    it('re-buffers a widened transient failure in the seal order and delivers the head once', async () => {
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'transient', 'ok', 'ok', 'ok');
+      const { stateMap } = await scheduleWidening(c);
+      expect(stateMap.get('s1')!.sealedPre).toBe('AP');
+
+      // A TRANSIENT failure re-buffers the widened payload. The prepended head
+      // 'A' is the OLDER text and the failed payload 'P' is newer than it, so
+      // the buffer must read 'AP' — the seal's order — not the 'PA' a blanket
+      // prepend produces. (Read before the retry timer fires: the retry flush
+      // empties the buffer again.)
+      c.pending[2].reject(new Error('transient'));
+      await vi.advanceTimersByTimeAsync(0);
+      await drain();
+      expect(stateMap.get('s1')!.buffer).toBe('AP');
+      expect(stateMap.get('s1')!.sealedPre).toBe('AP');
+
+      // The retry then delivers the seal's order: buffer and seal agree, so the
+      // predecessor head 'A' rides the payload exactly once and 'PA' — the
+      // transposed reading — never appears. (The retry's own attempts are the
+      // 'AP' pair: one rejected transiently, one delivered.)
+      await settle();
+      expect(c.attempts.map((a) => a.text)).toEqual([
+        'A',
+        'AB',
+        'P',
+        'AP',
+        'AP',
+      ]);
+      expect(c.attempts.filter((a) => a.text === 'A')).toHaveLength(1);
+      expect(c.attempts.some((a) => a.text === 'PA')).toBe(false);
+    });
+
+    it('keeps the head the widened success strip leaves instead of re-delivering it', async () => {
+      const c = widenedController();
+      c.setSeq('pending', 'permanent', 'ok', 'ok', 'ok');
+      const ch = makeChannel({ maxFlushRetries: 2 });
+      const chp = ch as unknown as Record<string, unknown>;
+      const stateMap = chp['streamState'] as Map<
+        string,
+        {
+          buffer: string;
+          sealedPre?: string;
+          sealWidenedInFlight?: boolean;
+          boundaryClearedInFlight?: string;
+        }
+      >;
+      const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+        string,
+        { turn: number; text: string; pre?: string }
+      >;
+      setReplyMsgId(ch, 'test-chat', 'msg-A');
+      onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+      // The live entry buffers 'R' and a boundary fires while no flush is in
+      // flight, so the buffer is sealed without any in-flight marker.
+      onResponseChunk(ch, 'test-chat', 'R', 's1');
+      onResponseBoundary(ch, 'test-chat', 's1');
+      expect(stateMap.get('s1')!.sealedPre).toBe('R');
+
+      // The idle flush sends 'R' carrying that seal and stays in flight.
+      await vi.advanceTimersByTimeAsync(2000);
+      await drain();
+      expect(c.pending).toHaveLength(1);
+
+      // While that send is in flight, a doomed head 'P' is merged by
+      // onPromptEnd's stash drain. The merge PREPENDS the older head, so the
+      // entry reads 'PR': the carried 'R' is the widened seal's suffix.
+      orphanBuffer.set('s1', { turn: 1, text: 'P', pre: 'P' });
+      onPromptEnd(ch, 'test-chat', 's1');
+      expect(stateMap.get('s1')!.sealedPre).toBe('PR');
+      expect(stateMap.get('s1')!.sealWidenedInFlight).toBe(true);
+
+      // The in-flight send SUCCEEDS, so 'R' is on the wire. The success arm
+      // must strip the delivered suffix and keep only 'P' — its only copy.
+      // Leaving 'PR' sealed makes the residual's give-up site deliver the
+      // already-delivered 'R' a second time.
+      c.pending[0].resolve(mockResponse(true));
+      await drain();
+
+      // The residual 'P' is flushed, rejected PERMANENTLY, and handed off: the
+      // delivered head reaches the wire exactly once across the sequence.
+      await settle(4);
+      expect(c.attempts.map((a) => a.text)).toEqual(['R', 'P', 'P']);
+      expect(c.attempts.filter((a) => a.text.includes('R'))).toHaveLength(1);
+    });
+
+    it('never narrows a residual seal the widened success strip would otherwise drop', async () => {
+      // This state IS reachable through the public hooks: a chunk that arrives
+      // during the widened flight and a boundary that captures it record
+      // 'residual' while the seal is widened (see the boundary test below). The
+      // test pins the widened success arm's 'residual' guard by setting the
+      // marker directly, so the assertion is immune to hook ordering. The guard
+      // is load-bearing: without it the success arm strips the residual away and
+      // the give-up site drops its only copy.
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'transient', 'transient', 'ok');
+      const { stateMap } = await scheduleWidening(c);
+      const state = stateMap.get('s1')!;
+      expect(state.sealedPre).toBe('AP');
+      expect(state.sealWidenedInFlight).toBe(true);
+      expect(state.buffer).toBe('A');
+
+      // The cell: a widened seal AND a residual marker on the same flight. The
+      // sealed value is the residual's only copy.
+      state.boundaryClearedInFlight = 'residual';
+      state.sealedPre = 'AP';
+
+      c.pending[2].resolve(mockResponse(true));
+      await drain();
+      // The guard keeps it: narrowed here, the residual would be dropped.
+      expect(state.sealedPre).toBe('AP');
+
+      // And it is still delivered, exactly once, by the residual's own chain.
+      await settle(8);
+      expect(c.attempts.map((a) => a.text)).toContain('AP');
+    });
+
+    it('re-buffers a widened transient failure in the seal order around a newer in-flight chunk', async () => {
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'ok', 'ok', 'ok');
+      // 'C' arrives while the widened 'P' send is still in flight, so the
+      // buffer holds the OLDER stashed head 'A' followed by the newer 'C'.
+      const { stateMap } = await scheduleWidening(c, { duringFlight: 'C' });
+      expect(stateMap.get('s1')!.sealedPre).toBe('AP');
+
+      // The transient failure re-buffers the payload BETWEEN the two portions,
+      // exactly as the seal reads: 'A' + 'P' + 'C'. A blanket append would give
+      // 'CAP'; the previous bug gave 'ACP'. Neither is the seal's order.
+      c.pending[2].reject(new Error('transient'));
+      await vi.advanceTimersByTimeAsync(0);
+      await drain();
+      expect(stateMap.get('s1')!.buffer).toBe('APC');
+      // And the reconstruction consumes the length marker: it has served its
+      // one purpose and the retry must not reorder against it again.
+      expect(stateMap.get('s1')!.staleStashPrefix).toBeUndefined();
+
+      // The retry delivers the seal's order, head first, exactly once.
+      await settle();
+      expect(c.attempts.map((a) => a.text)).toEqual(['A', 'AB', 'P', 'APC']);
+      expect(
+        c.attempts.filter((a) => a.outcome === 'ok').map((a) => a.text),
+      ).toEqual(['APC']);
+      expect(c.attempts.some((a) => a.text === 'ACP')).toBe(false);
+    });
+
+    it('does not drop a character when the newer in-flight chunk starts with the failed payload', async () => {
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'ok', 'ok', 'ok');
+      // The newer chunk 'PZ' begins with the failed payload's own text 'P'.
+      const { stateMap } = await scheduleWidening(c, { duringFlight: 'PZ' });
+      expect(stateMap.get('s1')!.sealedPre).toBe('AP');
+
+      c.pending[2].reject(new Error('transient'));
+      await vi.advanceTimersByTimeAsync(0);
+      await drain();
+      // 'A' + 'P' + 'PZ': the 'P' inside the newer chunk is real text, not a
+      // second copy of the payload. Stripping it (a startsWith/dedup test on
+      // the buffer) loses one character and yields 'AZP'.
+      expect(stateMap.get('s1')!.buffer).toBe('APPZ');
+
+      await settle();
+      expect(c.attempts.map((a) => a.text)).toEqual(['A', 'AB', 'P', 'APPZ']);
+      expect(
+        c.attempts.filter((a) => a.outcome === 'ok').map((a) => a.text),
+      ).toEqual(['APPZ']);
+      expect(c.attempts.some((a) => a.text === 'AZP')).toBe(false);
+    });
+
+    it('prepends the stashed head in front of chunks that arrived during the widened flight', async () => {
+      // The in-flight chunk makes the merge target non-empty, which is the only
+      // way the merge DIRECTION is observable: prepending the OLDER stashed head
+      // gives 'AC' (matching the widened seal 'AP'), appending it gives 'CA'.
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'ok', 'ok', 'ok');
+      const { stateMap } = await scheduleWidening(c, { duringFlight: 'C' });
+      const state = stateMap.get('s1')!;
+      expect(state.sealedPre).toBe('AP');
+      expect(state.buffer).toBe('AC');
+      expect(state.staleStashPrefix).toBe('A'.length);
+      expect(state.sealWidenedInFlight).toBe(true);
+
+      // The recorded marker and the merge direction then agree with the helper:
+      // the failed payload lands between the head and the newer chunk.
+      c.pending[2].reject(new Error('transient'));
+      await vi.advanceTimersByTimeAsync(0);
+      await drain();
+      expect(stateMap.get('s1')!.buffer).toBe('APC');
+    });
+
+    it('re-seals the widened window in seal order when a boundary re-sealed during the flight', async () => {
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'transient', 'ok', 'ok');
+      // The chunk 'C' arrives during the widened flight and the boundary then
+      // captures it as a residual: the boundary overwrites the seal with the
+      // buffer it saw ('C'), and onPromptEnd's later merge prepends the OLDER
+      // stashed head 'A', so the entry reads 'AC' — but the in-flight payload
+      // 'P' is in neither portion.
+      const { stateMap } = await scheduleWidening(c, {
+        duringFlight: 'C',
+        boundaryDuringFlight: true,
+      });
+      const state = stateMap.get('s1')!;
+      expect(state.boundaryClearedInFlight).toBe('residual');
+      expect(state.sealedPre).toBe('AC');
+      expect(state.buffer).toBe('AC');
+
+      // The boundary did NOT order the whole window: its residual 'AC' holds
+      // only the head 'A' and the newer 'C', so a plain prepend reproduces
+      // 'P' + 'AC' = 'PAC' — the transposition. The reconstruction must slot
+      // the payload between the head and the residual ('A' + 'P' + 'C'), and
+      // the boundary arm must extend the seal to that same window rather than
+      // overwrite the widened head.
+      c.pending[2].reject(new Error('transient'));
+      await vi.advanceTimersByTimeAsync(0);
+      await drain();
+      expect(stateMap.get('s1')!.buffer).toBe('APC');
+      expect(stateMap.get('s1')!.sealedPre).toBe('APC');
+
+      await settle();
+      expect(c.attempts.map((a) => a.text)).toEqual([
+        'A',
+        'AB',
+        'P',
+        'APC',
+        'APC',
+      ]);
+      // The whole window reaches the wire once, in order.
+      expect(
+        c.attempts.filter((a) => a.outcome === 'ok').map((a) => a.text),
+      ).toEqual(['APC']);
+      expect(c.attempts.some((a) => a.text === 'PAC' || a.text === 'ACP')).toBe(
+        false,
+      );
+    });
+
+    it('keeps the prepended head when a boundary fires before the widened merge', async () => {
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'transient', 'ok', 'ok');
+      // The boundary fires while the widened send is in flight and the entry's
+      // buffer is empty (the flush took it), so it captures no residual and
+      // records only the 'payload' marker. onPromptEnd's merge then prepends
+      // the OLDER stashed head 'A' in front of the widened seal 'AP' and the
+      // buffer 'A'.
+      const { stateMap } = await scheduleWidening(c, {
+        boundaryDuringFlight: true,
+      });
+      const state = stateMap.get('s1')!;
+      expect(state.boundaryClearedInFlight).toBe('payload');
+      expect(state.sealedPre).toBe('AP');
+      expect(state.buffer).toBe('A');
+      expect(state.sealWidenedInFlight).toBe(true);
+      expect(state.staleStashPrefix).toBe('A'.length);
+
+      // The widened send fails transiently. The boundary branch must not read
+      // the undelivered window as the payload alone (which overwrites the
+      // widened seal with 'P') nor drop the re-buffered head: the whole 'A' +
+      // 'P' window is restored and re-sealed in order.
+      c.pending[2].reject(new Error('transient'));
+      await vi.advanceTimersByTimeAsync(0);
+      await drain();
+      expect(stateMap.get('s1')!.buffer).toBe('AP');
+      expect(stateMap.get('s1')!.sealedPre).toBe('AP');
+
+      // The retry's own failure exhausts the bound and hands the seal off. The
+      // prepended head 'A' reaches the wire exactly once, ahead of 'P'. The
+      // loss this pins delivered 'P' alone (wire 'P') and dropped 'A' with the
+      // buffer.
+      await settle();
+      expect(
+        c.attempts
+          .filter((a) => a.outcome === 'ok')
+          .map((a) => a.text)
+          .join(''),
+      ).toBe('AP');
+      expect(
+        c.attempts
+          .filter((a) => a.outcome === 'ok')
+          .map((a) => a.text)
+          .join('')
+          .split('')
+          .filter((ch) => ch === 'A'),
+      ).toHaveLength(1);
+      expect(c.attempts.some((a) => a.text === 'PA')).toBe(false);
+    });
+
+    it('delivers the prepended head exactly once when a boundary fires before the widened merge then the send fails permanently', async () => {
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'ok', 'ok', 'ok');
+      // The boundary fires while the widened 'P' send is in flight and the
+      // flush already took the buffer, so it captures no residual and records
+      // only the 'payload' marker. onPromptEnd's merge then prepends the OLDER
+      // stashed head 'A' in front of the widened seal 'AP' and the buffer 'A'.
+      const { stateMap } = await scheduleWidening(c, {
+        boundaryDuringFlight: true,
+      });
+      const state = stateMap.get('s1')!;
+      expect(state.boundaryClearedInFlight).toBe('payload');
+      expect(state.sealedPre).toBe('AP');
+      expect(state.buffer).toBe('A');
+
+      // The widened send fails PERMANENTLY. The empty residual means the plain
+      // payload-plus-residual seal would be 'P' alone, and the head 'A' — the
+      // entry buffer's only copy — would be dropped with the entry: the
+      // operator reads 'P'. The permanent handoff must seal the same
+      // reconstruction the transient arm re-buffers: head + payload + newer.
+      c.pending[2].reject(new DeliveryError('RETRY_EXHAUSTED', 'permanent'));
+      await settle();
+
+      // The RESOLVED sends are the wire: the head and the payload each reach it
+      // exactly once, head first. Before the fix this read 'P' and 'A' was
+      // logged as dropped buffered text.
+      const wire = c.attempts
+        .filter((a) => a.outcome === 'ok')
+        .map((a) => a.text)
+        .join('');
+      expect(wire).toBe('AP');
+      expect(wire.split('').filter((ch) => ch === 'A')).toHaveLength(1);
+      expect(c.attempts.some((a) => a.outcome === 'ok' && a.text === 'P')).toBe(
+        false,
+      );
+    });
+
+    it('keeps the widened order when a boundary fires before the widened merge then the send fails permanently', async () => {
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'ok', 'ok', 'ok');
+      // The chunk 'C' arrives during the widened flight and the boundary then
+      // captures it as a residual, so the merge reads 'AC' in both the seal and
+      // the buffer while the in-flight payload 'P' is in neither portion.
+      const { stateMap } = await scheduleWidening(c, {
+        duringFlight: 'C',
+        boundaryDuringFlight: true,
+      });
+      const state = stateMap.get('s1')!;
+      expect(state.boundaryClearedInFlight).toBe('residual');
+      expect(state.sealedPre).toBe('AC');
+      expect(state.buffer).toBe('AC');
+
+      // The widened send fails PERMANENTLY. Sealing payload + residual gives
+      // 'PAC': the same characters once each, but the payload transposed in
+      // front of the OLDER head. The reconstruction slots the payload between
+      // the head and the residual, matching the transient arm — whose order the
+      // T4 sibling above pins for this same window.
+      c.pending[2].reject(new DeliveryError('RETRY_EXHAUSTED', 'permanent'));
+      await settle();
+
+      const wire = c.attempts
+        .filter((a) => a.outcome === 'ok')
+        .map((a) => a.text)
+        .join('');
+      expect(wire).toBe('APC');
+      expect(c.attempts.some((a) => a.text === 'PAC')).toBe(false);
+    });
   });
 
   it('re-seals the whole payload a boundary cleared while a transient send was in flight', async () => {
