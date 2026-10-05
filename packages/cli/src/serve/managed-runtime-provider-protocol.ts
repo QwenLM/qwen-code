@@ -540,6 +540,9 @@ function providerFitNotice(omitted: number, budgetBytes: number): string {
 export const PROVIDER_RESULT_STUB =
   '[Managed Runtime provider omitted this tool result to fit the wire limit.]';
 
+export const PROVIDER_DIFF_STUB =
+  '@@ -1 +1 @@\n+[Managed Runtime provider omitted this diff to fit the wire limit.]';
+
 interface ProviderFitSlot {
   get(): string;
   set(next: string): void;
@@ -605,7 +608,7 @@ function providerFitSlots(target: Record<string, unknown>): ProviderFitSlot[] {
 
 /**
  * The string leaves of one confirmation result that legitimately carry bulk
- * text (diffs, file contents, long commands or prompts).
+ * text to be cut head-and-tail (new file contents, long commands or prompts).
  */
 function confirmationFitSlots(
   target: Record<string, unknown>,
@@ -750,9 +753,11 @@ function providerFitLevel(
  * Shrinks an `execute`/`status`/`cancel`/`confirmation` result until its JSON fits the wire
  * budget, so a legitimately large tool result stays observable instead of
  * turning the route's size gate into a 400 that strands the execution as
- * UNKNOWN. Oldest progress events are evicted first (the client is told
- * through `firstAvailableSeq`/`progressGap`), then bulk text fields are cut
- * head-and-tail with an inline notice; `truncated` is set on shell displays.
+ * UNKNOWN. For observations, oldest progress events are evicted first (the client
+ * is told through `firstAvailableSeq`/`progressGap`), then bulk text fields are
+ * cut head-and-tail with an inline notice; `truncated` is set on shell displays.
+ * For confirmations, display fields (`originalContent`, `fileDiff`) are dropped
+ * or stubbed first and bulk fields cut head-and-tail with a warning notice.
  * Mutates and returns `value`; the caller owns a JSON-round-tripped copy.
  */
 export function fitManagedRuntimeProviderResult(
@@ -769,54 +774,68 @@ export function fitManagedRuntimeProviderResult(
     return value;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const root = value as Record<string, unknown>;
-  const fits = () =>
-    Buffer.byteLength(JSON.stringify(root), 'utf8') <= budgetBytes;
-  if (fits()) return value;
+  let size = Buffer.byteLength(JSON.stringify(root), 'utf8');
+  if (size <= budgetBytes) return value;
   if (operation.kind === 'confirmation') {
-    let size = Buffer.byteLength(JSON.stringify(root), 'utf8');
-    if (size <= budgetBytes) return value;
+    const measureSlots = (target: Record<string, unknown>) =>
+      confirmationFitSlots(target).map((slot) => ({
+        slot,
+        bytes: jsonTextBytes(slot.get()),
+        floor: jsonTextBytes(providerFitNotice(slot.get().length, budgetBytes)),
+      }));
     if (root['type'] === 'edit') {
       root['hideModify'] = true;
       root['warnings'] = [
         ...(Array.isArray(root['warnings'])
           ? (root['warnings'] as string[])
           : []),
-        `Content was truncated to fit the ${budgetBytes}-byte Managed Runtime wire limit; the change shown is partial.`,
+        `Content was truncated to fit the ${budgetBytes}-byte Managed Runtime wire limit; the change shown is partial, and original file content was omitted.`,
       ];
       size = Buffer.byteLength(JSON.stringify(root), 'utf8');
-      const stubBytes = jsonTextBytes(PROVIDER_RESULT_STUB);
-      // Sacrifice originalContent first (which is not rendered in the
-      // confirmation body) only if it is large enough that stubbing it saves bytes.
+      // Sacrifice originalContent first (setting it to null so consumers fall
+      // back to whole-file addition rather than a fabricated diff) only if it
+      // is large enough that dropping it saves bytes.
       if (
         size > budgetBytes &&
         typeof root['originalContent'] === 'string' &&
-        jsonTextBytes(root['originalContent']) > stubBytes
+        jsonTextBytes(root['originalContent']) > 4
       ) {
-        root['originalContent'] = PROVIDER_RESULT_STUB;
+        root['originalContent'] = null;
         size = Buffer.byteLength(JSON.stringify(root), 'utf8');
       }
-      // Replace fileDiff only when still over budget and it is large enough
-      // that stubbing it reduces payload size, preserving real diffs whenever possible.
+      const diffStubBytes = jsonTextBytes(PROVIDER_DIFF_STUB);
+      const absorbable = (excess: number): boolean =>
+        providerFitShed(measureSlots(root), 0) >= excess;
+      // Replace fileDiff only when still over budget, it is large enough that
+      // stubbing it reduces payload size, and cutting bulk slots cannot absorb the excess.
       if (
         size > budgetBytes &&
         typeof root['fileDiff'] === 'string' &&
-        jsonTextBytes(root['fileDiff']) > stubBytes
+        jsonTextBytes(root['fileDiff']) > diffStubBytes &&
+        !absorbable(size - budgetBytes)
       ) {
-        root['fileDiff'] = PROVIDER_RESULT_STUB;
+        root['fileDiff'] = PROVIDER_DIFF_STUB;
         size = Buffer.byteLength(JSON.stringify(root), 'utf8');
       }
       if (size <= budgetBytes) return value;
     }
-    const slots = confirmationFitSlots(root).map((slot) => ({
-      slot,
-      bytes: jsonTextBytes(slot.get()),
-      floor: jsonTextBytes(providerFitNotice(slot.get().length, budgetBytes)),
-    }));
+    if (root['type'] === 'exec') {
+      root['warnings'] = [
+        ...(Array.isArray(root['warnings'])
+          ? (root['warnings'] as string[])
+          : []),
+        `Command was truncated to fit the ${budgetBytes}-byte Managed Runtime wire limit; the command shown is partial.`,
+      ];
+      size = Buffer.byteLength(JSON.stringify(root), 'utf8');
+    }
+    const slots = measureSlots(root);
     const level = providerFitLevel(slots, size - budgetBytes);
     for (const { slot, bytes } of slots)
       if (bytes > level) cutProviderFitSlot(slot, level, budgetBytes);
     return value;
   }
+  const fits = () =>
+    Buffer.byteLength(JSON.stringify(root), 'utf8') <= budgetBytes;
   const status = operation.kind === 'execute' ? undefined : root;
   const execution = (
     operation.kind === 'execute' ? root : status?.['result']

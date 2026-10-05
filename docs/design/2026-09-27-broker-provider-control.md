@@ -82,20 +82,20 @@ Control requests and responses are bounded at 8 MiB for `bind-history`,
 also have the existing core limit of 256 KiB of canonical JSON; fitting the
 outer envelope does not bypass that limit. An `execute`, `status`, `cancel` or
 `confirmation` result that would exceed its operation's response budget is
-fitted rather than refused: for execution and status observations, the worker
+fitted rather than refused: for execution, status and cancel observations, the worker
 first evicts oldest progress events (announced through
 `firstAvailableSeq`/`progressGap`), then cuts bulk text fields head-and-tail
 with an inline notice and sets `truncated` on shell displays. For
 `confirmation` results, bulk text fields are collected per variant (`command`
-for `exec`, and `prompt` for `info`); for `edit` confirmations, display-only
-fields are replaced with a stub string — `originalContent` first (if a
-string), then `fileDiff` only while the result is still over budget — so
-`newContent` survives intact, and remaining bulk fields are cut head-and-tail if
-still over budget; when a confirmation still cannot fit the budget, it is
-returned unfitted and the route answers 413 `managed_runtime_provider_too_large`;
-variant-required fields and variant structures are never removed,
-`originalContent: null` survives, and a fitted `edit` confirmation is returned
-with `hideModify: true` and an omission notice in `warnings`; unlike
+for `exec`, and `prompt` for `info`); for `edit` confirmations, `originalContent`
+(if a string) is dropped to `null`, and `fileDiff` is replaced with an omission diff
+stub only while the result is still over budget and cutting bulk slots cannot absorb
+the remaining excess, so `fileDiff` is preserved whenever possible and `newContent`
+survives intact, and remaining bulk fields are cut head-and-tail if still over budget;
+when the serialized envelope still exceeds the wire limit, the route answers 413
+`managed_runtime_provider_too_large`; variant-required fields and variant structures
+are never removed, `originalContent: null` survives, and a fitted `edit` confirmation
+is returned with `hideModify: true` and an omission notice in `warnings`; unlike
 observations, confirmations undergo no progress eviction and set no `truncated`
 flag.
 For observations, when even fully cut text could not fit beside what the cut

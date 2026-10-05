@@ -5,14 +5,23 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('@opentui/core', () => ({
+  SyntaxStyle: {
+    fromStyles: (styles: Record<string, unknown>) => ({ styles }),
+  },
+}));
+
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { renderDiffBody } from '../ui/opentui/diff-render.js';
+import { buildPermissionRequestContent } from '../acp-integration/session/permissionUtils.js';
 import {
   MANAGED_RUNTIME_PROVIDER_PROTOCOL,
   ManagedRuntimeProviderProtocolError,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
-  PROVIDER_RESULT_STUB,
+  PROVIDER_DIFF_STUB,
   fitManagedRuntimeProviderResult,
   managedRuntimeProviderLimit,
   parseManagedRuntimeProviderOperation,
@@ -984,12 +993,16 @@ describe('managed-runtime-provider/1', () => {
         Buffer.byteLength(JSON.stringify(editDetails), 'utf8'),
       ).toBeLessThanOrEqual(budget);
       expect(editDetails.hideModify).toBe(true);
-      expect(editDetails.fileDiff).toBe(PROVIDER_RESULT_STUB);
+      expect(editDetails.fileDiff).toBe(PROVIDER_DIFF_STUB);
       expect(editDetails.newContent).toBe(inputNewContent);
       expect(editDetails.originalContent).toBeNull();
       expect(Array.isArray(editDetails.warnings)).toBe(true);
       expect(
         editDetails.warnings?.some((w: string) => /truncat|omitted/.test(w)),
+      ).toBe(true);
+      const rendered = renderDiffBody(editDetails.fileDiff);
+      expect(
+        rendered.some((row) => row.some((seg) => /omitted/.test(seg.text))),
       ).toBe(true);
       expect(
         parseManagedRuntimeProviderResult(confirmation, editDetails, session),
@@ -1023,8 +1036,56 @@ describe('managed-runtime-provider/1', () => {
         Buffer.byteLength(JSON.stringify(editDetails), 'utf8'),
       ).toBeLessThanOrEqual(budget);
       expect(editDetails.fileDiff).toBe(realDiff);
-      expect(editDetails.originalContent).toBe(PROVIDER_RESULT_STUB);
+      expect(editDetails.originalContent).toBeNull();
       expect(editDetails.newContent).toBe('n'.repeat(budget / 2));
+      expect(editDetails.hideModify).toBe(true);
+      const content = buildPermissionRequestContent(
+        editDetails as unknown as Parameters<
+          typeof buildPermissionRequestContent
+        >[0],
+      );
+      const diffBlock = content.find(
+        (c: { type: string }) => c.type === 'diff',
+      ) as { type: string; oldText: string; newText: string } | undefined;
+      expect(diffBlock).toBeDefined();
+      expect(diffBlock?.oldText).toBe('');
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, editDetails, session),
+      ).toEqual(editDetails);
+    });
+
+    it('preserves a real fileDiff and cuts newContent when originalContent is dropped and newContent absorbs overflow', () => {
+      const realDiff =
+        '--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n context\n-old line\n+new line\n context';
+      const editDetails: {
+        type: string;
+        title: string;
+        fileName: string;
+        filePath: string;
+        fileDiff: string;
+        originalContent: string | null;
+        newContent: string;
+        hideModify: boolean;
+        warnings?: string[];
+      } = {
+        type: 'edit',
+        title: 'Edit',
+        fileName: 'file.txt',
+        filePath: '/workspace/file.txt',
+        fileDiff: realDiff,
+        originalContent: 'o'.repeat(budget * 2),
+        newContent: 'n'.repeat(budget * 2),
+        hideModify: false,
+      };
+      fitManagedRuntimeProviderResult(confirmation, editDetails, budget);
+      expect(
+        Buffer.byteLength(JSON.stringify(editDetails), 'utf8'),
+      ).toBeLessThanOrEqual(budget);
+      expect(editDetails.fileDiff).toBe(realDiff);
+      expect(editDetails.originalContent).toBeNull();
+      expect(editDetails.newContent).toContain(
+        'Managed Runtime provider omitted',
+      );
       expect(editDetails.hideModify).toBe(true);
       expect(
         parseManagedRuntimeProviderResult(confirmation, editDetails, session),
@@ -1095,8 +1156,8 @@ describe('managed-runtime-provider/1', () => {
       expect(
         editDetails.warnings?.some((w: string) => /truncat|omitted/.test(w)),
       ).toBe(true);
-      expect(editDetails.fileDiff).toBe(PROVIDER_RESULT_STUB);
-      expect(editDetails.originalContent).toBe(PROVIDER_RESULT_STUB);
+      expect(editDetails.fileDiff).toBe(PROVIDER_DIFF_STUB);
+      expect(editDetails.originalContent).toBeNull();
       expect(editDetails.newContent.startsWith('n')).toBe(true);
       expect(editDetails.newContent.endsWith('n')).toBe(true);
       expect(editDetails.newContent).toContain(
@@ -1123,7 +1184,7 @@ describe('managed-runtime-provider/1', () => {
         Buffer.byteLength(JSON.stringify(editDetails), 'utf8'),
       ).toBeLessThanOrEqual(budget);
       expect(editDetails.originalContent).toBeNull();
-      expect(editDetails.fileDiff).toBe(PROVIDER_RESULT_STUB);
+      expect(editDetails.fileDiff).toBe(PROVIDER_DIFF_STUB);
       expect(editDetails.hideModify).toBe(true);
       expect(
         parseManagedRuntimeProviderResult(confirmation, editDetails, session),
@@ -1131,7 +1192,13 @@ describe('managed-runtime-provider/1', () => {
     });
 
     it('cuts bulk command in an exec confirmation', () => {
-      const execDetails = {
+      const execDetails: {
+        type: string;
+        title: string;
+        command: string;
+        rootCommand: string;
+        warnings?: string[];
+      } = {
         type: 'exec',
         title: 'Run',
         command: 'echo ' + 'x'.repeat(budget * 2),
@@ -1145,6 +1212,10 @@ describe('managed-runtime-provider/1', () => {
       expect(execDetails.command.endsWith('x')).toBe(true);
       expect(execDetails.command).toContain('Managed Runtime provider omitted');
       expect(execDetails.rootCommand).toBe('echo');
+      expect(Array.isArray(execDetails.warnings)).toBe(true);
+      expect(
+        execDetails.warnings?.some((w: string) => /truncat|omitted/.test(w)),
+      ).toBe(true);
       expect(
         parseManagedRuntimeProviderResult(confirmation, execDetails, session),
       ).toEqual(execDetails);
