@@ -480,6 +480,41 @@ describe('agent run lifecycle', () => {
     expect(finished.status).toBe('blocked');
   });
 
+  it('drops a Host result receipt when settlement overrode the outcome', async () => {
+    // A cancel leaves the lease in place, so a Host that finished before it
+    // learned of the cancellation still settles here. The reported status is
+    // overridden, so nothing was applied for that result, and a receipt would
+    // answer an exact re-post of it with `alreadyApplied`.
+    const hostResultReceipt = {
+      attempt: 1,
+      leaseId: 'lease',
+      digest: 'a'.repeat(64),
+    };
+    const cancelling = await seed({ runs: [run({ status: 'cancelling' })] });
+
+    const cancelled = await finish(cancelling.id, 'rn_alice', {
+      status: 'completed',
+      attempt: 1,
+      hostResultReceipt,
+    });
+
+    expect(cancelled.runs[0]?.status).toBe('cancelled');
+    expect(cancelled.runs[0]?.hostResultReceipt).toBeUndefined();
+
+    // The receipt records that this outcome's answer was applied, so a run
+    // settled to the status its Host reported keeps it.
+    const live = await seed();
+
+    const applied = await finish(live.id, 'rn_alice', {
+      status: 'completed',
+      attempt: 1,
+      hostResultReceipt,
+    });
+
+    expect(applied.runs[0]?.status).toBe('completed');
+    expect(applied.runs[0]?.hostResultReceipt).toEqual(hostResultReceipt);
+  });
+
   it('refuses any close on a thread a person already marked done', async () => {
     const thread = await seed({ status: 'done' });
 

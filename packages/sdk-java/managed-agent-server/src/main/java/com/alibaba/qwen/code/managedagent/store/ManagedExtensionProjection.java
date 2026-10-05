@@ -51,9 +51,11 @@ public final class ManagedExtensionProjection {
     public static final List<String> TASK_STATES = List.of("pending",
             "running", "waiting", "completed", "failed", "cancelled",
             "degraded", "recovery_blocked");
+    public static final List<String> TASK_KINDS = List.of("child_agent",
+            "workflow", "background_shell", "monitor", "automation_run");
+    public static final List<String> RUNTIME_STATES = List.of("unbound",
+            "provisioning", "ready", "draining", "lost");
 
-    private static final Set<String> TERMINAL = Set.of("settled", "failed",
-            "cancelled");
     /**
      * Run states that mean the work began. A blocked run may still prove
      * that it never started, so it sets no start of its own.
@@ -121,7 +123,7 @@ public final class ManagedExtensionProjection {
                         ? Long.valueOf(Math.max(occurredAt, createdAt)) : null;
         Long settledAt = previous != null && previous.settledAt() != null
                 ? previous.settledAt()
-                : TERMINAL.contains(state)
+                : ManagedExtensionRecords.TERMINAL.contains(state)
                         ? Long.valueOf(Math.max(occurredAt, startedAt != null
                                 ? startedAt : createdAt))
                         : null;
@@ -170,7 +172,8 @@ public final class ManagedExtensionProjection {
 
     private static String runtimeState(JsonNode run) {
         String execution = run.get("execution").textValue();
-        if (TERMINAL.contains(run.get("state").textValue())
+        if (ManagedExtensionRecords.TERMINAL.contains(
+                run.get("state").textValue())
                 || execution == null) {
             return null;
         }

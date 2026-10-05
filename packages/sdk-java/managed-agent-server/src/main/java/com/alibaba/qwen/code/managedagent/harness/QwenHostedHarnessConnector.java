@@ -18,7 +18,9 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
 import java.net.URI;
+import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -35,6 +37,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final WorkspaceExecutionStore workspaceExecution;
     private final DaemonApprovalMode approvalMode;
     private final ManagedActionStore actions;
+    private final WriterCredentialPolicy credentials;
     private volatile HostedHarnessClient client;
     // Sessions whose takeover load reported parked Runtime work that no
     // continue/cancel has been admitted for yet.
@@ -59,6 +62,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         this.sessions = sessions;
         this.actions = actions;
         this.workspaceExecution = workspaceExecution;
+        this.credentials = new WriterCredentialPolicy(properties);
         if (this.properties.getToken() == null
                 || this.properties.getToken().isBlank()
                 || this.properties.getCapabilityDigest() == null
@@ -81,6 +85,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 && !workspaceId.equals(runtimeWorkspaceId)) {
             throw new IllegalStateException("Managed Session Store and"
                     + " Runtime Broker workspace IDs must match");
+        }
+        Duration turnDeadline = this.properties.getTurnDeadline();
+        if (turnDeadline == null
+                || turnDeadline.compareTo(Duration.ofMillis(1)) < 0
+                || turnDeadline.compareTo(
+                        Duration.ofMillis(Integer.MAX_VALUE)) > 0) {
+            throw new IllegalStateException("Hosted Harness turn deadline must"
+                    + " be between 1 and 2147483647 milliseconds");
         }
         this.approvalMode = parseApprovalMode(
                 this.properties.getApprovalMode());
@@ -147,7 +159,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         SubmitHarnessTurn.Builder builder = SubmitHarnessTurn.builder()
                 .session(attachment(tenantId, sessionId, true))
                 .promptId(promptId)
-                .payloadDigest(payloadDigest);
+                .payloadDigest(payloadDigest)
+                .deadline(properties.getTurnDeadline());
         input.forEach(builder::addContent);
         PromptReceipt receipt = client().submitTurn(builder.build());
         return new Admission(receipt.getLastEventId(),
@@ -316,9 +329,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private HarnessSessionRef load(SessionRecord session,
             boolean passiveManagedRuntimeRecovery,
             boolean driveRuntimeRecovery) {
+        String profile = toolProfile(session);
         ManagedSessionStoreConnection store = managedSessionStore(session);
         return client().loadSession(new LoadHarnessSession(session.sessionId(), store,
-                passiveManagedRuntimeRecovery, toolProfile(session),
+                passiveManagedRuntimeRecovery, profile,
                 driveRuntimeRecovery));
     }
 
@@ -374,7 +388,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private static String toolProfile(SessionRecord session) {
-        return session.workspace() == null ? null : "hosted-workspace-files/1";
+        if (session.workspace() == null) {
+            return null;
+        }
+        if (session.toolProfile() == null || session.toolProfile().isBlank()) {
+            throw new IllegalStateException("Hosted Workspace Session tool profile is missing");
+        }
+        return session.toolProfile();
     }
 
     private ManagedSessionStoreConnection managedSessionStore(
@@ -382,14 +402,23 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (!sessionStore.isEnabled()) {
             return null;
         }
-        return ManagedSessionStoreConnection.builder()
-                .baseUri(URI.create(sessionStore.getBaseUrl()))
-                .tenantId(session.tenantId())
-                .workspaceId(session.workspace() == null ? workspaceId
-                        : session.workspace().getWorkspaceId())
-                .writerId(client().capabilities().getBootId())
-                .leaseDuration(sessionStore.getWriterLeaseDuration())
-                .build();
+        String workspace = session.workspace() == null ? workspaceId
+                : session.workspace().getWorkspaceId();
+        ManagedSessionStoreConnection.Builder builder =
+                ManagedSessionStoreConnection.builder()
+                        .baseUri(URI.create(sessionStore.getBaseUrl()))
+                        .tenantId(session.tenantId())
+                        .workspaceId(workspace)
+                        .writerId(client().capabilities().getBootId())
+                        .leaseDuration(
+                                sessionStore.getWriterLeaseDuration())
+                        .allowInsecureHttp(
+                                sessionStore.isAllowInsecureHttp());
+        if (credentials.isBound()) {
+            builder.writerToken(credentials.issue(session.tenantId(),
+                    workspace, session.sessionId()));
+        }
+        return builder.build();
     }
 
     private HostedHarnessClient client() {
