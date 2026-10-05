@@ -7583,7 +7583,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     },
   );
 
-  it('records the owed adoption when a teardown strands a resident passive load', async () => {
+  it('refuses a teardown that lands while a resident passive load is adopting', async () => {
     const { server } = await parkToolTurn(true);
     vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
       state: 'prepared',
@@ -7614,23 +7614,78 @@ describe('Hosted Harness Runtime turn takeover', () => {
       await vi.waitFor(() => expect(acquireSpy).toHaveBeenCalledOnce(), {
         timeout: 10_000,
       });
-      // A DELETE needs no client id, and close() fences an active Turn, MCP
-      // work and Hooks — not a parked passive recovery. It releases nothing
-      // (the lease is not recorded yet) and drops the Session.
-      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
-        204,
+      // The parked recovery holds close()'s fence for its whole await, so a
+      // DELETE without a client id is refused instead of racing the adoption:
+      // releasing mid-adoption persists the record RELEASED and every later
+      // acquire of that identity answers 409 runtime_session_not_acquirable.
+      const closed = await headers(
+        supertest(server).delete(`/session/${SESSION_ID}`),
       );
+      expect(closed.status).toBe(409);
+      expect(closed.body.code).toBe('hosted_turn_active');
       finishAcquire();
       const loaded = await loading;
-      expect(loaded.status).toBe(404);
-      expect(loaded.body.code).toBe('hosted_session_not_found');
-      // No route can hand the adoption back now, so it is named rather than
-      // released: a release would persist RELEASED and wedge every retried
-      // acquire of the identity.
+      expect(loaded.status).toBe(200);
       expect(release).not.toHaveBeenCalled();
-      expect(owedLines()).toHaveLength(1);
+      expect(owedLines()).toHaveLength(0);
     } finally {
       finishAcquire();
+      await loading;
+    }
+  }, 30_000);
+
+  it('refuses a teardown that lands after a resident passive load published its adoption', async () => {
+    const { server } = await parkToolTurn(true);
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    release.mockClear();
+    const stderr = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => undefined);
+    const owedLines = () =>
+      stderr.mock.calls.filter(
+        ([line]) => line.includes('stays owed') && line.includes(PROMPT_ID),
+      );
+    // onPassiveRuntimeAcquired publishes the adopted lease as soon as acquire
+    // resolves, and the recovery reads execution states after that: gating the
+    // read holds the teardown in the published-but-unfinished window.
+    const status = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValue({ state: 'prepared' });
+    let finishStatus!: () => void;
+    const statusGate = new Promise<void>((resolve) => {
+      finishStatus = resolve;
+    });
+    status.mockImplementationOnce(async () => {
+      await statusGate;
+      return { state: 'prepared' };
+    });
+    let loading: Promise<supertest.Response> | undefined;
+    try {
+      loading = headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+        .send({
+          managedSessionStore: store(),
+          toolProfile: FILE_PROFILE,
+          passiveManagedRuntimeRecovery: true,
+        })
+        .then((response) => response);
+      await vi.waitFor(() => expect(status).toHaveBeenCalledOnce(), {
+        timeout: 10_000,
+      });
+      const closed = await headers(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      );
+      expect(closed.status).toBe(409);
+      expect(closed.body.code).toBe('hosted_turn_active');
+      finishStatus();
+      const loaded = await loading;
+      expect(loaded.status).toBe(200);
+      // The adopted lease stays on the live Session: releasing it here would
+      // answer 409 runtime_session_not_acquirable to every later acquire of
+      // the same identity.
+      expect(release).not.toHaveBeenCalled();
+      expect(owedLines()).toHaveLength(0);
+    } finally {
+      finishStatus();
       await loading;
     }
   }, 30_000);

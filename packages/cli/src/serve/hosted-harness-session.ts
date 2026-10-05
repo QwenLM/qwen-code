@@ -1604,6 +1604,11 @@ export function registerHostedHarnessSessionRoutes(
             error(res, 409, 'hosted_turn_recovery_required');
             return;
           }
+          // The adoption this await publishes lands on a Session every route
+          // can still reach, so the recovery holds close()'s own fence: a
+          // concurrent teardown would otherwise release a lease that is still
+          // mid-adoption and persist the record RELEASED.
+          resident.mcpRecovering = true;
           const recovered = await recoverHostedRuntimeTurn({
             session: resident.managed,
             sessionId,
@@ -1614,6 +1619,8 @@ export function registerHostedHarnessSessionRoutes(
             onPassiveRuntimeAcquired: (runtimeSessionId) => {
               resident.runtimeLeaseHeld = runtimeSessionId;
             },
+          }).finally(() => {
+            resident.mcpRecovering = false;
           });
           recovery = recovered?.report;
           if (
@@ -1631,8 +1638,8 @@ export function registerHostedHarnessSessionRoutes(
             return;
           }
         }
-        // A teardown overlapping the await above released nothing (the lease
-        // was still unrecorded) and left no route to hand it back.
+        // The fence above covers the whole adoption, so these exits answer
+        // only a Session another route already dropped.
         if (sessions.get(sessionId) !== resident) {
           noteOwedAdoption(resident, sessionId);
           error(res, 404, 'hosted_session_not_found');

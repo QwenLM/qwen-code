@@ -652,7 +652,8 @@ opt-in while they can still read and create in the Workspace (the per-caller
 registry's `ACTIVE` state and the Workspace generation and storage the Session was bound
 to); the creator may also rename the Session. Cancelling aborts work that is
 already running, so the creator may cancel a running Turn while they can still
-read the Workspace, even after their create grant is revoked, the Workspace
+read the Workspace and the deployment still enables Workspace files, even after
+their create grant is revoked, the Workspace
 starts draining or it is re-registered. A live cancel reuses the owner's
 resident Harness attachment. A cold connector cache passively re-attaches for
 the persisted cancellation after checking the frozen Session binding and exact
