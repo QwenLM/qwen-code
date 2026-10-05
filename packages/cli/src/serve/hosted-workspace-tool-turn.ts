@@ -920,11 +920,12 @@ export class HostedWorkspaceToolTurn {
               ].includes(key),
           );
           // H3: a Monitor request is admitted exactly when this Session
-          // owns its monitor_run orchestrator, a Shell-mode publisher, and
+          // owns its monitor_run orchestrator and a Session publisher for
+          // the detached family — Shell-mode or the publication lane — and
           // the domain is enabled.
           monitorAdmitted =
             this.monitors !== undefined &&
-            this.shell !== undefined &&
+            (this.shell !== undefined || this.backgroundLane !== undefined) &&
             monitorRunAdmissionsEnabled();
           if (typeof args['command'] !== 'string' || !args['command'].trim()) {
             validationError = 'Hosted Monitor requires a nonempty command.';
@@ -1085,7 +1086,7 @@ export class HostedWorkspaceToolTurn {
           this.shell!.assertWritable,
           this.childRuns,
           this.monitors,
-          () => this.shell?.monitorWakeKick?.(),
+          () => this.shell!.monitorWakeKick?.(),
         );
         this.bindingGeneration = await this.broker.registerPublisher(
           await this.publisher.start(),
@@ -1106,7 +1107,7 @@ export class HostedWorkspaceToolTurn {
             this.backgroundLane.assertWritable,
             this.childRuns,
             this.monitors,
-            () => this.shell?.monitorWakeKick?.(),
+            () => this.backgroundLane!.monitorWakeKick?.(),
           );
         this.bindingGeneration = await this.broker.registerPublisher(
           await this.publisher.start(),
@@ -2100,8 +2101,11 @@ export class HostedWorkspaceToolTurn {
    * record and is fed lines through the Session publisher's fan-out.
    */
   private async resumeMonitorWatch(executionCallId: string): Promise<void> {
-    if (!this.shell || !this.publisher || !this.monitors) return;
-    const loops = (this.shell.monitorLoops ??= new Map());
+    // The lane is Shell-mode or the publication lane, whichever this turn
+    // owns — the detached family's loops park on it either way.
+    const lane = this.shell ?? this.backgroundLane;
+    if (!lane || !this.publisher || !this.monitors) return;
+    const loops = (lane.monitorLoops ??= new Map());
     if (loops.has(executionCallId)) return;
     const record = this.monitors.record(executionCallId);
     if (!record) return;
@@ -2114,7 +2118,7 @@ export class HostedWorkspaceToolTurn {
       executionCallId,
       executor,
       undefined,
-      () => this.shell?.monitorWakeKick?.(),
+      () => lane.monitorWakeKick?.(),
     );
     // Register the loop only after its start went through: a failed resume
     // leaves no dead entry to short-circuit every later one (the fan-out

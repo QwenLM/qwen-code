@@ -4216,7 +4216,10 @@ function backgroundTurnRig(
 
 function monitorTurnRig(
   outcome: ToolResultEnvelope,
-  opts: { notStartedProven?: boolean } = {},
+  opts: {
+    notStartedProven?: boolean;
+    lane?: HostedShellTurnOptions;
+  } = {},
 ) {
   enablement.childRun = true;
   enablement.monitorRun = true;
@@ -4349,7 +4352,7 @@ function monitorTurnRig(
     },
     () => true,
     { owner, captureBytes: 1024 * 1024 },
-    options,
+    opts.lane !== undefined ? undefined : options,
     undefined,
     undefined,
     undefined,
@@ -4361,8 +4364,9 @@ function monitorTurnRig(
       record: () => undefined,
     } as never,
     monitors as never,
+    opts.lane,
   );
-  return { order, monitors, options, turn };
+  return { order, monitors, options: opts.lane ?? options, turn };
 }
 
 function monitorCall() {
@@ -4454,6 +4458,55 @@ describe('hosted Monitor admission arm', () => {
       resources: [],
     });
     // A fresh accept starts exactly one observation lifecycle on the Session.
+    expect(rig.options.monitorLoops?.has('monitor-execution')).toBe(true);
+  });
+
+  it('drives a Monitor through the publication lane exactly where production admits it', async () => {
+    const { call, parts } = monitorCall();
+    const descriptor = { url: 'http://127.0.0.1:9/lane-mon', token: 'tok' };
+    const lane: HostedShellTurnOptions = {
+      resources: {} as never,
+      assertWritable: async () => undefined,
+      monitorLoops: undefined as Map<string, unknown> | undefined,
+      publisher: {
+        start: async () => descriptor,
+        register: vi.fn(),
+        setMonitorObserver: vi.fn(),
+        settleAttached: async () => undefined,
+        close: async () => undefined,
+      } as never,
+    } as unknown as HostedShellTurnOptions;
+    const rig = monitorTurnRig(DETACHED, { lane });
+    turn = rig.turn;
+    const result = await turn.execute(
+      [call],
+      parts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(result[0]?.functionResponse?.response).toMatchObject({
+      executionStatus: 'success',
+    });
+    // The lane carries the Session publisher for the detached family:
+    // installed once, fed with the monitoring capture, and its attach
+    // drives the observation loop to resume through the same lane.
+    expect(broker.registerPublisher).toHaveBeenCalledTimes(1);
+    expect(broker.prepareV3).toHaveBeenCalledTimes(1);
+    expect(broker.executeV3).toHaveBeenCalledTimes(1);
+    expect(rig.monitors.calls.map(([name]) => name)).toEqual([
+      'admit',
+      'dispatchStarted',
+      'attach',
+    ]);
+    const register = lane.publisher!.register as ReturnType<typeof vi.fn>;
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(register.mock.calls[0]![0]).toMatchObject({
+      capture: {
+        executionCallId: 'monitor-execution',
+        background: true,
+        monitoring: true,
+      },
+    });
     expect(rig.options.monitorLoops?.has('monitor-execution')).toBe(true);
   });
 

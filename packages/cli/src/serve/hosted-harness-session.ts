@@ -1768,7 +1768,11 @@ export function registerHostedHarnessSessionRoutes(
           },
           session.managed.authority.sessionHeader.sessionKey,
         );
-      if (session.toolProfile && brokerOptions && session.shell)
+      if (
+        session.toolProfile &&
+        brokerOptions &&
+        (session.shell || session.backgroundLane)
+      )
         session.monitors = new HostedMonitorSession(
           {
             authority: session.managed.authority,
@@ -1781,7 +1785,11 @@ export function registerHostedHarnessSessionRoutes(
       // as an ordinary text turn while the Session idles, queues in the
       // journal while a turn runs, and leaves the remainder accurately
       // pending the moment anything is parked or blocked.
-      if (session.monitors && session.shell && brokerOptions) {
+      if (
+        session.monitors &&
+        brokerOptions &&
+        (session.shell || session.backgroundLane)
+      ) {
         const wakeBusy = () =>
           session.active !== undefined ||
           session.mcpBusy === true ||
@@ -1851,7 +1859,11 @@ export function registerHostedHarnessSessionRoutes(
             );
           },
         });
-        session.shell.monitorWakeKick = () => session.monitorWake?.kick();
+        if (session.shell)
+          session.shell.monitorWakeKick = () => session.monitorWake?.kick();
+        if (session.backgroundLane)
+          session.backgroundLane.monitorWakeKick = () =>
+            session.monitorWake?.kick();
       }
       if (pinned) session.approval = pinned;
       // A takeover recovers exactly the parked Turn, including the file
