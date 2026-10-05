@@ -126,6 +126,16 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'hook_execution',
   ];
 
+/**
+ * The enabled domains whose records commit through the envelope path
+ * (`commitDomainRecord`), so they have no Stage H body. A slice that
+ * defines a body for one of them must move that domain's commits to
+ * `commitExtensionRecord` in the same change and remove its name from this
+ * list; the bodies module refuses to load over a name left here.
+ */
+export const MANAGED_SESSION_ENVELOPE_DOMAINS: readonly ManagedSessionDomain[] =
+  ['goal_state', 'session_metadata', 'file_history', 'session_source'];
+
 export function assertManagedSessionDomainEnabled(
   domain: ManagedSessionDomain,
 ): void {
@@ -364,7 +374,7 @@ function assertNoUnknownKeys(
   }
 }
 
-function boundedString(
+export function boundedString(
   value: ManagedSessionJsonValue | undefined,
   label: string,
   maxBytes: number,
