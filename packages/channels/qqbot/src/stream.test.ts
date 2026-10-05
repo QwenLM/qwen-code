@@ -7656,6 +7656,31 @@ describe('round-1 robustness pins', () => {
     expect(streamState(ch).get('s1')!.sourceLabel).toBe('SUB-1');
   });
 
+  it("keeps a drained stash's attribution label when the next chunk starts a fresh entry", async () => {
+    const ch = makeChannel();
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    // State a diverted turn leaves while a parked predecessor still owns the
+    // stream entry: its HEAD, with the sub-agent label captured at divert
+    // time, waits in the side buffer.
+    stash(ch, {
+      turn: 1,
+      text: 'LABELLED-HEAD ',
+      sourceLabel: 'SUB-1',
+    });
+    // The predecessor's chain settles and frees the entry, so this chunk
+    // takes the fresh-entry path and drains the stash into its buffer. No
+    // segment rides the draining chunk: the label can only come from the
+    // stash.
+    onResponseChunk(ch, 'test-chat', 'TAIL', 's1');
+    expect(streamState(ch).get('s1')!.sourceLabel).toBe('SUB-1');
+
+    vi.advanceTimersByTime(2000);
+    await drain();
+    // The drained buffer must flush under the stash's own label.
+    expect(sentContents().at(-1)).toBe('SUB\\-1\nLABELLED-HEAD TAIL');
+  });
+
   it("sends a cancelled turn's stash under its own attribution label", async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;

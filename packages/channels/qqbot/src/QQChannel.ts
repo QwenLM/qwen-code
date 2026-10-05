@@ -2094,6 +2094,7 @@ export class QQChannel extends ChannelBase {
       // buffer windows and drops it past its TTL — the rationale lives there.
       const held = this.streamOrphanBuffer.get(sessionId);
       let sealedPre: string | undefined;
+      let stashedLabel: string | undefined;
       if (held !== undefined) {
         if (held.turn === currentTurn) {
           // The previous turn's deferred chain has settled and freed the
@@ -2105,6 +2106,7 @@ export class QQChannel extends ChannelBase {
           // its collection at the boundary), so carry it on the state until the
           // drained send settles: a permanent failure re-stashes it below.
           sealedPre = held.pre;
+          stashedLabel = held.sourceLabel;
           chunk = held.text + chunk;
         } else {
           this.dropOrphanStash(sessionId, held);
@@ -2118,6 +2120,13 @@ export class QQChannel extends ChannelBase {
         segment,
       );
       if (sealedPre !== undefined) state.sealedPre = sealedPre;
+      // The stash carries the diverted turn's attribution label (a
+      // sub-agent/loop segment), and createStreamState only reads one off the
+      // draining segment: drop it here and the merged flush goes out
+      // unattributed. A label the draining segment supplied wins — same merge
+      // as onPromptEnd's stash drain — and this must land before the size-cap
+      // check below, which subtracts the rendered label's length.
+      state.sourceLabel ??= stashedLabel;
       this.streamState.set(sessionId, state);
     } else {
       state.sourceLabel ??= segment?.sourceLabel;
