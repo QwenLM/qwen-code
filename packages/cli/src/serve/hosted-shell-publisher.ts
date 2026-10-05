@@ -60,13 +60,17 @@ interface RegisteredCapture {
   // H3: the open-ended background capture of a proven child_run or
   // monitor_run start, with the manifest revisions it has already
   // forwarded to the record. A Monitor watch also carries the observer
-  // the hosted observation loop registers on it.
+  // the hosted observation loop registers on it. A finalize the record's
+  // state refused is remembered as `refusedBody` until `settleAttached`
+  // re-drives it, so a watch that ended before its start receipt landed
+  // still completes its own settle without any client retry.
   background?: {
     sink?: LocalShellStreamCapture;
     lastManifest: ManagedSessionDurableRef | null;
     recordDomain: 'child_run' | 'monitor_run';
     remainder: string;
     decoder: StringDecoder;
+    refusedBody?: Record<string, unknown>;
     observer?: {
       onLine: (line: string) => void;
       onExit: (failed: boolean) => void;
@@ -359,12 +363,16 @@ export class HostedShellPublisher {
         entry.finalizing = this.finalizeBackground(entry, body, String(id));
         try {
           entry.envelope = await entry.finalizing;
+          entry.background.refusedBody = undefined;
         } catch (cause) {
           // A rejected finalize must never pin the capture: a retry after
           // the cause resolved reads a clean settle attempt, not this
-          // permanent refusal. (attach-before-finalize exits once cached a
-          // failed stage and so wedged the shell's whole terminal leg.)
+          // permanent refusal. The refused body stays remembered too, so
+          // the settle the record's state missed — a watch that ended
+          // before its start receipt landed — completes on attach without
+          // any client retry.
           entry.finalizing = undefined;
+          entry.background.refusedBody = body;
           throw cause;
         }
         return entry.envelope;
@@ -732,7 +740,6 @@ export class HostedShellPublisher {
         const windowLines = background.remainder
           .split('\n')
           .filter((line) => line.length > 0);
-        background.remainder = '';
         if (windowLines.length > 0) {
           const args = JSON.parse(
             (
@@ -759,6 +766,10 @@ export class HostedShellPublisher {
             { lines: windowLines },
             { input },
           );
+          // Consume the tail only once its observation committed: a refused
+          // commit (the record is not attached yet) keeps the lines for the
+          // retry that settles this watch after the start receipt lands.
+          background.remainder = '';
           this.onNotification?.();
         }
         const last =
@@ -820,6 +831,30 @@ export class HostedShellPublisher {
     )
       throw new Error('Shell result has no matching durable receipt.');
     return receipt;
+  }
+
+  /**
+   * Re-drives a finalize the record's pre-attach state refused. The
+   * refused body stays on the entry, and once the record carries its start
+   * receipt the exact same chain — manifest advance, tail observation,
+   * record settle — completes without any client retry. A retry the client
+   * already drives owns the attempt and is never duplicated here.
+   */
+  async settleAttached(executionCallId: string): Promise<void> {
+    const entry = this.captures.get(executionCallId);
+    const background = entry?.background;
+    const body = background?.refusedBody;
+    if (!entry || !background || body === undefined) return;
+    if (entry.finalizing) return;
+    background.refusedBody = undefined;
+    entry.finalizing = this.finalizeBackground(entry, body, executionCallId);
+    try {
+      entry.envelope = await entry.finalizing;
+    } catch (cause) {
+      entry.finalizing = undefined;
+      background.refusedBody ??= body;
+      throw cause;
+    }
   }
 
   close(): Promise<void> {

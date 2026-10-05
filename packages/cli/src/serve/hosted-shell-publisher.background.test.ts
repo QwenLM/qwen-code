@@ -641,6 +641,173 @@ it('commits the tail an ownerless watch decoded before its record settles', asyn
   expect(wakes).toHaveLength(1);
 });
 
+it('completes a refused exit settle on the record’s own attach, without a client retry', async () => {
+  const r = await rig();
+  // The exit outruns the start receipt: admitted and dispatched, never yet
+  // attached — the exact shape of a fast exit racing the accepted start.
+  await r.orchestrator.admit({
+    shellId: 'execution-late',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'execution-late',
+    args: { command: 'echo bye', is_background: true },
+  });
+  await r.orchestrator.dispatchStarted('execution-late', {
+    runtimeBindingId: 'binding-a',
+    generation: '1',
+  });
+  const request = backgroundRequest(r.key, '1');
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'execution-late';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-a',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  prepared.sink.setStarted(7);
+  await prepared.sink.write('stdout', Buffer.from('done\n'));
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  await prepared.sink.finish('stderr', true);
+  const first = await fetch(r.descriptor.url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${r.descriptor.token}`,
+      'cache-control': 'no-store',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      operation: 'finalize',
+      executionCallId: 'execution-late',
+      started: true,
+      failed: false,
+      process: { exitCode: 0, signal: null, previewBytes: 0 },
+      executionStatus: 'success',
+      responseParts: [],
+      previewTruncated: false,
+      error: null,
+    }),
+  });
+  // The record refuses a settle it cannot name as attached.
+  expect(first.status).toBeGreaterThanOrEqual(400);
+  const unattached = parseChildRun(
+    session!.authority.extensionRecord('child_run', 'execution-late')!.record,
+  );
+  expect(unattached.stopReason).toBeNull();
+  // The start receipt lands through the ordinary accept: the refused
+  // finalize completes from the entry's own memory — no client retry.
+  await r.orchestrator.attach(
+    'execution-late',
+    { runtimeBindingId: 'binding-a', generation: '1' },
+    { pid: 7 },
+  );
+  await publisher!.settleAttached('execution-late');
+  const record = parseChildRun(
+    session!.authority.extensionRecord('child_run', 'execution-late')!.record,
+  );
+  expect(record).toMatchObject({
+    stopReason: 'exited',
+    run: { state: 'settled', execution: 'settled' },
+  });
+  expect(record.outputRef).not.toBeNull();
+});
+
+it('keeps an ownerless tail for the settle that its attach unblocks', async () => {
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.monitors.admit({
+    monitorId: 'monitor-late',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'monitor-late',
+    args: { command: 'tail -f log', description: 'log watch' },
+    maxEvents: 100,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+  });
+  await r.monitors.dispatchStarted('monitor-late', BINDING);
+  const request = backgroundRequest(r.key, '1', true);
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'monitor-late';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-m',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  prepared.sink.setStarted(9);
+  await prepared.sink.write('stdout', Buffer.from('first\nlast\n'));
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  const first = await fetch(r.descriptor.url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${r.descriptor.token}`,
+      'cache-control': 'no-store',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      operation: 'finalize',
+      executionCallId: 'monitor-late',
+      started: true,
+      failed: false,
+      process: { exitCode: 0, signal: null, previewBytes: 0 },
+      executionStatus: 'success',
+      responseParts: [],
+      previewTruncated: false,
+      error: null,
+    }),
+  });
+  expect(first.status).toBeGreaterThanOrEqual(400);
+  const pending = parseMonitorRun(
+    session!.authority.extensionRecord('monitor_run', 'monitor-late')!.record,
+  );
+  // The refusal consumed nothing: the tail waits with its record un-settled.
+  expect(pending).toMatchObject({
+    observationSequence: 0,
+    notifiedThrough: 0,
+    stopReason: null,
+  });
+  await r.monitors.attach('monitor-late', BINDING, { pid: 9 });
+  await publisher!.settleAttached('monitor-late');
+  const record = parseMonitorRun(
+    session!.authority.extensionRecord('monitor_run', 'monitor-late')!.record,
+  );
+  expect(record).toMatchObject({
+    observationSequence: 1,
+    notifiedThrough: 1,
+    stopReason: 'exited',
+    run: { state: 'settled', execution: 'settled' },
+  });
+  const observation = JSON.parse(
+    (await session!.resources.read(record.lastObservationRef!)).toString(
+      'utf8',
+    ),
+  ) as { lines: string[] };
+  expect(observation.lines).toEqual(['first', 'last']);
+});
+
 it('settles an unproven background end as a failure, never as an exit', async () => {
   const r = await rig();
   const request = backgroundRequest(r.key, '1');

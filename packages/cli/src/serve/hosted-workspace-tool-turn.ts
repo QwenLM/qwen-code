@@ -1912,6 +1912,10 @@ export class HostedWorkspaceToolTurn {
           },
         );
       }
+      // A watch that ended before this attach left its finalize refused:
+      // with the start receipt now committed, its own settle — tail
+      // observation included — completes without any client retry.
+      await this.publisher?.settleAttached(executionCallId);
       // A fresh accept starts the observation lifecycle; a replay never
       // reopens it, exactly like a replay never re-attaches.
       await this.resumeMonitorWatch(executionCallId);
@@ -2157,6 +2161,9 @@ export class HostedWorkspaceToolTurn {
           },
         );
       }
+      // A Shell that ended before this attach left its finalize refused:
+      // with the start receipt now committed, the settle completes here.
+      await this.publisher?.settleAttached(executionCallId);
     }
     let ref: ManagedSessionDurableRef;
     let converted: Part[];
