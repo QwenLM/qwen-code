@@ -30,6 +30,7 @@ import { readManagedSessionRecords } from '@qwen-code/qwen-code-core/managed-run
 import {
   readHostedFileHistory,
   commitHostedFileHistory,
+  type HostedFileHistorySettleBlocker,
 } from './hosted-file-history.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import { HostedHookSession } from './hosted-hook-session.js';
@@ -4083,7 +4084,7 @@ it.each([
   expect(rejection).toBeInstanceOf(HostedToolRecoveryRequiredError);
   // The settle ground must reach the cause message, or the one site that
   // blocks a live Turn drops the sub-cause it had in hand.
-  const grounds: Record<string, string> = {
+  const grounds: Record<string, HostedFileHistorySettleBlocker> = {
     'previous-batch': 'pending_message_not_ready',
     'missing-message-id': 'no_pending_message',
     'incomplete-results': 'tool_results_mismatch',

@@ -109,6 +109,9 @@ export type HostedFileHistorySettleBlocker =
   | 'authorization_initial'
   | `authorization_blocked_${HarnessRunAuthorizationBlockedReason}`
   | 'checkpoint_identity_mismatch'
+  // Never returned below: the load gate and the live-Turn path name the
+  // stranger record before this probe runs.
+  | 'pending_turn_mismatch'
   | `phase_${HarnessCheckpointPhase}`
   | 'pending_message_not_ready'
   | 'tool_item_unsettled'
@@ -119,41 +122,58 @@ export type HostedFileHistorySettleBlocker =
   | 'tool_results_mismatch';
 
 /**
- * Null when the pending turn settles clean; a terse ground the cold-load
- * refusal may log when it does not. The grounds are the same conjuncts the
+ * The settle verdict: `blocker` names the blocking conjunct and stays a
+ * byte-identical member of the closed union; `detail` rides beside it with
+ * the sub-cause core recorded — today only a blocked authorization's
+ * message — and is never concatenated into the ground.
+ */
+export interface HostedFileHistorySettlement {
+  blocker: HostedFileHistorySettleBlocker;
+  detail?: string;
+}
+
+/**
+ * Null when the pending turn settles clean; otherwise the blocking conjunct
+ * the cold-load refusal may log. The grounds are the same conjuncts the
  * boolean version evaluated, in the same order, each with its own name.
  */
 export async function canSettleHostedFileHistory(
   session: ManagedSession,
   record: HostedFileHistoryRecord,
-): Promise<HostedFileHistorySettleBlocker | null> {
-  if (record.pendingUndo) return 'undo_pending';
-  if (!record.pendingTurn) return 'no_pending_turn';
-  if (!record.pendingMessageId) return 'no_pending_message';
+): Promise<HostedFileHistorySettlement | null> {
+  if (record.pendingUndo) return { blocker: 'undo_pending' };
+  if (!record.pendingTurn) return { blocker: 'no_pending_turn' };
+  if (!record.pendingMessageId) return { blocker: 'no_pending_message' };
   const authorization = await session.authority.harnessRunAuthorization();
   if (authorization.status !== 'runnable')
     return authorization.status === 'blocked'
-      ? `authorization_blocked_${authorization.reason}`
-      : `authorization_${authorization.status}`;
+      ? {
+          blocker: `authorization_blocked_${authorization.reason}`,
+          detail: authorization.message,
+        }
+      : { blocker: `authorization_${authorization.status}` };
   const checkpoint = authorization.checkpoint;
   const items = checkpoint.tools?.items ?? [];
   if (
     checkpoint.identity.promptId !== record.pendingTurn ||
     checkpoint.identity.turnId !== record.pendingTurn
   )
-    return 'checkpoint_identity_mismatch';
+    return { blocker: 'checkpoint_identity_mismatch' };
   if (checkpoint.continuation.phase !== 'results_ready')
-    return `phase_${checkpoint.continuation.phase}`;
+    return { blocker: `phase_${checkpoint.continuation.phase}` };
   if (!items.some((item) => item.modelMessageId === record.pendingMessageId))
-    return 'pending_message_not_ready';
-  if (items.some((item) => item.state !== 'settled' || !item.outcomeRef))
-    return 'tool_item_unsettled';
+    return { blocker: 'pending_message_not_ready' };
+  // The parser enforces state === 'settled' iff outcomeRef !== null, so the
+  // state arm alone decides for every checkpoint that can reach here.
+  if (items.some((item) => item.state !== 'settled'))
+    return { blocker: 'tool_item_unsettled' };
   const current = (await session.sink.project()).filter(
     (item) => item.daemonPromptId === record.pendingTurn,
   );
   const index = current.findLastIndex((item) => item.type === 'assistant');
   const assistant = current[index];
-  if (assistant?.uuid !== record.pendingMessageId) return 'assistant_mismatch';
+  if (assistant?.uuid !== record.pendingMessageId)
+    return { blocker: 'assistant_mismatch' };
   const calls =
     assistant.message?.parts?.flatMap((part) =>
       part.functionCall?.id ? [part.functionCall.id] : [],
@@ -165,13 +185,14 @@ export async function canSettleHostedFileHistory(
         part.functionResponse?.id ? [part.functionResponse.id] : [],
       ) ?? [],
   );
-  if (calls.length === 0) return 'no_pending_tool_calls';
+  if (calls.length === 0) return { blocker: 'no_pending_tool_calls' };
   if (!tail.every((item) => item.type === 'tool_result'))
-    return 'unexpected_tail_item';
-  if (new Set(calls).size !== calls.length) return 'duplicate_tool_call_id';
+    return { blocker: 'unexpected_tail_item' };
+  if (new Set(calls).size !== calls.length)
+    return { blocker: 'duplicate_tool_call_id' };
   return isDeepStrictEqual(calls.sort(), results.sort())
     ? null
-    : 'tool_results_mismatch';
+    : { blocker: 'tool_results_mismatch' };
 }
 
 export async function commitHostedFileHistory(

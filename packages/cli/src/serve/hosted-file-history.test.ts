@@ -440,6 +440,7 @@ describe('canSettleHostedFileHistory grounds', () => {
 
   const grounds: Array<{
     ground: HostedFileHistorySettleBlocker | null;
+    detail?: string;
     prepare: (record: HostedFileHistoryRecord) => unknown;
   }> = [
     {
@@ -474,13 +475,26 @@ describe('canSettleHostedFileHistory grounds', () => {
       ] as const
     ).map((reason) => ({
       ground: `authorization_blocked_${reason}` as const,
-      prepare: () => mockAuthorization({ status: 'blocked', reason }),
+      detail: 'core detail',
+      prepare: () =>
+        mockAuthorization({
+          status: 'blocked',
+          reason,
+          message: 'core detail',
+        }),
     })),
     {
       ground: 'checkpoint_identity_mismatch',
       prepare: () =>
         runnableAuthorization({
-          identity: { promptId: 'another-turn', turnId: 'another-turn' },
+          identity: { promptId: 'another-turn', turnId: TURN },
+        }),
+    },
+    {
+      ground: 'checkpoint_identity_mismatch',
+      prepare: () =>
+        runnableAuthorization({
+          identity: { promptId: TURN, turnId: 'another-turn' },
         }),
     },
     {
@@ -493,7 +507,13 @@ describe('canSettleHostedFileHistory grounds', () => {
       prepare: () =>
         runnableAuthorization({
           tools: {
-            items: [{ modelMessageId: 'another-message', state: 'settled' }],
+            items: [
+              {
+                modelMessageId: 'another-message',
+                state: 'settled',
+                outcomeRef: {},
+              },
+            ],
           },
         }),
     },
@@ -502,7 +522,13 @@ describe('canSettleHostedFileHistory grounds', () => {
       prepare: () =>
         runnableAuthorization({
           tools: {
-            items: [{ modelMessageId: MESSAGE, state: 'dispatched' }],
+            items: [
+              {
+                modelMessageId: MESSAGE,
+                state: 'in_progress',
+                outcomeRef: null,
+              },
+            ],
           },
         }),
     },
@@ -559,12 +585,12 @@ describe('canSettleHostedFileHistory grounds', () => {
 
   it.each(grounds)(
     'names $ground when the pending turn cannot settle past it',
-    async ({ ground, prepare }) => {
+    async ({ ground, detail, prepare }) => {
       const record = pendingRecord();
       await prepare(record);
-      await expect(canSettleHostedFileHistory(session, record)).resolves.toBe(
-        ground,
-      );
+      await expect(
+        canSettleHostedFileHistory(session, record),
+      ).resolves.toEqual(ground === null ? null : { blocker: ground, detail });
     },
   );
 });
