@@ -99,7 +99,17 @@ worker. A stale sibling whose location cannot be resolved retains its occupied
 path without refusing unrelated shared reads. A resolvable redirect retains
 ownership of its target, including a formerly shared directory; access there is
 refused until the binding is repaired. Own-directory access remains available.
-Dangling links are checked against
+Ownership is geometric, with one exact exemption: a Session bound at a
+non-root ancestor of the caller owns its whole subtree, including what the
+caller reaches past its own directory, while a binding exactly at the mount
+root (`'.'`, a Workspace selection without `cwd_relative`) delimits no
+private area and never vets another Session's targets. Symmetrically, a
+caller bound at the mount root holds no private directory: its glob hits,
+reads, writes and edits refuse every target a non-root sibling owns,
+however the path is spelled, while shared locations owned by no sibling
+stay reachable. Whether nested or overlapping installations may exist at
+all is install-time policy and out of scope for this slice; the ownership
+above governs whatever the registry accepts. Dangling links are checked against
 their intended targets before a write. That registry check is worker-local, not a confidentiality guarantee
 across separate workers. It preserves `/1` linked-dependency reads; file
 history retains its own write boundary. Boot v1 keeps the stricter Session

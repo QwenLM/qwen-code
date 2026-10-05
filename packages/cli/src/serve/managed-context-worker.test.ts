@@ -1859,6 +1859,113 @@ describe('Managed context tool gate', () => {
     expect(JSON.stringify(sibling)).not.toContain('sibling');
   });
 
+  it('keeps a non-root ancestor sibling owning its whole subtree', async () => {
+    // The exemption covers only a binding AT the mount root: a Session
+    // installed at `services` owns `services/**`, so a caller nested under
+    // it cannot read or write outside its own directory within that tree.
+    const root = workspace(['services/api/src', 'services/web']);
+    fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
+    fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install);
+    await post(origin, ACTIVATION, workspaceActivation(install));
+    await post(origin, CONTEXT, workspaceInstallation('session-a', 'services'));
+    const call = async (callId: string, toolName: string, input: unknown) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', callId, ''),
+          toolName,
+          input,
+        })
+      ).json();
+
+    const read = await call('call-1', 'read_file', {
+      file_path: '../web/secret.txt',
+    });
+    expect(read.result.executionStatus).toBe('error');
+    expect(JSON.stringify(read)).toContain(
+      "Path '../web/secret.txt' is not within the Session working directory.",
+    );
+    expect(JSON.stringify(read)).not.toContain('sibling');
+    const write = await call('call-2', 'write_file', {
+      file_path: '../web/pwned.txt',
+      content: 'pwned',
+    });
+    expect(write.result.executionStatus).toBe('error');
+    expect(JSON.stringify(write)).toContain(
+      "Path '../web/pwned.txt' is not within the Session working directory.",
+    );
+    expect(fs.existsSync(path.join(root, 'services/web/pwned.txt'))).toBe(
+      false,
+    );
+    const own = await call('call-3', 'read_file', {
+      file_path: 'src/index.ts',
+    });
+    expect(own.result.executionStatus).toBe('success');
+    expect(JSON.stringify(own)).toContain('mine');
+  });
+
+  it('judges every target of a Workspace-root Session against sibling estates', async () => {
+    // A binding at `'.'` holds no private directory: its glob must not
+    // enumerate a sibling's files, and its reads, writes and edits spelled
+    // inside the mount still settle as the boundary refusal. Shared
+    // locations no sibling owns remain available to it.
+    const root = linkedDependencyWorkspace();
+    fs.writeFileSync(path.join(root, 'services/api/probe.txt'), 'api-secret');
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const rootInstall = workspaceInstallation('session-root', '.');
+    await post(origin, CONTEXT, rootInstall);
+    await post(origin, ACTIVATION, workspaceActivation(rootInstall));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-1', 'services/api'),
+    );
+    const exec = async (callId: string, toolName: string, input: unknown) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-root', callId, ''),
+          toolName,
+          input,
+        })
+      ).json();
+
+    const found = await exec('call-1', 'glob', { pattern: '**/probe.txt' });
+    expect(found.result.executionStatus).toBe('error');
+    expect(JSON.stringify(found)).not.toContain('services/api/probe.txt');
+    expect(JSON.stringify(found)).not.toContain('api-secret');
+    const read = await exec('call-2', 'read_file', {
+      file_path: 'services/api/probe.txt',
+    });
+    expect(read.result.executionStatus).toBe('error');
+    expect(JSON.stringify(read)).toContain(
+      "Path 'services/api/probe.txt' is not within the Session working directory.",
+    );
+    expect(JSON.stringify(read)).not.toContain('api-secret');
+    const write = await exec('call-3', 'write_file', {
+      file_path: 'services/api/pwned.txt',
+      content: 'pwned',
+    });
+    expect(write.result.executionStatus).toBe('error');
+    expect(fs.existsSync(path.join(root, 'services/api/pwned.txt'))).toBe(
+      false,
+    );
+    const shared = await exec('call-4', 'read_file', {
+      file_path: 'services/web/secret.txt',
+    });
+    expect(shared.result.executionStatus).toBe('success');
+    expect(JSON.stringify(shared)).toContain('sibling');
+  });
+
   it.each([
     'removed',
     'replaced by a file',

@@ -336,16 +336,28 @@ export function registerManagedContextRoutes(
           !path.isAbsolute(relative)
         );
       };
+      const root = await mount.rootDirectory();
+      // A target inside the caller's own directory is the caller's business
+      // only when that directory is private: a Session bound at the mount
+      // root (`'.'`, a Workspace selection without `cwd_relative`) delimits
+      // no private area, so its targets stay subject to sibling ownership.
+      if (
+        contains(ownDirectory, realPath) &&
+        (root === undefined || ownDirectory !== root)
+      ) {
+        return false;
+      }
       for (const [otherId, binding] of installations.bindings()) {
         if (otherId === sessionId) continue;
         const directory = await siblingDirectory(mount, binding.cwdRelative);
         // A binding that cannot be located at all cannot prove the outside
         // target is shared.
         if (directory === undefined) return true;
-        // A Session bound at an ancestor of the caller's own directory
-        // delimits no private area — it is the shared Workspace itself, and
-        // `'.'` is what a Workspace selection without `cwd_relative` binds.
-        if (contains(directory, ownDirectory)) continue;
+        // Only a binding AT the mount root exempts: the shared Workspace
+        // itself owns nothing. One bound at a non-root ancestor of the
+        // caller still owns its whole subtree, including what spills past
+        // the caller's directory.
+        if (root !== undefined && directory === root) continue;
         if (contains(directory, realPath)) return true;
       }
       return false;

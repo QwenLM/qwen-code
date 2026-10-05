@@ -300,9 +300,10 @@ export class ManagedToolExecutor {
      * case (a sibling Session's files are never this Session's business);
      * anywhere else inside the mount — a linked dependency's real location
      * — keeps the pre-containment behavior of reading through the symlink.
-     * `ownDirectory` is the caller's canonical Session directory, so a
-     * sibling bound at an ancestor of it can be told apart from one that
-     * delimits a private area.
+     * `ownDirectory` is the caller's canonical Session directory: a sibling
+     * bound exactly at the mount root delimits no private area and never
+     * vets, while a caller bound there holds none either, so its targets —
+     * however spelled — are judged against every non-root sibling.
      */
     private readonly ownsAnotherSessionDir?: (
       sessionId: string,
@@ -842,6 +843,7 @@ export class ManagedToolExecutor {
         );
         const realDirectory = await realpathDeepestExisting(directory);
         const relative = path.relative(realDirectory, realTarget);
+        let outOfBoundary = false;
         if (
           relative === '..' ||
           relative.startsWith(`..${path.sep}`) ||
@@ -852,26 +854,31 @@ export class ManagedToolExecutor {
           // the mount — a linked dependency's real location — stays
           // reachable, the behavior /1 Sessions had before containment.
           const workspaceRoot = tools.workspaceRoot;
-          const inMount =
-            workspaceRoot !== undefined &&
-            !escapesSession(
+          outOfBoundary =
+            workspaceRoot === undefined ||
+            escapesSession(
               path.relative(
                 await realpathDeepestExisting(workspaceRoot),
                 realTarget,
               ),
             );
-          if (
-            !inMount ||
-            (await this.ownsAnotherSessionDir?.(
-              tools.sessionId,
-              realTarget,
-              realDirectory,
-            ))
-          ) {
-            throw new Error(
-              `Path '${entry.input['file_path'] as string}' is not within the Session working directory.`,
-            );
-          }
+        }
+        outOfBoundary ||= Boolean(
+          await this.ownsAnotherSessionDir?.(
+            tools.sessionId,
+            realTarget,
+            realDirectory,
+          ),
+        );
+        if (outOfBoundary) {
+          // A non-escaping target is judged too: a Session bound at the
+          // mount root holds no private directory, so even a target spelled
+          // inside it can belong to a sibling. The callback answers false
+          // for any other caller's own-directory target before consulting a
+          // single binding.
+          throw new Error(
+            `Path '${entry.input['file_path'] as string}' is not within the Session working directory.`,
+          );
         }
       }
       if (entry.toolName === GlobTool.Name) {
@@ -995,14 +1002,22 @@ export class ManagedToolExecutor {
           const realRoot = await realpathDeepestExisting(root);
           for (const hit of resultPaths) {
             if (typeof hit !== 'string') continue;
-            const relative = path.relative(
-              realRoot,
-              path.join(
-                await realpathDeepestExisting(path.dirname(hit)),
-                path.basename(hit),
-              ),
+            const effective = path.join(
+              await realpathDeepestExisting(path.dirname(hit)),
+              path.basename(hit),
             );
-            if (escapesSession(relative)) {
+            const relative = path.relative(realRoot, effective);
+            if (
+              escapesSession(relative) ||
+              (await this.ownsAnotherSessionDir?.(
+                tools.sessionId,
+                effective,
+                realRoot,
+              ))
+            ) {
+              // The sibling-ownership arm carries the same message: it names
+              // no hit, and a root-bound caller's effective boundary excludes
+              // sibling estates even though they sit inside its own root.
               throw new Error(
                 'Glob results must stay within the Session working directory.',
               );
