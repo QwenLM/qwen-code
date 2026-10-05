@@ -6050,3 +6050,148 @@ it('projects generic tool wrappers into real names and arguments in chat message
     args: { query: 'value' },
   });
 });
+
+describe('session agent messages', () => {
+  const update = (update: Record<string, unknown>) =>
+    normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: { update },
+    });
+  const author = {
+    agentId: 'agent-1',
+    name: 'reviewer',
+    color: '#ff8800',
+    program: 'claude',
+  };
+
+  it('renders an agent reply as its own authored message, apart from the main assistant text around it', () => {
+    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      update({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Main answer.' },
+      }),
+      update({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Looks good to me.' },
+        _meta: {
+          source: 'agent_message',
+          qwenDiscreteMessage: true,
+          qwenTranscript: { segmentId: 'agent:run-1' },
+          qwenAgentMessage: {
+            kind: 'agent_message',
+            author,
+            runId: 'run-1',
+            status: 'completed',
+            steps: [{ id: 's1', title: 'Read: a.ts', status: 'completed' }],
+            totalTokens: 1234,
+          },
+        },
+      }),
+      update({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Main follow-up.' },
+      }),
+    ].flat());
+    const assistants = transcriptBlocksToDaemonMessages(state.blocks).filter(
+      (message) => message.role === 'assistant',
+    );
+    expect(assistants.map((message) => message.content)).toEqual([
+      'Main answer.',
+      'Looks good to me.',
+      'Main follow-up.',
+    ]);
+    expect(assistants[1]).toMatchObject({
+      author: { name: 'reviewer', color: '#ff8800' },
+      agentMessage: {
+        kind: 'agent_message',
+        runId: 'run-1',
+        status: 'completed',
+        totalTokens: 1234,
+        steps: [{ id: 's1', title: 'Read: a.ts', status: 'completed' }],
+      },
+    });
+    expect(assistants[0]).not.toHaveProperty('author');
+    expect(assistants[2]).not.toHaveProperty('author');
+    expect(assistants[2]).not.toHaveProperty('agentMessage');
+  });
+
+  it('keeps a failed agent reply with no text, so its status still shows', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('agent-block', 'assistant', '', 1, false, {
+        segmentId: 'agent:run-2',
+        meta: {
+          source: 'agent_message',
+          qwenDiscreteMessage: true,
+          qwenAgentMessage: {
+            kind: 'agent_message',
+            author,
+            runId: 'run-2',
+            status: 'offline',
+            error: 'runtime went away',
+          },
+        },
+      }),
+    ]);
+    expect(messages).toEqual([
+      expect.objectContaining({
+        id: 'agent-block',
+        role: 'assistant',
+        content: '',
+        author: { name: 'reviewer', color: '#ff8800' },
+        agentMessage: expect.objectContaining({
+          status: 'offline',
+          error: 'runtime went away',
+        }),
+      }),
+    ]);
+  });
+
+  it('renders an @-mention as an ordinary user message', () => {
+    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      update({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: '@reviewer please check' },
+        _meta: {
+          source: 'agent_mention',
+          qwenDiscreteMessage: true,
+          qwenAgentMessage: {
+            kind: 'agent_mention',
+            mentionedAgentIds: ['agent-1'],
+          },
+        },
+      }),
+    ].flat());
+    const [message] = transcriptBlocksToDaemonMessages(state.blocks);
+    expect(message).toMatchObject({
+      role: 'user',
+      content: '@reviewer please check',
+      source: 'agent_mention',
+      agentMessage: { kind: 'agent_mention', mentionedAgentIds: ['agent-1'] },
+    });
+    expect(message).not.toHaveProperty('author');
+  });
+
+  it('names the agent on a post an agent made into the session', () => {
+    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      update({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: '@writer your turn' },
+        _meta: {
+          source: 'agent_mention',
+          qwenDiscreteMessage: true,
+          qwenAgentMessage: {
+            kind: 'agent_mention',
+            author,
+            mentionedAgentIds: ['agent-2'],
+          },
+        },
+      }),
+    ].flat());
+    const [message] = transcriptBlocksToDaemonMessages(state.blocks);
+    expect(message).toMatchObject({
+      role: 'user',
+      author: { name: 'reviewer', color: '#ff8800' },
+    });
+  });
+});

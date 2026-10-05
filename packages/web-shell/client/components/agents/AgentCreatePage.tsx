@@ -47,6 +47,7 @@ import {
 import {
   AGENT_PROGRAMS,
   programLabel,
+  runtimePrograms,
   type AgentProgramView,
 } from '../workspace-agents/agents-view-logic';
 
@@ -823,7 +824,12 @@ export function AgentCreatePage({
                           checked={executionHostIds.has(host.id)}
                           onChange={() => {
                             setExecutionHostIds(new Set([host.id]));
-                            setExecutionProvider('qwen');
+                            // The first program this runtime runs; a runtime
+                            // that offers only Claude Code or Codex has no
+                            // Qwen Code to fall back to.
+                            setExecutionProvider(
+                              runtimePrograms(host)[0] ?? 'qwen',
+                            );
                             setRole('');
                             setModel('');
                           }}
@@ -856,14 +862,17 @@ export function AgentCreatePage({
                   const host = executionHosts.find((entry) =>
                     executionHostIds.has(entry.id),
                   );
+                  // This computer runs Qwen Code only.
+                  // TODO(multi-agent): offer Claude Code / Codex here too once
+                  // the local daemon reports the programs it can run.
                   const missing = (provider: AgentProgramView) =>
-                    provider === 'qwen'
-                      ? undefined
-                      : !host
-                        ? t('collab.agent.programLocal')
-                        : host.programs?.includes(provider)
-                          ? undefined
-                          : t('collab.agent.programMissing');
+                    !host
+                      ? provider === 'qwen'
+                        ? undefined
+                        : t('collab.agent.programLocal')
+                      : runtimePrograms(host).includes(provider)
+                        ? undefined
+                        : t('collab.agent.programMissing');
                   return (
                     <Field className="lg:col-span-2">
                       <FieldLabel>{t('collab.runtime.program')}</FieldLabel>

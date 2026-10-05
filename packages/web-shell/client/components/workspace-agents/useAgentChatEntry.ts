@@ -10,37 +10,66 @@ import type { ChatEditor } from '../ChatEditor';
 import type { WebShellAtProvider } from '../../customization';
 import type { useI18n } from '../../i18n';
 import { createThreadsHttpApi } from './threads-api';
-import { CONVERSATION_CONTEXT_PREFIX, programLabel } from './agents-view-logic';
+import { programLabel } from './agents-view-logic';
+import type { SessionAgentsApi } from './session-agents-api';
 import type { WorkspaceAgentSummaryView } from './ThreadsPage';
 
 type Submit = ComponentProps<typeof ChatEditor>['onSubmit'];
 
 /** The mention picker reuses one roster read for this long. */
 const ROSTER_TTL_MS = 5_000;
-const CONTEXT_MESSAGES = 6;
-const CONTEXT_CHARS = 4_000;
 
 /**
- * The tail of the conversation an agent was mentioned from, so a thread
- * started mid-conversation does not begin blind.
+ * The @tokens of a message, lowercased. Same rules as core's parseMentions: no
+ * ASCII word character before `@`, so "请@迁移助手" counts and "a@b.dev" does
+ * not; a token followed by `/` is a path, not a mention.
  */
-export function conversationContext(
-  messages: readonly { role: string; content?: unknown }[],
-): string {
-  const text = messages
-    .filter(
-      (message) =>
-        (message.role === 'user' || message.role === 'assistant') &&
-        typeof message.content === 'string' &&
-        message.content.trim(),
-    )
-    .slice(-CONTEXT_MESSAGES)
-    .map(
-      (message) =>
-        `${message.role === 'user' ? 'User' : 'Assistant'}: ${(message.content as string).trim()}`,
-    )
-    .join('\n\n');
-  return text.length > CONTEXT_CHARS ? `…${text.slice(-CONTEXT_CHARS)}` : text;
+export function mentionTokens(text: string): string[] {
+  const pattern = /(?<![A-Za-z0-9_.])@([\p{L}\p{N}][\p{L}\p{N}_-]{0,47})/gu;
+  return [...text.matchAll(pattern)]
+    .filter((match) => text[(match.index ?? 0) + match[0].length] !== '/')
+    .map((match) => match[1].toLowerCase());
+}
+
+/**
+ * The agents a message addresses, in mention order. A name may run into the
+ * next word in scripts without spaces ("@迁移助手看一下"); the longest name the
+ * token starts with wins. Same addressability predicate as the picker: an
+ * agent the server would skip must not divert the message.
+ */
+export function resolveMentionedAgents(
+  tokens: readonly string[],
+  agents: readonly WorkspaceAgentSummaryView[],
+): WorkspaceAgentSummaryView[] {
+  const resolved: WorkspaceAgentSummaryView[] = [];
+  for (const token of tokens) {
+    const agent = agents
+      .filter((candidate) => {
+        const lowerName = candidate.name.toLowerCase();
+        const rest = token.slice(lowerName.length);
+        return (
+          candidate.enabled &&
+          !candidate.retiredAt &&
+          token.startsWith(lowerName) &&
+          !/^[a-z0-9_-]/.test(rest) &&
+          // Core's `agentForToken` refuses a longer Latin word too: "@maría"
+          // is not "mar", "@alice２" is not "alice". A Han or kana
+          // continuation is still its own word, so it keeps resolving.
+          !/^[\p{Script=Latin}\p{Nd}]/u.test(rest)
+        );
+      })
+      .sort((a, b) => b.name.length - a.name.length)[0];
+    if (agent && !resolved.includes(agent)) resolved.push(agent);
+  }
+  return resolved;
+}
+
+/** Idempotency key for one @-mention post (`[A-Za-z0-9_.:-]{1,128}`). */
+function newClientMessageId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+    return `mention:${crypto.randomUUID()}`;
+  const random = Math.random().toString(36).slice(2);
+  return `mention:${Date.now().toString(36)}-${random}`;
 }
 
 export function useAgentChatEntry({
@@ -48,10 +77,10 @@ export function useAgentChatEntry({
   cwd,
   baseUrl,
   token,
+  sessionApi,
+  ensureSession,
   onSubmit,
-  onOpen,
   onError,
-  getContext,
   onCreateAgent,
   t,
 }: {
@@ -59,11 +88,15 @@ export function useAgentChatEntry({
   cwd?: string;
   baseUrl: string;
   token?: string;
+  /** The session routes of the same workspace (`cwd`). */
+  sessionApi?: SessionAgentsApi;
+  /**
+   * The current chat session's id, creating the session first when this is a
+   * new chat (the same lazy creation an ordinary first prompt goes through).
+   */
+  ensureSession: () => Promise<string | undefined>;
   onSubmit: Submit;
-  onOpen: (id: string, cwd: string) => void;
   onError: (message: string) => void;
-  /** The conversation so far, when mentioning from a chat that has one. */
-  getContext?: () => string;
   /** Offered as the picker's last item: open the New agent page. */
   onCreateAgent?: () => void;
   /**
@@ -178,24 +211,20 @@ export function useAgentChatEntry({
         : [],
     [api, listAgents, canCreateAgent, t],
   );
+  // Read through refs so a new callback each render keeps `submit` stable.
+  const ensureSessionRef = useRef(ensureSession);
+  ensureSessionRef.current = ensureSession;
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
   const submit = useCallback<Submit>(
     (text, images, files, commit, metadata) => {
-      // Same rules as core's parseMentions: no ASCII word character before
-      // `@`, so "请@迁移助手" counts and "a@b.dev" does not.
-      const mentions = [
-        ...text.matchAll(
-          /(?<![A-Za-z0-9_.])@([\p{L}\p{N}][\p{L}\p{N}_-]{0,47})/gu,
-        ),
-      ]
-        .filter((match) => text[(match.index ?? 0) + match[0].length] !== '/')
-        .map((match) => match[1].toLowerCase());
-      if (!api || !cwd || mentions.length === 0)
+      const tokens = mentionTokens(text);
+      if (!api || !sessionApi || !cwd || tokens.length === 0)
         return onSubmit(text, images, files, commit, metadata);
       if (busy.current) return false;
       busy.current = true;
       setPending(true);
       const submissionId = ++submission.current;
-      const context = getContext?.() ?? '';
       void (async () => {
         try {
           // No roster (collaboration off here, or the daemon unreachable)
@@ -205,38 +234,7 @@ export function useAgentChatEntry({
           );
           if (activeApi.current !== api || submission.current !== submissionId)
             return;
-          // The first agent addressed leads the thread: a follow-up without an
-          // @ goes to it, and sub-thread reports wake it.
-          // A name may run into the next word in scripts without spaces
-          // ("@迁移助手看一下"); the longest name the token starts with wins.
-          const lead = mentions
-            .map(
-              (token) =>
-                agents
-                  .filter(
-                    // Same addressability predicate as the picker above:
-                    // interception must not fire for an agent admission
-                    // would skip.
-                    (agent) => {
-                      const lowerName = agent.name.toLowerCase();
-                      const rest = token.slice(lowerName.length);
-                      return (
-                        agent.enabled &&
-                        !agent.retiredAt &&
-                        token.startsWith(lowerName) &&
-                        !/^[a-z0-9_-]/.test(rest) &&
-                        // Core's `agentForToken` refuses a longer Latin word
-                        // too: "@maría" is not "mar", "@alice２" is not
-                        // "alice". A Han or kana continuation is still its own
-                        // word, so it keeps resolving.
-                        !/^[\p{Script=Latin}\p{Nd}]/u.test(rest)
-                      );
-                    },
-                  )
-                  .sort((a, b) => b.name.length - a.name.length)[0],
-            )
-            .find((agent) => agent !== undefined);
-          if (!lead) {
+          if (resolveMentionedAgents(tokens, agents).length === 0) {
             let committed = false;
             const accepted = onSubmit(
               text,
@@ -251,23 +249,35 @@ export function useAgentChatEntry({
             if (accepted !== false && !committed) commit?.();
             return;
           }
+          // TODO(multi-agent): the mention route carries text only (plan
+          // §8-6); attachments on an @-mention are refused until it does.
           if (images?.length || files?.length)
             throw new Error(t('collab.mention.noAttachments'));
-          // One request: the message is the assignment, so the lead starts
-          // from it instead of receiving it mid-turn.
-          const { id } = await api.createThread({
-            title: text.trim().slice(0, 80),
-            body: context ? `${CONVERSATION_CONTEXT_PREFIX}${context}` : '',
-            assignee: lead.name,
-            message: text,
+          // The agents answer inside this chat session, so a new chat gets
+          // its session first, exactly as its first prompt would.
+          // TODO(multi-agent): a session created here is assumed to live in
+          // `cwd`; if the new-chat workspace picker targets another
+          // workspace, the mention goes to the wrong workspace's route.
+          // Creating the session can re-key this hook (the composer's
+          // workspace settles on the new session's), so no staleness check
+          // from here on: the message belongs to the session just created.
+          const sessionId = await ensureSessionRef.current();
+          if (!sessionId) throw new Error(t('collab.mention.noSession'));
+          // No local echo: the daemon records the @-mention and streams it
+          // back as a user message, live and on replay alike.
+          // TODO(multi-agent): a 202 with `deferred: true` (a main-model turn
+          // is running) clears the composer, but the @ message only appears
+          // once that turn settles and the record is written; until then only
+          // the agents' run cards show. A local echo would double it.
+          await sessionApi.mention(sessionId, {
+            text,
+            clientMessageId: newClientMessageId(),
           });
-          if (activeApi.current !== api || submission.current !== submissionId)
-            return;
           commit?.();
-          onOpen(id, cwd);
         } catch (error) {
-          if (submission.current !== submissionId) return;
-          onError(error instanceof Error ? error.message : String(error));
+          onErrorRef.current(
+            error instanceof Error ? error.message : String(error),
+          );
         } finally {
           if (submission.current === submissionId) {
             busy.current = false;
@@ -277,7 +287,7 @@ export function useAgentChatEntry({
       })();
       return false;
     },
-    [api, cwd, onSubmit, onOpen, onError, getContext, listAgents, t],
+    [api, sessionApi, cwd, onSubmit, listAgents, t],
   );
   return { providers, submit, pending };
 }

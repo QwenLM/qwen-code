@@ -4,30 +4,50 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * @fileoverview Coordinator side of the Agent Host protocol (v2).
+ *
+ * A Host (a remote `qwen serve` that joined this workspace) talks to these
+ * routes over outbound HTTP: enroll once, then heartbeat (presence, program
+ * probe, lease renewal, permission decisions), long-poll pickup for a session
+ * turn, stream ordered event batches, and post the turn's result. Work comes
+ * from the workspace's session-agent orchestrator (its remote queue); these
+ * handlers only authenticate, validate and translate.
+ */
+
 import express from 'express';
-import { setTimeout as delay } from 'node:timers/promises';
 import type { Application, Request, RequestHandler, Response } from 'express';
-import type { HostRunResult } from '@qwen-code/qwen-code-core';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
-import {
-  parseHostRunSteps,
-  applyHostRunResult,
-  reportHostRunProgress,
-  pickupRunForHost,
-  renewRunLease,
-} from '@qwen-code/qwen-code-core/agents/workspace-agents/host-lease.js';
 import {
   authenticateAgentHost,
   enrollAgentHost,
   heartbeatAgentHost,
+  normalizeHostProgramProbes,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import {
   AGENT_HOST_CREDENTIAL_REJECTED,
   AGENT_HOST_REPLACEMENT_REQUIRED,
+  hostAvailablePrograms,
+  type AgentHostView,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
+import {
+  HOST_PROTOCOL_VERSION,
+  type AgentAdapterEvent,
+  type AgentAdapterTurnResult,
+  type HostProgramProbe,
+  type HostTurnEventBatch,
+  type HostTurnResult,
+  type SessionAgentPermissionPrompt,
+  type SessionAgentProgram,
+  type SessionAgentStep,
+} from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
+import { isTerminalSessionAgentRunStatus } from '@qwen-code/qwen-code-core/agents/session-agents/binding-store.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { requireTrustedWorkspaceRuntime } from '../workspace-route-runtime.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
+import { getSessionAgentOrchestrator } from '../session-agents/orchestrator.js';
+import { getSessionAgentEventHub } from '../session-agents/events.js';
+import { createHostProgramAgentEnsurer } from '../agent-host-program-agents.js';
 
 const debugLogger = createDebugLogger('AGENT_HOSTS');
 
@@ -61,80 +81,244 @@ function readWaitMs(value: unknown): number | undefined {
     : undefined;
 }
 
-/** A result's summary may be as long as the progress text it replaces. */
-const MAX_RESULT_SUMMARY = 262_144;
-const MAX_RESULT_ERROR = 4_096;
-/** The thought stream a progress flush carries is shorter than its output. */
-const MAX_PROGRESS_THOUGHT = 65_536;
+/** Same bounds the orchestrator keeps for a live frame / final record. */
+const MAX_OUTPUT_TEXT = 262_144;
+const MAX_ERROR_TEXT = 4_096;
+const MAX_EVENT_TEXT = 262_144;
+const MAX_EVENTS_PER_BATCH = 2_000;
+const MAX_RUNS_PER_HEARTBEAT = 64;
+const MAX_ID = 256;
+/** Backstop between pickup scans; queued work wakes the poll sooner. */
+const PICKUP_MAX_INTERVAL_MS = 5_000;
 
-/**
- * A Host's reported spend: absent, or a whole non-negative number. The cap is
- * far above any real turn and only keeps a hostile value out of the ledger.
- */
-function readHostTokens(value: unknown): number | undefined | 'invalid' {
-  if (value === undefined) return undefined;
-  return typeof value === 'number' &&
+function isId(value: unknown): value is string {
+  return (
+    typeof value === 'string' && value.length > 0 && value.length <= MAX_ID
+  );
+}
+
+function isAttempt(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+}
+
+function isTokenCount(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
     Number.isSafeInteger(value) &&
     value >= 0 &&
     value <= 1_000_000_000
-    ? value
-    : 'invalid';
+  );
 }
 
-function readHostResult(
-  input: Record<string, unknown>,
-  hostId: string,
-): HostRunResult | undefined {
-  const threadId = input['threadId'];
-  const runId = input['runId'];
-  const leaseId = input['leaseId'];
-  const attempt = input['attempt'];
-  const status = input['status'];
-  const error = input['error'];
-  const rawClose = input['close'];
-  const tokens = readHostTokens(input['tokens']);
+function boundedString(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.length <= max;
+}
+
+function readStep(value: unknown): SessionAgentStep | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const { id, title, status } = value as Record<string, unknown>;
   if (
-    tokens === 'invalid' ||
-    typeof threadId !== 'string' ||
-    typeof runId !== 'string' ||
-    typeof leaseId !== 'string' ||
-    typeof attempt !== 'number' ||
-    !Number.isInteger(attempt) ||
-    attempt < 1 ||
-    (status !== 'completed' && status !== 'failed' && status !== 'cancelled') ||
-    (error !== undefined && typeof error !== 'string')
+    !isId(id) ||
+    !boundedString(title, 1_200) ||
+    (status !== 'running' && status !== 'completed' && status !== 'failed')
   ) {
     return undefined;
   }
-  const errorText =
-    typeof error === 'string' ? error.slice(0, MAX_RESULT_ERROR) : undefined;
-  let close: HostRunResult['close'];
-  if (rawClose !== undefined) {
-    if (typeof rawClose !== 'object' || rawClose === null) return undefined;
-    const value = rawClose as Record<string, unknown>;
+  return { id, title, status };
+}
+
+const PERMISSION_OPTION_KINDS = new Set([
+  'allow_once',
+  'allow_always',
+  'reject_once',
+  'reject_always',
+]);
+
+function readPermissionPrompt(
+  value: unknown,
+): SessionAgentPermissionPrompt | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const { requestId, title, toolName, inputPreview, options } = value as Record<
+    string,
+    unknown
+  >;
+  if (
+    !isId(requestId) ||
+    !boundedString(title, 1_200) ||
+    (toolName !== undefined && !boundedString(toolName, 256)) ||
+    (inputPreview !== undefined && !boundedString(inputPreview, 16_384)) ||
+    !Array.isArray(options) ||
+    options.length === 0 ||
+    options.length > 16
+  ) {
+    return undefined;
+  }
+  const parsed: SessionAgentPermissionPrompt['options'] = [];
+  for (const option of options) {
+    if (typeof option !== 'object' || option === null) return undefined;
+    const { optionId, name, kind } = option as Record<string, unknown>;
     if (
-      value['kind'] === 'review' &&
-      typeof value['summary'] === 'string' &&
-      value['summary'].trim() &&
-      value['summary'].length <= MAX_RESULT_SUMMARY
+      !isId(optionId) ||
+      !boundedString(name, 256) ||
+      typeof kind !== 'string' ||
+      !PERMISSION_OPTION_KINDS.has(kind)
     ) {
-      close = { kind: 'review', summary: value['summary'].trim() };
-    } else {
       return undefined;
     }
+    parsed.push({
+      optionId,
+      name,
+      kind: kind as SessionAgentPermissionPrompt['options'][number]['kind'],
+    });
   }
-  if (status !== 'completed' && close !== undefined) return undefined;
   return {
-    threadId,
-    runId,
-    hostId,
-    leaseId,
-    attempt,
-    status,
-    ...(close ? { close } : {}),
-    ...(errorText ? { error: errorText } : {}),
-    ...(tokens !== undefined ? { tokens } : {}),
+    requestId,
+    title,
+    ...(toolName !== undefined ? { toolName } : {}),
+    ...(inputPreview !== undefined ? { inputPreview } : {}),
+    options: parsed,
   };
+}
+
+/** One adapter event from a Host, validated field by field. */
+export function readHostEvent(value: unknown): AgentAdapterEvent | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const { type, text, nativeSessionId, step, prompt, requestId, totalTokens } =
+    value as Record<string, unknown>;
+  switch (type) {
+    case 'native_session':
+      return isId(nativeSessionId)
+        ? { type: 'native_session', nativeSessionId }
+        : undefined;
+    case 'text_delta':
+      return boundedString(text, MAX_EVENT_TEXT)
+        ? { type: 'text_delta', text }
+        : undefined;
+    case 'thought_delta':
+      return boundedString(text, MAX_EVENT_TEXT)
+        ? { type: 'thought_delta', text }
+        : undefined;
+    case 'session_send':
+      return boundedString(text, MAX_EVENT_TEXT) && text.trim()
+        ? { type: 'session_send', text }
+        : undefined;
+    case 'step': {
+      const parsed = readStep(step);
+      return parsed ? { type: 'step', step: parsed } : undefined;
+    }
+    case 'permission_request': {
+      const parsed = readPermissionPrompt(prompt);
+      return parsed
+        ? { type: 'permission_request', prompt: parsed }
+        : undefined;
+    }
+    case 'permission_resolved':
+      return isId(requestId)
+        ? { type: 'permission_resolved', requestId }
+        : undefined;
+    case 'usage':
+      return isTokenCount(totalTokens)
+        ? { type: 'usage', totalTokens }
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+export function readHostEventBatch(
+  input: Record<string, unknown>,
+): HostTurnEventBatch | undefined {
+  const { sessionId, runId, attempt, leaseId, sequence, events } = input;
+  if (
+    !isId(sessionId) ||
+    !isId(runId) ||
+    !isAttempt(attempt) ||
+    !isId(leaseId) ||
+    !isAttempt(sequence) ||
+    !Array.isArray(events) ||
+    events.length > MAX_EVENTS_PER_BATCH
+  ) {
+    return undefined;
+  }
+  const parsed: AgentAdapterEvent[] = [];
+  for (const raw of events) {
+    const event = readHostEvent(raw);
+    if (!event) return undefined;
+    parsed.push(event);
+  }
+  return { sessionId, runId, attempt, leaseId, sequence, events: parsed };
+}
+
+export function readHostTurnResult(
+  input: Record<string, unknown>,
+): HostTurnResult | undefined {
+  const { sessionId, runId, attempt, leaseId, result } = input;
+  if (
+    !isId(sessionId) ||
+    !isId(runId) ||
+    !isAttempt(attempt) ||
+    !isId(leaseId) ||
+    typeof result !== 'object' ||
+    result === null
+  ) {
+    return undefined;
+  }
+  const {
+    status,
+    outputText,
+    error,
+    nativeSessionId,
+    resumeRejected,
+    totalTokens,
+  } = result as Record<string, unknown>;
+  if (
+    (status !== 'completed' && status !== 'failed' && status !== 'cancelled') ||
+    !boundedString(outputText, MAX_OUTPUT_TEXT) ||
+    (error !== undefined && typeof error !== 'string') ||
+    (nativeSessionId !== undefined && !isId(nativeSessionId)) ||
+    (resumeRejected !== undefined && typeof resumeRejected !== 'boolean') ||
+    (totalTokens !== undefined && !isTokenCount(totalTokens))
+  ) {
+    return undefined;
+  }
+  const turn: AgentAdapterTurnResult = {
+    status,
+    outputText,
+    ...(typeof error === 'string' && error
+      ? { error: error.slice(0, MAX_ERROR_TEXT) }
+      : {}),
+    ...(nativeSessionId !== undefined ? { nativeSessionId } : {}),
+    ...(resumeRejected !== undefined ? { resumeRejected } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
+  };
+  return { sessionId, runId, attempt, leaseId, result: turn };
+}
+
+function readLeaseRefs(
+  value: unknown,
+): Array<{ runId: string; attempt: number; leaseId: string }> | undefined {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_RUNS_PER_HEARTBEAT) {
+    return undefined;
+  }
+  const refs: Array<{ runId: string; attempt: number; leaseId: string }> = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) return undefined;
+    const { runId, attempt, leaseId } = entry as Record<string, unknown>;
+    if (!isId(runId) || !isAttempt(attempt) || !isId(leaseId)) {
+      return undefined;
+    }
+    refs.push({ runId, attempt, leaseId });
+  }
+  return refs;
+}
+
+/** Programs a Host may be handed turns for: v2 Hosts only. */
+function pickupPrograms(host: AgentHostView): SessionAgentProgram[] {
+  // A v1 Host cannot execute a v2 assignment; handing it one would hold the
+  // lease until it rots to `offline`. It keeps polling and gets nothing.
+  if (host.protocol !== HOST_PROTOCOL_VERSION) return [];
+  return hostAvailablePrograms(host);
 }
 
 export function registerAgentHostTransportRoutes(
@@ -144,6 +328,7 @@ export function registerAgentHostTransportRoutes(
   isEnabledFor: (workspaceCwd: string) => boolean,
 ): void {
   const json = express.json({ limit: '16kb' });
+  const ensureProgramAgents = createHostProgramAgentEnsurer();
   const requireEnabled = (workspaceCwd: string, res: Response): boolean => {
     if (isEnabledFor(workspaceCwd)) return true;
     res.status(404).json({ error: 'Workspace not found.' });
@@ -183,8 +368,8 @@ export function registerAgentHostTransportRoutes(
     const enrollment = req.originalUrl.startsWith('/agent-hosts/enroll');
     const category = enrollment
       ? 'enrollment'
-      : req.originalUrl.endsWith('/progress')
-        ? 'progress'
+      : req.originalUrl.endsWith('/events')
+        ? 'events'
         : 'control';
     const tier = enrollment ? 'mutation' : 'read';
     const source = req.ip || req.socket.remoteAddress || 'unknown';
@@ -201,83 +386,6 @@ export function registerAgentHostTransportRoutes(
     }
     next();
   });
-
-  app.post(
-    '/agent-hosts/:workspaceId/:hostId/progress',
-    authenticated,
-    express.json({ limit: '2mb' }),
-    async (req, res) => {
-      const { workspaceId, hostId } = req.params;
-      const runtime = runtimeFor(workspaceRegistry, workspaceId);
-      if (!runtime) {
-        res.status(404).json({ error: 'Workspace not found.' });
-        return;
-      }
-      const {
-        threadId,
-        runId,
-        leaseId,
-        attempt,
-        sequence,
-        stage,
-        detail,
-        outputText,
-        thoughtText,
-        steps: rawSteps,
-        tokens: rawTokens,
-      } = body(req);
-      const steps = parseHostRunSteps(rawSteps);
-      const tokens = readHostTokens(rawTokens);
-      if (
-        tokens === 'invalid' ||
-        typeof threadId !== 'string' ||
-        typeof runId !== 'string' ||
-        typeof leaseId !== 'string' ||
-        typeof attempt !== 'number' ||
-        !Number.isSafeInteger(attempt) ||
-        attempt < 1 ||
-        typeof sequence !== 'number' ||
-        !Number.isSafeInteger(sequence) ||
-        sequence < 1 ||
-        typeof stage !== 'string' ||
-        ![
-          'starting',
-          'resuming',
-          'waiting',
-          'thinking',
-          'tool',
-          'responding',
-        ].includes(stage) ||
-        typeof detail !== 'string' ||
-        detail.length > 1200 ||
-        (outputText !== undefined &&
-          (typeof outputText !== 'string' ||
-            outputText.length > MAX_RESULT_SUMMARY)) ||
-        (thoughtText !== undefined &&
-          (typeof thoughtText !== 'string' ||
-            thoughtText.length > MAX_PROGRESS_THOUGHT)) ||
-        steps === 'invalid'
-      ) {
-        res.status(400).json({ error: 'Invalid progress.' });
-        return;
-      }
-      const result = await reportHostRunProgress(runtime.workspaceCwd, {
-        threadId,
-        runId,
-        hostId,
-        leaseId,
-        attempt,
-        sequence,
-        stage,
-        detail,
-        outputText,
-        thoughtText,
-        ...(steps ? { steps } : {}),
-        ...(tokens !== undefined ? { tokens } : {}),
-      });
-      res.status(result.ok ? 200 : 409).json(result);
-    },
-  );
 
   app.post('/agent-hosts/enroll', json, async (req: Request, res: Response) => {
     const input = body(req);
@@ -318,6 +426,12 @@ export function registerAgentHostTransportRoutes(
     }
   });
 
+  /**
+   * `{workspaceCwd, providers, programs?, protocol?, enrollmentToken?, runs?}`
+   * → `{host, leases: [{runId, ok}], decisions}`. Records presence and the
+   * program probe, renews each listed lease, hands back pending permission
+   * decisions, and adds an agent per newly offered program.
+   */
   app.post(
     '/agent-hosts/:workspaceId/:hostId/heartbeat',
     json,
@@ -327,8 +441,11 @@ export function registerAgentHostTransportRoutes(
       const secret = hostSecret(req);
       const input = body(req);
       const workspaceCwd = input['workspaceCwd'];
-      const providers = input['providers'];
+      const providers = input['providers'] ?? [];
       const enrollmentToken = input['enrollmentToken'];
+      const rawPrograms = input['programs'];
+      const rawProtocol = input['protocol'];
+      const protocol = isAttempt(rawProtocol) ? rawProtocol : undefined;
       if (
         !workspaceId ||
         !hostId ||
@@ -339,6 +456,19 @@ export function registerAgentHostTransportRoutes(
         (enrollmentToken !== undefined && typeof enrollmentToken !== 'string')
       ) {
         res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
+        return;
+      }
+      const programs: HostProgramProbe[] | undefined =
+        rawPrograms === undefined
+          ? undefined
+          : normalizeHostProgramProbes(rawPrograms);
+      const runs = readLeaseRefs(input['runs']);
+      if (
+        (rawPrograms !== undefined && programs === undefined) ||
+        (rawProtocol !== undefined && protocol === undefined) ||
+        runs === undefined
+      ) {
+        res.status(400).json({ error: 'Invalid Agent Host heartbeat.' });
         return;
       }
       const runtime = runtimeFor(workspaceRegistry, workspaceId);
@@ -357,48 +487,47 @@ export function registerAgentHostTransportRoutes(
             workspaceCwd,
             providers,
             ...(typeof enrollmentToken === 'string' ? { enrollmentToken } : {}),
+            ...(programs !== undefined ? { programs } : {}),
+            ...(protocol !== undefined ? { protocol } : {}),
           },
         );
         if (!host) {
           res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
           return;
         }
-        if (input['run'] !== undefined) {
-          const run = input['run'];
-          if (!run || typeof run !== 'object' || Array.isArray(run)) {
-            res.status(400).json({ error: 'Invalid Agent Host lease.' });
-            return;
+        // No orchestrator means no live runs in this daemon (it restarted or
+        // the workspace's agents are stopping): every lease is gone.
+        const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
+        const leases = runs.map((run) => ({
+          runId: run.runId,
+          ok:
+            orchestrator?.renewLease(
+              hostId,
+              run.runId,
+              run.attempt,
+              run.leaseId,
+            ).ok ?? false,
+        }));
+        if (host.protocol === HOST_PROTOCOL_VERSION) {
+          try {
+            const added = await ensureProgramAgents(runtime.workspaceCwd, host);
+            if (added.length > 0) {
+              getSessionAgentEventHub(runtime.workspaceCwd).publish({
+                type: 'changed',
+                scope: 'agents',
+              });
+            }
+          } catch (error) {
+            // Retried on the next heartbeat (the ensurer only remembers
+            // programs it finished).
+            debugLogger.warn('Could not add agents for Agent Host:', error);
           }
-          const { threadId, runId, leaseId, attempt } = run as Record<
-            string,
-            unknown
-          >;
-          if (
-            typeof threadId !== 'string' ||
-            typeof runId !== 'string' ||
-            typeof leaseId !== 'string' ||
-            typeof attempt !== 'number' ||
-            !Number.isSafeInteger(attempt) ||
-            attempt < 1
-          ) {
-            res.status(400).json({ error: 'Invalid Agent Host lease.' });
-            return;
-          }
-          const renewed = await renewRunLease(runtime.workspaceCwd, {
-            threadId,
-            runId,
-            leaseId,
-            attempt,
-            hostId,
-          });
-          if (!renewed.ok) {
-            res.status(409).json({ error: renewed.reason });
-            return;
-          }
-          res.json({ host, lease: renewed.value });
-          return;
         }
-        res.json({ host });
+        res.json({
+          host,
+          leases,
+          decisions: orchestrator?.decisionsForHost(hostId) ?? [],
+        });
       } catch (error) {
         if (
           error instanceof Error &&
@@ -407,11 +536,20 @@ export function registerAgentHostTransportRoutes(
           res.status(409).json({ error: AGENT_HOST_REPLACEMENT_REQUIRED });
           return;
         }
+        if (isStoreBusy(error)) {
+          res.status(503).json({ error: 'Agent Host store busy.' });
+          return;
+        }
         res.status(400).json({ error: 'Agent Host heartbeat refused.' });
       }
     },
   );
 
+  /**
+   * `{waitMs ≤ 25000}` → `{assignment: HostTurnAssignment}` or 204. Long
+   * polls; a run frame that queues or ends work (or a roster change) wakes
+   * the poll early, with a slow backstop scan in between.
+   */
   app.post(
     '/agent-hosts/:workspaceId/:hostId/pickup',
     json,
@@ -435,14 +573,25 @@ export function registerAgentHostTransportRoutes(
       }
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
       if (!requireEnabled(runtime.workspaceCwd, res)) return;
+      let wake: (() => void) | undefined;
+      const unsubscribe = getSessionAgentEventHub(
+        runtime.workspaceCwd,
+      ).subscribe((frame) => {
+        // Text deltas are the bulk of the traffic and never make work
+        // runnable; a queued run, a run ending (the next queued one for that
+        // agent becomes runnable) or a roster change can.
+        if (
+          frame.type !== 'run' ||
+          frame.status === 'queued' ||
+          isTerminalSessionAgentRunStatus(frame.status)
+        ) {
+          wake?.();
+        }
+      });
+      const onClose = () => wake?.();
+      req.on('close', onClose);
       try {
         const deadline = Date.now() + waitMs;
-        // An empty poll backs off: every pickup scan walks the agent store
-        // under its transaction, so a fixed 250ms cadence makes each idle
-        // Host hammer that lock ~4x/second doing nothing. Doubling to a 2s
-        // cap still answers fresh work promptly while an idle Host costs
-        // about one scan every other second. The cadence resets per request,
-        // so a Host that just received work re-polls hot.
         let pollIntervalMs = 250;
         for (;;) {
           // A Host that hung up must not have a run claimed for it here.
@@ -452,36 +601,30 @@ export function registerAgentHostTransportRoutes(
             return;
           }
           if (!requireEnabled(runtime.workspaceCwd, res)) return;
-          if (
-            !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
-          ) {
-            res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
-            return;
-          }
-          if (req.socket.destroyed || res.writableEnded) return;
-          if (runtimeFor(workspaceRegistry, workspaceId) !== runtime) {
-            res.status(404).json({ error: 'Workspace not found.' });
-            return;
-          }
-          if (!requireEnabled(runtime.workspaceCwd, res)) return;
-          const assignment = await pickupRunForHost(
+          const host = await authenticateAgentHost(
             runtime.workspaceCwd,
             hostId,
+            secret,
           );
-          if (
-            assignment &&
-            !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
-          ) {
+          if (!host) {
             res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
             return;
           }
           if (req.socket.destroyed || res.writableEnded) return;
-          if (runtimeFor(workspaceRegistry, workspaceId) !== runtime) {
-            res.status(404).json({ error: 'Workspace not found.' });
-            return;
-          }
-          if (!requireEnabled(runtime.workspaceCwd, res)) return;
+          const programs = pickupPrograms(host);
+          const orchestrator = getSessionAgentOrchestrator(
+            runtime.workspaceCwd,
+          );
+          const assignment =
+            orchestrator && programs.length > 0
+              ? await orchestrator.pickupForHost(hostId, programs)
+              : undefined;
           if (assignment) {
+            if (req.socket.destroyed || res.writableEnded) {
+              // TODO(multi-agent): the claim cannot be handed back; the run
+              // ends `offline` when its lease (60 s) runs out.
+              return;
+            }
             res.json({ assignment });
             return;
           }
@@ -490,65 +633,109 @@ export function registerAgentHostTransportRoutes(
             res.status(204).end();
             return;
           }
-          await delay(Math.min(pollIntervalMs, remaining));
-          pollIntervalMs = Math.min(pollIntervalMs * 2, 2000);
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(
+              resolve,
+              Math.min(pollIntervalMs, remaining),
+            );
+            wake = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+          });
+          wake = undefined;
+          pollIntervalMs = Math.min(pollIntervalMs * 2, PICKUP_MAX_INTERVAL_MS);
         }
       } catch (error) {
         // The store's message can name coordinator-side paths, so it stays
         // off the wire, same as the fixed answers enroll and heartbeat give.
         debugLogger.warn('Agent Host pickup failed:', error);
-        if (isStoreBusy(error)) {
-          // 409 reads as permanent to the client; a busy store is transient.
-          res.status(503).json({ error: 'Agent Host store busy.' });
-          return;
-        }
-        res.status(409).json({ error: 'Agent Host pickup refused.' });
+        if (res.headersSent) return;
+        // 409 reads as permanent to the client; a failed scan is transient.
+        res.status(503).json({ error: 'Agent Host pickup unavailable.' });
+      } finally {
+        wake = undefined;
+        unsubscribe();
+        req.off('close', onClose);
       }
     },
   );
 
+  /**
+   * A `HostTurnEventBatch` → `{ok, duplicate?, leaseExpiresAt, decisions}`;
+   * 409 `{error: 'unknown_run' | 'lease_mismatch'}` when the lease is stale.
+   */
+  app.post(
+    '/agent-hosts/:workspaceId/:hostId/events',
+    authenticated,
+    // A batch can carry a long text delta.
+    express.json({ limit: '2mb' }),
+    async (req: Request, res: Response) => {
+      const workspaceId = String(req.params['workspaceId']);
+      const hostId = String(req.params['hostId']);
+      const runtime = runtimeFor(workspaceRegistry, workspaceId);
+      if (!runtime) {
+        res.status(404).json({ error: 'Workspace not found.' });
+        return;
+      }
+      const batch = readHostEventBatch(body(req));
+      if (!batch) {
+        res.status(400).json({ error: 'Invalid Agent Host events.' });
+        return;
+      }
+      const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
+      if (!orchestrator) {
+        res.status(409).json({ error: 'unknown_run' });
+        return;
+      }
+      const ack = orchestrator.acceptHostEvents(hostId, batch);
+      if (!ack.ok) {
+        res.status(409).json({ error: ack.reason });
+        return;
+      }
+      res.json({ ...ack, decisions: orchestrator.decisionsForHost(hostId) });
+    },
+  );
+
+  /**
+   * A `HostTurnResult` → `{ok: true}`; 409 when the lease is stale (the
+   * Host discards the result), 503 when finishing failed transiently.
+   */
   app.post(
     '/agent-hosts/:workspaceId/:hostId/result',
     authenticated,
     // Carries the whole answer, which easily passes 16 KB.
     express.json({ limit: '2mb' }),
     async (req: Request, res: Response) => {
-      const workspaceId = req.params['workspaceId'];
-      const hostId = req.params['hostId'];
+      const workspaceId = String(req.params['workspaceId']);
+      const hostId = String(req.params['hostId']);
       const runtime = runtimeFor(workspaceRegistry, workspaceId);
       if (!runtime) {
         res.status(404).json({ error: 'Workspace not found.' });
         return;
       }
-      const input = readHostResult(body(req), hostId);
+      const input = readHostTurnResult(body(req));
       if (!input) {
         res.status(400).json({ error: 'Invalid Agent Host result.' });
         return;
       }
+      const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
+      if (!orchestrator) {
+        res.status(409).json({ error: 'unknown_run' });
+        return;
+      }
       try {
-        const result = await applyHostRunResult(runtime.workspaceCwd, input);
-        if (!result.ok) {
-          const status = result.reason === 'no_such_run' ? 404 : 409;
-          res.status(status).json({ error: result.reason });
+        const ack = await orchestrator.completeHostTurn(hostId, input);
+        if (!ack.ok) {
+          res.status(409).json({ error: ack.reason });
           return;
         }
-        res.json({
-          threadId: result.value.thread.id,
-          status: result.value.thread.status,
-          alreadyApplied: result.value.alreadyApplied,
-        });
+        res.json({ ok: true });
       } catch (error) {
-        // The store's message can name coordinator-side paths, so it stays
-        // off the wire, same as the fixed answers enroll and heartbeat give.
+        // The message can name coordinator-side paths; it stays off the wire.
+        // 503 so the Host retries: a 409 would make it drop a finished answer.
         debugLogger.warn('Agent Host result failed:', error);
-        if (isStoreBusy(error)) {
-          // 409 reads as permanent to the client: it would rewrite a
-          // finished answer as failed — or give up and let the still-held
-          // lease hand the run to the next pickup, silently re-running it.
-          res.status(503).json({ error: 'Agent Host store busy.' });
-          return;
-        }
-        res.status(409).json({ error: 'Agent Host result refused.' });
+        res.status(503).json({ error: 'Agent Host result not applied.' });
       }
     },
   );

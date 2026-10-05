@@ -8,6 +8,8 @@ import { readReportedArtifacts } from './reported-artifacts.js';
 import {
   isTaskExecutionMode,
   parseDaemonBackgroundTurn,
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
@@ -703,6 +705,11 @@ export function transcriptBlocksToDaemonMessages(
           needsNewContentMessage = true;
           break;
         }
+        // An @-mention renders as an ordinary user message; one an agent
+        // posted into the session carries that agent as its author.
+        const agentMessage = parseQwenAgentMessageMeta(
+          meta?.[QWEN_AGENT_MESSAGE_META_KEY],
+        );
         const msg: DaemonUserMessage = {
           id: block.id,
           role: 'user',
@@ -711,6 +718,17 @@ export function transcriptBlocksToDaemonMessages(
           sourceBlockIds: [block.id],
           ...(source ? { source } : {}),
           ...(inputAnnotations ? { inputAnnotations } : {}),
+          ...(agentMessage ? { agentMessage } : {}),
+          ...(agentMessage?.author
+            ? {
+                author: {
+                  name: agentMessage.author.name,
+                  ...(agentMessage.author.color
+                    ? { color: agentMessage.author.color }
+                    : {}),
+                },
+              }
+            : {}),
         };
         // Attach images if present
         if (images && images.length > 0) {
@@ -796,6 +814,39 @@ export function transcriptBlocksToDaemonMessages(
             data: notice.compressionPayload,
             timestamp: blockTime,
           });
+          break;
+        }
+        const agentMessage = textBlock.parentToolCallId
+          ? undefined
+          : parseQwenAgentMessageMeta(meta?.[QWEN_AGENT_MESSAGE_META_KEY]);
+        if (agentMessage?.kind === 'agent_message') {
+          // A workspace agent's reply is always its own message: it is never
+          // folded into the main assistant's text, nor is the next assistant
+          // text folded into it. It shows even without text, since a failed
+          // or cancelled run still has a status to report.
+          messages.push({
+            id: block.id,
+            role: 'assistant',
+            content: textBlock.text,
+            isStreaming: textBlock.streaming,
+            timestamp: blockTime,
+            sourceBlockIds: [block.id],
+            agentMessage,
+            ...(agentMessage.author
+              ? {
+                  author: {
+                    name: agentMessage.author.name,
+                    ...(agentMessage.author.color
+                      ? { color: agentMessage.author.color }
+                      : {}),
+                  },
+                }
+              : {}),
+            ...(textBlock.usage ? { usage: textBlock.usage } : {}),
+          });
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
           break;
         }
         if (!textBlock.text && !textBlock.usage) break;

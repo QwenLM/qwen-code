@@ -18,8 +18,14 @@
  *   POST /workspaces/:workspace/agent/sessions/:sessionId/runs/:runId/cancel
  *   POST /workspaces/:workspace/agent/sessions/:sessionId/stop
  *   POST /workspaces/:workspace/agent/sessions/:sessionId/runs/:runId/permission/:requestId
+ *
+ * Mounted separately, BEFORE the daemon bearer gate (see
+ * {@link registerSessionAgentSendRoute}), authenticated by a per-run token:
+ *
+ *   POST /workspaces/:workspace/agent/sessions/:sessionId/runs/:runId/send
  */
 
+import express from 'express';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import type { SessionAgentEventFrame } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 import {
@@ -44,6 +50,8 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import type { RateLimiterInstance } from '../rate-limit.js';
+import { isLoopbackAddress } from '../loopback-binds.js';
 
 export interface RegisterSessionAgentRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
@@ -52,6 +60,28 @@ export interface RegisterSessionAgentRoutesDeps {
   isAgentCollaborationEnabledFor: (workspaceCwd: string) => boolean;
   /** `experimental.agentChainLimit` for a workspace; absent means unlimited. */
   agentChainLimitFor?: (workspaceCwd: string) => number;
+  /**
+   * This daemon's loopback base URL (e.g. `http://127.0.0.1:<port>`), where
+   * a program's `session_send` MCP child reaches the per-run send route.
+   * Absent (or not loopback) means local Claude / Codex turns get no
+   * `session_send` tool.
+   * TODO(multi-agent): server.ts (Host agent) must pass
+   * `() => "http://127.0.0.1:" + getPort()` — and confirm the daemon is
+   * reachable there (a bind to one LAN address is not) and that
+   * `hostAllowlist` accepts `Host: 127.0.0.1:<port>`.
+   */
+  daemonLoopbackBaseUrl?: () => string | undefined;
+}
+
+/** Path of the per-run `session_send` endpoint, relative to the daemon. */
+export function sessionSendPath(
+  workspaceId: string,
+  sessionId: string,
+  runId: string,
+): string {
+  return `/workspaces/${encodeURIComponent(workspaceId)}/agent/sessions/${encodeURIComponent(
+    sessionId,
+  )}/runs/${encodeURIComponent(runId)}/send`;
 }
 
 const TEARDOWN_CHECK_MS = 5_000;
@@ -97,10 +127,16 @@ export function registerSessionAgentRoutes(
     runtime: WorkspaceRuntime,
   ): SessionAgentOrchestrator => {
     const workspaceCwd = runtime.workspaceCwd;
+    const workspaceId = runtime.workspaceId;
     const orchestrator = ensureSessionAgentOrchestrator({
       workspaceCwd,
       bridge: runtime.bridge,
       chainLimit: () => deps.agentChainLimitFor?.(workspaceCwd) ?? 0,
+      sessionSendUrl: (sessionId, runId) => {
+        const base = deps.daemonLoopbackBaseUrl?.();
+        if (!base) return undefined;
+        return `${base.replace(/\/+$/, '')}${sessionSendPath(workspaceId, sessionId, runId)}`;
+      },
     });
     owners.set(workspaceCwd, {
       bridge: runtime.bridge,
@@ -348,7 +384,9 @@ export function registerSessionAgentRoutes(
       if (!sessionId) return;
       const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
       try {
-        const runIds = orchestrator ? await orchestrator.stopAll(sessionId) : [];
+        const runIds = orchestrator
+          ? await orchestrator.stopAll(sessionId)
+          : [];
         res.json({ stopped: runIds });
       } catch (error) {
         fail(res, error);
@@ -383,6 +421,113 @@ export function registerSessionAgentRoutes(
         res.json({});
       } catch (error) {
         fail(res, error);
+      }
+    },
+  );
+}
+
+export interface RegisterSessionAgentSendRouteDeps {
+  workspaceRegistry: WorkspaceRegistry;
+  isAgentCollaborationEnabledFor: (workspaceCwd: string) => boolean;
+  rateLimiter?: Pick<RateLimiterInstance, 'checkRate'>;
+}
+
+const SESSION_SEND_AUTH = /^Bearer ([0-9a-f]{64})$/;
+
+/**
+ * `POST /workspaces/:workspace/agent/sessions/:sessionId/runs/:runId/send`
+ * `{ text }` — a session agent's `session_send` tool call, made by the
+ * `qwen agents session-send-mcp` child of a local Claude / Codex run.
+ *
+ * Authenticated by the run's own bearer token (issued by the orchestrator
+ * when the run starts, valid while it is live), NOT by the daemon bearer,
+ * which that child does not hold. So this must be mounted BEFORE
+ * `app.use(authenticate)` in server.ts, next to
+ * `registerAgentHostTransportRoutes`, and only when agent collaboration is
+ * enabled anywhere. It never creates an orchestrator.
+ */
+export function registerSessionAgentSendRoute(
+  app: Application,
+  deps: RegisterSessionAgentSendRouteDeps,
+): void {
+  const json = express.json({ limit: '512kb' });
+  // Token shape first, so a request without one is never parsed.
+  const tokenGate: RequestHandler = (req, res, next) => {
+    const source = req.ip || req.socket.remoteAddress || 'unknown';
+    if (
+      deps.rateLimiter &&
+      !deps.rateLimiter.checkRate(`session-send:${source}`, 'mutation')
+    ) {
+      res.status(429).json({
+        error: 'Rate limit exceeded',
+        code: 'rate_limit_exceeded',
+        tier: 'mutation',
+      });
+      return;
+    }
+    // The MCP child runs on this machine (same rule as the Host relay).
+    const peer = (req.socket.remoteAddress ?? '').replace(/^::ffff:/i, '');
+    if (!isLoopbackAddress(peer)) {
+      res.status(403).json({ error: 'loopback_only' });
+      return;
+    }
+    const match = SESSION_SEND_AUTH.exec(req.get('authorization') ?? '');
+    if (!match) {
+      res.status(401).json({ error: 'invalid_session_send_token' });
+      return;
+    }
+    res.locals['sessionSendToken'] = match[1];
+    next();
+  };
+  app.post(
+    '/workspaces/:workspace/agent/sessions/:sessionId/runs/:runId/send',
+    tokenGate,
+    json,
+    async (req: Request, res: Response) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime) return;
+      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!deps.isAgentCollaborationEnabledFor(runtime.workspaceCwd)) {
+        res.status(404).json({ error: 'agent_collaboration_disabled' });
+        return;
+      }
+      const sessionId = req.params['sessionId'];
+      if (!isValidSessionAgentsSessionId(sessionId)) {
+        res.status(400).json({ error: 'invalid_session_id' });
+        return;
+      }
+      const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
+      if (!orchestrator) {
+        res.status(401).json({ error: 'invalid_session_send_token' });
+        return;
+      }
+      const body = (
+        typeof req.body === 'object' && req.body !== null ? req.body : {}
+      ) as { text?: unknown };
+      try {
+        await orchestrator.postFromAgent(
+          sessionId,
+          req.params['runId'] ?? '',
+          String(res.locals['sessionSendToken']),
+          body.text,
+        );
+        res.json({ sent: true });
+      } catch (error) {
+        if (error instanceof SessionAgentError) {
+          res.status(error.status).json({
+            error: error.code,
+            message: error.message,
+            ...(error.details ?? {}),
+          });
+          return;
+        }
+        res.status(500).json({
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     },
   );

@@ -17,6 +17,16 @@
  * before calling this adapter, so `instructions` / `model` on the turn input
  * are not used here.
  *
+ * `sessionSendServer` is not used either.
+ * TODO(multi-agent): offer `session_send` to qwen agents. Two things block
+ * passing it as an ACP `mcpServers` entry: the bridge sends `mcpServers: []`
+ * on every newSession / loadSession (acp-bridge session-control-plane.ts, and
+ * `BridgeSpawnRequest` has no field for it), and the hidden session outlives
+ * a run while the server's token is per run, so an entry fixed at session
+ * creation would carry a dead token on the next run. Options: a built-in
+ * tool in the ACP child for `sourceType: 'agent'` sessions that posts
+ * through an ext method, or a per-prompt MCP override on the bridge.
+ *
  * Hidden sessions are closed after {@link QWEN_AGENT_SESSION_IDLE_CLOSE_MS}
  * idle so they do not exhaust the bridge's `maxSessions`.
  */
@@ -122,7 +132,11 @@ const PERMISSION_KINDS = new Set([
 
 function toPermissionPrompt(data: {
   requestId?: string;
-  toolCall?: { title?: string | null; kind?: string | null; rawInput?: unknown };
+  toolCall?: {
+    title?: string | null;
+    kind?: string | null;
+    rawInput?: unknown;
+  };
   options?: Array<{ optionId?: string; name?: string; kind?: string }>;
 }): SessionAgentPermissionPrompt | undefined {
   if (!data.requestId) return undefined;
@@ -222,7 +236,9 @@ export function createQwenAcpAdapter(
 
   return {
     program: 'qwen',
-    async runTurn(input: AgentAdapterTurnInput): Promise<AgentAdapterTurnResult> {
+    async runTurn(
+      input: AgentAdapterTurnInput,
+    ): Promise<AgentAdapterTurnResult> {
       const sessionId = input.nativeSessionId;
       if (!sessionId) {
         return {

@@ -342,6 +342,8 @@ import {
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
 import { registerAgentHostTransportRoutes } from './routes/agent-hosts.js';
+import { registerAgentHostRuntimeRoutes } from './routes/agent-host-connection.js';
+import { registerAgentHostRelayRoutes } from './agent-host-relay.js';
 import { registerA2ATransportRoutes } from './routes/a2a.js';
 import type {
   ChannelDeliveryAccepted,
@@ -1587,8 +1589,9 @@ export function createServeApp(
   // session sees (workspace scope wins), and the env var stays the
   // operator's process-wide override. The predicate is consulted at request
   // time, so a workspace registered or reconfigured after boot is seen
-  // without a daemon restart. A daemon running as another coordinator's
-  // Agent Host never serves collaboration itself.
+  // without a daemon restart. A daemon that joined another coordinator as an
+  // Agent Host may still coordinate its own workspace when that workspace
+  // opts in (plan decision 5: being a runtime is independent of the flag).
   // A settings file caught mid-edit (half-written JSON) keeps the last answer
   // read for that workspace: reading it as "off" would strand every live run
   // there within one recovery tick. The load asks the loader to report a
@@ -1598,7 +1601,6 @@ export function createServeApp(
   // throw on a parse error.
   const lastAgentCollaborationSetting = new Map<string, boolean>();
   const isAgentCollaborationEnabledFor = (workspaceCwd: string): boolean => {
-    if (opts.agentHostWorker) return false;
     if (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1')
       return true;
     try {
@@ -2379,6 +2381,16 @@ export function createServeApp(
       daemonLog,
     });
   }
+
+  // `session_send` relay for agent turns this daemon runs as a Host. Before
+  // the bearer gate: the MCP child holds only a per-run token, and the route
+  // answers loopback peers only. Mounted whatever the collaboration flag
+  // says, like the rest of being a runtime.
+  registerAgentHostRelayRoutes(app, {
+    hostname: opts.hostname,
+    getPort,
+    tls: Boolean(opts.tlsCert && opts.tlsKey),
+  });
 
   if (anyAgentCollaborationEnabled()) {
     registerA2ATransportRoutes(
@@ -3605,6 +3617,26 @@ export function createServeApp(
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
+
+  // Being joined as a runtime (`hosts/service`, `hosts/connect`) needs only
+  // the bearer gate, a trusted workspace and the mutation gate — not the
+  // collaboration opt-in, so a running daemon can join without a restart.
+  registerAgentHostRuntimeRoutes(
+    app,
+    '/workspaces/:workspace/agent',
+    (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) {
+        return undefined;
+      }
+      return runtime;
+    },
+    () => mutate(),
+  );
 
   // Gated on the opt-in, and gated by *not registering* rather than by
   // refusing inside the handlers: `registerWorkspaceAgentRoutes` runs a

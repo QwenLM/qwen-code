@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { SessionAgentsApi } from './session-agents-api';
 
 const createThreadsHttpApi = vi.hoisted(() => vi.fn());
 vi.mock('./threads-api', () => ({ createThreadsHttpApi }));
 
-const { useAgentChatEntry } = await import('./useAgentChatEntry');
+const { mentionTokens, resolveMentionedAgents, useAgentChatEntry } =
+  await import('./useAgentChatEntry');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -18,36 +20,66 @@ const mounted: Array<{
   node: HTMLElement;
 }> = [];
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
+const agent = (name: string, over: Record<string, unknown> = {}) =>
+  ({
+    id: `id-${name}`,
+    name,
+    enabled: true,
+    retiredAt: null,
+    status: 'idle',
+    ...over,
+  }) as never;
+
+function sessionApi(): SessionAgentsApi & {
+  mention: ReturnType<typeof vi.fn>;
+} {
+  return {
+    listRuns: vi.fn(),
+    mention: vi.fn().mockResolvedValue({ recordId: 'r1', runs: [] }),
+    cancelRun: vi.fn(),
+    stopAll: vi.fn(),
+    respondToPermission: vi.fn(),
+    subscribe: vi.fn(() => () => {}),
+  };
 }
 
 function Probe({
-  baseUrl,
-  getContext,
-  onSubmit = vi.fn(),
   enabled = true,
+  onSubmit,
+  onError,
+  ensureSession,
+  api,
 }: {
-  baseUrl: string;
-  getContext: () => string;
-  onSubmit?: () => void;
   enabled?: boolean;
+  onSubmit: (...args: unknown[]) => boolean | void;
+  onError: (message: string) => void;
+  ensureSession: () => Promise<string | undefined>;
+  api?: SessionAgentsApi;
 }) {
   latestEntry = useAgentChatEntry({
     enabled,
     cwd: '/repo',
-    baseUrl,
-    onSubmit,
-    onOpen: vi.fn(),
-    onError: vi.fn(),
-    getContext,
+    baseUrl: 'http://daemon',
+    sessionApi: api,
+    ensureSession,
+    onSubmit: onSubmit as never,
+    onError,
     t: ((key: string) => key) as never,
   });
   return null;
+}
+
+function mount(props: Parameters<typeof Probe>[0]) {
+  const node = document.createElement('div');
+  const root = createRoot(node);
+  mounted.push({ root, node });
+  act(() => root.render(<Probe {...props} />));
+}
+
+async function settle() {
+  await act(async () => {
+    for (let i = 0; i < 5; i += 1) await Promise.resolve();
+  });
 }
 
 afterEach(() => {
@@ -59,22 +91,38 @@ afterEach(() => {
   createThreadsHttpApi.mockReset();
 });
 
+describe('mention parsing', () => {
+  it('follows core: no word character before @, no path after', () => {
+    expect(
+      mentionTokens('请@迁移助手 看一下, mail a@b.dev, @Lead/x, @Rev'),
+    ).toEqual(['迁移助手', 'rev']);
+  });
+
+  it('resolves the longest name a token starts with, and skips paused agents', () => {
+    const agents = [
+      agent('mar'),
+      agent('迁移助手'),
+      agent('alice'),
+      agent('paused', { enabled: false }),
+    ];
+    expect(
+      resolveMentionedAgents(
+        mentionTokens('@maría @迁移助手看一下 @alice @paused @alice'),
+        agents,
+      ).map((entry) => (entry as { name: string }).name),
+    ).toEqual(['迁移助手', 'alice']);
+  });
+});
+
 it('is inert and delegates ordinary chat when collaboration is disabled', () => {
   const onSubmit = vi.fn(() => true);
-  const node = document.createElement('div');
-  const root = createRoot(node);
-  mounted.push({ root, node });
-
-  act(() =>
-    root.render(
-      <Probe
-        baseUrl="server-a"
-        enabled={false}
-        getContext={() => 'existing conversation'}
-        onSubmit={onSubmit}
-      />,
-    ),
-  );
+  mount({
+    enabled: false,
+    onSubmit,
+    onError: vi.fn(),
+    ensureSession: vi.fn(),
+    api: sessionApi(),
+  });
 
   expect(latestEntry.providers).toEqual([]);
   expect(latestEntry.pending).toBe(false);
@@ -89,151 +137,140 @@ it('is inert and delegates ordinary chat when collaboration is disabled', () => 
   );
 });
 
-it('does not submit captured mentions after the workspace API changes', async () => {
-  const roster = deferred<{
-    agents: Array<{
-      id: string;
-      name: string;
-      enabled: boolean;
-      retiredAt: null;
-    }>;
-  }>();
-  const oldApi = {
-    listAgents: vi.fn(() => roster.promise),
-    createThread: vi.fn(),
-  };
-  const newApi = {
-    listAgents: vi.fn().mockResolvedValue({ agents: [] }),
-    createThread: vi.fn(),
-  };
-  createThreadsHttpApi.mockImplementation((baseUrl: string) =>
-    baseUrl === 'old' ? oldApi : newApi,
-  );
-  const oldContext = vi.fn(() => 'old context');
-  const newContext = vi.fn(() => 'new context');
-  const node = document.createElement('div');
-  const root = createRoot(node);
-  mounted.push({ root, node });
-
-  act(() => root.render(<Probe baseUrl="old" getContext={oldContext} />));
-  act(() => {
-    expect(latestEntry.submit('@lead investigate')).toBe(false);
+it('posts a resolvable @-mention to the current session, with no thread and no local echo', async () => {
+  createThreadsHttpApi.mockReturnValue({
+    listAgents: vi.fn().mockResolvedValue({ agents: [agent('reviewer')] }),
   });
-  expect(oldContext).toHaveBeenCalledOnce();
-
-  act(() => root.render(<Probe baseUrl="new" getContext={newContext} />));
-  await act(async () => {
-    roster.resolve({
-      agents: [{ id: 'lead', name: 'lead', enabled: true, retiredAt: null }],
-    });
-    await roster.promise;
-  });
-
-  expect(oldApi.createThread).not.toHaveBeenCalled();
-  expect(newApi.createThread).not.toHaveBeenCalled();
-  expect(newContext).not.toHaveBeenCalled();
-});
-
-it('sends an @ message as ordinary chat when the roster cannot be read', async () => {
-  const api = {
-    listAgents: vi
-      .fn()
-      .mockRejectedValue(new Error('agent_collaboration_disabled')),
-    createThread: vi.fn(),
-  };
-  createThreadsHttpApi.mockReturnValue(api);
+  const api = sessionApi();
   const onSubmit = vi.fn();
-  const node = document.createElement('div');
-  const root = createRoot(node);
-  mounted.push({ root, node });
+  const onError = vi.fn();
+  const ensureSession = vi.fn().mockResolvedValue('session-1');
+  const commit = vi.fn();
+  mount({ onSubmit, onError, ensureSession, api });
+  await settle();
 
-  act(() =>
-    root.render(
-      <Probe baseUrl="x" getContext={() => ''} onSubmit={onSubmit} />,
-    ),
-  );
-  await act(async () => {
-    expect(latestEntry.submit('see @README.md')).toBe(false);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+  act(() => {
+    expect(
+      latestEntry.submit('@reviewer check this', [], [], commit, undefined),
+    ).toBe(false);
   });
+  await settle();
 
-  expect(api.createThread).not.toHaveBeenCalled();
-  expect(onSubmit).toHaveBeenCalledWith(
-    'see @README.md',
-    undefined,
-    undefined,
-    expect.any(Function),
-    undefined,
+  expect(ensureSession).toHaveBeenCalledTimes(1);
+  expect(api.mention).toHaveBeenCalledWith('session-1', {
+    text: '@reviewer check this',
+    clientMessageId: expect.stringMatching(/^[A-Za-z0-9_.:-]{1,128}$/),
+  });
+  expect(commit).toHaveBeenCalledTimes(1);
+  expect(onSubmit).not.toHaveBeenCalled();
+  expect(onError).not.toHaveBeenCalled();
+  expect(latestEntry.pending).toBe(false);
+});
+
+it('creates the session first in a new chat', async () => {
+  createThreadsHttpApi.mockReturnValue({
+    listAgents: vi.fn().mockResolvedValue({ agents: [agent('reviewer')] }),
+  });
+  const api = sessionApi();
+  let created: string | undefined;
+  const ensureSession = vi.fn(async () => {
+    created = 'new-session';
+    return created;
+  });
+  mount({ onSubmit: vi.fn(), onError: vi.fn(), ensureSession, api });
+  await settle();
+
+  act(() => {
+    latestEntry.submit('@reviewer hi');
+  });
+  await settle();
+
+  expect(created).toBe('new-session');
+  expect(api.mention).toHaveBeenCalledWith(
+    'new-session',
+    expect.objectContaining({ text: '@reviewer hi' }),
   );
 });
 
-it('does not read a longer Latin word as a shorter agent name', async () => {
-  const api = {
-    listAgents: vi.fn().mockResolvedValue({
-      agents: [{ id: 'mar', name: 'mar', enabled: true, retiredAt: null }],
-    }),
-    createThread: vi.fn().mockResolvedValue({ id: 'thread-1' }),
-  };
-  createThreadsHttpApi.mockReturnValue(api);
+it('sends a message whose @ names no agent as an ordinary prompt', async () => {
+  createThreadsHttpApi.mockReturnValue({
+    listAgents: vi.fn().mockResolvedValue({ agents: [agent('reviewer')] }),
+  });
+  const api = sessionApi();
   const onSubmit = vi.fn(() => true);
-  const node = document.createElement('div');
-  const root = createRoot(node);
-  mounted.push({ root, node });
+  const commit = vi.fn();
+  const ensureSession = vi.fn();
+  mount({ onSubmit, onError: vi.fn(), ensureSession, api });
+  await settle();
 
-  act(() =>
-    root.render(
-      <Probe baseUrl="x" getContext={() => ''} onSubmit={onSubmit} />,
-    ),
-  );
-
-  // Core's `agentForToken` refuses this token, and the server-side parser is
-  // authoritative, so intercepting it here would silently turn an ordinary
-  // chat message into work assigned to an agent nobody addressed.
-  await act(async () => {
-    expect(latestEntry.submit('ask @maría to review')).toBe(false);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+  act(() => {
+    latestEntry.submit('@someone else', undefined, undefined, commit);
   });
-  expect(api.createThread).not.toHaveBeenCalled();
+  await settle();
+
   expect(onSubmit).toHaveBeenCalledWith(
-    'ask @maría to review',
+    '@someone else',
     undefined,
     undefined,
     expect.any(Function),
     undefined,
   );
-
-  // Control: the exact name still leads, so the guard above is not refusing
-  // every mention.
-  await act(async () => {
-    expect(latestEntry.submit('@mar take a look')).toBe(false);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  });
-  expect(api.createThread).toHaveBeenCalledWith(
-    expect.objectContaining({ assignee: 'mar' }),
-  );
+  expect(commit).toHaveBeenCalledTimes(1);
+  expect(api.mention).not.toHaveBeenCalled();
+  expect(ensureSession).not.toHaveBeenCalled();
 });
 
-it('matches an agent whose lowercase name has a different length', async () => {
-  const api = {
-    listAgents: vi.fn().mockResolvedValue({
-      agents: [
-        { id: 'reviewer', name: 'İnceleyici', enabled: true, retiredAt: null },
-      ],
-    }),
-    createThread: vi.fn().mockResolvedValue({ id: 'thread-1' }),
-  };
-  createThreadsHttpApi.mockReturnValue(api);
-  const node = document.createElement('div');
-  const root = createRoot(node);
-  mounted.push({ root, node });
-
-  act(() => root.render(<Probe baseUrl="x" getContext={() => ''} />));
-  await act(async () => {
-    expect(latestEntry.submit('@İnceleyici review this')).toBe(false);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+it('refuses attachments on an @-mention and keeps the draft', async () => {
+  createThreadsHttpApi.mockReturnValue({
+    listAgents: vi.fn().mockResolvedValue({ agents: [agent('reviewer')] }),
   });
+  const api = sessionApi();
+  const onError = vi.fn();
+  const commit = vi.fn();
+  mount({ onSubmit: vi.fn(), onError, ensureSession: vi.fn(), api });
+  await settle();
 
-  expect(api.createThread).toHaveBeenCalledWith(
-    expect.objectContaining({ assignee: 'İnceleyici' }),
+  act(() => {
+    latestEntry.submit(
+      '@reviewer look at this',
+      [{ data: 'x', mimeType: 'image/png' }] as never,
+      undefined,
+      commit,
+    );
+  });
+  await settle();
+
+  expect(onError).toHaveBeenCalledWith('collab.mention.noAttachments');
+  expect(api.mention).not.toHaveBeenCalled();
+  expect(commit).not.toHaveBeenCalled();
+});
+
+it('reports a rejected mention through onError and keeps the draft', async () => {
+  createThreadsHttpApi.mockReturnValue({
+    listAgents: vi.fn().mockResolvedValue({ agents: [agent('reviewer')] }),
+  });
+  const api = sessionApi();
+  api.mention.mockRejectedValue(
+    new Error('The message does not @-mention any available agent.'),
   );
+  const onError = vi.fn();
+  const commit = vi.fn();
+  mount({
+    onSubmit: vi.fn(),
+    onError,
+    ensureSession: vi.fn().mockResolvedValue('session-1'),
+    api,
+  });
+  await settle();
+
+  act(() => {
+    latestEntry.submit('@reviewer go', undefined, undefined, commit);
+  });
+  await settle();
+
+  expect(onError).toHaveBeenCalledWith(
+    'The message does not @-mention any available agent.',
+  );
+  expect(commit).not.toHaveBeenCalled();
+  expect(latestEntry.pending).toBe(false);
 });

@@ -7,37 +7,31 @@
 import type {
   AgentCapabilitiesView,
   AgentConfigPatch,
-  NewThread,
   NewWorkspaceAgent,
   WorkspaceAgentRuntimeView,
   WorkspaceAgentSummaryView,
 } from './ThreadsPage';
-import type { ThreadDetailView } from './ThreadView';
+import { subscribeAgentStream, type AgentStreamState } from './agent-events';
 import type {
-  RoutingPreviewTarget,
-  ThreadSummaryView,
-} from './agents-view-logic';
-import {
-  subscribeAgentStream,
-  type AgentLiveEvent,
-  type AgentStreamState,
-} from './agent-events';
-import type { JoinToken } from './add-runtime-dialog';
+  ConnectExistingInput,
+  JoinCoordinatorInput,
+  JoinToken,
+} from './add-runtime-dialog';
 import type { AgentShare, AgentShareSummary } from './share-agent-dialog';
 
-interface CreateThreadResult {
-  id: string;
-}
+/**
+ * The Host connection protocol still names its provider on the wire, and the
+ * daemon accepts only this one (`routes/agent-host-connection.ts`). Which
+ * programs a runtime can run is reported separately, per runtime.
+ * TODO(multi-agent): drop once the connect routes stop requiring `provider`.
+ */
+const HOST_PROTOCOL_PROVIDER = 'qwen';
 
+/** Agent roster, runtimes, enrollment and sharing for one workspace. */
 export interface ThreadsApi {
-  connectRemoteHost?(input: {
-    remoteUrl: string;
-    remoteToken: string;
-    remoteCwd: string;
-    serverUrl: string;
-    provider: 'qwen';
-    allowHttp: boolean;
-  }): Promise<unknown>;
+  connectRemoteHost?(input: ConnectExistingInput): Promise<unknown>;
+  /** Makes this daemon a runtime of another coordinator. */
+  joinCoordinator?(input: JoinCoordinatorInput): Promise<unknown>;
   listAgents(): Promise<{
     agents: WorkspaceAgentSummaryView[];
     runtime?: WorkspaceAgentRuntimeView;
@@ -50,35 +44,18 @@ export interface ThreadsApi {
   createShare?(agentId: string): Promise<AgentShare>;
   listShares?(agentId: string): Promise<{ shares: AgentShareSummary[] }>;
   revokeShare?(agentId: string, callerId: string): Promise<unknown>;
-  listThreads(): Promise<{ threads: ThreadSummaryView[] }>;
-  getThread(id: string): Promise<ThreadDetailView>;
   createAgent(input: NewWorkspaceAgent): Promise<unknown>;
   deleteAgent(id: string): Promise<unknown>;
   setAgentEnabled(id: string, enabled: boolean): Promise<unknown>;
   updateAgent(id: string, patch: AgentConfigPatch): Promise<unknown>;
-  createThread(input: NewThread): Promise<CreateThreadResult>;
-  previewThread(
-    assignee?: string,
-  ): Promise<{ targets: RoutingPreviewTarget[] }>;
-  assignThread(id: string, assignee?: string): Promise<unknown>;
-  previewReply(
-    id: string,
-    text: string,
-  ): Promise<{ targets: RoutingPreviewTarget[] }>;
-  postReply(id: string, text: string): Promise<unknown>;
-  markDone(id: string): Promise<unknown>;
-  cancelRun(threadId: string, runId: string): Promise<unknown>;
-  /** Live events; absent in tests and older daemons, which then poll. */
+  /**
+   * Roster changes (`changed` frames) from the workspace's agent stream;
+   * absent in tests and older daemons, which then poll.
+   */
   subscribe?(
-    onEvent: (event: AgentLiveEvent) => void,
+    onEvent: (event: { type: string }) => void,
     onState: (state: AgentStreamState) => void,
   ): () => void;
-  /** Answers a tool approval an agent is waiting on. */
-  respondToPermission?(
-    sessionId: string,
-    requestId: string,
-    optionId: string,
-  ): Promise<unknown>;
 }
 
 export function createThreadsHttpApi(
@@ -111,7 +88,13 @@ export function createThreadsHttpApi(
     request<T>(path, { method: 'POST', body: JSON.stringify(body) });
 
   return {
-    connectRemoteHost: (input) => post('/hosts/remote-connect', input),
+    connectRemoteHost: (input) =>
+      post('/hosts/remote-connect', {
+        ...input,
+        provider: HOST_PROTOCOL_PROVIDER,
+      }),
+    joinCoordinator: (input) =>
+      post('/hosts/connect', { ...input, provider: HOST_PROTOCOL_PROVIDER }),
     listAgents: () => request('/agents'),
     createJoinToken: (supersedesHostId) =>
       post('/hosts/enrollment', supersedesHostId ? { supersedesHostId } : {}),
@@ -126,8 +109,6 @@ export function createThreadsHttpApi(
         `/agents/${encodeURIComponent(agentId)}/shares/${encodeURIComponent(callerId)}`,
         { method: 'DELETE' },
       ),
-    listThreads: () => request('/threads'),
-    getThread: (id) => request(`/threads/${encodeURIComponent(id)}`),
     createAgent: (input) => post('/agents', input),
     deleteAgent: (id) =>
       request(`/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
@@ -141,43 +122,10 @@ export function createThreadsHttpApi(
         method: 'PATCH',
         body: JSON.stringify(patch),
       }),
-    createThread: (input) => post('/threads', input),
-    previewThread: (assignee) => post('/threads/preview', { assignee }),
-    assignThread: (id, assignee) =>
-      request(`/threads/${encodeURIComponent(id)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ assignee: assignee ?? null }),
-      }),
-    previewReply: (id, text) =>
-      post(`/threads/${encodeURIComponent(id)}/preview`, { text }),
-    postReply: (id, text) =>
-      post(`/threads/${encodeURIComponent(id)}/posts`, { text }),
-    markDone: (id) => post(`/threads/${encodeURIComponent(id)}/done`, {}),
-    cancelRun: (threadId, runId) =>
-      post(
-        `/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/cancel`,
-        {},
-      ),
+    // TODO(multi-agent): `/events` is the thread-era workspace stream. If it is
+    // removed with the thread subsystem, the stream reports `closed` and the
+    // roster page falls back to polling; move to a roster-scoped stream then.
     subscribe: (onEvent, onState) =>
       subscribeAgentStream(`${root}/events`, token, onEvent, onState),
-    respondToPermission: async (sessionId, requestId, optionId) => {
-      const response = await fetch(
-        `${serverUrl}/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}`,
-        {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          body: JSON.stringify({ outcome: { outcome: 'selected', optionId } }),
-        },
-      );
-      if (!response.ok) {
-        const body = (await response.json().catch(() => ({}))) as {
-          error?: string;
-        };
-        throw new Error(body.error || `Approval failed (${response.status})`);
-      }
-    },
   };
 }

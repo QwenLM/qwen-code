@@ -130,7 +130,12 @@ function isValidBinding(value: unknown): value is SessionAgentBinding {
     typeof value['agentId'] === 'string' &&
     isOptionalString(value['nativeSessionId']) &&
     isOptionalString(value['runtimeId']) &&
-    isOptionalString(value['readThroughRecordId'])
+    isOptionalString(value['readThroughRecordId']) &&
+    (value['remotePersona'] === undefined ||
+      (isRecord(value['remotePersona']) &&
+        typeof value['remotePersona']['name'] === 'string' &&
+        isOptionalString(value['remotePersona']['instructions']) &&
+        isOptionalString(value['remotePersona']['model'])))
   );
 }
 
@@ -343,6 +348,8 @@ export interface SessionAgentNativeBinding {
   agentId: string;
   runId: string;
   status: SessionAgentRunStatus;
+  /** Present when this daemon runs the turn as a remote Host (see contract). */
+  remotePersona?: SessionAgentBinding['remotePersona'];
 }
 
 /**
@@ -386,7 +393,15 @@ export async function findSessionAgentBinding(
         candidate.lease === undefined,
     );
     if (!run) continue;
-    return { chatSessionId, agentId, runId: run.id, status: run.status };
+    return {
+      chatSessionId,
+      agentId,
+      runId: run.id,
+      status: run.status,
+      ...(binding.remotePersona
+        ? { remotePersona: { ...binding.remotePersona } }
+        : {}),
+    };
   }
   return undefined;
 }

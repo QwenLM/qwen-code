@@ -24,7 +24,7 @@
  * session is never driven by two processes.
  */
 
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
@@ -37,6 +37,7 @@ import {
   HOST_PROTOCOL_VERSION,
   type AgentAdapter,
   type AgentAdapterEvent,
+  type AgentAdapterTurnInput,
   type AgentMessageRecordPayload,
   type HostPermissionDecision,
   type HostTurnAssignment,
@@ -181,6 +182,12 @@ export interface SessionAgentOrchestratorOptions {
   now?: () => number;
   stallTimeoutMs?: number;
   leaseMs?: number;
+  /**
+   * The loopback URL of this daemon's per-run `session_send` endpoint
+   * (`POST .../sessions/:sessionId/runs/:runId/send`). Undefined (or not
+   * loopback) means local turns are not offered the `session_send` tool.
+   */
+  sessionSendUrl?: (sessionId: string, runId: string) => string | undefined;
   /** Set false in tests to drive sweeps by hand. */
   startTimers?: boolean;
 }
@@ -211,6 +218,11 @@ interface LiveRun {
   nativeSessionId?: string;
   totalTokens?: number;
   sendCount: number;
+  /**
+   * Bearer token of this run's `session_send` endpoint (32 random bytes,
+   * hex). Lives only in memory and only while the run is live.
+   */
+  sendToken?: string;
   /** Serializes `session_send` handling so records keep their order. */
   sendChain: Promise<void>;
   remote?: {
@@ -281,10 +293,7 @@ interface FinishOutcome {
 }
 
 /**
- * The program an agent runs with.
- * TODO(multi-agent): a local agent has no program field today
- * (`WorkspaceAgent.execution` is `{ mode: 'local' }`), so local agents are
- * always `qwen`. Local Claude / Codex agents need a program on the record.
+ * The program an agent runs with: `execution.provider`, default `qwen`.
  * For a managed-host agent without `provider`, "the host's default" is taken
  * to be qwen when offered, else the first program the host advertises.
  */
@@ -292,7 +301,11 @@ export function programForAgent(
   agent: WorkspaceAgent,
   hostPrograms?: readonly SessionAgentProgram[],
 ): SessionAgentProgram | undefined {
-  if (agent.execution?.mode !== 'managed-host') return 'qwen';
+  if (agent.execution?.mode !== 'managed-host') {
+    // A local agent may run Claude Code or Codex on this machine; whether the
+    // CLI is installed is checked by the adapter when the turn starts.
+    return agent.execution?.provider ?? 'qwen';
+  }
   const provider = agent.execution.provider;
   if (!hostPrograms) return provider ?? 'qwen';
   if (provider) return hostPrograms.includes(provider) ? provider : undefined;
@@ -311,6 +324,52 @@ function authorFor(
     ...(program ? { program } : {}),
     ...(runtimeId ? { runtimeId } : {}),
   };
+}
+
+const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+
+function isLoopbackUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      LOOPBACK_HOSTNAMES.has(parsed.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The stdio MCP server that exposes `session_send` to a local Claude / Codex
+ * turn: this CLI's hidden `agents session-send-mcp` command, pointed at the
+ * run's endpoint, with the run's token in its environment.
+ */
+export function buildSessionSendServer(
+  url: string,
+  token: string,
+): NonNullable<AgentAdapterTurnInput['sessionSendServer']> | undefined {
+  // Same entry precedent as `currentCliWorkerLaunch`.
+  const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1];
+  if (!cliEntry) return undefined;
+  // Inspector flags would make every MCP child open a debugger.
+  const execArgv = process.execArgv.filter(
+    (arg) => !/^--(inspect|debug)/.test(arg),
+  );
+  // TODO(multi-agent): a dev build started through a loader env var (see
+  // `processBootLoaderEnv`) does not pass it on here; production bundles do
+  // not need it.
+  return {
+    command: process.execPath,
+    args: [...execArgv, cliEntry, 'agents', 'session-send-mcp', '--url', url],
+    env: { QWEN_SESSION_SEND_TOKEN: token },
+  };
+}
+
+function tokensMatch(expected: string, given: string): boolean {
+  const a = Buffer.from(expected);
+  const b = Buffer.from(given);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function chainLimitError(limit: number, names: string[]): string {
@@ -337,6 +396,10 @@ export class SessionAgentOrchestrator {
   private readonly now: () => number;
   private readonly stallTimeoutMs: number;
   private readonly leaseMs: number;
+  private readonly sessionSendUrl?: (
+    sessionId: string,
+    runId: string,
+  ) => string | undefined;
   private readonly sessions = new Map<string, Promise<SessionState>>();
   /** States adopted by startup recovery; `session()` hands these out. */
   private readonly startupStates = new Map<string, SessionState>();
@@ -365,6 +428,7 @@ export class SessionAgentOrchestrator {
     this.stallTimeoutMs =
       options.stallTimeoutMs ?? SESSION_AGENT_STALL_TIMEOUT_MS;
     this.leaseMs = options.leaseMs ?? HOST_TURN_LEASE_MS;
+    this.sessionSendUrl = options.sessionSendUrl;
     this.recovered = this.recoverOnStartup().catch((error) => {
       writeStderrLine(
         `qwen serve: session agent recovery failed in ${this.workspaceCwd}: ${getErrorMessage(error)}`,
@@ -391,7 +455,11 @@ export class SessionAgentOrchestrator {
   ): Promise<SessionAgentMentionResult> {
     this.assertRunning();
     if (!isValidSessionAgentsSessionId(sessionId)) {
-      throw new SessionAgentError(400, 'invalid_session_id', 'Invalid session id.');
+      throw new SessionAgentError(
+        400,
+        'invalid_session_id',
+        'Invalid session id.',
+      );
     }
     const { text, clientMessageId } = input;
     if (
@@ -503,8 +571,7 @@ export class SessionAgentOrchestrator {
     const state = await this.session(sessionId);
     // Queued first, so finishing an executing run cannot start one of them.
     runs.sort(
-      (a, b) =>
-        Number(isExecutingRun(a.run)) - Number(isExecutingRun(b.run)),
+      (a, b) => Number(isExecutingRun(a.run)) - Number(isExecutingRun(b.run)),
     );
     for (const live of runs) await this.cancelLive(state, live);
     return runs.map((live) => live.run.id);
@@ -568,10 +635,61 @@ export class SessionAgentOrchestrator {
     pending.resolve(optionId);
   }
 
+  /**
+   * An agent of a live local run posted `text` with its `session_send` tool
+   * (the MCP child calls the run's endpoint with the run's token). Resolves
+   * once the post is recorded and routed; rejects with a SessionAgentError.
+   */
+  async postFromAgent(
+    sessionId: string,
+    runId: string,
+    token: string,
+    text: unknown,
+  ): Promise<void> {
+    this.assertRunning();
+    const live = this.live.get(runId);
+    // One answer for "no such run" and "wrong token": the route is not
+    // behind the daemon bearer.
+    if (
+      !live ||
+      live.sessionId !== sessionId ||
+      live.remote ||
+      !live.sendToken ||
+      !tokensMatch(live.sendToken, token)
+    ) {
+      throw new SessionAgentError(
+        401,
+        'invalid_session_send_token',
+        'Unknown run or invalid session_send token.',
+      );
+    }
+    if (!isExecutingRun(live.run)) {
+      throw new SessionAgentError(
+        409,
+        'run_not_running',
+        'The run is not running.',
+      );
+    }
+    if (
+      typeof text !== 'string' ||
+      text.trim().length === 0 ||
+      text.length > MAX_MENTION_TEXT_CHARS
+    ) {
+      throw new SessionAgentError(400, 'invalid_text', 'text is required.');
+    }
+    const state = await this.session(sessionId);
+    live.frame.activityAt = this.now();
+    await this.queueSessionSend(state, live, text);
+  }
+
   /** Live frames of one chat session (what a reconnecting client renders). */
   async snapshot(sessionId: string): Promise<SessionAgentRunFrame[]> {
     if (!isValidSessionAgentsSessionId(sessionId)) {
-      throw new SessionAgentError(400, 'invalid_session_id', 'Invalid session id.');
+      throw new SessionAgentError(
+        400,
+        'invalid_session_id',
+        'Invalid session id.',
+      );
     }
     await this.recovered;
     const state = this.sessions.has(sessionId)
@@ -902,7 +1020,9 @@ export class SessionAgentOrchestrator {
         );
         continue;
       }
-      if (file.runs.every((run) => isTerminalSessionAgentRunStatus(run.status))) {
+      if (
+        file.runs.every((run) => isTerminalSessionAgentRunStatus(run.status))
+      ) {
         continue;
       }
       roster ??= await this.readAgents(this.workspaceCwd);
@@ -1049,6 +1169,12 @@ export class SessionAgentOrchestrator {
       };
       await this.persist(state);
       if (controller.signal.aborted) throw new Error('cancelled');
+      live.sendToken = randomBytes(32).toString('hex');
+      const sendUrl = this.sessionSendUrl?.(state.sessionId, run.id);
+      const sessionSendServer =
+        sendUrl && isLoopbackUrl(sendUrl)
+          ? buildSessionSendServer(sendUrl, live.sendToken)
+          : undefined;
       const adapter = this.adapterFor(program, {
         workspaceCwd: this.workspaceCwd,
         bridge: this.bridge,
@@ -1061,8 +1187,8 @@ export class SessionAgentOrchestrator {
         ...(agent.model ? { model: agent.model } : {}),
         ...(nativeSessionId ? { nativeSessionId } : {}),
         cwd: this.workspaceCwd,
-        // TODO(multi-agent): expose the `session_send` MCP server to local
-        // Claude / Codex turns once it exists (plan §9.3).
+        // The qwen adapter cannot use it yet (see qwen-acp.ts).
+        ...(sessionSendServer ? { sessionSendServer } : {}),
         signal: controller.signal,
         onEvent: (event) => this.applyEvent(state, live, event),
         awaitPermission: (prompt) => this.awaitPermission(live, prompt),
@@ -1164,22 +1290,35 @@ export class SessionAgentOrchestrator {
         live.totalTokens = event.totalTokens;
         frame.totalTokens = event.totalTokens;
         break;
-      case 'session_send': {
-        const text = event.text;
-        live.sendChain = live.sendChain
-          .then(() => this.handleSessionSend(state, live, text))
-          .catch((error) => {
-            frame.error = getErrorMessage(error);
-            this.publish(live, state);
-          });
+      case 'session_send':
+        void this.queueSessionSend(state, live, event.text).catch(() => {});
         break;
-      }
       default: {
         const exhaustive: never = event;
         void exhaustive;
       }
     }
     this.publish(live, state);
+  }
+
+  /**
+   * Chains one `session_send` post behind the run's earlier ones. The
+   * returned promise reports this post's outcome; a failure is also shown on
+   * the run frame.
+   */
+  private queueSessionSend(
+    state: SessionState,
+    live: LiveRun,
+    text: string,
+  ): Promise<void> {
+    const done = live.sendChain.then(() =>
+      this.handleSessionSend(state, live, text),
+    );
+    live.sendChain = done.catch((error) => {
+      live.frame.error = getErrorMessage(error);
+      this.publish(live, state);
+    });
+    return done;
   }
 
   /**
@@ -1318,6 +1457,7 @@ export class SessionAgentOrchestrator {
     // Mark first so a concurrent sweep / cancel cannot finish it twice.
     run.status = outcome.status;
     run.endedAt = this.now();
+    delete live.sendToken;
     const runtimeId = live.remote?.hostId ?? LOCAL_SESSION_AGENT_RUNTIME_ID;
     for (const pending of live.pendingPermissions.values()) {
       pending.reject(new Error('run ended'));
@@ -1429,7 +1569,10 @@ export class SessionAgentOrchestrator {
     this.live.delete(run.id);
 
     if (recordId && followUps.length > 0) {
-      const depth = nextChainDepth({ kind: 'agent', chainDepth: run.chainDepth });
+      const depth = nextChainDepth({
+        kind: 'agent',
+        chainDepth: run.chainDepth,
+      });
       for (const agent of followUps) {
         this.enqueue(state, agent, recordId, depth);
       }
@@ -1511,7 +1654,9 @@ export class SessionAgentOrchestrator {
     attempt: number,
     leaseId: string,
     sessionId?: string,
-  ): { ok: true; live: LiveRun } | { ok: false; reason: 'unknown_run' | 'lease_mismatch' } {
+  ):
+    | { ok: true; live: LiveRun }
+    | { ok: false; reason: 'unknown_run' | 'lease_mismatch' } {
     const live = this.live.get(runId);
     if (!live || (sessionId !== undefined && live.sessionId !== sessionId)) {
       return { ok: false, reason: 'unknown_run' };
@@ -1534,7 +1679,9 @@ export class SessionAgentOrchestrator {
     live: LiveRun,
     state: SessionState | undefined,
   ): SessionAgentRunFrame {
-    const position = state ? queuePosition(state.file.runs, live.run) : undefined;
+    const position = state
+      ? queuePosition(state.file.runs, live.run)
+      : undefined;
     const frame: SessionAgentRunFrame = {
       ...live.frame,
       author: live.author,

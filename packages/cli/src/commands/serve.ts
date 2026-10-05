@@ -992,8 +992,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     const { runQwenServe } = await import('../serve/run-qwen-serve.js');
     try {
       const serveOptions = {
-        // A joined runtime is a worker too: it runs work for the coordinator
-        // and must not also host its own collaboration routes.
+        // A joined runtime is a worker: it runs turns for the coordinator. It
+        // may still coordinate its own workspace if that workspace opts in.
         agentHostWorker: Boolean(argv['agent-host-server'] || argv['join']),
         port: argv.port,
         hostname: argv.hostname,
@@ -1191,6 +1191,32 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           throw error;
         }
       }
+      // Re-join the coordinators this daemon was connected to through
+      // `hosts/connect` (`qwen agents join`) before it restarted. Detached:
+      // a coordinator that is down must not hold up the daemon.
+      // TODO(multi-agent): only the primary workspace is restored; other
+      // registered workspaces' saved connections wait for a manual connect.
+      void (async () => {
+        try {
+          await handle.runtimeReady;
+          const runtime = handle.getPrimaryWorkspaceRuntime();
+          if (
+            !runtime?.trusted ||
+            !runtime.generationGuard ||
+            runtime.generationGuard.closed
+          ) {
+            return;
+          }
+          const { restoreAgentHostConnections } = await import(
+            '../serve/agent-host-connections.js'
+          );
+          await restoreAgentHostConnections(runtime);
+        } catch (error) {
+          writeStderrLine(
+            `qwen serve: could not restore Agent Host connections: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      })();
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).
       if (argv['local-control']) {

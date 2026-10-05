@@ -27,9 +27,13 @@ import {
   writeClipboardText,
 } from '../../utils/clipboard';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
-import type { DaemonSessionGenerationEvent } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionGenerationEvent,
+  QwenAgentMessageMeta,
+} from '@qwen-code/sdk/daemon';
 import type { DaemonMessageAuthor } from '../../adapters/messageTypes';
 import { AuthorAvatar } from './AuthorAvatar';
+import { AgentMessageDetails } from './agent-message-details';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import flashStyles from '../MessageLocateFlash.module.css';
@@ -38,6 +42,8 @@ import styles from './AssistantMessage.module.css';
 interface AssistantMessageProps {
   content: string;
   author?: DaemonMessageAuthor;
+  /** A workspace agent's reply: its run status, error, steps and tokens. */
+  agentMessage?: QwenAgentMessageMeta;
   isStreaming?: boolean;
   timestamp?: number;
   onBranchSession?: () => void | Promise<void>;
@@ -58,6 +64,7 @@ interface AssistantMessageProps {
 export const AssistantMessage = memo(function AssistantMessage({
   content,
   author,
+  agentMessage,
   isStreaming,
   timestamp,
   onBranchSession,
@@ -158,6 +165,9 @@ export const AssistantMessage = memo(function AssistantMessage({
             />
           </div>
         </div>
+      )}
+      {agentMessage?.kind === 'agent_message' && (
+        <AgentMessageDetails meta={agentMessage} />
       )}
       {customFooter && (
         <div className={styles.customFooter}>{customFooter}</div>

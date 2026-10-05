@@ -815,3 +815,50 @@ describe('AssistantMessage satisfied / not-satisfied marks', () => {
     expect(find(container, '不满意')).not.toBeNull();
   });
 });
+
+describe('AssistantMessage agent replies', () => {
+  it('names the agent and reports a failed run with its error, steps and tokens', () => {
+    const container = render(
+      <AssistantMessage
+        content=""
+        author={{ name: 'reviewer', color: '#f80' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-1',
+          status: 'failed',
+          error: 'tool crashed',
+          steps: [{ id: 's1', title: 'Bash: npm test', status: 'failed' }],
+          totalTokens: 2048,
+        }}
+      />,
+    );
+
+    expect(container.textContent).toContain('reviewer');
+    expect(container.textContent).toContain('Failed');
+    expect(container.textContent).toContain('tool crashed');
+    expect(container.textContent).toContain('Bash: npm test');
+    expect(container.textContent).toContain(
+      `${(2048).toLocaleString()} tokens`,
+    );
+  });
+
+  it('shows no status word on a completed run, only its text and usage', () => {
+    const container = render(
+      <AssistantMessage
+        content="All good."
+        author={{ name: 'reviewer' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-2',
+          status: 'completed',
+          totalTokens: 12,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('All good.');
+    expect(container.textContent).toContain('12 tokens');
+    expect(container.querySelector('[role="status"]')).toBeNull();
+  });
+});

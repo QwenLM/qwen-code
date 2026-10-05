@@ -108,7 +108,7 @@ import {
   subscribeAgentEvents,
   type AgentLiveEvent,
 } from '../workspace-agents/agent-events.js';
-import { registerAgentHostConnectionRoutes } from './agent-host-connection.js';
+import { registerAgentHostRemoteConnectRoute } from './agent-host-connection.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -239,9 +239,12 @@ function readAgentExecution(
   if (value === undefined) return undefined;
   if (typeof value !== 'object' || value === null) return 'invalid';
   const input = value as Record<string, unknown>;
-  if (input['mode'] === 'local') return { mode: 'local' };
-  const hostIds = input['hostIds'];
   const provider = input['provider'];
+  if (input['mode'] === 'local') {
+    if (provider !== undefined && !isAgentProgram(provider)) return 'invalid';
+    return { mode: 'local', ...(provider ? { provider } : {}) };
+  }
+  const hostIds = input['hostIds'];
   if (
     input['mode'] !== 'managed-host' ||
     !Array.isArray(hostIds) ||
@@ -378,7 +381,10 @@ export function registerWorkspaceAgentRoutes(
     return runtime;
   };
 
-  registerAgentHostConnectionRoutes(app, prefix, runtimeFor, deps.mutate);
+  // `hosts/service` and `hosts/connect` (being joined as a runtime) are
+  // mounted by server.ts regardless of the opt-in; only the coordinator-side
+  // pull stays behind it.
+  registerAgentHostRemoteConnectRoute(app, prefix, runtimeFor, deps.mutate);
 
   const dispatch = async (runtime: WorkspaceRuntime): Promise<void> => {
     runtime.generationGuard?.assertOpen();

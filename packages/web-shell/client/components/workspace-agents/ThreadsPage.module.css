@@ -1,5 +1,5 @@
 /* The Agents page, in the same frame as the role templates it swaps with:
-   cards for the people, a list for the conversations. */
+   cards for the agents, cards for the runtimes they run on. */
 
 .formActions {
   display: flex;
@@ -67,25 +67,6 @@
   gap: 8px;
 }
 
-.agentName {
-  max-width: 100%;
-  overflow: hidden;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: start;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.agentName:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
 .statusBadge {
   font-size: 10px;
 }
@@ -101,28 +82,6 @@
   color: var(--status-attention-fg);
 }
 
-.agentActivityLink {
-  width: fit-content;
-  max-width: 100%;
-  overflow: hidden;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--muted-foreground);
-  font: inherit;
-  font-size: 12px;
-  text-align: start;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.agentActivityLink:hover {
-  color: var(--foreground);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
 .agentActions {
   display: flex;
   flex-shrink: 0;
@@ -130,40 +89,14 @@
   gap: 4px;
 }
 
-.emptyRoster {
-  padding: 8px 10px;
-  color: var(--muted-foreground);
-  font-size: 13px;
-}
-
-/* Settings and assigned conversations open inside the card they belong to,
-   under a rule, so they read as that agent's and not as a second panel. */
-.agentConfig,
-.agentWorkspace {
+/* Settings open inside the card they belong to, under a rule, so they read
+   as that agent's and not as a second panel. */
+.agentConfig {
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 14px 16px 16px;
   border-top: 1px solid var(--border);
-}
-
-.agentWorkspace {
-  gap: 2px;
-}
-
-.agentWorkspaceHeader {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 0 6px;
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
-.agentWorkspaceHeader strong {
-  color: var(--foreground);
-  font-size: 13px;
-  font-weight: 500;
 }
 
 .configLabel {
@@ -210,124 +143,6 @@
   overflow-wrap: anywhere;
   color: var(--muted-foreground);
   font-size: 12px;
-}
-
-/* Conversations */
-
-.group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-/* Sentence case, not a tracked-out eyebrow. The count is part of the
-   heading because "how many need me" is the question being answered. */
-.groupHeading {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--foreground);
-  font: inherit;
-  font-size: 14px;
-  font-weight: 600;
-  text-align: start;
-  cursor: default;
-}
-
-.groupHeadingToggle {
-  cursor: pointer;
-}
-
-.groupHeadingToggle:hover {
-  color: var(--muted-foreground);
-}
-
-.groupCount {
-  color: var(--muted-foreground);
-  font-size: 12px;
-  font-weight: 400;
-  font-variant-numeric: tabular-nums;
-}
-
-.list {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border-radius: var(--radius-xl, 12px);
-  background: var(--card);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--foreground) 10%, transparent);
-}
-
-.row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: start;
-  cursor: pointer;
-}
-
-.row + .row {
-  border-top: 1px solid var(--border);
-}
-
-.row:hover {
-  background: color-mix(in srgb, var(--foreground) 4%, transparent);
-}
-
-.row:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: -2px;
-}
-
-.rowText {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.rowTitle {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--foreground);
-  font-size: 14px;
-  line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The resolver's own sentence, rendered verbatim. */
-.rowReason {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--muted-foreground);
-  font-size: 12px;
-  line-height: 1.45;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The single attention treatment: this conversation is waiting on you.
-   Always paired with the sentence, so it is never colour alone. */
-.row[data-attention] .rowReason {
-  color: var(--status-attention-fg);
-}
-
-.rowChevron {
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-  color: var(--muted-foreground);
 }
 
 /* Runtimes */

@@ -735,6 +735,11 @@ export interface ApplyTurnCollapseOptions {
   enabled: boolean;
 }
 
+// TODO(multi-agent): a workspace agent's reply (`message.agentMessage`) counts
+// as a final answer, which is right for the turn its @-mention opens. If its
+// record lands inside a main-model turn instead (the user prompted while the
+// agent ran), it becomes that turn's final answer: the main reply folds on
+// collapse and the copy/feedback footer moves onto the agent's reply.
 function isFinalContentCandidate(
   item: DisplayItem,
   includeBackgroundNotifications: boolean,

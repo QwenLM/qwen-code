@@ -1775,6 +1775,7 @@ describe('bootstrap import boundaries', () => {
   it('keeps bootstrap top-level help commands aligned with config registrations', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
+      ['agentsCommand', 'agents'],
       ['authCommand', 'auth'],
       ['batchCommand', 'batch'],
       ['boardCommand', 'board'],

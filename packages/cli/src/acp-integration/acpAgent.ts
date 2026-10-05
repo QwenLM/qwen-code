@@ -175,6 +175,7 @@ import {
   qualifySkillName,
   sessionIdContext,
   resolveAgentPersona,
+  buildRemoteSessionAgentSystemPrompt,
   findAgentSessionBinding,
   resolveModelId,
   buildModelIdContext,
@@ -15616,9 +15617,14 @@ class QwenAgent implements Agent {
         // means not enabled, which refuses — the safe direction here, since the
         // alternative is granting an agent persona on a Config that cannot say
         // whether the operator opted in.
+        // A remote Host runs a coordinator's turn under a binding its daemon
+        // wrote for that turn (`remotePersona`); being a runtime does not
+        // require this workspace to run collaboration itself (plan §8-5).
+        const remotePersona = sessionAgentBinding?.remotePersona;
         const collaborationEnabled =
-          typeof config.isAgentCollaborationEnabled === 'function' &&
-          config.isAgentCollaborationEnabled();
+          remotePersona !== undefined ||
+          (typeof config.isAgentCollaborationEnabled === 'function' &&
+            config.isAgentCollaborationEnabled());
         if (!collaborationEnabled) {
           throw RequestError.invalidParams(
             undefined,
@@ -15649,21 +15655,35 @@ class QwenAgent implements Agent {
             'No dispatched run claims this session for that agent',
           );
         }
-        const persona = await resolveAgentPersona(
-          config,
-          sessionSource.sourceId,
-          sessionAgentBinding ? { surface: 'session' } : {},
-        );
-        if (persona.status !== 'resolved') {
-          throw RequestError.invalidParams(undefined, persona.error);
+        let personaModel: string | undefined;
+        if (remotePersona) {
+          // Not in this Host's roster: the coordinator sent the persona. No
+          // tool allowlist — every tool stays behind approval, which round-
+          // trips to the coordinator's session.
+          config.applyWorkspaceAgentPersona(
+            buildRemoteSessionAgentSystemPrompt(remotePersona),
+            remotePersona.name,
+            undefined,
+          );
+          personaModel = remotePersona.model;
+        } else {
+          const persona = await resolveAgentPersona(
+            config,
+            sessionSource.sourceId,
+            sessionAgentBinding ? { surface: 'session' } : {},
+          );
+          if (persona.status !== 'resolved') {
+            throw RequestError.invalidParams(undefined, persona.error);
+          }
+          config.applyWorkspaceAgentPersona(
+            persona.systemPrompt,
+            persona.agent.name,
+            persona.toolConfig.executionAllowedTools,
+          );
+          personaModel = persona.model;
         }
-        config.applyWorkspaceAgentPersona(
-          persona.systemPrompt,
-          persona.agent.name,
-          persona.toolConfig.executionAllowedTools,
-        );
         const currentAuthType = config.getModelsConfig().getCurrentAuthType();
-        const model = resolveModelId(persona.model, {
+        const model = resolveModelId(personaModel, {
           ...buildModelIdContext(config),
           currentModel: undefined,
           currentAuthType,

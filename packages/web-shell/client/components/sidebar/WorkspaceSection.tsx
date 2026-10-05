@@ -122,7 +122,6 @@ export interface WorkspaceHeaderActionsContext {
 }
 
 interface WorkspaceSectionProps {
-  additionalSessions?: readonly DaemonSessionSummary[];
   workspace: DaemonWorkspaceCapability;
   remote?: boolean;
   renderHeader?: (expanded: boolean) => ReactNode;
@@ -237,7 +236,6 @@ interface WorkspaceSectionProps {
 }
 
 export function WorkspaceSection({
-  additionalSessions,
   workspace,
   remote = false,
   renderHeader,
@@ -680,16 +678,7 @@ export function WorkspaceSection({
   );
   const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    const mapped = sessions.map((session) => mapSession?.(session) ?? session);
-    // Only a merge with collaboration rows is re-sorted, so the daemon's own
-    // order stands for everyone who has none.
-    const timeOf = (session: DaemonSessionSummary) =>
-      Date.parse(session.updatedAt ?? session.createdAt ?? '') || 0;
-    const newestFirst = (a: DaemonSessionSummary, b: DaemonSessionSummary) =>
-      timeOf(b) - timeOf(a);
-    const scoped = additionalSessions?.length
-      ? [...mapped, ...additionalSessions].sort(newestFirst)
-      : mapped;
+    const scoped = sessions.map((session) => mapSession?.(session) ?? session);
     if (!query) return scoped;
     const localMatches = scoped.filter((session) => {
       const label = (session.displayName || '').toLowerCase();
@@ -709,7 +698,6 @@ export function WorkspaceSection({
       mapSession,
     );
   }, [
-    additionalSessions,
     contentSearchHits,
     mapSession,
     searchQuery,

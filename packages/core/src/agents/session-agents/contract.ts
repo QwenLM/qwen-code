@@ -233,6 +233,12 @@ export interface SessionAgentBinding {
   runtimeId?: string;
   /** Last chat-session record uuid this agent has been given (read cursor). */
   readThroughRecordId?: string;
+  /**
+   * Set only on a remote Host, for a turn it runs on behalf of a coordinator:
+   * the agent is not in this Host's roster, so the persona travels with the
+   * assignment and this binding is what authorizes the hidden `agent` session.
+   */
+  remotePersona?: { name: string; instructions?: string; model?: string };
 }
 
 export interface SessionAgentRun {

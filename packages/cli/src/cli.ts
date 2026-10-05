@@ -46,6 +46,7 @@ type BootstrapRoute =
   | 'default';
 
 export const TOP_LEVEL_COMMANDS = [
+  ['agents <command>', 'Session agents: join a coordinator as a runtime'],
   ['auth', 'Configure authentication (removed)'],
   [
     'batch <command>',

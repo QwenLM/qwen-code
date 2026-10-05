@@ -19,6 +19,9 @@ import type {
   SessionAgentProgram,
 } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 import type { BridgeClientRequestContext } from '../../acp-session-bridge.js';
+import { agentProgramExecutable } from '../program-probe.js';
+import { createClaudeCliAdapter } from './claude-cli.js';
+import { createCodexAppServerAdapter } from './codex-app-server.js';
 import { createQwenAcpAdapter, type QwenAcpAdapterBridge } from './qwen-acp.js';
 
 export interface AgentAdapterContext {
@@ -31,13 +34,7 @@ export interface AgentAdapterContext {
   ) => BridgeClientRequestContext | undefined;
 }
 
-/**
- * Placeholder for programs whose adapter has not landed yet.
- * TODO(multi-agent): replace with `createClaudeCliAdapter` from
- * `./claude-cli.ts` and `createCodexAppServerAdapter` from
- * `./codex-app-server.ts` (being written in parallel, same `AgentAdapter`
- * interface).
- */
+/** Fallback for a program this build does not know. */
 function unavailableAdapter(program: SessionAgentProgram): AgentAdapter {
   return {
     program,
@@ -65,9 +62,16 @@ export function getAdapter(
           ? { permissionVoteContext: context.permissionVoteContext }
           : {}),
       });
-    case 'claude':
-    case 'codex':
-      return unavailableAdapter(program);
+    // The executable is the env override (QWEN_AGENT_CLAUDE_PATH /
+    // QWEN_AGENT_CODEX_PATH), else the name resolved on PATH.
+    case 'claude': {
+      const executable = agentProgramExecutable('claude');
+      return createClaudeCliAdapter(executable ? { executable } : {});
+    }
+    case 'codex': {
+      const executable = agentProgramExecutable('codex');
+      return createCodexAppServerAdapter(executable ? { executable } : {});
+    }
     default: {
       const exhaustive: never = program;
       return unavailableAdapter(exhaustive);

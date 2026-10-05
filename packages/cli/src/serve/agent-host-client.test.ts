@@ -10,9 +10,137 @@ import os from 'node:os';
 import path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { describe, expect, it, vi } from 'vitest';
-import type { HostRunResult } from '@qwen-code/qwen-code-core';
+import type {
+  AgentAdapter,
+  AgentAdapterTurnInput,
+  HostTurnAssignment,
+  HostTurnEventBatch,
+  HostTurnResult,
+  SessionAgentPermissionPrompt,
+} from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
-import { isRevocation, startAgentHostConnection } from './agent-host-client.js';
+import {
+  isRevocation,
+  MAX_CONCURRENT_HOST_TURNS,
+  sessionSendServerFor,
+  startAgentHostConnection,
+  stopAgentHostConnection,
+} from './agent-host-client.js';
+
+const { getAdapter } = vi.hoisted(() => ({
+  getAdapter: vi.fn<(...args: unknown[]) => AgentAdapter>(),
+}));
+
+vi.mock('./agent-host-programs.js', () => ({
+  getHostProgramProbe: async () => [
+    { program: 'qwen', available: true },
+    { program: 'claude', available: true, version: '2.1.0' },
+    { program: 'codex', available: false, reason: 'not installed' },
+  ],
+  availablePrograms: (probes: Array<{ program: string; available: boolean }>) =>
+    probes.filter((probe) => probe.available).map((probe) => probe.program),
+}));
+vi.mock('./session-agents/adapters/index.js', () => ({ getAdapter }));
+
+function assignment(
+  runId: string,
+  overrides: Partial<HostTurnAssignment> = {},
+): HostTurnAssignment {
+  return {
+    protocol: 2,
+    sessionId: 'chat-1',
+    runId,
+    attempt: 1,
+    leaseId: `lease-${runId}`,
+    leaseExpiresAt: Date.now() + 60_000,
+    agent: { agentId: 'ag_claude', name: 'claude-mac', program: 'claude' },
+    program: 'claude',
+    prompt: 'Look at the bug.',
+    ...overrides,
+  };
+}
+
+/**
+ * A fake coordinator: enroll, heartbeat (all leases ok), pickup from a
+ * queue (then idle 204s), events and result recorded.
+ */
+function fakeCoordinator(queue: HostTurnAssignment[]) {
+  const batches: HostTurnEventBatch[] = [];
+  const results: HostTurnResult[] = [];
+  const heartbeats: Array<Record<string, unknown>> = [];
+  const state: {
+    eventStatus: number;
+    decisions: unknown[];
+  } = { eventStatus: 200, decisions: [] };
+  const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+    const body = init?.body ? JSON.parse(init.body as string) : {};
+    if (url.endsWith('/enroll')) {
+      return Response.json({ host: { id: 'host-1' }, secret: 's'.repeat(43) });
+    }
+    if (url.endsWith('/heartbeat')) {
+      heartbeats.push(body);
+      return Response.json({
+        host: { id: 'host-1' },
+        leases: (body.runs ?? []).map((run: { runId: string }) => ({
+          runId: run.runId,
+          ok: true,
+        })),
+        decisions: state.decisions,
+      });
+    }
+    if (url.endsWith('/pickup')) {
+      const next = queue.shift();
+      if (next) return Response.json({ assignment: next });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return new Response(null, { status: 204 });
+    }
+    if (url.endsWith('/events')) {
+      if (state.eventStatus !== 200) {
+        return Response.json(
+          { error: 'lease_mismatch' },
+          { status: state.eventStatus },
+        );
+      }
+      batches.push(body);
+      return Response.json({ ok: true, decisions: state.decisions });
+    }
+    if (url.endsWith('/result')) {
+      results.push(body);
+      return Response.json({ ok: true });
+    }
+    return Response.json({ error: 'unexpected' }, { status: 500 });
+  });
+  return { fetchMock, batches, results, heartbeats, state };
+}
+
+/** Set `getAdapter` before calling: the first pickup runs immediately. */
+async function withHost(
+  coordinator: ReturnType<typeof fakeCoordinator>,
+  body: (workspaceCwd: string) => Promise<void>,
+) {
+  const qwenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'host-v2-'));
+  vi.stubEnv('QWEN_HOME', qwenHome);
+  vi.stubGlobal('fetch', coordinator.fetchMock);
+  const target = {
+    serverUrl: 'http://127.0.0.1:18590',
+    workspaceId: 'ws-test',
+    workspaceCwd: qwenHome,
+  };
+  try {
+    await startAgentHostConnection({
+      ...target,
+      bridge: {} as AcpSessionBridge,
+      enrollmentToken: 'join-token',
+    });
+    await body(qwenHome);
+  } finally {
+    stopAgentHostConnection(target);
+    getAdapter.mockReset();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    await fs.rm(qwenHome, { recursive: true, force: true });
+  }
+}
 
 describe('isRevocation', () => {
   // The transport error carries the route's body text as its message.
@@ -46,80 +174,201 @@ describe('isRevocation', () => {
   });
 });
 
-it('returns the provider detail when sendPrompt rejects with a JSON-RPC error', async () => {
-  const workspaceCwd = await fs.mkdtemp(path.join(os.tmpdir(), 'pr12582-f7-'));
-  let result: HostRunResult | undefined;
-  let pickups = 0;
-  const bridge = {
-    listWorkspaceSessions: () => [],
-    spawnOrAttach: vi.fn().mockResolvedValue({}),
-    async *subscribeEvents() {},
-    getSessionStatsStatus: vi.fn().mockResolvedValue({ models: {} }),
-    sendPrompt: vi.fn().mockRejectedValue({
-      code: -32603,
-      message: 'Internal error',
-      data: { details: '400 PR12582_PROVIDER_400_READABLE_CAUSE' },
-    }),
-    closeSession: vi.fn().mockResolvedValue({}),
-  } as unknown as AcpSessionBridge;
-  vi.stubEnv('QWEN_HOME', workspaceCwd);
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (url: string, init?: RequestInit) => {
-      if (url.endsWith('/enroll')) {
-        return Response.json({ host: { id: 'host-test' }, secret: 'secret' });
-      }
-      if (url.endsWith('/pickup')) {
-        if (++pickups > 1) {
-          return Response.json(
-            { error: 'Invalid Agent Host credential.' },
-            { status: 401 },
-          );
-        }
-        return Response.json({
-          assignment: {
-            agent: { id: 'agent-test', name: 'test' },
-            threadId: 'thread-test',
-            runId: 'run-test',
-            attempt: 1,
-            lease: { leaseId: 'lease-test' },
-            prompt: 'Read the fixture.',
-          },
-        });
-      }
-      if (url.endsWith('/result')) {
-        result = JSON.parse(init?.body as string) as HostRunResult;
-      }
-      if (url.endsWith('/heartbeat')) {
-        return Response.json({ lease: { leaseId: 'lease-test' } });
-      }
-      return Response.json({ ok: true });
-    }),
-  );
-  try {
-    await startAgentHostConnection({
-      bridge,
-      serverUrl: 'http://127.0.0.1:18583',
-      workspaceId: 'ws-test',
+it('runs a v2 turn through the adapter, round-trips a permission and returns the native session id', async () => {
+  const prompt: SessionAgentPermissionPrompt = {
+    requestId: 'perm-1',
+    title: 'Bash: ls',
+    options: [
+      { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+      { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+    ],
+  };
+  let input: AgentAdapterTurnInput | undefined;
+  const coordinator = fakeCoordinator([
+    assignment('run-1', { nativeSessionId: 'claude-0' }),
+  ]);
+  getAdapter.mockReturnValue({
+    program: 'claude',
+    async runTurn(turn) {
+      input = turn;
+      turn.onEvent({ type: 'text_delta', text: 'Looking' });
+      turn.onEvent({ type: 'permission_request', prompt });
+      // The person answers; the coordinator hands the decision back.
+      coordinator.state.decisions = [
+        { runId: 'run-1', attempt: 1, requestId: 'perm-1', optionId: 'allow' },
+      ];
+      const optionId = await turn.awaitPermission(prompt);
+      turn.onEvent({ type: 'permission_resolved', requestId: 'perm-1' });
+      turn.onEvent({ type: 'session_send', text: '@codex-mac have a look' });
+      return {
+        status: 'completed',
+        outputText: `chose ${optionId}`,
+        nativeSessionId: 'claude-1',
+      };
+    },
+  });
+  await withHost(coordinator, async (workspaceCwd) => {
+    await vi.waitFor(() => expect(coordinator.results).toHaveLength(1), {
+      timeout: 5_000,
+    });
+
+    expect(getAdapter).toHaveBeenCalledWith('claude', {
       workspaceCwd,
-      enrollmentToken: 'test-token',
+      bridge: expect.anything(),
+      agentId: 'ag_claude',
     });
-    await vi.waitFor(() => expect(pickups).toBe(2));
-    expect(result).toMatchObject({
-      status: 'failed',
-      error: '400 PR12582_PROVIDER_400_READABLE_CAUSE',
+    expect(input).toMatchObject({
+      prompt: 'Look at the bug.',
+      nativeSessionId: 'claude-0',
+      cwd: workspaceCwd,
     });
-    expect(bridge.sendPrompt).toHaveBeenCalledOnce();
-    expect(bridge.closeSession).toHaveBeenCalledOnce();
-    await vi.waitFor(async () => {
-      expect(await fs.readdir(path.join(workspaceCwd, 'agent-hosts'))).toEqual(
-        [],
+    expect(coordinator.results[0]).toEqual({
+      sessionId: 'chat-1',
+      runId: 'run-1',
+      attempt: 1,
+      leaseId: 'lease-run-1',
+      result: {
+        status: 'completed',
+        outputText: 'chose allow',
+        nativeSessionId: 'claude-1',
+      },
+    });
+    // Ordered, gap-free batches carrying every event before the result.
+    const sequences = coordinator.batches.map((batch) => batch.sequence);
+    expect(sequences).toEqual(sequences.map((_, index) => index + 1));
+    expect(
+      coordinator.batches
+        .flatMap((batch) => batch.events)
+        .map((event) => event.type),
+    ).toEqual([
+      'text_delta',
+      'permission_request',
+      'permission_resolved',
+      'session_send',
+    ]);
+    expect(coordinator.heartbeats[0]).toMatchObject({
+      protocol: 2,
+      providers: ['qwen', 'claude'],
+    });
+  });
+});
+
+it(`runs at most ${MAX_CONCURRENT_HOST_TURNS} turns at once`, async () => {
+  const queue = Array.from({ length: MAX_CONCURRENT_HOST_TURNS + 1 }, (_, i) =>
+    assignment(`run-${i}`, { sessionId: `chat-${i}` }),
+  );
+  let running = 0;
+  let peak = 0;
+  const releases: Array<() => void> = [];
+  const coordinator = fakeCoordinator(queue);
+  getAdapter.mockReturnValue({
+    program: 'claude',
+    async runTurn() {
+      running += 1;
+      peak = Math.max(peak, running);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      running -= 1;
+      return { status: 'completed', outputText: 'ok' };
+    },
+  });
+  await withHost(coordinator, async () => {
+    await vi.waitFor(() =>
+      expect(releases).toHaveLength(MAX_CONCURRENT_HOST_TURNS),
+    );
+    // The fifth waits for a free slot.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(releases).toHaveLength(MAX_CONCURRENT_HOST_TURNS);
+    releases[0]!();
+    await vi.waitFor(() =>
+      expect(releases).toHaveLength(MAX_CONCURRENT_HOST_TURNS + 1),
+    );
+    for (const release of releases) release();
+    await vi.waitFor(() =>
+      expect(coordinator.results).toHaveLength(MAX_CONCURRENT_HOST_TURNS + 1),
+    );
+    expect(peak).toBe(MAX_CONCURRENT_HOST_TURNS);
+  });
+});
+
+it('aborts a turn whose lease the coordinator refuses and posts no result', async () => {
+  let aborted = false;
+  const coordinator = fakeCoordinator([assignment('run-1')]);
+  coordinator.state.eventStatus = 409;
+  getAdapter.mockReturnValue({
+    program: 'claude',
+    async runTurn(turn) {
+      turn.onEvent({ type: 'text_delta', text: 'working' });
+      await new Promise<void>((resolve) =>
+        turn.signal.addEventListener('abort', () => resolve(), {
+          once: true,
+        }),
       );
+      aborted = true;
+      return { status: 'cancelled', outputText: '' };
+    },
+  });
+  await withHost(coordinator, async () => {
+    await vi.waitFor(() => expect(aborted).toBe(true), { timeout: 5_000 });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(coordinator.results).toEqual([]);
+  });
+});
+
+it('reports an adapter that throws as a failed turn', async () => {
+  const coordinator = fakeCoordinator([assignment('run-1')]);
+  getAdapter.mockReturnValue({
+    program: 'claude',
+    async runTurn() {
+      throw new Error('claude: command not found');
+    },
+  });
+  await withHost(coordinator, async () => {
+    await vi.waitFor(() => expect(coordinator.results).toHaveLength(1));
+    expect(coordinator.results[0]!.result).toEqual({
+      status: 'failed',
+      outputText: '',
+      error: 'claude: command not found',
     });
+  });
+});
+
+it('plans the qwen hidden session id when the coordinator has none', async () => {
+  let nativeSessionId: string | undefined;
+  const coordinator = fakeCoordinator([
+    assignment('run-1', { program: 'qwen' }),
+  ]);
+  getAdapter.mockReturnValue({
+    program: 'qwen',
+    async runTurn(turn) {
+      nativeSessionId = turn.nativeSessionId;
+      return { status: 'completed', outputText: 'ok' };
+    },
+  });
+  await withHost(coordinator, async () => {
+    await vi.waitFor(() => expect(coordinator.results).toHaveLength(1));
+    expect(nativeSessionId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+it('builds the session_send MCP command from a relay run', () => {
+  vi.stubEnv('QWEN_CLI_ENTRY', '/opt/qwen/cli.js');
+  try {
+    const server = sessionSendServerFor({
+      url: 'http://127.0.0.1:4170/agent-host-relay/runs/run-1/send',
+      token: 'tok',
+    });
+    expect(server?.command).toBe(process.execPath);
+    expect(server?.args.slice(-5)).toEqual([
+      '/opt/qwen/cli.js',
+      'agents',
+      'session-send-mcp',
+      '--url',
+      'http://127.0.0.1:4170/agent-host-relay/runs/run-1/send',
+    ]);
+    expect(server?.env).toEqual({ QWEN_SESSION_SEND_TOKEN: 'tok' });
+    expect(sessionSendServerFor(undefined)).toBeUndefined();
   } finally {
-    vi.unstubAllGlobals();
     vi.unstubAllEnvs();
-    await fs.rm(workspaceCwd, { recursive: true, force: true });
   }
 });
 
