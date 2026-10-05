@@ -920,12 +920,12 @@ export class HostedWorkspaceToolTurn {
               ].includes(key),
           );
           // H3: a Monitor request is admitted exactly when this Session
-          // owns its monitor_run orchestrator and a Session publisher for
-          // the detached family — Shell-mode or the publication lane — and
-          // the domain is enabled.
+          // owns its monitor_run orchestrator and the detached family has
+          // its v3 flow — publication — without it the request refuses at
+          // admission rather than travelling v2 and never landing.
           monitorAdmitted =
             this.monitors !== undefined &&
-            (this.shell !== undefined || this.backgroundLane !== undefined) &&
+            this.publication !== undefined &&
             monitorRunAdmissionsEnabled();
           if (typeof args['command'] !== 'string' || !args['command'].trim()) {
             validationError = 'Hosted Monitor requires a nonempty command.';
@@ -1448,6 +1448,9 @@ export class HostedWorkspaceToolTurn {
         if (
           (request.isShell || request.monitoring) &&
           this.publisher &&
+          // A refused request never funnels its identity: what admissions
+          // failed to admit must not be registered either.
+          request.validationError === undefined &&
           // A publication lane serves only the detached family: foreground
           // Shell captures stay on the Runtime's publication there.
           (this.shell !== undefined || request.background || request.monitoring)

@@ -4786,6 +4786,42 @@ describe('hosted Monitor admission arm', () => {
         'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.',
     });
   });
+
+  it('refuses a Monitor on a Session that owns monitors but no v3 lane', async () => {
+    enablement.monitorRun = true;
+    const { call, parts } = monitorCall();
+    const bare = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      async () => randomUUID(),
+      () => true,
+      {
+        resources: {} as never,
+        assertWritable: async () => undefined,
+      } as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { record: () => undefined } as never,
+      undefined,
+    );
+    const result = await bare.execute(
+      [call],
+      parts,
+      'model',
+      new AbortController().signal,
+    );
+    // Owning monitors without a v3 lane must never send the Monitor
+    // travelling v2 to the Runtime: it refuses at admission, accurately.
+    expect(result[0]?.functionResponse?.response).toMatchObject({
+      error:
+        'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.',
+    });
+  });
 });
 
 function backgroundCall() {
