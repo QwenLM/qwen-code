@@ -27,6 +27,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -71,6 +73,23 @@ class ManagedActionsTest {
 
     @TestBean(methodName = "createHarness")
     private HarnessConnector harness;
+
+    // The logback context is JVM-wide, so a failed assertion must not leave the
+    // capture attached for the rest of the surefire fork.
+    private final Logger serviceLog = (Logger) LoggerFactory.getLogger(ManagedActionService.class);
+    private final ListAppender<ILoggingEvent> logged = new ListAppender<>();
+
+    @BeforeEach
+    void captureServiceLog() {
+        logged.start();
+        serviceLog.addAppender(logged);
+    }
+
+    @AfterEach
+    void releaseServiceLog() {
+        serviceLog.detachAppender(logged);
+        logged.stop();
+    }
 
     private static final Map<String, Answer<Void>> responses = new ConcurrentHashMap<>();
 
@@ -145,10 +164,6 @@ class ManagedActionsTest {
 
     @Test
     void missingInvalidAndCorruptInputNeverFailsTheActionRead() throws Exception {
-        Logger log = (Logger) LoggerFactory.getLogger(ManagedActionService.class);
-        ListAppender<ILoggingEvent> logged = new ListAppender<>();
-        logged.start();
-        log.addAppender(logged);
         for (String fault : List.of("missing", "null", "scalar", "shape", "kind", "version", "length", "digest",
                 "corrupt", "unreferenced", "null-bytes")) {
             String tenant = tenant();
@@ -203,7 +218,6 @@ class ManagedActionsTest {
         inputViews(tenant, session, plain.id);
         // A version 1 Action stops at the eligibility gate and must not warn.
         assertThat(logged.list).isEmpty();
-        log.detachAppender(logged);
     }
 
     @Test
@@ -235,7 +249,7 @@ class ManagedActionsTest {
     @Test
     void omitsMalformedPayloadsAndInternalMcpInputs() throws Exception {
         for (String fault : List.of("session", "runtime", "extra", "json", "duplicate", "tool",
-                "scalar", "mcp", "utf8", "empty", "surrogate")) {
+                "scalar", "mcp", "utf8", "empty", "surrogate", "payloadField", "blankRuntime")) {
             String tenant = tenant();
             String session = session(tenant);
             ObjectNode wrapper = (ObjectNode) json.readTree(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{}}"));
@@ -248,6 +262,11 @@ class ManagedActionsTest {
                 case "tool" -> wrapper.put("payloadJson", "{\"toolName\":\"edit\",\"input\":{}}");
                 case "scalar" -> wrapper.put("payloadJson", "{\"toolName\":\"write_file\",\"input\":\"not an object\"}");
                 case "mcp" -> wrapper.put("payloadJson", "{\"toolName\":\"managed_mcp_call\",\"input\":{\"grant\":\"internal authorization\"}}");
+                // The two guards no other arm reaches: a producer-added payload field, and a
+                // blank (not merely non-textual) runtimeSessionId.
+                case "payloadField" -> wrapper.put(
+                        "payloadJson", "{\"toolName\":\"write_file\",\"input\":{},\"grant\":\"internal authorization\"}");
+                case "blankRuntime" -> wrapper.put("runtimeSessionId", "");
                 default -> {}
             }
             byte[] bytes = json.writeValueAsBytes(wrapper);
