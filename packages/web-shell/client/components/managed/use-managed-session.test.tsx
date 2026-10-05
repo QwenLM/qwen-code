@@ -223,6 +223,9 @@ describe('useManagedSession', () => {
         await vi.advanceTimersByTimeAsync(100);
       });
       expect(latest?.stoppedReason).toBe('session gone');
+      // The terminal stop also ended the bootstrap's in-flight read: the
+      // skeleton and the loading line must not outlive the verdict.
+      expect(latest?.loading).toBe(false);
       expect(calls).toBe(0);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3_300);
@@ -268,6 +271,7 @@ describe('useManagedSession', () => {
       expect(provider.getSession.mock.calls.length).toBeGreaterThan(4);
       expect(latest?.stoppedReason).toBe('history pruned');
       expect(latest?.stoppedLeg).toBe('transcript');
+      expect(latest?.loading).toBe(false);
     } finally {
       vi.useRealTimers();
     }
@@ -308,6 +312,9 @@ describe('useManagedSession', () => {
       });
       expect(latest?.stoppedReason).toBe('history pruned');
       expect(latest?.stoppedLeg).toBe('transcript');
+      // No snapshot ever succeeded in this scenario, so the failure record
+      // is the only writer that could have ended the bootstrap loading.
+      expect(latest?.loading).toBe(false);
       // ...and the verdict is still standing after the session leg heals
       // and the re-armed bootstrap keeps climbing the transcript ladder.
       await act(async () => {
@@ -391,6 +398,45 @@ describe('useManagedSession', () => {
       expect(subscribeEvents.mock.calls.length).toBeLessThanOrEqual(45);
       expect(latest?.stoppedReason).toBe('session gone');
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a definite stream verdict standing through later transient failures', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* () {
+        subscribeCalls += 1;
+        yield event(1);
+        if (subscribeCalls === 1)
+          throw Object.assign(new Error('session gone'), { status: 404 });
+        throw new TypeError('connection reset by peer');
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // Every later call is a weaker transient failure on the same leg: it
+      // must not downgrade the standing terminal verdict.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9_000);
+      });
+      expect(subscribeCalls).toBeGreaterThan(2);
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      restoreBackoff();
       vi.useRealTimers();
     }
   });
@@ -690,6 +736,9 @@ describe('useManagedSession', () => {
         await vi.advanceTimersByTimeAsync(120_000);
       });
       expect(getTranscript).toHaveBeenCalledTimes(1);
+      // The shared failure writer cleared the bootstrap's loading flag,
+      // even though no snapshot ever succeeded.
+      expect(latest?.loading).toBe(false);
     } finally {
       vi.useRealTimers();
     }
@@ -3060,6 +3109,78 @@ describe('useManagedSession', () => {
       expect(latest?.stoppedReason).toBeUndefined();
       expect(latest?.events.map((item) => item.id)).toEqual([5, 6]);
       expect(latest?.olderCursor).toBe('cursor-5');
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a resync verdict standing when a later page fetch fails', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let snapshotCalls = 0;
+      let subscribeCalls = 0;
+      const getTranscript = vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) => {
+          if (request.before)
+            return Promise.reject(new Error('older page fetch failed (500)'));
+          snapshotCalls += 1;
+          return snapshotCalls === 1
+            ? Promise.resolve({
+                events: [event(5), event(6)],
+                olderCursor: 'cursor-5',
+                lastEventId: 6,
+              })
+            : Promise.reject(
+                Object.assign(new Error('history pruned'), { status: 404 }),
+              );
+        },
+      );
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript,
+        async *subscribeEvents(
+          _sessionId: string,
+          request: { signal?: AbortSignal },
+        ) {
+          subscribeCalls += 1;
+          if (subscribeCalls === 1) {
+            yield { ...event(6), type: 'stream_gap' };
+            return;
+          }
+          yield event(7);
+          await new Promise((resolve) =>
+            request.signal?.addEventListener('abort', resolve),
+          );
+        },
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // The gap resync's definite answer stands as the transcript leg's
+      // terminal verdict while the stream recovers around it.
+      expect(latest?.stoppedReason).toBe('history pruned');
+      expect(latest?.stoppedLeg).toBe('transcript');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_100);
+      });
+      expect(latest?.events.map((item) => item.id)).toEqual([5, 6, 7]);
+
+      // The failed click is a weaker later failure on the same leg: the
+      // standing resync verdict must not be downgraded by it.
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.stoppedReason).toBe('history pruned');
+      expect(latest?.stoppedLeg).toBe('transcript');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+      expect(latest?.stoppedReason).toBe('history pruned');
+      expect(latest?.stoppedLeg).toBe('transcript');
     } finally {
       restoreBackoff();
       vi.useRealTimers();

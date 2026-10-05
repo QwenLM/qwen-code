@@ -119,13 +119,22 @@ export function useManagedSession(
     const record = (leg: SignalLeg, error: unknown, final: boolean) => {
       if (abort.signal.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
-      setState((current) => ({
-        ...current,
-        signals: {
-          ...(current.signals ?? {}),
-          [leg]: { leg, message, final, seq: ++seqRef.current },
-        },
-      }));
+      setState((current) => {
+        const previous = current.signals?.[leg];
+        // A standing terminal verdict leaves only through retire(): a
+        // weaker later failure on the same leg must not downgrade it.
+        if (previous?.final && !final) return current;
+        return {
+          ...current,
+          // Every recorded failure is also the end of any in-flight read;
+          // the success paths clear the flag on theirs.
+          loading: false,
+          signals: {
+            ...(current.signals ?? {}),
+            [leg]: { leg, message, final, seq: ++seqRef.current },
+          },
+        };
+      });
     };
     const fail = (leg: SignalLeg, error: unknown) => record(leg, error, false);
     const stop = (leg: SignalLeg, error: unknown) => record(leg, error, true);
@@ -331,11 +340,11 @@ export function useManagedSession(
                 gapStalls += 1;
                 delayMs = BASE_RETRY_DELAY_MS;
                 if (gapStalls >= 3)
-                  fail(
-                    'stream',
+                  failed(
                     new Error(
                       'Managed Agent event stream is not advancing; retrying',
                     ),
+                    'stream',
                   );
               }
             } catch (error) {
@@ -461,21 +470,29 @@ export function useManagedSession(
           if (moved !== undefined && allowRetry) return fetchPage(moved, false);
           return;
         }
-        // A failed click is a transcript-leg read failing; record it there
-        // so the next successful page or resync retires it.
+        // A failed click is a transcript-leg read failing; record it with
+        // the same classification and monotonicity guard the effect's
+        // record() applies — this callback lives outside the effect
+        // closure, so it mirrors the guarded write rather than calling it:
+        // a definite 4xx goes final, anything weaker must not downgrade a
+        // standing verdict, and the next page or resync success retires it.
         const message = error instanceof Error ? error.message : String(error);
-        setState((current) => ({
-          ...current,
-          signals: {
-            ...(current.signals ?? {}),
-            transcript: {
-              leg: 'transcript',
-              message,
-              final: false,
-              seq: ++seqRef.current,
+        const final = !isAuthFailure(error) && isNonRetryableClientError(error);
+        setState((current) => {
+          if (current.signals?.transcript?.final && !final) return current;
+          return {
+            ...current,
+            signals: {
+              ...(current.signals ?? {}),
+              transcript: {
+                leg: 'transcript',
+                message,
+                final,
+                seq: ++seqRef.current,
+              },
             },
-          },
-        }));
+          };
+        });
       }
     };
     try {
