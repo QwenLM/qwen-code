@@ -104,6 +104,75 @@ describe('memory file change hook', () => {
     }
   });
 
+  it.each(['user', 'project', 'team'] as const)(
+    'notifies and coalesces legal dot-prefixed documents in %s memory',
+    async (scope) => {
+      const projectRoot = await setup();
+      const root =
+        scope === 'user'
+          ? getUserAutoMemoryRoot()
+          : scope === 'project'
+            ? getAutoMemoryRoot(projectRoot)
+            : getTeamAutoMemoryRoot(projectRoot);
+      const relativePaths = ['..notes.md', '..archive/note.md'];
+      const files = relativePaths.map((relative) => path.join(root, relative));
+      const seen: MemoryChangedNotice[] = [];
+      const stop = registerMemoryChangedListener(projectRoot, (change) => {
+        seen.push(change);
+      });
+      try {
+        for (const file of files) {
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          await fs.writeFile(file, 'before');
+        }
+        await notifyMemoryFileChange(files, projectRoot, 'create', stop.id);
+        expect(seen).toEqual([
+          expect.objectContaining({
+            scope,
+            operation: 'create',
+            relativePaths,
+          }),
+        ]);
+        seen.length = 0;
+        await withCoalescedMemoryChanges(projectRoot, stop.id, async () => {
+          for (const file of files) {
+            await fs.writeFile(file, 'after');
+            await notifyMemoryFileChange(file, projectRoot, 'update', stop.id);
+          }
+          expect(seen).toEqual([]);
+        });
+        expect(seen).toEqual([
+          expect.objectContaining({
+            scope,
+            operation: 'update',
+            relativePaths: expect.arrayContaining(relativePaths),
+          }),
+        ]);
+        expect(seen[0]!.relativePaths).toHaveLength(relativePaths.length);
+        seen.length = 0;
+        await withCoalescedMemoryChanges(projectRoot, stop.id, async () => {
+          for (const file of files) await fs.unlink(file);
+        });
+        expect(seen).toEqual([
+          expect.objectContaining({
+            scope,
+            operation: 'delete',
+            relativePaths: expect.arrayContaining(relativePaths),
+          }),
+        ]);
+        expect(seen[0]!.relativePaths).toHaveLength(relativePaths.length);
+        expect(
+          describeMemoryFileChange(
+            path.join(root, '..', 'outside.md'),
+            projectRoot,
+          ),
+        ).toBeUndefined();
+      } finally {
+        stop();
+      }
+    },
+  );
+
   it('keeps secondary project roots out of configured-root document keys', async () => {
     const projectRoot = await setup();
     const originalLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];

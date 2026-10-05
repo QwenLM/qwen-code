@@ -15,7 +15,6 @@ import {
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
   isMemoryDocumentFilename,
-  isTeamAutoMemPath,
   TEAM_AUTO_MEMORY_DIRNAME,
 } from './paths.js';
 import { QWEN_DIR, realpathNearestExisting } from '../utils/paths.js';
@@ -156,7 +155,8 @@ function relativeInside(root: string, filePath: string): string | undefined {
   const relative = path.relative(path.resolve(root), path.resolve(filePath));
   if (
     relative === '' ||
-    relative.startsWith('..') ||
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
     path.isAbsolute(relative)
   ) {
     return undefined;
@@ -230,7 +230,8 @@ export function describeMemoryFileChange(
     if (candidate.scope === 'team') {
       if (
         !isTeamRootInRepository(candidate.root, resolvedRoot) ||
-        !isTeamAutoMemPath(absolutePath, projectRoot)
+        relativeInside(resolvedRoot, realpathNearestExisting(absolutePath)) ===
+          undefined
       ) {
         continue;
       }
@@ -325,7 +326,11 @@ async function isTreeVisible(root: string, filePath: string): Promise<boolean> {
     const relative = path.relative(resolvedRoot, current);
     // '' is a case-divergent spelling of the root itself.
     if (relative === '') return true;
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    if (
+      relative === '..' ||
+      relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative)
+    ) {
       return false;
     }
     const stat = await fs.lstat(current).catch(() => undefined);
