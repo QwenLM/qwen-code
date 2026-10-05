@@ -19,7 +19,7 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, lstatSync: vi.fn(actual.lstatSync) };
 });
 
-it('rejects an unavailable filesystem root instead of repeatedly checking its parent', () => {
+it('stops at an unavailable filesystem root without repeatedly checking its parent', () => {
   const managed = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-root-'));
   const root = path.parse(path.resolve(managed)).root;
   const writable = path.join(root, 'qwen-unavailable-root', 'state');
@@ -50,11 +50,7 @@ it('rejects an unavailable filesystem root instead of repeatedly checking its pa
     fs.rmSync(managed, { recursive: true, force: true });
   }
   expect(rootChecks).toBe(1);
-  expect(failure).toBeInstanceOf(Error);
-  expect((failure as Error).message).toContain('Invalid --managed-extensions');
-  expect((failure as Error).message).toContain(
-    `filesystem root "${root}" is unavailable`,
-  );
+  expect(failure).toBeUndefined();
 });
 
 it('rejects case aliases of managed state roots on case-insensitive filesystems', () => {

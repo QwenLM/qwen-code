@@ -170,11 +170,7 @@ function canonicalDirectory(directory: string): string {
       return path.join(fs.realpathSync.native(current), ...missing);
     }
     const parent = path.dirname(current);
-    if (parent === current) {
-      throw new Error(
-        `Invalid --managed-extensions: cannot resolve directory "${directory}" because filesystem root "${current}" is unavailable.`,
-      );
-    }
+    if (parent === current) return path.join(current, ...missing);
     missing.unshift(path.basename(current));
     current = parent;
   }
