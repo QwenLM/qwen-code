@@ -134,7 +134,7 @@ L3 返回 `workspace_lifecycle_journal_unverified`。未来 compaction 必须
 
 ## 4. 兼容与启用
 
-在已有 V35 工具配置及 V36–V39 journal/查询迁移之后新增 V40 生命周期迁移，
+在已有 V35 工具配置、V36–V39 journal/查询迁移及 V40 创建者迁移之后新增 V41 生命周期迁移，
 保留这些迁移和 V32。
 升级前已接纳的操作沿用原协议与证据，不产生新 Hook 身份。
 仍存活的 protocol-zero close attachment 仅在持久 close claim 有效时保留原 DELETE
@@ -143,6 +143,11 @@ L3 返回 `workspace_lifecycle_journal_unverified`。未来 compaction 必须
 启用 L3 准入前升级全部 coordinator 和 Harness。缺少新协议能力时拒绝准入，
 不回退到旧 DELETE。存在未完成 L3 操作时不回滚到旧 coordinator。
 L2 CLOSED/ARCHIVED 删除继续独立于 Harness 可用性。
+
+读取生命周期或普通 writer 状态前，先执行已配置的 Store writer 凭证校验。
+生命周期加载原样传递签发的凭证及传输策略。cleanup 仍须使用原 writer 和当前
+claim；过期或 SEALED 的 cleanup grant 不绕过凭证校验。凭证策略变更可能使恢复
+持续阻塞，不能因此创建替代 writer 或 Runtime。
 
 实施顺序：协议与围栏；限定权限和回执；close 语义；ACTIVE delete 准入与
 capability；恢复验证。同步 canonical OpenAPI 和相关中英文设计。

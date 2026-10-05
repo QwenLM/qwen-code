@@ -174,8 +174,8 @@ accept those Sessions; this PR does not implement compaction recovery.
 
 ## 4. Compatibility and rollout
 
-Add lifecycle migration V40 after the existing V35 tool-profile and V36–V39
-journal/query migrations; preserve those migrations and V32. Historical admitted operations retain their
+Add lifecycle migration V41 after the existing V35 tool-profile, V36–V39
+journal/query and V40 creator migrations; preserve those migrations and V32. Historical admitted operations retain their
 original protocol and evidence, without new Hook identities.
 Live protocol-zero close attachments retain their legacy DELETE and original
 Hook control path only while their persisted close claim is valid. Ordinary
@@ -187,6 +187,13 @@ coordinators and Harnesses before enabling new L3 admission. A missing protocol
 capability rejects admission rather than falling back to legacy DELETE. Do not
 roll back to old coordinators while L3 operations remain unfinished. L2
 CLOSED/ARCHIVED deletion remains independent of Harness availability.
+
+The configured Store writer-credential policy applies before lifecycle or
+ordinary writer state is read. Lifecycle loads carry the provisioned credential
+and transport policy unchanged. Cleanup still requires the original writer and
+current claim; an expired or SEALED cleanup grant does not bypass credential
+validation. A credential-policy change may leave recovery blocked and cannot
+justify a replacement writer or Runtime.
 
 Implementation order: protocol and fences; scoped authority and receipts;
 close semantics; ACTIVE delete admission and capability; recovery validation.

@@ -144,6 +144,9 @@ public class ManagedSessionStore {
     public void authorizeLifecycle(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        validateScope(tenantId, request.workspaceId(), sessionId);
+        requireCredential(tenantId, request.workspaceId(), sessionId,
+                writerToken);
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenantId, sessionId);
@@ -184,6 +187,9 @@ public class ManagedSessionStore {
     @Transactional
     public void authorizeOrdinary(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
+        validateScope(tenantId, request.workspaceId(), sessionId);
+        requireCredential(tenantId, request.workspaceId(), sessionId,
+                writerToken);
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         if (!"legacy-close".equals(request.kind()) || !WorkspaceLifecycleStore.legacyClose(jdbc, tenantId, sessionId)) {
@@ -268,15 +274,15 @@ public class ManagedSessionStore {
     @Transactional
     public WriterGrant acquireWriter(String tenantId, String sessionId, String writerToken,
             AcquireWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        validateScope(tenantId, request.workspaceId(), sessionId);
+        requireCredential(tenantId, request.workspaceId(), sessionId,
+                writerToken);
         checkLifecycleWriter(tenantId, sessionId, authority);
         if (authority != null) {
             WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, false);
         } else {
             requireOrdinaryAdmission(tenantId, sessionId);
         }
-        validateScope(tenantId, request.workspaceId(), sessionId);
-        requireCredential(tenantId, request.workspaceId(), sessionId,
-                writerToken);
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
         ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
@@ -374,10 +380,10 @@ public class ManagedSessionStore {
     @Transactional
     public WriterGrant renewWriter(String tenantId, String sessionId, String writerToken,
             RenewWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        checkLifecycleWriter(tenantId, sessionId, authority);
         validateScope(tenantId, request.workspaceId(), sessionId);
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
+        checkLifecycleWriter(tenantId, sessionId, authority);
         validateStableId(request.writerId(), "writerId");
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
         validateLeaseMillis(request.leaseMillis());
@@ -407,10 +413,10 @@ public class ManagedSessionStore {
     @Transactional
     public SealReceipt sealWriter(String tenantId, String sessionId, String writerToken,
             SealWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        checkLifecycleWriter(tenantId, sessionId, authority);
         validateScope(tenantId, request.workspaceId(), sessionId);
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
+        checkLifecycleWriter(tenantId, sessionId, authority);
         validateStableId(request.writerId(), "writerId");
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
@@ -484,10 +490,10 @@ public class ManagedSessionStore {
     @Transactional
     public CommitReceipt commit(String tenantId, String sessionId, String writerToken,
             CommitTransactionRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        checkLifecycleWriter(tenantId, sessionId, authority);
         validateScope(tenantId, request.workspaceId(), sessionId);
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
+        checkLifecycleWriter(tenantId, sessionId, authority);
         validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);

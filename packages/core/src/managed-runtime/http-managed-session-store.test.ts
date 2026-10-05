@@ -169,7 +169,7 @@ describe('HTTP Managed Session store', () => {
       operation: string | null;
     }> = [];
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'https://session-store.test',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -229,7 +229,7 @@ describe('HTTP Managed Session store', () => {
     const server = new FakeManagedSessionStore();
     const authorize = vi.fn();
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'https://session-store.test',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
