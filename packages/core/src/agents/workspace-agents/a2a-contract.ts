@@ -14,18 +14,15 @@
  * wins, because it is what a real client links against.
  *
  * Nothing here talks to the network. It is the vocabulary the transport layer
- * is held to, kept separate so the mapping can be exercised without it.
- *
- * The unit mapping (session multi-agent, see
- * docs/plans/2026-10-05-session-multi-agent-redesign.md): an A2A `Task` is ONE
- * agent run inside a chat session the daemon created for the caller, and the
- * A2A `contextId` is that chat session's id. A further message with the same
- * `contextId` is another run in the same session, so the agent's native
- * session — and what it remembers — carries over.
+ * will be held to when P2 builds it, kept separate so the mapping can be
+ * exercised before any of that exists.
  */
 
-import type { SessionAgentRunStatus } from '../session-agents/contract.js';
-import { isValidAgentName } from './store.js';
+import {
+  LIVE_RUN_STATUSES,
+  outstandingCloseObligations,
+} from './thread-status.js';
+import { isThreadTerminal, type Thread, type ThreadStatus } from './types.js';
 
 /**
  * Wire version, sent and matched in the `A2A-Version` header. `Major.Minor`
@@ -54,17 +51,18 @@ export const A2A_CONTENT_TYPE = 'application/a2a+json';
 /**
  * Our protocol extension, declared in `AgentCapabilities.extensions`.
  *
- * A2A has nowhere in its data model for the two things worth carrying across
- * the boundary, so both ride here rather than being smuggled into a field
- * that means something else:
+ * A2A has nowhere in its data model for either of the two things we must carry
+ * across the boundary, so both ride here rather than being smuggled into a
+ * field that means something else:
  *
- *   - the local run status, which tells a caller seeing `INPUT_REQUIRED`
- *     whether more input would help (it would not for `awaiting_approval`:
- *     only the workspace owner can answer a tool approval);
+ *   - the run frame that tells a dispatched turn which thread it acts on. The
+ *     local channel for this is `_meta` on the ACP prompt, which is a daemon
+ *     trust boundary and deliberately not reachable from outside; an external
+ *     task needs its own, and `Task.metadata` under this URI is it.
  *   - token usage, which A2A 1.0 does not model at all.
  *
  * `required: false` when declared: a client that ignores the extension still
- * gets correct Task and Message semantics, it just cannot see the extras.
+ * gets correct Task and Message semantics, it just cannot see usage.
  */
 export const QWEN_A2A_EXTENSION_URI =
   'https://qwenlm.github.io/qwen-code/a2a/workspace-agents/v1';
@@ -86,50 +84,99 @@ export type A2ATaskState =
   | 'TASK_STATE_CANCELED'
   | 'TASK_STATE_REJECTED';
 
-/** States after which a task never changes again. */
-export function isTerminalA2ATaskState(state: A2ATaskState): boolean {
-  return (
-    state === 'TASK_STATE_COMPLETED' ||
-    state === 'TASK_STATE_FAILED' ||
-    state === 'TASK_STATE_CANCELED' ||
-    state === 'TASK_STATE_REJECTED'
-  );
-}
-
 /**
- * Session agent run status → A2A task state.
+ * Local thread status → A2A task state.
  *
- * `awaiting_approval` maps to `INPUT_REQUIRED`: the run is not progressing
- * and a person has to unblock it. That person is the workspace owner, who
- * answers the tool approval in the chat session in WebShell; the A2A caller
- * cannot, and sending more input does not answer it. `localStatus` in the
- * extension metadata tells the two apart.
+ * The unit mapping is deliberate and is the load-bearing decision here: an A2A
+ * `Task` is one local `Thread`, not one `ThreadRun`. A Task survives
+ * `INPUT_REQUIRED` and further input, which is exactly a thread being answered
+ * and worked again; a run is a single turn and has no protocol counterpart. An
+ * A2A `contextId` is then the thread tree — `rootThreadId` — since the spec
+ * calls it "the contextual collection of interactions", which is what a parent
+ * thread and its splits are.
  *
- * `offline` (the runtime that held the run went away) is a failure from the
- * caller's side: the run will not resume.
+ * `in_review` maps to `INPUT_REQUIRED` rather than `WORKING`: the work is not
+ * progressing and it is a person who unblocks it, which is what that state
+ * means to a caller deciding whether to wait. The distinction between "asked a
+ * question" and "submitted for review" is lost across the boundary; it is
+ * preserved in the extension metadata for clients that care.
  */
-export function toA2ATaskState(status: SessionAgentRunStatus): A2ATaskState {
+export function toA2ATaskState(status: ThreadStatus): A2ATaskState {
   switch (status) {
-    case 'queued':
+    case 'open':
       return 'TASK_STATE_SUBMITTED';
-    case 'running':
+    case 'in_progress':
       return 'TASK_STATE_WORKING';
-    case 'awaiting_approval':
+    case 'blocked':
+    case 'in_review':
       return 'TASK_STATE_INPUT_REQUIRED';
-    case 'completed':
+    case 'done':
       return 'TASK_STATE_COMPLETED';
-    case 'failed':
-    case 'offline':
-      return 'TASK_STATE_FAILED';
     case 'cancelled':
       return 'TASK_STATE_CANCELED';
     default: {
-      // Exhaustiveness: a new run status must decide what it looks like to a
+      // Exhaustiveness: a new ThreadStatus must decide what it looks like to a
       // caller, rather than silently arriving as some default.
       const unreachable: never = status;
-      throw new Error(`Unmapped run status: ${String(unreachable)}`);
+      throw new Error(`Unmapped thread status: ${String(unreachable)}`);
     }
   }
+}
+
+/**
+ * The A2A task state an external caller sees.
+ *
+ * `toA2ATaskState` alone never reaches a terminal state for one: `done` is set
+ * only by a local person, a quiescent thread with nothing outstanding stays
+ * `in_progress`, and the `INPUT_REQUIRED` it would report is a dead end
+ * because continuing a task is refused. So once no run is live the outcome is
+ * read from what the runs left behind: a failure, a cancellation, or a run
+ * parked by an opt-out is `FAILED`; anything else — an answer, a summary for
+ * review, a question — is `COMPLETED`, carrying the agent's last post. A
+ * local person can still reply afterwards; the caller sees that as new work
+ * only through the extension metadata.
+ */
+export function toExternalA2ATaskState(
+  thread: Thread,
+  descendants: readonly Thread[] = [],
+): A2ATaskState {
+  if (thread.status === 'done' || thread.status === 'cancelled')
+    return toA2ATaskState(thread.status);
+  const tree = [thread, ...descendants];
+  if (
+    tree.some((member) =>
+      member.runs.some((run) => LIVE_RUN_STATUSES.has(run.status)),
+    ) ||
+    descendants.some((member) =>
+      member.outbox.some(
+        (event) => event.kind === 'parent_report' && event.status === 'pending',
+      ),
+    )
+  )
+    return 'TASK_STATE_WORKING';
+  if (thread.runs.length === 0) return 'TASK_STATE_SUBMITTED';
+  const outstanding = tree
+    .filter((member) => !isThreadTerminal(member.status))
+    .flatMap(outstandingCloseObligations);
+  const failed = outstanding.some(
+    (obligation) =>
+      obligation.kind === 'failure' ||
+      obligation.kind === 'cancelled' ||
+      obligation.kind === 'stranded' ||
+      obligation.kind === 'unclosed',
+  );
+  if (failed) return 'TASK_STATE_FAILED';
+  // Decided from the obligations, not the status: `blocked` is also what a
+  // question or a review outranking a live wait resolves to. A wait keeps the
+  // task working while its subtask is live (`in_progress`); only a wait that
+  // is all that is left, with its subtask gone, is stranded.
+  if (outstanding.some((obligation) => obligation.kind === 'waiting')) {
+    if (thread.status === 'in_progress') return 'TASK_STATE_WORKING';
+    if (outstanding.every((obligation) => obligation.kind === 'waiting')) {
+      return 'TASK_STATE_FAILED';
+    }
+  }
+  return 'TASK_STATE_COMPLETED';
 }
 
 /**
@@ -141,11 +188,11 @@ export function toA2ATaskState(status: SessionAgentRunStatus): A2ATaskState {
  * collide with — or deliberately shadow — another's submission by reusing an
  * id it can see or guess.
  *
- * Must be persisted before the work is started. A key written afterwards
- * cannot answer the question it exists for, which is whether a retry arriving
- * mid-acceptance is the same request; and comparing a stored key against a
- * differing body is what makes "same key, different content" a refusal
- * rather than a silent overwrite.
+ * Must be computed and persisted in the same write that accepts the work. A
+ * key written afterwards cannot answer the question it exists for, which is
+ * whether a retry arriving mid-acceptance is the same request; and comparing a
+ * stored key against a differing body is what makes "same key, different
+ * content" a refusal rather than a silent overwrite.
  */
 export function externalRequestKey(input: {
   /** Stable id of the authenticated caller, from the transport's auth. */
@@ -169,42 +216,21 @@ export function externalRequestKey(input: {
     .join('');
 }
 
-/**
- * Any `@token` the mention parser could read as an address: an `@` not
- * preceded by an ASCII word character or a dot, followed by a letter or
- * digit. A superset of `MENTION_PATTERN` in mentions.ts, so neutralizing
- * every match leaves nothing the parser resolves.
- */
-const MENTION_LIKE_AT = /(?<![A-Za-z0-9_.])@(?=[\p{L}\p{N}])/gu;
-
-/** U+2060 WORD JOINER: invisible, and not a letter or digit. */
-const WORD_JOINER = '⁠';
-
-/**
- * The chat-session post an external message becomes.
- *
- * A grant names one agent, so an external caller addresses that agent only:
- * the post is `@<agent> <text>`, and every `@name` the caller wrote is
- * neutralized (a word joiner after the `@`) so it cannot wake another agent
- * of this workspace. The text still reads the same to people and models.
- */
-export function a2aMentionText(agentName: string, text: string): string {
-  if (!isValidAgentName(agentName)) {
-    throw new Error(`Invalid agent name: ${JSON.stringify(agentName)}`);
-  }
-  return `@${agentName} ${text.replace(MENTION_LIKE_AT, `@${WORD_JOINER}`)}`;
-}
-
-/** Everything the extension publishes about a task, for `Task.metadata`. */
+/** Everything the extension publishes about a thread, for `Task.metadata`. */
 export interface QwenA2ATaskMetadata {
-  /**
-   * The local run status. Distinguishes `awaiting_approval` (the workspace
-   * owner must approve a tool call) from other `INPUT_REQUIRED` causes, and
-   * `offline` from `failed`. Absent once the run is no longer tracked.
-   */
-  localStatus?: SessionAgentRunStatus;
-  /** Why the run failed, when it did. */
-  error?: string;
+  /** Distinguishes `blocked` from `in_review`, which A2A merges. */
+  localStatus: ThreadStatus;
   /** Absent when this daemon has no figure; never reported as 0 for unknown. */
   tokensUsed?: number;
+  rootThreadId: string;
+}
+
+export function toQwenA2ATaskMetadata(thread: Thread): QwenA2ATaskMetadata {
+  return {
+    localStatus: thread.status,
+    rootThreadId: thread.rootThreadId,
+    ...(typeof thread.tokensUsed === 'number'
+      ? { tokensUsed: thread.tokensUsed }
+      : {}),
+  };
 }

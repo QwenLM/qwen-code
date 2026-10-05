@@ -16,6 +16,16 @@ import type {
   JoinToken,
 } from './add-runtime-dialog';
 import type { AgentShare, AgentShareSummary } from './share-agent-dialog';
+import type { SessionSquadView } from '@qwen-code/sdk/daemon';
+
+/** Body of a squad create; on update, `null` clears a text field. */
+export interface SquadInput {
+  name: string;
+  description: string | null;
+  instructions: string | null;
+  leaderAgentId: string;
+  members: Array<{ agentId: string; role?: string }>;
+}
 
 /** Agent roster, runtimes, enrollment and sharing for one workspace. */
 export interface ThreadsApi {
@@ -37,6 +47,12 @@ export interface ThreadsApi {
   deleteAgent(id: string): Promise<unknown>;
   setAgentEnabled(id: string, enabled: boolean): Promise<unknown>;
   updateAgent(id: string, patch: AgentConfigPatch): Promise<unknown>;
+  /** Squads; absent on a daemon without them. */
+  listSquads?(): Promise<{ squads: SessionSquadView[] }>;
+  createSquad?(input: SquadInput): Promise<unknown>;
+  updateSquad?(id: string, input: Partial<SquadInput>): Promise<unknown>;
+  /** Retires the squad (it keeps its name and history). */
+  retireSquad?(id: string): Promise<unknown>;
 }
 
 export function createThreadsHttpApi(
@@ -100,5 +116,14 @@ export function createThreadsHttpApi(
         method: 'PATCH',
         body: JSON.stringify(patch),
       }),
+    listSquads: () => request('/squads'),
+    createSquad: (input) => post('/squads', input),
+    updateSquad: (id, input) =>
+      request(`/squads/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(input),
+      }),
+    retireSquad: (id) =>
+      request(`/squads/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   };
 }

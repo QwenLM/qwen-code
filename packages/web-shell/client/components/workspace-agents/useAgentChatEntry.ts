@@ -16,6 +16,7 @@ import {
   type SessionAgentsApi,
 } from './session-agents-api';
 import type { WorkspaceAgentSummaryView } from './ThreadsPage';
+import type { SessionSquadView } from '@qwen-code/sdk/daemon';
 
 type Submit = ComponentProps<typeof ChatEditor>['onSubmit'];
 
@@ -63,6 +64,44 @@ export function resolveMentionedAgents(
       })
       .sort((a, b) => b.name.length - a.name.length)[0];
     if (agent && !resolved.includes(agent)) resolved.push(agent);
+  }
+  return resolved;
+}
+
+/** A 32px "people" mask: squads get an icon in the picker, agents none. */
+export const SQUAD_PICKER_ICON =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAVklEQVR42u2TMQ4AIAgD+f+ncXXRgKFWTC/pai8CZkKIJvgi1PKdRKlgRgDyU20ETkb1lwD0WqIPU88VdoaCOlsPhlo+S5QJOijU8rAEXeDGrggh3mEAQPbbJbEAqj0AAAAASUVORK5CYII=';
+
+/** Squads that can take a mention: not retired, leader able to run. */
+function engageableSquads(
+  squads: readonly SessionSquadView[],
+): SessionSquadView[] {
+  return squads.filter((squad) => !squad.retiredAt && !squad.leaderIssue);
+}
+
+/**
+ * The squads a message addresses, by the same token rules as
+ * {@link resolveMentionedAgents}. A token that names an agent exactly is the
+ * agent's, as on the daemon.
+ */
+export function resolveMentionedSquads(
+  tokens: readonly string[],
+  squads: readonly SessionSquadView[],
+): SessionSquadView[] {
+  const resolved: SessionSquadView[] = [];
+  for (const token of tokens) {
+    const squad = engageableSquads(squads)
+      .filter((candidate) => {
+        const lowerName = candidate.name.toLowerCase();
+        const rest = token.slice(lowerName.length);
+        return (
+          token.startsWith(lowerName) &&
+          !/^[a-z0-9_-]/.test(rest) &&
+          !/^[\p{Script=Latin}\p{Nd}]/u.test(rest)
+        );
+      })
+      .sort((a, b) => b.name.length - a.name.length)[0];
+    if (squad && !resolved.includes(squad)) resolved.push(squad);
   }
   return resolved;
 }
@@ -130,6 +169,10 @@ export function useAgentChatEntry({
     | { api: unknown; at: number; agents: Promise<WorkspaceAgentSummaryView[]> }
     | undefined
   >(undefined);
+  const squadRoster = useRef<
+    | { api: unknown; at: number; squads: Promise<SessionSquadView[]> }
+    | undefined
+  >(undefined);
   const api = useMemo(
     () =>
       enabled && cwd ? createThreadsHttpApi(baseUrl, token, cwd) : undefined,
@@ -139,6 +182,7 @@ export function useAgentChatEntry({
   activeApi.current = api;
   // Names known so far, so a typed @query can be claimed without waiting.
   const agentNames = useRef<string[]>([]);
+  const squadNames = useRef<string[]>([]);
   const [pending, setPending] = useState(false);
   const busy = useRef(false);
   const submission = useRef(0);
@@ -166,14 +210,35 @@ export function useAgentChatEntry({
     });
     return agents;
   }, [api]);
+  // Squads, cached like the roster. A daemon without squad routes has none.
+  const listSquads = useCallback((): Promise<SessionSquadView[]> => {
+    if (!api?.listSquads) return Promise.resolve([]);
+    const cached = squadRoster.current;
+    if (cached?.api === api && Date.now() - cached.at < ROSTER_TTL_MS)
+      return cached.squads;
+    const squads = api.listSquads().then(
+      (result) => result.squads,
+      (): SessionSquadView[] => [],
+    );
+    squadRoster.current = { api, at: Date.now(), squads };
+    void squads.then((list) => {
+      if (squadRoster.current?.squads !== squads) return;
+      squadNames.current = engageableSquads(list).map((squad) =>
+        squad.name.toLowerCase(),
+      );
+    });
+    return squads;
+  }, [api]);
   // Load the roster up front so the first typed @name already resolves.
   useEffect(() => {
     submission.current += 1;
     busy.current = false;
     setPending(false);
     agentNames.current = [];
+    squadNames.current = [];
     listAgents().catch(() => {});
-  }, [listAgents]);
+    void listSquads();
+  }, [listAgents, listSquads]);
   const providers = useMemo<WebShellAtProvider[]>(
     () =>
       api
@@ -183,8 +248,8 @@ export function useAgentChatEntry({
               label: t('collab.mention.provider'),
               claimsTypedQuery: (query) => {
                 const lower = query.toLowerCase();
-                return agentNames.current.some((name) =>
-                  name.startsWith(lower),
+                return [...agentNames.current, ...squadNames.current].some(
+                  (name) => name.startsWith(lower),
                 );
               },
               search: async ({ query }) => [
@@ -213,6 +278,23 @@ export function useAgentChatEntry({
                     ...(agent.color ? { iconColor: agent.color } : {}),
                     insertText: `@${agent.name} `,
                   })),
+                ...engageableSquads(await listSquads())
+                  .filter((squad) =>
+                    squad.name.toLowerCase().includes(query.toLowerCase()),
+                  )
+                  .map((squad) => ({
+                    id: `squad:${squad.id}`,
+                    label: squad.name,
+                    // "Leader alice · 2 member(s)".
+                    subtitle: t('collab.squad.summary', {
+                      leader: squad.leaderName ?? '—',
+                      count: squad.members.length,
+                    }),
+                    description: t('collab.mention.squad'),
+                    icon: SQUAD_PICKER_ICON,
+                    iconMode: 'mask' as const,
+                    insertText: `@${squad.name} `,
+                  })),
                 ...(canCreateAgent
                   ? [
                       {
@@ -226,7 +308,7 @@ export function useAgentChatEntry({
             },
           ]
         : [],
-    [api, listAgents, canCreateAgent, t],
+    [api, listAgents, listSquads, canCreateAgent, t],
   );
   // Read through refs so a new callback each render keeps `submit` stable.
   const ensureSessionRef = useRef(ensureSession);
@@ -248,12 +330,16 @@ export function useAgentChatEntry({
         try {
           // No roster (collaboration off here, or the daemon unreachable)
           // means no agent can be addressed: send it as an ordinary message.
-          const agents = await listAgents().catch(
-            (): WorkspaceAgentSummaryView[] => [],
-          );
+          const [agents, squads] = await Promise.all([
+            listAgents().catch((): WorkspaceAgentSummaryView[] => []),
+            listSquads(),
+          ]);
           if (activeApi.current !== api || submission.current !== submissionId)
             return;
-          if (resolveMentionedAgents(tokens, agents).length === 0) {
+          if (
+            resolveMentionedAgents(tokens, agents).length === 0 &&
+            resolveMentionedSquads(tokens, squads).length === 0
+          ) {
             let committed = false;
             const accepted = onSubmit(
               text,
@@ -300,11 +386,13 @@ export function useAgentChatEntry({
           // is running) clears the composer, but the @ message only appears
           // once that turn settles and the record is written; until then only
           // the agents' run cards show. A local echo would double it.
-          await routes.mention(sessionId, {
+          const result = await routes.mention(sessionId, {
             text,
             clientMessageId: newClientMessageId(),
           });
           commit?.();
+          // Posted, but a squad in it could not start (its leader cannot run).
+          if (result?.squadError) onErrorRef.current(result.squadError);
         } catch (error) {
           onErrorRef.current(
             error instanceof Error ? error.message : String(error),
@@ -318,7 +406,7 @@ export function useAgentChatEntry({
       })();
       return false;
     },
-    [api, sessionApi, cwd, baseUrl, token, onSubmit, listAgents, t],
+    [api, sessionApi, cwd, baseUrl, token, onSubmit, listAgents, listSquads, t],
   );
   return { providers, submit, pending };
 }

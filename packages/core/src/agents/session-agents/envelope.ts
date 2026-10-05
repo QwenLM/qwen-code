@@ -102,6 +102,12 @@ export function formatAgentMessageModelText(
   if (payload.author.program) {
     attributes.push(`program="${escapeAttribute(payload.author.program)}"`);
   }
+  if (payload.author.squadName) {
+    attributes.push(`squad="${escapeAttribute(payload.author.squadName)}"`);
+  }
+  if (payload.squadOutcome) {
+    attributes.push(`outcome="${escapeAttribute(payload.squadOutcome)}"`);
+  }
   let body = payload.displayText;
   if (payload.status !== 'completed') {
     const reason = payload.error?.trim();

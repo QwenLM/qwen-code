@@ -20,7 +20,10 @@ import type { WorkspaceAgent } from '../workspace-agents/types.js';
 import {
   DEFAULT_AGENT_CHAIN_LIMIT,
   DEFAULT_AGENT_TOKEN_BUDGET,
+  type SessionSquad,
+  type SessionSquadLeaderIssue,
 } from './contract.js';
+import { squadLeaderIssue } from './squad-store.js';
 
 export interface MentionTargets {
   /** Addressable agents to start, in first-mention order, deduplicated. */
@@ -60,6 +63,75 @@ export function resolveMentionTargets(
     else unavailable.push(agent);
   }
   return { agents, unavailable, unknown: parsed.unknown, selfMentioned };
+}
+
+/** A mentioned squad that cannot be started. */
+export interface UnavailableSquadTarget {
+  squad: SessionSquad;
+  reason: 'retired' | `leader_${SessionSquadLeaderIssue}`;
+}
+
+export interface MentionTargetsWithSquads extends MentionTargets {
+  /** Squads to engage (each runs its leader in squad mode), in mention order. */
+  squads: SessionSquad[];
+  /** Mentioned squads that are retired or whose leader cannot run. */
+  unavailableSquads: UnavailableSquadTarget[];
+}
+
+/** Prefix that keeps squad ids apart from agent ids in one parse. */
+const SQUAD_TOKEN_ID_PREFIX = 'squad\u0000';
+
+/**
+ * {@link resolveMentionTargets}, plus `@squadName`. Squads and agents share
+ * one namespace (the squad store refuses a squad named like an agent), so
+ * both are parsed in one pass and the longest-name rule applies across them;
+ * should an agent and a squad still share a name, the agent wins.
+ */
+export function resolveMentionTargetsWithSquads(
+  text: string,
+  roster: readonly WorkspaceAgent[],
+  squads: readonly SessionSquad[],
+  authorAgentId?: string,
+): MentionTargetsWithSquads {
+  const squadEntries: WorkspaceAgent[] = squads.map((squad) => ({
+    id: `${SQUAD_TOKEN_ID_PREFIX}${squad.id}`,
+    name: squad.name,
+    createdAt: squad.createdAt,
+  }));
+  const parsed = parseMentions(text, [...roster, ...squadEntries]);
+  // Only agents the combined parse picked: "@迁移组" names the squad 迁移组,
+  // not an agent 迁移 followed by more Han text.
+  const picked = new Set(parsed.ids);
+  const agentTargets = resolveMentionTargets(
+    text,
+    roster.filter((agent) => picked.has(agent.id)),
+    authorAgentId,
+  );
+  const byId = new Map(squads.map((squad) => [squad.id, squad]));
+  const engaged: SessionSquad[] = [];
+  const unavailableSquads: UnavailableSquadTarget[] = [];
+  for (const id of parsed.ids) {
+    if (!id.startsWith(SQUAD_TOKEN_ID_PREFIX)) continue;
+    const squad = byId.get(id.slice(SQUAD_TOKEN_ID_PREFIX.length));
+    if (!squad) continue;
+    if (squad.retiredAt !== undefined) {
+      unavailableSquads.push({ squad, reason: 'retired' });
+      continue;
+    }
+    const issue = squadLeaderIssue(squad, roster);
+    if (issue) {
+      unavailableSquads.push({ squad, reason: `leader_${issue}` });
+      continue;
+    }
+    engaged.push(squad);
+  }
+  return {
+    ...agentTargets,
+    // A typo is only "unknown" when it matches neither an agent nor a squad.
+    unknown: parsed.unknown,
+    squads: engaged,
+    unavailableSquads,
+  };
 }
 
 /** Who wrote the post that triggers a run. */

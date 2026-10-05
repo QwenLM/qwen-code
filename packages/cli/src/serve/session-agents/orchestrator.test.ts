@@ -16,6 +16,7 @@ import type {
   SessionAgentPermissionPrompt,
   SessionAgentProgram,
   SessionAgentRunFrame,
+  SessionSquad,
 } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 import type { ConversationRecordLike } from '@qwen-code/qwen-code-core/agents/session-agents/conversation-delta.js';
 import {
@@ -26,6 +27,7 @@ import type { AgentAdapterContext } from './adapters/index.js';
 import { SessionAgentEventHub } from './events.js';
 import {
   SESSION_AGENT_RESTARTED_ERROR,
+  SessionAgentError,
   SessionAgentOrchestrator,
   type SessionAgentBridge,
   type SessionAgentOrchestratorOptions,
@@ -879,5 +881,282 @@ describe('SessionAgentOrchestrator', () => {
     await expect(
       orchestrator.postFromAgent(SESSION, 'ag_q', first, 'stale'),
     ).rejects.toMatchObject({ status: 401 });
+  });
+});
+
+describe('SessionAgentOrchestrator squads', () => {
+  const lead: WorkspaceAgent = {
+    id: 'ag_lead',
+    name: 'lead',
+    createdAt: 1,
+    execution: { mode: 'local', provider: 'claude' },
+  };
+  const squad: SessionSquad = {
+    id: 'sq_1',
+    name: 'crew',
+    instructions: 'Keep it short.',
+    leaderAgentId: 'ag_lead',
+    members: [{ agentId: 'ag_alice', role: 'writes code' }, { agentId: 'ag_bob' }],
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  function squadHarness(
+    options: {
+      squads?: SessionSquad[];
+      roster?: WorkspaceAgent[];
+      extra?: Partial<SessionAgentOrchestratorOptions>;
+    } = {},
+  ) {
+    const squads = options.squads ?? [squad];
+    const h = harness({
+      roster: options.roster ?? [lead, alice, bob],
+      extra: { readSquads: async () => squads, ...options.extra },
+    });
+    /** The `nth` turn (0-based) run for `agentId`. */
+    const turnOf = (agentId: string, nth = 0) =>
+      h.turns.filter((turn) => turn.context.agentId === agentId)[nth];
+    const messageOf = (agentId: string, nth = 0) =>
+      h.bridge.records.filter(
+        (record) =>
+          record.subtype === 'agent_message' &&
+          (record.systemPayload as { author?: { agentId?: string } })?.author
+            ?.agentId === agentId,
+      )[nth];
+    const engagement = async () => (await fileFor()).squads?.['sq_1'];
+    return { ...h, turnOf, messageOf, engagement };
+  }
+
+  it('runs the leader, wakes it per member reply, and ends on no_action', async () => {
+    const h = squadHarness();
+    const result = await h.orchestrator.mention(SESSION, {
+      text: '@crew fix the login bug',
+      clientMessageId: 'm1',
+    });
+    expect(result.runs).toEqual([
+      { runId: expect.any(String), agentId: 'ag_lead', status: 'queued' },
+    ]);
+    expect(h.bridge.records[0]!.systemPayload).toMatchObject({
+      mentionedAgentIds: [],
+      mentionedSquadIds: ['sq_1'],
+    });
+    const leaderRunId = result.runs[0]!.runId;
+
+    await vi.waitFor(() => expect(h.turnOf('ag_lead')).toBeDefined());
+    const briefing = h.turnOf('ag_lead')!.input.prompt;
+    expect(briefing).toContain('<squad_briefing squad="crew">');
+    expect(briefing).toContain(
+      '- @alice (role: writes code; program: Claude Code; runs on: this computer)',
+    );
+    expect(briefing).toContain('Keep it short.');
+    expect(h.lastFrame(leaderRunId)).toMatchObject({
+      squadId: 'sq_1',
+      squadName: 'crew',
+      author: { agentId: 'ag_lead', squadName: 'crew' },
+    });
+    expect(await h.engagement()).toMatchObject({
+      leaderAgentId: 'ag_lead',
+      active: true,
+    });
+
+    h.turnOf('ag_lead')!.finish({ outputText: '@alice please fix it' });
+    await vi.waitFor(() => expect(h.turnOf('ag_alice')).toBeDefined());
+    // A delegated member's run belongs to the engagement; bob was not asked.
+    const aliceRunId = h.frames.find(
+      (frame) => frame.author.agentId === 'ag_alice',
+    )!.runId;
+    await vi.waitFor(async () =>
+      expect((await h.engagement())?.outstandingRunIds).toEqual([aliceRunId]),
+    );
+    expect(h.lastFrame(aliceRunId)).toMatchObject({
+      squadId: 'sq_1',
+      squadName: 'crew',
+    });
+    expect(h.lastFrame(aliceRunId)!.author.squadName).toBeUndefined();
+    expect(h.messageOf('ag_lead')!.systemPayload).toMatchObject({
+      displayText: '@alice please fix it',
+      author: { squadName: 'crew' },
+    });
+    expect(h.turnOf('ag_bob')).toBeUndefined();
+
+    h.turnOf('ag_alice')!.finish({ outputText: 'Fixed in auth.ts.' });
+    await vi.waitFor(() => expect(h.turnOf('ag_lead', 1)).toBeDefined());
+    const wake = h.turnOf('ag_lead', 1)!.input.prompt;
+    expect(wake).toContain('<squad_briefing squad="crew">');
+    expect(wake).toContain('Fixed in auth.ts.');
+    const aliceRecord = h.messageOf('ag_alice')!;
+    expect(
+      (await fileFor()).runs.find(
+        (run) => run.agentId === 'ag_lead' && run.id !== leaderRunId,
+      ),
+    ).toMatchObject({
+      squadId: 'sq_1',
+      triggerRecordIds: [aliceRecord.uuid],
+      chainDepth: 2,
+    });
+
+    // Nothing left to do: an empty reply is recorded as no_action.
+    h.turnOf('ag_lead', 1)!.finish({ outputText: '   ' });
+    await vi.waitFor(() =>
+      expect(h.messageOf('ag_lead', 1)?.systemPayload).toMatchObject({
+        displayText: '',
+        status: 'completed',
+        squadOutcome: 'no_action',
+        author: { agentId: 'ag_lead', squadName: 'crew' },
+      }),
+    );
+    await vi.waitFor(async () =>
+      expect(await h.engagement()).toMatchObject({
+        active: false,
+        outstandingRunIds: [],
+      }),
+    );
+
+    // After the engagement, a member's reply no longer wakes the leader.
+    await h.orchestrator.mention(SESSION, {
+      text: '@alice one more thing',
+      clientMessageId: 'm2',
+    });
+    await vi.waitFor(() => expect(h.turnOf('ag_alice', 1)).toBeDefined());
+    h.turnOf('ag_alice', 1)!.finish({ outputText: 'Done.' });
+    await vi.waitFor(() => expect(h.messageOf('ag_alice', 1)).toBeDefined());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(h.turnOf('ag_lead', 2)).toBeUndefined();
+  });
+
+  it('coalesces member replies that land while the leader is busy into one wake', async () => {
+    const h = squadHarness();
+    await h.orchestrator.mention(SESSION, {
+      text: '@crew split this',
+      clientMessageId: 'm1',
+    });
+    await vi.waitFor(() => expect(h.turnOf('ag_lead')).toBeDefined());
+    // The leader delegates mid-turn (session_send) and keeps running.
+    h.turnOf('ag_lead')!.input.onEvent({
+      type: 'session_send',
+      text: '@alice front end, @bob back end',
+    });
+    await vi.waitFor(() => {
+      expect(h.turnOf('ag_alice')).toBeDefined();
+      expect(h.turnOf('ag_bob')).toBeDefined();
+    });
+    await vi.waitFor(async () =>
+      expect((await h.engagement())?.outstandingRunIds).toHaveLength(2),
+    );
+    h.turnOf('ag_alice')!.finish({ outputText: 'front done' });
+    h.turnOf('ag_bob')!.finish({ outputText: 'back done' });
+    await vi.waitFor(async () =>
+      expect(
+        (await fileFor()).runs.find(
+          (run) => run.agentId === 'ag_lead' && run.status === 'queued',
+        )?.triggerRecordIds,
+      ).toHaveLength(2),
+    );
+
+    h.turnOf('ag_lead')!.finish({ outputText: 'Delegated.' });
+    await vi.waitFor(() => expect(h.turnOf('ag_lead', 1)).toBeDefined());
+    const wake = h.turnOf('ag_lead', 1)!.input.prompt;
+    expect(wake).toContain('front done');
+    expect(wake).toContain('back done');
+    h.turnOf('ag_lead', 1)!.finish({ outputText: 'Both halves are done.' });
+    await vi.waitFor(async () =>
+      expect((await h.engagement())?.active).toBe(false),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(h.turnOf('ag_lead', 2)).toBeUndefined();
+  });
+
+  it('runs a directly mentioned leader in squad mode while its engagement is active', async () => {
+    const h = squadHarness();
+    await h.orchestrator.mention(SESSION, {
+      text: '@crew go',
+      clientMessageId: 'm1',
+    });
+    await vi.waitFor(() => expect(h.turnOf('ag_lead')).toBeDefined());
+    h.turnOf('ag_lead')!.finish({ outputText: '@bob take it' });
+    await vi.waitFor(() => expect(h.turnOf('ag_bob')).toBeDefined());
+    const direct = await h.orchestrator.mention(SESSION, {
+      text: '@lead how is it going?',
+      clientMessageId: 'm2',
+    });
+    await vi.waitFor(() => expect(h.turnOf('ag_lead', 1)).toBeDefined());
+    expect(h.turnOf('ag_lead', 1)!.input.prompt).toContain('<squad_briefing');
+    expect(h.lastFrame(direct.runs[0]!.runId)).toMatchObject({
+      squadId: 'sq_1',
+    });
+  });
+
+  it('refuses a squad whose leader is unavailable, and records why beside other targets', async () => {
+    const paused: WorkspaceAgent = { ...lead, enabled: false };
+    const h = squadHarness({ roster: [paused, alice, bob] });
+    const refused = await h.orchestrator
+      .mention(SESSION, { text: '@crew do it', clientMessageId: 'm1' })
+      .then(
+        () => undefined,
+        (error: unknown) => error as SessionAgentError,
+      );
+    expect(refused).toBeInstanceOf(SessionAgentError);
+    expect(refused).toMatchObject({ status: 400, code: 'squad_unavailable' });
+    expect(refused!.message).toContain('@crew');
+    expect(h.bridge.records).toHaveLength(0);
+
+    const mixed = await h.orchestrator.mention(SESSION, {
+      text: '@crew and @bob do it',
+      clientMessageId: 'm2',
+    });
+    expect(mixed.squadError).toContain('@crew');
+    expect(mixed.runs.map((run) => run.agentId)).toEqual(['ag_bob']);
+    expect(h.bridge.records[0]!.systemPayload).toMatchObject({
+      mentionedAgentIds: ['ag_bob'],
+      error: expect.stringContaining('leader is paused'),
+    });
+    expect((await fileFor()).squads).toBeUndefined();
+  });
+
+  it('stops a squad loop at the token budget and ends the engagement', async () => {
+    const h = squadHarness({ extra: { tokenBudget: () => 100 } });
+    await h.orchestrator.mention(SESSION, {
+      text: '@crew go',
+      clientMessageId: 'm1',
+    });
+    await vi.waitFor(() => expect(h.turnOf('ag_lead')).toBeDefined());
+    h.turnOf('ag_lead')!.finish({
+      outputText: '@alice do it',
+      totalTokens: 10,
+    });
+    await vi.waitFor(() => expect(h.turnOf('ag_alice')).toBeDefined());
+    h.turnOf('ag_alice')!.finish({ outputText: 'done', totalTokens: 200 });
+    await vi.waitFor(() =>
+      expect(h.messageOf('ag_alice')?.systemPayload).toMatchObject({
+        status: 'completed',
+        error: expect.stringContaining('Agent token budget'),
+      }),
+    );
+    await vi.waitFor(async () =>
+      expect((await h.engagement())?.active).toBe(false),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(h.turnOf('ag_lead', 1)).toBeUndefined();
+  });
+
+  it('ends the engagement when everything is stopped', async () => {
+    const h = squadHarness();
+    await h.orchestrator.mention(SESSION, {
+      text: '@crew go',
+      clientMessageId: 'm1',
+    });
+    await vi.waitFor(() => expect(h.turnOf('ag_lead')).toBeDefined());
+    h.turnOf('ag_lead')!.finish({ outputText: '@alice go' });
+    await vi.waitFor(() => expect(h.turnOf('ag_alice')).toBeDefined());
+    await h.orchestrator.stopAll(SESSION);
+    await vi.waitFor(async () =>
+      expect(await h.engagement()).toMatchObject({
+        active: false,
+        outstandingRunIds: [],
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // A stopped member does not wake its leader.
+    expect(h.turnOf('ag_lead', 1)).toBeUndefined();
   });
 });

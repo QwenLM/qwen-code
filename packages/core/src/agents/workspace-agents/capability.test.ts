@@ -7,17 +7,32 @@
 import { describe, expect, it } from 'vitest';
 import { ToolNames } from '../../tools/tool-names.js';
 import {
+  buildAgentToolConfig,
   buildSessionAgentToolConfig,
   classifyAgentTool,
   createAgentToolInvocationGuard,
   createSessionAgentToolInvocationGuard,
+  THREAD_TOOL_NAMES,
   AGENT_TOOL_CLASSIFICATION,
 } from './capability.js';
 
 describe('agent capability boundary', () => {
-  it('classifies every core tool exactly once', () => {
+  it('classifies every core and thread tools exactly once', () => {
     expect(new Set(Object.keys(AGENT_TOOL_CLASSIFICATION))).toEqual(
-      new Set(Object.values(ToolNames)),
+      new Set([...Object.values(ToolNames), ...THREAD_TOOL_NAMES]),
+    );
+    // `THREAD_TOOL_NAMES` is built from `ToolNames`, so the six are core wire
+    // names too. What must hold is that nothing else joins their class: an
+    // ordinary tool classified `thread` would be handed to every agent as part
+    // of the collaboration surface.
+    const threadNames = new Set<string>(THREAD_TOOL_NAMES);
+    expect(
+      Object.values(ToolNames)
+        .filter((name) => !threadNames.has(name))
+        .map(classifyAgentTool),
+    ).not.toContain('thread');
+    expect(THREAD_TOOL_NAMES.map(classifyAgentTool)).toEqual(
+      THREAD_TOOL_NAMES.map(() => 'thread'),
     );
   });
 
@@ -26,22 +41,61 @@ describe('agent capability boundary', () => {
     expect(classifyAgentTool('__proto__')).toBe('deny');
   });
 
-  it('gives a session agent every tool unless a definition narrows it', () => {
-    expect(buildSessionAgentToolConfig()).toEqual({ tools: ['*'] });
+  it('applies the built-in ceiling and always adds thread tools', () => {
+    const full = buildAgentToolConfig();
+    const wildcard = buildAgentToolConfig({ tools: ['*'] });
+    const narrowed = buildAgentToolConfig({
+      tools: [ToolNames.READ_FILE, ToolNames.EDIT, 'mcp__server__read'],
+    });
+
+    expect(wildcard).toEqual(full);
+    expect(full.tools).not.toContain(ToolNames.SHELL);
+    expect(full.tools).not.toContain(ToolNames.MEMORY);
+    expect(full.tools).not.toContain(ToolNames.SKILL);
+    expect(full.disallowedTools).toEqual(
+      expect.arrayContaining([
+        ToolNames.EDIT,
+        ToolNames.WRITE_FILE,
+        ToolNames.MEMORY,
+      ]),
+    );
+    expect(narrowed.tools).toEqual([ToolNames.READ_FILE, ...THREAD_TOOL_NAMES]);
+    expect(narrowed.executionAllowedTools).toEqual(narrowed.tools);
+    expect(narrowed.disallowedTools).toEqual(full.disallowedTools);
+  });
+
+  it('preserves definition execution and disallow restrictions', () => {
+    const narrowed = buildAgentToolConfig({
+      tools: ['*'],
+      executionAllowedTools: [ToolNames.READ_FILE, ToolNames.SHELL],
+      disallowedTools: [ToolNames.READ_FILE, 'thread_post'],
+    });
+
+    expect(narrowed.tools).toEqual([...THREAD_TOOL_NAMES]);
+    expect(narrowed.executionAllowedTools).toEqual(narrowed.tools);
+    expect(narrowed.disallowedTools).not.toContain('thread_post');
+    expect(narrowed.disallowedTools).toContain(ToolNames.READ_FILE);
+  });
+
+  it('gives a session agent every tool but the thread tools unless a definition narrows it', () => {
+    expect(buildSessionAgentToolConfig()).toEqual({
+      tools: ['*'],
+      disallowedTools: [...THREAD_TOOL_NAMES],
+    });
     expect(
       buildSessionAgentToolConfig({
-        tools: [ToolNames.READ_FILE, ToolNames.EDIT],
+        tools: [ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.THREAD_POST],
         executionAllowedTools: [ToolNames.READ_FILE, ToolNames.SHELL],
         disallowedTools: [ToolNames.SHELL, ToolNames.SHELL],
       }),
     ).toEqual({
-      tools: [ToolNames.READ_FILE, ToolNames.EDIT],
+      tools: [ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.THREAD_POST],
       executionAllowedTools: [ToolNames.READ_FILE],
-      disallowedTools: [ToolNames.SHELL],
+      disallowedTools: [ToolNames.SHELL, ...THREAD_TOOL_NAMES],
     });
   });
 
-  it('lets a session agent call writes unless its allowlist excludes them', async () => {
+  it('lets a session agent call writes unless its allowlist excludes them, never thread tools', async () => {
     const base = {
       callId: 'call-1',
       signal: new AbortController().signal,
@@ -54,6 +108,12 @@ describe('agent capability boundary', () => {
         toolName: ToolNames.EDIT,
       }),
     ).resolves.toEqual({ allowed: true });
+    await expect(
+      createSessionAgentToolInvocationGuard()({
+        ...base,
+        toolName: ToolNames.THREAD_POST,
+      }),
+    ).resolves.toEqual(expect.objectContaining({ allowed: false }));
     await expect(
       createSessionAgentToolInvocationGuard(
         undefined,

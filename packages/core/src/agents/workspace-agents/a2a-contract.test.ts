@@ -5,21 +5,32 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { SessionAgentRunStatus } from '../session-agents/contract.js';
 import {
-  a2aMentionText,
   externalRequestKey,
-  isTerminalA2ATaskState,
   toA2ATaskState,
+  toExternalA2ATaskState,
 } from './a2a-contract.js';
-import { parseMentions } from './mentions.js';
-import type { WorkspaceAgent } from './types.js';
+import type { Thread, ThreadRun, ThreadStatus } from './types.js';
 
-const roster: WorkspaceAgent[] = [
-  { id: 'ag_lead', name: 'lead', createdAt: 1 },
-  { id: 'ag_other', name: 'other', createdAt: 1 },
-  { id: 'ag_cn', name: '迁移助手', createdAt: 1 },
-];
+function run(overrides: Partial<ThreadRun>): ThreadRun {
+  return {
+    id: 'rn_1',
+    agentId: 'ag_a',
+    status: 'completed',
+    triggerMessageIds: [],
+    acceptedMessageIds: [],
+    consumedMessageIds: [],
+    usageByRound: [],
+    queueSequence: 1,
+    attempts: 1,
+    queuedAt: 1,
+    ...overrides,
+  };
+}
+
+function thread(status: ThreadStatus, runs: ThreadRun[]): Thread {
+  return { status, runs, messages: [] } as unknown as Thread;
+}
 
 describe('A2A contract', () => {
   it('scopes opaque message ids without delimiter collisions', () => {
@@ -37,50 +48,41 @@ describe('A2A contract', () => {
     expect(first).not.toBe(second);
   });
 
-  it('maps every run status to a task state', () => {
-    const cases: Array<[SessionAgentRunStatus, string]> = [
-      ['queued', 'TASK_STATE_SUBMITTED'],
-      ['running', 'TASK_STATE_WORKING'],
-      ['awaiting_approval', 'TASK_STATE_INPUT_REQUIRED'],
-      ['completed', 'TASK_STATE_COMPLETED'],
-      ['failed', 'TASK_STATE_FAILED'],
-      ['offline', 'TASK_STATE_FAILED'],
-      ['cancelled', 'TASK_STATE_CANCELED'],
-    ];
-    for (const [status, state] of cases) {
-      expect(toA2ATaskState(status)).toBe(state);
-    }
-    expect(isTerminalA2ATaskState('TASK_STATE_INPUT_REQUIRED')).toBe(false);
-    expect(isTerminalA2ATaskState('TASK_STATE_CANCELED')).toBe(true);
-  });
-
-  it('refuses an unmapped run status', () => {
-    expect(() => toA2ATaskState('future' as SessionAgentRunStatus)).toThrow(
-      'Unmapped run status: future',
+  it('gives an external task a terminal state once no run is live', () => {
+    const state = (status: ThreadStatus, runs: ThreadRun[]) =>
+      toExternalA2ATaskState(thread(status, runs));
+    expect(state('open', [])).toBe('TASK_STATE_SUBMITTED');
+    expect(state('in_progress', [run({ status: 'running' })])).toBe(
+      'TASK_STATE_WORKING',
     );
+    // An answer with nothing outstanding stays `in_progress` locally.
+    expect(state('in_progress', [run({})])).toBe('TASK_STATE_COMPLETED');
+    const review = run({ closeKind: 'review' });
+    expect(state('in_review', [review])).toBe('TASK_STATE_COMPLETED');
+    const failed = run({ status: 'failed' });
+    expect(state('blocked', [failed])).toBe('TASK_STATE_FAILED');
+    const waiting = run({ closeKind: 'waiting' });
+    expect(state('in_progress', [waiting])).toBe('TASK_STATE_WORKING');
+    const live = run({ status: 'running' });
+    expect(state('cancelled', [live])).toBe('TASK_STATE_CANCELED');
   });
 
-  it('addresses the granted agent only', () => {
-    const text = a2aMentionText(
-      'lead',
-      'Ask @other and 请@迁移助手看一下, then mail ops@example.com about @scope/pkg.',
-    );
-
-    expect(text.startsWith('@lead ')).toBe(true);
-    expect(parseMentions(text, roster)).toEqual({
-      ids: ['ag_lead'],
-      unknown: [],
-    });
-    // Addresses that were never mentions are left alone.
-    expect(text).toContain('ops@example.com');
-    // A caller naming the granted agent again does not change who answers.
-    const repeated = a2aMentionText('lead', '@lead hi');
-    expect(parseMentions(repeated, roster).ids).toEqual(['ag_lead']);
+  it('reads a wait beside another obligation as an answer, not a failure', () => {
+    // `blocked` / `in_review` is also what a question or a review outranking
+    // a live wait resolves to; only a wait left alone is stranded.
+    const state = (status: ThreadStatus, runs: ThreadRun[]) =>
+      toExternalA2ATaskState(thread(status, runs));
+    const waiting = run({ id: 'rn_wait', closeKind: 'waiting' });
+    const review = run({ id: 'rn_review', closeKind: 'review' });
+    const question = run({ id: 'rn_question', closeKind: 'blocked' });
+    expect(state('in_review', [waiting, review])).toBe('TASK_STATE_COMPLETED');
+    expect(state('blocked', [waiting, question])).toBe('TASK_STATE_COMPLETED');
+    expect(state('blocked', [waiting])).toBe('TASK_STATE_FAILED');
   });
 
-  it('refuses a name that would not parse as a mention', () => {
-    expect(() => a2aMentionText('two words', 'hi')).toThrow(
-      'Invalid agent name',
+  it('refuses an unmapped local status', () => {
+    expect(() => toA2ATaskState('future' as ThreadStatus)).toThrow(
+      'Unmapped thread status: future',
     );
   });
 });

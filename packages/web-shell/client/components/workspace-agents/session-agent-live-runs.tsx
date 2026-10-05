@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { RefreshCwIcon, SquareIcon } from 'lucide-react';
+import { RefreshCwIcon, SquareIcon, UsersIcon } from 'lucide-react';
 import type {
   SessionAgentPermissionPrompt,
   SessionAgentRunFrame,
@@ -383,6 +383,84 @@ function LiveRun({
   );
 }
 
+/** One squad engagement as the live runs show it. */
+export interface SquadEngagementView {
+  squadId: string;
+  squadName: string;
+  /** The leader, while its squad-mode run is queued or running. */
+  leader?: string;
+  /** Delegated members still working, in arrival order. */
+  members: string[];
+}
+
+/**
+ * Squad engagements under way in this session, derived from live run frames
+ * carrying `squadId`: a leader run names its squad on its author; a member
+ * run the leader waits on carries the squad id (and name) on the frame.
+ */
+export function squadEngagements(
+  runs: readonly SessionAgentRunFrame[],
+): SquadEngagementView[] {
+  const byId = new Map<string, SquadEngagementView>();
+  for (const run of runs) {
+    if (!run.squadId || isTerminalRunStatus(run.status)) continue;
+    const name = run.squadName ?? run.author.squadName;
+    let view = byId.get(run.squadId);
+    if (!view) {
+      view = { squadId: run.squadId, squadName: name ?? '', members: [] };
+      byId.set(run.squadId, view);
+    }
+    if (!view.squadName && name) view.squadName = name;
+    if (run.author.squadName) view.leader = run.author.name;
+    else if (!view.members.includes(run.author.name)) {
+      view.members.push(run.author.name);
+    }
+  }
+  return [...byId.values()].filter((view) => view.squadName);
+}
+
+/** A small bar per active squad engagement: its name and who is working. */
+export function SquadEngagementBar({
+  runs,
+}: {
+  runs: readonly SessionAgentRunFrame[];
+}) {
+  const { t } = useI18n();
+  const engagements = squadEngagements(runs);
+  if (engagements.length === 0) return null;
+  return (
+    <div className={styles.squadBars} data-testid="squad-engagements">
+      {engagements.map((engagement) => (
+        <div
+          key={engagement.squadId}
+          className={styles.squadBar}
+          role="status"
+          data-squad-id={engagement.squadId}
+        >
+          <UsersIcon aria-hidden="true" className={styles.squadIcon} />
+          <span className={styles.squadName}>
+            {t('collab.squad.engagement', { squad: engagement.squadName })}
+          </span>
+          {engagement.members.length > 0 && (
+            <span>
+              {t('collab.squad.engagementMembers', {
+                names: engagement.members.join(', '),
+              })}
+            </span>
+          )}
+          {engagement.leader && engagement.members.length === 0 && (
+            <span>
+              {t('collab.squad.engagementLeader', {
+                leader: engagement.leader,
+              })}
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /**
  * The session's live agent runs, rendered at the bottom of the message list as
  * the agents' messages-in-progress. Each is replaced by the agent's recorded
@@ -411,6 +489,7 @@ export function SessionAgentLiveRuns({
   if (runs.length === 0) return null;
   return (
     <div className={styles.list} data-testid="session-agent-live-runs">
+      <SquadEngagementBar runs={runs} />
       {runs.map((run) => (
         <LiveRun
           key={run.runId}

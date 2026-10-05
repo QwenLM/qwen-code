@@ -20,6 +20,8 @@ export interface SessionMentionResult {
     agentId: string;
     status: SessionAgentRunStatus;
   }>;
+  /** Why some mentioned squads were not started (the others were). */
+  squadError?: string;
 }
 
 /**

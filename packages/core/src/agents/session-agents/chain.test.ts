@@ -12,9 +12,11 @@ import {
   nextChainDepth,
   normalizeAgentChainLimit,
   resolveMentionTargets,
+  resolveMentionTargetsWithSquads,
   isWithinTokenBudget,
   normalizeAgentTokenBudget,
 } from './chain.js';
+import type { SessionSquad } from './contract.js';
 
 const agent = (id: string, name: string, extra: Partial<WorkspaceAgent> = {}) =>
   ({ id, name, createdAt: 1, ...extra }) as WorkspaceAgent;
@@ -89,5 +91,88 @@ describe('agent token budget', () => {
     expect(isWithinTokenBudget(999_999, 1_000_000)).toBe(true);
     expect(isWithinTokenBudget(1_000_000, 1_000_000)).toBe(false);
     expect(isWithinTokenBudget(5_000_000, 0)).toBe(true);
+  });
+});
+
+describe('resolveMentionTargetsWithSquads', () => {
+  const squad = (
+    id: string,
+    name: string,
+    leaderAgentId: string,
+    extra: Partial<SessionSquad> = {},
+  ): SessionSquad => ({
+    id,
+    name,
+    leaderAgentId,
+    members: [],
+    createdAt: 1,
+    updatedAt: 1,
+    ...extra,
+  });
+  const squads = [
+    squad('sq_r', 'reviewers', 'ag_a'),
+    squad('sq_off', 'night', 'ag_off'),
+    squad('sq_lost', 'lost', 'ag_gone'),
+    squad('sq_old', 'old', 'ag_a', { retiredAt: 3 }),
+    squad('sq_han', '迁移组', 'ag_b'),
+  ];
+  const withHan = [...roster, agent('ag_h', '迁移')];
+
+  it('resolves squads and agents in one pass, keeping both orders', () => {
+    const targets = resolveMentionTargetsWithSquads(
+      '@reviewers please, and @bob',
+      roster,
+      squads,
+    );
+    expect(targets.squads.map((s) => s.id)).toEqual(['sq_r']);
+    expect(targets.agents.map((a) => a.id)).toEqual(['ag_b']);
+    expect(targets.unavailableSquads).toEqual([]);
+  });
+
+  it('reports retired squads and squads whose leader cannot run', () => {
+    const targets = resolveMentionTargetsWithSquads(
+      '@night @lost @old',
+      roster,
+      squads,
+    );
+    expect(targets.squads).toEqual([]);
+    expect(
+      targets.unavailableSquads.map(({ squad, reason }) => [squad.id, reason]),
+    ).toEqual([
+      ['sq_off', 'leader_disabled'],
+      ['sq_lost', 'leader_retired'],
+      ['sq_old', 'retired'],
+    ]);
+  });
+
+  it('prefers the longest name across agents and squads', () => {
+    const targets = resolveMentionTargetsWithSquads(
+      '请@迁移组看一下',
+      withHan,
+      squads,
+    );
+    expect(targets.squads.map((s) => s.id)).toEqual(['sq_han']);
+    expect(targets.agents).toEqual([]);
+    const agentOnly = resolveMentionTargetsWithSquads(
+      '请@迁移看一下',
+      withHan,
+      squads,
+    );
+    expect(agentOnly.agents.map((a) => a.id)).toEqual(['ag_h']);
+    expect(agentOnly.squads).toEqual([]);
+  });
+
+  it('keeps the old resolver unchanged and still ignores self-mentions', () => {
+    const targets = resolveMentionTargetsWithSquads(
+      '@alice @reviewer',
+      roster,
+      squads,
+      'ag_a',
+    );
+    expect(targets.selfMentioned).toBe(true);
+    expect(targets.agents).toEqual([]);
+    // A near-miss of a squad name is an unknown mention, like an agent's.
+    expect(targets.unknown).toEqual(['reviewer']);
+    expect(resolveMentionTargets('@reviewers', roster).agents).toEqual([]);
   });
 });

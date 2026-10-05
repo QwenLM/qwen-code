@@ -43,6 +43,7 @@ import {
   runtimePrograms,
   type AgentProgramView,
 } from './agents-view-logic';
+import { SquadsSection, type SquadsSectionProps } from './squads-section';
 import styles from './ThreadsPage.module.css';
 
 /**
@@ -97,6 +98,11 @@ export interface ThreadsPageProps {
     list: (agentId: string) => Promise<AgentShareSummary[]>;
     revoke: (agentId: string, callerId: string) => Promise<unknown>;
   };
+  /** The workspace's squads and their actions; absent hides the section. */
+  squads?: Pick<
+    SquadsSectionProps,
+    'squads' | 'onCreate' | 'onUpdate' | 'onRetire'
+  >;
   pending?: boolean;
 }
 
@@ -184,6 +190,7 @@ export function ThreadsPage({
   onJoinCoordinator,
   hostServerUrl,
   shares,
+  squads,
   pending,
 }: ThreadsPageProps) {
   const runtimeEntries = runtimes ?? [];
@@ -593,6 +600,15 @@ export function ThreadsPage({
             ))
           )}
         </section>
+
+        {view === 'agents' && squads ? (
+          <SquadsSection
+            {...squads}
+            agents={agents}
+            pending={pending}
+            {...(onMentionAgent ? { onMention: onMentionAgent } : {})}
+          />
+        ) : null}
 
         {view === 'runtime' && runtimeEntries.length > 0 ? (
           runtimeEntries.map((runtimeEntry) => (

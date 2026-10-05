@@ -40,7 +40,12 @@ export interface SessionAgentAuthor {
   color?: string;
   program?: SessionAgentProgram;
   runtimeId?: string;
+  /** Set when the agent ran as the leader of this squad. */
+  squadName?: string;
 }
+
+/** `no_action`: a squad leader's empty reply, rendered as a muted line. */
+export type SessionSquadOutcome = 'no_action';
 
 /** `_meta.qwenAgentMessage` on a transcript update (live or replayed). */
 export interface QwenAgentMessageMeta {
@@ -52,6 +57,8 @@ export interface QwenAgentMessageMeta {
   steps?: SessionAgentStep[];
   totalTokens?: number;
   mentionedAgentIds?: string[];
+  mentionedSquadIds?: string[];
+  squadOutcome?: SessionSquadOutcome;
 }
 
 export const QWEN_AGENT_MESSAGE_META_KEY = 'qwenAgentMessage';
@@ -99,16 +106,46 @@ export interface SessionAgentRunFrame {
   retryable?: boolean;
   /** Set on the final frame of a retried run: the run that replaces it. */
   retriedAsRunId?: string;
+  /** The squad engagement this run belongs to (leader or delegated member). */
+  squadId?: string;
+  squadName?: string;
 }
 
 export interface SessionAgentChangedFrame {
   type: 'changed';
-  scope: 'agents' | 'runtimes';
+  scope: 'agents' | 'runtimes' | 'squads';
 }
 
 export type SessionAgentEventFrame =
   | SessionAgentRunFrame
   | SessionAgentChangedFrame;
+
+export interface SessionSquadMember {
+  agentId: string;
+  role?: string;
+}
+
+export interface SessionSquad {
+  id: string;
+  name: string;
+  description?: string;
+  instructions?: string;
+  leaderAgentId: string;
+  members: SessionSquadMember[];
+  createdAt: number;
+  updatedAt: number;
+  retiredAt?: number;
+}
+
+export type SessionSquadLeaderIssue = 'missing' | 'retired' | 'disabled';
+
+/** `GET /workspaces/:ws/agent/squads` entry: names resolved on the daemon. */
+export interface SessionSquadView extends SessionSquad {
+  leaderName?: string;
+  /** Set when the squad cannot be activated until its leader is fixed. */
+  leaderIssue?: SessionSquadLeaderIssue;
+  members: Array<SessionSquadMember & { name: string }>;
+}
 
 const AGENT_TERMINAL = new Set(['completed', 'failed', 'cancelled', 'offline']);
 
@@ -140,6 +177,9 @@ export function parseQwenAgentMessageMeta(
         ...(typeof a['runtimeId'] === 'string'
           ? { runtimeId: a['runtimeId'] }
           : {}),
+        ...(typeof a['squadName'] === 'string' && a['squadName']
+          ? { squadName: a['squadName'] }
+          : {}),
       };
     }
   }
@@ -168,6 +208,11 @@ export function parseQwenAgentMessageMeta(
         (id): id is string => typeof id === 'string',
       )
     : undefined;
+  const mentionedSquads = Array.isArray(record['mentionedSquadIds'])
+    ? (record['mentionedSquadIds'] as unknown[]).filter(
+        (id): id is string => typeof id === 'string',
+      )
+    : undefined;
   return {
     kind: record['kind'],
     ...(author ? { author } : {}),
@@ -179,5 +224,11 @@ export function parseQwenAgentMessageMeta(
       ? { totalTokens: record['totalTokens'] }
       : {}),
     ...(mentioned ? { mentionedAgentIds: mentioned } : {}),
+    ...(mentionedSquads && mentionedSquads.length > 0
+      ? { mentionedSquadIds: mentionedSquads }
+      : {}),
+    ...(record['squadOutcome'] === 'no_action'
+      ? { squadOutcome: 'no_action' as const }
+      : {}),
   };
 }

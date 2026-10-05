@@ -7,8 +7,13 @@ import type { SessionAgentsApi } from './session-agents-api';
 const createThreadsHttpApi = vi.hoisted(() => vi.fn());
 vi.mock('./threads-api', () => ({ createThreadsHttpApi }));
 
-const { mentionTokens, resolveMentionedAgents, useAgentChatEntry } =
-  await import('./useAgentChatEntry');
+const {
+  mentionTokens,
+  resolveMentionedAgents,
+  resolveMentionedSquads,
+  SQUAD_PICKER_ICON,
+  useAgentChatEntry,
+} = await import('./useAgentChatEntry');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -341,4 +346,131 @@ it('reports a rejected mention through onError and keeps the draft', async () =>
   );
   expect(commit).not.toHaveBeenCalled();
   expect(latestEntry.pending).toBe(false);
+});
+
+describe('squads', () => {
+  const squad = (name: string, over: Record<string, unknown> = {}) =>
+    ({
+      id: `sq-${name}`,
+      name,
+      leaderAgentId: 'id-lead',
+      leaderName: 'lead',
+      members: [
+        { agentId: 'id-a', name: 'alice' },
+        { agentId: 'id-b', name: 'bob' },
+      ],
+      createdAt: 1,
+      updatedAt: 1,
+      ...over,
+    }) as never;
+
+  it('resolves only squads that can take work', () => {
+    const squads = [
+      squad('crew'),
+      squad('old', { retiredAt: 2 }),
+      squad('headless', { leaderIssue: 'retired' }),
+    ];
+    expect(
+      resolveMentionedSquads(
+        mentionTokens('@crew @old @headless @crewmate'),
+        squads,
+      ).map((entry) => (entry as { name: string }).name),
+    ).toEqual(['crew']);
+  });
+
+  it('lists squads in the picker with their own icon, leader and member count', async () => {
+    createThreadsHttpApi.mockReturnValue({
+      listAgents: vi.fn().mockResolvedValue({ agents: [agent('alice')] }),
+      listSquads: vi.fn().mockResolvedValue({
+        squads: [squad('crew'), squad('old', { retiredAt: 2 })],
+      }),
+    });
+    mount({
+      onSubmit: vi.fn(),
+      onError: vi.fn(),
+      ensureSession: vi.fn(),
+      api: sessionApi(),
+    });
+    await settle();
+
+    const provider = latestEntry.providers[0]!;
+    // The typed query claims a squad name before any search.
+    expect(provider.claimsTypedQuery?.('cr')).toBe(true);
+    const items = await provider.search({
+      query: '',
+      signal: new AbortController().signal,
+    });
+    const alice = items.find((item) => item.label === 'alice')!;
+    const crew = items.find((item) => item.label === 'crew')!;
+    expect(alice.icon).toBeUndefined();
+    expect(crew).toMatchObject({
+      id: 'squad:sq-crew',
+      icon: SQUAD_PICKER_ICON,
+      iconMode: 'mask',
+      subtitle: 'collab.squad.summary',
+      description: 'collab.mention.squad',
+      insertText: '@crew ',
+    });
+    expect(SQUAD_PICKER_ICON).toMatch(/^data:image\/png;base64,/);
+    expect(items.some((item) => item.label === 'old')).toBe(false);
+  });
+
+  it('posts a message that addresses only a squad to the agents route', async () => {
+    createThreadsHttpApi.mockReturnValue({
+      listAgents: vi.fn().mockResolvedValue({ agents: [agent('alice')] }),
+      listSquads: vi.fn().mockResolvedValue({ squads: [squad('crew')] }),
+    });
+    const api = sessionApi();
+    const onSubmit = vi.fn();
+    mount({
+      onSubmit,
+      onError: vi.fn(),
+      ensureSession: vi.fn().mockResolvedValue('session-1'),
+      api,
+    });
+    await settle();
+
+    act(() => {
+      latestEntry.submit('@crew fix the build');
+    });
+    await settle();
+
+    expect(api.mention).toHaveBeenCalledWith(
+      'session-1',
+      expect.objectContaining({ text: '@crew fix the build' }),
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('reports a squad the daemon could not start beside agents it did', async () => {
+    createThreadsHttpApi.mockReturnValue({
+      listAgents: vi.fn().mockResolvedValue({ agents: [agent('alice')] }),
+      listSquads: vi.fn().mockResolvedValue({ squads: [squad('crew')] }),
+    });
+    const api = sessionApi();
+    api.mention.mockResolvedValue({
+      recordId: 'r1',
+      runs: [],
+      squadError: 'Squad @crew was not started: its leader is paused.',
+    });
+    const onError = vi.fn();
+    const commit = vi.fn();
+    mount({
+      onSubmit: vi.fn(),
+      onError,
+      ensureSession: vi.fn().mockResolvedValue('session-1'),
+      api,
+    });
+    await settle();
+
+    act(() => {
+      latestEntry.submit('@crew and @alice go', [], [], commit);
+    });
+    await settle();
+
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(
+      'Squad @crew was not started: its leader is paused.',
+    );
+  });
 });

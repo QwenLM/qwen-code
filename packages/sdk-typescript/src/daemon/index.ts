@@ -912,4 +912,9 @@ export type {
   SessionAgentRunStatus,
   SessionAgentStep,
   SessionAgentTerminalStatus,
+  SessionSquad,
+  SessionSquadLeaderIssue,
+  SessionSquadMember,
+  SessionSquadOutcome,
+  SessionSquadView,
 } from './session-agents.js';

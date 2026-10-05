@@ -40,6 +40,35 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.session.offline': (v) => `${v?.agent}'s runtime is offline`,
   'collab.session.cancelled': (v) => `${v?.agent} was stopped`,
   'collab.session.stopAll': 'Stop all agents',
+  // --- squads ---
+  'collab.squad.section': 'Squads',
+  'collab.squad.sectionHint':
+    'A leader agent and its members. @ the squad in a chat: the leader hands the work to members and reports back.',
+  'collab.squad.new': 'New squad',
+  'collab.squad.empty': 'No squads yet.',
+  'collab.squad.name': 'Name (used as @name in chat)',
+  'collab.squad.description': 'Description (optional)',
+  'collab.squad.instructions': 'Instructions for the leader (optional)',
+  'collab.squad.leader': 'Leader',
+  'collab.squad.leaderPick': 'Choose a leader',
+  'collab.squad.members': 'Members',
+  'collab.squad.role': 'Role (optional)',
+  'collab.squad.save': 'Save squad',
+  'collab.squad.edit': 'Edit',
+  'collab.squad.retire': 'Retire',
+  'collab.squad.retireConfirm': (v) =>
+    `Retire squad "${v?.name}"? It keeps its history and takes no new work.`,
+  'collab.squad.retired': 'Retired',
+  'collab.squad.needsLeader': 'Needs a new leader',
+  'collab.squad.leaderPaused': 'Leader is paused',
+  'collab.squad.summary': (v) =>
+    `Leader ${v?.leader} · ${v?.count} member(s)`,
+  'collab.squad.noAction': 'no action needed',
+  'collab.squad.engagement': (v) => `Squad ${v?.squad}`,
+  'collab.squad.engagementMembers': (v) => `working: ${v?.names}`,
+  'collab.squad.engagementLeader': (v) => `${v?.leader} is deciding`,
+  'collab.mention.squad': 'Squad',
+  // --- end squads ---
   'collab.mention.noSession':
     'Could not start a session for this message. Try again.',
   // --- end session agents (chat) ---
@@ -245,6 +274,34 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.session.offline': (v) => `${v?.agent} 所在的 Runtime 离线了`,
   'collab.session.cancelled': (v) => `${v?.agent} 已停止`,
   'collab.session.stopAll': '停止全部 Agent',
+  // --- squads ---
+  'collab.squad.section': '小队',
+  'collab.squad.sectionHint':
+    '一个负责人 Agent 加若干成员。在对话里 @ 小队，负责人把工作分给成员并汇报结果。',
+  'collab.squad.new': '新建小队',
+  'collab.squad.empty': '还没有小队。',
+  'collab.squad.name': '名字（在对话里用 @名字 调用）',
+  'collab.squad.description': '说明（可选）',
+  'collab.squad.instructions': '给负责人的指令（可选）',
+  'collab.squad.leader': '负责人',
+  'collab.squad.leaderPick': '选择负责人',
+  'collab.squad.members': '成员',
+  'collab.squad.role': '角色（可选）',
+  'collab.squad.save': '保存小队',
+  'collab.squad.edit': '编辑',
+  'collab.squad.retire': '退役',
+  'collab.squad.retireConfirm': (v) =>
+    `确定退役小队“${v?.name}”吗？它保留历史记录，不再接新的工作。`,
+  'collab.squad.retired': '已退役',
+  'collab.squad.needsLeader': '需要新的负责人',
+  'collab.squad.leaderPaused': '负责人已停用',
+  'collab.squad.summary': (v) => `负责人 ${v?.leader} · ${v?.count} 名成员`,
+  'collab.squad.noAction': '无需动作',
+  'collab.squad.engagement': (v) => `小队 ${v?.squad}`,
+  'collab.squad.engagementMembers': (v) => `进行中：${v?.names}`,
+  'collab.squad.engagementLeader': (v) => `${v?.leader} 正在决定下一步`,
+  'collab.mention.squad': '小队',
+  // --- end squads ---
   'collab.mention.noSession': '没能为这条消息创建会话，请重试。',
   // --- end session agents (chat) ---
   'collab.runtime.addTitle': '添加 Runtime',

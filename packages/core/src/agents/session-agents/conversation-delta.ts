@@ -68,6 +68,27 @@ export interface BuildAgentInputOptions {
    * newest last; `id` is the trigger id the caller used for it.
    */
   pendingMessages?: ReadonlyArray<{ id: string; speaker: string; text: string }>;
+  /**
+   * Set when the agent runs as a squad leader: a squad briefing (roster and
+   * protocol) is put before the header. It is never cut for budget; the
+   * conversation is.
+   */
+  squad?: SquadBriefing;
+}
+
+/** What a squad leader is told about its squad (plan §11.3). */
+export interface SquadBriefing {
+  name: string;
+  instructions?: string;
+  members: ReadonlyArray<{
+    name: string;
+    role?: string;
+    description?: string;
+    /** Program label, e.g. "Claude Code". */
+    program?: string;
+    /** Where it runs, e.g. "this computer" or a runtime name. */
+    runtime?: string;
+  }>;
 }
 
 export interface AgentInput {
@@ -198,7 +219,10 @@ function escapeAttribute(value: string): string {
 
 /** Keeps message bodies from opening or closing the wrapper tags. */
 function defangTags(text: string): string {
-  return text.replace(/<(\/?)(message|conversation)\b/gi, '&lt;$1$2');
+  return text.replace(
+    /<(\/?)(message|conversation|squad_briefing)\b/gi,
+    '&lt;$1$2',
+  );
 }
 
 function truncateMiddle(text: string, maxChars: number): string {
@@ -239,6 +263,61 @@ function renderHeader(
   return lines.join('\n');
 }
 
+/** Flattens a roster field to one line. */
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+// TODO(multi-agent): model-facing text — needs eval before release
+/**
+ * The squad leader protocol, adapted from Multica's squad operating protocol
+ * (server/internal/handler/squad_briefing.go) to @-mentions in a chat
+ * session: coordinate rather than do the work, delegate tersely, stop after
+ * dispatching, re-evaluate on each wake, and stay silent when nothing is
+ * needed (an empty reply is recorded as "no action").
+ */
+export function renderSquadBriefing(
+  squad: SquadBriefing,
+  leaderName: string,
+): string {
+  const lines = [
+    `<squad_briefing squad="${escapeAttribute(squad.name)}">`,
+    `You are @${leaderName}, the leader of the squad @${squad.name}. Your job is to coordinate the squad, not to do the work yourself, even when the request reads like "do X".`,
+    'Protocol:',
+    '1. Pick the member(s) whose role and description fit the work, and delegate by writing @MemberName in your reply with what they should do. Writing the @name is what starts them.',
+    '2. Be terse. Members read this conversation themselves: do not restate it. Say only who, why (one short clause), and any extra constraints or ordering.',
+    '3. Delegate only to the members listed below.',
+    '4. Stop after dispatching: once you have delegated, end your turn.',
+    '5. You are woken again each time a member replies. Read what is new and decide the next step: delegate it, report to the person, or wrap up.',
+    '6. If no member fits the work, say so and name the gap instead of doing it yourself.',
+    '7. If nothing is needed from you (for example a member posted an update that needs no response), reply with nothing at all. Do not post a message saying you are taking no action.',
+  ];
+  const instructions = squad.instructions?.trim();
+  if (instructions) {
+    lines.push('Squad instructions:', defangTags(instructions));
+  }
+  if (squad.members.length === 0) {
+    lines.push('Squad members: none yet. Tell the person the squad has no members.');
+  } else {
+    lines.push('Squad members:');
+    for (const member of squad.members) {
+      const facts = [
+        member.role ? `role: ${oneLine(member.role)}` : undefined,
+        member.program ? `program: ${oneLine(member.program)}` : undefined,
+        member.runtime ? `runs on: ${oneLine(member.runtime)}` : undefined,
+      ].filter(Boolean);
+      const description = member.description
+        ? ` — ${oneLine(defangTags(member.description))}`
+        : '';
+      lines.push(
+        `- @${member.name}${facts.length > 0 ? ` (${facts.join('; ')})` : ''}${description}`,
+      );
+    }
+  }
+  lines.push('</squad_briefing>');
+  return lines.join('\n');
+}
+
 /**
  * Builds the user turn for one agent run: a short instruction header and the
  * conversation delta, cut to `budgetChars` by dropping the oldest messages
@@ -253,6 +332,7 @@ export function buildAgentInput(options: BuildAgentInputOptions): AgentInput {
     fallbackMessageCount = DEFAULT_FALLBACK_MESSAGE_COUNT,
     mainAssistantName = 'Qwen',
     pendingMessages = [],
+    squad,
   } = options;
 
   const cursorIndex =
@@ -281,7 +361,10 @@ export function buildAgentInput(options: BuildAgentInputOptions): AgentInput {
   }
 
   const triggers = new Set(trigger.recordIds);
-  const header = renderHeader(trigger.agentName, mainAssistantName, cursorLost);
+  const briefing = squad
+    ? `${renderSquadBriefing(squad, trigger.agentName)}\n\n`
+    : '';
+  const header = `${briefing}${renderHeader(trigger.agentName, mainAssistantName, cursorLost)}`;
   const open = '<conversation>';
   const close = '</conversation>';
   const fixed = header.length + 2 + open.length + 1 + close.length + 1;

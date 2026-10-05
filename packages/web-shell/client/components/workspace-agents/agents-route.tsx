@@ -19,7 +19,8 @@ import {
 import { AgentCreatePage } from '../agents/AgentCreatePage';
 import { useI18n } from '../../i18n';
 import { isAgentCollaborationEnabledForWorkspace } from '../../utils/workspace';
-import { createThreadsHttpApi } from './threads-api';
+import { createThreadsHttpApi, type SquadInput } from './threads-api';
+import type { SessionSquadView } from '@qwen-code/sdk/daemon';
 
 /**
  * Roster polling cadence. The roster has no live stream (the thread-era
@@ -84,6 +85,7 @@ export function AgentsRoute({
   const { t } = useI18n();
   const [agents, setAgents] = useState<WorkspaceAgentSummaryView[]>([]);
   const [runtimes, setRuntimes] = useState<WorkspaceAgentRuntimeView[]>([]);
+  const [squads, setSquads] = useState<SessionSquadView[] | undefined>();
   const [view, setView] = useState<AgentWorkspaceView>(
     initialView === undefined || initialView === 'new-agent'
       ? 'agents'
@@ -110,12 +112,19 @@ export function AgentsRoute({
     if (!client) return;
     const sequence = ++refreshSequence.current;
     try {
-      const next = await client.listAgents();
+      const [next, squadList] = await Promise.all([
+        client.listAgents(),
+        // An older daemon has no squad routes: the section stays hidden.
+        client.listSquads
+          ? client.listSquads().catch(() => undefined)
+          : Promise.resolve(undefined),
+      ]);
       if (activeClient.current !== client || sequence < appliedRefresh.current)
         return;
       appliedRefresh.current = sequence;
       setAgents(next.agents);
       setRuntimes(next.runtimes ?? (next.runtime ? [next.runtime] : []));
+      setSquads(squadList?.squads);
       setRefreshError(undefined);
     } catch (cause) {
       if (activeClient.current !== client || sequence < appliedRefresh.current)
@@ -191,6 +200,9 @@ export function AgentsRoute({
     removeHost,
     connectRemoteHost,
     joinCoordinator,
+    createSquad,
+    updateSquad,
+    retireSquad,
   } = client;
   const shares =
     createShare && listShares && revokeShare
@@ -247,6 +259,18 @@ export function AgentsRoute({
             }
           : {})}
         {...(shares ? { shares } : {})}
+        {...(squads && createSquad && updateSquad && retireSquad
+          ? {
+              squads: {
+                squads,
+                onCreate: (input: SquadInput) =>
+                  void mutate(() => createSquad(input)),
+                onUpdate: (id: string, input: SquadInput) =>
+                  void mutate(() => updateSquad(id, input)),
+                onRetire: (id: string) => void mutate(() => retireSquad(id)),
+              },
+            }
+          : {})}
         {...(onOpenDefinitions ? { onOpenDefinitions } : {})}
         hostServerUrl={workspace.baseUrl}
       />

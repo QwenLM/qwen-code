@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   EARLIER_MESSAGES_OMITTED_MARKER,
   buildAgentInput,
+  renderSquadBriefing,
   type ConversationRecordLike,
 } from './conversation-delta.js';
 
@@ -156,5 +157,73 @@ describe('buildAgentInput', () => {
       '<message from="User" addressed_to_you="true">\n@bob now',
     );
     expect(input.lastRecordId).toBe('u1');
+  });
+});
+
+describe('squad briefing', () => {
+  const squad = {
+    name: 'reviewers',
+    instructions: 'Ship <message>small</message> PRs.',
+    members: [
+      {
+        name: 'alice',
+        role: 'reads\ndiffs',
+        description: 'Careful reviewer',
+        program: 'Claude Code',
+        runtime: 'this computer',
+      },
+      { name: 'carol' },
+    ],
+  };
+
+  it('puts the roster and protocol before the header', () => {
+    const input = buildAgentInput({
+      records,
+      trigger,
+      budgetChars: 100_000,
+      squad,
+    });
+    const briefingAt = input.prompt.indexOf('<squad_briefing squad="reviewers">');
+    expect(briefingAt).toBe(0);
+    expect(input.prompt.indexOf('You are @bob, an agent')).toBeGreaterThan(
+      briefingAt,
+    );
+    expect(input.prompt).toContain(
+      '- @alice (role: reads diffs; program: Claude Code; runs on: this computer) — Careful reviewer',
+    );
+    expect(input.prompt).toContain('- @carol\n');
+    expect(input.prompt).toContain('Stop after dispatching');
+    expect(input.prompt).toContain('reply with nothing at all');
+    // Squad text cannot open the conversation's own tags.
+    expect(input.prompt).toContain('Ship &lt;message>small&lt;/message> PRs.');
+  });
+
+  it('keeps the whole briefing when the budget is tight', () => {
+    const briefing = renderSquadBriefing(squad, 'bob');
+    const long = Array.from({ length: 40 }, (_, index) =>
+      user(`u${index}`, `message number ${index} ${'x'.repeat(200)}`),
+    );
+    const input = buildAgentInput({
+      records: long,
+      trigger: { ...trigger, recordIds: ['u39'] },
+      budgetChars: briefing.length + 2_000,
+      squad,
+    });
+    expect(input.prompt.startsWith(briefing)).toBe(true);
+    expect(input.prompt.length).toBeLessThanOrEqual(briefing.length + 2_000);
+    expect(input.prompt).toContain('message number 39');
+    expect(input.omittedCount).toBeGreaterThan(0);
+  });
+
+  it('says so when the squad has no members', () => {
+    expect(renderSquadBriefing({ name: 's', members: [] }, 'lead')).toContain(
+      'Squad members: none yet.',
+    );
+  });
+
+  it('adds nothing for an ordinary run', () => {
+    expect(
+      buildAgentInput({ records, trigger, budgetChars: 100_000 }).prompt,
+    ).not.toContain('squad_briefing');
   });
 });

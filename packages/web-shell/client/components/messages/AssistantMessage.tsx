@@ -143,12 +143,44 @@ export const AssistantMessage = memo(function AssistantMessage({
     },
     [assistantFeedbackRating],
   );
+  const squadName =
+    agentMessage?.kind === 'agent_message'
+      ? agentMessage.author?.squadName
+      : undefined;
+  if (
+    agentMessage?.kind === 'agent_message' &&
+    agentMessage.squadOutcome === 'no_action'
+  ) {
+    // A squad leader that decided nothing was needed: one muted line, not a
+    // message. The label lives in the collaboration dictionary, which the
+    // transcript build stubs out (`t` then echoes the key).
+    const noActionKey = 'collab.squad.noAction';
+    const noActionLabel = t(noActionKey);
+    return (
+      <div
+        className={styles.squadNoAction}
+        data-squad-outcome="no_action"
+        role="note"
+      >
+        {[
+          author?.name ?? agentMessage.author?.name,
+          squadName,
+          noActionLabel === noActionKey ? '—' : noActionLabel,
+        ]
+          .filter(Boolean)
+          .join(' · ')}
+      </div>
+    );
+  }
   return (
     <div className={styles.message}>
       {author && (
         <div className={styles.author}>
           <AuthorAvatar name={author.name} color={author.color} />
           <span className={styles.authorName}>{author.name}</span>
+          {squadName && (
+            <span className={styles.authorSquad}>· {squadName}</span>
+          )}
         </div>
       )}
       {content && (

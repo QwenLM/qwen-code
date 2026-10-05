@@ -9,6 +9,7 @@ import {
   describeRun,
   INPUT_PREVIEW_MAX_CHARS,
   SessionAgentLiveRuns,
+  squadEngagements,
   STALL_NOTICE_MS,
   toApprovalRequest,
 } from './session-agent-live-runs';
@@ -343,5 +344,83 @@ describe('SessionAgentLiveRuns', () => {
     expect(allow).toBeDefined();
     act(() => allow?.click());
     expect(onRespond).toHaveBeenCalledWith('r1', 'p1', 'allow');
+  });
+});
+
+describe('squad engagements', () => {
+  const leader = run({
+    runId: 'lead-1',
+    status: 'queued',
+    squadId: 'sq_1',
+    squadName: 'crew',
+    author: { agentId: 'ag_lead', name: 'lead', squadName: 'crew' },
+  });
+  const alice = run({
+    runId: 'a-1',
+    squadId: 'sq_1',
+    squadName: 'crew',
+    author: { agentId: 'ag_a', name: 'alice' },
+  });
+  const bob = run({
+    runId: 'b-1',
+    squadId: 'sq_1',
+    author: { agentId: 'ag_b', name: 'bob' },
+  });
+
+  it('groups live runs by squad: the leader and the members still working', () => {
+    expect(
+      squadEngagements([
+        alice,
+        bob,
+        leader,
+        run({ runId: 'x', author: { agentId: 'x', name: 'solo' } }),
+        run({ ...alice, runId: 'a-0', status: 'completed' }),
+      ]),
+    ).toEqual([
+      {
+        squadId: 'sq_1',
+        squadName: 'crew',
+        leader: 'lead',
+        members: ['alice', 'bob'],
+      },
+    ]);
+    // Nothing live, nothing shown.
+    expect(squadEngagements([run({ ...alice, status: 'completed' })])).toEqual(
+      [],
+    );
+  });
+
+  it('renders one bar per engagement above the runs', () => {
+    const node = document.createElement('div');
+    const root = createRoot(node);
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <SessionAgentLiveRuns
+            runs={[leader, alice]}
+            onCancel={vi.fn()}
+            onRespond={vi.fn()}
+          />
+        </I18nProvider>,
+      ),
+    );
+    const bar = node.querySelector('[data-squad-id="sq_1"]');
+    expect(bar?.textContent).toContain('Squad crew');
+    expect(bar?.textContent).toContain('working: alice');
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <SessionAgentLiveRuns
+            runs={[leader]}
+            onCancel={vi.fn()}
+            onRespond={vi.fn()}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(
+      node.querySelector('[data-squad-id="sq_1"]')?.textContent,
+    ).toContain('lead is deciding');
+    act(() => root.unmount());
   });
 });

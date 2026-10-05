@@ -110,4 +110,24 @@ describe('session agent run queue', () => {
     expect(nextRunnable(runs, 'ag_a')).toBeUndefined();
     expect(nextRunnable(runs, 'ag_b')?.agentId).toBe('ag_b');
   });
+
+  it('carries a squad onto a new or coalesced run without overriding one', () => {
+    const runs: SessionAgentRun[] = [];
+    const newRunId = ids();
+    const base = { agentId: 'ag_lead', chainDepth: 0, now: 1, newRunId };
+    const plain = enqueueTrigger(runs, { ...base, recordId: 'r1' });
+    expect(plain.run.squadId).toBeUndefined();
+    enqueueTrigger(runs, { ...base, recordId: 'r2', squadId: 'sq_1' });
+    expect(plain.run.squadId).toBe('sq_1');
+    enqueueTrigger(runs, { ...base, recordId: 'r3', squadId: 'sq_2' });
+    expect(plain.run.squadId).toBe('sq_1');
+    expect(plain.run.triggerRecordIds).toEqual(['r1', 'r2', 'r3']);
+    const other = enqueueTrigger(runs, {
+      ...base,
+      agentId: 'ag_other',
+      recordId: 'r4',
+      squadId: 'sq_3',
+    });
+    expect(other.run.squadId).toBe('sq_3');
+  });
 });

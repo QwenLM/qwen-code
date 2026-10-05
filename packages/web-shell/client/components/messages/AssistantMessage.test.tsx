@@ -889,3 +889,65 @@ describe('AssistantMessage agent replies', () => {
     expect(container.textContent).toContain('Failed');
   });
 });
+
+describe('AssistantMessage squad replies', () => {
+  it('labels a leader reply "leader · squad"', () => {
+    const container = render(
+      <AssistantMessage
+        content="@alice please take it"
+        author={{ name: 'lead' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-4',
+          status: 'completed',
+          author: { agentId: 'ag_lead', name: 'lead', squadName: 'crew' },
+        }}
+      />,
+    );
+    expect(container.textContent).toContain('lead· crew');
+    expect(container.textContent).toContain('@alice please take it');
+  });
+
+  it('renders a no_action reply as one muted line', () => {
+    const container = render(
+      <AssistantMessage
+        content=""
+        author={{ name: 'lead' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-5',
+          status: 'completed',
+          squadOutcome: 'no_action',
+          author: { agentId: 'ag_lead', name: 'lead', squadName: 'crew' },
+        }}
+        showFooterActions
+      />,
+    );
+    const line = container.querySelector('[data-squad-outcome="no_action"]');
+    expect(line?.textContent).toBe('lead · crew · no action needed');
+    // Not a message: no avatar row, no footer.
+    expect(container.querySelector('button')).toBeNull();
+    expect(container.childElementCount).toBe(1);
+    expect(line?.childElementCount).toBe(0);
+  });
+
+  it('never shows the dictionary key where the collaboration strings are absent', () => {
+    // The transcript build stubs the collaboration dictionary; zh-CN here
+    // still has it, so check the localized label instead.
+    const container = render(
+      <AssistantMessage
+        content=""
+        author={{ name: 'lead' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-6',
+          status: 'completed',
+          squadOutcome: 'no_action',
+        }}
+      />,
+      'zh-CN',
+    );
+    expect(container.textContent).toBe('lead · 无需动作');
+    expect(container.textContent).not.toContain('collab.');
+  });
+});

@@ -25,6 +25,22 @@
   white-space: nowrap;
 }
 
+/* "leader · squad": the squad a leader replied for. */
+.authorSquad {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+/* A squad leader's "no action needed": a muted line, not a message. */
+.squadNoAction {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .thinkingAuthor {
   flex-shrink: 0;
   color: var(--foreground);

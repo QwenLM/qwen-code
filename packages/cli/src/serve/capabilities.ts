@@ -124,7 +124,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // definitions. Built-in / extension agents stay read-only.
   workspace_agents: { since: 'v1' },
   workspace_agent_generate: { since: 'v1' },
-  // Persistent workspace Agents answering @-mentions in chat sessions
+  // Persistent workspace Agents collaborating on shared task threads
   // (`/workspaces/:workspace/agent/*`). Conditional on the
   // `experimental.agentCollaboration` opt-in. Whether the routes exist at all
   // is settled at daemon startup, but the tag is recomputed per response, so a

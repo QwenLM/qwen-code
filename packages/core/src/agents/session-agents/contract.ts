@@ -78,7 +78,15 @@ export interface SessionAgentAuthor {
   program?: SessionAgentProgram;
   /** Runtime the agent ran on: 'local' or a host id. */
   runtimeId?: string;
+  /** Set when the agent ran as the leader of this squad. */
+  squadName?: string;
 }
+
+/**
+ * Outcome of a squad leader's turn. `no_action`: the leader replied with
+ * nothing (it decided nothing was needed); rendered as a muted line.
+ */
+export type SessionSquadOutcome = 'no_action';
 
 /** `systemPayload` of an `agent_message` record. */
 export interface AgentMessageRecordPayload {
@@ -95,6 +103,8 @@ export interface AgentMessageRecordPayload {
   totalTokens?: number;
   /** The record uuid that triggered this run (the mention or agent message). */
   triggerRecordId?: string;
+  /** Set on a squad leader's empty reply. */
+  squadOutcome?: SessionSquadOutcome;
 }
 
 /** `systemPayload` of an `agent_mention` record. */
@@ -102,8 +112,12 @@ export interface AgentMentionRecordPayload {
   displayText: string;
   /** Agent ids the message addressed. */
   mentionedAgentIds: string[];
+  /** Squad ids the message addressed (each runs its leader in squad mode). */
+  mentionedSquadIds?: string[];
   /** Author when an agent (not the user) posted via `session_send`. */
   author?: SessionAgentAuthor;
+  /** Why some addressed squads were not started (leader unavailable). */
+  error?: string;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -165,6 +179,9 @@ export interface QwenAgentMessageMeta {
   steps?: SessionAgentStep[];
   totalTokens?: number;
   mentionedAgentIds?: string[];
+  mentionedSquadIds?: string[];
+  /** `no_action`: a squad leader's empty reply (a muted one-line row). */
+  squadOutcome?: SessionSquadOutcome;
 }
 
 export const QWEN_AGENT_MESSAGE_META_KEY = 'qwenAgentMessage' as const;
@@ -214,6 +231,13 @@ export interface SessionAgentRunFrame {
   retryable?: boolean;
   /** Set on the final frame of a retried run: the run that replaces it. */
   retriedAsRunId?: string;
+  /**
+   * The squad engagement this run belongs to: the leader's squad-mode run,
+   * or a member run the leader delegated and is waiting on.
+   */
+  squadId?: string;
+  /** That squad's name, for the session's engagement bar. */
+  squadName?: string;
 }
 
 export interface SessionAgentPermissionPrompt {
@@ -233,7 +257,7 @@ export interface SessionAgentPermissionPrompt {
 /** Signal frame: roster or runtime presence changed; clients refetch. */
 export interface SessionAgentChangedFrame {
   type: 'changed';
-  scope: 'agents' | 'runtimes';
+  scope: 'agents' | 'runtimes' | 'squads';
 }
 
 export type SessionAgentEventFrame =
@@ -298,6 +322,23 @@ export interface SessionAgentRun {
   totalTokens?: number;
   /** The run this one retries (see `retryable` on the run frame). */
   retryOf?: string;
+  /** Set on a squad leader's run: it runs in squad mode for this squad. */
+  squadId?: string;
+}
+
+/**
+ * One squad engagement in a chat session: a person @-mentioned the squad, its
+ * leader runs in squad mode, delegates to members by @-mention, and is woken
+ * each time one of them finishes. Ends (`active: false`) when a leader turn
+ * finishes with nothing outstanding and no further leader turn queued.
+ */
+export interface SessionSquadEngagement {
+  leaderAgentId: string;
+  /** The record (or `pending:` trigger id) that started it. */
+  startedByRecordId: string;
+  /** Member runs the leader delegated and has not yet been woken for. */
+  outstandingRunIds: string[];
+  active: boolean;
 }
 
 /** On disk: `<agentsDir>/sessions/<sessionId>.json`, mode 0600. */
@@ -312,6 +353,59 @@ export interface SessionAgentsFile {
    * message (reset by a human mention). Bounded by the token budget.
    */
   chainTokens?: number;
+  /** Squad engagements in this session, by squad id. */
+  squads?: Record<string, SessionSquadEngagement>;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Squads: daemon-owned, per workspace (`<agentsDir>/squads.json`).          */
+/* ------------------------------------------------------------------------ */
+
+export const SESSION_SQUADS_SCHEMA_VERSION = 1 as const;
+
+export interface SessionSquadMember {
+  agentId: string;
+  /** What the leader should use this member for (shown in the roster). */
+  role?: string;
+}
+
+/**
+ * A named group of agents with a leader. `@name` wakes only the leader, which
+ * coordinates: it delegates to members by @-mention and is woken when they
+ * reply. Names share the agents' namespace (no agent and squad share one).
+ */
+export interface SessionSquad {
+  id: string;
+  name: string;
+  description?: string;
+  /** Standing instructions for the leader, shown in its squad briefing. */
+  instructions?: string;
+  leaderAgentId: string;
+  /** Agents only; the leader need not be one of them. */
+  members: SessionSquadMember[];
+  createdAt: number;
+  updatedAt: number;
+  /** Set when a person retires the squad; it then takes no new work. */
+  retiredAt?: number;
+}
+
+export interface SessionSquadsFile {
+  schemaVersion: typeof SESSION_SQUADS_SCHEMA_VERSION;
+  squads: SessionSquad[];
+}
+
+/**
+ * Why a squad cannot be activated: its leader agent no longer exists, was
+ * retired, or is disabled. A missing or retired leader needs a new leader.
+ */
+export type SessionSquadLeaderIssue = 'missing' | 'retired' | 'disabled';
+
+/** A squad as the routes return it: names resolved against the roster. */
+export interface SessionSquadView extends SessionSquad {
+  leaderName?: string;
+  /** Set when the squad cannot be activated (see {@link SessionSquadLeaderIssue}). */
+  leaderIssue?: SessionSquadLeaderIssue;
+  members: Array<SessionSquadMember & { name: string }>;
 }
 
 /* ------------------------------------------------------------------------ */

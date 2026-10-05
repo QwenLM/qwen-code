@@ -72,7 +72,9 @@ import {
   type SessionAgentTerminalStatus,
   type SessionAgentsFile,
   type SessionExternalRecordResponse,
+  type SessionSquad,
 } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
+import { readSquads as readWorkspaceSquads } from '@qwen-code/qwen-code-core/agents/session-agents/squad-store.js';
 import {
   formatAgentMentionModelText,
   formatAgentMessageModelText,
@@ -89,6 +91,7 @@ import {
 import {
   buildAgentInput,
   type ConversationRecordLike,
+  type SquadBriefing,
 } from '@qwen-code/qwen-code-core/agents/session-agents/conversation-delta.js';
 import {
   isWithinChainLimit,
@@ -97,6 +100,8 @@ import {
   normalizeAgentChainLimit,
   normalizeAgentTokenBudget,
   resolveMentionTargets,
+  resolveMentionTargetsWithSquads,
+  type UnavailableSquadTarget,
 } from '@qwen-code/qwen-code-core/agents/session-agents/chain.js';
 import {
   SessionNotFoundError,
@@ -214,6 +219,8 @@ export interface SessionAgentMentionResult {
   /** The ACP child holds the record until the main-model turn settles. */
   deferred?: boolean;
   runs: SessionAgentRunSummary[];
+  /** Why some mentioned squads were not started (also on the record). */
+  squadError?: string;
 }
 
 /**
@@ -238,6 +245,7 @@ export interface SessionAgentOrchestratorOptions {
   tokenBudget?: () => number;
   /** Test seams. */
   readAgents?: (workspaceCwd: string) => Promise<WorkspaceAgent[]>;
+  readSquads?: (workspaceCwd: string) => Promise<SessionSquad[]>;
   loadRecords?: (
     sessionId: string,
   ) => Promise<readonly ConversationRecordLike[]>;
@@ -296,6 +304,8 @@ interface LiveRun {
   sendCount: number;
   /** Serializes `session_send` handling so records keep their order. */
   sendChain: Promise<void>;
+  /** Name of the squad this run leads (`run.squadId`), once known. */
+  squadName?: string;
   /** Lease, attempt and last sequence live on `run.lease` (persisted). */
   remote?: {
     hostId: string;
@@ -473,6 +483,34 @@ function tokenBudgetError(budget: number, names: string[]): string {
     .join(', ')}. Post a message to continue.`;
 }
 
+/** Why mentioned squads were not started, one sentence each. */
+function squadUnavailableError(
+  unavailable: readonly UnavailableSquadTarget[],
+): string {
+  return unavailable
+    .map(({ squad, reason }) =>
+      reason === 'retired'
+        ? `Squad @${squad.name} is retired.`
+        : reason === 'leader_disabled'
+          ? `Squad @${squad.name} was not started: its leader is paused. Resume the leader or pick another one.`
+          : `Squad @${squad.name} was not started: it needs a new leader (the leader agent was ${
+              reason === 'leader_retired' ? 'retired' : 'removed'
+            }).`,
+    )
+    .join(' ');
+}
+
+const PROGRAM_LABELS: Readonly<Record<SessionAgentProgram, string>> = {
+  qwen: 'Qwen Code',
+  claude: 'Claude Code',
+  codex: 'Codex',
+};
+
+function joinErrors(...errors: Array<string | undefined>): string | undefined {
+  const present = errors.filter((error): error is string => !!error);
+  return present.length > 0 ? present.join(' ') : undefined;
+}
+
 function chainLimitError(limit: number, names: string[]): string {
   return `Agent chain limit (${limit}) reached; not started: ${names
     .map((name) => `@${name}`)
@@ -546,6 +584,11 @@ export class SessionAgentOrchestrator {
   private readonly readAgents: (
     workspaceCwd: string,
   ) => Promise<WorkspaceAgent[]>;
+  private readonly readSquads: (
+    workspaceCwd: string,
+  ) => Promise<SessionSquad[]>;
+  /** Squad names by id, as last read (frames carry them). */
+  private readonly squadNames = new Map<string, string>();
   private readonly loadRecords: (
     sessionId: string,
   ) => Promise<readonly ConversationRecordLike[]>;
@@ -595,6 +638,7 @@ export class SessionAgentOrchestrator {
     this.tokenBudget =
       options.tokenBudget ?? (() => DEFAULT_AGENT_TOKEN_BUDGET);
     this.readAgents = options.readAgents ?? readWorkspaceAgents;
+    this.readSquads = options.readSquads ?? readWorkspaceSquads;
     this.loadRecords =
       options.loadRecords ??
       (async (sessionId) => {
@@ -662,16 +706,42 @@ export class SessionAgentOrchestrator {
       );
     }
     const roster = await this.readAgents(this.workspaceCwd);
-    const targets = resolveMentionTargets(text, roster);
-    if (targets.agents.length === 0) {
+    const squads = await this.loadSquads();
+    const targets = resolveMentionTargetsWithSquads(text, roster, squads);
+    // A squad target runs its leader (resolution already checked it can).
+    const squadLeaders = targets.squads.flatMap((squad) => {
+      const leader = roster.find((agent) => agent.id === squad.leaderAgentId);
+      return leader ? [{ squad, leader }] : [];
+    });
+    const squadError =
+      targets.unavailableSquads.length > 0
+        ? squadUnavailableError(targets.unavailableSquads)
+        : undefined;
+    if (targets.agents.length === 0 && squadLeaders.length === 0) {
+      const details = {
+        unavailable: targets.unavailable.map((agent) => agent.name),
+        unknown: targets.unknown,
+        ...(targets.unavailableSquads.length > 0
+          ? {
+              unavailableSquads: targets.unavailableSquads.map(
+                ({ squad, reason }) => ({ name: squad.name, reason }),
+              ),
+            }
+          : {}),
+      };
+      if (squadError) {
+        throw new SessionAgentError(
+          400,
+          'squad_unavailable',
+          squadError,
+          details,
+        );
+      }
       throw new SessionAgentError(
         400,
         'no_agents_mentioned',
         'The message does not @-mention any available agent.',
-        {
-          unavailable: targets.unavailable.map((agent) => agent.name),
-          unknown: targets.unknown,
-        },
+        details,
       );
     }
     const state = await this.session(sessionId);
@@ -683,13 +753,17 @@ export class SessionAgentOrchestrator {
         recordKey,
         // Passed unchanged: the main model detects the envelope by its
         // exact start and end.
-        modelText: formatAgentMentionModelText(
-          text,
-          targets.agents.map((agent) => agent.name),
-        ),
+        modelText: formatAgentMentionModelText(text, [
+          ...targets.agents.map((agent) => agent.name),
+          ...squadLeaders.map(({ squad }) => squad.name),
+        ]),
         payload: {
           displayText: text,
           mentionedAgentIds: targets.agents.map((agent) => agent.id),
+          ...(squadLeaders.length > 0
+            ? { mentionedSquadIds: squadLeaders.map(({ squad }) => squad.id) }
+            : {}),
+          ...(squadError ? { error: squadError } : {}),
         },
       });
     } catch (error) {
@@ -722,18 +796,32 @@ export class SessionAgentOrchestrator {
     }
     // A person posted: the agents' shared token budget starts over.
     delete state.file.chainTokens;
-    const runs = targets.agents.map((agent) =>
-      this.enqueue(state, agent, triggerId, nextChainDepth({ kind: 'human' })),
-    );
+    const depth = nextChainDepth({ kind: 'human' });
+    const runs: SessionAgentRunSummary[] = [];
+    const addRun = (summary: SessionAgentRunSummary) => {
+      if (!runs.some((existing) => existing.runId === summary.runId)) {
+        runs.push(summary);
+      }
+    };
+    // Squads first, so a leader also named directly runs in squad mode.
+    for (const { squad, leader } of squadLeaders) {
+      this.startEngagement(state, squad, triggerId);
+      addRun(this.enqueue(state, leader, triggerId, depth, squad.id));
+    }
+    for (const agent of targets.agents) {
+      addRun(this.enqueue(state, agent, triggerId, depth));
+    }
     // The runs are already queued in memory and the record is written, so a
     // failed save is logged (by persist) rather than reported as a refusal;
     // a local run re-saves before it starts and fails there if it cannot.
     await this.persist(state).catch(() => {});
     for (const agent of targets.agents) this.pumpAgent(agent.id);
+    for (const { leader } of squadLeaders) this.pumpAgent(leader.id);
     return {
       recordId: record.recordId,
       ...(record.deferred ? { deferred: true } : {}),
       runs,
+      ...(squadError ? { squadError } : {}),
     };
   }
 
@@ -1107,6 +1195,7 @@ export class SessionAgentOrchestrator {
         );
         const binding = state.file.bindings[agent.id] ?? { agentId: agent.id };
         const records = await this.loadRecords(live.sessionId);
+        const squad = await this.squadBriefingFor(live, roster);
         // A native session lives on one runtime. On a different Host the
         // agent starts a fresh one that has seen nothing, so it gets the
         // conversation from the start (bounded by the budget), not the delta
@@ -1126,6 +1215,7 @@ export class SessionAgentOrchestrator {
           },
           budgetChars: AGENT_INPUT_CHAR_BUDGET,
           pendingMessages: this.pendingFor(live.sessionId, agent.id, records),
+          ...(squad ? { squad } : {}),
         });
         live.lastRecordId = input.lastRecordId;
         // A native session lives on one runtime; resume only there.
@@ -1145,7 +1235,7 @@ export class SessionAgentOrchestrator {
           leaseExpiresAt: lease.expiresAt,
           // The linked definition (`agentType`) is resolved here: the Host
           // does not have this workspace's definitions.
-          agent: { ...live.author, ...persona },
+          agent: { ...this.authorOf(live), ...persona },
           program,
           prompt: input.prompt,
           ...(nativeSessionId ? { nativeSessionId } : {}),
@@ -1461,6 +1551,8 @@ export class SessionAgentOrchestrator {
         },
       });
     }
+    // Member runs that died with the previous daemon wake no leader.
+    if (this.settleEngagements(state)) changed = true;
     if (changed) void this.persist(state).catch(() => {});
     return state;
   }
@@ -1533,18 +1625,27 @@ export class SessionAgentOrchestrator {
     };
   }
 
+  /**
+   * Queues (or coalesces) a run of `agent`. `squadId` runs it as that
+   * squad's leader; without one, a leader whose squad engagement is active
+   * in this session runs in squad mode anyway (a person or agent addressing
+   * the leader mid-engagement).
+   */
   private enqueue(
     state: SessionState,
     agent: WorkspaceAgent,
     recordId: string,
     chainDepth: number,
+    squadId?: string,
   ): SessionAgentRunSummary {
+    const squad = squadId ?? this.activeSquadLedBy(state, agent.id);
     const outcome = enqueueTrigger(state.file.runs, {
       agentId: agent.id,
       recordId,
       chainDepth,
       now: this.now(),
       newRunId: () => `sr_${randomUUID()}`,
+      ...(squad ? { squadId: squad } : {}),
     });
     let live = this.live.get(outcome.run.id);
     if (!live) {
@@ -1647,6 +1748,7 @@ export class SessionAgentOrchestrator {
             );
       const binding = state.file.bindings[agent.id] ?? { agentId: agent.id };
       const records = await this.loadRecords(state.sessionId);
+      const squad = await this.squadBriefingFor(live, roster);
       // The agent's native session is reusable only on the runtime and with
       // the program that created it. After a move (remote -> local) or a
       // program change it starts fresh, so it gets the conversation from the
@@ -1668,6 +1770,7 @@ export class SessionAgentOrchestrator {
         },
         budgetChars: AGENT_INPUT_CHAR_BUDGET,
         pendingMessages: this.pendingFor(state.sessionId, agent.id, records),
+        ...(squad ? { squad } : {}),
       });
       live.lastRecordId = input.lastRecordId;
       const resumable =
@@ -1859,7 +1962,10 @@ export class SessionAgentOrchestrator {
   ): Promise<void> {
     if (text.trim().length === 0) return;
     const roster = await this.readAgents(this.workspaceCwd);
+    // TODO(multi-agent): an agent's `@squad` is not routed (only a person
+    // starts an engagement); a leader naming its own squad must not loop.
     const targets = resolveMentionTargets(text, roster, live.run.agentId);
+    const squadMembers = await this.squadMembersFor(live);
     live.sendCount += 1;
     const recordKey = `send:${live.run.id}:${live.sendCount}`;
     let record: SessionExternalRecordResponse;
@@ -1898,6 +2004,7 @@ export class SessionAgentOrchestrator {
       live,
       targets.agents,
       triggerId,
+      squadMembers,
     );
     if (limitError) {
       live.frame.error = limitError;
@@ -1914,6 +2021,7 @@ export class SessionAgentOrchestrator {
     author: LiveRun,
     agents: readonly WorkspaceAgent[],
     recordId: string,
+    squadMembers?: ReadonlySet<string>,
   ): string | undefined {
     if (agents.length === 0 || this.stopped) return undefined;
     const depth = nextChainDepth({
@@ -1934,7 +2042,12 @@ export class SessionAgentOrchestrator {
         agents.map((agent) => agent.name),
       );
     }
-    for (const agent of agents) this.enqueue(state, agent, recordId, depth);
+    for (const agent of agents) {
+      const summary = this.enqueue(state, agent, recordId, depth);
+      if (squadMembers?.has(agent.id)) {
+        this.trackDelegation(state, author.run.squadId, summary.runId);
+      }
+    }
     void this.persist(state)
       .catch(() => {})
       .then(() => {
@@ -1952,6 +2065,8 @@ export class SessionAgentOrchestrator {
       run.status = 'cancelled';
       run.endedAt = this.now();
       this.live.delete(run.id);
+      this.releaseOutstanding(state, run.id);
+      this.settleEngagements(state);
       this.publish(live);
       this.hub.forgetRun(state.sessionId, run.id);
       this.republishQueued(run.agentId);
@@ -2048,9 +2163,54 @@ export class SessionAgentOrchestrator {
       }
     }
 
+    // A squad leader's delegations: the follow-ups that are its members are
+    // tracked, so their replies wake it again.
+    const squadMembers =
+      followUps.length > 0 ? await this.squadMembersFor(live) : undefined;
+    // A member its leader is waiting on: wake the leader, which is one more
+    // hop and is charged to the budget like any other.
+    const wakes: Array<{ squadId: string; leader: WorkspaceAgent }> = [];
+    const waiting = this.releaseOutstanding(state, run.id);
+    // A run a person stopped does not wake anyone.
+    if (waiting.length > 0 && outcome.status !== 'cancelled' && !this.stopped) {
+      try {
+        const roster = await this.readAgents(this.workspaceCwd);
+        const depth = nextChainDepth({
+          kind: 'agent',
+          chainDepth: run.chainDepth,
+        });
+        const limit = normalizeAgentChainLimit(this.chainLimit());
+        const budget = normalizeAgentTokenBudget(this.tokenBudget());
+        const spent =
+          (state.file.chainTokens ?? 0) +
+          (outcome.totalTokens ?? live.totalTokens ?? 0);
+        for (const squadId of waiting) {
+          const leaderId = state.file.squads?.[squadId]?.leaderAgentId;
+          const leader = roster.find((agent) => agent.id === leaderId);
+          if (!leader || !isAgentAddressable(leader)) {
+            error = joinErrors(
+              error,
+              `Squad @${this.squadNames.get(squadId) ?? squadId} stops here: its leader is unavailable.`,
+            );
+          } else if (!isWithinChainLimit(depth, limit)) {
+            error = joinErrors(error, chainLimitError(limit, [leader.name]));
+          } else if (!isWithinTokenBudget(spent, budget)) {
+            error = joinErrors(error, tokenBudgetError(budget, [leader.name]));
+          } else {
+            wakes.push({ squadId, leader });
+          }
+        }
+      } catch (wakeError) {
+        error = joinErrors(
+          error,
+          `Could not wake the squad leader: ${getErrorMessage(wakeError)}`,
+        );
+      }
+    }
+
     const payload: AgentMessageRecordPayload = {
       displayText,
-      author: { ...live.author, runtimeId },
+      author: { ...this.authorOf(live), runtimeId },
       runId: run.id,
       status: outcome.status,
       ...(error ? { error } : {}),
@@ -2059,6 +2219,13 @@ export class SessionAgentOrchestrator {
       ...(totalTokens !== undefined ? { totalTokens } : {}),
       ...(run.triggerRecordIds.length > 0
         ? { triggerRecordId: run.triggerRecordIds.at(-1) }
+        : {}),
+      // A leader with nothing to do replies with nothing: recorded, shown
+      // as one muted line.
+      ...(run.squadId &&
+      outcome.status === 'completed' &&
+      displayText.trim().length === 0
+        ? { squadOutcome: 'no_action' as const }
         : {}),
     };
     // The trigger id follow-ups read this reply by (`pending:` while the
@@ -2155,18 +2322,30 @@ export class SessionAgentOrchestrator {
       this.watchRecord(run.id);
     }
 
+    const nextDepth = nextChainDepth({
+      kind: 'agent',
+      chainDepth: run.chainDepth,
+    });
     if (recordId && followUps.length > 0) {
-      const depth = nextChainDepth({
-        kind: 'agent',
-        chainDepth: run.chainDepth,
-      });
       for (const agent of followUps) {
-        this.enqueue(state, agent, recordId, depth);
+        const summary = this.enqueue(state, agent, recordId, nextDepth);
+        if (squadMembers?.has(agent.id)) {
+          this.trackDelegation(state, run.squadId, summary.runId);
+        }
       }
     }
+    // TODO(multi-agent): a member reply whose record could not be written
+    // (no trigger id) does not wake its leader; the engagement then ends.
+    if (recordId) {
+      for (const { squadId, leader } of wakes) {
+        this.enqueue(state, leader, recordId, nextDepth, squadId);
+      }
+    }
+    this.settleEngagements(state);
     await this.persist(state).catch(() => {});
     this.pumpAgent(run.agentId);
     for (const agent of followUps) this.pumpAgent(agent.id);
+    if (recordId) for (const { leader } of wakes) this.pumpAgent(leader.id);
   }
 
   private addPendingPost(post: PendingPost): void {
@@ -2459,13 +2638,220 @@ export class SessionAgentOrchestrator {
     );
     const frame: SessionAgentRunFrame = {
       ...live.frame,
-      author: live.author,
+      author: this.authorOf(live),
       status: live.run.status,
       ...(live.frame.steps ? { steps: [...live.frame.steps] } : {}),
     };
     if (position !== undefined) frame.queuePosition = position;
     else delete frame.queuePosition;
+    const squadId = live.run.squadId ?? this.memberSquadOf(live);
+    const squadName = squadId ? this.squadNames.get(squadId) : undefined;
+    if (squadId) frame.squadId = squadId;
+    else delete frame.squadId;
+    if (squadName) frame.squadName = squadName;
+    else delete frame.squadName;
     return frame;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Squads                                                                 */
+  /* ---------------------------------------------------------------------- */
+
+  /** The workspace's squads; an unreadable file reads as none (logged). */
+  private async loadSquads(): Promise<SessionSquad[]> {
+    try {
+      const squads = await this.readSquads(this.workspaceCwd);
+      for (const squad of squads) this.squadNames.set(squad.id, squad.name);
+      return squads;
+    } catch (error) {
+      writeStderrLine(
+        `qwen serve: could not read squads in ${this.workspaceCwd}: ${getErrorMessage(error)}`,
+      );
+      return [];
+    }
+  }
+
+  /** The author a run is shown and recorded under: a leader names its squad. */
+  private authorOf(live: LiveRun): SessionAgentAuthor {
+    const squadId = live.run.squadId;
+    const squadName =
+      squadId === undefined
+        ? undefined
+        : (live.squadName ?? this.squadNames.get(squadId));
+    return squadName ? { ...live.author, squadName } : live.author;
+  }
+
+  /** Opens (or keeps) the squad's engagement in this chat session. */
+  private startEngagement(
+    state: SessionState,
+    squad: SessionSquad,
+    triggerId: string,
+  ): void {
+    const engagements = (state.file.squads ??= {});
+    const existing = engagements[squad.id];
+    if (existing?.active) {
+      existing.leaderAgentId = squad.leaderAgentId;
+      return;
+    }
+    engagements[squad.id] = {
+      leaderAgentId: squad.leaderAgentId,
+      startedByRecordId: triggerId,
+      outstandingRunIds: [],
+      active: true,
+    };
+  }
+
+  /** An active engagement in this session led by `agentId`, if any. */
+  private activeSquadLedBy(
+    state: SessionState,
+    agentId: string,
+  ): string | undefined {
+    for (const [squadId, engagement] of Object.entries(
+      state.file.squads ?? {},
+    )) {
+      if (engagement.active && engagement.leaderAgentId === agentId) {
+        return squadId;
+      }
+    }
+    return undefined;
+  }
+
+  /** The engagement whose leader waits on this (member) run. */
+  private memberSquadOf(live: LiveRun): string | undefined {
+    const engagements = this.states.get(live.sessionId)?.file.squads;
+    for (const [squadId, engagement] of Object.entries(engagements ?? {})) {
+      if (engagement.outstandingRunIds.includes(live.run.id)) return squadId;
+    }
+    return undefined;
+  }
+
+  /** Member agent ids of the squad `live` leads (itself excluded). */
+  private async squadMembersFor(
+    live: LiveRun,
+  ): Promise<ReadonlySet<string> | undefined> {
+    const squadId = live.run.squadId;
+    if (!squadId) return undefined;
+    const squad = (await this.loadSquads()).find(
+      (candidate) => candidate.id === squadId,
+    );
+    if (!squad) return undefined;
+    return new Set(
+      squad.members
+        .map((member) => member.agentId)
+        .filter((agentId) => agentId !== live.run.agentId),
+    );
+  }
+
+  /** The leader delegated to a member: wait for that run's reply. */
+  private trackDelegation(
+    state: SessionState,
+    squadId: string | undefined,
+    runId: string,
+  ): void {
+    const engagement = squadId ? state.file.squads?.[squadId] : undefined;
+    if (!engagement?.active) return;
+    if (!engagement.outstandingRunIds.includes(runId)) {
+      engagement.outstandingRunIds.push(runId);
+    }
+    const live = this.live.get(runId);
+    if (live) this.publish(live);
+  }
+
+  /**
+   * Stops waiting on a finished (or dropped) run. Returns the squads whose
+   * leader was waiting on it.
+   */
+  private releaseOutstanding(state: SessionState, runId: string): string[] {
+    const released: string[] = [];
+    for (const [squadId, engagement] of Object.entries(
+      state.file.squads ?? {},
+    )) {
+      if (!engagement.outstandingRunIds.includes(runId)) continue;
+      engagement.outstandingRunIds = engagement.outstandingRunIds.filter(
+        (id) => id !== runId,
+      );
+      if (engagement.active) released.push(squadId);
+    }
+    return released;
+  }
+
+  /**
+   * Ends every engagement of this session with nothing outstanding and no
+   * leader run queued or executing for it. Outstanding ids of runs that are
+   * no longer live (ended without a wake: a restart, a cancel) are dropped
+   * first. Returns whether anything changed.
+   */
+  private settleEngagements(state: SessionState): boolean {
+    let changed = false;
+    for (const [squadId, engagement] of Object.entries(
+      state.file.squads ?? {},
+    )) {
+      if (!engagement.active) continue;
+      const outstanding = engagement.outstandingRunIds.filter(
+        (runId) => this.live.get(runId)?.sessionId === state.sessionId,
+      );
+      if (outstanding.length !== engagement.outstandingRunIds.length) {
+        engagement.outstandingRunIds = outstanding;
+        changed = true;
+      }
+      if (outstanding.length > 0) continue;
+      const leading = [...this.live.values()].some(
+        (live) =>
+          live.sessionId === state.sessionId &&
+          live.run.squadId === squadId &&
+          !isTerminalSessionAgentRunStatus(live.run.status),
+      );
+      if (leading) continue;
+      engagement.active = false;
+      changed = true;
+    }
+    return changed;
+  }
+
+  /**
+   * The squad briefing for a leader run (`run.squadId`), or undefined when
+   * the run is not a leader's or the squad is gone. Members that cannot run
+   * (disabled, retired, missing) are left out.
+   */
+  private async squadBriefingFor(
+    live: LiveRun,
+    roster: readonly WorkspaceAgent[],
+  ): Promise<SquadBriefing | undefined> {
+    const squadId = live.run.squadId;
+    if (!squadId) return undefined;
+    const squad = (await this.loadSquads()).find(
+      (candidate) => candidate.id === squadId,
+    );
+    if (!squad) return undefined;
+    live.squadName = squad.name;
+    const byId = new Map(roster.map((agent) => [agent.id, agent]));
+    return {
+      name: squad.name,
+      ...(squad.instructions ? { instructions: squad.instructions } : {}),
+      members: squad.members.flatMap((member) => {
+        const agent = byId.get(member.agentId);
+        if (
+          !agent ||
+          agent.id === live.run.agentId ||
+          !isAgentAddressable(agent)
+        ) {
+          return [];
+        }
+        const program = programForAgent(agent);
+        return [
+          {
+            name: agent.name,
+            ...(member.role ? { role: member.role } : {}),
+            ...(agent.description ? { description: agent.description } : {}),
+            ...(program ? { program: PROGRAM_LABELS[program] } : {}),
+            runtime:
+              agent.execution?.mode === 'managed-host'
+                ? `remote runtime ${agent.execution.hostIds.join(', ')}`
+                : 'this computer',
+          },
+        ];
+      }),
+    };
   }
 
   private publish(live: LiveRun): void {

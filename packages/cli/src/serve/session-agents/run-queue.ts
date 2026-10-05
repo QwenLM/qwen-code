@@ -36,6 +36,11 @@ export interface EnqueueTriggerInput {
   chainDepth: number;
   now: number;
   newRunId: () => string;
+  /**
+   * Run the agent as this squad's leader. Coalesced into a queued run that
+   * has no squad yet; a queued run already leading another squad keeps it.
+   */
+  squadId?: string;
 }
 
 export type EnqueueTriggerOutcome =
@@ -65,6 +70,7 @@ export function enqueueTrigger(
       queued.chainDepth,
       input.chainDepth,
     );
+    if (input.squadId !== undefined) queued.squadId ??= input.squadId;
     return { kind: 'coalesced', run: queued };
   }
   const run: SessionAgentRun = {
@@ -75,6 +81,7 @@ export function enqueueTrigger(
     chainDepth: input.chainDepth,
     createdAt: input.now,
     attempts: 0,
+    ...(input.squadId !== undefined ? { squadId: input.squadId } : {}),
   };
   runs.push(run);
   return { kind: 'created', run };

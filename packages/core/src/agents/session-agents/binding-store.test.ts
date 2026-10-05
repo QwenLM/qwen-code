@@ -85,6 +85,36 @@ describe('session agents binding store', () => {
     expect(await listSessionAgentsSessionIds(projectRoot)).toEqual([SESSION]);
   });
 
+  it('round-trips squad engagements and a run\'s squadId', async () => {
+    await updateSessionAgents(projectRoot, SESSION, (file) => {
+      file.runs.push(run('sr_1', 'queued', { squadId: 'sq_1' }));
+      file.squads = {
+        sq_1: {
+          leaderAgentId: 'ag_1',
+          startedByRecordId: 'r1',
+          outstandingRunIds: ['sr_2'],
+          active: true,
+        },
+      };
+    });
+    const read = await readSessionAgents(projectRoot, SESSION);
+    expect(read.runs[0]?.squadId).toBe('sq_1');
+    expect(read.squads?.['sq_1']).toEqual({
+      leaderAgentId: 'ag_1',
+      startedByRecordId: 'r1',
+      outstandingRunIds: ['sr_2'],
+      active: true,
+    });
+    // A malformed engagement refuses the write rather than wedging reads.
+    await expect(
+      updateSessionAgents(projectRoot, SESSION, (file) => {
+        file.squads = {
+          sq_1: { leaderAgentId: 'ag_1' } as never,
+        };
+      }),
+    ).rejects.toThrow(/Malformed/);
+  });
+
   it('writes the file with mode 0600', async () => {
     if (process.platform === 'win32') return;
     await updateSessionAgents(projectRoot, SESSION, () => {});

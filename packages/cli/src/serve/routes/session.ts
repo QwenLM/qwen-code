@@ -796,9 +796,9 @@ function parseRequestedSessionSource(
   body: Record<string, unknown>,
   res: Response,
 ): { sourceType?: string; sourceId?: string } | null {
-  // Agent sessions are created by the session-agents orchestrator
-  // in-process, never through this route. Accepting the source here would let
-  // a client relabel a session it restores so a real run is sent into it.
+  // Agent sessions are created by the dispatcher in-process, never through
+  // this route. Accepting the source here would let a client relabel a
+  // session it restores so the dispatcher sends a real run into it.
   if (
     body['sourceType'] === AGENT_HOST_SESSION_SOURCE_TYPE ||
     body['sourceType'] === AGENT_SESSION_SOURCE_TYPE

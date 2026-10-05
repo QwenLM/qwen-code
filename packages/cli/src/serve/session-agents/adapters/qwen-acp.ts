@@ -8,9 +8,10 @@
  * @fileoverview The `qwen` program adapter: one hidden ACP session per
  * (chat session, agent) on this daemon's own bridge.
  *
- * Creates or resumes a hidden `sourceType: 'agent'` session under a
- * deterministic id, sends the turn with `sendPrompt`, follows it on
- * `subscribeEvents`, and waits for the bridge's turn terminal. The child
+ * Reuses the patterns of the thread-era `session-dispatch-port.ts` and
+ * `stream-agent-turn.ts`: create or resume a hidden `sourceType: 'agent'`
+ * session under a deterministic id, send the turn with `sendPrompt`, follow
+ * it on `subscribeEvents`, and wait for the bridge's turn terminal. The child
  * resolves the agent's persona itself (from `sourceId`) and authorizes the
  * session against the session-agents binding the orchestrator persisted
  * before calling this adapter, so `instructions` / `model` on the turn input

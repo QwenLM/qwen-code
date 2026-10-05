@@ -30,6 +30,7 @@ import {
   type SessionAgentRun,
   type SessionAgentRunStatus,
   type SessionAgentsFile,
+  type SessionSquadEngagement,
 } from './contract.js';
 
 const SESSIONS_DIRNAME = 'sessions';
@@ -172,7 +173,28 @@ function isValidRun(value: unknown): value is SessionAgentRun {
     isOptionalString(value['error']) &&
     isOptionalFiniteNumber(value['totalTokens']) &&
     isOptionalString(value['retryOf']) &&
+    isOptionalString(value['squadId']) &&
     isValidLease(value['lease'])
+  );
+}
+
+function isValidEngagement(value: unknown): value is SessionSquadEngagement {
+  return (
+    isRecord(value) &&
+    typeof value['leaderAgentId'] === 'string' &&
+    typeof value['startedByRecordId'] === 'string' &&
+    Array.isArray(value['outstandingRunIds']) &&
+    value['outstandingRunIds'].every((id) => typeof id === 'string') &&
+    typeof value['active'] === 'boolean'
+  );
+}
+
+function isValidEngagements(
+  value: unknown,
+): value is Record<string, SessionSquadEngagement> | undefined {
+  return (
+    value === undefined ||
+    (isRecord(value) && Object.values(value).every(isValidEngagement))
   );
 }
 
@@ -208,10 +230,14 @@ export function parseSessionAgentsFile(
         isValidBinding(binding) && binding.agentId === agentId,
     ) ||
     !Array.isArray(runs) ||
-    !runs.every(isValidRun)
+    !runs.every(isValidRun) ||
+    !isValidEngagements(value['squads'])
   ) {
     throw new Error(`Malformed session agents file ${filePath}.`);
   }
+  const squads = value['squads'] as
+    | Record<string, SessionSquadEngagement>
+    | undefined;
   return {
     schemaVersion: SESSION_AGENTS_SCHEMA_VERSION,
     sessionId,
@@ -222,6 +248,7 @@ export function parseSessionAgentsFile(
     value['chainTokens'] > 0
       ? { chainTokens: value['chainTokens'] }
       : {}),
+    ...(squads && Object.keys(squads).length > 0 ? { squads } : {}),
   };
 }
 
@@ -312,6 +339,9 @@ export async function updateSessionAgents(
       bindings: mutated.bindings,
       runs: trimTerminalRuns(mutated.runs),
       ...(mutated.chainTokens ? { chainTokens: mutated.chainTokens } : {}),
+      ...(mutated.squads && Object.keys(mutated.squads).length > 0
+        ? { squads: mutated.squads }
+        : {}),
     };
     // Validate what is about to be written with the same rules a read uses,
     // so a bad in-memory value fails here rather than wedging the next read.
@@ -335,6 +365,7 @@ export async function writeSessionAgents(
     bindings: structuredClone(file.bindings),
     runs: structuredClone(file.runs),
     ...(file.chainTokens ? { chainTokens: file.chainTokens } : {}),
+    ...(file.squads ? { squads: structuredClone(file.squads) } : {}),
   }));
 }
 
@@ -369,8 +400,8 @@ export interface SessionAgentNativeBinding {
  * Whether `nativeSessionId` is the native (hidden ACP) session a live run in
  * some chat session is driving for `agentId`.
  *
- * What authorizes an `agent` session: `sourceType` and `sourceId` on a
- * session request are claims, and what makes one true is
+ * The session-agents counterpart of `findAgentSessionBinding`: `sourceType`
+ * and `sourceId` on a session request are claims, and what makes one true is
  * that the orchestrator persisted a binding naming this session for this
  * agent AND a run of that agent is executing. The orchestrator writes both
  * before it spawns or resumes the session.

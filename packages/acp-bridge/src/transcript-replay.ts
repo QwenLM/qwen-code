@@ -328,6 +328,9 @@ function parseAgentAuthor(value: unknown): SessionAgentAuthor | undefined {
     ...(typeof value['runtimeId'] === 'string'
       ? { runtimeId: value['runtimeId'] }
       : {}),
+    ...(typeof value['squadName'] === 'string' && value['squadName']
+      ? { squadName: value['squadName'] }
+      : {}),
   };
 }
 
@@ -396,12 +399,19 @@ export function createAgentRecordTranscriptUpdate(
         : undefined;
     // A failed run can end with no reply text; show why instead of nothing.
     // TODO(multi-agent): UI copy for an empty failed reply is a placeholder.
+    const squadOutcome =
+      payload['squadOutcome'] === 'no_action' ? 'no_action' : undefined;
+    // An empty chunk is dropped by the client's normalizer, so a squad
+    // leader's silent "no action" turn carries a short placeholder; the UI
+    // renders it from `squadOutcome`, not from this text.
     const text =
       displayText.length > 0
         ? displayText
         : status && status !== 'completed'
           ? (error ?? `Agent run ${status}.`)
-          : '';
+          : squadOutcome
+            ? 'No action needed.'
+            : '';
     if (text.length === 0) return undefined;
     const agentMeta: QwenAgentMessageMeta = {
       kind: 'agent_message',
@@ -411,6 +421,7 @@ export function createAgentRecordTranscriptUpdate(
       ...(error ? { error } : {}),
       ...(steps ? { steps } : {}),
       ...(totalTokens !== undefined ? { totalTokens } : {}),
+      ...(squadOutcome ? { squadOutcome } : {}),
     };
     return createTranscriptMessageUpdate({
       role: 'assistant',
@@ -432,9 +443,20 @@ export function createAgentRecordTranscriptUpdate(
         (id): id is string => typeof id === 'string',
       )
     : [];
+  const mentionedSquadIds = Array.isArray(payload['mentionedSquadIds'])
+    ? payload['mentionedSquadIds'].filter(
+        (id): id is string => typeof id === 'string',
+      )
+    : [];
+  const mentionError =
+    typeof payload['error'] === 'string' && payload['error'].length > 0
+      ? payload['error']
+      : undefined;
   const mentionMeta: QwenAgentMessageMeta = {
     kind: 'agent_mention',
     mentionedAgentIds,
+    ...(mentionedSquadIds.length > 0 ? { mentionedSquadIds } : {}),
+    ...(mentionError ? { error: mentionError } : {}),
     ...(author ? { author } : {}),
   };
   return createTranscriptMessageUpdate({
