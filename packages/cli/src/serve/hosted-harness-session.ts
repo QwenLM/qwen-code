@@ -808,6 +808,11 @@ async function verifyWorkspaceRestore(
         'hook_registration',
         'hook_execution',
         'file_history',
+        // H3 families: an admitted child_run or monitor_run journal is
+        // exactly what a workspace-profile load must restore, driven by
+        // their own record parsers up front.
+        'child_run',
+        'monitor_run',
       ].includes(event.payload['domain'] as string)
     )
       throw new Error('Hosted recovery domain is unsupported.');

@@ -72,6 +72,49 @@ import type {
   ManagedHookCatalog,
   ManagedHookControl,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+import { HostedMonitorSession } from './hosted-monitor-session.js';
+import { monitorWakeNeedsRecovery } from './hosted-monitor-wake-turn.js';
+
+const wakeDeps = vi.hoisted(() => ({
+  last: undefined as unknown,
+}));
+
+const domainEnablement = vi.hoisted(() => ({
+  childRun: false,
+  monitorRun: false,
+}));
+
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionDomainEnabled: (
+        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+      ) => {
+        if (domain === 'child_run' && domainEnablement.childRun) return;
+        if (domain === 'monitor_run' && domainEnablement.monitorRun) return;
+        actual.assertManagedSessionDomainEnabled(domain);
+      },
+    };
+  },
+);
+
+vi.mock('./hosted-monitor-wake-turn.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./hosted-monitor-wake-turn.js')>();
+  return {
+    ...actual,
+    createMonitorWakeRunTurn: (params: never) => {
+      wakeDeps.last = params;
+      return actual.createMonitorWakeRunTurn(params as never);
+    },
+  };
+});
 
 const state = vi.hoisted(() => ({
   root: '',
@@ -540,6 +583,229 @@ describe('Hosted Harness no-tool session', () => {
       release();
     }
     expect((await closing).status).toBe(204);
+  });
+
+  const MONITOR_BINDING = { runtimeBindingId: 'binding-1', generation: '1' };
+
+  async function prewriteMonitorSession(): Promise<string> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const journalStore = new LocalJsonlManagedSessionJournalStore({
+      runtimeBaseDir: state.root,
+      sessionId: SESSION_ID,
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+    });
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore,
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+              hookCatalog: hookPin,
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    const turnId = 'monitor-1:notify:1';
+    try {
+      // A parked harness prompt keeps the wake pump blocked without asking
+      // the close path to care: only DELETE's own settle may speak for an
+      // unattempted monitor notification.
+      await managed.authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: 'prompt-1',
+          sessionKey: key,
+          contentDigest: 'a'.repeat(64),
+        },
+        {
+          inputId: 'prompt-1',
+          turnId: 'prompt-1',
+          source: 'hosted-harness',
+          contentRef: await managed.resources.publish(
+            'managed-input',
+            Buffer.from('[{"type":"text","text":"hi"}]', 'utf8'),
+          ),
+          admissionRef: await managed.resources.publish(
+            'managed-admission',
+            Buffer.from('{}', 'utf8'),
+          ),
+          deadline: null,
+          wakeReason: 'input',
+        },
+      );
+      const monitors = new HostedMonitorSession(
+        { authority: managed.authority, resources: managed.resources },
+        key,
+      );
+      await monitors.admit({
+        monitorId: 'monitor-1',
+        ownerScopeId: key.sessionId,
+        executionCallId: 'call-1',
+        args: { command: 'tail -f build.log' },
+        maxEvents: 100,
+        idleTimeoutMs: 60_000,
+        debounceMs: 1_000,
+      });
+      await monitors.dispatchStarted('monitor-1', MONITOR_BINDING);
+      await monitors.attach('monitor-1', MONITOR_BINDING, { watch: 'started' });
+      await monitors.observe(
+        'monitor-1',
+        { lines: ['one'] },
+        {
+          input: {
+            inputId: turnId,
+            turnId,
+            source: 'monitor',
+            contentRef: await managed.resources.publish(
+              'managed-input',
+              Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+            ),
+            admissionRef: await managed.resources.publish(
+              'managed-admission',
+              Buffer.from('{}', 'utf8'),
+            ),
+            deadline: null,
+            wakeReason: 'input',
+          },
+        },
+      );
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+    return turnId;
+  }
+
+  function mockBrokerBroker() {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+      async (operation) => {
+        if (operation.kind === 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled' as const,
+            catalog: {
+              ...hookPin,
+              hooks: [
+                HookEventName.Notification,
+                HookEventName.SessionEnd,
+                HookEventName.SessionDelete,
+              ].map((eventName) => ({
+                hookId: eventName,
+                eventName,
+                sequential: false,
+                async: false,
+                failClosed: true,
+                onceKey: null,
+                config: { type: 'command' as const },
+              })),
+              ...operation.pin,
+            },
+          };
+        return {
+          operationId: operation.operationId,
+          state: 'settled' as const,
+          result: {
+            success: true,
+            outcome: 'success' as const,
+            duration: 0,
+            output: { hookSpecificOutput: { additionalContext: 'checked' } },
+          },
+        };
+      },
+    );
+  }
+
+  it('settles a pending Monitor notification as session_closing when the Session closes', async () => {
+    domainEnablement.monitorRun = true;
+    const notificationTurnId = await prewriteMonitorSession();
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    expect(loaded.body.recoveryRequired).toBe(true);
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+    );
+    const settled = journal.events.filter(
+      (event) =>
+        event.kind === 'turn.settled' &&
+        event.payload['turnId'] === notificationTurnId,
+    );
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.payload).toMatchObject({
+      outcome: 'cancelled',
+      stopReason: 'session_closing',
+    });
+    expect(
+      (
+        await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      ).status,
+    ).toBe(404);
+  });
+
+  it('wires the wake pump with the shared recovery predicate (M3b)', async () => {
+    domainEnablement.monitorRun = true;
+    await prewriteMonitorSession();
+    mockBrokerBroker();
+    wakeDeps.last = undefined;
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    expect(
+      (wakeDeps.last as { needsRecovery?: unknown } | undefined)?.needsRecovery,
+    ).toBe(monitorWakeNeedsRecovery);
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
   });
 
   it('runs and queries a Hook-only operation without opening a user turn', async () => {
