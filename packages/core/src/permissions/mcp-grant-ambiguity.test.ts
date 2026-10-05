@@ -133,6 +133,7 @@ describe('registry-backed MCP allow ambiguity', () => {
           '_internal_secret',
         ],
         ['mcp__foo___*', 'foo_', 'release', 'foo', '_deploy'],
+        ['mcp__foo____*', 'foo', '__internal', 'foo_', '_internal'],
       ]) {
         const own = tool(server, name, ownerApp);
         const foreign = tool(foreignServer, foreignName);
@@ -155,6 +156,50 @@ describe('registry-backed MCP allow ambiguity', () => {
       expect(await pm.evaluate(context(own))).toBe('allow');
       expect(await pm.evaluate(context(foreign))).toBe('default');
       expect(pm.hasRelevantRules(context(foreign))).toBe(false);
+    },
+  );
+
+  it('keeps a nested bare server distinct from an exact registered tool', async () => {
+    const exact = tool('foo', 'bar');
+    const nested = tool('foo__bar', 'deploy');
+    const rule = 'mcp__foo__bar';
+    const { pm, registry } = setup(rule, [exact, nested]);
+    expect(await pm.evaluate(context(exact))).toBe('allow');
+    expect(await pm.evaluate(context(nested))).toBe('default');
+    const { pm: deny } = setup(rule, [exact, nested], 'deny');
+    for (const entry of [exact, nested]) {
+      expect(await deny.evaluate(context(entry))).toBe('deny');
+    }
+    registry.removeMcpToolsByServer('foo');
+    expect(await pm.evaluate(context(nested))).toBe('allow');
+  });
+
+  it.each(['mcp__my__svc', 'mcp__my__svc___*'])(
+    'grants a single nested producer through %s',
+    async (rule) => {
+      const entry = tool('my__svc', '_internal');
+      const { pm } = setup(rule, [entry]);
+      expect(await pm.evaluate(context(entry))).toBe('allow');
+    },
+  );
+
+  it.each(['foo.bar', 'foo:bar'])(
+    'refuses a lossy prefix also claimed by a longer key: %s',
+    async (server) => {
+      const own = tool(server, 'deploy');
+      const longer = tool('foo_bar__deploy_service_prod', 'x');
+      const { pm, registry } = setup('mcp__foo_bar__deploy*', [own, longer]);
+      for (const entry of [own, longer]) {
+        expect(await pm.evaluate(context(entry))).toBe('default');
+        expect(pm.hasRelevantRules(context(entry))).toBe(false);
+      }
+      registry.removeMcpToolsByServer(longer.serverName);
+      expect(await pm.evaluate(context(own))).toBe('allow');
+      const restart = tool(server, 'restart');
+      const { pm: whole } = setup('mcp__foo_bar__*', [own, restart]);
+      for (const entry of [own, restart]) {
+        expect(await whole.evaluate(context(entry))).toBe('allow');
+      }
     },
   );
 

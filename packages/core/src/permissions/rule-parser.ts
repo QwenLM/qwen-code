@@ -1727,7 +1727,6 @@ export function matchesMcpPattern(
       // Leading tool underscores can imitate a sibling server separator.
       // Read boundaries from the producer rather than splitting the tool name.
       const serverSpellings = mcpSegmentSpellings(mcpIdentity.serverName);
-      const segments = prefix.split('__');
       const boundary = serverSpellings
         .map((spelling) => `mcp__${spelling}__`)
         .find((serverPrefix) => prefix.startsWith(serverPrefix));
@@ -1739,16 +1738,6 @@ export function matchesMcpPattern(
         return namesThisKey ? matchesPrefixLiterally(prefix) : false;
       }
       const toolPrefix = prefix.slice(boundary.length);
-      // Separator continuation also looks like a real leading tool underscore.
-      // Require both the rule server segment and the producer tool prefix.
-      if (toolPrefix !== '' && !/[^_]/.test(toolPrefix)) {
-        return (
-          serverSpellings.includes(segments[1] ?? '') &&
-          mcpSegmentSpellings(mcpIdentity.serverToolName).some((spelling) =>
-            spelling.startsWith(toolPrefix),
-          )
-        );
-      }
       // Use the registered server boundary to retain hash/truncation suffixes.
       const registeredBoundary = `mcp__${mcpIdentity.serverName.replace(/[^A-Za-z0-9_-]/g, '_')}__`;
       const registeredToolSegment = toolName.startsWith(registeredBoundary)
@@ -1769,17 +1758,14 @@ export function matchesMcpPattern(
   }
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
-  // Only when the pattern has exactly 2 parts (mcp + server) and the tool has 3+.
-  // Segment equality keeps foo_ separate from foo's leading-underscore tools.
+  if (mcpIdentity !== undefined) {
+    return mcpSegmentSpellings(mcpIdentity.serverName).some(
+      (server) => pattern === `mcp__${server}`,
+    );
+  }
+  // Without producer identity, only MCP names may use the split fallback.
   const patternParts = pattern.split('__');
   if (patternParts.length === 2 && patternParts[0] === 'mcp') {
-    if (mcpIdentity !== undefined) {
-      // The rule may use any of this producer's own server spellings.
-      return mcpSegmentSpellings(mcpIdentity.serverName).includes(
-        patternParts[1] ?? '',
-      );
-    }
-    // Without producer identity, only MCP names may use the split fallback.
     return spellings.some((spelling) => {
       const spellingParts = spelling.split('__');
       return (
@@ -1814,8 +1800,9 @@ export function hasAmbiguousMcpGrant(
   if (pattern === registeredName) {
     return others.some((other) => spellings(other)[1] === pattern);
   }
-  if (pattern === rawName || pattern === `mcp__${identity.serverName}`) {
-    return false;
+  if (pattern === rawName) return false;
+  if (pattern === `mcp__${identity.serverName}`) {
+    return others.some((other) => spellings(other).includes(pattern));
   }
   if (!pattern.endsWith('*')) {
     return others.some(
@@ -1866,7 +1853,9 @@ export function hasAmbiguousMcpGrant(
     spellings(other).some(
       (spelling) =>
         spelling.startsWith(prefix) &&
-        (claims.length === 0 || ownSpellings.includes(spelling)),
+        (other.serverName !== identity.serverName ||
+          claims.length === 0 ||
+          ownSpellings.includes(spelling)),
     ),
   );
 }
@@ -1943,7 +1932,9 @@ function matchesRestrictiveMcpName(
   return (
     toolName.startsWith(prefix) &&
     (!toolName.startsWith(registeredServerPrefix) ||
-      prefix.startsWith(registeredServerPrefix))
+      prefix.startsWith(registeredServerPrefix) ||
+      (registeredServerPrefix.startsWith(prefix) &&
+        !toolName.slice(registeredServerPrefix.length).startsWith('_')))
   );
 }
 

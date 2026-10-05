@@ -796,21 +796,15 @@ describe('exact entries in a truncated legacy spelling shared by two servers', (
     ).toBe('disabled');
   });
 
-  it('matches no exact entry in the shared spelling against the sibling server', async () => {
+  it('withholds the shared spelling from the sibling grant aliases', async () => {
     expect(
       matchesToolPattern(sharedLegacy, sibling.name, sibling.permissionAliases),
     ).toBe(false);
     expect(matchesRuleWith(sharedLegacy, sibling)).toBe(false);
 
-    const pm = makePm({ permissionsDeny: [sharedLegacy] });
+    const pm = makePm({ permissionsAllow: [sharedLegacy] });
 
-    expect(await pm.evaluate(aliasContext(sibling))).toBe('default');
-    expect(
-      await pm.getToolRegistrationStatus(
-        sibling.name,
-        sibling.permissionAliases,
-      ),
-    ).toBe('registered');
+    expect(await pm.evaluate(producerContext(sibling))).toBe('default');
   });
 
   it('still matches the exact raw identity and the own-server wildcard (controls)', () => {
@@ -828,7 +822,7 @@ describe('exact entries in a truncated legacy spelling shared by two servers', (
     ).toBe(true);
   });
 
-  it('matches no entry in a spelling shared by two keys that both contain the separator', async () => {
+  it('withholds grant aliases shared by two keys that contain the separator', async () => {
     // Both keys lose their divergent suffix beyond the head window. Splitting
     // the common rendering cannot recover either producer's server boundary.
     const alpha = prodTool('a__very_long_server_key_name_alpha', sharedTool);
@@ -848,19 +842,9 @@ describe('exact entries in a truncated legacy spelling shared by two servers', (
       ).toBe(false);
       expect(matchesRuleWith(sharedSpelling, tool)).toBe(false);
 
-      const denyPm = makePm({ permissionsDeny: [sharedSpelling] });
-
-      expect(await denyPm.evaluate(aliasContext(tool))).toBe('default');
-      expect(
-        await denyPm.getToolRegistrationStatus(
-          tool.name,
-          tool.permissionAliases,
-        ),
-      ).toBe('registered');
-
       const allowPm = makePm({ permissionsAllow: [sharedSpelling] });
 
-      expect(await allowPm.evaluate(aliasContext(tool))).toBe('default');
+      expect(await allowPm.evaluate(producerContext(tool))).toBe('default');
     }
   });
 });
@@ -869,40 +853,38 @@ describe('exact entries in a truncated legacy spelling shared by two servers', (
 // Only the key with a preserved boundary may publish these reductions.
 describe('truncated legacy reductions retain the complete server boundary (R12-1)', () => {
   // Both reductions are still computable and still byte-identical…
-  const expectSharedReduction = (
+  const expectSharedReduction = async (
     own: DiscoveredMCPTool,
     sibling: DiscoveredMCPTool,
-    ownRaw: string,
-    siblingRaw: string,
-  ): string => {
-    const shared = generateLegacyMcpToolName(ownRaw);
-    expect(shared).toBe(generateLegacyMcpToolName(siblingRaw));
+  ): Promise<string> => {
+    const raw = (tool: DiscoveredMCPTool) =>
+      `mcp__${tool.serverName}__${tool.serverToolName}`;
+    const shared = generateLegacyMcpToolName(raw(own));
+    expect(shared).toBe(generateLegacyMcpToolName(raw(sibling)));
     expect(own.name).not.toBe(sibling.name);
-    // …but only the own server may advertise it.
     expect(own.permissionAliases).toContain(shared);
     expect(sibling.permissionAliases).not.toContain(shared);
-    // The arrays share no element at all.
     expect(
       own.permissionAliases.some((a) => sibling.permissionAliases.includes(a)),
     ).toBe(false);
-    return shared;
-  };
-
-  const expectSiblingImmune = async (
-    shared: string,
-    sibling: DiscoveredMCPTool,
-  ) => {
     expect(
       matchesToolPattern(shared, sibling.name, sibling.permissionAliases),
     ).toBe(false);
-    for (const lists of [
-      { permissionsAllow: [shared] },
-      { permissionsDeny: [shared] },
-    ]) {
-      const pm = makePm(lists);
-
-      expect(await pm.evaluate(aliasContext(sibling))).toBe('default');
+    const allow = makePm({ permissionsAllow: [shared] });
+    for (const ctx of [aliasContext(sibling), producerContext(sibling)]) {
+      expect(await allow.evaluate(ctx)).toBe('default');
     }
+    const deny = makePm({ permissionsDeny: [shared] });
+    const ctx = producerContext(sibling);
+    expect(await deny.evaluate(ctx)).toBe('deny');
+    expect(
+      await deny.getToolRegistrationStatus(
+        sibling.name,
+        sibling.permissionAliases,
+        ctx.mcpIdentity,
+      ),
+    ).toBe('disabled');
+    return shared;
   };
 
   it('separates keys one underscore apart (acme-weather-forecast vs acme-weather-forecast_)', async () => {
@@ -912,14 +894,8 @@ describe('truncated legacy reductions retain the complete server boundary (R12-1
     const sharedTool = 'get_extended_weather_forecast_for_week';
     const own = prodTool('acme-weather-forecast', sharedTool);
     const sibling = prodTool('acme-weather-forecast_', sharedTool);
-    const shared = expectSharedReduction(
-      own,
-      sibling,
-      `mcp__acme-weather-forecast__${sharedTool}`,
-      `mcp__acme-weather-forecast___${sharedTool}`,
-    );
+    const shared = await expectSharedReduction(own, sibling);
 
-    await expectSiblingImmune(shared, sibling);
     // The own server keeps its persisted legacy coverage (deny stays deny).
     expect(matchesToolPattern(shared, own.name, own.permissionAliases)).toBe(
       true,
@@ -937,17 +913,11 @@ describe('truncated legacy reductions retain the complete server boundary (R12-1
     const toolB = `efghijklmnssue_with_attachments_and_labels`;
     const own = prodTool('github', toolA);
     const sibling = prodTool('github__create_reposito', toolB);
-    const shared = expectSharedReduction(
-      own,
-      sibling,
-      `mcp__github__${toolA}`,
-      `mcp__github__create_reposito__${toolB}`,
-    );
+    const shared = await expectSharedReduction(own, sibling);
     expect(shared).toBe(
       'mcp__github__create_reposito___ssue_with_attachments_and_labels',
     );
 
-    await expectSiblingImmune(shared, sibling);
     expect(matchesToolPattern(shared, own.name, own.permissionAliases)).toBe(
       true,
     );
@@ -960,14 +930,8 @@ describe('truncated legacy reductions retain the complete server boundary (R12-1
     const siblingTool = `${'a'.repeat(17)}${'Y'.repeat(11)}${'b'.repeat(32)}`;
     const own = prodTool('foo', ownTool);
     const sibling = prodTool('foo_', siblingTool);
-    const shared = expectSharedReduction(
-      own,
-      sibling,
-      `mcp__foo__${ownTool}`,
-      `mcp__foo___${siblingTool}`,
-    );
+    const shared = await expectSharedReduction(own, sibling);
 
-    await expectSiblingImmune(shared, sibling);
     expect(matchesToolPattern(shared, own.name, own.permissionAliases)).toBe(
       true,
     );
@@ -1139,7 +1103,7 @@ describe('the producer-carried identity channel (R4-2)', () => {
     ['foo_', '_internal', 'mcp__foo_', true],
     ['foo_', '_internal', 'mcp__foo__*', false],
     ['foo_', '_internal', 'mcp__foo___*', true],
-    ['foo_', '_internal', 'mcp__foo____*', false],
+    ['foo_', '_internal', 'mcp__foo____*', true],
     ['foo_', '_internal', 'mcp__foo____in*', true],
     ['foo_bar', 'baz', 'mcp__foo', false],
     ['foo_bar', 'baz', 'mcp__foo_bar', true],
@@ -1259,13 +1223,6 @@ describe('the producer-carried identity channel (R4-2)', () => {
         identity,
       ),
     ).toBe(true);
-
-    // The guard that keeps a sibling key out stays: `mcp__foo____*` was
-    // written for server `foo`, so it must not auto-approve `foo_`'s tool.
-    const sibling = prodTool('foo_', '_internal');
-    const pm = makePm({ permissionsAllow: ['mcp__foo____*'] });
-
-    expect(await pm.evaluate(producerContext(sibling))).toBe('default');
   });
 });
 
@@ -1431,17 +1388,17 @@ describe('restrictive rules retain withheld legacy exact and prefix spellings', 
 });
 
 describe('a restrictive wildcard that is a literal prefix of the registered name keeps covering its own key (R17-1)', () => {
-  // For underscore-containing keys, restrictive registered prefixes retain
-  // coverage even when the identity split cannot attribute them. Never grant.
-  const shapes: Array<[string, string, string]> = [
-    ['a__b', '_hidden', 'mcp__a__b___*'],
-    ['my__svc', '_internal', 'mcp__my__svc___*'],
-    ['foo_', '_internal', 'mcp__foo____*'],
+  const shapes: Array<[string, string, string, 'allow' | 'default']> = [
+    ['a__b', '_hidden', 'mcp__a__b___*', 'allow'],
+    ['my__svc', '_internal', 'mcp__my__svc___*', 'allow'],
+    ['foo_', '_internal', 'mcp__foo____*', 'allow'],
+    ['foo', 'bar', 'mcp__foo_*', 'default'],
+    ['github', 'deploy', 'mcp__github_*', 'default'],
   ];
 
   it.each(shapes)(
-    'denies %s / %s for %s and leaves the allow direction untouched',
-    async (serverName, serverToolName, rule) => {
+    'retains restrictive coverage for %s / %s under %s (allow=%s)',
+    async (serverName, serverToolName, rule, grant) => {
       const tool = prodTool(serverName, serverToolName);
       const ctx = producerContext(tool);
       const identity = ctx.mcpIdentity;
@@ -1454,13 +1411,25 @@ describe('a restrictive wildcard that is a literal prefix of the registered name
       const deny = makePm({ permissionsDeny: [rule] });
 
       expect(await deny.evaluate(ctx)).toBe('deny');
+      expect(deny.findMatchingDenyRule(ctx)).toBe(rule);
+      expect(deny.hasRelevantRules(ctx)).toBe(true);
+      expect(
+        matchesAgentToolBlocklist(
+          [rule],
+          tool.name,
+          tool.permissionAliases,
+          identity,
+        ),
+      ).toBe(true);
+      const ask = makePm({ permissionsAsk: [rule] });
+      expect(await ask.evaluate(ctx)).toBe('ask');
       expect(
         await deny.isToolEnabled(tool.name, tool.permissionAliases, identity),
       ).toBe(false);
 
       const allow = makePm({ permissionsAllow: [rule] });
 
-      expect(await allow.evaluate(ctx)).toBe('default');
+      expect(await allow.evaluate(ctx)).toBe(grant);
     },
   );
 
