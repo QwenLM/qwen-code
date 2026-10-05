@@ -62,6 +62,13 @@ describe('terminalImageRenderer', () => {
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'terminal-image-test-'));
+    // The fake renderer executables below are CommonJS scripts; scope them
+    // explicitly so a "type": "module" package.json above os.tmpdir()
+    // cannot flip them to ESM.
+    await fs.writeFile(
+      path.join(tempDir, 'package.json'),
+      '{"type":"commonjs"}',
+    );
     imagePath = path.join(tempDir, 'pixel.png');
     await fs.writeFile(imagePath, PNG_1X1);
   });
@@ -690,12 +697,6 @@ describe('terminalImageRenderer', () => {
     async () => {
       const binDir = path.join(tempDir, 'bin');
       await fs.mkdir(binDir);
-      // Pin the shim's module scope: an ambient package.json up the tmp
-      // tree ({"type":"module"}) would otherwise parse this CJS script as ESM.
-      await fs.writeFile(
-        path.join(binDir, 'package.json'),
-        '{"type":"commonjs"}',
-      );
       const chafaPath = path.join(binDir, 'chafa');
       await fs.writeFile(
         chafaPath,

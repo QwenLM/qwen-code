@@ -2626,6 +2626,9 @@ describe('per-hunk probes against real git', () => {
 
       const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-apply-canary-'));
       const shimDir = mkdtempSync(join(tmpdir(), 'qwen-apply-shim-'));
+      // The git shim below is a CommonJS script; scope it explicitly so a
+      // "type": "module" package.json above os.tmpdir() cannot flip it.
+      writeFileSync(join(shimDir, 'package.json'), '{"type":"commonjs"}');
       const canary = join(canaryDir, 'PWNED-apply');
       const stamp = join(shimDir, 'armed');
       const savedPath = process.env['PATH'];
@@ -2665,9 +2668,6 @@ process.exit(r.status === null ? 1 : r.status);
 `,
         );
         chmodSync(join(shimDir, 'git'), 0o755);
-        // Pin the shim's module scope: an ambient package.json up the tmp
-        // tree ({"type":"module"}) would otherwise parse this CJS shim as ESM.
-        writeFileSync(join(shimDir, 'package.json'), '{"type":"commonjs"}');
         process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
 
         const got = runOneHunkProbe(
