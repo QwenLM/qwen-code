@@ -93,7 +93,9 @@ export class WorkspaceActivations {
         const sessionId = request['sessionId'] as string;
         const active = request['operation'] === 'activate';
         if (
-          (active && this.sessions.get(sessionId) === false) ||
+          (active &&
+            (!executor.isAdmissionOpen ||
+              this.sessions.get(sessionId) === false)) ||
           (!active && executor.hasActiveSession(sessionId))
         ) {
           res.status(409).json({ code: 'managed_activation_conflict' });

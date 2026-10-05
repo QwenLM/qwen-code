@@ -783,27 +783,34 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
   });
 
   it('honors and reserves a normalized caller-supplied session ID', async () => {
-    const requestedId = '550E8400-E29B-41D4-A716-446655440000';
+    // Fresh id per attempt: vitest `retry` re-enters this body against the
+    // same long-lived daemon, and a fixed id turns one timed-out create into
+    // deterministic 409 session_id_conflict failures on every retry — the
+    // session a failed attempt left live (or abandoned-but-later-registered)
+    // still owns the reservation the retry's first POST collides with. The
+    // ACP_INITIALIZE_TIMEOUT_MS note above names the load class.
+    const requestedId = randomUUID().toUpperCase();
     const normalizedId = requestedId.toLowerCase();
-    const created = await fetch(`${base}/session`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        cwd: REPO_ROOT,
-        sessionId: requestedId,
-        sessionScope: 'single',
-      }),
-    });
-    expect(created.status).toBe(200);
-    await expect(created.json()).resolves.toMatchObject({
-      sessionId: normalizedId,
-      attached: false,
-    });
-
     try {
+      const created = await fetch(`${base}/session`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          cwd: REPO_ROOT,
+          sessionId: requestedId,
+          sessionScope: 'single',
+        }),
+      });
+      const createdBody = await created.json();
+      expect(created.status, JSON.stringify(createdBody)).toBe(200);
+      expect(createdBody).toMatchObject({
+        sessionId: normalizedId,
+        attached: false,
+      });
+
       let conflict: unknown;
       try {
         await client.createOrAttachSession({

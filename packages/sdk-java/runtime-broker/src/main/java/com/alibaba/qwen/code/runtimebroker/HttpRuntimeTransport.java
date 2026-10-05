@@ -105,6 +105,56 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         this.requestTimeout = requestTimeout;
     }
 
+    @Override
+    public CompletionStage<Map<String, Object>> attestCsi(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            Map<String, Object> storage, Map<String, Object> pod) {
+        if (lease == null || seed == null || !seed.matches(lease)
+                || client.followRedirects() != HttpClient.Redirect.NEVER) {
+            throw new IllegalArgumentException("CSI seed must bind the lease.");
+        }
+        var boot = ManagedCsiProtocol.boot(request, seed, storage);
+        var expectedPod = BrokerValues.immutableMap(pod);
+        ManagedCsiProtocol.validatePodIdentity(expectedPod, (String) storage.get("namespace"));
+        return post(lease, ManagedCsiProtocol.ATTEST_PATH,
+                encodeToolRequest(ManagedCsiProtocol.attestationRequest(boot), BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
+                .thenApply(bytes -> {
+                    try {
+                        return ManagedCsiProtocol.verifyAttestation(ManagedContextProtocol.parse(bytes), boot, expectedPod);
+                    } catch (RuntimeException failure) {
+                        throw new RuntimeBrokerException(409, "workspace_csi_identity_conflict",
+                                "Workspace CSI attestation conflicts.", false);
+                    }
+                });
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
+            Map<String, Object> expectedCaptureIdentity) {
+        if (client.followRedirects() != HttpClient.Redirect.NEVER) {
+            throw new IllegalArgumentException("CSI acknowledgement requires redirects disabled.");
+        }
+        var originalBoot = BrokerValues.immutableMap(boot);
+        var pod = BrokerValues.immutableMap(expectedPod);
+        var body = BrokerValues.immutableMap(request);
+        var capture = BrokerValues.immutableMap(expectedCaptureIdentity);
+        ManagedCsiProtocol.validateAcknowledgementRequest(body, originalBoot, pod);
+        ManagedCsiProtocol.validateAcknowledgementIdentity(lease, session, originalBoot, body, capture);
+        byte[] encoded = encodeToolRequest(body, BODY_LIMIT_BYTES);
+        ManagedCsiProtocol.parseAcknowledgement(encoded);
+        return post(lease, ManagedCsiProtocol.ACKNOWLEDGE_PATH, encoded, BODY_LIMIT_BYTES).thenApply(bytes -> {
+            try {
+                return ManagedCsiProtocol.verifyAcknowledgement(ManagedCsiProtocol.parseAcknowledgement(bytes),
+                        body, originalBoot, pod, capture);
+            } catch (RuntimeException failure) {
+                throw new RuntimeBrokerException(409, "workspace_csi_identity_conflict",
+                        "Workspace CSI acknowledgement conflicts.", false);
+            }
+        });
+    }
+
+    @Override
     public CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         if (lease == null || request == null || seed == null) {
