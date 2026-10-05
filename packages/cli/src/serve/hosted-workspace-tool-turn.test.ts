@@ -1825,9 +1825,9 @@ function actionIds(): string[] {
 
 async function requested(count = 1): Promise<string> {
   let requestId = '';
-  // The Turn performs several sequential fsynced durable writes before the
-  // Action request surfaces; the hard-coded 1s vi.waitFor default races them
-  // on the coverage-enabled, shared post-merge CI runners.
+  // The Action request commits first and its await_action checkpoint after
+  // it, each behind fsynced durable writes; on the coverage-enabled, shared
+  // post-merge CI runners the checkpoint lost vitest's 1s default (#13397).
   await vi.waitFor(
     async () => {
       const ids = actionIds();
