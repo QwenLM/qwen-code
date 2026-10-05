@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import {
   captureHookExecutionOwner,
@@ -14044,6 +14045,46 @@ export class Session implements SessionContext {
           };
           callIdAware.setCallId?.(callId);
           toolBuildSucceeded = true;
+
+          if (this.config.getSessionSourceType?.() === 'agent-host') {
+            // Keep upstream authority at the final execution boundary.
+            const confinementGuard = createAgentHostToolInvocationGuard(
+              undefined,
+              this.config.getTargetDir(),
+              (candidate) =>
+                this.config
+                  .getWorkspaceContext()
+                  .isPathWithinWorkspace(candidate),
+            );
+            const invocationContext = getInvocationContext();
+            const confinementDecision = await evaluateToolInvocationGuard(
+              confinementGuard,
+              {
+                callId,
+                toolName: policyToolName,
+                args: invocation.params as Record<string, unknown>,
+                signal: activeToolAbortSignal,
+                permissionChecked: false,
+                sessionId: this.config.getSessionId(),
+                cwd: this.config.getTargetDir(),
+                ...(invocationContext ? { invocationContext } : {}),
+              },
+            );
+            const confinementCancellation =
+              cancelBeforeExecutionIfAborted(toolName);
+            if (confinementCancellation) return confinementCancellation;
+            if (!confinementDecision.allowed) {
+              return earlyErrorResponse(
+                new Error(confinementDecision.reason),
+                toolName,
+                {
+                  status: 'error',
+                  errorType: ToolErrorType.EXECUTION_DENIED,
+                  executionStatus: 'not_started',
+                },
+              );
+            }
+          }
 
           // Production AgentTool always initializes `eventEmitter` on its
           // invocation (`agent.ts:392`). Be defensive about the `undefined`

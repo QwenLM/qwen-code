@@ -35,9 +35,14 @@ export const OUTPUT_TOKEN_CEILING: TokenCount = ESCALATED_MAX_TOKENS;
  * prompt has (nearly) filled the window, still ask for at least this much
  * rather than max_tokens <= 0 — compaction/hard-rescue owns that regime. An
  * explicit user ceiling below this floor is still respected (the floor
- * bounds the room, not the ceiling). Must stay below ~5K so that
- * `margin + MIN_CLAMPED_OUTPUT_TOKENS` fits inside the headroom compaction
- * leaves free (15% of a 100K window); see the window-clamp design doc.
+ * bounds the room, not the ceiling), and a window too small to hold the
+ * floor wins the same way: `clampOutputTokensToWindow` caps it by
+ * `window − prompt`. Must stay below ~5K so that
+ * `margin + MIN_CLAMPED_OUTPUT_TOKENS` fits
+ * inside the headroom compaction leaves free (15% of a 100K window); see the
+ * window-clamp design doc. That derivation is large-window-only — below
+ * ≈26.7K the margin's own 10K floor plus this one exceed the whole window,
+ * which is why the cap exists (#13252).
  */
 export const MIN_CLAMPED_OUTPUT_TOKENS: TokenCount = 4_000;
 
@@ -55,10 +60,14 @@ export function outputClampMargin(contextWindowSize: number): TokenCount {
 /**
  * Size an output request to the room actually left in the context window:
  * `min(ceiling, window − prompt − margin)`, floored at
- * MIN_CLAMPED_OUTPUT_TOKENS. Makes `prompt + max_tokens ≤ window` an
- * invariant on every main-turn request (issue #5950 becomes structurally
+ * `min(MIN_CLAMPED_OUTPUT_TOKENS, window − prompt)`. Makes
+ * `prompt + max_tokens ≤ window` an invariant on every main-turn request
+ * whose prompt still fits the window (issue #5950 becomes structurally
  * impossible), which is what lets compaction thresholds run against the
- * full window with no output reservation.
+ * full window with no output reservation. Once the prompt alone reaches the
+ * window that inequality is unsatisfiable for any provider-valid
+ * `max_tokens`, so the result bottoms out at 1 and compaction/hard-rescue
+ * owns the recovery — same shape as `computeCompactionOutputBudget`.
  *
  * @param outputCeiling - Upper bound on the request: the user's explicit
  *   max_tokens when set, else `min(tokenLimit(model,'output'),
@@ -75,11 +84,22 @@ export function clampOutputTokensToWindow(
 ): TokenCount {
   const room =
     contextWindowSize - promptTokens - outputClampMargin(contextWindowSize);
+  // Cap the floor by the room the window actually has left for output, so it
+  // can never push `prompt + max_tokens` past `contextWindowSize`. Uncapped,
+  // the 4K floor does exactly that on a user-configured small window: at
+  // window 8192 / prompt 5000 the 10K margin floor drives room to −6808 and
+  // the request goes out at 4000, i.e. 9000 > 8192 (#13252). Still ≥ 1 so
+  // `max_tokens` stays provider-valid when the prompt already fills the
+  // window.
+  const floor = Math.max(
+    1,
+    Math.min(MIN_CLAMPED_OUTPUT_TOKENS, contextWindowSize - promptTokens),
+  );
   // Floor the ROOM, then cap by the ceiling — never the other way around: an
-  // explicit ceiling below MIN_CLAMPED_OUTPUT_TOKENS (e.g.
+  // explicit ceiling below the floor (e.g.
   // QWEN_CODE_MAX_OUTPUT_TOKENS=2000 on a capacity-constrained backend) must
   // be respected, not inflated to the floor.
-  return Math.min(outputCeiling, Math.max(MIN_CLAMPED_OUTPUT_TOKENS, room));
+  return Math.min(outputCeiling, Math.max(floor, room));
 }
 
 export function parsePositiveIntegerEnvValue(

@@ -1,8 +1,12 @@
 # Daemon Workspace Trust Hot Reload
 
+[English](2026-07-17-daemon-workspace-trust-hot-reload.md) | [简体中文](2026-07-17-daemon-workspace-trust-hot-reload.zh-CN.md)
+
 ## Status
 
-Implemented for QwenLM/qwen-code#6378.
+Implemented for QwenLM/qwen-code#6378. Updated for QwenLM/qwen-code#13130,
+which adds the operator-authority trust grant described in
+[Web Shell Workspace Trust Grant](2026-10-01-web-shell-workspace-trust-grant.md).
 
 ## Problem
 
@@ -111,12 +115,17 @@ workspaces remain available.
 
 ## Protocol
 
-The request-only endpoint remains request-only. Trust status v1 remains the
-default compatibility view. Clients request v2 with `statusVersion=2`; old
-servers may return v1. V2 separates configured policy from effective runtime
-state and reports `stable`, `applying`, or `failed`, an opaque revision, and a
-stable error code. The daemon advertises `workspace_trust_hot_reload` only
-after primary and secondary routing use generation-aware resolution.
+`POST /workspace/trust/request` remains request-only: it publishes the request
+and still requires a local operator decision. Recording a decision directly is
+the separate `POST /workspace/trust/grant` route, which requires operator
+authority and is documented in
+[Web Shell Workspace Trust Grant](2026-10-01-web-shell-workspace-trust-grant.md).
+Trust status v1 remains the default compatibility view. Clients request v2 with
+`statusVersion=2`; old servers may return v1. V2 separates configured policy
+from effective runtime state and reports `stable`, `applying`, or `failed`, an
+opaque revision, and a stable error code. The daemon advertises
+`workspace_trust_hot_reload` only after primary and secondary routing use
+generation-aware resolution.
 
 No reliable applied-event bus is introduced. GET status is the source of
 truth. A trust-change request requires an active generation to publish the
@@ -124,7 +133,7 @@ existing event; otherwise it returns a retryable 503.
 
 ## Non-goals
 
-- Direct remote trust approval.
+- Direct remote trust approval without operator authority.
 - Zero-downtime dual runtimes or session migration.
 - Public generation identifiers.
 - Parallel runtime rebuilds.

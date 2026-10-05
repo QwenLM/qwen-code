@@ -121,6 +121,7 @@ async function openPanel(
       replayedCount: scenario.events.length,
     }),
   );
+  await page.getByTestId('manage-workspaces').locator('../..').hover();
   await page.getByTestId('manage-workspaces').click();
   await expect(page.getByTestId('workspaces-overview-panel')).toBeVisible();
 }
