@@ -20,6 +20,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "stdio-relay.h"
+
 struct landlock_ruleset_attr {
   uint64_t handled_access_fs;
 };
@@ -271,6 +273,8 @@ static int make_stdio_blocking(void) {
 }
 
 int main(int argc, char **argv) {
+  if (argc >= 3 && strcmp(argv[1], "--relay-stdin") == 0)
+    return relay_stdin(&argv[2]);
   struct command_line parsed = {0};
   int code = parse_arguments(argc, argv, &parsed);
   if (code != 0) return code;

@@ -37,6 +37,17 @@ export {
 export { consumeAgentInput } from './workspace-agents/run-lifecycle.js';
 export { resolveAgentPersona } from './workspace-agents/persona.js';
 export { findAgentSessionBinding } from './workspace-agents/session-binding.js';
+export type {
+  HostRunAssignment,
+  HostRunResult,
+} from './workspace-agents/host-lease.js';
+export type {
+  A2ATaskView,
+  A2AAgentCard,
+  A2ACaller,
+  A2AFailure,
+} from './workspace-agents/a2a-server.js';
+export type { A2AGrant } from './workspace-agents/types.js';
 export { strandLocalRuns } from './workspace-agents/stranded-runs.js';
 export type { AgentRunContext } from './workspace-agents/run-context.js';
 export {
@@ -53,6 +64,7 @@ export type {
 } from './workspace-agents/dispatcher.js';
 export type {
   WorkspaceAgent,
+  WorkspaceAgentExecution,
   Thread,
   ThreadRun,
   ThreadPriority,

@@ -44,24 +44,52 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request) {
+        requireReady(request);
         return delegate.provision(request);
     }
 
     @Override
     public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        requireReady(request);
         return delegate.provision(request, seed);
     }
 
     @Override
     public CompletionStage<RuntimeResourceHandle> ensureResource(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed, RuntimeResourceHandle knownHandle) {
+        requireReady(request);
         return delegate.ensureResource(request, seed, knownHandle);
+    }
+
+    private void requireReady(RuntimeProvisionRequest request) {
+        if (!request.isManagedContext() || !executionStore.verifiedRecoveryEnabled()) {
+            return;
+        }
+        var resolved = resolver.resolve(request.getIsolationKey());
+        if (!resolved.scope().equals(request.getScope())
+                || !resolved.binding().getStorageId().equals(request.getStorageId())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
     }
 
     @Override
     public CompletionStage<RuntimeObservation> reconcile(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed, RuntimeResourceHandle handle, RuntimeLease lastLease) {
         return delegate.reconcile(request, seed, handle, lastLease);
+    }
+
+    @Override
+    public boolean supportsDrainedStop() {
+        return delegate.supportsDrainedStop();
+    }
+
+    @Override
+    public CompletionStage<com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
+        if (executionStore.hasHolder(binding)) {
+            return CompletableFuture.failedFuture(new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(
+                    409, "workspace_close_execution_unsettled", "Original Workspace holder remains.", false));
+        }
+        return delegate.stopDrained(binding);
     }
 
     @Override

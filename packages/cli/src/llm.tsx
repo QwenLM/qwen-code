@@ -45,7 +45,10 @@ import path from 'node:path';
 import v8 from 'node:v8';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
-import { scrubAndReportInheritedLoaderEnv } from './config/shared-env-keys.js';
+import {
+  processBootLoaderEnv,
+  scrubAndReportInheritedLoaderEnv,
+} from './config/shared-env-keys.js';
 import { QWEN_CODE_SERVE_ENV } from './config/acp-channel-fallback.js';
 import {
   buildDisabledSkillNamesProvider,
@@ -494,6 +497,20 @@ export async function main() {
     isAcpMode &&
     privateAcpParentCapability !== undefined &&
     conversationsRuntimeMarkerSeen;
+  // Only the daemon that spawns a Managed host can drive its sessions, and
+  // the Conversations runtime is never paired. A repeated option arrives as
+  // an array, which is refused too.
+  if (
+    argv.acpExecutionEngine !== undefined &&
+    (argv.acpExecutionEngine !== 'managed' ||
+      !isAcpMode ||
+      privateAcpParentCapability === undefined ||
+      conversationsRuntimeProvenance)
+  ) {
+    throw new Error(
+      '--acp-execution-engine is reserved for hosts spawned by qwen serve.',
+    );
+  }
   const privateAcpChildEnv =
     isAcpMode && privateAcpParentCapability !== undefined
       ? {
@@ -580,7 +597,7 @@ export async function main() {
   // check corruptedPath directly to keep stderr visible in relaunch.
   if (settings.corruptedPath) {
     writeStderrLine(
-      'Warning: Settings file had invalid JSON and was reset. ' +
+      'Warning: Workspace settings had invalid JSON. ' +
         'A copy of the corrupted file has been saved at: ' +
         settings.corruptedPath,
     );
@@ -873,7 +890,12 @@ export async function main() {
     // respawn this process with process.env and still need the loader to
     // boot, and the respawned child re-runs this scrub itself. Only the
     // final process (no relaunch) reaches here.
-    scrubAndReportInheritedLoaderEnv(process.env, 'qwen', 'ACP child');
+    scrubAndReportInheritedLoaderEnv(
+      process.env,
+      'qwen',
+      'ACP child',
+      processBootLoaderEnv,
+    );
   }
 
   // When --worktree is going to chdir us into a worktree below, resolve
@@ -1274,12 +1296,20 @@ export async function main() {
       markAcpStartup('acpImportStart');
       const { runAcpAgent } = await import('./acp-integration/acpAgent.js');
       markAcpStartup('acpImportEnd');
+      // A Managed host runs its sessions' tools in Runtime workers.
+      const managedRuntimeEnvironment =
+        argv.acpExecutionEngine === 'managed'
+          ? (await import('./serve/managed-runtime-session-worker.js'))
+              .createManagedRuntimeEnvironment
+          : undefined;
       try {
         await runAcpAgent(config, settings, argv, {
           privateParentCapability: isAcpMode
             ? privateAcpParentCapability
             : undefined,
           conversationsRuntimeProvenance,
+          executionEngine: argv.acpExecutionEngine,
+          managedRuntimeEnvironment,
           externalToolGuardRequired:
             isAcpMode &&
             privateAcpParentCapability !== undefined &&

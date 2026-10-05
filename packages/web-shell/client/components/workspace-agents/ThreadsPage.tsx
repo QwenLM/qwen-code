@@ -5,12 +5,19 @@
  */
 
 import { useI18n } from '../../i18n';
+import { AddRuntimeDialog, type JoinToken } from './add-runtime-dialog';
+import {
+  ShareAgentDialog,
+  type AgentShare,
+  type AgentShareSummary,
+} from './share-agent-dialog';
 import { useMemo, useState, type FormEvent } from 'react';
 import {
   ChevronRightIcon,
   MessagesSquareIcon,
   MoreHorizontalIcon,
   PlusIcon,
+  ServerIcon,
 } from 'lucide-react';
 
 import { AuthorAvatar } from '../messages/AuthorAvatar';
@@ -43,8 +50,10 @@ import {
   explainSkip,
   groupThreads,
   needsAttention,
+  programLabel,
   statusReasonLabel,
   summarizePreview,
+  type AgentProgramView,
   type RoutingPreviewTarget,
   type ThreadGroup,
   type ThreadSummaryView,
@@ -62,6 +71,13 @@ export interface AgentConfigPatch {
   instructions?: string | null;
   agentType?: string | null;
   maxConcurrentRuns?: number | null;
+  execution?:
+    | { mode: 'local' }
+    | {
+        mode: 'managed-host';
+        hostIds: string[];
+        provider?: AgentProgramView;
+      };
 }
 
 /** What every agent in this workspace may do. A property of the subsystem. */
@@ -72,17 +88,36 @@ export interface AgentCapabilitiesView {
 }
 
 export interface ThreadsPageProps {
+  onConnectRemoteHost?: (input: {
+    remoteUrl: string;
+    remoteToken: string;
+    remoteCwd: string;
+    serverUrl: string;
+    provider: 'qwen';
+    allowHttp: boolean;
+  }) => Promise<boolean>;
   createError?: string;
   agents: readonly WorkspaceAgentSummaryView[];
   threads: readonly ThreadSummaryView[];
+  runtimes?: readonly WorkspaceAgentRuntimeView[];
   view: AgentWorkspaceView;
   onViewChange: (view: AgentWorkspaceView) => void;
   onOpenThread: (threadId: string) => void;
   onDeleteAgent: (agentId: string) => void;
   onSetAgentEnabled: (agentId: string, enabled: boolean) => void;
   onUpdateAgent?: (agentId: string, patch: AgentConfigPatch) => void;
-  onOpenAgentBuilder?: () => void;
+  onOpenAgentBuilder?: (hostId?: string) => void;
   onOpenDefinitions?: () => void;
+  /** Issues a single-use join token for the Add runtime dialog. */
+  onCreateJoinToken?: (supersedesHostId?: string) => Promise<JoinToken>;
+  onRemoveRuntime?: (hostId: string) => void;
+  hostServerUrl?: string;
+  /** A2A shares of one agent; absent hides Share. */
+  shares?: {
+    create: (agentId: string) => Promise<AgentShare>;
+    list: (agentId: string) => Promise<AgentShareSummary[]>;
+    revoke: (agentId: string, callerId: string) => Promise<unknown>;
+  };
   capabilities?: AgentCapabilitiesView;
   onCreateThread: (input: NewThread) => Promise<boolean> | void;
   workspaceCwd?: string;
@@ -104,8 +139,11 @@ export interface WorkspaceAgentSummaryView {
   /** What this identity is told on top of its definition's prompt. */
   instructions?: string;
   maxConcurrentRuns?: number;
+  execution?: AgentConfigPatch['execution'];
   enabled: boolean;
   status: 'offline' | 'idle' | 'working' | 'blocked' | 'error';
+  /** Absent from a daemon older than runtimes; that agent runs here. */
+  runtime?: WorkspaceAgentRuntimeView;
   /** Set once the identity is retired: it keeps its posts and takes no work. */
   retiredAt?: number;
   workingOn?: {
@@ -116,7 +154,25 @@ export interface WorkspaceAgentSummaryView {
   waiting: number;
 }
 
-export type AgentWorkspaceView = 'agents' | 'tasks';
+export interface WorkspaceAgentRuntimeView {
+  id: string;
+  kind: 'local' | 'external';
+  label: string;
+  provider: string;
+  /** Program ids the runtime reported it can run. */
+  programs?: readonly string[];
+  status: 'online' | 'offline';
+  workspaceId?: string;
+  workspaceCwd?: string;
+  hostSessionId?: string;
+  lastSeenAt?: number;
+  agentCount?: number;
+  sessionCount?: number;
+  runningTaskCount?: number;
+  queuedTaskCount?: number;
+}
+
+export type AgentWorkspaceView = 'agents' | 'tasks' | 'runtime';
 
 export interface NewWorkspaceAgent {
   name: string;
@@ -125,6 +181,7 @@ export interface NewWorkspaceAgent {
   model?: string;
   instructions?: string;
   maxConcurrentRuns?: number;
+  execution?: AgentConfigPatch['execution'];
 }
 
 export type ThreadPriorityChoice = 'urgent' | 'high' | 'normal' | 'low';
@@ -141,6 +198,7 @@ export interface NewThread {
 }
 
 const AGENT_STATUSES = new Set([
+  'online',
   'idle',
   'working',
   'blocked',
@@ -228,6 +286,7 @@ function Group({
 export function ThreadsPage({
   agents,
   threads,
+  runtimes,
   view,
   onViewChange,
   onOpenThread,
@@ -236,6 +295,11 @@ export function ThreadsPage({
   onUpdateAgent,
   onOpenAgentBuilder,
   onOpenDefinitions,
+  onCreateJoinToken,
+  onRemoveRuntime,
+  onConnectRemoteHost,
+  hostServerUrl,
+  shares,
   capabilities,
   onCreateThread,
   workspaceCwd,
@@ -247,13 +311,32 @@ export function ThreadsPage({
   pending,
 }: ThreadsPageProps) {
   const groups = useMemo(() => groupThreads(threads), [threads]);
+  const runtimeEntries = runtimes ?? [];
   const [creating, setCreating] = useState<'thread'>();
-  const [configuring, setConfiguring] = useState<string>();
+  const [configuring, setConfiguring] = useState<{
+    id: string;
+    hostIds: string[];
+  }>();
   const [openAgentId, setOpenAgentId] = useState<string>();
   const { t } = useI18n();
+  const [addingRuntime, setAddingRuntime] = useState(false);
+  const [replacingRuntime, setReplacingRuntime] =
+    useState<WorkspaceAgentRuntimeView>();
+  const [sharing, setSharing] = useState<{ id: string; name: string }>();
   const [taskAssignee, setTaskAssignee] = useState('');
   const statusLabel = (status: string) =>
     AGENT_STATUSES.has(status) ? t(`collab.agentStatus.${status}`) : status;
+  const hostLabel = (entry?: WorkspaceAgentRuntimeView) =>
+    !entry || entry.kind === 'local'
+      ? t('collab.agent.thisComputer')
+      : entry.label;
+  // "Program · Runtime": what the agent runs as, then where.
+  const agentPlace = (agent: WorkspaceAgentSummaryView) =>
+    `${programLabel(
+      agent.execution?.mode === 'managed-host'
+        ? agent.execution.provider
+        : undefined,
+    )} · ${hostLabel(agent.runtime)}`;
 
   const submitConfig =
     (agentId: string) => (event: FormEvent<HTMLFormElement>) => {
@@ -268,12 +351,39 @@ export function ThreadsPage({
         return value === '' ? null : value;
       };
       const runs = String(data.get('maxConcurrentRuns') ?? '').trim();
+      const hostIds = data
+        .getAll('executionHostId')
+        .map((value) => String(value));
+      const current = agents.find((agent) => agent.id === agentId);
+      const currentHostIds =
+        current?.execution?.mode === 'managed-host'
+          ? current.execution.hostIds
+          : [];
+      const placementChanged =
+        hostIds.length !== currentHostIds.length ||
+        hostIds.some((hostId) => !currentHostIds.includes(hostId));
       onUpdateAgent(agentId, {
         description: field('description'),
         model: field('model'),
         agentType: field('agentType'),
         instructions: field('instructions'),
         maxConcurrentRuns: runs === '' ? null : Number(runs),
+        ...(placementChanged
+          ? {
+              execution:
+                hostIds.length > 0
+                  ? ({
+                      mode: 'managed-host',
+                      hostIds,
+                      // Moving an agent keeps the program it is bound to.
+                      ...(current?.execution?.mode === 'managed-host' &&
+                      current.execution.provider
+                        ? { provider: current.execution.provider }
+                        : {}),
+                    } as const)
+                  : ({ mode: 'local' } as const),
+            }
+          : {}),
       });
       setConfiguring(undefined);
     };
@@ -335,6 +445,19 @@ export function ThreadsPage({
               {t('collab.agent.new')}
             </Button>
           ) : null}
+          {view === 'runtime' && onCreateJoinToken ? (
+            <Button
+              variant="outline"
+              disabled={pending}
+              onClick={() => {
+                setReplacingRuntime(undefined);
+                setAddingRuntime(true);
+              }}
+            >
+              <PlusIcon data-icon="inline-start" />
+              {t('collab.runtime.addTitle')}
+            </Button>
+          ) : null}
           {view === 'tasks' ? (
             <Button
               onClick={() => {
@@ -359,7 +482,7 @@ export function ThreadsPage({
         size="sm"
         aria-label={t('agents.title')}
       >
-        {(['agents', 'tasks'] as const).map((item) => (
+        {(['agents', 'tasks', 'runtime'] as const).map((item) => (
           <ToggleGroupItem key={item} value={item}>
             {t(`collab.tabs.${item}`)}
           </ToggleGroupItem>
@@ -470,7 +593,7 @@ export function ThreadsPage({
                   .filter((agent) => agent.enabled && !agent.retiredAt)
                   .map((agent) => (
                     <option key={agent.id} value={agent.name}>
-                      {agent.name}
+                      {agent.name} · {agentPlace(agent)}
                     </option>
                   ))}
               </select>
@@ -600,6 +723,9 @@ export function ThreadsPage({
                     <CardDescription className="truncate text-xs">
                       {agent.description || '—'}
                     </CardDescription>
+                    <span className="truncate text-xs text-muted-foreground">
+                      {agentPlace(agent)}
+                    </span>
                     {agent.workingOn ? (
                       <button
                         type="button"
@@ -642,9 +768,26 @@ export function ThreadsPage({
                         <DropdownMenuContent align="end" className="min-w-40">
                           {onUpdateAgent ? (
                             <DropdownMenuItem
-                              onSelect={() => setConfiguring(agent.id)}
+                              onSelect={() =>
+                                setConfiguring({
+                                  id: agent.id,
+                                  hostIds:
+                                    agent.execution?.mode === 'managed-host'
+                                      ? [...agent.execution.hostIds]
+                                      : [],
+                                })
+                              }
                             >
                               {t('collab.agent.configure')}
+                            </DropdownMenuItem>
+                          ) : null}
+                          {shares ? (
+                            <DropdownMenuItem
+                              onSelect={() =>
+                                setSharing({ id: agent.id, name: agent.name })
+                              }
+                            >
+                              {t('collab.agent.share')}
                             </DropdownMenuItem>
                           ) : null}
                           <DropdownMenuItem
@@ -680,7 +823,7 @@ export function ThreadsPage({
                     </div>
                   )}
                 </div>
-                {configuring === agent.id && onUpdateAgent ? (
+                {configuring?.id === agent.id && onUpdateAgent ? (
                   <form
                     className={styles.agentConfig}
                     onSubmit={submitConfig(agent.id)}
@@ -709,6 +852,7 @@ export function ThreadsPage({
                       <input
                         className={styles.field}
                         name="agentType"
+                        disabled={configuring.hostIds.length > 0}
                         defaultValue={agent.agentType ?? ''}
                         placeholder={t('collab.config.workspaceDefault')}
                       />
@@ -718,6 +862,7 @@ export function ThreadsPage({
                       <input
                         className={styles.field}
                         name="model"
+                        disabled={configuring.hostIds.length > 0}
                         defaultValue={agent.model ?? ''}
                         placeholder={t('collab.config.workspaceDefault')}
                       />
@@ -733,6 +878,50 @@ export function ThreadsPage({
                         defaultValue={agent.maxConcurrentRuns ?? 1}
                       />
                     </label>
+                    {runtimeEntries.some(
+                      (entry) => entry.kind === 'external',
+                    ) ? (
+                      <fieldset className={styles.configLabel}>
+                        <legend>{t('collab.config.runtimes')}</legend>
+                        {runtimeEntries
+                          .filter((entry) => entry.kind === 'external')
+                          .map((entry) => (
+                            <label key={entry.id}>
+                              <input
+                                name="executionHostId"
+                                type="checkbox"
+                                value={entry.id}
+                                checked={configuring.hostIds.includes(entry.id)}
+                                disabled={
+                                  !configuring.hostIds.includes(entry.id) &&
+                                  !entry.programs?.includes(
+                                    agent.execution?.mode === 'managed-host'
+                                      ? (agent.execution.provider ?? 'qwen')
+                                      : 'qwen',
+                                  )
+                                }
+                                onChange={(event) => {
+                                  const hostIds = event.target.checked
+                                    ? [...configuring.hostIds, entry.id]
+                                    : configuring.hostIds.filter(
+                                        (id) => id !== entry.id,
+                                      );
+                                  setConfiguring({ id: agent.id, hostIds });
+                                }}
+                              />{' '}
+                              {hostLabel(entry)} · {entry.provider} ·{' '}
+                              {statusLabel(entry.status)}
+                            </label>
+                          ))}
+                        <span className={styles.configNote}>
+                          {t(
+                            configuring.hostIds.length > 0
+                              ? 'collab.agent.hostPersona'
+                              : 'collab.config.runtimesHint',
+                          )}
+                        </span>
+                      </fieldset>
+                    ) : null}
                     <p className={styles.configNote}>
                       {t('collab.config.note')}
                     </p>
@@ -755,7 +944,9 @@ export function ThreadsPage({
                   <section className={styles.agentWorkspace}>
                     <div className={styles.agentWorkspaceHeader}>
                       <strong>{t('collab.agent.assigned')}</strong>
-                      <span>{statusLabel(agent.status)}</span>
+                      <span>
+                        {hostLabel(agent.runtime)} · {statusLabel(agent.status)}
+                      </span>
                     </div>
                     {threads.some(
                       (thread) => thread.assigneeName === agent.name,
@@ -823,7 +1014,172 @@ export function ThreadsPage({
             />
           ))
         )}
+
+        {view === 'runtime' && runtimeEntries.length > 0 ? (
+          runtimeEntries.map((runtimeEntry) => (
+            <section className={styles.runtimeCard} key={runtimeEntry.id}>
+              <div className={styles.runtimeHeader}>
+                <h2 className={styles.runtimeTitle}>
+                  {hostLabel(runtimeEntry)}
+                </h2>
+                <p className={styles.configNote}>
+                  {runtimeEntry.kind === 'local'
+                    ? t('collab.runtime.localNote')
+                    : t('collab.runtime.remoteNote')}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <strong
+                  className={styles.runtimeStatus}
+                  data-runtime-status={runtimeEntry.status}
+                >
+                  {statusLabel(runtimeEntry.status)}
+                </strong>
+                {runtimeEntry.kind === 'external' &&
+                (onRemoveRuntime || onCreateJoinToken) ? (
+                  <>
+                    {onCreateJoinToken ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={pending}
+                        onClick={() => {
+                          setReplacingRuntime(runtimeEntry);
+                          setAddingRuntime(true);
+                        }}
+                      >
+                        {t('collab.runtime.replace')}
+                      </Button>
+                    ) : null}
+                    {onRemoveRuntime ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={pending}
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              t('collab.runtime.removeConfirm', {
+                                name: runtimeEntry.label,
+                              }),
+                            )
+                          ) {
+                            onRemoveRuntime(runtimeEntry.id);
+                          }
+                        }}
+                      >
+                        {t('collab.runtime.remove')}
+                      </Button>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
+              <dl className={styles.runtimeFacts}>
+                <div>
+                  <dt>{t('collab.runtime.programs')}</dt>
+                  <dd>{runtimeEntry.provider}</dd>
+                </div>
+                {runtimeEntry.workspaceCwd ? (
+                  <div>
+                    <dt>{t('collab.runtime.folder')}</dt>
+                    <dd>
+                      <code>{runtimeEntry.workspaceCwd}</code>
+                    </dd>
+                  </div>
+                ) : null}
+                <div>
+                  <dt>{t('collab.runtime.agents')}</dt>
+                  <dd>{runtimeEntry.agentCount ?? 0}</dd>
+                </div>
+                <div>
+                  <dt>{t('collab.runtime.running')}</dt>
+                  <dd>{runtimeEntry.runningTaskCount ?? 0}</dd>
+                </div>
+                <div>
+                  <dt>{t('collab.runtime.queued')}</dt>
+                  <dd>{runtimeEntry.queuedTaskCount ?? 0}</dd>
+                </div>
+              </dl>
+              <details className="mt-4 text-xs text-muted-foreground">
+                <summary className="cursor-pointer">
+                  {t('collab.runtime.technical')}
+                </summary>
+                <p>{t('collab.runtime.id', { id: runtimeEntry.id })}</p>
+                {runtimeEntry.hostSessionId && (
+                  <p>
+                    {t('collab.runtime.hostSession', {
+                      id: runtimeEntry.hostSessionId,
+                    })}
+                  </p>
+                )}
+                <p>
+                  {t('collab.runtime.sessions', {
+                    count: runtimeEntry.sessionCount ?? 0,
+                  })}
+                </p>
+                {runtimeEntry.lastSeenAt && (
+                  <p>
+                    {t('collab.runtime.lastSeen', {
+                      time: new Date(
+                        runtimeEntry.lastSeenAt,
+                      ).toLocaleTimeString(),
+                    })}
+                  </p>
+                )}
+              </details>
+            </section>
+          ))
+        ) : view === 'runtime' ? (
+          <Empty className="border">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <ServerIcon />
+              </EmptyMedia>
+              <EmptyTitle>{t('collab.runtime.empty')}</EmptyTitle>
+              <EmptyDescription>
+                {t('collab.runtime.emptyHint')}
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        ) : null}
       </div>
+      {onCreateJoinToken && (
+        <AddRuntimeDialog
+          key={replacingRuntime?.id ?? 'add-host'}
+          open={addingRuntime}
+          onOpenChange={(open) => {
+            setAddingRuntime(open);
+            if (!open) setReplacingRuntime(undefined);
+          }}
+          serverUrl={hostServerUrl ?? ''}
+          runtimes={runtimeEntries}
+          onCreateJoinToken={onCreateJoinToken}
+          replacementTarget={replacingRuntime}
+          {...(onConnectRemoteHost
+            ? { onConnectExisting: onConnectRemoteHost }
+            : {})}
+          {...(onOpenAgentBuilder
+            ? {
+                onCreateAgentOn: (runtimeId: string) => {
+                  setAddingRuntime(false);
+                  onOpenAgentBuilder(runtimeId);
+                },
+              }
+            : {})}
+        />
+      )}
+      {shares && sharing && (
+        <ShareAgentDialog
+          agentName={sharing.name}
+          open
+          onOpenChange={(open) => {
+            if (!open) setSharing(undefined);
+          }}
+          onCreate={() => shares.create(sharing.id)}
+          onList={() => shares.list(sharing.id)}
+          onRevoke={(callerId) => shares.revoke(sharing.id, callerId)}
+        />
+      )}
     </div>
   );
 }

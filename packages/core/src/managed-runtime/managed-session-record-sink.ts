@@ -44,6 +44,7 @@ const CARRIED_SYSTEM_SUBTYPES = new Set([
 const CARRIED_MESSAGE_SUBTYPES = new Set([
   'goal_runtime',
   'mid_turn_user_message',
+  'code_mode_tool_result',
 ]);
 
 function isNonEmptyString(value: unknown): boolean {
@@ -486,7 +487,7 @@ export class ManagedSessionRecordSink {
   }
 
   /** Reader-facing records rebuilt from the authoritative log. */
-  project(): Promise<ChatRecord[]> {
-    return this.projection.project();
+  project(throughSequence?: number): Promise<ChatRecord[]> {
+    return this.projection.project(throughSequence);
   }
 }

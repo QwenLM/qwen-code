@@ -14,6 +14,7 @@ import {
 import {
   ThreadsPage,
   type WorkspaceAgentSummaryView,
+  type WorkspaceAgentRuntimeView,
   type AgentWorkspaceView,
   type AgentCapabilitiesView,
 } from './ThreadsPage';
@@ -22,6 +23,7 @@ import { ThreadChat } from './ThreadChat';
 import { Button } from '../ui/button';
 import { AgentCreatePage } from '../agents/AgentCreatePage';
 import { useI18n } from '../../i18n';
+import { isAgentCollaborationEnabledForWorkspace } from '../../utils/workspace';
 import type {
   RoutingPreviewTarget,
   ThreadSummaryView,
@@ -104,11 +106,31 @@ export function ThreadsRoute({
   const workspace = useWorkspace();
   const connection = useConnection();
   const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState<string>();
-  const workspaceCwd =
+  const collaborationWorkspaces = useMemo(
+    () =>
+      (workspace.capabilities?.workspaces ?? []).filter((entry) =>
+        isAgentCollaborationEnabledForWorkspace(
+          workspace.capabilities,
+          entry.cwd,
+        ),
+      ),
+    [workspace.capabilities],
+  );
+  const requestedWorkspaceCwd =
     boundWorkspaceCwd ??
     selectedWorkspaceCwd ??
     connection.workspaceCwd ??
-    workspace.capabilities?.workspaces?.find((entry) => entry.primary)?.cwd;
+    collaborationWorkspaces.find((entry) => entry.primary)?.cwd ??
+    collaborationWorkspaces[0]?.cwd;
+  const workspaceCwd = isAgentCollaborationEnabledForWorkspace(
+    workspace.capabilities,
+    requestedWorkspaceCwd,
+  )
+    ? requestedWorkspaceCwd
+    : boundWorkspaceCwd
+      ? undefined
+      : (collaborationWorkspaces.find((entry) => entry.primary)?.cwd ??
+        collaborationWorkspaces[0]?.cwd);
   const client = useMemo(
     () =>
       workspaceCwd
@@ -118,6 +140,7 @@ export function ThreadsRoute({
   );
   const { t } = useI18n();
   const [agents, setAgents] = useState<WorkspaceAgentSummaryView[]>([]);
+  const [runtimes, setRuntimes] = useState<WorkspaceAgentRuntimeView[]>([]);
   const [view, setView] = useState<AgentWorkspaceView>(
     initialView === undefined || initialView === 'new-agent'
       ? 'agents'
@@ -137,10 +160,10 @@ export function ThreadsRoute({
     RoutingPreviewTarget[] | undefined
   >();
   const [pending, setPending] = useState(false);
-  // Set while the New agent page is open.
-  const [creatingAgent, setCreatingAgent] = useState(
-    initialView === 'new-agent',
-  );
+  // Set while the New agent page is open; may name the runtime to preselect.
+  const [creatingAgent, setCreatingAgent] = useState<
+    { hostId?: string } | undefined
+  >(initialView === 'new-agent' ? {} : undefined);
   const [refreshError, setRefreshError] = useState<string | undefined>();
   const [actionError, setActionError] = useState<string | undefined>();
   const error = actionError ?? refreshError;
@@ -179,6 +202,9 @@ export function ThreadsRoute({
       }
       appliedRefresh.current = sequence;
       setAgents(nextAgents.agents);
+      setRuntimes(
+        nextAgents.runtimes ?? (nextAgents.runtime ? [nextAgents.runtime] : []),
+      );
       if (nextAgents.capabilities) setCapabilities(nextAgents.capabilities);
       setThreads(nextThreads.threads);
       setDetail(nextDetail);
@@ -322,8 +348,12 @@ export function ThreadsRoute({
       <AgentCreatePage
         initialScope="workspace"
         workspaceCwd={workspaceCwd}
-        onCancel={() => setCreatingAgent(false)}
-        onCreated={() => setCreatingAgent(false)}
+        executionHosts={runtimes.filter((entry) => entry.kind === 'external')}
+        {...(creatingAgent.hostId
+          ? { initialHostId: creatingAgent.hostId }
+          : {})}
+        onCancel={() => setCreatingAgent(undefined)}
+        onCreated={() => setCreatingAgent(undefined)}
         onSaveWorkspaceAgent={async (input) => {
           await client.createAgent(input);
           await refresh();
@@ -347,6 +377,16 @@ export function ThreadsRoute({
       </div>
     );
   }
+
+  const { createShare, listShares, revokeShare, removeHost } = client;
+  const shares =
+    createShare && listShares && revokeShare
+      ? {
+          create: createShare,
+          list: async (agentId: string) => (await listShares(agentId)).shares,
+          revoke: revokeShare,
+        }
+      : undefined;
 
   // Outside the shell's chat column (an embedded Agents page with no chat to
   // switch to) the same conversation opens in place, with a way back.
@@ -423,6 +463,12 @@ export function ThreadsRoute({
         threads={threads}
         view={view}
         onViewChange={setView}
+        runtimes={runtimes}
+        onConnectRemoteHost={
+          client.connectRemoteHost
+            ? (input) => mutate(() => client.connectRemoteHost!(input))
+            : undefined
+        }
         createPreview={createPreview}
         pending={pending}
         onOpenThread={(id) => {
@@ -438,11 +484,22 @@ export function ThreadsRoute({
         onUpdateAgent={(id, patch) =>
           void mutate(() => client.updateAgent(id, patch))
         }
-        onOpenAgentBuilder={() => setCreatingAgent(true)}
+        onOpenAgentBuilder={(hostId) => setCreatingAgent({ hostId })}
+        {...(client.createJoinToken
+          ? { onCreateJoinToken: client.createJoinToken }
+          : {})}
+        {...(removeHost
+          ? {
+              onRemoveRuntime: (hostId: string) =>
+                void mutate(() => removeHost(hostId)),
+            }
+          : {})}
+        {...(shares ? { shares } : {})}
         {...(onOpenDefinitions ? { onOpenDefinitions } : {})}
         {...(capabilities ? { capabilities } : {})}
         workspaceCwd={workspaceCwd}
-        workspaces={workspace.capabilities?.workspaces ?? []}
+        hostServerUrl={workspace.baseUrl}
+        workspaces={collaborationWorkspaces}
         onWorkspaceChange={(cwd) => {
           setSelectedWorkspaceCwd(cwd);
           setAgents([]);

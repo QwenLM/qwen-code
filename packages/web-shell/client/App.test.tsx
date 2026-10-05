@@ -34,6 +34,7 @@ import {
   type DaemonWorkspaceMcpServerStatus,
   type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceVoiceStatus,
+  type DaemonWorkspaceProviderStatus,
   type GoalSnapshotV2,
   type SessionSource,
   type SessionSourcesResult,
@@ -53,8 +54,8 @@ import type {
   ChatHeaderRenderInfo,
   WebShellComposerToolbarRenderInfo,
 } from './customization';
-import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
-import { serializeStatsMessage } from './components/messages/StatsMessage';
+import { createContextUsageMessageData } from './components/messages/ContextUsageMessage';
+import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
@@ -76,6 +77,7 @@ type MockConnection = {
   models: Array<{
     id: string;
     label?: string;
+    baseModelId?: string;
     reasoningPreview?: {
       enabled: boolean;
       effort: string;
@@ -135,6 +137,7 @@ function activeGoalSnapshot(
 type ChatEditorTestProps = {
   btwEnabled?: boolean;
   contextChipPlacement?: 'toolbar' | 'below' | 'header';
+  liveVoicePortalContainer?: HTMLElement | null;
   onSkillsOpenChange?: (open: boolean) => void;
   skillsLoading?: boolean;
   skillsLoadError?: boolean;
@@ -763,6 +766,7 @@ const {
         onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
       } | null,
       settings: [] as DaemonSettingDescriptor[],
+      providers: [] as DaemonWorkspaceProviderStatus[],
       settingsLoading: false,
       // A background revalidation: the real resource sets loading:true while
       // keeping the last-known-good data and status.
@@ -957,7 +961,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
     useProviders: (options?: { autoLoad?: boolean; enabled?: boolean }) => {
       testState.latestProvidersHookOptions = options;
       return {
-        providers: [],
+        providers: testState.providers,
         current: undefined,
         loading: false,
         error: undefined,
@@ -1558,12 +1562,17 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
     >();
   return {
     DEFAULT_SESSION_ACTION_ITEMS: actual.DEFAULT_SESSION_ACTION_ITEMS,
+    SIDEBAR_RAIL_WIDTH: actual.SIDEBAR_RAIL_WIDTH,
     WebShellSidebar: (props: {
       collapsed?: boolean;
+      onCollapsedChange?: (collapsed: boolean) => void;
+      activePage?: string;
+      onOpenHome?: () => void;
       onOpenSettings?: () => void;
       onOpenAgents?: (view?: 'agents' | 'tasks') => void;
       onOpenPlugins?: () => void;
       onOpenChannels?: () => void;
+      onOpenLive?: () => void;
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
@@ -1607,6 +1616,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           'data-current-session-running': String(
             Boolean(props.currentSessionRunning),
           ),
+          'data-active-page': props.activePage,
           'data-show-session-source-switch': String(
             props.showSessionSourceSwitch,
           ),
@@ -1628,6 +1638,24 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             onClick: props.onOpenSettings,
           },
           'settings',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-home',
+            type: 'button',
+            onClick: props.onOpenHome,
+          },
+          'home',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'toggle-sidebar-collapse',
+            type: 'button',
+            onClick: () => props.onCollapsedChange?.(!props.collapsed),
+          },
+          'toggle collapse',
         ),
         React.createElement(
           'button',
@@ -1768,6 +1796,16 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           },
           'plugins',
         ),
+        props.onOpenLive &&
+          React.createElement(
+            'button',
+            {
+              'data-testid': 'open-live',
+              type: 'button',
+              onClick: props.onOpenLive,
+            },
+            'Live',
+          ),
         React.createElement(
           'button',
           {
@@ -11597,6 +11635,7 @@ beforeEach(() => {
   testState.settings = [];
   testState.settingsLoading = false;
   testState.settingsReloading = false;
+  testState.providers = [];
   testState.settingsError = undefined;
   testState.latestSettingsHookOptions = undefined;
   testState.latestProvidersHookOptions = undefined;
@@ -14470,52 +14509,60 @@ describe('App shell command queueing', () => {
 });
 
 describe('App read-only local commands mid-turn', () => {
-  it('runs /stats immediately while streaming and skips the echo', async () => {
-    const statsFixture: DaemonSessionStatsStatus = {
-      v: 1,
-      sessionId: 'session-1',
-      workspaceCwd: '/tmp/project',
-      sessionStartTimeMs: 1000,
-      durationMs: 42000,
-      promptCount: 2,
-      models: {},
-      tools: {
-        totalCalls: 1,
-        totalSuccess: 1,
-        totalFail: 0,
-        totalDurationMs: 120,
-        byName: {},
-      },
-      files: { totalLinesAdded: 3, totalLinesRemoved: 1 },
-      sources: [],
-    };
-    mockSessionActions.getStats.mockResolvedValue(statsFixture);
-    const { rerender } = renderApp({});
-    await flush();
+  it.each([
+    ['/stats', 'overview'],
+    ['/stats model', 'model'],
+    ['/stats tools', 'tools'],
+  ] as const)(
+    'runs %s immediately while streaming and skips the echo',
+    async (command, view) => {
+      const statsFixture: DaemonSessionStatsStatus = {
+        v: 1,
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+        sessionStartTimeMs: 1000,
+        durationMs: 42000,
+        promptCount: 2,
+        models: {},
+        tools: {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+          totalDurationMs: 120,
+          byName: {},
+        },
+        files: { totalLinesAdded: 3, totalLinesRemoved: 1 },
+        sources: [],
+      };
+      mockSessionActions.getStats.mockResolvedValue(statsFixture);
+      const { rerender } = renderApp({});
+      await flush();
 
-    act(() => {
-      testState.streamingState = 'responding';
-      rerender({});
-    });
-
-    let accepted: boolean | void;
-    await act(async () => {
-      accepted = testState.latestChatEditorProps?.onSubmit('/stats');
-      await vi.waitFor(() => {
-        expect(mockSessionActions.getStats).toHaveBeenCalled();
+      act(() => {
+        testState.streamingState = 'responding';
+        rerender({});
       });
-    });
 
-    expect(accepted).toBe(true);
-    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
-    expect(mockStore.dispatch).toHaveBeenCalledWith([
-      expect.objectContaining({
-        type: 'status',
-        clearActiveText: false,
-        text: serializeStatsMessage(statsFixture, 'overview'),
-      }),
-    ]);
-  });
+      let accepted: boolean | void;
+      await act(async () => {
+        accepted = testState.latestChatEditorProps?.onSubmit(command);
+        await vi.waitFor(() => {
+          expect(mockSessionActions.getStats).toHaveBeenCalled();
+        });
+      });
+
+      expect(accepted).toBe(true);
+      expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(mockStore.dispatch).toHaveBeenCalledWith([
+        expect.objectContaining({
+          type: 'status',
+          clearActiveText: false,
+          text: 'Session Stats',
+          data: createStatsMessageData(statsFixture, view),
+        }),
+      ]);
+    },
+  );
 
   it('echoes /stats when idle', async () => {
     renderApp({});
@@ -14641,59 +14688,65 @@ describe('App read-only local commands mid-turn', () => {
     expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/status');
   });
 
-  it('runs /context immediately while streaming and skips the echo', async () => {
-    const contextFixture: DaemonSessionContextUsageStatus = {
-      v: 1,
-      sessionId: 'session-1',
-      workspaceCwd: '/tmp/project',
-      usage: {
-        modelName: 'qwen',
-        totalTokens: 1234,
-        contextWindowSize: 131072,
-        breakdown: {
-          systemPrompt: 500,
-          builtinTools: 200,
-          mcpTools: 0,
-          memoryFiles: 50,
-          skills: 0,
-          messages: 584,
-          freeSpace: 129738,
-          autocompactBuffer: 0,
+  it.each(['/context', '/context detail', '/context -d'])(
+    'runs %s immediately while streaming and skips the echo',
+    async (command) => {
+      const contextFixture: DaemonSessionContextUsageStatus = {
+        v: 1,
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+        usage: {
+          modelName: 'qwen',
+          totalTokens: 1234,
+          contextWindowSize: 131072,
+          breakdown: {
+            systemPrompt: 500,
+            builtinTools: 200,
+            mcpTools: 0,
+            memoryFiles: 50,
+            skills: 0,
+            messages: 584,
+            freeSpace: 129738,
+            autocompactBuffer: 0,
+          },
+          builtinTools: [{ name: 'read_file', tokens: 120 }],
+          mcpTools: [],
+          memoryFiles: [{ path: 'QWEN.md', tokens: 50 }],
+          skills: [],
         },
-        builtinTools: [{ name: 'read_file', tokens: 120 }],
-        mcpTools: [],
-        memoryFiles: [{ path: 'QWEN.md', tokens: 50 }],
-        skills: [],
-      },
-      formattedText: 'Context usage: 1.2k / 131k tokens',
-    };
-    mockSessionActions.getContextUsage.mockResolvedValue(contextFixture);
-    const { rerender } = renderApp({});
-    await flush();
+        formattedText: 'Context usage: 1.2k / 131k tokens',
+      };
+      mockSessionActions.getContextUsage.mockResolvedValue(contextFixture);
+      const { rerender } = renderApp({});
+      await flush();
 
-    act(() => {
-      testState.streamingState = 'responding';
-      rerender({});
-    });
-
-    let accepted: boolean | void;
-    await act(async () => {
-      accepted = testState.latestChatEditorProps?.onSubmit('/context');
-      await vi.waitFor(() => {
-        expect(mockSessionActions.getContextUsage).toHaveBeenCalled();
+      act(() => {
+        testState.streamingState = 'responding';
+        rerender({});
       });
-    });
 
-    expect(accepted).toBe(true);
-    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
-    expect(mockStore.dispatch).toHaveBeenCalledWith([
-      expect.objectContaining({
-        type: 'status',
-        clearActiveText: false,
-        text: serializeContextUsageMessage(contextFixture),
-      }),
-    ]);
-  });
+      let accepted: boolean | void;
+      await act(async () => {
+        accepted = testState.latestChatEditorProps?.onSubmit(command);
+        await vi.waitFor(() => {
+          expect(mockSessionActions.getContextUsage).toHaveBeenCalled();
+        });
+      });
+      expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
+        detail: command !== '/context',
+      });
+      expect(accepted).toBe(true);
+      expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(mockStore.dispatch).toHaveBeenCalledWith([
+        expect.objectContaining({
+          type: 'status',
+          clearActiveText: false,
+          text: 'Context Usage',
+          data: createContextUsageMessageData(contextFixture),
+        }),
+      ]);
+    },
+  );
 
   it('echoes /context when idle', async () => {
     renderApp({});
@@ -16048,7 +16101,7 @@ describe('App session callbacks', () => {
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
       expect.objectContaining({
         type: 'status',
-        text: expect.stringContaining('web-shell:context-usage:v1:'),
+        data: expect.objectContaining({ type: 'web-shell:context-usage:v1:' }),
       }),
     ]);
   });
@@ -30756,7 +30809,7 @@ describe('App session callbacks', () => {
     });
 
     const panel = container.querySelector('[data-testid="inline-panel"]');
-    expect(panel?.getAttribute('aria-label')).toBe('Channels');
+    expect(panel?.getAttribute('aria-label')).toBe('Settings');
     expect(
       panel?.querySelector('[data-testid="channels-manager-page"]'),
     ).not.toBeNull();
@@ -32527,7 +32580,9 @@ describe('App session callbacks', () => {
       expect(mockStore.dispatch).not.toHaveBeenCalledWith([
         expect.objectContaining({
           type: 'status',
-          text: expect.stringContaining('web-shell:context-usage:v1:'),
+          data: expect.objectContaining({
+            type: 'web-shell:context-usage:v1:',
+          }),
         }),
       ]);
       expect(
@@ -34497,46 +34552,57 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
-  it('clears a forced compact drawer after crossing to a wide viewport', async () => {
-    let mobileChangeHandler:
-      | ((event: { matches: boolean }) => void)
-      | undefined;
-    Object.defineProperty(window, 'matchMedia', {
-      configurable: true,
-      value: vi.fn().mockImplementation((query: string) => ({
-        matches: query.includes('min-width'),
-        media: query,
-        addEventListener: (
-          _type: string,
-          handler: (event: { matches: boolean }) => void,
-        ) => {
-          if (query.includes('max-width')) mobileChangeHandler = handler;
-        },
-        removeEventListener: vi.fn(),
-      })),
-    });
-    const shellRef = createRef<WebShellApi>();
-    const { container } = renderApp({ sidebar: true, shellRef });
-    await flush();
+  it('clears a forced compact drawer after the embedded container becomes wide', async () => {
+    const observers = new Map<Element, ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) {
+        observers.set(element, this.callback);
+      }
+      unobserve(element: Element) {
+        observers.delete(element);
+      }
+      disconnect() {}
+    } as typeof ResizeObserver;
+    try {
+      const shellRef = createRef<WebShellApi>();
+      const { container } = renderApp({ sidebar: true, shellRef });
+      await flush();
+      const layout = container.querySelector(
+        '[data-sidebar-shell]',
+      )!.parentElement!;
+      const shellRoot = container.querySelector('[data-web-shell-root]')!;
+      const resize = observers.get(layout)!;
+      Object.defineProperty(layout, 'clientWidth', {
+        configurable: true,
+        value: 560,
+      });
+      await act(async () => {
+        resize([], {} as ResizeObserver);
+      });
+      expect(shellRoot.hasAttribute('data-compact-sidebar')).toBe(true);
+      await act(async () => {
+        shellRef.current?.openSessionDrawer();
+      });
+      expect(
+        container.querySelector('[data-sidebar-shell]')?.className,
+      ).toContain('mobileDrawerForced');
 
-    await act(async () => {
-      shellRef.current?.openSessionDrawer();
-      await Promise.resolve();
-    });
-    expect(
-      container.querySelector('[data-sidebar-shell]')?.className,
-    ).toContain('mobileDrawerForced');
-
-    await act(async () => {
-      mobileChangeHandler?.({ matches: false });
-      await Promise.resolve();
-    });
-    expect(
-      container.querySelector('[data-sidebar-shell]')?.className,
-    ).not.toContain('mobileDrawerForced');
-    expect(
-      container.querySelector('[data-sidebar-shell][role="dialog"]'),
-    ).toBeNull();
+      Object.defineProperty(layout, 'clientWidth', { value: 1000 });
+      await act(async () => {
+        resize([], {} as ResizeObserver);
+      });
+      expect(shellRoot.hasAttribute('data-compact-sidebar')).toBe(false);
+      expect(
+        container.querySelector('[data-sidebar-shell]')?.className,
+      ).not.toContain('mobileDrawerForced');
+      expect(
+        container.querySelector('[data-sidebar-shell][role="dialog"]'),
+      ).toBeNull();
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
   });
 
   it('starts a new session from the external shell ref and returns to chat', async () => {
@@ -36832,6 +36898,52 @@ describe('App session callbacks', () => {
     expect(editorFocus).toHaveBeenCalled();
   });
 
+  it('loads existing Live settings from its rail entry only while open', async () => {
+    testState.settings = [
+      {
+        ...sessionWorkflowSetting(),
+        key: 'experimental.liveVoice.enabled',
+        values: { effective: false },
+      },
+    ];
+    mockWorkspace.client.liveSetupStatus.mockResolvedValueOnce({
+      v: 1,
+      enabled: false,
+      keyConfigured: false,
+      model: 'qwen3.5-omni-plus-realtime',
+      shortcut: '',
+      install: { state: 'not-installed' },
+      live: { v: 1, available: false, state: 'unavailable', shortcut: '' },
+    });
+    const { container } = renderApp({
+      sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+    });
+    await flush();
+    mockWorkspace.client.liveSetupStatus.mockClear();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-live"]')!
+        .click(),
+    );
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="inline-panel"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Settings');
+    expect(mockWorkspace.client.liveSetupStatus).toHaveBeenCalledOnce();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sidebar-settings"]',
+        )!
+        .click(),
+    );
+    await flush();
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    expect(mockWorkspace.client.liveSetupStatus).toHaveBeenCalledOnce();
+  });
+
   it('reads Live setup only in Settings even when the host hides the Live sidebar group', async () => {
     testState.settings = [
       {
@@ -36855,6 +36967,298 @@ describe('App session callbacks', () => {
     );
     await act(async () => window.dispatchEvent(new Event('focus')));
     expect(mockWorkspace.client.liveSetupStatus).toHaveBeenCalledOnce();
+  });
+
+  it('returns the sidebar page to Home when the Live settings panel closes', async () => {
+    testState.settings = [
+      {
+        ...sessionWorkflowSetting(),
+        key: 'experimental.liveVoice.enabled',
+        values: { effective: false },
+      },
+    ];
+    mockWorkspace.client.liveSetupStatus.mockResolvedValueOnce({
+      v: 1,
+      enabled: false,
+      keyConfigured: false,
+      model: 'qwen3.5-omni-plus-realtime',
+      shortcut: '',
+      install: { state: 'not-installed' },
+      live: { v: 1, available: false, state: 'unavailable', shortcut: '' },
+    });
+    const { container, rerender } = renderApp({
+      sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+    });
+    await flush();
+    const sidebarPage = () =>
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page');
+    expect(sidebarPage()).toBe('home');
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-live"]')!
+        .click(),
+    );
+    await flush();
+    expect(sidebarPage()).toBe('live');
+
+    // An approval surfacing force-closes the panel; the sidebar section must
+    // follow back to the session instead of pinning the closed panel's column.
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(sidebarPage()).toBe('home');
+  });
+
+  it('keeps the Channels column when a channel session opens from its panel', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_source_metadata'],
+    };
+    const { container } = renderApp({
+      sidebar: { primaryNav: { items: ['channels'] } },
+    });
+    await flush();
+    const sidebarPage = () =>
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page');
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-channels"]')!
+        .click(),
+    );
+    await flush();
+    expect(sidebarPage()).toBe('channels');
+
+    // Opening a conversation closes the panel; the Channels column and its
+    // rail selection must survive instead of snapping back to Home.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(sidebarPage()).toBe('channels');
+  });
+
+  it('restores Home with one rail click from the Live panel in a Live session', async () => {
+    mockConnection.sessionContext = { kind: 'live' };
+    const { container } = renderApp({
+      sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+    });
+    await flush();
+    const sidebarPage = () =>
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page');
+    expect(sidebarPage()).toBe('live');
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-live"]')!
+        .click(),
+    );
+    await flush();
+    expect(sidebarPage()).toBe('live');
+
+    // The explicit Home choice must stick: the panel close must not revert
+    // the section to the Live session default.
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-home"]')!
+        .click(),
+    );
+    await flush();
+    expect(sidebarPage()).toBe('home');
+  });
+
+  it('keeps the sidebar on the Home page in split view', async () => {
+    const { container } = renderApp({
+      sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+    });
+    await flush();
+    const sidebarPage = () =>
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page');
+    expect(sidebarPage()).toBe('home');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    // 'split' must not leak as a sidebar page: a wide split keeps the home
+    // column (the folded-rail path is driven by the collapsed prop instead).
+    expect(sidebarPage()).toBe('home');
+  });
+
+  it('closes the compact drawer when the rail Home entry is opened', async () => {
+    const observers = new Map<Element, ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) {
+        observers.set(element, this.callback);
+      }
+      unobserve(element: Element) {
+        observers.delete(element);
+      }
+      disconnect() {}
+    } as typeof ResizeObserver;
+    try {
+      const shellRef = createRef<WebShellApi>();
+      const { container } = renderApp({
+        sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+        shellRef,
+      });
+      await flush();
+      const layout = container.querySelector(
+        '[data-sidebar-shell]',
+      )!.parentElement!;
+      const shellRoot = container.querySelector('[data-web-shell-root]')!;
+      const resize = observers.get(layout)!;
+      Object.defineProperty(layout, 'clientWidth', {
+        configurable: true,
+        value: 560,
+      });
+      await act(async () => {
+        resize([], {} as ResizeObserver);
+      });
+      expect(shellRoot.hasAttribute('data-compact-sidebar')).toBe(true);
+      await act(async () => {
+        shellRef.current?.openSessionDrawer();
+      });
+      expect(
+        container.querySelector('[data-sidebar-shell][role="dialog"]'),
+      ).not.toBeNull();
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-home"]')!
+          .click();
+        await Promise.resolve();
+      });
+
+      expect(
+        container.querySelector('[data-sidebar-shell][role="dialog"]'),
+      ).toBeNull();
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it('does not persist the desktop collapse preference from a drawer Home tap', async () => {
+    const observers = new Map<Element, ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) {
+        observers.set(element, this.callback);
+      }
+      unobserve(element: Element) {
+        observers.delete(element);
+      }
+      disconnect() {}
+    } as typeof ResizeObserver;
+    try {
+      const shellRef = createRef<WebShellApi>();
+      const { container } = renderApp({
+        sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+        shellRef,
+      });
+      await flush();
+      const layout = container.querySelector(
+        '[data-sidebar-shell]',
+      )!.parentElement!;
+      const resize = observers.get(layout)!;
+      Object.defineProperty(layout, 'clientWidth', {
+        configurable: true,
+        value: 560,
+      });
+      await act(async () => {
+        resize([], {} as ResizeObserver);
+      });
+      await act(async () => {
+        shellRef.current?.openSessionDrawer();
+      });
+      expect(
+        container.querySelector('[data-sidebar-shell][role="dialog"]'),
+      ).not.toBeNull();
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-home"]')!
+          .click();
+        await Promise.resolve();
+      });
+
+      // The rail Home entry stays tappable inside the forced-open drawer, and
+      // a tap that only navigates must not write the desktop collapse
+      // preference; restoring a genuinely collapsed rail is the sidebar's own
+      // responsibility through openNavigation.
+      expect(
+        container.querySelector('[data-sidebar-shell][role="dialog"]'),
+      ).toBeNull();
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-sidebar-collapsed'),
+      ).toBeNull();
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it('keeps the Live voice trigger reachable when the Live page hides the chat', async () => {
+    testState.settings = [
+      {
+        ...sessionWorkflowSetting(),
+        key: 'experimental.liveVoice.enabled',
+        values: { effective: false },
+      },
+    ];
+    mockWorkspace.client.liveSetupStatus.mockResolvedValueOnce({
+      v: 1,
+      enabled: false,
+      keyConfigured: false,
+      model: 'qwen3.5-omni-plus-realtime',
+      shortcut: '',
+      install: { state: 'not-installed' },
+      live: { v: 1, available: false, state: 'unavailable', shortcut: '' },
+    });
+    const { container } = renderApp({
+      sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+    });
+    await flush();
+    // The mocked sidebar never registers its slot, so the composer's voice
+    // button has no portal target until the Live page header offers one.
+    expect(
+      testState.latestChatEditorProps?.liveVoicePortalContainer ?? null,
+    ).toBeNull();
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-live"]')!
+        .click(),
+    );
+    await flush();
+
+    const slot = container.querySelector('[data-live-voice-page-slot]');
+    expect(slot).not.toBeNull();
+    expect(testState.latestChatEditorProps?.liveVoicePortalContainer).toBe(
+      slot,
+    );
   });
 
   it('enables providers only while Settings is open', async () => {
@@ -37880,11 +38284,44 @@ describe('App session callbacks', () => {
     expect(settingsReload).toHaveBeenCalled();
   });
 
-  it('decodes a pinned fastModel setting before opening the fast-model picker (#12760)', async () => {
-    // The CLI picker persists `authType:id\0<baseUrl>`; handing the raw value
-    // to the dialog makes currentIdx -1 (no registry id can contain NUL), so
-    // the picker highlights an unrelated row and Enter erases the pin.
+  it('matches a pinned fastModel to its exact ACP row before opening the picker (#12814)', async () => {
     const pinned = 'openai:shared-fast\0https://free-quota.example.com/v1';
+    mockConnection.models = [
+      {
+        id: 'qwen-route:v1:a',
+        baseModelId: 'shared-fast',
+      },
+      {
+        id: 'qwen-route:v1:b',
+        baseModelId: 'shared-fast',
+      },
+    ];
+    testState.providers = [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'openai',
+        current: false,
+        models: [
+          {
+            modelId: 'qwen-route:v1:a',
+            baseModelId: 'shared-fast',
+            name: 'A',
+            baseUrl: 'https://exhausted-plan.example.com/v1',
+            isCurrent: false,
+            isRuntime: false,
+          },
+          {
+            modelId: 'qwen-route:v1:b',
+            baseModelId: 'shared-fast',
+            name: 'B',
+            baseUrl: 'https://free-quota.example.com/v1',
+            isCurrent: false,
+            isRuntime: false,
+          },
+        ],
+      },
+    ];
     testState.settings = [
       {
         key: 'fastModel',
@@ -37909,7 +38346,7 @@ describe('App session callbacks', () => {
       '[data-testid="model-select"]',
     );
     expect(select?.getAttribute('data-current-model-id')).toBe(
-      'shared-fast(openai)',
+      'qwen-route:v1:b',
     );
   });
 
@@ -43982,6 +44419,36 @@ it('does not restore a workspace-agent thread when collaboration is disabled', a
   mockWorkspace.capabilities = {
     ...mockWorkspace.capabilities,
     features: ['agent_collaboration_v1'],
+    workspaces: [
+      { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      {
+        id: 'enabled',
+        cwd: '/tmp/enabled',
+        primary: false,
+        trusted: true,
+        agentCollaborationEnabled: true,
+      },
+    ],
+  };
+  rerender();
+  await flush();
+
+  expect(
+    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
+  ).toBeNull();
+  expect(
+    container
+      .querySelector('[data-testid="sidebar"]')
+      ?.getAttribute('data-has-open-agents'),
+  ).toBe('false');
+
+  mockWorkspace.capabilities = {
+    ...mockWorkspace.capabilities,
+    workspaces: mockWorkspace.capabilities.workspaces.map((entry) =>
+      entry.cwd === '/tmp/project'
+        ? { ...entry, agentCollaborationEnabled: true }
+        : entry,
+    ),
   };
   rerender();
   await act(async () => {
@@ -44032,3 +44499,453 @@ function mockRuntimeStopChoice() {
 
   return stopRuntime;
 }
+describe('App sidebar toggle shortcut (#5074 rail follow-ups)', () => {
+  it('does not toggle the sidebar from an editable target inside a shadow-DOM portal', async () => {
+    window.localStorage.removeItem('qwen-code-web-shell-sidebar-collapsed');
+    const { container } = renderApp({ shadowDom: { portals: true } });
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-collapsed'),
+    ).toBe('false');
+
+    // A portaled dialog input lives in the portal shadow root. keydown is
+    // composed: the browser retargets it to the shadow host at the window
+    // listener while composedPath() keeps the real node — model that
+    // delivery, mirroring the artifact-panel focusin test above.
+    const portalHost = document.querySelector<HTMLElement>(
+      '[data-web-shell-shadow-host="portals"]',
+    );
+    expect(portalHost?.shadowRoot).not.toBeNull();
+    const input = document.createElement('input');
+    portalHost!.shadowRoot!.appendChild(input);
+    const keydown = new KeyboardEvent('keydown', {
+      key: 'b',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    Object.defineProperty(keydown, 'composedPath', {
+      value: () => [
+        input,
+        portalHost,
+        document.body,
+        document.documentElement,
+        document,
+        window,
+      ],
+    });
+    await act(async () => {
+      portalHost!.dispatchEvent(keydown);
+      await Promise.resolve();
+    });
+
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-collapsed'),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-collapsed'),
+    ).toBe('false');
+    input.remove();
+  });
+
+  it('does not invert the stored collapse preference in the split-view fold band', async () => {
+    window.localStorage.removeItem('qwen-code-web-shell-sidebar-collapsed');
+    const observers = new Map<Element, ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) {
+        observers.set(element, this.callback);
+      }
+      unobserve(element: Element) {
+        observers.delete(element);
+      }
+      disconnect() {}
+    } as typeof ResizeObserver;
+    try {
+      const { container, unmount: unmountFirst } = renderApp();
+      await flush();
+      const layout = container.querySelector(
+        '[data-sidebar-shell]',
+      )!.parentElement!;
+      const resize = observers.get(layout)!;
+      Object.defineProperty(layout, 'clientWidth', {
+        configurable: true,
+        value: 1100,
+      });
+      await act(async () => {
+        resize([], {} as ResizeObserver);
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      // A 1100px container auto-folds the sidebar in split view even though
+      // the stored preference is expanded.
+      expect(
+        container
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('true');
+
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'b',
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+        await Promise.resolve();
+      });
+
+      // The shortcut toggles from the effective (folded) value: a no-op on
+      // screen that leaves the stored preference expanded, instead of
+      // inverting it invisibly.
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-sidebar-collapsed'),
+      ).toBe('false');
+      expect(
+        container
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('true');
+
+      // A stored collapsed preference must survive the same keypress: the
+      // fold, not the user, owns the rendered state here, so the toggle
+      // rewrites the unchanged preference instead of flipping it open.
+      // Unmount the first instance so its keydown listener cannot race this
+      // arm's write.
+      unmountFirst();
+      window.localStorage.setItem(
+        'qwen-code-web-shell-sidebar-collapsed',
+        'true',
+      );
+      const { container: seededContainer } = renderApp();
+      await flush();
+      const seededLayout = seededContainer.querySelector(
+        '[data-sidebar-shell]',
+      )!.parentElement!;
+      const seededResize = observers.get(seededLayout)!;
+      Object.defineProperty(seededLayout, 'clientWidth', {
+        configurable: true,
+        value: 1100,
+      });
+      await act(async () => {
+        seededResize([], {} as ResizeObserver);
+      });
+      await act(async () => {
+        seededContainer
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        seededContainer
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('true');
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'b',
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+        await Promise.resolve();
+      });
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-sidebar-collapsed'),
+      ).toBe('true');
+      expect(
+        seededContainer
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('true');
+
+      // The rail's Collapse/Expand entrance reaches the same writer: in the
+      // fold band a click that changes nothing on screen must also preserve
+      // the stored preference (the clamp lives in the shared writer, not at
+      // the keyboard entrance).
+      window.localStorage.setItem(
+        'qwen-code-web-shell-sidebar-collapsed',
+        'true',
+      );
+      const { container: clickContainer } = renderApp();
+      await flush();
+      const clickLayout = clickContainer.querySelector(
+        '[data-sidebar-shell]',
+      )!.parentElement!;
+      const clickResize = observers.get(clickLayout)!;
+      Object.defineProperty(clickLayout, 'clientWidth', {
+        configurable: true,
+        value: 1100,
+      });
+      await act(async () => {
+        clickResize([], {} as ResizeObserver);
+      });
+      await act(async () => {
+        clickContainer
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        clickContainer
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('true');
+      await act(async () => {
+        clickContainer
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="toggle-sidebar-collapse"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-sidebar-collapsed'),
+      ).toBe('true');
+      expect(
+        clickContainer
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('true');
+
+      // The same fold-band tap that EXITS split view is not a no-op: one
+      // Home click must also restore the column it reveals, while the
+      // in-place arms above keep the preference protected.
+      window.localStorage.setItem(
+        'qwen-code-web-shell-sidebar-collapsed',
+        'true',
+      );
+      const { container: homeContainer } = renderApp();
+      await flush();
+      const homeLayout = homeContainer.querySelector(
+        '[data-sidebar-shell]',
+      )!.parentElement!;
+      const homeResize = observers.get(homeLayout)!;
+      Object.defineProperty(homeLayout, 'clientWidth', {
+        configurable: true,
+        value: 1100,
+      });
+      await act(async () => {
+        homeResize([], {} as ResizeObserver);
+      });
+      await act(async () => {
+        homeContainer
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        homeContainer
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('true');
+      await act(async () => {
+        homeContainer
+          .querySelector<HTMLButtonElement>('[data-testid="open-home"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        homeContainer
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('false');
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-sidebar-collapsed'),
+      ).toBe('false');
+      // Return the shared preference to the expanded default so later tests
+      // in this describe mount the same sidebar state as before.
+      window.localStorage.removeItem('qwen-code-web-shell-sidebar-collapsed');
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it('restores the Channels column with one rail click when leaving split in the fold band', async () => {
+    window.localStorage.removeItem('qwen-code-web-shell-sidebar-collapsed');
+    const observers = new Map<Element, ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) {
+        observers.set(element, this.callback);
+      }
+      unobserve(element: Element) {
+        observers.delete(element);
+      }
+      disconnect() {}
+    } as typeof ResizeObserver;
+    try {
+      mockConnection.capabilities = {
+        qwenCodeVersion: '1.2.3',
+        features: ['session_source_metadata'],
+      };
+      window.localStorage.setItem(
+        'qwen-code-web-shell-sidebar-collapsed',
+        'true',
+      );
+      const { container } = renderApp({
+        sidebar: { primaryNav: { items: ['channels'] } },
+      });
+      await flush();
+      const layout = container.querySelector(
+        '[data-sidebar-shell]',
+      )!.parentElement!;
+      const resize = observers.get(layout)!;
+      Object.defineProperty(layout, 'clientWidth', {
+        configurable: true,
+        value: 1100,
+      });
+      await act(async () => {
+        resize([], {} as ResizeObserver);
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        container
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('true');
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-channels"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        container
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('false');
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-sidebar-collapsed'),
+      ).toBe('false');
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it('restores the Live column with one rail click when leaving split in the fold band', async () => {
+    window.localStorage.removeItem('qwen-code-web-shell-sidebar-collapsed');
+    const observers = new Map<Element, ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) {
+        observers.set(element, this.callback);
+      }
+      unobserve(element: Element) {
+        observers.delete(element);
+      }
+      disconnect() {}
+    } as typeof ResizeObserver;
+    try {
+      window.localStorage.setItem(
+        'qwen-code-web-shell-sidebar-collapsed',
+        'true',
+      );
+      const { container } = renderApp({
+        sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+      });
+      await flush();
+      const layout = container.querySelector(
+        '[data-sidebar-shell]',
+      )!.parentElement!;
+      const resize = observers.get(layout)!;
+      Object.defineProperty(layout, 'clientWidth', {
+        configurable: true,
+        value: 1100,
+      });
+      await act(async () => {
+        resize([], {} as ResizeObserver);
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        container
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('true');
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-live"]')!
+          .click();
+        await Promise.resolve();
+      });
+      expect(
+        container
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('false');
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-sidebar-collapsed'),
+      ).toBe('false');
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it('keeps a restored environment panel docked at 1084px of chat body when the rail is present', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-environment-panel-open',
+      JSON.stringify({ v: 1, ['/tmp/project\0session-1']: true }),
+    );
+    const observers = new Map<Element, ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) {
+        observers.set(element, this.callback);
+      }
+      unobserve(element: Element) {
+        observers.delete(element);
+      }
+      disconnect() {}
+    } as typeof ResizeObserver;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+      function () {
+        if (this.dataset['testid'] !== 'context-body') return new DOMRect();
+        return new DOMRect(0, 0, 1084, 600);
+      },
+    );
+    try {
+      const { container } = renderApp({
+        sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+      });
+      await flush();
+
+      // A 1440px window minus the 356px rail sidebar leaves 1084px of chat
+      // body. The dock budget excludes the rail, so the restored panel docks
+      // instead of being force-closed by the breakpoint crossing on load.
+      const panel = container.querySelector(
+        '[data-testid="environment-panel"]:not([hidden])',
+      );
+      expect(panel).not.toBeNull();
+      expect(panel?.getAttribute('data-floating')).toBe('false');
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+});

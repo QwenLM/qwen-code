@@ -339,6 +339,8 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import { registerAgentHostTransportRoutes } from './routes/agent-hosts.js';
+import { registerA2ATransportRoutes } from './routes/a2a.js';
 import type {
   ChannelDeliveryAccepted,
   ChannelDeliveryRequest,
@@ -1127,8 +1129,8 @@ export function createServeApp(
   };
   // The collaboration flag is resolved per workspace at request time (see
   // `isAgentCollaborationEnabledFor` below). One boot-time decision remains:
-  // when no registered workspace has it on, the routes and the recovery sweep
-  // are never registered, so enabling it for the first time still needs a
+  // when no registered workspace has it on, the routes and recovery are never
+  // registered, so enabling it for the first time still needs a
   // daemon restart — the setting keeps `requiresRestart: true` for that case.
   let standaloneSessionsAvailable = false;
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
@@ -1583,7 +1585,8 @@ export function createServeApp(
   // session sees (workspace scope wins), and the env var stays the
   // operator's process-wide override. The predicate is consulted at request
   // time, so a workspace registered or reconfigured after boot is seen
-  // without a daemon restart.
+  // without a daemon restart. A daemon running as another coordinator's
+  // Agent Host never serves collaboration itself.
   // A settings file caught mid-edit (half-written JSON) keeps the last answer
   // read for that workspace: reading it as "off" would strand every live run
   // there within one recovery tick. The load asks the loader to report a
@@ -1593,6 +1596,7 @@ export function createServeApp(
   // throw on a parse error.
   const lastAgentCollaborationSetting = new Map<string, boolean>();
   const isAgentCollaborationEnabledFor = (workspaceCwd: string): boolean => {
+    if (opts.agentHostWorker) return false;
     if (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1')
       return true;
     try {
@@ -1611,8 +1615,8 @@ export function createServeApp(
       return lastAgentCollaborationSetting.get(workspaceCwd) ?? false;
     }
   };
-  // Whether the routes and the recovery sweep exist at all. Evaluated at
-  // call time over the registry rather than snapshotted at boot.
+  // Whether the routes and recovery exist at all. Evaluated at call time over
+  // the registry rather than snapshotted at boot.
   let agentCollaborationRoutesMounted = false;
   // Only trusted workspaces count: an untrusted one cannot use collaboration,
   // and reading its settings is itself something untrusted access must not do
@@ -2358,6 +2362,21 @@ export function createServeApp(
     });
   }
 
+  if (anyAgentCollaborationEnabled()) {
+    registerA2ATransportRoutes(
+      app,
+      workspaceRegistry,
+      rateLimiter,
+      isAgentCollaborationEnabledFor,
+    );
+    registerAgentHostTransportRoutes(
+      app,
+      workspaceRegistry,
+      rateLimiter,
+      isAgentCollaborationEnabledFor,
+    );
+  }
+
   // Credentials are a listener-scoped set, not one token: while Local Control
   // is on, the LAN listener accepts a revocable pairing token and rejects the
   // runtime token, and the primary listener does the reverse. With no Local
@@ -2633,6 +2652,9 @@ export function createServeApp(
     sessionRestoreTimeoutMs,
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
+    agentCollaborationEnabledFor: (workspaceCwd) =>
+      agentCollaborationRoutesMounted &&
+      isAgentCollaborationEnabledFor(workspaceCwd),
   });
   registerBrandRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -2961,6 +2983,10 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspace: primaryWorkspace,
+    // The primary runtime's own resolved env, so extension telemetry consent
+    // and proxy resolve per workspace instead of off the daemon's shared
+    // `process.env` (same carrier `registerWorkspaceSetupGithubRoutes` uses).
+    env: primaryRuntimeEffectiveEnv,
     mutate,
     safeBody,
     sendBridgeError,
@@ -3576,7 +3602,7 @@ export function createServeApp(
       isAgentCollaborationEnabledFor,
     });
     agentCollaborationRoutesMounted = true;
-  } else {
+  } else if (!opts.agentHostWorker) {
     // Close out runs the switch left mid-flight. Recovery cannot tell "the
     // daemon crashed" from "the operator turned this off" — both look like a
     // live run whose body is gone — so if these were left as they are,

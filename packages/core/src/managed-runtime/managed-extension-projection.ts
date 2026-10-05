@@ -9,12 +9,32 @@ import type { ManagedToolInvocationStatus } from '../tools/managed-tool-runtime.
 import {
   isMonitorRunStart,
   isMonitorRunSuccessor,
+  isTerminalRunState,
   parseMonitorRun,
   type ExtensionExecutionState,
   type ExtensionRun,
   type ExtensionRunState,
 } from './managed-extension-record.js';
-import type { ManagedSessionDomain } from './managed-session-records.js';
+import {
+  MANAGED_SESSION_ENVELOPE_DOMAINS,
+  type ManagedSessionDomain,
+} from './managed-session-records.js';
+import {
+  isMcpConfigurationStart,
+  isMcpConfigurationSuccessor,
+  isMcpOperationStart,
+  isMcpOperationSuccessor,
+  parseMcpConfiguration,
+  parseMcpOperation,
+} from './managed-mcp-record.js';
+import {
+  isHookRegistrationStart,
+  isHookRegistrationSuccessor,
+  isHookExecutionStart,
+  isHookExecutionSuccessor,
+  parseHookRegistration,
+  parseHookExecution,
+} from './managed-hook-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -57,7 +77,7 @@ export type ManagedTaskRuntimeState =
  * identity that keys the record's revision chain and the run it embeds.
  */
 export interface ManagedExtensionRecordBody {
-  readonly taskKind: ManagedTaskKind;
+  readonly taskKind: ManagedTaskKind | null;
   /** The parsed body is closed and frozen; the authority stores exactly it. */
   parse(value: unknown): {
     readonly record: unknown;
@@ -70,11 +90,50 @@ export interface ManagedExtensionRecordBody {
 
 /**
  * The record bodies defined so far. A domain joins when its slice defines
- * its body; enabling it for submission remains a separate step.
+ * its body; enabling it for submission remains a separate step. A body
+ * never joins a domain that is already enabled for envelope commits: the
+ * envelopes `commitDomainRecord` wrote for it predate the body, and every
+ * closed body rejects their keys.
  */
 export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
   Partial<Record<ManagedSessionDomain, ManagedExtensionRecordBody>>
 > = Object.freeze({
+  mcp_configuration: Object.freeze({
+    taskKind: null,
+    parse: (value: unknown) => {
+      const record = parseMcpConfiguration(value);
+      return { record, recordId: record.configurationId, run: record.run };
+    },
+    isStart: isMcpConfigurationStart,
+    isSuccessor: isMcpConfigurationSuccessor,
+  }),
+  mcp_operation: Object.freeze({
+    taskKind: null,
+    parse: (value: unknown) => {
+      const record = parseMcpOperation(value);
+      return { record, recordId: record.operationId, run: record.run };
+    },
+    isStart: isMcpOperationStart,
+    isSuccessor: isMcpOperationSuccessor,
+  }),
+  hook_registration: Object.freeze({
+    taskKind: null,
+    parse: (value: unknown) => {
+      const record = parseHookRegistration(value);
+      return { record, recordId: record.registrationId, run: record.run };
+    },
+    isStart: isHookRegistrationStart,
+    isSuccessor: isHookRegistrationSuccessor,
+  }),
+  hook_execution: Object.freeze({
+    taskKind: null,
+    parse: (value: unknown) => {
+      const record = parseHookExecution(value);
+      return { record, recordId: record.hookExecutionId, run: record.run };
+    },
+    isStart: isHookExecutionStart,
+    isSuccessor: isHookExecutionSuccessor,
+  }),
   monitor_run: Object.freeze({
     taskKind: 'monitor',
     parse: (value: unknown) => {
@@ -85,6 +144,20 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isMonitorRunSuccessor,
   }),
 });
+
+// An envelope domain's commits predates any body a later slice could
+// register, and every closed body would reject them; refuse the collision
+// at build time rather than at the Sessions' next open.
+const envelopeBodyCollision = Object.keys(
+  MANAGED_EXTENSION_RECORD_BODIES,
+).filter((domain) =>
+  (MANAGED_SESSION_ENVELOPE_DOMAINS as readonly string[]).includes(domain),
+);
+if (envelopeBodyCollision.length > 0) {
+  throw new Error(
+    `record bodies stay out of the envelope domains: ${envelopeBodyCollision.join(', ')}`,
+  );
+}
 
 /**
  * The key of one record's revision chain: SHA-256 over the Session ID, the
@@ -122,11 +195,6 @@ export interface ManagedSessionTaskView extends ManagedTaskProjection {
   readonly kind: ManagedTaskKind;
 }
 
-const TERMINAL: readonly ExtensionRunState[] = [
-  'settled',
-  'failed',
-  'cancelled',
-];
 /**
  * Run states that mean the work began. A blocked run may still prove that it
  * never started, so it sets no start of its own.
@@ -158,7 +226,7 @@ function taskState(run: ExtensionRun): ManagedTaskState {
 }
 
 function runtimeState(run: ExtensionRun): ManagedTaskRuntimeState | null {
-  if (TERMINAL.includes(run.state) || run.execution === null) return null;
+  if (isTerminalRunState(run.state) || run.execution === null) return null;
   if (run.runtime === null) return 'unbound';
   if (run.execution === 'running_attached') return 'ready';
   if (run.reason === 'runtime_lost') return 'lost';
@@ -186,7 +254,7 @@ export function projectManagedTask(
     (STARTED.includes(run.state) ? Math.max(occurredAt, createdAt) : null);
   const settledAt =
     previous?.settledAt ??
-    (TERMINAL.includes(run.state)
+    (isTerminalRunState(run.state)
       ? Math.max(occurredAt, startedAt ?? createdAt)
       : null);
   return Object.freeze({
