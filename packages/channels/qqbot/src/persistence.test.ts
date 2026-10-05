@@ -44,6 +44,15 @@ vi.mock('./login.js', () => ({
   qrCodeLogin: vi.fn(),
 }));
 
+// The pure channel-base helpers stay the shipped implementations rather than
+// hand-written mirrors, so a test that drives one cannot diverge from what
+// production imports. `truncateUtf16Units` is imported by QQChannel; the test
+// double suite at the bottom of this file pins it and `sanitizeLogText` to the
+// real module.
+const realChannelBase = await vi.importActual<
+  typeof import('@qwen-code/channel-base')
+>('@qwen-code/channel-base');
+
 vi.mock('@qwen-code/channel-base', () => ({
   ChannelBase: class {
     protected config: Record<string, unknown> = {};
@@ -71,21 +80,8 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
-  sanitizeLogText: (text: string, maxLen: number): string => {
-    const sanitized = Array.from(text, (c) => {
-      const cp = c.codePointAt(0)!;
-      if (cp === 0x1b) return ' '; // ESC
-      if (cp === 0x9b) return ' '; // C1
-      if (cp === 0x85 || cp === 0x2028 || cp === 0x2029) return ' '; // line/paragraph sep
-      if (cp === 0x202e) return ' '; // RLO
-      if (cp === 0x0a || cp === 0x0d) return '\n';
-      if (cp < 0x20) return '';
-      return c;
-    }).join('');
-    return sanitized.length > maxLen
-      ? sanitized.slice(0, maxLen) + '...'
-      : sanitized;
-  },
+  sanitizeLogText: realChannelBase.sanitizeLogText,
+  truncateUtf16Units: realChannelBase.truncateUtf16Units,
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
@@ -609,5 +605,20 @@ describe('fixRestoredSessions', () => {
     ).fixRestoredSessions();
 
     expect(toSession.get('k1')).toBe('already-valid');
+  });
+});
+
+// Pin the mock's pure channel-base helpers to the shipped module: dropping an
+// export from the factory (as happened to `truncateUtf16Units`) reddens here
+// instead of leaving a latent "No export is defined on the mock" error for the
+// next test that drives QQChannel's call sites.
+describe('channel-base test double', () => {
+  it('exposes the shipped channel-base helpers by identity', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const mocked = await import('@qwen-code/channel-base');
+    expect(mocked.truncateUtf16Units).toBe(actual.truncateUtf16Units);
+    expect(mocked.sanitizeLogText).toBe(actual.sanitizeLogText);
   });
 });
