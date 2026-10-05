@@ -49,6 +49,7 @@ import {
 } from '../services/tokenEstimation.js';
 import {
   defaultOutputCeiling,
+  hasExplicitOutputLimit,
   parsePositiveIntegerEnvValue,
   tokenLimit,
 } from './tokenLimits.js';
@@ -190,9 +191,30 @@ function budgetOutputTokensForWindow(
 ): GenerateContentConfig {
   if (requestConfig.maxOutputTokens !== undefined) return requestConfig;
 
+  // The env override is an operator ceiling, not a licence to emit above the
+  // model's own output maximum. Two wires apply no output clamp of their own —
+  // Gemini/Vertex, and OpenAI Responses, which assigns `max_output_tokens`
+  // straight off the request — while the sibling chat wire does clamp
+  // (`openaiContentGenerator/provider/default.ts` applyOutputTokenLimit, "cap at
+  // model limit to avoid API errors"). On those two an over-limit budget reaches
+  // the server as-is and comes back a plain 400, which `utils/retry.ts` does not
+  // retry, so a side query that succeeded before it was budgeted now fails.
+  // Gate on `hasExplicitOutputLimit` rather than clamping to `tokenLimit(model,
+  // 'output')`: an id in neither table resolves to `DEFAULT_OUTPUT_TOKEN_LIMIT`,
+  // and catalog-only limits must not clamp a user's endpoint-specific override.
+  const envCeiling = parsePositiveIntegerEnvValue(
+    process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+  );
   const explicitCeiling =
     contentGeneratorConfig?.samplingParams?.max_tokens ??
-    parsePositiveIntegerEnvValue(process.env['QWEN_CODE_MAX_OUTPUT_TOKENS']);
+    (envCeiling === undefined
+      ? undefined
+      : Math.min(
+          envCeiling,
+          hasExplicitOutputLimit(model)
+            ? tokenLimit(model, 'output')
+            : Number.POSITIVE_INFINITY,
+        ));
   // `<= 0` means "not configured", the reading `config.ts` gives this same
   // field: a cleared or mis-merged settings value must not become the window
   // term and cancel every governed side query's budget.

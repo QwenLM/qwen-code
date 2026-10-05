@@ -1741,6 +1741,36 @@ describe('BaseLlmClient', () => {
 
         expect(sentBudget()).toBe(40_000);
       });
+
+      it('does not let the override authorize a budget above the model output limit', async () => {
+        // The override is an operator ceiling, not a licence to emit above the
+        // model's own output maximum. Two wires apply no output clamp of their
+        // own — Gemini/Vertex and OpenAI Responses, which assigns
+        // `max_output_tokens` straight off the request
+        // (`responses-pipeline.ts` reconcileMaxTokens) — while the sibling chat
+        // wire does clamp (`provider/default.ts` applyOutputTokenLimit, "cap at
+        // model limit to avoid API errors"). On those two an emitted 172_000 for
+        // a model whose output maximum is 131_072 goes out as-is and the server
+        // answers a plain 400, which `utils/retry.ts` does not retry — where
+        // before side queries were budgeted the same request carried no
+        // `max_tokens` and succeeded.
+        //
+        // The clamp has to key on `hasExplicitOutputLimit`, never on
+        // `tokenLimit(model, 'output')` unconditionally: an id in neither table
+        // resolves to `DEFAULT_OUTPUT_TOKEN_LIMIT`, and `tokenLimits.ts` states
+        // that catalog-only limits "must not clamp a user's endpoint-specific
+        // override" — the `test-model` case above is what pins that.
+        process.env[ENV_KEY] = '200000';
+        useWindow('gpt-5', 272_000);
+
+        // 272_000 − 100_000 = 172_000 of room: below the operator's 200_000, so
+        // an output-blind comparison emits it, but above `gpt-5`'s 131_072 output
+        // maximum, so the override cannot authorize it and the wire keeps its
+        // pre-budget behaviour of sending nothing.
+        await askText('gpt-5', 100_000);
+
+        expect(sentBudget()).toBeUndefined();
+      });
     });
   });
 });
