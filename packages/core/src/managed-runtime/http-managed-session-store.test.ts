@@ -9,7 +9,6 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openManagedSession } from './managed-session-assembly.js';
 import { ManagedHookActivationController } from './managed-hook-activation.js';
@@ -99,6 +98,7 @@ describe('HTTP Managed Session store', () => {
     const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1102,11 +1102,11 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
       leaseDurationMs: 1000,
-      allowInsecureHttp: true,
       fetchFn,
     });
     const unhandled: unknown[] = [];
@@ -1148,6 +1148,7 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1185,6 +1186,7 @@ describe('HTTP Managed Session store', () => {
       });
       const stores = createHttpManagedSessionStores({
         baseUrl: 'http://session-store.test',
+        allowInsecureHttp: true,
         sessionKey: SESSION_KEY,
         writerId: 'harness-a',
         writerToken: TOKEN_A,
@@ -1218,6 +1220,7 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1254,6 +1257,7 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1305,6 +1309,7 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1385,6 +1390,7 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1417,6 +1423,7 @@ describe('HTTP Managed Session store', () => {
     );
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1460,6 +1467,7 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1498,6 +1506,7 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
@@ -1990,21 +1999,33 @@ describe('HTTP Managed Session store', () => {
     await session.close();
   });
 
-  it('rejects a journal that does not match the durable head', async () => {
-    const server = new FakeManagedSessionStore();
-    const { stores, session } = await bootStoresAndSession(server);
-    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
-    await expect(journal.read()).resolves.toBeDefined();
-    server.headOverrides['committedSequence'] = 99;
-    await expect(journal.read()).rejects.toThrow(
-      /do not match the durable head/,
-    );
-    await session.close();
-  });
+  it.each([
+    ['committedSequence', 99],
+    ['lastCommitDigest', 'a'.repeat(64)],
+    ['activationEpoch', 7],
+  ])(
+    'rejects a journal that does not match the durable head (%s=%s)',
+    async (key, value) => {
+      const server = new FakeManagedSessionStore();
+      const { stores, session } = await bootStoresAndSession(server);
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(journal.read()).resolves.toBeDefined();
+      server.headOverrides[key] = value;
+      await expect(journal.read()).rejects.toThrow(
+        /do not match the durable head/,
+      );
+      await session.close();
+    },
+  );
 
   it.each([
     ['recoveryStatus', 'BLOCKED_RESOURCE'],
     ['storageVersion', 2],
+    ['state', 'SEALED'],
+    ['writerGeneration', 2],
+    ['compactedThroughRevision', 1],
   ])(
     'rejects a restore head not addressable by this writer (%s=%s)',
     async (key, value) => {
@@ -2328,7 +2349,8 @@ class FakeManagedSessionStore {
     if (suffix === '/transactions') {
       this.transactionReads++;
       const after = Number(url.searchParams.get('afterRevision') ?? 0);
-      const transactions = this.transactions.slice(after, after + 100);
+      const limit = Number(url.searchParams.get('limit') ?? 100);
+      const transactions = this.transactions.slice(after, after + limit);
       return jsonResponse({
         transactions,
         nextRevision: after + transactions.length,

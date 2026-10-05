@@ -98,6 +98,24 @@ describe('SessionExecutionEngineAccumulator', () => {
     });
   });
 
+  it('reports an owner record whose payload is not an object as invalid owner record', () => {
+    const accumulator = new SessionExecutionEngineAccumulator('s1');
+    expect(() =>
+      accumulator.parseLine(
+        line({
+          type: 'system',
+          subtype: 'session_execution_engine',
+          systemPayload: 'managed',
+        }),
+        snapshot.filePath,
+      ),
+    ).not.toThrow();
+    expect(accumulator.finish(snapshot)).toMatchObject({
+      status: 'unavailable',
+      reason: 'invalid owner record',
+    });
+  });
+
   it('reports two owner records naming different engines as conflicting owners', () => {
     const accumulator = new SessionExecutionEngineAccumulator('s1');
     accumulator.parseLine(
@@ -156,8 +174,23 @@ describe('SessionExecutionEngineAccumulator', () => {
     expect(accumulator.parseLine(raw, snapshot.filePath)).toEqual([
       {
         value: JSON.parse(raw),
-        record: expect.objectContaining({ uuid: 'rec-1', sessionId: 's1' }),
+        record: expect.objectContaining({
+          uuid: 'rec-1',
+          sessionId: 's1',
+          message: { role: 'user', parts: [{ text: 'hi' }] },
+        }),
       },
+    ]);
+  });
+
+  it('keeps a slot for a physical record that fails validation', () => {
+    const accumulator = new SessionExecutionEngineAccumulator('s1');
+    const raw = JSON.stringify({ not: 'a transcript record' });
+    // One entry per physical record, even when the record half is undefined:
+    // buildIndex counts fragments over these slots and the snapshot reader
+    // pushes every value, so the array must stay 1:1 with the parsed lines.
+    expect(accumulator.parseLine(raw, snapshot.filePath)).toEqual([
+      { value: JSON.parse(raw), record: undefined },
     ]);
   });
 });
