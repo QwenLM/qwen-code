@@ -2515,8 +2515,15 @@ export class LocalManagedSessionAuthority {
     const validated = validateTranscriptRecord(resultValue);
     const candidate = validated.record as Partial<ChatRecord> | undefined;
     if (
+      validated.record !== undefined &&
+      validated.record.sessionId !== this.sessionKey.sessionId
+    ) {
+      throw new ManagedSessionRecordError(
+        `turn result resource ${ref.resourceId} contains an invalid reader-facing record: it belongs to session ${validated.record.sessionId}, not ${this.sessionKey.sessionId}.`,
+      );
+    }
+    if (
       validated.record === undefined ||
-      validated.record.sessionId !== this.sessionKey.sessionId ||
       typeof candidate?.cwd !== 'string' ||
       typeof candidate?.version !== 'string' ||
       typeof candidate?.timestamp !== 'string' ||

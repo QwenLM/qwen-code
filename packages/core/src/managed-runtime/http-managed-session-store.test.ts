@@ -887,6 +887,31 @@ describe('HTTP Managed Session store', () => {
     expect(
       committedResources.map(({ resourceId }) => resourceId).sort(),
     ).toEqual([checkpointRef.resourceId, historyRef.resourceId].sort());
+    // The turn.settled fence reads the result body back, so the event must
+    // carry a genuine reader-facing record; the old checkpoint rides in
+    // pendingOwnersRef to prove a later commit ships a previously committed
+    // resource.
+    const turnResultRef = await first.resources.publish(
+      'managed-turn-result',
+      Buffer.from(
+        JSON.stringify({
+          uuid: 'record-turn-old-root',
+          parentUuid: null,
+          sessionId: SESSION_KEY.sessionId,
+          timestamp: '2026-09-22T00:00:01.000Z',
+          type: 'system',
+          subtype: 'turn_result',
+          cwd: '/workspace',
+          version: 'test',
+          systemPayload: {
+            promptId: 'old-root',
+            state: 'completed',
+            stopReason: 'end_turn',
+          },
+        }),
+        'utf8',
+      ),
+    );
     await first.authority.appendExecutionEvent(
       {
         operation: 'referenceOldCheckpoint',
@@ -910,18 +935,19 @@ describe('HTTP Managed Session store', () => {
           turnId: 'old-root',
           outcome: 'completed',
           stopReason: 'end_turn',
-          resultRef: checkpointRef,
+          resultRef: turnResultRef,
           usageRef: null,
-          pendingOwnersRef: null,
+          pendingOwnersRef: checkpointRef,
         },
       }),
       { class: 'harness', activation: first.activation },
     );
-    expect(server.commits.at(-1)!['resources']).toEqual([
-      {
-        ...checkpointRef,
-      },
-    ]);
+    const referencedResources = server.commits.at(-1)!['resources'] as Array<{
+      resourceId: string;
+    }>;
+    expect(
+      referencedResources.map(({ resourceId }) => resourceId).sort(),
+    ).toEqual([checkpointRef.resourceId, turnResultRef.resourceId].sort());
     const snapshotResources = new Map<
       string,
       {
@@ -2119,6 +2145,22 @@ describe('HTTP Managed Session store', () => {
       if (process.env['QWEN_WRITE_GOLDEN'] === '1') {
         writeFileSync(fixture, `${JSON.stringify(written, null, 2)}\n`);
       }
+      // Every ref a commit's own records declare must ship in that commit's
+      // resources. This reads the writer's output rather than the fixture, so
+      // regenerating the golden cannot launder a ref-collection regression
+      // into a pass. One-directional by design: resources also carries the
+      // transitive closure of refs nested inside resource bodies.
+      for (const commit of written.commits) {
+        const declared = refsDeclaredBy(String(commit['recordBytesBase64']));
+        const shipped = new Set(
+          (commit['resources'] as ManagedSessionDurableRef[]).map(
+            (ref) => ref.resourceId,
+          ),
+        );
+        for (const ref of declared) {
+          expect(shipped.has(ref.resourceId)).toBe(true);
+        }
+      }
       expect(written).toEqual(JSON.parse(readFileSync(fixture, 'utf8')));
     } finally {
       ids.fixed = false;
@@ -3010,6 +3052,37 @@ class FakeManagedSessionStore {
       replayed: false,
     };
   }
+}
+
+function refsDeclaredBy(recordBytesBase64: string): ManagedSessionDurableRef[] {
+  const refs: ManagedSessionDurableRef[] = [];
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(walk);
+      return;
+    }
+    if (typeof value !== 'object' || value === null) {
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (
+      typeof record['resourceId'] === 'string' &&
+      typeof record['kind'] === 'string' &&
+      typeof record['schemaVersion'] === 'number' &&
+      typeof record['byteLength'] === 'number' &&
+      typeof record['digest'] === 'string'
+    ) {
+      refs.push(record as unknown as ManagedSessionDurableRef);
+    }
+    Object.values(record).forEach(walk);
+  };
+  for (const line of Buffer.from(recordBytesBase64, 'base64')
+    .toString('utf8')
+    .trimEnd()
+    .split('\n')) {
+    walk(JSON.parse(line));
+  }
+  return refs;
 }
 
 function requestUrl(input: URL | RequestInfo): string {

@@ -37,6 +37,26 @@ import { parseToolPublicationBinding } from './managed-tool-publication.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 const key = { tenantId: 't', workspaceId: 'w', sessionId: 'checkpoint-test' };
+// The turn.settled commit fence reads the result body back and requires a
+// reader-facing record, so a turn-complete fixture publishes a real one.
+const turnResultBody = () =>
+  Buffer.from(
+    JSON.stringify({
+      uuid: 'rec-turn-checkpoint-test',
+      parentUuid: null,
+      sessionId: key.sessionId,
+      timestamp: new Date(0).toISOString(),
+      type: 'system',
+      subtype: 'turn_result',
+      cwd: '/workspace',
+      version: 'test',
+      systemPayload: {
+        promptId: 'turn',
+        state: 'completed',
+        stopReason: 'end_turn',
+      },
+    }),
+  );
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -512,7 +532,7 @@ describe('original receipt checkpoint observation', () => {
       }
       const resultRef = await f.resources.publish(
         'managed-turn-result',
-        Buffer.from('{}'),
+        turnResultBody(),
       );
       await f.session.authority.commitTurnComplete(
         {
@@ -617,7 +637,7 @@ describe('original receipt checkpoint observation', () => {
     const covered = f.session.authority.committedSequence;
     const resultRef = await f.resources.publish(
       'managed-turn-result',
-      Buffer.from('{}'),
+      turnResultBody(),
     );
     await f.session.authority.commitTurnComplete(
       {

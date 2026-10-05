@@ -2740,7 +2740,8 @@ describe('managed session checkpoints', () => {
         turnResultBody({
           sessionId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
         }),
-      detail: (resultRef: ManagedSessionDurableRef) => resultRef.resourceId,
+      detail: (resultRef: ManagedSessionDurableRef) =>
+        `turn result resource ${resultRef.resourceId} contains an invalid reader-facing record: it belongs to session f47ac10b-58cc-4372-a567-0e02b2c3d479, not managed-session.`,
     },
     {
       label: 'a record without a cwd',
