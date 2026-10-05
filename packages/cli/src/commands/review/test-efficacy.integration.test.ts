@@ -2626,6 +2626,9 @@ describe('per-hunk probes against real git', () => {
 
       const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-apply-canary-'));
       const shimDir = mkdtempSync(join(tmpdir(), 'qwen-apply-shim-'));
+      // The git shim below is a CommonJS script; scope it explicitly so a
+      // "type": "module" package.json above os.tmpdir() cannot flip it.
+      writeFileSync(join(shimDir, 'package.json'), '{"type":"commonjs"}');
       const canary = join(canaryDir, 'PWNED-apply');
       const stamp = join(shimDir, 'armed');
       const savedPath = process.env['PATH'];
