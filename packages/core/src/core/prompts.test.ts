@@ -217,6 +217,16 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
   });
 
+  it('answers from sufficient current context without weakening verification', () => {
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain('**Answer From Context First:**');
+    expect(prompt).toContain('reuse prior observations');
+    expect(prompt).toContain('current or post-change state');
+    expect(prompt).toContain('only a summary lacking the needed evidence');
+    expect(prompt).toContain('not verification before claiming a change works');
+  });
+
   it.each([
     [
       'interactive',
@@ -491,6 +501,8 @@ describe('Core System Prompt (prompts.ts)', () => {
     vi.mocked(isGitRepository).mockReturnValue(true);
     const prompt = unsandboxed();
     expect(prompt).toContain('# Git Repository');
+    expect(prompt).toContain('## Git as Source of Truth');
+    expect(prompt).toContain('`git log` / `git blame` are authoritative');
     expect(prompt).toMatchSnapshot();
   });
 
@@ -498,6 +510,8 @@ describe('Core System Prompt (prompts.ts)', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
     const prompt = unsandboxed();
     expect(prompt).not.toContain('# Git Repository');
+    expect(prompt).not.toContain('Git as Source of Truth');
+    expect(prompt).not.toMatch(/\bgit (?:log|blame|status|diff|show|add)\b/);
     expect(prompt).toMatchSnapshot();
   });
 
@@ -983,6 +997,29 @@ describe('main-session style: reminder decision matches prompt section', () => {
     );
   });
 
+  it.each(['open', 'closed'] as const)(
+    'names effective command networking %s in the model prompt',
+    (network) => {
+      const config = {
+        ...headlessConfig(),
+        getShellExecutionSandbox: () => ({
+          filesystem: 'read-only' as const,
+          network,
+          requestedBackend: 'bwrap' as const,
+          effectiveBackend: 'bwrap' as const,
+          workspace: '/workspace',
+          installation: '/installation',
+          state: '/state',
+        }),
+      };
+      const prompt = getMainSessionBaseSystemPrompt(config);
+      expect(prompt).toContain(`command network policy is ${network}`);
+      expect(prompt.includes('Closed networking prevents')).toBe(
+        network === 'closed',
+      );
+    },
+  );
+
   it.each(['read-only', 'workspace-write'] as const)(
     'describes resolved Landlock restrictions for %s',
     (filesystem) => {
@@ -1003,6 +1040,7 @@ describe('main-session style: reminder decision matches prompt section', () => {
 
       const prompt = getMainSessionBaseSystemPrompt(config);
       expect(prompt).toContain('# Tool Execution Sandbox (Landlock, partial)');
+      expect(prompt).toContain('Command network policy is open');
       expect(prompt).toContain(
         `workspace is ${filesystem === 'workspace-write' ? 'writable' : 'read-only'}`,
       );

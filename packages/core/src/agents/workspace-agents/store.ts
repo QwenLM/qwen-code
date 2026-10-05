@@ -395,9 +395,23 @@ function isValidProgress(value: unknown): boolean {
   );
 }
 
+const HOST_RESULT_DIGEST = /^[a-f0-9]{64}$/;
+
+function isValidHostResultReceipt(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isPositiveInteger(value['attempt']) &&
+    isNonEmptyString(value['leaseId']) &&
+    typeof value['digest'] === 'string' &&
+    HOST_RESULT_DIGEST.test(value['digest'])
+  );
+}
+
 function isValidRun(value: unknown): value is ThreadRun {
   if (!isRecord(value)) return false;
   const valid =
+    (value['hostResultReceipt'] === undefined ||
+      isValidHostResultReceipt(value['hostResultReceipt'])) &&
     isValidProgress(value['progress']) &&
     isValidId(value['id']) &&
     isValidId(value['agentId']) &&
