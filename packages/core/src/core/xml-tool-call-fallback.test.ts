@@ -872,6 +872,32 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     }
   });
 
+  it('skips the lexer past the length cap while still honouring examples', () => {
+    // The cap is what bounds marked's quadratic inline lexer, so past it the
+    // lexer must not run at all — and the regex-only fallback must still keep
+    // a documented call from being dispatched. Both halves are pinned on
+    // behaviour rather than elapsed time, which is flaky in CI.
+    const spy = vi.spyOn(Lexer, 'lexInline');
+    try {
+      const overCap =
+        '<example>model:\n' +
+        '*a '.repeat(2000) +
+        'x'.repeat(64 * 1024) +
+        readBlock +
+        EXAMPLE_CLOSE;
+      expect(overCap.length).toBeGreaterThan(64 * 1024);
+      expect(tryRecoverXmlToolCalls(overCap).recovered).toBe(false);
+      expect(spy).not.toHaveBeenCalled();
+
+      const underCap = '<example>model:\n' + readBlock + EXAMPLE_CLOSE;
+      expect(underCap.length).toBeLessThanOrEqual(64 * 1024);
+      expect(tryRecoverXmlToolCalls(underCap).recovered).toBe(false);
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('degrades to no example filtering when the lexer throws', () => {
     const spy = vi.spyOn(Lexer, 'lexInline').mockImplementation((): never => {
       throw new Error('lexer boom');

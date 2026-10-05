@@ -16,6 +16,14 @@ const PARAMETER_PATTERN =
 // block, which leaves `outsideParameters` empty and slips past the guard.
 const PARAM_OPEN_PATTERN = /<parameter(?:\s+name=["'][^"']*["']|=[^\s<>]+)?>/g;
 
+// marked's inline lexer is quadratic on unterminated emphasis runs and
+// nothing upstream bounds a model turn's length: measured on this build, a
+// `'*a '.repeat(n)` run after one example marker costs 238ms at 2k units,
+// 794ms at 4k, 3.0s at 8k and 11.7s at 16k (~64KB) — a synchronous stall
+// inside a streaming turn. Past this size the lexer pass is skipped and
+// example detection degrades to the regex-only tag scan.
+const MAX_LEXER_SCAN_LENGTH = 64 * 1024;
+
 export interface ExtractedToolCall {
   name: string;
   args: Record<string, unknown>;
@@ -138,6 +146,9 @@ function computeExampleRanges(
   // here can only yield "no ranges" — which is what an example-free text has.
   if (!text.includes('<example') && !text.includes('</example')) return [];
 
+  // Over the cap the lexer is skipped and every regex-matched tag is taken at
+  // face value, which is the regex-only behaviour this replaced.
+  const skipLexer = text.length > MAX_LEXER_SCAN_LENGTH;
   const tagPositions = new Set<number>();
   function collectTags(tokens: Token[], raw: string, baseOffset: number) {
     let cursor = 0;
@@ -163,12 +174,14 @@ function computeExampleRanges(
   }
   proseParts.push(text.slice(cursor));
   const prose = proseParts.join('');
-  try {
-    collectTags(Lexer.lexInline(prose), prose, 0);
-  } catch {
-    // The regex-only implementation this replaced could not throw; a lexer
-    // failure must degrade to "no example ranges", not abort the turn.
-    tagPositions.clear();
+  if (!skipLexer) {
+    try {
+      collectTags(Lexer.lexInline(prose), prose, 0);
+    } catch {
+      // The regex-only implementation this replaced could not throw; a lexer
+      // failure must degrade to "no example ranges", not abort the turn.
+      tagPositions.clear();
+    }
   }
 
   const ranges: Array<[number, number]> = [];
@@ -179,7 +192,7 @@ function computeExampleRanges(
   while ((match = tags.exec(text)) !== null) {
     const tagPosition = match.index;
     if (
-      !tagPositions.has(tagPosition) ||
+      (!skipLexer && !tagPositions.has(tagPosition)) ||
       parameterRanges.some(
         ([start, end]) => tagPosition >= start && tagPosition < end,
       ) ||
