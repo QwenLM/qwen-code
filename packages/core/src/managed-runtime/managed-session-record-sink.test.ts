@@ -23,6 +23,7 @@ import {
 } from './managed-session-record-sink.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import { readManagedSessionTitleInfoSync } from '../utils/sessionStorageUtils.js';
+import { readManagedSessionRecords } from './managed-session-message-projection.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 
 const DIGEST = 'f'.repeat(64);
@@ -575,6 +576,28 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
+  it.each([
+    ['an empty prompt id', { promptId: '', state: 'completed' }],
+    ['an empty state', { promptId: 'turn-1', state: '' }],
+    ['a non-string prompt id', { promptId: 7, state: 'completed' }],
+    ['a non-string state', { promptId: 'turn-1', state: 7 }],
+  ] as const)('refuses a turn result with %s', async (_name, systemPayload) => {
+    const harness = await createHarness();
+    const refused = record({
+      uuid: 'rec-turn-bad',
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload,
+    } as Partial<ChatRecord>);
+    // canCarry refuses before write does: a caller refusing up front must
+    // never be able to queue a write that fails mid-turn.
+    expect(harness.sink.canCarry(refused)).toBe(false);
+    await expect(harness.sink.write(refused)).rejects.toThrow(
+      ManagedSessionUnmappedRecordError,
+    );
+    await harness.close();
+  });
+
   it('commits a next-turn checkpoint with turn.settled when a runnable v1 exists', async () => {
     const harness = await createHarness();
     await commitInitialV1(harness);
@@ -713,6 +736,95 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
+  it('round-trips a file-history snapshot through the file_history domain', async () => {
+    const harness = await createHarness();
+    const snapshot = record({
+      uuid: 'rec-history-1',
+      type: 'system',
+      subtype: 'file_history_snapshot',
+      systemPayload: { snapshots: [] },
+    } as Partial<ChatRecord>);
+    await harness.sink.write(snapshot);
+
+    const committed = harness.authority
+      .readEvents()
+      .filter((event) => event.kind === 'domain.committed');
+    expect(committed).toHaveLength(1);
+    expect(committed[0].payload['domain']).toBe('file_history');
+    await harness.close();
+
+    await expect(
+      readManagedSessionRecords({
+        transcriptPath: harness.transcriptPath,
+        runtimeBaseDir: harness.runtimeBaseDir,
+        sessionKey,
+      }),
+    ).resolves.toEqual([snapshot]);
+  });
+
+  it('round-trips a session source through the session_source domain', async () => {
+    const harness = await createHarness();
+    const source = record({
+      uuid: 'rec-source-1',
+      type: 'system',
+      subtype: 'session_source',
+      systemPayload: { sourceType: 'web' },
+    } as Partial<ChatRecord>);
+    await harness.sink.write(source);
+
+    const committed = harness.authority
+      .readEvents()
+      .filter((event) => event.kind === 'domain.committed');
+    expect(committed).toHaveLength(1);
+    expect(committed[0].payload['domain']).toBe('session_source');
+    await harness.close();
+
+    await expect(
+      readManagedSessionRecords({
+        transcriptPath: harness.transcriptPath,
+        runtimeBaseDir: harness.runtimeBaseDir,
+        sessionKey,
+      }),
+    ).resolves.toEqual([source]);
+  });
+
+  it.each([
+    ['slash_command', { command: 'about' }],
+    ['at_command', { path: 'README.md' }],
+    ['ui_telemetry', { uiEvent: { event: 'turn_complete' } }],
+    ['attribution_snapshot', { snapshot: { human: 1, assistant: 2 } }],
+  ] as const)(
+    'round-trips a carried %s record through the message channel',
+    async (subtype, systemPayload) => {
+      const harness = await createHarness();
+      const carried = record({
+        type: 'system',
+        subtype,
+        systemPayload,
+      } as Partial<ChatRecord>);
+      await harness.sink.write(carried);
+      // The name names the channel: a carried subtype lands as one
+      // message.committed event and no domain record, or the live
+      // projection silently drops it.
+      const events = harness.authority.readEvents();
+      expect(
+        events.filter((event) => event.kind === 'message.committed'),
+      ).toHaveLength(1);
+      expect(
+        events.filter((event) => event.kind === 'domain.committed'),
+      ).toHaveLength(0);
+      await harness.close();
+
+      await expect(
+        readManagedSessionRecords({
+          transcriptPath: harness.transcriptPath,
+          runtimeBaseDir: harness.runtimeBaseDir,
+          sessionKey,
+        }),
+      ).resolves.toEqual([carried]);
+    },
+  );
+
   it('preserves original Code Mode facts on the message channel', async () => {
     const harness = await createHarness();
     const fact = record({
@@ -742,11 +854,14 @@ describe('managed session record sink', () => {
   it('refuses an unmapped record instead of appending it directly', async () => {
     const harness = await createHarness();
     const before = await fs.readFile(harness.transcriptPath, 'utf8');
+    // rewind is genuinely unmapped; a payload-less mapped subtype would
+    // refuse for a different reason (its shape check, not the mapping).
     await expect(
-      harness.sink.write(
-        record({ type: 'system', subtype: 'file_history_snapshot' }),
-      ),
+      harness.sink.write(record({ type: 'system', subtype: 'rewind' })),
     ).rejects.toThrow(ManagedSessionUnmappedRecordError);
+    await expect(
+      harness.sink.write(record({ type: 'system', subtype: 'rewind' })),
+    ).rejects.toThrow(/no mapping yet.*rewind/);
 
     // A silent fallback would put content in the transcript that the
     // authoritative log does not account for.
