@@ -1820,6 +1820,10 @@ export function registerHostedHarnessSessionRoutes(
                 brokerOptions,
               ),
             busy: wakeBusy,
+            needsRecovery: (cause) =>
+              cause instanceof HostedToolRecoveryRequiredError ||
+              cause instanceof HostedMcpRecoveryRequiredError ||
+              cause instanceof HostedHookRecoveryRequiredError,
             writeStderr: writeStderrLineSafe,
           }),
           failed: (cause) => {

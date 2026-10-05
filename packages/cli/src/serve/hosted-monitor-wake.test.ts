@@ -26,6 +26,16 @@ import {
   createMonitorWakeRunTurn,
   type MonitorWakeTurnSession,
 } from './hosted-monitor-wake-turn.js';
+import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
+import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
+import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
+
+// The production predicate from the wake scheduler wiring, mirrored
+// verbatim so a classification drift here or there turns a witness red.
+const needsRecovery = (cause: unknown): boolean =>
+  cause instanceof HostedToolRecoveryRequiredError ||
+  cause instanceof HostedMcpRecoveryRequiredError ||
+  cause instanceof HostedHookRecoveryRequiredError;
 
 // monitor_run is enabled by the H3 enablement slice; the close-side settle
 // rig commits a notification input ahead of it, like the funnel suite does.
@@ -366,6 +376,7 @@ describe('createMonitorWakeRunTurn', () => {
           reachedModel = true;
         },
         busy: () => access.active !== undefined,
+        needsRecovery,
         writeStderr: () => undefined,
       });
       const pending = runTurn({ turnId: 'm:1', text: 'wake' });
@@ -404,10 +415,89 @@ describe('createMonitorWakeRunTurn', () => {
           ran = promptId;
         },
         busy: () => access.active !== undefined,
+        needsRecovery,
         writeStderr: () => undefined,
       });
       expect(await runTurn({ turnId: 'm:1', text: 'wake' })).toBe('settled');
       expect(ran).toBe('m:1');
+      expect(access.active).toBeUndefined();
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  it.each([
+    ['tool', () => new HostedToolRecoveryRequiredError(new Error('parked'))],
+    ['mcp', () => new HostedMcpRecoveryRequiredError()],
+    ['hook', () => new HostedHookRecoveryRequiredError()],
+  ])(
+    'leaves a %s recovery-required input unsettled rather than consuming it',
+    async (_kind, makeCause) => {
+      const { session, lease } = await openWakeSession();
+      try {
+        const access: MonitorWakeTurnSession['session'] = {
+          active: undefined,
+          blocked: false,
+          managed: { sink: session.sink },
+        };
+        const writes = vi.spyOn(session.sink, 'write');
+        const runTurn = createMonitorWakeRunTurn({
+          session: access,
+          sessionId,
+          cwd: '/workspace',
+          executeHostedTurn: async () => {
+            throw makeCause();
+          },
+          busy: () => access.active !== undefined,
+          needsRecovery,
+          writeStderr: () => undefined,
+        });
+        expect(await runTurn({ turnId: 'm:1', text: 'wake' })).toBe('settled');
+        // A recovery-required turn parks like a parked prompt: blocked, its
+        // input unconsumed, and no error turn_result minted on top of it.
+        expect(access.blocked).toBe(true);
+        expect(writes).not.toHaveBeenCalled();
+        expect(access.active).toBeUndefined();
+      } finally {
+        await lease.release().catch(() => undefined);
+      }
+    },
+  );
+
+  it('settles a generic wake failure as an error turn_result and rethrows', async () => {
+    const { session, lease } = await openWakeSession();
+    try {
+      const access: MonitorWakeTurnSession['session'] = {
+        active: undefined,
+        blocked: false,
+        managed: { sink: session.sink },
+      };
+      const writes = vi.spyOn(session.sink, 'write');
+      const failure = new Error('boom');
+      const runTurn = createMonitorWakeRunTurn({
+        session: access,
+        sessionId,
+        cwd: '/workspace',
+        executeHostedTurn: async () => {
+          throw failure;
+        },
+        busy: () => access.active !== undefined,
+        needsRecovery,
+        writeStderr: () => undefined,
+      });
+      await expect(runTurn({ turnId: 'm:1', text: 'wake' })).rejects.toBe(
+        failure,
+      );
+      expect(writes).toHaveBeenCalledTimes(1);
+      expect(writes.mock.calls[0]![0]).toMatchObject({
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: 'm:1',
+          state: 'error',
+          stopReason: 'error',
+        },
+      });
+      expect(access.blocked).toBe(false);
       expect(access.active).toBeUndefined();
     } finally {
       await lease.release().catch(() => undefined);

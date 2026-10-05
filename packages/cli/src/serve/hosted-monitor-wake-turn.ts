@@ -41,6 +41,14 @@ export function createMonitorWakeRunTurn(params: {
     abort: AbortController,
   ) => Promise<unknown>;
   readonly busy: () => boolean;
+  /**
+   * The recovery-required classification. It is injected because the three
+   * RecoveryRequiredError classes must be matched by type — their
+   * constructors never assign `name`, so every instance reads `name ===
+   * 'Error'` and a name comparison silently reclassifies a recovery
+   * exception as an ordinary failure, settling its unconsumed input.
+   */
+  readonly needsRecovery: (cause: unknown) => boolean;
   readonly writeStderr: (line: string) => void;
 }): (turn: HostedMonitorWakeTurn) => Promise<'settled' | 'busy'> {
   const { session } = params;
@@ -69,12 +77,7 @@ export function createMonitorWakeRunTurn(params: {
     try {
       await params.executeHostedTurn(turn.turnId, turn.text, abort);
     } catch (cause) {
-      const needsRecovery =
-        cause instanceof Error &&
-        (cause.name === 'HostedToolRecoveryRequiredError' ||
-          cause.name === 'HostedMcpRecoveryRequiredError' ||
-          cause.name === 'HostedHookRecoveryRequiredError');
-      if (needsRecovery) {
+      if (params.needsRecovery(cause)) {
         // Something parked mid-turn: a later settle or takeover consumes
         // the input, exactly like a parked prompt.
         session.blocked = true;
