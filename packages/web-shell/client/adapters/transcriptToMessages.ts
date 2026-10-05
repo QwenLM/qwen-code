@@ -13,6 +13,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
+  QwenAgentMessageMeta,
   DaemonTranscriptBlock,
   DaemonTextTranscriptBlock,
   DaemonToolTranscriptBlock,
@@ -75,6 +76,28 @@ interface BackgroundAgentTaskUpdate {
   status: string;
   awaitingProcessing: boolean;
   endTime: number;
+}
+
+/**
+ * The session agent behind a user or assistant block: its live / replayed
+ * `_meta.qwenAgentMessage`, or, in an exported transcript (which carries no
+ * `meta`), the block's `author`. The exported form keeps only the name, which
+ * is enough to render the reply as the agent's own message.
+ */
+function agentMessageOfBlock(
+  block: DaemonTextTranscriptBlock,
+  meta: Record<string, unknown> | undefined,
+): QwenAgentMessageMeta | undefined {
+  const live = parseQwenAgentMessageMeta(meta?.[QWEN_AGENT_MESSAGE_META_KEY]);
+  if (live) return live;
+  if (block.kind !== 'user' && block.kind !== 'assistant') return undefined;
+  const author = getRecord((block as { author?: unknown }).author);
+  const name = getString(author, 'name')?.trim();
+  if (!name) return undefined;
+  return {
+    kind: block.kind === 'assistant' ? 'agent_message' : 'agent_mention',
+    author: { agentId: '', name },
+  };
 }
 
 function collectBackgroundTaskUpdates(
@@ -707,9 +730,7 @@ export function transcriptBlocksToDaemonMessages(
         }
         // An @-mention renders as an ordinary user message; one an agent
         // posted into the session carries that agent as its author.
-        const agentMessage = parseQwenAgentMessageMeta(
-          meta?.[QWEN_AGENT_MESSAGE_META_KEY],
-        );
+        const agentMessage = agentMessageOfBlock(textBlock, meta);
         const msg: DaemonUserMessage = {
           id: block.id,
           role: 'user',
@@ -818,7 +839,7 @@ export function transcriptBlocksToDaemonMessages(
         }
         const agentMessage = textBlock.parentToolCallId
           ? undefined
-          : parseQwenAgentMessageMeta(meta?.[QWEN_AGENT_MESSAGE_META_KEY]);
+          : agentMessageOfBlock(textBlock, meta);
         if (agentMessage?.kind === 'agent_message') {
           // A workspace agent's reply is always its own message: it is never
           // folded into the main assistant's text, nor is the next assistant

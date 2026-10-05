@@ -48,3 +48,20 @@
   justify-content: flex-end;
   margin-bottom: 6px;
 }
+
+/* A tool input preview reads as code whatever the page's font reset does. */
+.approval pre {
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.pendingRecord {
+  margin-top: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}

@@ -83,9 +83,22 @@ export interface SessionAgentRunFrame {
   error?: string;
   totalTokens?: number;
   activityAt: number;
-  /** The terminal `agent_message` record is in the transcript. */
+  /**
+   * Record state of a terminal frame (never on a non-terminal one):
+   * `true` the `agent_message` record is in the transcript, drop the card;
+   * `false` the record is pending, or the run is `retryable`, keep the card;
+   * absent no record will be written (cancelled while queued, dismissed,
+   * retried), drop the card.
+   */
   recorded?: boolean;
   recordId?: string;
+  /**
+   * A run a daemon restart interrupted: offer Retry
+   * (`POST …/runs/:runId/retry`) and Dismiss (`POST …/runs/:runId/cancel`).
+   */
+  retryable?: boolean;
+  /** Set on the final frame of a retried run: the run that replaces it. */
+  retriedAsRunId?: string;
 }
 
 export interface SessionAgentChangedFrame {

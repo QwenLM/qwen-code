@@ -52,6 +52,11 @@ const mocks = vi.hoisted(() => ({
   getCliVersion: vi.fn(),
   installManagedNpmUpdate: vi.fn(),
   runWorkspaceRecoveryWorker: vi.fn(),
+  runSessionSendMcp: vi.fn(),
+}));
+
+vi.mock('./commands/agents/session-send-mcp-server.js', () => ({
+  runSessionSendMcp: mocks.runSessionSendMcp,
 }));
 
 vi.mock('./serve/workspace-recovery-worker.js', () => ({
@@ -133,6 +138,17 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['managed-runtime-worker'])).toBe(
       'managed-runtime-worker',
     );
+    expect(
+      resolveBootstrapRoute([
+        'agents',
+        'session-send-mcp',
+        '--url',
+        'http://127.0.0.1:4170/x/send',
+      ]),
+    ).toBe('session-send-mcp');
+    expect(
+      resolveBootstrapRoute(['agents', 'join', 'https://hub/join/w']),
+    ).toBe('default');
   });
 
   it('keeps bundled entrypoint paths out of the route detection', async () => {
@@ -767,6 +783,31 @@ describe('runCliEntry', () => {
     expect(mocks.installManagedNpmUpdate).not.toHaveBeenCalled();
     expect(mocks.main).not.toHaveBeenCalled();
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
+  });
+
+  it('serves session_send without normal startup or any stdout output', async () => {
+    await runCliEntry([
+      'agents',
+      'session-send-mcp',
+      '--url',
+      'http://127.0.0.1:4170/sessions/s/runs/r/send',
+    ]);
+
+    expect(mocks.runSessionSendMcp).toHaveBeenCalledWith(
+      'http://127.0.0.1:4170/sessions/s/runs/r/send',
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(stdout.join('')).toBe('');
+  });
+
+  it('refuses session-send-mcp without a URL, on stderr only', async () => {
+    await runCliEntry(['agents', 'session-send-mcp']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain('--url');
+    expect(stdout.join('')).toBe('');
+    expect(mocks.runSessionSendMcp).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
   });
 
   it('rejects arguments on the hidden Runtime worker route', async () => {

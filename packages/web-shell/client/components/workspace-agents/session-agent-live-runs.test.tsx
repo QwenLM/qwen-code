@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SessionAgentRunFrame } from '@qwen-code/sdk/daemon';
 import { getTranslator, I18nProvider } from '../../i18n';
 import {
+  canRetryRun,
   describeRun,
+  INPUT_PREVIEW_MAX_CHARS,
   SessionAgentLiveRuns,
   STALL_NOTICE_MS,
   toApprovalRequest,
@@ -78,6 +80,110 @@ it('maps a run permission onto the main chat approval card', () => {
   });
 });
 
+describe('approval input preview', () => {
+  const options = [
+    { optionId: 'yes', name: 'Allow', kind: 'allow_once' as const },
+  ];
+
+  it('shows a shell tool its command, whichever program asked', () => {
+    // Claude: Bash with JSON input.
+    expect(
+      toApprovalRequest(
+        {
+          requestId: 'p1',
+          title: 'Bash: npm test',
+          toolName: 'Bash',
+          inputPreview: JSON.stringify({
+            command: 'npm test',
+            description: 'Run tests',
+          }),
+          options,
+        },
+        'claude-B',
+        t,
+      ),
+    ).toMatchObject({
+      toolKind: 'execute',
+      content: [],
+      rawInput: { description: 'npm test', command: 'npm test' },
+    });
+    // Codex: exec_command with argv.
+    expect(
+      toApprovalRequest(
+        {
+          requestId: 'p2',
+          title: 'exec_command',
+          toolName: 'exec_command',
+          inputPreview: JSON.stringify({ command: ['git', 'status'] }),
+          options,
+        },
+        'codex',
+        t,
+      ).rawInput,
+    ).toEqual({ command: 'git status' });
+    // A clipped preview is not JSON: shown as it came.
+    expect(
+      toApprovalRequest(
+        {
+          requestId: 'p3',
+          title: 'execute',
+          toolName: 'execute',
+          inputPreview: '{"command":"echo hi…',
+          options,
+        },
+        'qwen',
+        t,
+      ).rawInput,
+    ).toEqual({ command: '{"command":"echo hi…' });
+  });
+
+  it("shows any other tool's input as indented, bounded text", () => {
+    const request = toApprovalRequest(
+      {
+        requestId: 'p1',
+        title: 'Write: docs/a.md',
+        toolName: 'Write',
+        inputPreview: JSON.stringify({ file_path: 'docs/a.md', content: 'x' }),
+        options,
+      },
+      'claude-B',
+      t,
+    );
+    expect(request.toolKind).toBeUndefined();
+    expect(request.contentIsInput).toBe(true);
+    expect(request.content).toEqual([
+      {
+        type: 'text',
+        text: '{\n  "file_path": "docs/a.md",\n  "content": "x"\n}',
+      },
+    ]);
+    expect(request.rawInput).toEqual({ description: 'docs/a.md' });
+
+    const long = toApprovalRequest(
+      {
+        requestId: 'p2',
+        title: 'mcp_tool',
+        toolName: 'mcp_tool',
+        inputPreview: 'y'.repeat(INPUT_PREVIEW_MAX_CHARS + 50),
+        options,
+      },
+      'claude-B',
+      t,
+    );
+    expect(long.content[0]?.text).toHaveLength(INPUT_PREVIEW_MAX_CHARS + 1);
+    expect(long.content[0]?.text?.endsWith('…')).toBe(true);
+  });
+});
+
+it('offers retry only on a failed or offline run the daemon marked retryable', () => {
+  expect(canRetryRun(run({ status: 'failed', retryable: true }))).toBe(true);
+  expect(canRetryRun(run({ status: 'offline', retryable: true }))).toBe(true);
+  expect(canRetryRun(run({ status: 'failed' }))).toBe(false);
+  expect(canRetryRun(run({ status: 'completed', retryable: true }))).toBe(
+    false,
+  );
+});
+
 describe('SessionAgentLiveRuns', () => {
   const mounted: Array<{
     root: ReturnType<typeof createRoot>;
@@ -139,6 +245,79 @@ describe('SessionAgentLiveRuns', () => {
         (button) => button.textContent === 'Stop',
       ),
     ).toBe(false);
+  });
+
+  it('says a finished run waits for the current reply until it is recorded', () => {
+    const pending = render([
+      run({ status: 'completed', outputText: 'Done', recorded: false }),
+    ]);
+    expect(
+      pending.node.querySelector('[data-testid="agent-run-pending"]')
+        ?.textContent,
+    ).toBe(
+      'This reply will appear in the chat when the current reply finishes.',
+    );
+    const others = render([
+      run({ runId: 'live', status: 'running' }),
+      // Retryable: no record is coming, Retry / Dismiss say what to do.
+      run({
+        runId: 'restarted',
+        status: 'failed',
+        recorded: false,
+        retryable: true,
+      }),
+    ]);
+    expect(
+      others.node.querySelector('[data-testid="agent-run-pending"]'),
+    ).toBeNull();
+  });
+
+  it('offers Retry and Dismiss on a retryable run, and only there', () => {
+    const onRetry = vi.fn().mockResolvedValue(undefined);
+    const { node } = render(
+      [
+        run({
+          runId: 'r1',
+          status: 'failed',
+          recorded: false,
+          retryable: true,
+          error: 'daemon restarted',
+        }),
+        run({ runId: 'r2', status: 'failed', recorded: false }),
+      ],
+      { onRetry },
+    );
+    const retry = node.querySelectorAll('[data-testid="session-agent-retry"]');
+    const dismiss = node.querySelectorAll(
+      '[data-testid="session-agent-dismiss"]',
+    );
+    expect(retry).toHaveLength(1);
+    expect(dismiss).toHaveLength(1);
+    expect(
+      retry[0]?.closest('[data-run-id]')?.getAttribute('data-run-id'),
+    ).toBe('r1');
+    expect(retry[0]?.textContent).toBe('Retry');
+    expect(dismiss[0]?.textContent).toBe('Dismiss');
+    act(() => (retry[0] as HTMLButtonElement).click());
+    expect(onRetry).toHaveBeenCalledWith('r1');
+  });
+
+  it('dismisses a retryable run through the cancel route', async () => {
+    const { node, onCancel } = render([
+      run({ status: 'failed', recorded: false, retryable: true }),
+    ]);
+    // No retry handler: Dismiss alone.
+    expect(
+      node.querySelector('[data-testid="session-agent-retry"]'),
+    ).toBeNull();
+    await act(async () => {
+      (
+        node.querySelector(
+          '[data-testid="session-agent-dismiss"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    expect(onCancel).toHaveBeenCalledWith('r1');
   });
 
   it('puts the approval on the run, without taking focus, and sends the vote', () => {

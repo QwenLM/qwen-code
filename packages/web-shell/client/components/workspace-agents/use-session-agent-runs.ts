@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   parseQwenAgentMessageMeta,
   QWEN_AGENT_MESSAGE_META_KEY,
@@ -15,15 +15,6 @@ import {
 import type { AgentStreamState } from './agent-events';
 import type { SessionAgentsApi } from './session-agents-api';
 
-/**
- * How long a finished run keeps showing its live frame when the transcript has
- * not caught up. The daemon defers an agent's record while a main-model turn
- * is running, so the `agent_message` can land well after the terminal frame;
- * dropping the frame on arrival would make the reply vanish until then.
- * TODO(multi-agent): a main-model turn longer than this still hides a finished
- * reply until its record lands; the frame could carry a "recorded" flag.
- */
-export const TERMINAL_FRAME_GRACE_MS = 5 * 60_000;
 /** Snapshot polling cadence while the live stream is down. */
 const POLL_MS = 5_000;
 
@@ -64,25 +55,57 @@ interface TrackedFrame {
   frame: SessionAgentRunFrame;
   /** Arrival order, so the list does not reshuffle as frames update. */
   order: number;
-  /** Local clock when the run was first seen terminal. */
-  terminalAt?: number;
+  /**
+   * The run is off the screen for good: its record is in the transcript, or
+   * none will be written. Kept, slimmed, so that a stale snapshot cannot put
+   * the card back.
+   */
+  settled?: true;
 }
 
 export type RunFrameMap = ReadonlyMap<string, TrackedFrame>;
 
 /**
+ * Whether a frame ends the run's card (contract `recorded`): a terminal frame
+ * keeps it only while `recorded` is `false` (record pending, or the run is
+ * retryable). `true` means the record now renders; absent means none will be
+ * written (cancelled while queued, dismissed, retried).
+ */
+export function isSettledRunFrame(frame: SessionAgentRunFrame): boolean {
+  return isTerminalRunStatus(frame.status) && frame.recorded !== false;
+}
+
+function settledEntry(tracked: TrackedFrame): TrackedFrame {
+  const { frame } = tracked;
+  return {
+    order: tracked.order,
+    settled: true,
+    frame: {
+      type: 'run',
+      sessionId: frame.sessionId,
+      runId: frame.runId,
+      author: frame.author,
+      status: frame.status,
+      activityAt: frame.activityAt,
+    },
+  };
+}
+
+/**
  * Folds one frame into the map. A frame seen twice (the stream opens with a
  * snapshot that a GET may already have delivered) is harmless; an older frame
- * never overwrites a newer one, and a terminal run never comes back to life.
+ * never overwrites a newer one, a terminal run never comes back to life, and
+ * a settled run stays settled (a snapshot polled before the record landed can
+ * arrive after the frame that settled it).
  */
 export function applyRunFrame(
   current: RunFrameMap,
   frame: SessionAgentRunFrame,
-  now: number,
   order: number,
 ): RunFrameMap {
   const existing = current.get(frame.runId);
   if (existing) {
+    if (existing.settled) return current;
     const wasTerminal = isTerminalRunStatus(existing.frame.status);
     if (wasTerminal && !isTerminalRunStatus(frame.status)) return current;
     // A snapshot fetched before a streamed frame can arrive after it.
@@ -93,43 +116,40 @@ export function applyRunFrame(
       return current;
     }
   }
+  const tracked: TrackedFrame = { frame, order: existing?.order ?? order };
   const next = new Map(current);
-  next.set(frame.runId, {
-    frame,
-    order: existing?.order ?? order,
-    ...(isTerminalRunStatus(frame.status)
-      ? { terminalAt: existing?.terminalAt ?? now }
-      : {}),
-  });
+  next.set(
+    frame.runId,
+    isSettledRunFrame(frame) ? settledEntry(tracked) : tracked,
+  );
   return next;
 }
 
 /**
- * Drops runs whose reply is already in the transcript, and finished runs past
- * the grace period. Returns `current` when nothing changed.
+ * Settles runs whose `agent_message` the transcript already shows (it can
+ * land before the frame that says so). Returns `current` when nothing
+ * changed.
  */
 export function pruneRunFrames(
   current: RunFrameMap,
   settledRunIds: ReadonlySet<string>,
-  now: number,
 ): RunFrameMap {
   let next: Map<string, TrackedFrame> | undefined;
   for (const [runId, tracked] of current) {
-    const expired =
-      tracked.terminalAt !== undefined &&
-      now - tracked.terminalAt >= TERMINAL_FRAME_GRACE_MS;
-    if (settledRunIds.has(runId) || expired) {
-      next ??= new Map(current);
-      next.delete(runId);
-    }
+    if (tracked.settled || !settledRunIds.has(runId)) continue;
+    next ??= new Map(current);
+    next.set(runId, settledEntry(tracked));
   }
   return next ?? current;
 }
 
 /**
  * Live agent runs of one chat session: the `runs` snapshot, then the
- * `session-events` stream. A run disappears once its `agent_message` is in
- * the transcript (`settledRunIds`), which is what replaces it on screen.
+ * `session-events` stream. A run keeps its card, finished or not, until a
+ * frame settles it (see {@link isSettledRunFrame}) or its `agent_message`
+ * shows up in the transcript (`settledRunIds`), which is what replaces it on
+ * screen. A finished run whose record waits behind a main-model turn, or a
+ * run a daemon restart cut short, stays until then.
  */
 export function useSessionAgentRuns({
   api,
@@ -139,7 +159,12 @@ export function useSessionAgentRuns({
   api: SessionAgentsApi | undefined;
   sessionId: string | undefined;
   settledRunIds: ReadonlySet<string>;
-}): { runs: SessionAgentRunFrame[]; anyLive: boolean } {
+}): {
+  runs: SessionAgentRunFrame[];
+  anyLive: boolean;
+  /** Runs a `retryable` run again; rejects when the daemon refuses. */
+  retry: (runId: string) => Promise<void>;
+} {
   const [state, setState] = useState<{
     key: string | undefined;
     frames: RunFrameMap;
@@ -158,7 +183,7 @@ export function useSessionAgentRuns({
         let next = current.frames;
         for (const frame of frames) {
           if (frame.sessionId && frame.sessionId !== sessionId) continue;
-          next = applyRunFrame(next, frame, Date.now(), order++);
+          next = applyRunFrame(next, frame, order++);
         }
         return next === current.frames ? current : { ...current, frames: next };
       });
@@ -198,41 +223,50 @@ export function useSessionAgentRuns({
     };
   }, [api, sessionId, key]);
 
-  // Drop runs the transcript has caught up with, and expire finished ones.
+  // Settle runs the transcript has caught up with.
   const frames = state.key === key ? state.frames : undefined;
   useEffect(() => {
     if (!frames || frames.size === 0) return;
-    const prune = () =>
-      setState((current) => {
-        const next = pruneRunFrames(current.frames, settledRunIds, Date.now());
-        return next === current.frames ? current : { ...current, frames: next };
-      });
-    prune();
-    const nextExpiry = [...frames.values()].reduce<number | undefined>(
-      (soonest, tracked) =>
-        tracked.terminalAt === undefined
-          ? soonest
-          : Math.min(
-              soonest ?? Infinity,
-              tracked.terminalAt + TERMINAL_FRAME_GRACE_MS,
-            ),
-      undefined,
-    );
-    if (nextExpiry === undefined) return;
-    const timer = setTimeout(prune, Math.max(0, nextExpiry - Date.now()));
-    return () => clearTimeout(timer);
+    setState((current) => {
+      const next = pruneRunFrames(current.frames, settledRunIds);
+      return next === current.frames ? current : { ...current, frames: next };
+    });
   }, [frames, settledRunIds]);
+
+  const retry = useCallback(
+    async (runId: string) => {
+      if (!api || !sessionId) return;
+      await api.retryRun(sessionId, runId);
+      // The retry is a new run with its own card; this one is done. The
+      // daemon's final frame says so too, but a snapshot polled before it
+      // must not bring the card back meanwhile.
+      setState((current) => {
+        const tracked = current.frames.get(runId);
+        if (current.key !== sessionId || !tracked || tracked.settled) {
+          return current;
+        }
+        const next = new Map(current.frames);
+        next.set(runId, settledEntry(tracked));
+        return { ...current, frames: next };
+      });
+    },
+    [api, sessionId],
+  );
 
   return useMemo(() => {
     const runs = frames
       ? [...frames.values()]
-          .filter((tracked) => !settledRunIds.has(tracked.frame.runId))
+          .filter(
+            (tracked) =>
+              !tracked.settled && !settledRunIds.has(tracked.frame.runId),
+          )
           .sort((a, b) => a.order - b.order)
           .map((tracked) => tracked.frame)
       : [];
     return {
       runs,
       anyLive: runs.some((run) => !isTerminalRunStatus(run.status)),
+      retry,
     };
-  }, [frames, settledRunIds]);
+  }, [frames, settledRunIds, retry]);
 }

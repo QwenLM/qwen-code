@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { SquareIcon } from 'lucide-react';
+import { RefreshCwIcon, SquareIcon } from 'lucide-react';
 import type {
   SessionAgentPermissionPrompt,
   SessionAgentRunFrame,
@@ -105,7 +105,74 @@ export function describeRun(
   }
 }
 
-/** The run's permission prompt as the main chat's approval card reads it. */
+/** Client-side cap on a tool input preview (the daemon bounds it too). */
+export const INPUT_PREVIEW_MAX_CHARS = 4_000;
+
+/**
+ * Tool names that run a shell command, across the programs: Qwen reports the
+ * ACP kind (`execute`), Claude `Bash`, Codex `exec_command`.
+ */
+const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'bash',
+  'shell',
+  'exec',
+  'execute',
+  'exec_command',
+  'local_shell',
+  'run_shell_command',
+]);
+
+function clipPreview(text: string): string {
+  return text.length > INPUT_PREVIEW_MAX_CHARS
+    ? `${text.slice(0, INPUT_PREVIEW_MAX_CHARS)}…`
+    : text;
+}
+
+/** The preview as JSON when it parses (a clipped preview does not). */
+function parsePreview(preview: string): unknown {
+  try {
+    return JSON.parse(preview) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * What a shell tool will run: the `command` of its input (a string, or argv
+ * as Codex sends it), else the preview as it came.
+ */
+function shellCommandOf(preview: string): string {
+  const parsed = parsePreview(preview);
+  const command =
+    parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)['command']
+      : undefined;
+  if (typeof command === 'string' && command) return clipPreview(command);
+  if (
+    Array.isArray(command) &&
+    command.length > 0 &&
+    command.every((part) => typeof part === 'string')
+  ) {
+    return clipPreview(command.join(' '));
+  }
+  return clipPreview(preview);
+}
+
+/** Any other tool's input, indented when it is whole JSON. */
+function formatInputPreview(preview: string): string {
+  const parsed = parsePreview(preview);
+  return clipPreview(
+    parsed !== undefined && typeof parsed === 'object' && parsed !== null
+      ? JSON.stringify(parsed, null, 2)
+      : preview,
+  );
+}
+
+/**
+ * The run's permission prompt as the main chat's approval card reads it. A
+ * shell tool shows its command as the main chat's shell approval does; any
+ * other tool shows its input preview in the card's monospace content block.
+ */
 export function toApprovalRequest(
   permission: SessionAgentPermissionPrompt,
   agent: string,
@@ -114,20 +181,25 @@ export function toApprovalRequest(
   // "WriteFile: docs/testing.md" heads the card as the tool with its target
   // under it, as the main chat's approval shows it.
   const { description } = parseTitle(permission.title);
+  const preview = permission.inputPreview || undefined;
+  const isShell =
+    permission.toolName !== undefined &&
+    SHELL_TOOL_NAMES.has(permission.toolName.toLowerCase());
+  const command = preview && isShell ? shellCommandOf(preview) : undefined;
+  const inputText = preview && !isShell ? formatInputPreview(preview) : '';
   return {
     id: permission.requestId,
     title: permission.title || t('collab.approval.title', { agent }),
     ...(permission.toolName ? { toolName: permission.toolName } : {}),
-    content: [],
-    ...(description || permission.inputPreview
+    // ToolApproval shows a command only for an exec-kind request.
+    ...(isShell ? { toolKind: 'execute' } : {}),
+    content: inputText ? [{ type: 'text', text: inputText }] : [],
+    ...(inputText ? { contentIsInput: true } : {}),
+    ...(description || command
       ? {
           rawInput: {
             ...(description ? { description } : {}),
-            // TODO(multi-agent): ToolApproval reads `command` only for
-            // shell-like tools; other tools' input preview is not shown yet.
-            ...(permission.inputPreview
-              ? { command: permission.inputPreview }
-              : {}),
+            ...(command ? { command } : {}),
           },
         }
       : {}),
@@ -141,11 +213,69 @@ export function toApprovalRequest(
   };
 }
 
+/** A failed or offline run the daemon offers to run again. */
+export function canRetryRun(run: SessionAgentRunFrame): boolean {
+  return (
+    run.retryable === true &&
+    (run.status === 'failed' || run.status === 'offline')
+  );
+}
+
+/**
+ * Retry and Dismiss on a run a daemon restart cut short. Such a run writes no
+ * record, so its card is the only place to act on it: Retry queues it again
+ * as a new run, Dismiss (the cancel route) lets it go.
+ */
+function RetryableRunActions({
+  runId,
+  onRetry,
+  onDismiss,
+}: {
+  runId: string;
+  onRetry?: (runId: string) => Promise<void>;
+  onDismiss: (runId: string) => Promise<void>;
+}) {
+  const { t } = useI18n();
+  const [pending, setPending] = useState<'retry' | 'dismiss'>();
+  const start = (kind: 'retry' | 'dismiss', run: () => Promise<void>) => {
+    setPending(kind);
+    void run().finally(() => setPending(undefined));
+  };
+  return (
+    <div className={styles.actions}>
+      {onRetry && (
+        <Button
+          size="xs"
+          variant="outline"
+          data-testid="session-agent-retry"
+          disabled={pending !== undefined}
+          onClick={() => start('retry', () => onRetry(runId))}
+        >
+          <RefreshCwIcon aria-hidden="true" />
+          {pending === 'retry'
+            ? t('collab.run.retrying')
+            : t('collab.run.retry')}
+        </Button>
+      )}
+      <Button
+        size="xs"
+        variant="ghost"
+        data-testid="session-agent-dismiss"
+        disabled={pending !== undefined}
+        onClick={() => start('dismiss', () => onDismiss(runId))}
+      >
+        {t('collab.run.dismiss')}
+      </Button>
+    </div>
+  );
+}
+
 function LiveRun({
   run,
   now,
   onCancel,
   onRespond,
+  onRetry,
 }: {
   run: SessionAgentRunFrame;
   now: number;
@@ -155,6 +285,7 @@ function LiveRun({
     requestId: string,
     optionId: string,
   ) => Promise<void>;
+  onRetry?: (runId: string) => Promise<void>;
 }) {
   const { t } = useI18n();
   const [stopping, setStopping] = useState(false);
@@ -213,6 +344,13 @@ function LiveRun({
           {run.error && <span className={styles.error}>{run.error}</span>}
         </div>
       )}
+      {canRetryRun(run) && (
+        <RetryableRunActions
+          runId={run.runId}
+          onRetry={onRetry}
+          onDismiss={onCancel}
+        />
+      )}
       <AgentStepList
         steps={run.steps ?? []}
         label={t('collab.run.steps', { agent: run.author.name })}
@@ -234,6 +372,13 @@ function LiveRun({
         </div>
       )}
       <AgentTokenUsage totalTokens={run.totalTokens} />
+      {terminal && run.recorded === false && !run.retryable && (
+        // Finished, but its record waits for the main reply to settle; the
+        // record then replaces this card.
+        <div className={styles.pendingRecord} data-testid="agent-run-pending">
+          {t('collab.run.pendingRecord')}
+        </div>
+      )}
     </div>
   );
 }
@@ -250,6 +395,7 @@ export function SessionAgentLiveRuns({
   runs,
   onCancel,
   onRespond,
+  onRetry,
 }: {
   runs: readonly SessionAgentRunFrame[];
   onCancel: (runId: string) => Promise<void>;
@@ -258,6 +404,8 @@ export function SessionAgentLiveRuns({
     requestId: string,
     optionId: string,
   ) => Promise<void>;
+  /** Offered on a failed run the daemon marked retryable. */
+  onRetry?: (runId: string) => Promise<void>;
 }) {
   const now = useNow(runs.some((run) => run.status === 'running'));
   if (runs.length === 0) return null;
@@ -270,6 +418,7 @@ export function SessionAgentLiveRuns({
           now={now}
           onCancel={onCancel}
           onRespond={onRespond}
+          onRetry={onRetry}
         />
       ))}
     </div>

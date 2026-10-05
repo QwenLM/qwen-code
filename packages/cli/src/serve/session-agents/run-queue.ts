@@ -95,7 +95,11 @@ export function nextRunnable(
     .sort((a, b) => a.createdAt - b.createdAt)[0];
 }
 
-/** 1-based position among the agent's queued runs; undefined when not queued. */
+/**
+ * 1-based position among the agent's queued runs in `runs`, oldest first;
+ * undefined when not queued. The orchestrator passes the runs of every chat
+ * session, since an agent's `maxConcurrentRuns` is shared across them.
+ */
 export function queuePosition(
   runs: readonly SessionAgentRun[],
   run: SessionAgentRun,

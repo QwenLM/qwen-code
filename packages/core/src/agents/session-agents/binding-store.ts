@@ -146,7 +146,8 @@ function isValidLease(value: unknown): boolean {
       typeof value['hostId'] === 'string' &&
       typeof value['leaseId'] === 'string' &&
       typeof value['attempt'] === 'number' &&
-      typeof value['expiresAt'] === 'number')
+      typeof value['expiresAt'] === 'number' &&
+      isOptionalFiniteNumber(value['lastSequence']))
   );
 }
 
@@ -166,6 +167,7 @@ function isValidRun(value: unknown): value is SessionAgentRun {
     isOptionalFiniteNumber(value['endedAt']) &&
     isOptionalString(value['error']) &&
     isOptionalFiniteNumber(value['totalTokens']) &&
+    isOptionalString(value['retryOf']) &&
     isValidLease(value['lease'])
   );
 }

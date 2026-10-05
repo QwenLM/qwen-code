@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -14,11 +15,8 @@ import {
   issueA2AGrant,
   revokeA2AGrant,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-grants.js';
-import {
-  listThreads,
-  updateWorkspaceAgents,
-} from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { updateWorkspaceAgents } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
+import { Storage, type A2ASessionPort } from '@qwen-code/qwen-code-core';
 import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
@@ -33,9 +31,55 @@ const headers = {
   'x-qwen-agent-id': 'ag_lead',
 };
 
+/** Session agents as A2A sees them; a cancel ends the run at once. */
+function fakeSessions() {
+  const sessions: string[] = [];
+  const runs = new Map<string, 'queued' | 'cancelled'>();
+  const posts: string[] = [];
+  const port: A2ASessionPort = {
+    async createSession() {
+      const id = randomUUID();
+      sessions.push(id);
+      return id;
+    },
+    async mention(_sessionId, input) {
+      posts.push(input.text);
+      const runId = `sr_${runs.size + 1}`;
+      runs.set(runId, 'queued');
+      return { runs: [{ runId, agentId: 'ag_lead' }] };
+    },
+    async liveRun(_sessionId, runId) {
+      return runs.get(runId) === 'queued'
+        ? { status: 'queued', activityAt: 1_000 }
+        : undefined;
+    },
+    async recordedReply(_sessionId, runId) {
+      return runs.get(runId) === 'cancelled'
+        ? {
+            at: 2_000,
+            payload: {
+              displayText: '',
+              author: { agentId: 'ag_lead', name: 'lead' },
+              runId,
+              status: 'cancelled',
+            },
+          }
+        : undefined;
+    },
+    async cancel(_sessionId, runId) {
+      if (runs.get(runId) !== 'queued') return false;
+      runs.set(runId, 'cancelled');
+      return true;
+    },
+  };
+  return { port, sessions, posts };
+}
+
 let runtimeDir: string;
+let sessions: ReturnType<typeof fakeSessions>;
 
 beforeEach(async () => {
+  sessions = fakeSessions();
   runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'a2a-route-test-'));
   Storage.setRuntimeBaseDir(runtimeDir);
   await updateWorkspaceAgents(PROJECT_ROOT, () => [
@@ -59,9 +103,13 @@ function runtime(trusted: boolean): WorkspaceRuntime {
 
 function appFor(trusted: boolean, checkRate: ReturnType<typeof vi.fn>) {
   const app = express();
-  registerA2ATransportRoutes(app, createWorkspaceRegistry([runtime(trusted)]), {
-    checkRate,
-  });
+  registerA2ATransportRoutes(
+    app,
+    createWorkspaceRegistry([runtime(trusted)]),
+    { checkRate },
+    undefined,
+    () => sessions.port,
+  );
   return app;
 }
 
@@ -117,6 +165,21 @@ describe('A2A transport', () => {
     });
     expect(sent.body.error).toBeUndefined();
     const taskId = sent.body.result.task.id as string;
+    const contextId = sent.body.result.task.contextId as string;
+    expect(contextId).toBe(sessions.sessions[0]);
+    expect(sessions.posts).toEqual(['@lead Inspect the cache.']);
+
+    // Another message in the same context is the next turn there.
+    const followUp = await call('share_1', first.secret, 'SendMessage', {
+      message: {
+        role: 'ROLE_USER',
+        messageId: 'msg-2',
+        contextId,
+        parts: [{ text: 'And the lockfile?' }],
+      },
+    });
+    expect(followUp.body.result.task).toMatchObject({ contextId });
+    expect(sessions.sessions).toHaveLength(1);
 
     const polled = await call('share_1', first.secret, 'GetTask', {
       id: taskId,
@@ -125,8 +188,8 @@ describe('A2A transport', () => {
 
     const listed = await call('share_1', first.secret, 'ListTasks', {});
     expect(listed.body.result).toMatchObject({
-      tasks: [expect.objectContaining({ id: taskId })],
-      totalSize: 1,
+      tasks: [expect.objectContaining({ id: taskId }), expect.anything()],
+      totalSize: 2,
     });
 
     const privatePoll = await call('share_2', second.secret, 'GetTask', {
@@ -197,7 +260,7 @@ describe('A2A transport', () => {
     );
   });
 
-  it('refuses task continuation instead of silently creating a new task', async () => {
+  it('refuses adding a message to an existing task', async () => {
     const { secret } = await issueA2AGrant(PROJECT_ROOT, {
       callerId: 'share_1',
       agentId: 'ag_lead',
@@ -227,9 +290,11 @@ describe('A2A transport', () => {
 
     expect(response.body).toMatchObject({
       error: {
-        message: 'Continuing an existing task or context is not supported.',
+        message:
+          'Messages cannot be added to an existing task; send a new message with its contextId.',
       },
     });
+    expect(sessions.posts).toEqual([]);
   });
 });
 
@@ -261,7 +326,13 @@ it.each(['replaced', 'untrusted', 'disabled'] as const)(
       return true;
     });
     const app = express();
-    registerA2ATransportRoutes(app, registry, { checkRate }, () => enabled);
+    registerA2ATransportRoutes(
+      app,
+      registry,
+      { checkRate },
+      () => enabled,
+      () => sessions.port,
+    );
     const response = await request(app)
       .post('/a2a/v1')
       .set({
@@ -282,6 +353,7 @@ it.each(['replaced', 'untrusted', 'disabled'] as const)(
         },
       });
     expect(response.body.error).toBeDefined();
-    expect((await listThreads(PROJECT_ROOT)).threads).toEqual([]);
+    expect(sessions.sessions).toEqual([]);
+    expect(sessions.posts).toEqual([]);
   },
 );

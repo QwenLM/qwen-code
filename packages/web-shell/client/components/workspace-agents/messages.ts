@@ -27,6 +27,11 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.run.stalled': (v) =>
     `${v?.agent} has shown no progress for ${v?.elapsed}. It may be stuck.`,
   'collab.run.stop': 'Stop',
+  'collab.run.retry': 'Retry',
+  'collab.run.retrying': 'Retrying…',
+  'collab.run.dismiss': 'Dismiss',
+  'collab.run.pendingRecord':
+    'This reply will appear in the chat when the current reply finishes.',
   // --- session agents (chat) ---
   'collab.session.working': (v) => `${v?.agent} is working…`,
   'collab.session.thinking': (v) => `${v?.agent} is thinking…`,
@@ -229,6 +234,10 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.run.stalled': (v) =>
     `${v?.agent} 已经 ${v?.elapsed} 没有进展，可能卡住了`,
   'collab.run.stop': '停止',
+  'collab.run.retry': '重试',
+  'collab.run.retrying': '正在重试…',
+  'collab.run.dismiss': '忽略',
+  'collab.run.pendingRecord': '当前回复结束后，这条回复会出现在对话中。',
   // --- session agents (chat) ---
   'collab.session.working': (v) => `${v?.agent} 正在工作…`,
   'collab.session.thinking': (v) => `${v?.agent} 正在思考…`,

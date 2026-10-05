@@ -193,13 +193,27 @@ export interface SessionAgentRunFrame {
   /** Epoch ms of the last activity (for "no activity for N min"). */
   activityAt: number;
   /**
-   * Set on a terminal frame once its `agent_message` record is in the chat
-   * transcript (it may be deferred while a main-model turn runs). Clients
-   * drop the live card when this is true, not merely when the run ends.
+   * Record state of a terminal frame. The client rule:
+   * - `true`: the run's `agent_message` record is in the transcript; drop the
+   *   live card (the record renders instead).
+   * - `false`: the record is pending (deferred while a main-model turn runs,
+   *   or its write is being retried), or the run is `retryable`; keep the
+   *   card. A later frame for the same run settles it.
+   * - absent: no record will be written for this run (cancelled while
+   *   queued, dismissed, or superseded by `retriedAsRunId`); drop the card.
+   * Non-terminal frames never carry it.
    */
   recorded?: boolean;
   /** uuid of that record, when known. */
   recordId?: string;
+  /**
+   * A run interrupted by a daemon restart (`failed`, error "daemon
+   * restarted"): offer "Retry" (`POST .../runs/:runId/retry`) and "Dismiss"
+   * (`POST .../runs/:runId/cancel`).
+   */
+  retryable?: boolean;
+  /** Set on the final frame of a retried run: the run that replaces it. */
+  retriedAsRunId?: string;
 }
 
 export interface SessionAgentPermissionPrompt {
@@ -261,10 +275,23 @@ export interface SessionAgentRun {
   startedAt?: number;
   endedAt?: number;
   error?: string;
-  /** Remote runs: lease fencing (see host protocol below). */
-  lease?: { hostId: string; leaseId: string; attempt: number; expiresAt: number };
+  /**
+   * Remote runs: lease fencing (see host protocol below). Kept on a run
+   * cancelled while a Host executed it, so a restarted daemon can still tell
+   * that Host the run was cancelled.
+   */
+  lease?: {
+    hostId: string;
+    leaseId: string;
+    attempt: number;
+    expiresAt: number;
+    /** Highest `HostTurnEventBatch.sequence` accepted for this attempt. */
+    lastSequence?: number;
+  };
   attempts: number;
   totalTokens?: number;
+  /** The run this one retries (see `retryable` on the run frame). */
+  retryOf?: string;
 }
 
 /** On disk: `<agentsDir>/sessions/<sessionId>.json`, mode 0600. */
@@ -380,6 +407,12 @@ export interface HostPermissionDecision {
   attempt: number;
   requestId: string;
   optionId: string;
+  /**
+   * Unique per decision. A person may answer the same `requestId` again;
+   * the newest decision replaces the earlier one, and the Host applies each
+   * `decisionId` at most once.
+   */
+  decisionId?: string;
 }
 
 export interface HostTurnResult {

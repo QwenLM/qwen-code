@@ -16,15 +16,17 @@
  * before calling this adapter, so `instructions` / `model` on the turn input
  * are not used here.
  *
- * `sessionSendServer` is not used either.
- * TODO(multi-agent): offer `session_send` to qwen agents. Two things block
- * passing it as an ACP `mcpServers` entry: the bridge sends `mcpServers: []`
- * on every newSession / loadSession (acp-bridge session-control-plane.ts, and
- * `BridgeSpawnRequest` has no field for it), and the hidden session outlives
- * a run while the server's token is per run, so an entry fixed at session
- * creation would carry a dead token on the next run. Options: a built-in
- * tool in the ACP child for `sourceType: 'agent'` sessions that posts
- * through an ext method, or a per-prompt MCP override on the bridge.
+ * `session_send`: the hidden session outlives a run, and an ACP session's
+ * MCP servers are fixed when it is created (`mcpServers` on the bridge's
+ * spawn / resume request), so the tool's bearer token belongs to the
+ * (chat session, agent) binding, not the run. The orchestrator hands
+ * {@link QwenAcpAdapterOptions.sessionSend}: `rotate()` mints a fresh token
+ * whenever this adapter (re)creates the session, and `isCurrent()` reports
+ * whether the orchestrator still holds the binding's token; a live session
+ * whose token is gone (the orchestrator was rebuilt on the same bridge) is
+ * closed and reloaded so its server carries a valid one. The send route
+ * then resolves the post to the agent's CURRENT live run. The turn input's
+ * per-run `sessionSendServer` is not used here.
  *
  * Hidden sessions are closed after {@link QWEN_AGENT_SESSION_IDLE_CLOSE_MS}
  * idle so they do not exhaust the bridge's `maxSessions`.
@@ -82,8 +84,48 @@ export interface QwenAcpAdapterOptions {
     requestId: string,
   ) => BridgeClientRequestContext | undefined;
   idleCloseMs?: number;
+  /** See the file header. Absent means the session gets no `session_send`. */
+  sessionSend?: QwenSessionSendBinding;
   /** Test seam. */
   sessionExists?: (sessionId: string) => Promise<boolean>;
+}
+
+/** The `session_send` token of one (chat session, agent) binding. */
+export interface QwenSessionSendBinding {
+  /** False when a live session may carry a token the daemon no longer holds. */
+  isCurrent(): boolean;
+  /**
+   * Mints the binding's next token and returns the stdio server that carries
+   * it, or undefined when this daemon cannot offer the tool.
+   */
+  rotate(): AgentAdapterTurnInput['sessionSendServer'];
+}
+
+/**
+ * ACP `mcpServers[].name` of the `session_send` server (the tool prefix).
+ * TODO(multi-agent): model-facing — offering `session_send` to qwen agents
+ * (tool name and description) needs eval before release.
+ */
+export const SESSION_SEND_MCP_SERVER_NAME = 'qwen_session';
+
+/** The contract's stdio server as an ACP `McpServerStdio` (env is required). */
+export function toAcpStdioServer(
+  server: NonNullable<AgentAdapterTurnInput['sessionSendServer']>,
+): {
+  name: string;
+  command: string;
+  args: string[];
+  env: Array<{ name: string; value: string }>;
+} {
+  return {
+    name: SESSION_SEND_MCP_SERVER_NAME,
+    command: server.command,
+    args: [...server.args],
+    env: Object.entries(server.env ?? {}).map(([name, value]) => ({
+      name,
+      value,
+    })),
+  };
 }
 
 /** Idle-close timers, shared by every adapter instance on one bridge. */
@@ -212,19 +254,22 @@ export function createQwenAcpAdapter(
     if (
       live &&
       live.sourceType === AGENT_SESSION_SOURCE_TYPE &&
-      live.sourceId === agentId
+      live.sourceId === agentId &&
+      options.sessionSend?.isCurrent() !== false
     ) {
       return;
     }
     // Opened by a person as an ordinary session (no persona, no agent
-    // surface): close it and reload it as the agent's, as the thread-era
-    // port does.
+    // surface), or carrying a dead `session_send` token: close it and reload
+    // it as the agent's, as the thread-era port does.
     if (live) await bridge.closeSession(sessionId);
+    const sendServer = options.sessionSend?.rotate();
     const request = {
       workspaceCwd,
       sessionId,
       sourceType: AGENT_SESSION_SOURCE_TYPE,
       sourceId: agentId,
+      ...(sendServer ? { mcpServers: [toAcpStdioServer(sendServer)] } : {}),
     };
     if (await sessionExists(sessionId)) {
       await bridge.resumeSession(request);

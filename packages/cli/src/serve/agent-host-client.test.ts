@@ -20,15 +20,23 @@ import type {
 } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import {
+  isAgentHostConnectionRunning,
+  isCancellation,
   isRevocation,
   MAX_CONCURRENT_HOST_TURNS,
   sessionSendServerFor,
   startAgentHostConnection,
   stopAgentHostConnection,
 } from './agent-host-client.js';
+import {
+  decisionsForAwaited,
+  type HostAwaitedPermission,
+  type HostDecision,
+} from './agent-host-decisions.js';
 
-const { getAdapter } = vi.hoisted(() => ({
+const { getAdapter, openRelay } = vi.hoisted(() => ({
   getAdapter: vi.fn<(...args: unknown[]) => AgentAdapter>(),
+  openRelay: vi.fn<(...args: unknown[]) => unknown>(),
 }));
 
 vi.mock('./agent-host-programs.js', () => ({
@@ -41,6 +49,7 @@ vi.mock('./agent-host-programs.js', () => ({
     probes.filter((probe) => probe.available).map((probe) => probe.program),
 }));
 vi.mock('./session-agents/adapters/index.js', () => ({ getAdapter }));
+vi.mock('./agent-host-relay.js', () => ({ openAgentHostRelayRun: openRelay }));
 
 function assignment(
   runId: string,
@@ -61,17 +70,28 @@ function assignment(
 }
 
 /**
- * A fake coordinator: enroll, heartbeat (all leases ok), pickup from a
- * queue (then idle 204s), events and result recorded.
+ * A fake coordinator: enroll, heartbeat (leases ok unless cancelled),
+ * pickup from a queue (then idle 204s), a decisions long-poll filtered like
+ * the real route, events and result recorded.
  */
 function fakeCoordinator(queue: HostTurnAssignment[]) {
   const batches: HostTurnEventBatch[] = [];
   const results: HostTurnResult[] = [];
   const heartbeats: Array<Record<string, unknown>> = [];
+  const decisionPolls: Array<{ awaiting: HostAwaitedPermission[] }> = [];
   const state: {
     eventStatus: number;
-    decisions: unknown[];
-  } = { eventStatus: 200, decisions: [] };
+    /** Answer events (and results) with 409 `{cancelled: true}`. */
+    cancelled: boolean;
+    /** runIds the heartbeat reports cancelled. */
+    cancelledLeases: Set<string>;
+    decisions: HostDecision[];
+  } = {
+    eventStatus: 200,
+    cancelled: false,
+    cancelledLeases: new Set(),
+    decisions: [],
+  };
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     const body = init?.body ? JSON.parse(init.body as string) : {};
     if (url.endsWith('/enroll')) {
@@ -81,12 +101,35 @@ function fakeCoordinator(queue: HostTurnAssignment[]) {
       heartbeats.push(body);
       return Response.json({
         host: { id: 'host-1' },
-        leases: (body.runs ?? []).map((run: { runId: string }) => ({
-          runId: run.runId,
-          ok: true,
-        })),
+        leases: (body.runs ?? []).map((run: { runId: string }) =>
+          state.cancelledLeases.has(run.runId)
+            ? { runId: run.runId, ok: false, cancelled: true }
+            : { runId: run.runId, ok: true },
+        ),
         decisions: state.decisions,
       });
+    }
+    if (url.endsWith('/decisions')) {
+      decisionPolls.push(body);
+      const deadline = Date.now() + 2_000;
+      for (;;) {
+        if (init?.signal?.aborted) {
+          throw new DOMException('aborted', 'AbortError');
+        }
+        const found = decisionsForAwaited(state.decisions, body.awaiting);
+        if (found.length > 0 || Date.now() > deadline) {
+          return Response.json({ decisions: found });
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+    const runRoute = url.endsWith('/events') || url.endsWith('/result');
+    if (state.cancelled && runRoute) {
+      if (url.endsWith('/result')) results.push(body);
+      return Response.json(
+        { error: 'cancelled', cancelled: true },
+        { status: 409 },
+      );
     }
     if (url.endsWith('/pickup')) {
       const next = queue.shift();
@@ -110,7 +153,7 @@ function fakeCoordinator(queue: HostTurnAssignment[]) {
     }
     return Response.json({ error: 'unexpected' }, { status: 500 });
   });
-  return { fetchMock, batches, results, heartbeats, state };
+  return { fetchMock, batches, results, heartbeats, decisionPolls, state };
 }
 
 /** Set `getAdapter` before calling: the first pickup runs immediately. */
@@ -136,6 +179,7 @@ async function withHost(
   } finally {
     stopAgentHostConnection(target);
     getAdapter.mockReset();
+    openRelay.mockReset();
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     await fs.rm(qwenHome, { recursive: true, force: true });
@@ -655,3 +699,185 @@ it.each(['write', 'remove'] as const)(
     }
   },
 );
+
+const PROMPT: SessionAgentPermissionPrompt = {
+  requestId: 'perm-1',
+  title: 'Bash: rm build',
+  options: [
+    { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+    { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+  ],
+};
+
+/** An adapter that streams once, then waits for its turn to be aborted. */
+function adapterUntilAborted(order: string[]) {
+  return {
+    program: 'claude' as const,
+    async runTurn(turn: AgentAdapterTurnInput) {
+      turn.onEvent({ type: 'text_delta', text: 'working' });
+      await new Promise<void>((resolve) =>
+        turn.signal.addEventListener(
+          'abort',
+          () => {
+            order.push('adapter aborted');
+            resolve();
+          },
+          { once: true },
+        ),
+      );
+      return { status: 'cancelled' as const, outputText: '' };
+    },
+  };
+}
+
+it('stops a run the heartbeat reports cancelled: adapter first, then the relay, and no result', async () => {
+  const order: string[] = [];
+  const coordinator = fakeCoordinator([assignment('run-1')]);
+  openRelay.mockReturnValue({
+    url: 'http://127.0.0.1:1/agent-host-relay/runs/run-1/send',
+    token: 'tok',
+    close: () => order.push('relay closed'),
+  });
+  getAdapter.mockReturnValue(adapterUntilAborted(order));
+  await withHost(coordinator, async () => {
+    await vi.waitFor(() => expect(coordinator.batches).toHaveLength(1));
+    coordinator.state.cancelledLeases.add('run-1');
+    // The next heartbeat (every 5 s) carries the cancellation.
+    await vi.waitFor(() => expect(order).toContain('relay closed'), {
+      timeout: 8_000,
+    });
+    expect(order.slice(0, 2)).toEqual(['adapter aborted', 'relay closed']);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(coordinator.results).toEqual([]);
+  });
+}, 15_000);
+
+it('stops a run when events come back 409 cancelled', async () => {
+  const order: string[] = [];
+  const coordinator = fakeCoordinator([assignment('run-1')]);
+  coordinator.state.cancelled = true;
+  getAdapter.mockReturnValue(adapterUntilAborted(order));
+  await withHost(coordinator, async () => {
+    await vi.waitFor(() => expect(order).toEqual(['adapter aborted']), {
+      timeout: 5_000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(coordinator.results).toEqual([]);
+  });
+});
+
+it('discards a result the coordinator refuses as cancelled, without retrying', async () => {
+  const coordinator = fakeCoordinator([assignment('run-1')]);
+  getAdapter.mockReturnValue({
+    program: 'claude',
+    async runTurn() {
+      // Cancelled after the adapter already finished.
+      coordinator.state.cancelled = true;
+      return { status: 'completed', outputText: 'done' };
+    },
+  });
+  await withHost(coordinator, async () => {
+    await vi.waitFor(() => expect(coordinator.results).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(coordinator.results).toHaveLength(1);
+  });
+});
+
+it('recognizes the cancellation refusal', () => {
+  expect(isCancellation({ status: 409, cancelled: true })).toBe(true);
+  expect(isCancellation({ status: 409 })).toBe(false);
+  expect(isCancellation(undefined)).toBe(false);
+});
+
+it('waits on a person through one decisions long-poll, with no empty event batches', async () => {
+  const coordinator = fakeCoordinator([assignment('run-1')]);
+  let answer: string | undefined;
+  getAdapter.mockReturnValue({
+    program: 'claude',
+    async runTurn(turn) {
+      turn.onEvent({ type: 'permission_request', prompt: PROMPT });
+      answer = await turn.awaitPermission(PROMPT);
+      turn.onEvent({ type: 'permission_resolved', requestId: 'perm-1' });
+      return { status: 'completed', outputText: answer };
+    },
+  });
+  await withHost(coordinator, async () => {
+    await vi.waitFor(() =>
+      expect(coordinator.decisionPolls.length).toBeGreaterThan(0),
+    );
+    expect(coordinator.decisionPolls[0]!.awaiting).toEqual([
+      { runId: 'run-1', attempt: 1, requestId: 'perm-1', seen: [] },
+    ]);
+    // Idle while the person decides: nothing is polled through events.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    coordinator.state.decisions = [
+      { runId: 'run-1', attempt: 1, requestId: 'perm-1', optionId: 'allow' },
+    ];
+    await vi.waitFor(() => expect(coordinator.results).toHaveLength(1));
+    expect(answer).toBe('allow');
+    expect(
+      coordinator.batches.filter((batch) => batch.events.length === 0),
+    ).toEqual([]);
+  });
+});
+
+it.each([
+  ['with decision ids', 'd1', 'd2'],
+  ['without decision ids (keyed by the answer)', undefined, undefined],
+])(
+  'hands a re-armed wait the second answer, not the resent first one (%s)',
+  async (_label, firstId, secondId) => {
+    const coordinator = fakeCoordinator([assignment('run-1')]);
+    const answers: string[] = [];
+    getAdapter.mockReturnValue({
+      program: 'claude',
+      async runTurn(turn) {
+        turn.onEvent({ type: 'permission_request', prompt: PROMPT });
+        // The bridge refuses the first vote, so the adapter waits again.
+        answers.push(await turn.awaitPermission(PROMPT));
+        answers.push(await turn.awaitPermission(PROMPT));
+        turn.onEvent({ type: 'permission_resolved', requestId: 'perm-1' });
+        return { status: 'completed', outputText: answers.join(',') };
+      },
+    });
+    const decision = (optionId: string, decisionId?: string) => ({
+      runId: 'run-1',
+      attempt: 1,
+      requestId: 'perm-1',
+      optionId,
+      ...(decisionId ? { decisionId } : {}),
+    });
+    // Kept (and resent) until the coordinator sees permission_resolved.
+    coordinator.state.decisions = [decision('allow', firstId)];
+    await withHost(coordinator, async () => {
+      await vi.waitFor(() => expect(answers).toEqual(['allow']));
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(answers).toEqual(['allow']);
+      // The second poll asks only for a decision it has not used.
+      expect(coordinator.decisionPolls.at(-1)!.awaiting[0]!.seen).toEqual([
+        firstId ? `id:${firstId}` : 'option:allow',
+      ]);
+      // The person answers the re-armed request.
+      coordinator.state.decisions = [decision('deny', secondId)];
+      await vi.waitFor(() => expect(coordinator.results).toHaveLength(1));
+      expect(answers).toEqual(['allow', 'deny']);
+    });
+  },
+);
+
+it('reports whether a connection is running', async () => {
+  const coordinator = fakeCoordinator([]);
+  await withHost(coordinator, async (workspaceCwd) => {
+    const target = {
+      serverUrl: 'http://127.0.0.1:18590',
+      workspaceId: 'ws-test',
+      workspaceCwd,
+    };
+    expect(isAgentHostConnectionRunning(target)).toBe(true);
+    expect(
+      isAgentHostConnectionRunning({ ...target, workspaceId: 'other' }),
+    ).toBe(false);
+    stopAgentHostConnection(target);
+    expect(isAgentHostConnectionRunning(target)).toBe(false);
+  });
+});

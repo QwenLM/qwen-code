@@ -11,7 +11,6 @@
  * remembers the connection and reconnects after restarts.
  */
 
-import { createInterface } from 'node:readline/promises';
 import type { CommandModule } from 'yargs';
 import { parseJoinLink } from '../../serve/agent-host-join.js';
 import {
@@ -42,19 +41,76 @@ export interface JoinDeps {
   err: (line: string) => void;
 }
 
-async function promptTokenFromTty(): Promise<string | undefined> {
-  if (!process.stdin.isTTY) return undefined;
-  // TODO(multi-agent): the token is echoed; it is single-use and expires in
-  // 15 minutes, but a hidden prompt would be better.
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    const answer = await rl.question(
-      'Enrollment token (from the join dialog): ',
-    );
-    return answer.trim();
-  } finally {
-    rl.close();
+/** The parts of a TTY stdin a hidden prompt uses. */
+export interface HiddenInput {
+  isTTY?: boolean;
+  isRaw?: boolean;
+  setRawMode?: (raw: boolean) => unknown;
+  on(event: 'data', listener: (chunk: Buffer | string) => void): unknown;
+  off(event: 'data', listener: (chunk: Buffer | string) => void): unknown;
+  resume(): unknown;
+  pause(): unknown;
+}
+
+/**
+ * Reads one line from a TTY without echoing it (raw mode, restored after).
+ * Enter or Ctrl+D ends the line, Backspace edits it, Ctrl+C cancels
+ * (undefined). Undefined as well when `input` is not a TTY.
+ */
+export function readHiddenLine(
+  question: string,
+  input: HiddenInput,
+  write: (text: string) => void,
+): Promise<string | undefined> {
+  if (!input.isTTY || typeof input.setRawMode !== 'function') {
+    return Promise.resolve(undefined);
   }
+  const wasRaw = input.isRaw === true;
+  input.setRawMode(true);
+  write(question);
+  return new Promise<string | undefined>((resolve) => {
+    let line = '';
+    const finish = (answer: string | undefined) => {
+      input.off('data', onData);
+      input.setRawMode?.(wasRaw);
+      input.pause();
+      write('\n');
+      resolve(answer);
+    };
+    const onData = (chunk: Buffer | string) => {
+      for (const char of chunk.toString('utf8')) {
+        switch (char) {
+          case '\r':
+          case '\n':
+          case '\u0004':
+            finish(line);
+            return;
+          case '\u0003':
+            finish(undefined);
+            return;
+          case '\u007f':
+          case '\b':
+            line = [...line].slice(0, -1).join('');
+            break;
+          default:
+            // Other control bytes (arrow keys, escape sequences) are not
+            // part of a token.
+            if (char >= ' ') line += char;
+        }
+      }
+    };
+    input.on('data', onData);
+    input.resume();
+  });
+}
+
+async function promptTokenFromTty(): Promise<string | undefined> {
+  const answer = await readHiddenLine(
+    'Enrollment token (from the join dialog, not shown): ',
+    process.stdin,
+    (text) => process.stderr.write(text),
+  );
+  return answer?.trim();
 }
 
 /** Returns the process exit code. */

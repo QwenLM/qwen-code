@@ -41,6 +41,7 @@ type BootstrapRoute =
   | 'serve'
   | 'mcp'
   | 'managed-runtime-worker'
+  | 'session-send-mcp'
   | 'help'
   | 'version'
   | 'default';
@@ -395,6 +396,11 @@ export function resolveBootstrapRoute(
   if (firstArg === 'managed-runtime-worker') {
     return 'managed-runtime-worker';
   }
+  // The daemon spawns `agents session-send-mcp --url <endpoint>` per agent
+  // run; its stdout is an MCP stream, so it skips normal startup entirely.
+  if (firstArg === 'agents' && argv[1] === 'session-send-mcp') {
+    return 'session-send-mcp';
+  }
 
   return 'default';
 }
@@ -585,6 +591,25 @@ export async function runCliEntry(
       './serve/managed-runtime-attestation-worker.js'
     );
     await runManagedRuntimeAttestationWorker();
+    return;
+  } else if (route === 'session-send-mcp') {
+    // Nothing on this path may write to stdout (the MCP stream) or read
+    // settings: Codex starts MCP servers with a minimal environment.
+    const { readSessionSendMcpUrl } = await import(
+      './commands/agents/session-send-mcp.js'
+    );
+    const url = readSessionSendMcpUrl(argv.slice(2));
+    if (!url) {
+      writeStderrLine(
+        'Usage: qwen agents session-send-mcp --url <endpoint>',
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const { runSessionSendMcp } = await import(
+      './commands/agents/session-send-mcp-server.js'
+    );
+    await runSessionSendMcp(url);
     return;
   } else if (route === 'help') {
     await printTopLevelHelp();

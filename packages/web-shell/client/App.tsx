@@ -18836,13 +18836,22 @@ export function App({
       workspace.token,
     ],
   );
-  const ensureAgentMentionSession = useCallback(
-    async () =>
-      connectionRef.current.sessionId ??
-      (await ensureSessionForPrompt()) ??
-      connectionRef.current.sessionId,
-    [ensureSessionForPrompt],
-  );
+  // The session an @-mention goes to, with the workspace it lives in: a new
+  // chat's session is created in the composer's workspace, which can differ
+  // from the one this hook's routes were built for. Same resolution as an
+  // ordinary first prompt (`promptWorkspaceCwd` in the submit path).
+  const ensureAgentMentionSession = useCallback(async () => {
+    const existing = connectionRef.current.sessionId;
+    const allocated = existing ? undefined : await ensureSessionForPrompt();
+    const sessionId = existing ?? allocated ?? connectionRef.current.sessionId;
+    if (!sessionId) return undefined;
+    const allocatedOwner = allocatedSessionCatalogOwnerRef.current;
+    const workspaceCwd =
+      allocatedOwner?.sessionId === sessionId
+        ? allocatedOwner.workspaceCwd
+        : getComposerWorkspaceCwd();
+    return { sessionId, ...(workspaceCwd ? { workspaceCwd } : {}) };
+  }, [ensureSessionForPrompt, getComposerWorkspaceCwd]);
   const settledAgentRunsKey = useMemo(
     () => settledAgentRunKey(blocks),
     [blocks],
@@ -18905,6 +18914,17 @@ export function App({
     },
     [reportAgentError, sessionAgentsApi],
   );
+  const retrySessionAgentRunRequest = sessionAgentRuns.retry;
+  const retrySessionAgentRun = useCallback(
+    async (runId: string) => {
+      try {
+        await retrySessionAgentRunRequest(runId);
+      } catch (error) {
+        reportAgentError(error);
+      }
+    },
+    [reportAgentError, retrySessionAgentRunRequest],
+  );
   const sessionAgentTail = useMemo(
     () =>
       sessionAgentRuns.runs.length > 0 ? (
@@ -18912,11 +18932,13 @@ export function App({
           runs={sessionAgentRuns.runs}
           onCancel={cancelSessionAgentRun}
           onRespond={respondToSessionAgentPermission}
+          onRetry={retrySessionAgentRun}
         />
       ) : undefined,
     [
       cancelSessionAgentRun,
       respondToSessionAgentPermission,
+      retrySessionAgentRun,
       sessionAgentRuns.runs,
     ],
   );

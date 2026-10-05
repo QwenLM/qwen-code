@@ -861,4 +861,31 @@ describe('AssistantMessage agent replies', () => {
     expect(container.textContent).toContain('12 tokens');
     expect(container.querySelector('[role="status"]')).toBeNull();
   });
+
+  it("offers copy alone on an agent's reply", () => {
+    // MessageList passes an agent's reply footer actions without feedback or
+    // branch; the copy button and the status still render.
+    const container = render(
+      <AssistantMessage
+        content="Agent reply"
+        author={{ name: 'reviewer' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-3',
+          status: 'failed',
+        }}
+        showFooterActions
+        showAssistantFeedback={false}
+        showBranchAction={false}
+        onBranchSession={vi.fn()}
+      />,
+    );
+
+    expect(
+      container.querySelector('button[aria-label="Copy"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Branch"]')).toBeNull();
+    expect(container.querySelector('button[aria-pressed]')).toBeNull();
+    expect(container.textContent).toContain('Failed');
+  });
 });

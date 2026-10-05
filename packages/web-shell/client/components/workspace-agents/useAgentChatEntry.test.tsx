@@ -37,6 +37,7 @@ function sessionApi(): SessionAgentsApi & {
     listRuns: vi.fn(),
     mention: vi.fn().mockResolvedValue({ recordId: 'r1', runs: [] }),
     cancelRun: vi.fn(),
+    retryRun: vi.fn(),
     stopAll: vi.fn(),
     respondToPermission: vi.fn(),
     subscribe: vi.fn(() => () => {}),
@@ -49,18 +50,23 @@ function Probe({
   onError,
   ensureSession,
   api,
+  sessionApiFor,
 }: {
   enabled?: boolean;
   onSubmit: (...args: unknown[]) => boolean | void;
   onError: (message: string) => void;
-  ensureSession: () => Promise<string | undefined>;
+  ensureSession: () => Promise<
+    { sessionId: string; workspaceCwd?: string } | string | undefined
+  >;
   api?: SessionAgentsApi;
+  sessionApiFor?: (workspaceCwd: string) => SessionAgentsApi;
 }) {
   latestEntry = useAgentChatEntry({
     enabled,
     cwd: '/repo',
     baseUrl: 'http://daemon',
     sessionApi: api,
+    sessionApiFor,
     ensureSession,
     onSubmit: onSubmit as never,
     onError,
@@ -188,6 +194,68 @@ it('creates the session first in a new chat', async () => {
   expect(created).toBe('new-session');
   expect(api.mention).toHaveBeenCalledWith(
     'new-session',
+    expect.objectContaining({ text: '@reviewer hi' }),
+  );
+});
+
+it("posts to the new session's own workspace when the picker chose another one", async () => {
+  createThreadsHttpApi.mockReturnValue({
+    listAgents: vi.fn().mockResolvedValue({ agents: [agent('reviewer')] }),
+  });
+  const api = sessionApi();
+  const other = sessionApi();
+  const sessionApiFor = vi.fn(() => other);
+  const commit = vi.fn();
+  mount({
+    onSubmit: vi.fn(),
+    onError: vi.fn(),
+    ensureSession: vi
+      .fn()
+      .mockResolvedValue({ sessionId: 'new-session', workspaceCwd: '/other' }),
+    api,
+    sessionApiFor,
+  });
+  await settle();
+
+  act(() => {
+    latestEntry.submit('@reviewer hi', undefined, undefined, commit);
+  });
+  await settle();
+
+  expect(sessionApiFor).toHaveBeenCalledWith('/other');
+  expect(other.mention).toHaveBeenCalledWith(
+    'new-session',
+    expect.objectContaining({ text: '@reviewer hi' }),
+  );
+  expect(api.mention).not.toHaveBeenCalled();
+  expect(commit).toHaveBeenCalledTimes(1);
+});
+
+it("keeps the hook's routes when the session lives in the same workspace", async () => {
+  createThreadsHttpApi.mockReturnValue({
+    listAgents: vi.fn().mockResolvedValue({ agents: [agent('reviewer')] }),
+  });
+  const api = sessionApi();
+  const sessionApiFor = vi.fn(() => sessionApi());
+  mount({
+    onSubmit: vi.fn(),
+    onError: vi.fn(),
+    ensureSession: vi
+      .fn()
+      .mockResolvedValue({ sessionId: 'session-1', workspaceCwd: '/repo' }),
+    api,
+    sessionApiFor,
+  });
+  await settle();
+
+  act(() => {
+    latestEntry.submit('@reviewer hi');
+  });
+  await settle();
+
+  expect(sessionApiFor).not.toHaveBeenCalled();
+  expect(api.mention).toHaveBeenCalledWith(
+    'session-1',
     expect.objectContaining({ text: '@reviewer hi' }),
   );
 });

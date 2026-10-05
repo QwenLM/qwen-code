@@ -1191,32 +1191,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           throw error;
         }
       }
-      // Re-join the coordinators this daemon was connected to through
-      // `hosts/connect` (`qwen agents join`) before it restarted. Detached:
-      // a coordinator that is down must not hold up the daemon.
-      // TODO(multi-agent): only the primary workspace is restored; other
-      // registered workspaces' saved connections wait for a manual connect.
-      void (async () => {
-        try {
-          await handle.runtimeReady;
-          const runtime = handle.getPrimaryWorkspaceRuntime();
-          if (
-            !runtime?.trusted ||
-            !runtime.generationGuard ||
-            runtime.generationGuard.closed
-          ) {
-            return;
-          }
-          const { restoreAgentHostConnections } = await import(
-            '../serve/agent-host-connections.js'
-          );
-          await restoreAgentHostConnections(runtime);
-        } catch (error) {
-          writeStderrLine(
-            `qwen serve: could not restore Agent Host connections: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      })();
+      // Saved Host connections (`qwen agents join`) of every trusted
+      // workspace are restored by the daemon itself (serve/server.ts).
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).
       if (argv['local-control']) {

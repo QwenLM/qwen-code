@@ -9,10 +9,11 @@
  *
  * A Host (a remote `qwen serve` that joined this workspace) talks to these
  * routes over outbound HTTP: enroll once, then heartbeat (presence, program
- * probe, lease renewal, permission decisions), long-poll pickup for a session
- * turn, stream ordered event batches, and post the turn's result. Work comes
- * from the workspace's session-agent orchestrator (its remote queue); these
- * handlers only authenticate, validate and translate.
+ * probe, lease renewal and cancellation, permission decisions), long-poll
+ * pickup for a session turn, long-poll decisions while a turn waits on a
+ * person, stream ordered event batches, and post the turn's result. Work
+ * comes from the workspace's session-agent orchestrator (its remote queue);
+ * these handlers only authenticate, validate and translate.
  */
 
 import express from 'express';
@@ -34,7 +35,9 @@ import {
   HOST_PROTOCOL_VERSION,
   type AgentAdapterEvent,
   type AgentAdapterTurnResult,
+  type HostLeaseStatus,
   type HostProgramProbe,
+  type HostTurnAssignment,
   type HostTurnEventBatch,
   type HostTurnResult,
   type SessionAgentPermissionPrompt,
@@ -44,10 +47,18 @@ import {
 import { isTerminalSessionAgentRunStatus } from '@qwen-code/qwen-code-core/agents/session-agents/binding-store.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { requireTrustedWorkspaceRuntime } from '../workspace-route-runtime.js';
-import type { RateLimiterInstance } from '../rate-limit.js';
+import type {
+  RateLimiterInstance,
+  RateLimitTierConfig,
+} from '../rate-limit.js';
 import { getSessionAgentOrchestrator } from '../session-agents/orchestrator.js';
+import { ensureSessionAgentOrchestratorForRuntime } from './session-agents.js';
 import { getSessionAgentEventHub } from '../session-agents/events.js';
 import { createHostProgramAgentEnsurer } from '../agent-host-program-agents.js';
+import {
+  decisionsForAwaited,
+  type HostAwaitedPermission,
+} from '../agent-host-decisions.js';
 
 const debugLogger = createDebugLogger('AGENT_HOSTS');
 
@@ -90,6 +101,132 @@ const MAX_RUNS_PER_HEARTBEAT = 64;
 const MAX_ID = 256;
 /** Backstop between pickup scans; queued work wakes the poll sooner. */
 const PICKUP_MAX_INTERVAL_MS = 5_000;
+/** Backstop between decision scans; a recorded decision wakes the poll. */
+const DECISIONS_INTERVAL_MS = 1_000;
+const MAX_AWAITED = 16;
+const MAX_SEEN_PER_AWAITED = 8;
+const MAX_DECISION_KEY = 300;
+/** A response that neither finished nor closed by then is given up on. */
+const DELIVERY_TIMEOUT_MS = 30_000;
+
+/**
+ * Per-Host budget for everything after authentication (heartbeat, pickup,
+ * decisions, events, result), keyed by host id. A Host flushes events every
+ * 250 ms for each of up to 4 turns (~960 a minute) plus a heartbeat every
+ * 5 s; this leaves 2.5x headroom. The daemon's general `read` tier (120 a
+ * minute per source) would throttle one busy Host.
+ */
+export const AGENT_HOST_RATE_LIMIT: RateLimitTierConfig = {
+  windowMs: 60_000,
+  max: 2_400,
+};
+
+/**
+ * Reads an orchestrator ack, whichever way it says "cancelled": a refusal
+ * with `reason: 'cancelled'`, or a `cancelled` flag.
+ */
+export function readHostAck(ack: unknown): {
+  ok: boolean;
+  reason?: string;
+  cancelled: boolean;
+} {
+  const loose = (typeof ack === 'object' && ack !== null ? ack : {}) as {
+    ok?: unknown;
+    reason?: unknown;
+    cancelled?: unknown;
+  };
+  const cancelled = loose.cancelled === true || loose.reason === 'cancelled';
+  return {
+    // A cancelled run is never ok, whatever else the ack says.
+    ok: loose.ok === true && !cancelled,
+    ...(typeof loose.reason === 'string' ? { reason: loose.reason } : {}),
+    cancelled,
+  };
+}
+
+/** The 409 body for a refused ack; `cancelled: true` tells the Host to stop. */
+function refusal(ack: ReturnType<typeof readHostAck>): Record<string, unknown> {
+  return {
+    error: ack.reason ?? (ack.cancelled ? 'cancelled' : 'lease_mismatch'),
+    ...(ack.cancelled ? { cancelled: true } : {}),
+  };
+}
+
+/**
+ * Orchestrator hook: hands a turn that was claimed for `hostId` but never
+ * reached it back to the queue (the next pickup is attempt + 1). Looked up
+ * at run time so this compiles with and without it.
+ */
+interface HostAssignmentRelease {
+  releaseHostAssignment(
+    hostId: string,
+    ref: Pick<
+      HostTurnAssignment,
+      'sessionId' | 'runId' | 'attempt' | 'leaseId'
+    >,
+  ): unknown;
+}
+
+function releaseAssignment(
+  orchestrator: object,
+  hostId: string,
+  assignment: HostTurnAssignment,
+): void {
+  const release = (orchestrator as Partial<HostAssignmentRelease>)
+    .releaseHostAssignment;
+  if (typeof release !== 'function') {
+    debugLogger.warn(
+      `Agent Host ${hostId} did not receive run ${assignment.runId}; it ends offline when its lease runs out.`,
+    );
+    return;
+  }
+  const ref = {
+    sessionId: assignment.sessionId,
+    runId: assignment.runId,
+    attempt: assignment.attempt,
+    leaseId: assignment.leaseId,
+  };
+  try {
+    void Promise.resolve(release.call(orchestrator, hostId, ref)).catch(
+      (error: unknown) =>
+        debugLogger.warn('Could not release an undelivered assignment:', error),
+    );
+  } catch (error) {
+    debugLogger.warn('Could not release an undelivered assignment:', error);
+  }
+}
+
+/**
+ * Writes `body` and resolves true once the response is flushed to the
+ * socket, false when the connection closed or failed first. `finish` means
+ * handed to the kernel, not received: a connection lost after that still
+ * falls to lease expiry.
+ */
+function deliver(res: Response, body: unknown): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (delivered: boolean) => {
+      if (timer) clearTimeout(timer);
+      res.off('finish', onFinish);
+      res.off('close', onClose);
+      res.off('error', onError);
+      resolve(delivered);
+    };
+    const onFinish = () => settle(true);
+    const onClose = () => settle(res.writableFinished);
+    const onError = () => settle(false);
+    res.once('finish', onFinish);
+    res.once('close', onClose);
+    res.once('error', onError);
+    timer = setTimeout(() => settle(res.writableFinished), DELIVERY_TIMEOUT_MS);
+    timer.unref?.();
+    try {
+      res.json(body);
+    } catch {
+      settle(false);
+    }
+  });
+}
 
 function isId(value: unknown): value is string {
   return (
@@ -313,6 +450,34 @@ function readLeaseRefs(
   return refs;
 }
 
+/** `awaiting` of a decisions poll: the requests a Host waits on. */
+export function readAwaitedPermissions(
+  value: unknown,
+): HostAwaitedPermission[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_AWAITED) return undefined;
+  const awaited: HostAwaitedPermission[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) return undefined;
+    const { runId, attempt, requestId, seen } = entry as Record<
+      string,
+      unknown
+    >;
+    const keys = seen ?? [];
+    if (
+      !isId(runId) ||
+      !isAttempt(attempt) ||
+      !isId(requestId) ||
+      !Array.isArray(keys) ||
+      keys.length > MAX_SEEN_PER_AWAITED ||
+      !keys.every((key) => boundedString(key, MAX_DECISION_KEY))
+    ) {
+      return undefined;
+    }
+    awaited.push({ runId, attempt, requestId, seen: keys as string[] });
+  }
+  return awaited;
+}
+
 /** Programs a Host may be handed turns for: v2 Hosts only. */
 function pickupPrograms(host: AgentHostView): SessionAgentProgram[] {
   // A v1 Host cannot execute a v2 assignment; handing it one would hold the
@@ -326,6 +491,12 @@ export function registerAgentHostTransportRoutes(
   workspaceRegistry: WorkspaceRegistry,
   rateLimiter: Pick<RateLimiterInstance, 'checkRate'> | undefined,
   isEnabledFor: (workspaceCwd: string) => boolean,
+  /**
+   * Budget per authenticated Host (see {@link AGENT_HOST_RATE_LIMIT}); its
+   * `read` tier is used. Undefined leaves authenticated Host traffic
+   * unthrottled.
+   */
+  hostRateLimiter?: Pick<RateLimiterInstance, 'checkRate'>,
 ): void {
   const json = express.json({ limit: '16kb' });
   const ensureProgramAgents = createHostProgramAgentEnsurer();
@@ -334,6 +505,48 @@ export function registerAgentHostTransportRoutes(
     res.status(404).json({ error: 'Workspace not found.' });
     return false;
   };
+  const sourceOf = (req: Request) =>
+    req.ip || req.socket.remoteAddress || 'unknown';
+  const tooMany = (res: Response, tier: string) => {
+    res.status(429).json({
+      error: 'Rate limit exceeded',
+      code: 'rate_limit_exceeded',
+      tier,
+    });
+  };
+  /**
+   * A credential rejection. Failed attempts are throttled per source (the
+   * per-Host budget only applies once a Host has proved who it is), so
+   * guessing secrets stays bounded.
+   */
+  const rejectCredential = (req: Request, res: Response) => {
+    if (
+      rateLimiter &&
+      !rateLimiter.checkRate(
+        `agent-host:auth-failure:${sourceOf(req)}`,
+        'mutation',
+      )
+    ) {
+      tooMany(res, 'mutation');
+      return;
+    }
+    res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
+  };
+  /** The authenticated Host's own budget; false (and 429 sent) when spent. */
+  const allowHost = (req: Request, res: Response): boolean => {
+    if (
+      !hostRateLimiter ||
+      hostRateLimiter.checkRate(
+        `agent-host:${String(req.params['workspaceId'])}:${String(req.params['hostId'])}`,
+        'read',
+      )
+    ) {
+      return true;
+    }
+    tooMany(res, 'agent-host');
+    return false;
+  };
+
   // Runs before the large-body routes parse anything, so a request with a
   // wrong secret never gets 2 MB read on its behalf. It is also the only place
   // those routes check trust, the collaboration setting and the credential:
@@ -358,30 +571,25 @@ export function registerAgentHostTransportRoutes(
         secret,
       ))
     ) {
-      res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
+      rejectCredential(req, res);
       return;
     }
+    if (!allowHost(req, res)) return;
     next();
   };
 
-  app.use('/agent-hosts', (req, res, next) => {
-    const enrollment = req.originalUrl.startsWith('/agent-hosts/enroll');
-    const category = enrollment
-      ? 'enrollment'
-      : req.originalUrl.endsWith('/events')
-        ? 'events'
-        : 'control';
-    const tier = enrollment ? 'mutation' : 'read';
-    const source = req.ip || req.socket.remoteAddress || 'unknown';
+  // Enrollment is throttled per source before anything else. Every other
+  // route is throttled per Host once it authenticates (`allowHost`), and its
+  // failed authentications per source (`rejectCredential`).
+  app.use('/agent-hosts/enroll', (req, res, next) => {
     if (
       rateLimiter &&
-      !rateLimiter.checkRate(`agent-host:${category}:${source}`, tier)
+      !rateLimiter.checkRate(
+        `agent-host:enrollment:${sourceOf(req)}`,
+        'mutation',
+      )
     ) {
-      res.status(429).json({
-        error: 'Rate limit exceeded',
-        code: 'rate_limit_exceeded',
-        tier,
-      });
+      tooMany(res, 'mutation');
       return;
     }
     next();
@@ -428,9 +636,10 @@ export function registerAgentHostTransportRoutes(
 
   /**
    * `{workspaceCwd, providers, programs?, protocol?, enrollmentToken?, runs?}`
-   * → `{host, leases: [{runId, ok}], decisions}`. Records presence and the
-   * program probe, renews each listed lease, hands back pending permission
-   * decisions, and adds an agent per newly offered program.
+   * → `{host, leases: HostLeaseStatus[], decisions}`. Records presence and
+   * the program probe, renews each listed lease (or reports it cancelled),
+   * hands back pending permission decisions, and adds an agent per newly
+   * offered program.
    */
   app.post(
     '/agent-hosts/:workspaceId/:hostId/heartbeat',
@@ -492,22 +701,34 @@ export function registerAgentHostTransportRoutes(
           },
         );
         if (!host) {
-          res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
+          rejectCredential(req, res);
           return;
         }
+        if (!allowHost(req, res)) return;
         // No orchestrator means no live runs in this daemon (it restarted or
         // the workspace's agents are stopping): every lease is gone.
-        const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
-        const leases = runs.map((run) => ({
-          runId: run.runId,
-          ok:
+        const orchestrator =
+          ensureSessionAgentOrchestratorForRuntime(runtime) ??
+          getSessionAgentOrchestrator(runtime.workspaceCwd);
+        // Startup recovery re-adopts leased runs; renewing before it ends
+        // would answer `unknown_run` and make the Host drop a live turn.
+        await orchestrator?.ready();
+        const leases = runs.map((run): HostLeaseStatus => {
+          const ack = readHostAck(
             orchestrator?.renewLease(
               hostId,
               run.runId,
               run.attempt,
               run.leaseId,
-            ).ok ?? false,
-        }));
+            ),
+          );
+          return {
+            runId: run.runId,
+            ok: ack.ok,
+            // The person stopped it: the Host aborts the turn, no result.
+            ...(ack.cancelled ? { cancelled: true } : {}),
+          };
+        });
         if (host.protocol === HOST_PROTOCOL_VERSION) {
           try {
             const added = await ensureProgramAgents(runtime.workspaceCwd, host);
@@ -593,6 +814,7 @@ export function registerAgentHostTransportRoutes(
       try {
         const deadline = Date.now() + waitMs;
         let pollIntervalMs = 250;
+        let counted = false;
         for (;;) {
           // A Host that hung up must not have a run claimed for it here.
           if (req.socket.destroyed || res.writableEnded) return;
@@ -607,25 +829,37 @@ export function registerAgentHostTransportRoutes(
             secret,
           );
           if (!host) {
-            res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
+            rejectCredential(req, res);
             return;
+          }
+          // One request, one unit of the Host's budget, however often the
+          // poll rescans.
+          if (!counted) {
+            counted = true;
+            if (!allowHost(req, res)) return;
           }
           if (req.socket.destroyed || res.writableEnded) return;
           const programs = pickupPrograms(host);
-          const orchestrator = getSessionAgentOrchestrator(
-            runtime.workspaceCwd,
-          );
+          const orchestrator =
+            ensureSessionAgentOrchestratorForRuntime(runtime) ??
+            getSessionAgentOrchestrator(runtime.workspaceCwd);
+          await orchestrator?.ready();
           const assignment =
             orchestrator && programs.length > 0
               ? await orchestrator.pickupForHost(hostId, programs)
               : undefined;
           if (assignment) {
-            if (req.socket.destroyed || res.writableEnded) {
-              // TODO(multi-agent): the claim cannot be handed back; the run
-              // ends `offline` when its lease (60 s) runs out.
-              return;
+            // A Host that hung up while the turn was being claimed, or a
+            // write that fails, gives the turn straight back to the queue
+            // instead of holding it until its lease (60 s) runs out.
+            const delivered =
+              !req.socket.destroyed &&
+              !res.writableEnded &&
+              !res.destroyed &&
+              (await deliver(res, { assignment }));
+            if (!delivered && orchestrator) {
+              releaseAssignment(orchestrator, hostId, assignment);
             }
-            res.json({ assignment });
             return;
           }
           const remaining = deadline - Date.now();
@@ -662,8 +896,86 @@ export function registerAgentHostTransportRoutes(
   );
 
   /**
+   * `{waitMs ≤ 25000, awaiting: [{runId, attempt, requestId, seen}]}` →
+   * `{decisions}`. The Host keeps one open while a turn waits on a person;
+   * it answers as soon as a decision for an awaited request exists whose key
+   * is not in that request's `seen`, else empty at `waitMs`. A run frame of
+   * this Host's (the orchestrator publishes one when it records a decision)
+   * wakes the poll, with a short in-memory backstop scan in between.
+   */
+  app.post(
+    '/agent-hosts/:workspaceId/:hostId/decisions',
+    authenticated,
+    express.json({ limit: '64kb' }),
+    async (req: Request, res: Response) => {
+      const workspaceId = String(req.params['workspaceId']);
+      const hostId = String(req.params['hostId']);
+      const runtime = runtimeFor(workspaceRegistry, workspaceId);
+      if (!runtime) {
+        res.status(404).json({ error: 'Workspace not found.' });
+        return;
+      }
+      const input = body(req);
+      const waitMs = readWaitMs(input['waitMs']);
+      const awaited = readAwaitedPermissions(input['awaiting']);
+      if (waitMs === undefined || awaited === undefined) {
+        res.status(400).json({ error: 'Invalid Agent Host decisions poll.' });
+        return;
+      }
+      let wake: (() => void) | undefined;
+      const unsubscribe = getSessionAgentEventHub(
+        runtime.workspaceCwd,
+      ).subscribe((frame) => {
+        if (frame.type === 'run' && frame.author.runtimeId === hostId) {
+          wake?.();
+        }
+      });
+      const onClose = () => wake?.();
+      req.on('close', onClose);
+      try {
+        const deadline = Date.now() + waitMs;
+        for (;;) {
+          if (req.socket.destroyed || res.writableEnded) return;
+          if (runtimeFor(workspaceRegistry, workspaceId) !== runtime) {
+            res.status(404).json({ error: 'Workspace not found.' });
+            return;
+          }
+          if (!requireEnabled(runtime.workspaceCwd, res)) return;
+          const decisions = decisionsForAwaited(
+            getSessionAgentOrchestrator(runtime.workspaceCwd)?.decisionsForHost(
+              hostId,
+            ) ?? [],
+            awaited,
+          );
+          const remaining = deadline - Date.now();
+          if (decisions.length > 0 || remaining <= 0) {
+            res.json({ decisions });
+            return;
+          }
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(
+              resolve,
+              Math.min(DECISIONS_INTERVAL_MS, remaining),
+            );
+            wake = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+          });
+          wake = undefined;
+        }
+      } finally {
+        wake = undefined;
+        unsubscribe();
+        req.off('close', onClose);
+      }
+    },
+  );
+
+  /**
    * A `HostTurnEventBatch` → `{ok, duplicate?, leaseExpiresAt, decisions}`;
-   * 409 `{error: 'unknown_run' | 'lease_mismatch'}` when the lease is stale.
+   * 409 `{error: 'unknown_run' | 'lease_mismatch'}` when the lease is stale,
+   * 409 `{error, cancelled: true}` when the person stopped the run.
    */
   app.post(
     '/agent-hosts/:workspaceId/:hostId/events',
@@ -683,23 +995,28 @@ export function registerAgentHostTransportRoutes(
         res.status(400).json({ error: 'Invalid Agent Host events.' });
         return;
       }
-      const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
+      const orchestrator =
+        ensureSessionAgentOrchestratorForRuntime(runtime) ??
+        getSessionAgentOrchestrator(runtime.workspaceCwd);
       if (!orchestrator) {
         res.status(409).json({ error: 'unknown_run' });
         return;
       }
-      const ack = orchestrator.acceptHostEvents(hostId, batch);
+      await orchestrator.ready();
+      const raw = orchestrator.acceptHostEvents(hostId, batch);
+      const ack = readHostAck(raw);
       if (!ack.ok) {
-        res.status(409).json({ error: ack.reason });
+        res.status(409).json(refusal(ack));
         return;
       }
-      res.json({ ...ack, decisions: orchestrator.decisionsForHost(hostId) });
+      res.json({ ...raw, decisions: orchestrator.decisionsForHost(hostId) });
     },
   );
 
   /**
-   * A `HostTurnResult` → `{ok: true}`; 409 when the lease is stale (the
-   * Host discards the result), 503 when finishing failed transiently.
+   * A `HostTurnResult` → `{ok: true}`; 409 when the lease is stale or the run
+   * was cancelled (the Host discards the result), 503 when finishing failed
+   * transiently.
    */
   app.post(
     '/agent-hosts/:workspaceId/:hostId/result',
@@ -719,15 +1036,20 @@ export function registerAgentHostTransportRoutes(
         res.status(400).json({ error: 'Invalid Agent Host result.' });
         return;
       }
-      const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
+      const orchestrator =
+        ensureSessionAgentOrchestratorForRuntime(runtime) ??
+        getSessionAgentOrchestrator(runtime.workspaceCwd);
       if (!orchestrator) {
         res.status(409).json({ error: 'unknown_run' });
         return;
       }
+      await orchestrator.ready();
       try {
-        const ack = await orchestrator.completeHostTurn(hostId, input);
+        const ack = readHostAck(
+          await orchestrator.completeHostTurn(hostId, input),
+        );
         if (!ack.ok) {
-          res.status(409).json({ error: ack.reason });
+          res.status(409).json(refusal(ack));
           return;
         }
         res.json({ ok: true });

@@ -11,7 +11,10 @@ import type { WebShellAtProvider } from '../../customization';
 import type { useI18n } from '../../i18n';
 import { createThreadsHttpApi } from './threads-api';
 import { programLabel } from './agents-view-logic';
-import type { SessionAgentsApi } from './session-agents-api';
+import {
+  createSessionAgentsHttpApi,
+  type SessionAgentsApi,
+} from './session-agents-api';
 import type { WorkspaceAgentSummaryView } from './ThreadsPage';
 
 type Submit = ComponentProps<typeof ChatEditor>['onSubmit'];
@@ -64,6 +67,13 @@ export function resolveMentionedAgents(
   return resolved;
 }
 
+/** The chat session an @-mention goes to, and the workspace it lives in. */
+export interface AgentMentionSession {
+  sessionId: string;
+  /** Unset: the hook's own `cwd`. */
+  workspaceCwd?: string;
+}
+
 /** Idempotency key for one @-mention post (`[A-Za-z0-9_.:-]{1,128}`). */
 function newClientMessageId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
@@ -78,6 +88,7 @@ export function useAgentChatEntry({
   baseUrl,
   token,
   sessionApi,
+  sessionApiFor,
   ensureSession,
   onSubmit,
   onError,
@@ -91,10 +102,16 @@ export function useAgentChatEntry({
   /** The session routes of the same workspace (`cwd`). */
   sessionApi?: SessionAgentsApi;
   /**
-   * The current chat session's id, creating the session first when this is a
-   * new chat (the same lazy creation an ordinary first prompt goes through).
+   * The session routes of another workspace, for a session that lives
+   * elsewhere. Defaults to the HTTP routes of that workspace.
    */
-  ensureSession: () => Promise<string | undefined>;
+  sessionApiFor?: (workspaceCwd: string) => SessionAgentsApi;
+  /**
+   * The current chat session, creating it first when this is a new chat (the
+   * same lazy creation an ordinary first prompt goes through), with the
+   * workspace it was created in.
+   */
+  ensureSession: () => Promise<AgentMentionSession | string | undefined>;
   onSubmit: Submit;
   onError: (message: string) => void;
   /** Offered as the picker's last item: open the New agent page. */
@@ -214,6 +231,8 @@ export function useAgentChatEntry({
   // Read through refs so a new callback each render keeps `submit` stable.
   const ensureSessionRef = useRef(ensureSession);
   ensureSessionRef.current = ensureSession;
+  const sessionApiForRef = useRef(sessionApiFor);
+  sessionApiForRef.current = sessionApiFor;
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
   const submit = useCallback<Submit>(
@@ -255,21 +274,33 @@ export function useAgentChatEntry({
             throw new Error(t('collab.mention.noAttachments'));
           // The agents answer inside this chat session, so a new chat gets
           // its session first, exactly as its first prompt would.
-          // TODO(multi-agent): a session created here is assumed to live in
-          // `cwd`; if the new-chat workspace picker targets another
-          // workspace, the mention goes to the wrong workspace's route.
           // Creating the session can re-key this hook (the composer's
           // workspace settles on the new session's), so no staleness check
           // from here on: the message belongs to the session just created.
-          const sessionId = await ensureSessionRef.current();
-          if (!sessionId) throw new Error(t('collab.mention.noSession'));
+          const ensured = await ensureSessionRef.current();
+          const target: AgentMentionSession | undefined =
+            typeof ensured === 'string' ? { sessionId: ensured } : ensured;
+          if (!target?.sessionId) throw new Error(t('collab.mention.noSession'));
+          // A new chat whose workspace picker pointed elsewhere created its
+          // session in that workspace: its routes are the ones that know it.
+          // The server re-resolves the names against that workspace's roster
+          // and refuses a message that names none of its agents.
+          const otherWorkspace =
+            target.workspaceCwd && target.workspaceCwd !== cwd
+              ? target.workspaceCwd
+              : undefined;
+          const routes = otherWorkspace
+            ? (sessionApiForRef.current?.(otherWorkspace) ??
+              createSessionAgentsHttpApi(baseUrl, token, otherWorkspace))
+            : sessionApi;
+          const sessionId = target.sessionId;
           // No local echo: the daemon records the @-mention and streams it
           // back as a user message, live and on replay alike.
           // TODO(multi-agent): a 202 with `deferred: true` (a main-model turn
           // is running) clears the composer, but the @ message only appears
           // once that turn settles and the record is written; until then only
           // the agents' run cards show. A local echo would double it.
-          await sessionApi.mention(sessionId, {
+          await routes.mention(sessionId, {
             text,
             clientMessageId: newClientMessageId(),
           });
@@ -287,7 +318,7 @@ export function useAgentChatEntry({
       })();
       return false;
     },
-    [api, sessionApi, cwd, onSubmit, listAgents, t],
+    [api, sessionApi, cwd, baseUrl, token, onSubmit, listAgents, t],
   );
   return { providers, submit, pending };
 }

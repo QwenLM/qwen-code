@@ -16,6 +16,7 @@
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import lockfile from 'proper-lockfile';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -139,6 +140,8 @@ export async function removeAgentHostConnection(
 }
 
 const RESTORE_RETRY_MS = 30_000;
+/** How often a restored connection checks that it is still up. */
+const RESTORE_WATCH_MS = 5_000;
 
 export interface AgentHostRestoreRuntime {
   bridge: AcpSessionBridge;
@@ -146,27 +149,53 @@ export interface AgentHostRestoreRuntime {
   generationGuard?: WorkspaceGenerationGuard;
 }
 
+export interface AgentHostRestoreOptions {
+  /**
+   * The trusted, active runtime serving `workspaceCwd` right now, or
+   * undefined (not registered, not trusted, or between generations).
+   */
+  runtimeFor(workspaceCwd: string): AgentHostRestoreRuntime | undefined;
+  /** Stops every restore loop. */
+  signal?: AbortSignal;
+  retryMs?: number;
+  watchMs?: number;
+}
+
+function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return delay(ms, undefined, { ref: false, signal }).catch(() => undefined);
+}
+
 /**
- * Re-establishes, in the background, every saved connection for this
- * runtime's workspace whose credential still exists; a record whose
- * credential is gone (revoked) is pruned. A coordinator that is down is
- * retried every 30 s until it answers or this runtime closes. Never throws.
+ * Keeps every saved connection up, for every workspace this daemon serves,
+ * in the background. Each record waits until its workspace has a trusted
+ * active runtime (a workspace registered or trusted later is picked up on
+ * the next check, every 5 s), connects, and connects again when that
+ * runtime is replaced or the connection stops. A coordinator that is down is
+ * retried every 30 s. A record whose credential is gone (revoked) is pruned; a
+ * record that was removed (`DELETE hosts/connect`) is let go. Never throws.
  */
 export async function restoreAgentHostConnections(
-  runtime: AgentHostRestoreRuntime,
-  retryMs = RESTORE_RETRY_MS,
+  options: AgentHostRestoreOptions,
 ): Promise<void> {
-  const { hasAgentHostCredential, startAgentHostConnection } = await import(
-    './agent-host-client.js'
-  );
-  const records = (await readAgentHostConnections()).filter(
-    (record) => record.workspaceCwd === runtime.workspaceCwd,
-  );
-  for (const record of records) {
-    void (async () => {
-      for (;;) {
-        if (runtime.generationGuard?.closed) return;
-        if (!(await hasAgentHostCredential(record))) {
+  const {
+    hasAgentHostCredential,
+    isAgentHostConnectionRunning,
+    startAgentHostConnection,
+  } = await import('./agent-host-client.js');
+  const retryMs = options.retryMs ?? RESTORE_RETRY_MS;
+  const watchMs = options.watchMs ?? RESTORE_WATCH_MS;
+  const { signal } = options;
+  const keep = async (saved: AgentHostConnectionRecord) => {
+    while (!signal?.aborted) {
+      const record = (await readAgentHostConnections()).find((entry) =>
+        sameConnection(entry, saved),
+      );
+      if (!record || signal?.aborted) return;
+      const runtime = options.runtimeFor(record.workspaceCwd);
+      if (runtime && !runtime.generationGuard?.closed) {
+        const credential = await hasAgentHostCredential(record);
+        if (signal?.aborted) return;
+        if (!credential) {
           await removeAgentHostConnection(record).catch(() => undefined);
           writeStderrLine(
             `qwen serve: dropped the saved Agent Host connection to ${record.serverUrl} (no credential).`,
@@ -182,20 +211,34 @@ export async function restoreAgentHostConnections(
               ? { generationGuard: runtime.generationGuard }
               : {}),
           });
-          return;
+          if (signal?.aborted) return;
+          // Up. Watch it: a replaced runtime (trust change, re-registration)
+          // closes this generation, and the connection stops with it.
+          while (
+            !signal?.aborted &&
+            !runtime.generationGuard?.closed &&
+            isAgentHostConnectionRunning(record)
+          ) {
+            await pause(watchMs, signal);
+          }
         } catch (error) {
           writeStderrLine(
             `qwen serve: could not reconnect to ${record.serverUrl}; retrying: ${error instanceof Error ? error.message : String(error)}`,
           );
+          await pause(retryMs, signal);
+          continue;
         }
-        // TODO(multi-agent): a connection that drops after it was up is
-        // retried by its own heartbeat loop; only the first contact is
-        // retried here.
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, retryMs);
-          timer.unref?.();
-        });
       }
-    })();
+      // No usable runtime yet, or the connection just stopped: look again
+      // soon, never in a tight loop.
+      await pause(watchMs, signal);
+    }
+  };
+  for (const record of await readAgentHostConnections()) {
+    void keep(record).catch((error: unknown) =>
+      writeStderrLine(
+        `qwen serve: stopped restoring the Agent Host connection to ${record.serverUrl}: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
   }
 }

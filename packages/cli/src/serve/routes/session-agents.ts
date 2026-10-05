@@ -16,13 +16,15 @@
  *   GET  /workspaces/:workspace/agent/session-events?sessionId=
  *   POST /workspaces/:workspace/agent/sessions/:sessionId/mentions
  *   POST /workspaces/:workspace/agent/sessions/:sessionId/runs/:runId/cancel
+ *   POST /workspaces/:workspace/agent/sessions/:sessionId/runs/:runId/retry
  *   POST /workspaces/:workspace/agent/sessions/:sessionId/stop
  *   POST /workspaces/:workspace/agent/sessions/:sessionId/runs/:runId/permission/:requestId
  *
  * Mounted separately, BEFORE the daemon bearer gate (see
- * {@link registerSessionAgentSendRoute}), authenticated by a per-run token:
+ * {@link registerSessionAgentSendRoute}), authenticated by the
+ * (chat session, agent) binding's `session_send` token:
  *
- *   POST /workspaces/:workspace/agent/sessions/:sessionId/runs/:runId/send
+ *   POST /workspaces/:workspace/agent/sessions/:sessionId/agents/:agentId/send
  */
 
 import express from 'express';
@@ -53,6 +55,23 @@ import type {
 import type { RateLimiterInstance } from '../rate-limit.js';
 import { isLoopbackAddress } from '../loopback-binds.js';
 
+let orchestratorFactory:
+  | ((runtime: WorkspaceRuntime) => SessionAgentOrchestrator | undefined)
+  | undefined;
+
+/**
+ * The workspace's orchestrator, created on demand with the same wiring the
+ * session-agent routes use. Host transport routes call this rather than
+ * `getSessionAgentOrchestrator`, so a Host renewing a lease right after a
+ * daemon restart reaches the orchestrator whose startup recovery re-adopts
+ * that run, instead of being told every lease is gone.
+ */
+export function ensureSessionAgentOrchestratorForRuntime(
+  runtime: WorkspaceRuntime,
+): SessionAgentOrchestrator | undefined {
+  return orchestratorFactory?.(runtime);
+}
+
 export interface RegisterSessionAgentRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
@@ -62,8 +81,8 @@ export interface RegisterSessionAgentRoutesDeps {
   agentChainLimitFor?: (workspaceCwd: string) => number;
   /**
    * This daemon's loopback base URL (e.g. `http://127.0.0.1:<port>`), where
-   * a program's `session_send` MCP child reaches the per-run send route.
-   * Absent (or not loopback) means local Claude / Codex turns get no
+   * a program's `session_send` MCP child reaches the binding's send route.
+   * Absent (or not loopback) means local turns (qwen, Claude, Codex) get no
    * `session_send` tool.
    * TODO(multi-agent): server.ts (Host agent) must pass
    * `() => "http://127.0.0.1:" + getPort()` — and confirm the daemon is
@@ -73,15 +92,18 @@ export interface RegisterSessionAgentRoutesDeps {
   daemonLoopbackBaseUrl?: () => string | undefined;
 }
 
-/** Path of the per-run `session_send` endpoint, relative to the daemon. */
+/**
+ * Path of one (chat session, agent) binding's `session_send` endpoint,
+ * relative to the daemon.
+ */
 export function sessionSendPath(
   workspaceId: string,
   sessionId: string,
-  runId: string,
+  agentId: string,
 ): string {
   return `/workspaces/${encodeURIComponent(workspaceId)}/agent/sessions/${encodeURIComponent(
     sessionId,
-  )}/runs/${encodeURIComponent(runId)}/send`;
+  )}/agents/${encodeURIComponent(agentId)}/send`;
 }
 
 const TEARDOWN_CHECK_MS = 5_000;
@@ -132,10 +154,10 @@ export function registerSessionAgentRoutes(
       workspaceCwd,
       bridge: runtime.bridge,
       chainLimit: () => deps.agentChainLimitFor?.(workspaceCwd) ?? 0,
-      sessionSendUrl: (sessionId, runId) => {
+      sessionSendUrl: (sessionId, agentId) => {
         const base = deps.daemonLoopbackBaseUrl?.();
         if (!base) return undefined;
-        return `${base.replace(/\/+$/, '')}${sessionSendPath(workspaceId, sessionId, runId)}`;
+        return `${base.replace(/\/+$/, '')}${sessionSendPath(workspaceId, sessionId, agentId)}`;
       },
     });
     owners.set(workspaceCwd, {
@@ -144,6 +166,11 @@ export function registerSessionAgentRoutes(
     });
     return orchestrator;
   };
+  orchestratorFactory = (runtime) =>
+    deps.isAgentCollaborationEnabledFor(runtime.workspaceCwd) &&
+    !runtime.generationGuard?.closed
+      ? orchestratorFor(runtime)
+      : undefined;
 
   const sessionIdParam = (req: Request, res: Response): string | undefined => {
     const sessionId = req.params['sessionId'];
@@ -374,6 +401,33 @@ export function registerSessionAgentRoutes(
     },
   );
 
+  /**
+   * Re-queues a failed / offline run (one a daemon restart interrupted shows
+   * `retryable: true` on its frame) as a new run. 202 `{runId, agentId,
+   * status}`; 404 `run_not_found`; 409 `run_not_retryable` /
+   * `run_already_retried` / `agent_unavailable`.
+   */
+  app.post(
+    `${prefix}/sessions/:sessionId/runs/:runId/retry`,
+    deps.mutate({ strict: true }),
+    async (req: Request, res: Response) => {
+      const runtime = runtimeFor(req, res);
+      if (!runtime) return;
+      const sessionId = sessionIdParam(req, res);
+      if (!sessionId) return;
+      const orchestrator = orchestratorFor(runtime);
+      try {
+        const run = await orchestrator.retry(
+          sessionId,
+          req.params['runId'] ?? '',
+        );
+        res.status(202).json(run);
+      } catch (error) {
+        fail(res, error);
+      }
+    },
+  );
+
   app.post(
     `${prefix}/sessions/:sessionId/stop`,
     deps.mutate({ strict: true }),
@@ -435,16 +489,21 @@ export interface RegisterSessionAgentSendRouteDeps {
 const SESSION_SEND_AUTH = /^Bearer ([0-9a-f]{64})$/;
 
 /**
- * `POST /workspaces/:workspace/agent/sessions/:sessionId/runs/:runId/send`
+ * `POST /workspaces/:workspace/agent/sessions/:sessionId/agents/:agentId/send`
  * `{ text }` — a session agent's `session_send` tool call, made by the
- * `qwen agents session-send-mcp` child of a local Claude / Codex run.
+ * `qwen agents session-send-mcp` child of a local run (the hidden qwen
+ * session's MCP server, or a Claude / Codex process's).
  *
- * Authenticated by the run's own bearer token (issued by the orchestrator
- * when the run starts, valid while it is live), NOT by the daemon bearer,
- * which that child does not hold. So this must be mounted BEFORE
- * `app.use(authenticate)` in server.ts, next to
+ * Authenticated by the (chat session, agent) binding's bearer token (minted
+ * by the orchestrator when it creates the native session or process),
+ * NOT by the daemon bearer, which that child does not hold; the post goes
+ * to the agent's current executing run in that session. So this must be
+ * mounted BEFORE `app.use(authenticate)` in server.ts, next to
  * `registerAgentHostTransportRoutes`, and only when agent collaboration is
  * enabled anywhere. It never creates an orchestrator.
+ *
+ * 200 `{sent: true}`; 401 `invalid_session_send_token`; 403
+ * `loopback_only`; 400 `invalid_text`; 409 `run_not_running`; 429.
  */
 export function registerSessionAgentSendRoute(
   app: Application,
@@ -480,7 +539,7 @@ export function registerSessionAgentSendRoute(
     next();
   };
   app.post(
-    '/workspaces/:workspace/agent/sessions/:sessionId/runs/:runId/send',
+    '/workspaces/:workspace/agent/sessions/:sessionId/agents/:agentId/send',
     tokenGate,
     json,
     async (req: Request, res: Response) => {
@@ -511,7 +570,7 @@ export function registerSessionAgentSendRoute(
       try {
         await orchestrator.postFromAgent(
           sessionId,
-          req.params['runId'] ?? '',
+          req.params['agentId'] ?? '',
           String(res.locals['sessionSendToken']),
           body.text,
         );

@@ -4,8 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
-import { postSessionSend, sessionSendMcpCommand } from './session-send-mcp.js';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  postSessionSend,
+  readSessionSendMcpUrl,
+  sessionSendMcpCommand,
+} from './session-send-mcp.js';
+
+const { runSessionSendMcp } = vi.hoisted(() => ({
+  runSessionSendMcp: vi.fn(async (_url: string) => {}),
+}));
+vi.mock('./session-send-mcp-server.js', () => ({ runSessionSendMcp }));
 
 function fakeFetch(status: number, body: unknown) {
   const calls: Array<{ url: string; init: RequestInit }> = [];
@@ -61,5 +73,38 @@ describe('session-send-mcp', () => {
       postSessionSend('http://127.0.0.1:1/s', undefined, 'hi', impl),
     ).rejects.toThrow('QWEN_SESSION_SEND_TOKEN');
     expect(calls).toHaveLength(0);
+  });
+
+  it('loads the MCP server only when the command runs', async () => {
+    // config.ts registers this command on every `qwen` start.
+    const source = readFileSync(
+      path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        'session-send-mcp.ts',
+      ),
+      'utf8',
+    );
+    expect(source).not.toMatch(/from '@modelcontextprotocol\//);
+    expect(source).not.toMatch(/from 'zod'/);
+
+    await (
+      sessionSendMcpCommand.handler as (argv: { url: string }) => Promise<void>
+    )({ url: 'http://127.0.0.1:1/send' });
+    expect(runSessionSendMcp).toHaveBeenCalledWith('http://127.0.0.1:1/send');
+  });
+
+  it('reads the endpoint the daemon passes, and nothing else', () => {
+    expect(readSessionSendMcpUrl(['--url', 'http://127.0.0.1:1/s'])).toBe(
+      'http://127.0.0.1:1/s',
+    );
+    expect(readSessionSendMcpUrl(['--url=http://127.0.0.1:1/s'])).toBe(
+      'http://127.0.0.1:1/s',
+    );
+    expect(readSessionSendMcpUrl([])).toBeUndefined();
+    expect(readSessionSendMcpUrl(['--url'])).toBeUndefined();
+    expect(readSessionSendMcpUrl(['--url='])).toBeUndefined();
+    expect(
+      readSessionSendMcpUrl(['--url', 'http://127.0.0.1:1/s', '--debug']),
+    ).toBeUndefined();
   });
 });

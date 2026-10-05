@@ -22,7 +22,11 @@ import type { BridgeClientRequestContext } from '../../acp-session-bridge.js';
 import { agentProgramExecutable } from '../program-probe.js';
 import { createClaudeCliAdapter } from './claude-cli.js';
 import { createCodexAppServerAdapter } from './codex-app-server.js';
-import { createQwenAcpAdapter, type QwenAcpAdapterBridge } from './qwen-acp.js';
+import {
+  createQwenAcpAdapter,
+  type QwenAcpAdapterBridge,
+  type QwenSessionSendBinding,
+} from './qwen-acp.js';
 
 export interface AgentAdapterContext {
   workspaceCwd: string;
@@ -32,6 +36,8 @@ export interface AgentAdapterContext {
   permissionVoteContext?: (
     requestId: string,
   ) => BridgeClientRequestContext | undefined;
+  /** See `QwenAcpAdapterOptions.sessionSend` (used by the `qwen` adapter). */
+  sessionSend?: QwenSessionSendBinding;
 }
 
 /** Fallback for a program this build does not know. */
@@ -61,6 +67,7 @@ export function getAdapter(
         ...(context.permissionVoteContext
           ? { permissionVoteContext: context.permissionVoteContext }
           : {}),
+        ...(context.sessionSend ? { sessionSend: context.sessionSend } : {}),
       });
     // The executable is the env override (QWEN_AGENT_CLAUDE_PATH /
     // QWEN_AGENT_CODEX_PATH), else the name resolved on PATH.

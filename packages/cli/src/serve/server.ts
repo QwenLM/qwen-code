@@ -164,7 +164,10 @@ import {
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
 import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
-import { registerSessionAgentRoutes } from './routes/session-agents.js';
+import {
+  registerSessionAgentRoutes,
+  registerSessionAgentSendRoute,
+} from './routes/session-agents.js';
 import { normalizeAgentChainLimit } from '@qwen-code/qwen-code-core/agents/session-agents/chain.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
@@ -218,7 +221,11 @@ import {
 import { registerWorkspaceModelsRoutes } from './routes/workspace-models.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
-import { setRateLimiter } from './rate-limit.js';
+import {
+  createRateLimiter,
+  setRateLimiter,
+  type RateLimiterInstance,
+} from './rate-limit.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import { VirtualSubagentSessions } from './virtual-subagent-sessions.js';
 import {
@@ -340,9 +347,15 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
-import { registerAgentHostTransportRoutes } from './routes/agent-hosts.js';
+import {
+  AGENT_HOST_RATE_LIMIT,
+  registerAgentHostTransportRoutes,
+} from './routes/agent-hosts.js';
 import { registerAgentHostRuntimeRoutes } from './routes/agent-host-connection.js';
-import { registerAgentHostRelayRoutes } from './agent-host-relay.js';
+import {
+  registerAgentHostRelayRoutes,
+  relayBaseUrl,
+} from './agent-host-relay.js';
 import { registerA2ATransportRoutes } from './routes/a2a.js';
 import type {
   ChannelDeliveryAccepted,
@@ -2381,6 +2394,7 @@ export function createServeApp(
     });
   }
 
+  let agentHostRateLimiter: RateLimiterInstance | undefined;
   // `session_send` relay for agent turns this daemon runs as a Host. Before
   // the bearer gate: the MCP child holds only a per-run token, and the route
   // answers loopback peers only. Mounted whatever the collaboration flag
@@ -2390,6 +2404,15 @@ export function createServeApp(
     getPort,
     tls: Boolean(opts.tlsCert && opts.tlsKey),
   });
+  // The URL this daemon's own loopback-only routes are reached on, for the
+  // `session_send` MCP child of an agent this daemon runs (read lazily: the
+  // port is 0 until `listen()` resolves).
+  const daemonLoopbackBaseUrl = () =>
+    relayBaseUrl({
+      hostname: opts.hostname,
+      port: getPort(),
+      tls: Boolean(opts.tlsCert && opts.tlsKey),
+    });
 
   if (anyAgentCollaborationEnabled()) {
     registerA2ATransportRoutes(
@@ -2398,12 +2421,33 @@ export function createServeApp(
       rateLimiter,
       isAgentCollaborationEnabledFor,
     );
+    // Host traffic (events every 250 ms per turn, heartbeats, polls) gets
+    // its own budget per authenticated Host instead of the general `read`
+    // tier; same opt-in as the general limiter.
+    agentHostRateLimiter = rateLimiter
+      ? createRateLimiter({
+          tiers: {
+            prompt: AGENT_HOST_RATE_LIMIT,
+            mutation: AGENT_HOST_RATE_LIMIT,
+            read: AGENT_HOST_RATE_LIMIT,
+          },
+          hostname: opts.hostname,
+        })
+      : undefined;
     registerAgentHostTransportRoutes(
       app,
       workspaceRegistry,
       rateLimiter,
       isAgentCollaborationEnabledFor,
+      agentHostRateLimiter,
     );
+    // `session_send` from a local session agent's MCP child: per-binding
+    // token, loopback peers only, so it sits before the daemon bearer gate.
+    registerSessionAgentSendRoute(app, {
+      workspaceRegistry,
+      isAgentCollaborationEnabledFor,
+      ...(rateLimiter ? { rateLimiter } : {}),
+    });
   }
 
   // Credentials are a listener-scoped set, not one token: while Local Control
@@ -3637,6 +3681,39 @@ export function createServeApp(
     () => mutate(),
   );
 
+  // Reconnect, in the background, every saved Host connection (`qwen agents
+  // join`, `hosts/connect`) of every trusted workspace, including ones
+  // registered or trusted after boot. The real daemon only, like
+  // scheduled-task residency below: tests and embeds that call
+  // createServeApp must not dial out on the strength of ~/.qwen.
+  if (deps.manageScheduledTaskSessions) {
+    const agentHostRestore = new AbortController();
+    (
+      app.locals as { stopAgentHostRestore?: () => void }
+    ).stopAgentHostRestore = () => agentHostRestore.abort();
+    void import('./agent-host-connections.js')
+      .then(({ restoreAgentHostConnections }) =>
+        restoreAgentHostConnections({
+          signal: agentHostRestore.signal,
+          runtimeFor: (workspaceCwd) => {
+            const runtime = workspaceRegistry.getByWorkspaceCwd(workspaceCwd);
+            if (!runtime?.generationGuard || runtime.generationGuard.closed) {
+              return undefined;
+            }
+            const trusted = runtime.primary
+              ? isPrimaryWorkspaceTrusted()
+              : runtime.trusted;
+            return trusted ? runtime : undefined;
+          },
+        }),
+      )
+      .catch((error: unknown) =>
+        writeStderrLine(
+          `qwen serve: could not restore Agent Host connections: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+  }
+
   // Gated on the opt-in, and gated by *not registering* rather than by
   // refusing inside the handlers. Skipping the call leaves the routes 404,
   // which is also what the absent `agent_collaboration_v1` capability tells
@@ -3653,6 +3730,7 @@ export function createServeApp(
       mutate,
       isAgentCollaborationEnabledFor,
       agentChainLimitFor,
+      daemonLoopbackBaseUrl,
     });
     agentCollaborationRoutesMounted = true;
   }
@@ -4110,6 +4188,11 @@ export function createServeApp(
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());
+      stopAppResource(() => agentHostRateLimiter?.dispose());
+      stopAppResource(
+        (app.locals as { stopAgentHostRestore?: () => void })
+          .stopAgentHostRestore,
+      );
       stopAppResource(() => webTerminalRegistry.dispose());
       const drains = await Promise.allSettled(pendingDrains);
       stopAppResource(() => acpHandleRef.current?.dispose());

@@ -9,7 +9,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
+import { createWorkspaceGenerationGuard } from './workspace-registry.js';
 import {
+  type AgentHostRestoreRuntime,
   agentHostConnectionsPath,
   readAgentHostConnections,
   removeAgentHostConnection,
@@ -17,12 +19,14 @@ import {
   saveAgentHostConnection,
 } from './agent-host-connections.js';
 
-const { hasCredential, startConnection } = vi.hoisted(() => ({
+const { hasCredential, startConnection, isRunning } = vi.hoisted(() => ({
   hasCredential: vi.fn<(...args: unknown[]) => Promise<boolean>>(),
   startConnection: vi.fn<(...args: unknown[]) => Promise<void>>(),
+  isRunning: vi.fn<(...args: unknown[]) => boolean>(),
 }));
 vi.mock('./agent-host-client.js', () => ({
   hasAgentHostCredential: hasCredential,
+  isAgentHostConnectionRunning: isRunning,
   startAgentHostConnection: startConnection,
 }));
 vi.mock('../utils/stdioHelpers.js', () => ({ writeStderrLine: vi.fn() }));
@@ -68,39 +72,138 @@ it('saves one record per connection, privately, and removes it', async () => {
   ]);
 });
 
-it('restores this workspace’s connections and prunes one without a credential', async () => {
+function runtime(workspaceCwd: string) {
+  return {
+    bridge: { workspaceCwd } as unknown as AcpSessionBridge,
+    workspaceCwd,
+    generationGuard: createWorkspaceGenerationGuard(),
+  };
+}
+
+/** Runs a restore and stops its loops afterwards. */
+async function restoring(
+  runtimeFor: (workspaceCwd: string) => AgentHostRestoreRuntime | undefined,
+  body: () => Promise<void>,
+) {
+  const stop = new AbortController();
+  try {
+    await restoreAgentHostConnections({
+      runtimeFor,
+      signal: stop.signal,
+      retryMs: 10,
+      watchMs: 10,
+    });
+    await body();
+  } finally {
+    stop.abort();
+  }
+}
+
+it('restores the connections of every trusted workspace and prunes one without a credential', async () => {
   await saveAgentHostConnection(record);
   await saveAgentHostConnection({ ...record, workspaceId: 'ws_revoked' });
   await saveAgentHostConnection({ ...record, workspaceCwd: '/elsewhere' });
+  await saveAgentHostConnection({ ...record, workspaceCwd: '/untrusted' });
   hasCredential.mockImplementation(
     async (target) =>
       (target as { workspaceId: string }).workspaceId !== 'ws_revoked',
   );
   startConnection.mockResolvedValue(undefined);
-  const bridge = {} as AcpSessionBridge;
+  isRunning.mockReturnValue(true);
+  const work = runtime('/work');
+  const elsewhere = runtime('/elsewhere');
 
-  await restoreAgentHostConnections({ bridge, workspaceCwd: '/work' });
-
-  await vi.waitFor(() => expect(startConnection).toHaveBeenCalledOnce());
-  expect(startConnection).toHaveBeenCalledWith({ ...record, bridge });
-  await vi.waitFor(async () =>
-    expect(
-      (await readAgentHostConnections()).map((entry) => entry.workspaceId),
-    ).not.toContain('ws_revoked'),
+  await restoring(
+    (cwd) =>
+      cwd === '/work' ? work : cwd === '/elsewhere' ? elsewhere : undefined,
+    async () => {
+      await vi.waitFor(() => expect(startConnection).toHaveBeenCalledTimes(2));
+      expect(startConnection).toHaveBeenCalledWith({
+        ...record,
+        bridge: work.bridge,
+        generationGuard: work.generationGuard,
+      });
+      expect(startConnection).toHaveBeenCalledWith({
+        ...record,
+        workspaceCwd: '/elsewhere',
+        bridge: elsewhere.bridge,
+        generationGuard: elsewhere.generationGuard,
+      });
+      await vi.waitFor(async () =>
+        expect(
+          (await readAgentHostConnections()).map((entry) => entry.workspaceId),
+        ).not.toContain('ws_revoked'),
+      );
+      // Still waiting for the untrusted one; never connected.
+      expect(
+        startConnection.mock.calls.some(
+          ([target]) =>
+            (target as { workspaceCwd: string }).workspaceCwd === '/untrusted',
+        ),
+      ).toBe(false);
+    },
   );
 });
 
 it('retries a coordinator that is down at boot', async () => {
   await saveAgentHostConnection(record);
   hasCredential.mockResolvedValue(true);
+  isRunning.mockReturnValue(true);
   startConnection
     .mockRejectedValueOnce(new Error('ECONNREFUSED'))
     .mockResolvedValue(undefined);
+  const work = runtime('/work');
 
-  await restoreAgentHostConnections(
-    { bridge: {} as AcpSessionBridge, workspaceCwd: '/work' },
-    10,
+  await restoring(
+    () => work,
+    async () => {
+      await vi.waitFor(() => expect(startConnection).toHaveBeenCalledTimes(2));
+    },
   );
+});
 
-  await vi.waitFor(() => expect(startConnection).toHaveBeenCalledTimes(2));
+it('connects a workspace that becomes available after boot', async () => {
+  await saveAgentHostConnection(record);
+  hasCredential.mockResolvedValue(true);
+  isRunning.mockReturnValue(true);
+  startConnection.mockResolvedValue(undefined);
+  let available: AgentHostRestoreRuntime | undefined;
+
+  await restoring(
+    () => available,
+    async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(startConnection).not.toHaveBeenCalled();
+      available = runtime('/work');
+      await vi.waitFor(() => expect(startConnection).toHaveBeenCalledOnce());
+    },
+  );
+});
+
+it('reconnects on the new runtime when the old one is replaced, and lets a removed record go', async () => {
+  await saveAgentHostConnection(record);
+  hasCredential.mockResolvedValue(true);
+  isRunning.mockReturnValue(true);
+  startConnection.mockResolvedValue(undefined);
+  let current = runtime('/work');
+  const first = current;
+
+  await restoring(
+    () => current,
+    async () => {
+      await vi.waitFor(() => expect(startConnection).toHaveBeenCalledOnce());
+      current = runtime('/work');
+      first.generationGuard.close();
+      await vi.waitFor(() => expect(startConnection).toHaveBeenCalledTimes(2));
+      expect(startConnection).toHaveBeenLastCalledWith(
+        expect.objectContaining({ bridge: current.bridge }),
+      );
+
+      // `DELETE hosts/connect` forgets it; a stopped connection stays down.
+      await removeAgentHostConnection(record);
+      isRunning.mockReturnValue(false);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(startConnection).toHaveBeenCalledTimes(2);
+    },
+  );
 });

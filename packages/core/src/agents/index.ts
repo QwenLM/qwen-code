@@ -33,13 +33,15 @@ export {
   buildRemoteSessionAgentSystemPrompt,
   resolveAgentPersona,
 } from './workspace-agents/persona.js';
-// TODO(multi-agent): A2A inbound still names the thread-era task model; these
-// types come from a2a-server.ts, which is being re-pointed at sessions.
+// A2A inbound: a task is one agent run in a chat session (a2a-contract.ts).
 export type {
   A2ATaskView,
   A2AAgentCard,
   A2ACaller,
   A2AFailure,
+  A2ARecordedReply,
+  A2ASessionPort,
+  A2ASessionRun,
 } from './workspace-agents/a2a-server.js';
 export type { A2AGrant } from './workspace-agents/types.js';
 export type {

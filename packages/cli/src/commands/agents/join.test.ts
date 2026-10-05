@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { EventEmitter } from 'node:events';
 import { expect, it, vi } from 'vitest';
-import { runAgentsJoin, type JoinDeps } from './join.js';
+import {
+  readHiddenLine,
+  runAgentsJoin,
+  type HiddenInput,
+  type JoinDeps,
+} from './join.js';
 
 function deps(overrides: Partial<JoinDeps> = {}) {
   const out: string[] = [];
@@ -101,3 +107,51 @@ it('reports the daemon’s refusal and a malformed link', async () => {
 
   expect(await runAgentsJoin({ link: 'not a link' }, value)).toBe(1);
 });
+
+function fakeTty(isTTY = true) {
+  const emitter = new EventEmitter();
+  const modes: boolean[] = [];
+  const input: HiddenInput = {
+    isTTY,
+    isRaw: false,
+    setRawMode: (raw) => modes.push(raw),
+    on: (event, listener) => emitter.on(event, listener),
+    off: (event, listener) => emitter.off(event, listener),
+    resume: () => undefined,
+    pause: () => undefined,
+  };
+  const type = (text: string) => emitter.emit('data', Buffer.from(text));
+  return { input, modes, type, emitter };
+}
+
+it('reads the enrollment token without echoing it', async () => {
+  const { input, modes, type, emitter } = fakeTty();
+  const written: string[] = [];
+
+  const answer = readHiddenLine('Token: ', input, (text) => written.push(text));
+  type('ab');
+  type('x\u007fc');
+  type('d\r');
+
+  await expect(answer).resolves.toBe('abcd');
+  // Raw mode on for the prompt, restored after; only the prompt and the
+  // closing newline are written, never the typed characters.
+  expect(modes).toEqual([true, false]);
+  expect(written).toEqual(['Token: ', '\n']);
+  expect(emitter.listenerCount('data')).toBe(0);
+});
+
+it('cancels the hidden prompt on Ctrl+C and skips it without a TTY', async () => {
+  const tty = fakeTty();
+  const cancelled = readHiddenLine('Token: ', tty.input, () => undefined);
+  tty.type('secr\u0003');
+  await expect(cancelled).resolves.toBeUndefined();
+  expect(tty.modes).toEqual([true, false]);
+
+  const piped = fakeTty(false);
+  await expect(
+    readHiddenLine('Token: ', piped.input, () => undefined),
+  ).resolves.toBeUndefined();
+  expect(piped.modes).toEqual([]);
+});
+

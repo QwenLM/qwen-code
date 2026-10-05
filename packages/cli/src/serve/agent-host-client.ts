@@ -13,8 +13,10 @@
  * runs up to {@link MAX_CONCURRENT_HOST_TURNS} at once through the same
  * adapters the coordinator uses locally. Adapter events stream back in
  * ordered batches; permission requests wait for the person's decision, which
- * comes back on heartbeat and event responses; the result carries the
- * program's native session id so the next turn resumes it.
+ * a decisions long-poll (open only while a turn waits) brings back at once,
+ * and heartbeat and event responses bring as well; the result carries the
+ * program's native session id so the next turn resumes it. A run the person
+ * stops on the coordinator is aborted here and posts no result.
  */
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -30,7 +32,7 @@ import {
   type AgentAdapterEvent,
   type AgentAdapterTurnInput,
   type AgentAdapterTurnResult,
-  type HostPermissionDecision,
+  type HostLeaseStatus,
   type HostProgramProbe,
   type HostTurnAssignment,
   type HostTurnEventBatch,
@@ -60,13 +62,21 @@ import {
   buildSessionSendServer,
   HOST_TURN_LEASE_MS,
 } from './session-agents/orchestrator.js';
+import {
+  hostDecisionKey,
+  type HostAwaitedPermission,
+  type HostDecision,
+} from './agent-host-decisions.js';
 
 const HEARTBEAT_MS = 5_000;
 const RETRY_MS = 2_000;
 /** Adapter events are batched this long before they are posted. */
 const EVENT_FLUSH_MS = 250;
-/** While a permission waits, decisions are polled this often. */
-const DECISION_POLL_MS = 1_000;
+/** How long one decisions long-poll stays open (the coordinator's maximum). */
+const DECISIONS_WAIT_MS = 25_000;
+/** Bounds the coordinator's validation of a decisions poll accepts. */
+const MAX_AWAITED = 16;
+const MAX_SEEN_PER_AWAITED = 8;
 /** With no renewal for a lease term the run is gone on the coordinator. */
 const TURN_LEASE_MS = HOST_TURN_LEASE_MS;
 /** Turns this Host runs at once. */
@@ -242,16 +252,28 @@ async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
   });
   const result = (await response.json().catch(() => ({}))) as {
     error?: string;
+    cancelled?: unknown;
   } & T;
   if (!response.ok) {
     throw Object.assign(
       new Error(
         result.error ?? `Agent Host request failed (${response.status}).`,
       ),
-      { status: response.status },
+      {
+        status: response.status,
+        ...(result.cancelled === true ? { cancelled: true } : {}),
+      },
     );
   }
   return result;
+}
+
+/** The coordinator's 409 for a run the person stopped. */
+export function isCancellation(error: unknown): boolean {
+  return (
+    (error as { status?: number } | null | undefined)?.status === 409 &&
+    (error as { cancelled?: unknown }).cancelled === true
+  );
 }
 
 /** A 4xx the same request will get again; 408 and 429 are worth a retry. */
@@ -358,6 +380,27 @@ async function pickup(
   return result.assignment;
 }
 
+/** One decisions long-poll; resolves with the decisions it brought. */
+async function pollDecisions(
+  credential: AgentHostCredential,
+  awaiting: HostAwaitedPermission[],
+  signal: AbortSignal,
+): Promise<HostDecision[]> {
+  const response = await requestJson<{ decisions?: HostDecision[] }>(
+    hostUrl(credential, 'decisions'),
+    {
+      method: 'POST',
+      headers: hostHeaders(credential),
+      body: JSON.stringify({ waitMs: DECISIONS_WAIT_MS, awaiting }),
+      signal: AbortSignal.any([
+        signal,
+        AbortSignal.timeout(DECISIONS_WAIT_MS + 10_000),
+      ]),
+    },
+  );
+  return Array.isArray(response.decisions) ? response.decisions : [];
+}
+
 /** The `session_send` MCP server command for a run, or undefined. */
 export function sessionSendServerFor(
   relay: Pick<AgentHostRelayRun, 'url' | 'token'> | undefined,
@@ -374,8 +417,12 @@ interface PermissionWaiter {
 interface HostTurn {
   assignment: HostTurnAssignment;
   controller: AbortController;
-  /** The coordinator refused this lease; nothing more is sent for it. */
+  /**
+   * The coordinator refused this lease, or the person stopped the run there;
+   * nothing more is sent for it.
+   */
   lost: boolean;
+  relay?: AgentHostRelayRun;
   renewedAt: number;
   sequence: number;
   pending: AgentAdapterEvent[];
@@ -383,12 +430,18 @@ interface HostTurn {
   inflight?: Pick<HostTurnEventBatch, 'sequence' | 'events'>;
   sendChain: Promise<void>;
   flushTimer?: ReturnType<typeof setTimeout>;
-  decisionPoll?: ReturnType<typeof setInterval>;
+  /** The current waiter per requestId; a re-armed wait replaces it. */
   waiters: Map<string, PermissionWaiter>;
-  /** Decisions that arrived before their waiter (requestId → optionId). */
-  early: Map<string, string>;
-  /** requestIds already answered; a resent decision is applied once. */
-  applied: Set<string>;
+  /** A decision no waiter took yet, per requestId (the newest wins). */
+  early: Map<string, { key: string; optionId: string }>;
+  /**
+   * Keys of the decisions each requestId's waiters already took. The
+   * coordinator resends a decision until it sees `permission_resolved`; a
+   * re-armed wait takes only a decision it has not used.
+   */
+  used: Map<string, string[]>;
+  /** requestIds the adapter reported resolved; later decisions are stale. */
+  resolved: Set<string>;
 }
 
 /** Splits off the next batch: bounded in count and in text size. */
@@ -478,6 +531,27 @@ export async function startAgentHostConnection(
   }
 }
 
+/** True while a connection to this (coordinator, workspace, cwd) runs. */
+export function isAgentHostConnectionRunning(target: {
+  serverUrl: string;
+  workspaceId: string;
+  workspaceCwd: string;
+  allowHttp?: boolean;
+}): boolean {
+  try {
+    const existing = activeConnections.get(
+      connectionKey(
+        normalizeServerUrl(target.serverUrl, target.allowHttp),
+        target.workspaceId,
+        target.workspaceCwd,
+      ),
+    );
+    return existing !== undefined && !existing.stop.signal.aborted;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Stops a running connection (its turns are aborted and their leases lapse
  * on the coordinator). The saved credential stays; revocation is the
@@ -551,8 +625,8 @@ async function connectAgentHost(
   assertOpen();
   const turns = new Map<string, HostTurn>();
   interface HeartbeatResponse {
-    leases?: Array<{ runId: string; ok: boolean }>;
-    decisions?: HostPermissionDecision[];
+    leases?: HostLeaseStatus[];
+    decisions?: HostDecision[];
   }
   const sendHeartbeat = async (
     target: AgentHostCredential,
@@ -642,44 +716,151 @@ async function connectAgentHost(
   /* Turns                                                                */
   /* -------------------------------------------------------------------- */
 
-  const loseTurn = (turn: HostTurn, reason: string) => {
+  /**
+   * Stops a turn this Host may no longer finish: the adapter is cancelled,
+   * then the `session_send` relay closes, and no result is posted.
+   */
+  const loseTurn = (turn: HostTurn, reason: string, cancelled = false) => {
     if (turn.lost) return;
     turn.lost = true;
     const error = new Error(reason);
     turn.controller.abort(error);
+    turn.relay?.close();
+    if (turn.flushTimer) {
+      clearTimeout(turn.flushTimer);
+      turn.flushTimer = undefined;
+    }
+    turn.pending = [];
     for (const waiter of turn.waiters.values()) waiter.reject(error);
     turn.waiters.clear();
+    if (cancelled) {
+      writeStderrLine(
+        `qwen serve: run ${turn.assignment.runId} was stopped on the coordinator.`,
+      );
+    }
+    refreshDecisionPoll();
   };
 
-  const applyDecisions = (
-    decisions: readonly HostPermissionDecision[] = [],
-  ) => {
+  const cancelTurn = (turn: HostTurn) =>
+    loseTurn(turn, 'The run was cancelled on the coordinator.', true);
+
+  /** Hands decision `key` to the current waiter of `requestId`. */
+  const takeDecision = (
+    turn: HostTurn,
+    requestId: string,
+    key: string,
+    optionId: string,
+  ): boolean => {
+    const waiter = turn.waiters.get(requestId);
+    if (!waiter) return false;
+    turn.waiters.delete(requestId);
+    turn.early.delete(requestId);
+    turn.used.set(requestId, [
+      ...(turn.used.get(requestId) ?? []).slice(1 - MAX_SEEN_PER_AWAITED),
+      key,
+    ]);
+    waiter.resolve(optionId);
+    return true;
+  };
+
+  /**
+   * Applies decisions from any response. Idempotent: a resent decision is
+   * taken once, and only by a waiter that has not used it.
+   */
+  const applyDecisions = (decisions: readonly HostDecision[] = []) => {
+    let taken = false;
     for (const decision of decisions) {
       const turn = turns.get(decision.runId);
       if (
         !turn ||
         turn.lost ||
         turn.assignment.attempt !== decision.attempt ||
-        turn.applied.has(decision.requestId)
+        turn.resolved.has(decision.requestId)
       ) {
         continue;
       }
-      const waiter = turn.waiters.get(decision.requestId);
-      if (!waiter) {
-        turn.early.set(decision.requestId, decision.optionId);
+      const key = hostDecisionKey(decision);
+      if (turn.used.get(decision.requestId)?.includes(key)) continue;
+      if (takeDecision(turn, decision.requestId, key, decision.optionId)) {
+        taken = true;
         continue;
       }
-      turn.applied.add(decision.requestId);
-      turn.waiters.delete(decision.requestId);
-      waiter.resolve(decision.optionId);
+      turn.early.set(decision.requestId, { key, optionId: decision.optionId });
     }
+    if (taken) refreshDecisionPoll();
+  };
+
+  /* -------------------------------------------------------------------- */
+  /* Decisions long-poll                                                  */
+  /* -------------------------------------------------------------------- */
+
+  /** The requests this Host's turns wait on, with the keys each has used. */
+  const awaitedPermissions = (): HostAwaitedPermission[] => {
+    const awaited: HostAwaitedPermission[] = [];
+    for (const turn of turns.values()) {
+      if (turn.lost) continue;
+      for (const requestId of turn.waiters.keys()) {
+        awaited.push({
+          runId: turn.assignment.runId,
+          attempt: turn.assignment.attempt,
+          requestId,
+          seen: turn.used.get(requestId) ?? [],
+        });
+      }
+    }
+    // TODO(multi-agent): past this many open requests the rest wait for the
+    // heartbeat; 4 turns rarely hold more than one each.
+    return awaited.slice(0, MAX_AWAITED);
+  };
+
+  let decisionPoll: AbortController | undefined;
+  /**
+   * Keeps exactly one decisions long-poll open while any turn waits on a
+   * person, restarted whenever the set of waits changes so the coordinator
+   * always matches against the current ones.
+   */
+  const refreshDecisionPoll = () => {
+    decisionPoll?.abort();
+    decisionPoll = undefined;
+    if (stop.signal.aborted || awaitedPermissions().length === 0) return;
+    const controller = new AbortController();
+    decisionPoll = controller;
+    const signal = AbortSignal.any([stop.signal, controller.signal]);
+    void (async () => {
+      while (!signal.aborted) {
+        const awaiting = awaitedPermissions();
+        if (awaiting.length === 0) break;
+        try {
+          applyDecisions(
+            await pollDecisions(activeCredential, awaiting, signal),
+          );
+        } catch (error) {
+          if (signal.aborted) break;
+          if (isRevocation(error)) {
+            await discardRevokedCredential(activeCredential).catch(
+              () => undefined,
+            );
+            stop.abort(error);
+            break;
+          }
+          // A coordinator without the decisions route answers 404 for
+          // good; the heartbeat still brings decisions, so back off to it.
+          await delay(
+            isPermanentRejection(error) ? HEARTBEAT_MS : RETRY_MS,
+            undefined,
+            { signal },
+          ).catch(() => undefined);
+        }
+      }
+      if (decisionPoll === controller) decisionPoll = undefined;
+    })();
   };
 
   /** Posts the next batch (or retries the unacknowledged one). */
-  const sendBatch = async (turn: HostTurn, force: boolean): Promise<void> => {
+  const sendBatch = async (turn: HostTurn): Promise<void> => {
     if (turn.lost || stop.signal.aborted) return;
     if (!turn.inflight) {
-      if (turn.pending.length === 0 && !force) return;
+      if (turn.pending.length === 0) return;
       turn.sequence += 1;
       turn.inflight = {
         sequence: turn.sequence,
@@ -696,7 +877,7 @@ async function connectAgentHost(
     };
     try {
       const response = await requestJson<{
-        decisions?: HostPermissionDecision[];
+        decisions?: HostDecision[];
       }>(hostUrl(activeCredential, 'events'), {
         method: 'POST',
         signal: AbortSignal.any([stop.signal, AbortSignal.timeout(10_000)]),
@@ -709,8 +890,12 @@ async function connectAgentHost(
       if (turn.pending.length > 0) scheduleFlush(turn, 0);
     } catch (error) {
       const status = (error as { status?: number }).status;
+      if (isCancellation(error)) {
+        cancelTurn(turn);
+        return;
+      }
       if (status === 409 || status === 404 || isRevocation(error)) {
-        // The run moved on (cancelled, re-leased, or this Host was removed).
+        // The run moved on (re-leased, or this Host was removed).
         loseTurn(turn, extractErrorMessage(error));
         return;
       }
@@ -730,8 +915,8 @@ async function connectAgentHost(
     }
   };
 
-  const flush = (turn: HostTurn, force = false): Promise<void> => {
-    turn.sendChain = turn.sendChain.then(() => sendBatch(turn, force));
+  const flush = (turn: HostTurn): Promise<void> => {
+    turn.sendChain = turn.sendChain.then(() => sendBatch(turn));
     return turn.sendChain;
   };
 
@@ -746,6 +931,10 @@ async function connectAgentHost(
 
   const pushEvent = (turn: HostTurn, event: AgentAdapterEvent) => {
     if (turn.lost) return;
+    if (event.type === 'permission_resolved') {
+      turn.resolved.add(event.requestId);
+      turn.early.delete(event.requestId);
+    }
     turn.pending.push(event);
     scheduleFlush(turn);
   };
@@ -757,42 +946,26 @@ async function connectAgentHost(
     if (turn.lost) {
       return Promise.reject(new Error('Agent Host lease lost.'));
     }
-    const stopPollIfIdle = () => {
-      if (turn.waiters.size === 0 && turn.decisionPoll) {
-        clearInterval(turn.decisionPoll);
-        turn.decisionPoll = undefined;
-      }
-    };
-    const early = turn.early.get(prompt.requestId);
-    if (early !== undefined) {
-      turn.early.delete(prompt.requestId);
-      turn.applied.add(prompt.requestId);
-      return Promise.resolve(early);
-    }
-    // TODO(multi-agent): the coordinator keeps one decision per requestId.
-    // If the adapter re-arms after its bridge refused a vote, the same
-    // decision is not applied twice here and the coordinator does not take a
-    // second one, so that request waits until the run ends.
+    const { requestId } = prompt;
+    // Waiting again on a request reported resolved makes it live again.
+    turn.resolved.delete(requestId);
+    // A re-armed wait (the adapter's bridge refused the vote) replaces the
+    // previous one; decisions go to the current waiter only.
+    const previous = turn.waiters.get(requestId);
+    turn.waiters.delete(requestId);
+    previous?.reject(new Error('Permission request re-armed.'));
     return new Promise<string>((resolve, reject) => {
-      turn.waiters.set(prompt.requestId, {
-        resolve: (optionId) => {
-          stopPollIfIdle();
-          resolve(optionId);
-        },
-        reject: (error) => {
-          stopPollIfIdle();
-          reject(error);
-        },
-      });
-      // An idle run sends no events, so decisions would otherwise wait for
-      // the 5 s heartbeat. An empty batch renews the lease and brings them.
-      // TODO(multi-agent): a coordinator push (or a pickup-style long poll
-      // for decisions) would avoid polling.
-      turn.decisionPoll ??= setInterval(
-        () => void flush(turn, true),
-        DECISION_POLL_MS,
-      );
-      turn.decisionPoll.unref?.();
+      turn.waiters.set(requestId, { resolve, reject });
+      const early = turn.early.get(requestId);
+      if (
+        early &&
+        !turn.used.get(requestId)?.includes(early.key) &&
+        takeDecision(turn, requestId, early.key, early.optionId)
+      ) {
+        return;
+      }
+      turn.early.delete(requestId);
+      refreshDecisionPoll();
     });
   };
 
@@ -853,6 +1026,12 @@ async function connectAgentHost(
         const status = (error as { status?: number }).status;
         const message = extractErrorMessage(error);
         if (status === 409) {
+          if (isCancellation(error)) {
+            writeStderrLine(
+              `qwen serve: run ${turn.assignment.runId} was stopped on the coordinator; result discarded.`,
+            );
+            return;
+          }
           writeStderrLine(
             `qwen serve: discarded agent turn result (${message}).`,
           );
@@ -904,7 +1083,8 @@ async function connectAgentHost(
       sendChain: Promise.resolve(),
       waiters: new Map(),
       early: new Map(),
-      applied: new Set(),
+      used: new Map(),
+      resolved: new Set(),
     };
     turns.set(assignment.runId, turn);
     const stopTurn = () => turn.controller.abort(stop.signal.reason);
@@ -936,6 +1116,10 @@ async function connectAgentHost(
       relay = openAgentHostRelayRun(assignment.runId, (text) =>
         pushEvent(turn, { type: 'session_send', text }),
       );
+      turn.relay = relay;
+      // Cancelled while the binding was being written: never start.
+      if (turn.lost) relay?.close();
+      turn.controller.signal.throwIfAborted();
       const sessionSendServer = sessionSendServerFor(relay);
       const adapter = getAdapter(assignment.program, {
         workspaceCwd: options.workspaceCwd,
@@ -972,12 +1156,11 @@ async function connectAgentHost(
             ),
         );
       }
-      if (turn.decisionPoll) clearInterval(turn.decisionPoll);
-      turn.decisionPoll = undefined;
       for (const waiter of turn.waiters.values()) {
         waiter.reject(new Error('Agent turn ended.'));
       }
       turn.waiters.clear();
+      refreshDecisionPoll();
     }
     try {
       // Events (a `session_send` above all) must land before the result:
@@ -992,6 +1175,7 @@ async function connectAgentHost(
       });
     } finally {
       turns.delete(assignment.runId);
+      refreshDecisionPoll();
     }
   };
 
@@ -1010,7 +1194,8 @@ async function connectAgentHost(
       for (const lease of response.leases ?? []) {
         const turn = turns.get(lease.runId);
         if (!turn) continue;
-        if (lease.ok) turn.renewedAt = now;
+        if (lease.cancelled === true) cancelTurn(turn);
+        else if (lease.ok) turn.renewedAt = now;
         else loseTurn(turn, 'The coordinator refused this run lease.');
       }
       applyDecisions(response.decisions);

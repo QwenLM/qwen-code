@@ -26,6 +26,7 @@ import type {
   CancelNotification,
   ContentBlock,
   LoadSessionResponse,
+  McpServer,
   PromptRequest,
   PromptResponse,
   RequestPermissionResponse,
@@ -333,6 +334,14 @@ export interface BridgeSpawnRequest {
   sessionId?: string;
   /** Trusted Hosted Harness route only; forwarded through private ACP metadata. */
   managedSessionStore?: BridgeManagedSessionStore;
+  /**
+   * Daemon-internal: session-level MCP servers for ACP `session/new`, used
+   * only when this call creates the session (an attach keeps the live
+   * session's servers). No HTTP route forwards a client value here; the
+   * session-agents orchestrator uses it to give a hidden agent session its
+   * `session_send` tool. Absent means none (the historical `[]`).
+   */
+  mcpServers?: McpServer[];
 }
 
 /** Internal daemon-only creation surface for a managed standalone session. */
@@ -494,12 +503,18 @@ export interface BridgeRestoreSessionRequest {
   suppressWorktreeContextRestore?: boolean;
   /** Delay ask_user_question recovery until daemon route validation finishes. */
   deferRestoreAskUserQuestionPrompt?: boolean;
+  /**
+   * Daemon-internal: session-level MCP servers for ACP `session/load` /
+   * `session/resume` (see `BridgeSpawnRequest.mcpServers`). Absent means
+   * none.
+   */
+  mcpServers?: McpServer[];
 }
 
 /** Internal daemon-only restore surface for a managed standalone session. */
 export type BridgeStandaloneRestoreSessionRequest = Omit<
   BridgeRestoreSessionRequest,
-  'sourceType' | 'sourceId'
+  'sourceType' | 'sourceId' | 'mcpServers'
 >;
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';

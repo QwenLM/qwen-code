@@ -6194,4 +6194,47 @@ describe('session agent messages', () => {
       author: { name: 'reviewer', color: '#ff8800' },
     });
   });
+
+  it("names the agent from an exported block's author, which carries no meta", () => {
+    // The export document strips `meta` and keeps the agent as `author`.
+    const exported = (
+      id: string,
+      kind: 'user' | 'assistant',
+      text: string,
+      author?: { name: string },
+    ) =>
+      ({
+        id,
+        kind,
+        text,
+        clientReceivedAt: 0,
+        createdAt: 0,
+        updatedAt: 0,
+        streaming: false,
+        ...(author ? { author } : {}),
+      }) as unknown as DaemonTranscriptBlock;
+    const messages = transcriptBlocksToDaemonMessages([
+      exported('u1', 'user', '@claude-B check', { name: 'lead' }),
+      exported('a1', 'assistant', 'Main answer.'),
+      exported('a2', 'assistant', 'Agent reply.', { name: 'claude-B' }),
+      exported('a3', 'assistant', 'Main follow-up.'),
+    ]);
+    expect(messages.map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+      'assistant',
+      'assistant',
+    ]);
+    expect(messages[0]).toMatchObject({
+      author: { name: 'lead' },
+      agentMessage: { kind: 'agent_mention' },
+    });
+    expect(messages[2]).toMatchObject({
+      content: 'Agent reply.',
+      author: { name: 'claude-B' },
+      agentMessage: { kind: 'agent_message', author: { name: 'claude-B' } },
+    });
+    expect(messages[1]).not.toHaveProperty('author');
+    expect(messages[3]).not.toHaveProperty('agentMessage');
+  });
 });

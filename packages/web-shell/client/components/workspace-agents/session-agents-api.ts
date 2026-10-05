@@ -33,6 +33,8 @@ export interface SessionAgentsApi {
     input: { text: string; clientMessageId: string },
   ): Promise<SessionMentionResult>;
   cancelRun(sessionId: string, runId: string): Promise<unknown>;
+  /** Runs a failed run marked `retryable` again. */
+  retryRun(sessionId: string, runId: string): Promise<unknown>;
   stopAll(sessionId: string): Promise<unknown>;
   respondToPermission(
     sessionId: string,
@@ -89,6 +91,11 @@ export function createSessionAgentsHttpApi(
     cancelRun: (sessionId, runId) =>
       post(
         `${session(sessionId)}/runs/${encodeURIComponent(runId)}/cancel`,
+        {},
+      ),
+    retryRun: (sessionId, runId) =>
+      post(
+        `${session(sessionId)}/runs/${encodeURIComponent(runId)}/retry`,
         {},
       ),
     stopAll: (sessionId) => post(`${session(sessionId)}/stop`, {}),

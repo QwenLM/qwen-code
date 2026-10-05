@@ -19,9 +19,25 @@
  * the core binding store; the in-memory copy is authoritative while the
  * daemon runs (this assumes one daemon per workspace).
  *
- * Concurrency rule (plan §8-3): per (chat session, agent) at most one
- * executing run and at most one queued run (see run-queue.ts), so a native
- * session is never driven by two processes.
+ * Concurrency rules: per (chat session, agent) at most one executing run and
+ * at most one queued run (plan §8-3, run-queue.ts), so a native session is
+ * never driven by two processes; and per agent, across chat sessions, at
+ * most `maxConcurrentRuns` executing runs (default 1). Queued runs start
+ * oldest first across sessions; `queuePosition` on a frame counts the
+ * agent's queued runs in every session.
+ *
+ * Record state: a run's terminal frame says whether its `agent_message`
+ * record is in the transcript (`recorded`, see contract.ts). A record the
+ * ACP child deferred (a main-model turn was running), or one whose write
+ * failed, is watched by re-sending the same idempotent request with backoff
+ * until it lands, for at most {@link RECORD_WATCH_MAX_MS}; meanwhile the
+ * snapshot keeps reporting the run with `recorded: false`.
+ *
+ * Restart: runs a previous daemon left live are adopted from disk. Queued
+ * runs of managed-host agents stay queued; a remote run that was executing
+ * under a lease is re-adopted with its lease and last accepted event
+ * sequence, so the Host can carry on; every other one is `failed` with
+ * "daemon restarted" and offered for {@link SessionAgentOrchestrator.retry}.
  */
 
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -29,11 +45,13 @@ import { SessionService } from '@qwen-code/qwen-code-core/services/sessionServic
 import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
   isAgentAddressable,
+  maxConcurrentRunsFor,
   readWorkspaceAgents,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import type { WorkspaceAgent } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
 import {
   AGENT_INPUT_CHAR_BUDGET,
+  AGENT_MESSAGE_SUBTYPE,
   HOST_PROTOCOL_VERSION,
   type AgentAdapter,
   type AgentAdapterEvent,
@@ -87,7 +105,10 @@ import {
   getAdapter as defaultGetAdapter,
   type AgentAdapterContext,
 } from './adapters/index.js';
-import type { QwenAcpAdapterBridge } from './adapters/qwen-acp.js';
+import type {
+  QwenAcpAdapterBridge,
+  QwenSessionSendBinding,
+} from './adapters/qwen-acp.js';
 import {
   getSessionAgentEventHub,
   type SessionAgentEventHub,
@@ -119,6 +140,15 @@ const CLIENT_MESSAGE_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const MAX_MENTION_TEXT_CHARS = 100_000;
 /** How long a deferred post is carried before it is assumed recorded. */
 const PENDING_POST_TTL_MS = 60 * 60_000;
+/** First re-check of a deferred / failed `agent_message` record write. */
+export const RECORD_WATCH_INITIAL_MS = 1_000;
+const RECORD_WATCH_MAX_INTERVAL_MS = 15_000;
+/** How long a pending record is watched before the watcher gives up. */
+export const RECORD_WATCH_MAX_MS = PENDING_POST_TTL_MS;
+/** Terminal runs the snapshot still reports (record pending, or retryable). */
+const MAX_SETTLED_RUNS = 200;
+/** How long a Host is told "cancelled" for a run stopped while it ran it. */
+const CANCELLED_LEASE_TTL_MS = 10 * 60_000;
 
 /**
  * Writes durable records through the ACP child. A record is deferred (and
@@ -132,6 +162,18 @@ export type SessionAgentRecordWriter = Pick<
 
 export type SessionAgentBridge = QwenAcpAdapterBridge &
   SessionAgentRecordWriter;
+
+type RecordRequest = Parameters<
+  SessionAgentRecordWriter['appendExternalRecord']
+>[1];
+
+/** A linked agent definition, as far as a session turn needs it. */
+export interface SessionAgentDefinition {
+  systemPrompt?: string;
+  model?: string;
+  /** Set when the definition names an external executor (refused). */
+  executor?: unknown;
+}
 
 /** A refusal the route maps to an HTTP status. */
 export class SessionAgentError extends Error {
@@ -170,9 +212,17 @@ export interface SessionAgentMentionResult {
   runs: SessionAgentRunSummary[];
 }
 
+/**
+ * Answer to a Host's lease renewal, event batch or result. A failure means
+ * the Host must stop the turn; `reason: 'cancelled'` (with `cancelled:
+ * true`) means the person stopped the run here: abort it and post no
+ * result. Host routes map it to `HostLeaseStatus.cancelled` (heartbeat) and
+ * to 409 `{error: 'cancelled', cancelled: true}` (events, result).
+ */
 export type HostAck =
   | { ok: true; duplicate?: boolean; leaseExpiresAt?: number }
-  | { ok: false; reason: 'unknown_run' | 'lease_mismatch' };
+  | { ok: false; reason: 'unknown_run' | 'lease_mismatch' }
+  | { ok: false; reason: 'cancelled'; cancelled: true };
 
 export interface SessionAgentOrchestratorOptions {
   workspaceCwd: string;
@@ -192,12 +242,20 @@ export interface SessionAgentOrchestratorOptions {
   now?: () => number;
   stallTimeoutMs?: number;
   leaseMs?: number;
+  /** First re-check delay of a pending record (doubles, capped at 15s). */
+  recordWatchMs?: number;
+  /** Loads a linked agent definition (`WorkspaceAgent.agentType`) by name. */
+  loadDefinition?: (
+    workspaceCwd: string,
+    name: string,
+  ) => Promise<SessionAgentDefinition | null>;
   /**
-   * The loopback URL of this daemon's per-run `session_send` endpoint
-   * (`POST .../sessions/:sessionId/runs/:runId/send`). Undefined (or not
+   * The loopback URL of this daemon's `session_send` endpoint for one
+   * (chat session, agent) binding
+   * (`POST .../sessions/:sessionId/agents/:agentId/send`). Undefined (or not
    * loopback) means local turns are not offered the `session_send` tool.
    */
-  sessionSendUrl?: (sessionId: string, runId: string) => string | undefined;
+  sessionSendUrl?: (sessionId: string, agentId: string) => string | undefined;
   /** Set false in tests to drive sweeps by hand. */
   startTimers?: boolean;
 }
@@ -217,6 +275,8 @@ interface LiveRun {
   sessionId: string;
   run: SessionAgentRun;
   author: SessionAgentAuthor;
+  /** The agent's `maxConcurrentRuns`, as last read from the roster. */
+  maxConcurrent: number;
   frame: SessionAgentRunFrame;
   steps: Map<string, SessionAgentStep>;
   controller?: AbortController;
@@ -228,19 +288,36 @@ interface LiveRun {
   nativeSessionId?: string;
   totalTokens?: number;
   sendCount: number;
-  /**
-   * Bearer token of this run's `session_send` endpoint (32 random bytes,
-   * hex). Lives only in memory and only while the run is live.
-   */
-  sendToken?: string;
   /** Serializes `session_send` handling so records keep their order. */
   sendChain: Promise<void>;
+  /** Lease, attempt and last sequence live on `run.lease` (persisted). */
   remote?: {
     hostId: string;
     program: SessionAgentProgram;
-    lastSequence: number;
     decisions: HostPermissionDecision[];
   };
+}
+
+/**
+ * A terminal run the snapshot still reports: its record is pending (watched
+ * until it lands), or it was interrupted by a restart and can be retried.
+ */
+interface SettledRun {
+  sessionId: string;
+  frame: SessionAgentRunFrame;
+  /** The record request being re-sent; absent for a retryable run. */
+  request?: RecordRequest;
+  /** `error` to show once the record lands (a write error is cleared). */
+  recordedError?: string;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+interface CancelledLease {
+  sessionId: string;
+  hostId: string;
+  leaseId: string;
+  attempt: number;
+  at: number;
 }
 
 /**
@@ -300,6 +377,8 @@ interface FinishOutcome {
   error?: string;
   nativeSessionId?: string;
   totalTokens?: number;
+  /** The program refused the resume and used a fresh native session. */
+  resumeRejected?: boolean;
 }
 
 /**
@@ -388,6 +467,64 @@ function chainLimitError(limit: number, names: string[]): string {
     .join(', ')}.`;
 }
 
+/** Reads a definition the way the daemon's agent-definition routes do. */
+async function defaultLoadDefinition(
+  workspaceCwd: string,
+  name: string,
+): Promise<SessionAgentDefinition | null> {
+  // Lazy: the routes module is heavy and only an agent with `agentType`
+  // running outside this daemon's ACP child needs it.
+  const { createDaemonSubagentManager } = await import(
+    '../workspace-agents.js'
+  );
+  return createDaemonSubagentManager(workspaceCwd).loadSubagent(name);
+}
+
+/**
+ * Persona text for a turn the ACP child does not resolve itself (a Claude /
+ * Codex turn, or any remote turn): the linked definition's prompt followed
+ * by the agent's own instructions. Fails closed like `resolveAgentPersona`.
+ * TODO(multi-agent): model-facing text — needs eval before release. For a
+ * remote qwen turn the Host wraps all of this under "configured with these
+ * instructions", after the identity contract, while a local qwen turn puts
+ * the definition prompt before it.
+ */
+export async function resolveTurnPersona(
+  agent: WorkspaceAgent,
+  program: SessionAgentProgram,
+  loadDefinition: (name: string) => Promise<SessionAgentDefinition | null>,
+): Promise<{ instructions?: string; model?: string }> {
+  let definitionPrompt: string | undefined;
+  let definitionModel: string | undefined;
+  if (agent.agentType) {
+    const loaded = await loadDefinition(agent.agentType);
+    if (!loaded) {
+      throw new Error(`Agent definition "${agent.agentType}" is unavailable.`);
+    }
+    if (loaded.executor !== undefined) {
+      throw new Error(
+        `Agent definition "${agent.agentType}" declares an external executor, which a workspace Agent cannot use. Set execution.mode to "managed-host" on the Agent instead, or use a definition without an executor block.`,
+      );
+    }
+    definitionPrompt = loaded.systemPrompt?.trim() || undefined;
+    definitionModel = loaded.model?.trim() || undefined;
+  }
+  const instructions = [definitionPrompt, agent.instructions?.trim()]
+    .filter(Boolean)
+    .join('\n\n');
+  // A definition's model names a Qwen model; Claude / Codex keep their own
+  // default unless the agent record names one.
+  const model =
+    agent.model ??
+    (program === 'qwen' && definitionModel && definitionModel !== 'inherit'
+      ? definitionModel
+      : undefined);
+  return {
+    ...(instructions ? { instructions } : {}),
+    ...(model ? { model } : {}),
+  };
+}
+
 export class SessionAgentOrchestrator {
   readonly workspaceCwd: string;
   readonly bridge: SessionAgentBridge;
@@ -408,13 +545,31 @@ export class SessionAgentOrchestrator {
   private readonly leaseMs: number;
   private readonly sessionSendUrl?: (
     sessionId: string,
-    runId: string,
+    agentId: string,
   ) => string | undefined;
+  private readonly recordWatchMs: number;
+  private readonly loadDefinition: (
+    workspaceCwd: string,
+    name: string,
+  ) => Promise<SessionAgentDefinition | null>;
   private readonly sessions = new Map<string, Promise<SessionState>>();
   /** States adopted by startup recovery; `session()` hands these out. */
   private readonly startupStates = new Map<string, SessionState>();
+  /** Every adopted state, by session id (for cross-session scheduling). */
+  private readonly states = new Map<string, SessionState>();
   private readonly live = new Map<string, LiveRun>();
   private readonly pendingPosts = new Map<string, PendingPost>();
+  /** By run id; insertion order is age (oldest evicted first). */
+  private readonly settled = new Map<string, SettledRun>();
+  /** By run id: remote runs cancelled here while a Host executed them. */
+  private readonly cancelledLeases = new Map<string, CancelledLease>();
+  /**
+   * `session_send` bearer token per (chat session, agent) binding
+   * (32 random bytes, hex), in memory only. See {@link rotateSendToken}.
+   */
+  private readonly sendTokens = new Map<string, string>();
+  /** States with unsaved event sequences, flushed by the sweep. */
+  private readonly dirty = new Set<SessionState>();
   private readonly recovered: Promise<void>;
   private sweepTimer: ReturnType<typeof setInterval> | undefined;
   private stopped = false;
@@ -439,6 +594,8 @@ export class SessionAgentOrchestrator {
       options.stallTimeoutMs ?? SESSION_AGENT_STALL_TIMEOUT_MS;
     this.leaseMs = options.leaseMs ?? HOST_TURN_LEASE_MS;
     this.sessionSendUrl = options.sessionSendUrl;
+    this.recordWatchMs = options.recordWatchMs ?? RECORD_WATCH_INITIAL_MS;
+    this.loadDefinition = options.loadDefinition ?? defaultLoadDefinition;
     this.recovered = this.recoverOnStartup().catch((error) => {
       writeStderrLine(
         `qwen serve: session agent recovery failed in ${this.workspaceCwd}: ${getErrorMessage(error)}`,
@@ -555,7 +712,7 @@ export class SessionAgentOrchestrator {
     // failed save is logged (by persist) rather than reported as a refusal;
     // a local run re-saves before it starts and fails there if it cannot.
     await this.persist(state).catch(() => {});
-    for (const agent of targets.agents) this.pump(state, agent.id);
+    for (const agent of targets.agents) this.pumpAgent(agent.id);
     return {
       recordId: record.recordId,
       ...(record.deferred ? { deferred: true } : {}),
@@ -563,13 +720,101 @@ export class SessionAgentOrchestrator {
     };
   }
 
-  /** Cancels one run (queued or executing). False when it is not live. */
+  /**
+   * Cancels one run (queued or executing), or dismisses a `retryable` one
+   * (its final frame then has neither `recorded` nor `retryable`). False
+   * when it is neither: unknown, finished, or finished with its record still
+   * pending.
+   */
   async cancel(sessionId: string, runId: string): Promise<boolean> {
     const live = this.live.get(runId);
-    if (!live || live.sessionId !== sessionId) return false;
+    if (!live || live.sessionId !== sessionId) {
+      const settled = this.settled.get(runId);
+      if (settled?.sessionId !== sessionId || !settled.frame.retryable) {
+        return false;
+      }
+      this.dropSettled(runId, {});
+      return true;
+    }
     const state = await this.session(sessionId);
     await this.cancelLive(state, live);
     return true;
+  }
+
+  /**
+   * Runs a `failed` or `offline` run again (typically one a daemon restart
+   * interrupted): queues a NEW run with the same triggers and chain depth,
+   * `retryOf: runId`, and, when the old run is still in the snapshot
+   * (retryable, or its record pending), publishes its final frame with
+   * `retriedAsRunId`; a run whose record already landed gets no frame. Refuses (SessionAgentError) when the run is unknown
+   * (404 `run_not_found`), not failed/offline (409 `run_not_retryable`),
+   * already retried (409 `run_already_retried`), or its agent can no longer
+   * take work (409 `agent_unavailable`).
+   */
+  async retry(
+    sessionId: string,
+    runId: string,
+  ): Promise<SessionAgentRunSummary> {
+    this.assertRunning();
+    if (!isValidSessionAgentsSessionId(sessionId)) {
+      throw new SessionAgentError(
+        400,
+        'invalid_session_id',
+        'Invalid session id.',
+      );
+    }
+    const state = await this.session(sessionId);
+    const run = state.file.runs.find((candidate) => candidate.id === runId);
+    if (!run) {
+      throw new SessionAgentError(404, 'run_not_found', 'No such run.');
+    }
+    if (run.status !== 'failed' && run.status !== 'offline') {
+      throw new SessionAgentError(
+        409,
+        'run_not_retryable',
+        'Only a failed or offline run can be retried.',
+      );
+    }
+    const roster = await this.readAgents(this.workspaceCwd);
+    const agent = roster.find((candidate) => candidate.id === run.agentId);
+    if (!agent || !isAgentAddressable(agent)) {
+      throw new SessionAgentError(
+        409,
+        'agent_unavailable',
+        'This agent is disabled or no longer exists.',
+      );
+    }
+    // After the roster read, which another retry call may have raced.
+    if (state.file.runs.some((candidate) => candidate.retryOf === runId)) {
+      throw new SessionAgentError(
+        409,
+        'run_already_retried',
+        'This run was already retried.',
+      );
+    }
+    // A new run id: the record key is `agent:<runId>`, and the old run may
+    // already own one, which would make the retry's reply a silent no-op.
+    let summary: SessionAgentRunSummary | undefined;
+    for (const trigger of run.triggerRecordIds) {
+      summary = this.enqueue(state, agent, trigger, run.chainDepth);
+    }
+    const retried = summary && this.live.get(summary.runId)?.run;
+    if (!retried) {
+      throw new SessionAgentError(
+        409,
+        'run_not_retryable',
+        'This run has no trigger to answer.',
+      );
+    }
+    retried.retryOf ??= runId;
+    this.dropSettled(runId, { retriedAsRunId: retried.id });
+    await this.persist(state).catch(() => {});
+    this.pumpAgent(agent.id);
+    return {
+      runId: retried.id,
+      agentId: agent.id,
+      status: retried.status,
+    };
   }
 
   /** "Stop all agents" for one chat session. Returns the runs it stopped. */
@@ -618,18 +863,23 @@ export class SessionAgentOrchestrator {
       throw new SessionAgentError(400, 'invalid_option', 'Unknown optionId.');
     }
     if (live.remote) {
-      if (
-        !live.remote.decisions.some(
-          (decision) => decision.requestId === requestId,
-        )
-      ) {
-        live.remote.decisions.push({
-          runId,
-          attempt: live.run.attempts,
-          requestId,
-          optionId,
-        });
-      }
+      // A second answer replaces the first (the Host applies the newest
+      // `decisionId` it has not applied yet). The frame wakes the Host's
+      // decisions long-poll, which follows run frames of its runtime.
+      const decision: HostPermissionDecision = {
+        runId,
+        attempt: live.run.attempts,
+        requestId,
+        optionId,
+        decisionId: randomUUID(),
+      };
+      live.remote.decisions = [
+        ...live.remote.decisions.filter(
+          (existing) => existing.requestId !== requestId,
+        ),
+        decision,
+      ];
+      this.publish(live);
       return;
     }
     const pending = live.pendingPermissions.get(requestId);
@@ -646,38 +896,29 @@ export class SessionAgentOrchestrator {
   }
 
   /**
-   * An agent of a live local run posted `text` with its `session_send` tool
-   * (the MCP child calls the run's endpoint with the run's token). Resolves
-   * once the post is recorded and routed; rejects with a SessionAgentError.
+   * An agent posted `text` with its `session_send` tool: the MCP child calls
+   * the (chat session, agent) endpoint with that binding's token. The post is
+   * attributed to the agent's CURRENT executing local run in that session.
+   * Resolves once the post is recorded and routed; rejects with a
+   * SessionAgentError: 401 `invalid_session_send_token` (unknown binding or
+   * wrong token), 400 `invalid_text`, 409 `run_not_running` (no run of that
+   * agent is executing in the session right now).
    */
   async postFromAgent(
     sessionId: string,
-    runId: string,
+    agentId: string,
     token: string,
     text: unknown,
   ): Promise<void> {
     this.assertRunning();
-    const live = this.live.get(runId);
-    // One answer for "no such run" and "wrong token": the route is not
+    const expected = this.sendTokens.get(this.sendKey(sessionId, agentId));
+    // One answer for "no such binding" and "wrong token": the route is not
     // behind the daemon bearer.
-    if (
-      !live ||
-      live.sessionId !== sessionId ||
-      live.remote ||
-      !live.sendToken ||
-      !tokensMatch(live.sendToken, token)
-    ) {
+    if (!expected || !tokensMatch(expected, token)) {
       throw new SessionAgentError(
         401,
         'invalid_session_send_token',
-        'Unknown run or invalid session_send token.',
-      );
-    }
-    if (!isExecutingRun(live.run)) {
-      throw new SessionAgentError(
-        409,
-        'run_not_running',
-        'The run is not running.',
+        'Unknown agent binding or invalid session_send token.',
       );
     }
     if (
@@ -686,6 +927,20 @@ export class SessionAgentOrchestrator {
       text.length > MAX_MENTION_TEXT_CHARS
     ) {
       throw new SessionAgentError(400, 'invalid_text', 'text is required.');
+    }
+    const live = [...this.live.values()].find(
+      (candidate) =>
+        candidate.sessionId === sessionId &&
+        candidate.run.agentId === agentId &&
+        !candidate.remote &&
+        isExecutingRun(candidate.run),
+    );
+    if (!live) {
+      throw new SessionAgentError(
+        409,
+        'run_not_running',
+        'The agent has no running turn in this session.',
+      );
     }
     const state = await this.session(sessionId);
     live.frame.activityAt = this.now();
@@ -702,12 +957,14 @@ export class SessionAgentOrchestrator {
       );
     }
     await this.recovered;
-    const state = this.sessions.has(sessionId)
-      ? await this.session(sessionId)
-      : undefined;
-    return [...this.live.values()]
+    const frames = [...this.live.values()]
       .filter((live) => live.sessionId === sessionId)
-      .map((live) => this.buildFrame(live, state));
+      .map((live) => this.buildFrame(live));
+    // Finished runs whose record is still pending, and retryable ones.
+    for (const settled of this.settled.values()) {
+      if (settled.sessionId === sessionId) frames.push({ ...settled.frame });
+    }
+    return frames;
   }
 
   /**
@@ -727,17 +984,44 @@ export class SessionAgentOrchestrator {
     }));
   }
 
-  /** Stops every run in every session and the timers. Idempotent. */
+  /**
+   * Resolves once startup recovery has adopted the runs a previous daemon
+   * left. Host routes await it before `renewLease` / `acceptHostEvents` /
+   * `completeHostTurn`, so a Host whose run is being re-adopted is not
+   * told `unknown_run` in that window.
+   */
+  ready(): Promise<void> {
+    return this.recovered;
+  }
+
+  /**
+   * Stops this daemon's local runs (queued and executing) and the timers.
+   * Remote runs are left on disk as they are (queued, or executing under
+   * their lease with the last accepted sequence), so the next orchestrator
+   * for this workspace (after a restart, or a replaced bridge) re-adopts
+   * them and their Host carries on. Idempotent.
+   */
   async dispose(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
     if (this.sweepTimer) clearInterval(this.sweepTimer);
-    const sessionIds = new Set(
-      [...this.live.values()].map((live) => live.sessionId),
-    );
-    for (const sessionId of sessionIds) {
-      await this.stopAll(sessionId).catch(() => []);
+    for (const settled of this.settled.values()) {
+      if (settled.timer) clearTimeout(settled.timer);
     }
+    const local = [...this.live.values()].filter(
+      (live) =>
+        !live.remote && live.author.runtimeId === LOCAL_SESSION_AGENT_RUNTIME_ID,
+    );
+    // Queued first, so finishing an executing run cannot start one of them.
+    local.sort(
+      (a, b) => Number(isExecutingRun(a.run)) - Number(isExecutingRun(b.run)),
+    );
+    for (const live of local) {
+      const state = this.states.get(live.sessionId);
+      if (state) await this.cancelLive(state, live).catch(() => {});
+    }
+    for (const state of this.dirty) await this.persist(state).catch(() => {});
+    this.dirty.clear();
   }
 
   /* ---------------------------------------------------------------------- */
@@ -756,7 +1040,11 @@ export class SessionAgentOrchestrator {
     if (this.stopped) return undefined;
     await this.recovered;
     const roster = await this.readAgents(this.workspaceCwd);
-    for (const live of [...this.live.values()]) {
+    // Oldest first across chat sessions, like local runs.
+    const queued = [...this.live.values()]
+      .filter((live) => live.run.status === 'queued')
+      .sort((a, b) => a.run.createdAt - b.run.createdAt);
+    for (const live of queued) {
       const { run } = live;
       if (run.status !== 'queued') continue;
       const agent = roster.find((candidate) => candidate.id === run.agentId);
@@ -768,11 +1056,15 @@ export class SessionAgentOrchestrator {
       ) {
         continue;
       }
+      live.maxConcurrent = maxConcurrentRunsFor(agent);
+      if (this.executingCount(agent.id) >= live.maxConcurrent) continue;
       const program = programForAgent(agent, programs);
       if (!program) continue;
       const state = await this.session(live.sessionId);
       if (run.status !== 'queued') continue;
       if (nextRunnable(state.file.runs, agent.id)?.id !== run.id) continue;
+      // Re-checked after the await: a concurrent pickup may have started one.
+      if (this.executingCount(agent.id) >= live.maxConcurrent) continue;
 
       // Claim synchronously: a concurrent pickup sees `running` and skips.
       const now = this.now();
@@ -780,17 +1072,22 @@ export class SessionAgentOrchestrator {
       run.attempts += 1;
       run.startedAt = now;
       delete run.error;
-      const lease = {
+      const lease: NonNullable<SessionAgentRun['lease']> = {
         hostId,
         leaseId: randomUUID(),
         attempt: run.attempts,
         expiresAt: now + this.leaseMs,
+        lastSequence: 0,
       };
       run.lease = lease;
       live.author = authorFor(agent, hostId, program);
-      live.remote = { hostId, program, lastSequence: 0, decisions: [] };
+      live.remote = { hostId, program, decisions: [] };
       live.frame.activityAt = now;
+      this.republishQueued(agent.id);
       try {
+        const persona = await resolveTurnPersona(agent, program, (name) =>
+          this.loadDefinition(this.workspaceCwd, name),
+        );
         const binding = state.file.bindings[agent.id] ?? { agentId: agent.id };
         const records = await this.loadRecords(live.sessionId);
         const input = buildAgentInput({
@@ -809,7 +1106,7 @@ export class SessionAgentOrchestrator {
         const nativeSessionId =
           binding.runtimeId === hostId ? binding.nativeSessionId : undefined;
         await this.persist(state);
-        this.publish(live, state);
+        this.publish(live);
         return {
           protocol: HOST_PROTOCOL_VERSION,
           sessionId: live.sessionId,
@@ -819,14 +1116,9 @@ export class SessionAgentOrchestrator {
           // Renewals before this returns are not reflected; fine for a lease
           // this fresh.
           leaseExpiresAt: lease.expiresAt,
-          // TODO(multi-agent): a linked definition (`agentType`) is not
-          // resolved for remote turns; only the record's own instructions
-          // and model travel.
-          agent: {
-            ...live.author,
-            ...(agent.instructions ? { instructions: agent.instructions } : {}),
-            ...(agent.model ? { model: agent.model } : {}),
-          },
+          // The linked definition (`agentType`) is resolved here: the Host
+          // does not have this workspace's definitions.
+          agent: { ...live.author, ...persona },
           program,
           prompt: input.prompt,
           ...(nativeSessionId ? { nativeSessionId } : {}),
@@ -842,7 +1134,13 @@ export class SessionAgentOrchestrator {
     return undefined;
   }
 
-  /** Extends a Host's lease on a run it is executing. */
+  /**
+   * Extends a Host's lease on a run it is executing. Returns `{ok: true,
+   * leaseExpiresAt}`; `{ok: false, reason: 'cancelled', cancelled: true}`
+   * when the run was cancelled here (the Host aborts the turn and posts no
+   * result); `{ok: false, reason: 'unknown_run' | 'lease_mismatch'}` when
+   * the lease is stale (the Host drops the turn).
+   */
   renewLease(
     hostId: string,
     runId: string,
@@ -856,7 +1154,57 @@ export class SessionAgentOrchestrator {
     return { ok: true, leaseExpiresAt: lease.expiresAt };
   }
 
-  /** Folds an ordered event batch from a Host, like a local turn's events. */
+  /**
+   * Gives back a pickup the Host never received (its pickup response was
+   * lost): the run is queued again for any Host, and the next claim gets
+   * attempt + 1. Fenced like {@link renewLease}; returns `{ok: true}` or
+   * the same failures.
+   */
+  releaseHostAssignment(
+    hostId: string,
+    assignment: {
+      sessionId: string;
+      runId: string;
+      attempt: number;
+      leaseId: string;
+    },
+  ): HostAck {
+    const fenced = this.fence(
+      hostId,
+      assignment.runId,
+      assignment.attempt,
+      assignment.leaseId,
+      assignment.sessionId,
+    );
+    if (!fenced.ok) return fenced;
+    const { live } = fenced;
+    live.run.status = 'queued';
+    delete live.run.lease;
+    delete live.run.startedAt;
+    delete live.remote;
+    live.author = { ...live.author };
+    delete live.author.runtimeId;
+    // The Host never ran it: nothing it streamed belongs to the next attempt.
+    delete live.frame.permission;
+    delete live.frame.outputText;
+    delete live.frame.thoughtText;
+    delete live.frame.steps;
+    live.steps.clear();
+    const state = this.states.get(live.sessionId);
+    if (state) void this.persist(state).catch(() => {});
+    // Wakes other Hosts' pickups and refreshes queue positions.
+    this.publish(live);
+    this.republishQueued(live.run.agentId);
+    return { ok: true };
+  }
+
+  /**
+   * Folds an ordered event batch from a Host, like a local turn's events.
+   * Same returns as {@link renewLease}, plus `{ok: true, duplicate: true}`
+   * for a batch at or below the last accepted sequence. The sequence is
+   * persisted with the run (flushed by the sweep), so fencing survives a
+   * daemon restart.
+   */
   acceptHostEvents(hostId: string, batch: HostTurnEventBatch): HostAck {
     const fenced = this.fence(
       hostId,
@@ -867,23 +1215,27 @@ export class SessionAgentOrchestrator {
     );
     if (!fenced.ok) return fenced;
     const { live } = fenced;
-    const remote = live.remote!;
-    if (batch.sequence <= remote.lastSequence) {
+    const lease = live.run.lease!;
+    if (batch.sequence <= (lease.lastSequence ?? 0)) {
       return { ok: true, duplicate: true };
     }
     // TODO(multi-agent): a gap in `sequence` is accepted as-is; a Host that
     // dropped a batch loses those deltas from the live frame only (the final
-    // text comes with the result).
-    remote.lastSequence = batch.sequence;
-    const lease = live.run.lease!;
+    // text comes with the result). Needs a real Host to decide on resend.
+    lease.lastSequence = batch.sequence;
     lease.expiresAt = this.now() + this.leaseMs;
-    void this.session(live.sessionId).then((state) => {
+    const state = this.states.get(live.sessionId);
+    if (state) {
+      this.dirty.add(state);
       for (const event of batch.events) this.applyEvent(state, live, event);
-    });
+    }
     return { ok: true, leaseExpiresAt: lease.expiresAt };
   }
 
-  /** A Host finished a turn. */
+  /**
+   * A Host finished a turn. Returns `{ok: true}`, or a failure as in
+   * {@link renewLease} (a cancelled run's result is dropped).
+   */
   async completeHostTurn(
     hostId: string,
     result: HostTurnResult,
@@ -908,6 +1260,7 @@ export class SessionAgentOrchestrator {
       ...(result.result.totalTokens !== undefined
         ? { totalTokens: result.result.totalTokens }
         : {}),
+      ...(result.result.resumeRejected ? { resumeRejected: true } : {}),
     });
     return { ok: true };
   }
@@ -932,6 +1285,13 @@ export class SessionAgentOrchestrator {
    */
   sweep(): void {
     const now = this.now();
+    for (const state of this.dirty) void this.persist(state).catch(() => {});
+    this.dirty.clear();
+    for (const [runId, cancelled] of [...this.cancelledLeases]) {
+      if (now - cancelled.at > CANCELLED_LEASE_TTL_MS) {
+        this.cancelledLeases.delete(runId);
+      }
+    }
     for (const live of [...this.live.values()]) {
       if (!isExecutingRun(live.run)) continue;
       if (live.remote) {
@@ -994,11 +1354,15 @@ export class SessionAgentOrchestrator {
 
   /**
    * Takes a file read from disk into memory. Live runs on disk at this point
-   * belong to a previous daemon (one daemon per workspace), so they are
-   * closed: local ones `failed` with "daemon restarted", leased remote ones
-   * `offline`. Queued runs of managed-host agents stay queued for pickup when
-   * `roster` is given; every other queued run is failed too.
-   * TODO(multi-agent): offer "retry" on runs failed by a restart.
+   * belong to a previous daemon (one daemon per workspace). With `roster`
+   * (startup recovery): queued runs of managed-host agents stay queued for
+   * pickup, and a remote run executing under a lease (`running`) is
+   * re-adopted with that lease (renewed for one period) and its last
+   * accepted sequence. Every other live run is `failed` with "daemon
+   * restarted" and offered for {@link retry} (`retryable` in the snapshot);
+   * a leased one is also fenced as cancelled, so its Host aborts. A remote
+   * run that was `awaiting_approval` is in that last group: the prompt it
+   * waits on was in memory only.
    */
   private adopt(
     file: SessionAgentsFile,
@@ -1009,25 +1373,66 @@ export class SessionAgentOrchestrator {
       file,
       writeChain: Promise.resolve(),
     };
+    this.states.set(file.sessionId, state);
     const now = this.now();
     let changed = false;
     for (const run of file.runs) {
-      if (isTerminalSessionAgentRunStatus(run.status)) continue;
+      if (isTerminalSessionAgentRunStatus(run.status)) {
+        // A run cancelled while a Host ran it keeps its lease (finishRun).
+        if (
+          run.status === 'cancelled' &&
+          run.lease &&
+          now - (run.endedAt ?? run.createdAt) <= CANCELLED_LEASE_TTL_MS
+        ) {
+          this.rememberCancelledLease(file.sessionId, run);
+        }
+        continue;
+      }
       if (this.live.has(run.id)) continue;
       const agent = roster?.find((candidate) => candidate.id === run.agentId);
-      if (
-        run.status === 'queued' &&
-        agent &&
-        agent.execution?.mode === 'managed-host'
-      ) {
+      const remoteAgent =
+        agent !== undefined && agent.execution?.mode === 'managed-host';
+      if (run.status === 'queued' && remoteAgent) {
         this.live.set(run.id, this.newLive(file.sessionId, run, agent));
         continue;
       }
-      run.status = run.lease ? 'offline' : 'failed';
+      if (run.status === 'running' && run.lease && remoteAgent) {
+        const live = this.newLive(file.sessionId, run, agent);
+        const program = programForAgent(agent) ?? 'qwen';
+        live.author = authorFor(agent, run.lease.hostId, program);
+        live.remote = { hostId: run.lease.hostId, program, decisions: [] };
+        run.lease.expiresAt = now + this.leaseMs;
+        this.live.set(run.id, live);
+        changed = true;
+        continue;
+      }
+      if (run.lease) this.rememberCancelledLease(file.sessionId, run);
+      run.status = 'failed';
       run.error = SESSION_AGENT_RESTARTED_ERROR;
       run.endedAt = now;
       delete run.lease;
       changed = true;
+      const author: SessionAgentAuthor = agent
+        ? authorFor(
+            agent,
+            remoteAgent ? undefined : LOCAL_SESSION_AGENT_RUNTIME_ID,
+            programForAgent(agent),
+          )
+        : { agentId: run.agentId, name: run.agentId };
+      this.addSettled(run.id, {
+        sessionId: file.sessionId,
+        frame: {
+          type: 'run',
+          sessionId: file.sessionId,
+          runId: run.id,
+          author,
+          status: 'failed',
+          error: SESSION_AGENT_RESTARTED_ERROR,
+          activityAt: now,
+          recorded: false,
+          retryable: true,
+        },
+      });
     }
     if (changed) void this.persist(state).catch(() => {});
     return state;
@@ -1047,8 +1452,14 @@ export class SessionAgentOrchestrator {
         );
         continue;
       }
+      // Nothing to adopt: no live run, and no remote run cancelled while
+      // its Host ran it (whose Host must still be told).
       if (
-        file.runs.every((run) => isTerminalSessionAgentRunStatus(run.status))
+        file.runs.every(
+          (run) =>
+            isTerminalSessionAgentRunStatus(run.status) &&
+            !(run.status === 'cancelled' && run.lease),
+        )
       ) {
         continue;
       }
@@ -1066,6 +1477,7 @@ export class SessionAgentOrchestrator {
     run: SessionAgentRun,
     agent: WorkspaceAgent,
   ): LiveRun {
+    const maxConcurrent = maxConcurrentRunsFor(agent);
     const author = authorFor(
       agent,
       agent.execution?.mode === 'managed-host'
@@ -1077,6 +1489,7 @@ export class SessionAgentOrchestrator {
       sessionId,
       run,
       author,
+      maxConcurrent,
       frame: {
         type: 'run',
         sessionId,
@@ -1111,7 +1524,7 @@ export class SessionAgentOrchestrator {
       live = this.newLive(state.sessionId, outcome.run, agent);
       this.live.set(outcome.run.id, live);
     }
-    this.publish(live, state);
+    this.publish(live);
     return {
       runId: outcome.run.id,
       agentId: agent.id,
@@ -1119,20 +1532,53 @@ export class SessionAgentOrchestrator {
     };
   }
 
-  /** Starts the agent's next queued run if it is local and idle. */
-  private pump(state: SessionState, agentId: string): void {
+  /** Executing runs of `agentId` in every chat session, local or remote. */
+  private executingCount(agentId: string): number {
+    let count = 0;
+    for (const live of this.live.values()) {
+      if (live.run.agentId === agentId && isExecutingRun(live.run)) count += 1;
+    }
+    return count;
+  }
+
+  /**
+   * Starts queued LOCAL runs of `agentId`, oldest first across chat
+   * sessions, while it is under its `maxConcurrentRuns` and each run is
+   * next in its own session. Remote runs wait for a Host's pickup. Then
+   * republishes the agent's queued frames (their positions moved).
+   */
+  private pumpAgent(agentId: string): void {
     if (this.stopped) return;
-    const run = nextRunnable(state.file.runs, agentId);
-    if (!run) return;
-    const live = this.live.get(run.id);
-    if (!live) return;
-    // Remote runs wait for a Host's pickup.
-    if (live.author.runtimeId !== LOCAL_SESSION_AGENT_RUNTIME_ID) return;
-    void this.runLocal(state, live).catch((error) => {
-      writeStderrLine(
-        `qwen serve: session agent run ${run.id} crashed: ${getErrorMessage(error)}`,
-      );
-    });
+    const queued = [...this.live.values()]
+      .filter(
+        (live) =>
+          live.run.agentId === agentId &&
+          live.run.status === 'queued' &&
+          live.author.runtimeId === LOCAL_SESSION_AGENT_RUNTIME_ID,
+      )
+      .sort((a, b) => a.run.createdAt - b.run.createdAt);
+    for (const live of queued) {
+      if (this.executingCount(agentId) >= live.maxConcurrent) break;
+      const state = this.states.get(live.sessionId);
+      if (!state) continue;
+      if (nextRunnable(state.file.runs, agentId)?.id !== live.run.id) continue;
+      // Claims the run synchronously (status `running`) before its first
+      // await, so the count above sees it on the next iteration.
+      void this.runLocal(state, live).catch((error) => {
+        writeStderrLine(
+          `qwen serve: session agent run ${live.run.id} crashed: ${getErrorMessage(error)}`,
+        );
+      });
+    }
+    this.republishQueued(agentId);
+  }
+
+  private republishQueued(agentId: string): void {
+    for (const live of this.live.values()) {
+      if (live.run.agentId === agentId && live.run.status === 'queued') {
+        this.publish(live);
+      }
+    }
   }
 
   private async runLocal(state: SessionState, live: LiveRun): Promise<void> {
@@ -1145,7 +1591,7 @@ export class SessionAgentOrchestrator {
     const controller = new AbortController();
     live.controller = controller;
     live.frame.activityAt = this.now();
-    this.publish(live, state);
+    this.publish(live);
 
     let outcome: FinishOutcome;
     try {
@@ -1159,6 +1605,19 @@ export class SessionAgentOrchestrator {
       }
       const program = programForAgent(agent)!;
       live.author = authorFor(agent, LOCAL_SESSION_AGENT_RUNTIME_ID, program);
+      live.maxConcurrent = maxConcurrentRunsFor(agent);
+      // The qwen ACP child resolves its persona itself (from the roster).
+      const persona =
+        program === 'qwen'
+          ? {
+              ...(agent.instructions
+                ? { instructions: agent.instructions }
+                : {}),
+              ...(agent.model ? { model: agent.model } : {}),
+            }
+          : await resolveTurnPersona(agent, program, (name) =>
+              this.loadDefinition(this.workspaceCwd, name),
+            );
       const binding = state.file.bindings[agent.id] ?? { agentId: agent.id };
       const records = await this.loadRecords(state.sessionId);
       const input = buildAgentInput({
@@ -1196,25 +1655,29 @@ export class SessionAgentOrchestrator {
       };
       await this.persist(state);
       if (controller.signal.aborted) throw new Error('cancelled');
-      live.sendToken = randomBytes(32).toString('hex');
-      const sendUrl = this.sessionSendUrl?.(state.sessionId, run.id);
+      // A Claude / Codex process lives for one turn: its `session_send`
+      // server gets a fresh token now. The hidden qwen session outlives the
+      // turn, so the adapter rotates the token only when it (re)creates it.
+      const sessionSend: QwenSessionSendBinding = {
+        isCurrent: () => this.sendTokenIsCurrent(state.sessionId, agent.id),
+        rotate: () => this.rotateSendToken(state.sessionId, agent.id),
+      };
       const sessionSendServer =
-        sendUrl && isLoopbackUrl(sendUrl)
-          ? buildSessionSendServer(sendUrl, live.sendToken)
-          : undefined;
+        program === 'qwen'
+          ? undefined
+          : this.rotateSendToken(state.sessionId, agent.id);
       const adapter = this.adapterFor(program, {
         workspaceCwd: this.workspaceCwd,
         bridge: this.bridge,
         agentId: agent.id,
         permissionVoteContext: (requestId) => live.voterContexts.get(requestId),
+        sessionSend,
       });
       const result = await adapter.runTurn({
         prompt: input.prompt,
-        ...(agent.instructions ? { instructions: agent.instructions } : {}),
-        ...(agent.model ? { model: agent.model } : {}),
+        ...persona,
         ...(nativeSessionId ? { nativeSessionId } : {}),
         cwd: this.workspaceCwd,
-        // The qwen adapter cannot use it yet (see qwen-acp.ts).
         ...(sessionSendServer ? { sessionSendServer } : {}),
         signal: controller.signal,
         onEvent: (event) => this.applyEvent(state, live, event),
@@ -1230,10 +1693,8 @@ export class SessionAgentOrchestrator {
         ...(result.totalTokens !== undefined
           ? { totalTokens: result.totalTokens }
           : {}),
+        ...(result.resumeRejected ? { resumeRejected: true } : {}),
       };
-      // TODO(multi-agent): on `resumeRejected` the native session is new and
-      // has none of the earlier context; consider resetting the read cursor
-      // so the next turn gets a longer history.
     } catch (error) {
       outcome = {
         status: controller.signal.aborted ? 'cancelled' : 'failed',
@@ -1325,7 +1786,7 @@ export class SessionAgentOrchestrator {
         void exhaustive;
       }
     }
-    this.publish(live, state);
+    this.publish(live);
   }
 
   /**
@@ -1343,7 +1804,7 @@ export class SessionAgentOrchestrator {
     );
     live.sendChain = done.catch((error) => {
       live.frame.error = getErrorMessage(error);
-      this.publish(live, state);
+      this.publish(live);
     });
     return done;
   }
@@ -1401,7 +1862,7 @@ export class SessionAgentOrchestrator {
     );
     if (limitError) {
       live.frame.error = limitError;
-      this.publish(live, state);
+      this.publish(live);
     }
   }
 
@@ -1431,7 +1892,7 @@ export class SessionAgentOrchestrator {
     void this.persist(state)
       .catch(() => {})
       .then(() => {
-        for (const agent of agents) this.pump(state, agent.id);
+        for (const agent of agents) this.pumpAgent(agent.id);
       });
     return undefined;
   }
@@ -1440,20 +1901,21 @@ export class SessionAgentOrchestrator {
     const { run } = live;
     if (isTerminalSessionAgentRunStatus(run.status)) return;
     if (run.status === 'queued') {
-      // Never started: nothing to write into the transcript.
-      // TODO(multi-agent): the client drops a terminal frame with no record
-      // on its own; confirm with the web-shell side.
+      // Never started: nothing to write into the transcript, so the final
+      // frame carries no `recorded` (contract: the client drops the card).
       run.status = 'cancelled';
       run.endedAt = this.now();
       this.live.delete(run.id);
-      this.publish(live, state);
+      this.publish(live);
       this.hub.forgetRun(state.sessionId, run.id);
+      this.republishQueued(run.agentId);
       await this.persist(state).catch(() => {});
       return;
     }
     if (live.remote) {
-      // TODO(multi-agent): tell the Host to stop (today it learns from the
-      // lease mismatch on its next events / renew call).
+      // From here on the Host's renew / events / result calls answer
+      // `cancelled`: it aborts the turn and posts no result.
+      this.rememberCancelledLease(state.sessionId, run);
       await live.sendChain;
       await this.finishRun(state, live, {
         status: 'cancelled',
@@ -1484,7 +1946,6 @@ export class SessionAgentOrchestrator {
     // Mark first so a concurrent sweep / cancel cannot finish it twice.
     run.status = outcome.status;
     run.endedAt = this.now();
-    delete live.sendToken;
     const runtimeId = live.remote?.hostId ?? LOCAL_SESSION_AGENT_RUNTIME_ID;
     for (const pending of live.pendingPermissions.values()) {
       pending.reject(new Error('run ended'));
@@ -1540,33 +2001,46 @@ export class SessionAgentOrchestrator {
         ? { triggerRecordId: run.triggerRecordIds.at(-1) }
         : {}),
     };
+    // The trigger id follow-ups read this reply by (`pending:` while the
+    // record is not yet in the transcript).
     let recordId: string | undefined;
+    /** The record's uuid once it is in the transcript. */
+    let landedRecordId: string | undefined;
     const recordKey = `agent:${run.id}`;
+    const request: RecordRequest = {
+      kind: 'agent_message',
+      recordKey,
+      modelText: formatAgentMessageModelText(payload),
+      payload,
+    };
+    let watch = false;
     try {
-      const written = await this.appendRecord(state.sessionId, {
-        kind: 'agent_message',
-        recordKey,
-        modelText: formatAgentMessageModelText(payload),
-        payload,
-      });
+      const written = await this.appendRecord(state.sessionId, request);
       recordId = triggerIdFor(written, recordKey);
-      if (written.deferred && displayText.trim()) {
-        this.addPendingPost({
-          sessionId: state.sessionId,
-          id: recordId,
-          kind: 'agent_message',
-          speaker: `${live.author.name} (agent)`,
-          text: displayText,
-          authorAgentId: run.agentId,
-          runId: run.id,
-          createdAt: this.now(),
-        });
+      if (written.deferred || !written.recordId) {
+        watch = true;
+        if (displayText.trim()) {
+          this.addPendingPost({
+            sessionId: state.sessionId,
+            id: recordId,
+            kind: 'agent_message',
+            speaker: `${live.author.name} (agent)`,
+            text: displayText,
+            authorAgentId: run.agentId,
+            runId: run.id,
+            createdAt: this.now(),
+          });
+        }
+      } else {
+        landedRecordId = written.recordId;
       }
     } catch (writeError) {
-      // TODO(multi-agent): retry the record write; today the reply survives
-      // only in the run frame and the agent's native session.
-      error = `Could not record the reply: ${recordWriteError(writeError).message}`;
+      const refusal = recordWriteError(writeError);
+      error = `Could not record the reply: ${refusal.message}`;
       followUps = [];
+      // A managed session refuses every write; anything else is retried by
+      // the record watcher, which also reports when it lands.
+      watch = refusal.code !== 'managed_session_unsupported';
     }
 
     const binding = state.file.bindings[run.agentId] ?? {
@@ -1576,24 +2050,46 @@ export class SessionAgentOrchestrator {
       binding.nativeSessionId = nativeSessionId;
       binding.runtimeId = runtimeId;
     }
-    // Advance the cursor only when the agent answered: a failed or cancelled
-    // run's input is offered again next time.
-    if (outcome.status === 'completed' && live.lastRecordId) {
+    if (outcome.resumeRejected) {
+      // A fresh native session holds none of the earlier conversation: drop
+      // the cursor so the next prompt carries the history again (bounded by
+      // AGENT_INPUT_CHAR_BUDGET).
+      delete binding.readThroughRecordId;
+    } else if (outcome.status === 'completed' && live.lastRecordId) {
+      // Advance the cursor only when the agent answered: a failed or
+      // cancelled run's input is offered again next time.
       binding.readThroughRecordId = live.lastRecordId;
     }
     state.file.bindings[run.agentId] = binding;
     if (error) run.error = error;
     else delete run.error;
     if (totalTokens !== undefined) run.totalTokens = totalTokens;
-    delete run.lease;
+    // Kept on a remote run cancelled here, so a restarted daemon can still
+    // answer its Host `cancelled` (see adopt).
+    if (!(outcome.status === 'cancelled' && live.remote)) delete run.lease;
     state.file.runs = trimTerminalRuns(state.file.runs);
 
     live.frame.error = error;
     if (!error) delete live.frame.error;
     delete live.frame.permission;
-    this.publish(live, state);
+    if (landedRecordId) {
+      live.frame.recorded = true;
+      live.frame.recordId = landedRecordId;
+    } else if (watch) {
+      live.frame.recorded = false;
+    }
+    this.publish(live);
     this.hub.forgetRun(state.sessionId, run.id);
     this.live.delete(run.id);
+    if (watch) {
+      this.addSettled(run.id, {
+        sessionId: state.sessionId,
+        frame: this.buildFrame(live),
+        request,
+        ...(payload.error ? { recordedError: payload.error } : {}),
+      });
+      this.watchRecord(run.id);
+    }
 
     if (recordId && followUps.length > 0) {
       const depth = nextChainDepth({
@@ -1605,8 +2101,8 @@ export class SessionAgentOrchestrator {
       }
     }
     await this.persist(state).catch(() => {});
-    this.pump(state, run.agentId);
-    for (const agent of followUps) this.pump(state, agent.id);
+    this.pumpAgent(run.agentId);
+    for (const agent of followUps) this.pumpAgent(agent.id);
   }
 
   private addPendingPost(post: PendingPost): void {
@@ -1615,8 +2111,8 @@ export class SessionAgentOrchestrator {
 
   /**
    * Deferred posts another agent should see, dropping those that have since
-   * landed in `records` (matched by kind, text, author and run).
-   * TODO(multi-agent): match by recordKey once records carry it.
+   * landed in `records` (matched by kind, text, author and, for a reply, its
+   * run id; records do not carry their `recordKey`).
    */
   private pendingFor(
     sessionId: string,
@@ -1681,9 +2177,18 @@ export class SessionAgentOrchestrator {
     attempt: number,
     leaseId: string,
     sessionId?: string,
-  ):
-    | { ok: true; live: LiveRun }
-    | { ok: false; reason: 'unknown_run' | 'lease_mismatch' } {
+  ): { ok: true; live: LiveRun } | Extract<HostAck, { ok: false }> {
+    // Checked first: a cancel answers `cancelled` while it is finishing too.
+    const cancelled = this.cancelledLeases.get(runId);
+    if (
+      cancelled &&
+      cancelled.hostId === hostId &&
+      cancelled.leaseId === leaseId &&
+      cancelled.attempt === attempt &&
+      (sessionId === undefined || cancelled.sessionId === sessionId)
+    ) {
+      return { ok: false, reason: 'cancelled', cancelled: true };
+    }
     const live = this.live.get(runId);
     if (!live || (sessionId !== undefined && live.sessionId !== sessionId)) {
       return { ok: false, reason: 'unknown_run' };
@@ -1702,13 +2207,192 @@ export class SessionAgentOrchestrator {
     return { ok: true, live };
   }
 
-  private buildFrame(
-    live: LiveRun,
-    state: SessionState | undefined,
-  ): SessionAgentRunFrame {
-    const position = state
-      ? queuePosition(state.file.runs, live.run)
-      : undefined;
+  private rememberCancelledLease(
+    sessionId: string,
+    run: SessionAgentRun,
+  ): void {
+    if (!run.lease) return;
+    this.cancelledLeases.set(run.id, {
+      sessionId,
+      hostId: run.lease.hostId,
+      leaseId: run.lease.leaseId,
+      attempt: run.lease.attempt,
+      at: run.endedAt ?? this.now(),
+    });
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* session_send tokens                                                    */
+  /* ---------------------------------------------------------------------- */
+
+  private sendKey(sessionId: string, agentId: string): string {
+    return `${sessionId}\u0000${agentId}`;
+  }
+
+  /** The binding's endpoint, when this daemon can offer `session_send`. */
+  private sendUrlFor(sessionId: string, agentId: string): string | undefined {
+    const url = this.sessionSendUrl?.(sessionId, agentId);
+    return url && isLoopbackUrl(url) ? url : undefined;
+  }
+
+  /**
+   * Mints the binding's next token (the previous one stops working) and
+   * returns the stdio server carrying it; undefined (and no token) when the
+   * daemon cannot offer the tool.
+   */
+  private rotateSendToken(
+    sessionId: string,
+    agentId: string,
+  ): AgentAdapterTurnInput['sessionSendServer'] {
+    const key = this.sendKey(sessionId, agentId);
+    const url = this.sendUrlFor(sessionId, agentId);
+    if (!url) {
+      this.sendTokens.delete(key);
+      return undefined;
+    }
+    const token = randomBytes(32).toString('hex');
+    this.sendTokens.set(key, token);
+    return buildSessionSendServer(url, token);
+  }
+
+  /** False when a live session may carry a token this daemon lost. */
+  private sendTokenIsCurrent(sessionId: string, agentId: string): boolean {
+    if (!this.sendUrlFor(sessionId, agentId)) return true;
+    return this.sendTokens.has(this.sendKey(sessionId, agentId));
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Record watch and settled runs                                          */
+  /* ---------------------------------------------------------------------- */
+
+  /** Keeps a terminal run in the snapshot; evicts the oldest past the cap. */
+  private addSettled(runId: string, settled: SettledRun): void {
+    this.settled.set(runId, settled);
+    while (this.settled.size > MAX_SETTLED_RUNS) {
+      const oldest = this.settled.keys().next().value;
+      if (oldest === undefined) break;
+      const evicted = this.settled.get(oldest);
+      if (evicted?.timer) clearTimeout(evicted.timer);
+      this.settled.delete(oldest);
+    }
+  }
+
+  /**
+   * Forgets a settled run and publishes its final frame without `recorded`
+   * or `retryable` (the client drops the card), merged with `extra`.
+   */
+  private dropSettled(
+    runId: string,
+    extra: Partial<SessionAgentRunFrame>,
+  ): void {
+    const settled = this.settled.get(runId);
+    if (!settled) return;
+    if (settled.timer) clearTimeout(settled.timer);
+    this.settled.delete(runId);
+    const frame: SessionAgentRunFrame = { ...settled.frame, ...extra };
+    delete frame.recorded;
+    delete frame.retryable;
+    this.hub.publish(frame);
+    this.hub.forgetRun(settled.sessionId, runId);
+  }
+
+  /**
+   * Re-sends a pending `agent_message` record until it is in the transcript,
+   * then publishes the run's frame with `recorded: true`. The child is
+   * idempotent on `recordKey`: a still-deferred record answers `deferred`
+   * again, a landed one answers its uuid. Only when the chat session is not
+   * live (its deferred records died with it) is the transcript checked, and
+   * the record written again (restoring the session) if it is not there.
+   * Backs off from {@link recordWatchMs} to 15s; gives up after
+   * {@link RECORD_WATCH_MAX_MS}, leaving the run in the snapshot with
+   * `recorded: false`.
+   */
+  private watchRecord(runId: string): void {
+    const settled = this.settled.get(runId);
+    if (!settled?.request) return;
+    const request = settled.request;
+    const { sessionId } = settled;
+    const startedAt = this.now();
+    let delayMs = this.recordWatchMs;
+    const check = async (): Promise<void> => {
+      settled.timer = undefined;
+      if (this.stopped || this.settled.get(runId) !== settled) return;
+      let recordId: string | undefined;
+      try {
+        const response = await this.bridge.appendExternalRecord(
+          sessionId,
+          request,
+        );
+        if (!response.deferred && response.recordId) {
+          recordId = response.recordId;
+        }
+      } catch (error) {
+        if (error instanceof SessionNotFoundError) {
+          try {
+            recordId = await this.findAgentMessageRecord(sessionId, runId);
+            if (!recordId) {
+              const response = await this.appendRecord(sessionId, request);
+              if (!response.deferred && response.recordId) {
+                recordId = response.recordId;
+              }
+            }
+          } catch {
+            // Retried on the next check.
+          }
+        }
+      }
+      if (this.stopped || this.settled.get(runId) !== settled) return;
+      if (recordId) {
+        this.settled.delete(runId);
+        const frame: SessionAgentRunFrame = {
+          ...settled.frame,
+          recorded: true,
+          recordId,
+        };
+        if (settled.recordedError) frame.error = settled.recordedError;
+        else delete frame.error;
+        this.hub.publish(frame);
+        this.hub.forgetRun(sessionId, runId);
+        return;
+      }
+      if (this.now() - startedAt >= RECORD_WATCH_MAX_MS) return;
+      delayMs = Math.min(delayMs * 2, RECORD_WATCH_MAX_INTERVAL_MS);
+      schedule();
+    };
+    const schedule = () => {
+      settled.timer = setTimeout(() => void check(), delayMs);
+      settled.timer.unref?.();
+    };
+    schedule();
+  }
+
+  /** uuid of run `runId`'s `agent_message` record in the transcript. */
+  private async findAgentMessageRecord(
+    sessionId: string,
+    runId: string,
+  ): Promise<string | undefined> {
+    const records = await this.loadRecords(sessionId);
+    return records.find(
+      (record) =>
+        record.subtype === AGENT_MESSAGE_SUBTYPE &&
+        (record.systemPayload as { runId?: unknown } | undefined)?.runId ===
+          runId,
+    )?.uuid;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Frames                                                                 */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * 1-based position among the agent's queued runs in EVERY chat session
+   * (runs start oldest first across sessions, up to `maxConcurrentRuns`).
+   */
+  private buildFrame(live: LiveRun): SessionAgentRunFrame {
+    const position = queuePosition(
+      [...this.live.values()].map((candidate) => candidate.run),
+      live.run,
+    );
     const frame: SessionAgentRunFrame = {
       ...live.frame,
       author: live.author,
@@ -1720,10 +2404,10 @@ export class SessionAgentOrchestrator {
     return frame;
   }
 
-  private publish(live: LiveRun, state: SessionState): void {
+  private publish(live: LiveRun): void {
     live.frame.status = live.run.status;
     live.frame.author = live.author;
-    this.hub.publish(this.buildFrame(live, state));
+    this.hub.publish(this.buildFrame(live));
   }
 
   /** Serialized whole-file write of the in-memory state. */
