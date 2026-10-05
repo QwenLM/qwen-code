@@ -220,11 +220,14 @@ class HarnessEventStreamPinningTest {
         if (configured == null) {
             return Runtime.getRuntime().availableProcessors();
         }
-        // The JDK's own read is a bare Integer.parseInt, once, in
-        // VirtualThread.createDefaultScheduler: no trim, no catch, no
-        // clamp. A malformed value kills scheduler init there before any
+        // The JDK's own read of parallelism is a bare Integer.parseInt,
+        // once, in VirtualThread.createDefaultScheduler: no trim, no
+        // catch. A malformed value kills scheduler init there before any
         // witness can run, so leniency here would only mis-size fleets in
-        // a JVM that cannot start a virtual thread at all.
+        // a JVM that cannot start a virtual thread at all. This models
+        // parallelism alone: the JDK also clamps it down to
+        // jdk.virtualThreadScheduler.maxPoolSize when that is set, so an
+        // externally capped pool makes this read too high.
         return Integer.parseInt(configured);
     }
 
