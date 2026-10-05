@@ -96,6 +96,7 @@ import {
   mountWorkspaceMemoryRoutes,
   mountWorkspaceQualifiedMemoryRoutes,
 } from './workspace-memory.js';
+import { mountWorkspaceCloudMemoryRoutes } from './cloud-memory.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
   mountWorkspaceQualifiedMemoryRememberRoutes,
@@ -2311,6 +2312,11 @@ export function createServeApp(
   });
 
   // Workspace memory + agents CRUD routes.
+  mountWorkspaceCloudMemoryRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    mutate,
+    safeBody,
+  });
   mountWorkspaceMemoryRoutes(app, {
     bridge: primaryBridge,
     boundWorkspace: primaryBoundWorkspace,

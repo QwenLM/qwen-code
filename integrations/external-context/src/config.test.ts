@@ -55,7 +55,7 @@ describe('loadConfig', () => {
     expect(config).not.toHaveProperty('write');
   });
 
-  it('enables writes only for a v1 Mem0 provider', async () => {
+  it('enables writes for v1 memory providers', async () => {
     const fixture = await createFixture();
     await writeConfig(fixture, {
       version: 1,
@@ -77,9 +77,32 @@ describe('loadConfig', () => {
       write: { enabled: true },
       provider: { type: 'mem0-platform-v3' },
     });
+
+    await writeConfig(fixture, {
+      version: 1,
+      write: { enabled: true },
+      provider: {
+        type: 'dataworks-bff-memory-v1',
+        baseUrl: 'https://memory.example.com/dmai/',
+        tokenEnv: 'MEMORY_TOKEN',
+      },
+    });
+    await expect(
+      loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
+        MEMORY_TOKEN: 'secret-value',
+      }),
+    ).resolves.toMatchObject({
+      version: 1,
+      write: { enabled: true },
+      provider: {
+        type: 'dataworks-bff-memory-v1',
+        token: 'secret-value',
+      },
+    });
   });
 
-  it('rejects writes for Generic HTTP and v2 configurations', async () => {
+  it('rejects writes for read-only Generic HTTP and v2 configurations', async () => {
     const fixture = await createFixture();
     await writeConfig(fixture, {
       version: 1,
@@ -96,14 +119,14 @@ describe('loadConfig', () => {
         CONTEXT_TOKEN: 'secret-value',
       }),
     ).rejects.toThrow(
-      'External context memory writes require a Mem0 provider.',
+      'External context memory writes require a memory provider.',
     );
     await expect(
       loadConfig({
         QWEN_EXTERNAL_CONTEXT_CONFIG: fixture.config,
       }),
     ).rejects.toThrow(
-      'External context memory writes require a Mem0 provider.',
+      'External context memory writes require a memory provider.',
     );
 
     await writeConfig(fixture, {

@@ -717,11 +717,7 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
 }
 
 export type ExtensionOriginSource =
-  | 'QwenCode'
-  | 'Claude'
-  | 'Gemini'
-  | 'Qoder'
-  | 'AgentPlugins';
+  'QwenCode' | 'Claude' | 'Gemini' | 'Qoder' | 'AgentPlugins';
 export type ExtensionNetworkPolicy = 'public';
 
 export interface ExtensionInstallMetadata {
@@ -889,6 +885,20 @@ export interface ConfigParameters {
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
   terminalImageRenderSupportProvider?: () => Promise<TerminalImageRenderSupport>;
+  /**
+   * Optional live cloud-memory recall supplied by the CLI host. The provider
+   * owns endpoint/auth resolution and must not expose credentials in results.
+   */
+  cloudMemoryRecallProvider?: (
+    query: string,
+    signal: AbortSignal,
+  ) => Promise<string | undefined>;
+  /** Optional live cloud-memory capture supplied by the CLI host. */
+  cloudMemoryCaptureProvider?: (
+    userPrompt: string,
+    assistantText: string,
+    signal?: AbortSignal,
+  ) => Promise<void>;
   /**
    * Skill discovery levels that should not be loaded. Sourced from
    * `settings.skills.disabledLevels`.
@@ -1326,8 +1336,7 @@ export interface ConfigParameters {
 }
 
 export type TerminalImageRenderSupport =
-  | { available: true }
-  | { available: false; reason: string };
+  { available: true } | { available: false; reason: string };
 
 export interface ImageGenerationConfig {
   model: string;
@@ -2000,8 +2009,7 @@ export class Config {
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
   private pendingSessionWriterRelease:
-    | { lease: SessionWriterLease; promise: Promise<void> }
-    | undefined;
+    { lease: SessionWriterLease; promise: Promise<void> } | undefined;
   private sessionWriterReclaimPolicy: 'local' | 'never' = 'local';
   private sessionWriterTakeoverPolicy: 'never' | 'certified' = 'never';
   private sessionWriterShutdownRequested = false;
@@ -2054,8 +2062,7 @@ export class Config {
   private permissionManager: PermissionManager | null = null;
   private readonly toolInvocationGuard: ToolInvocationGuard | undefined;
   private modelInvocableCommandsProvider:
-    | (() => ReadonlyArray<{ name: string; description: string }>)
-    | null = null;
+    (() => ReadonlyArray<{ name: string; description: string }>) | null = null;
   private modelInvocableCommandsExecutor:
     | ((
         name: string,
@@ -2092,10 +2099,18 @@ export class Config {
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
   private readonly disabledSkillNamesProvider:
-    | (() => ReadonlySet<string>)
-    | null;
+    (() => ReadonlySet<string>) | null;
   private readonly terminalImageRenderSupportProvider:
-    | (() => Promise<TerminalImageRenderSupport>)
+    (() => Promise<TerminalImageRenderSupport>) | null;
+  private readonly cloudMemoryRecallProvider:
+    | ((query: string, signal: AbortSignal) => Promise<string | undefined>)
+    | null;
+  private readonly cloudMemoryCaptureProvider:
+    | ((
+        userPrompt: string,
+        assistantText: string,
+        signal?: AbortSignal,
+      ) => Promise<void>)
     | null;
   private readonly disabledSkillLevels: ReadonlySet<SkillLevel>;
   private readonly customSkillDirs: readonly string[];
@@ -2129,8 +2144,7 @@ export class Config {
    */
   private readonly recentlyRemovedMcpServers = new Set<string>();
   private readonly topTierMcpServers:
-    | Record<string, MCPServerConfig>
-    | undefined;
+    Record<string, MCPServerConfig> | undefined;
   private readonly runtimeMcpServers = new Map<string, MCPServerConfig>();
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
@@ -2302,8 +2316,7 @@ export class Config {
   private shellExecutionConfig: ShellExecutionConfig;
   private arenaManager: ArenaManager | null = null;
   private arenaManagerChangeCallback:
-    | ((manager: ArenaManager | null) => void)
-    | null = null;
+    ((manager: ArenaManager | null) => void) | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
   private teamManager: TeamManager | null = null;
   private teamManagerChangeCallbacks = new Set<
@@ -2448,6 +2461,8 @@ export class Config {
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
     this.terminalImageRenderSupportProvider =
       params.terminalImageRenderSupportProvider ?? null;
+    this.cloudMemoryRecallProvider = params.cloudMemoryRecallProvider ?? null;
+    this.cloudMemoryCaptureProvider = params.cloudMemoryCaptureProvider ?? null;
     this.disabledSkillLevels = new Set(params.disabledSkillLevels ?? []);
     this.customSkillDirs = Object.freeze([...(params.customSkillDirs ?? [])]);
     this.disabledTools = new Set(params.disabledTools ?? []);
@@ -3211,8 +3226,7 @@ export class Config {
                   (input['permission_mode'] as PermissionMode) ||
                     PermissionMode.Default,
                   (input['permission_suggestions'] as
-                    | PermissionSuggestion[]
-                    | undefined) || undefined,
+                    PermissionSuggestion[] | undefined) || undefined,
                   signal,
                 );
                 break;
@@ -5151,8 +5165,7 @@ export class Config {
    * the bridge at an unreachable, or non-image-capable, model.
    */
   private resolveVisionModelSelection():
-    | VisionBridgeModelSelection
-    | undefined {
+    VisionBridgeModelSelection | undefined {
     if (!this.visionModel) return undefined;
     const visionModelForLog = formatVisionModelSettingForLog(this.visionModel);
     const parsedSetting = parseVisionModelSetting(this.visionModel);
@@ -6167,8 +6180,7 @@ export class Config {
   }
 
   getMcpTransportPool():
-    | import('../tools/mcp-transport-pool.js').McpTransportPool
-    | undefined {
+    import('../tools/mcp-transport-pool.js').McpTransportPool | undefined {
     return this.mcpTransportPool;
   }
 
@@ -7835,6 +7847,41 @@ export class Config {
   }
 
   /**
+   * Recall user-level cloud memory for one real user prompt. This deliberately
+   * stays separate from configurable Hooks: the Memory UI toggle controls a
+   * built-in product capability and safe/bare mode must disable it even when
+   * the host accidentally supplies a provider.
+   */
+  async recallCloudMemory(
+    query: string,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
+    if (
+      !this.cloudMemoryRecallProvider ||
+      this.getBareMode() ||
+      this.isSafeMode()
+    ) {
+      return undefined;
+    }
+    return this.cloudMemoryRecallProvider(query, signal);
+  }
+
+  async captureCloudMemory(
+    userPrompt: string,
+    assistantText: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (
+      !this.cloudMemoryCaptureProvider ||
+      this.getBareMode() ||
+      this.isSafeMode()
+    ) {
+      return;
+    }
+    await this.cloudMemoryCaptureProvider(userPrompt, assistantText, signal);
+  }
+
+  /**
    * Whether the git-shared team memory tier is active. Opt-in: off unless the
    * `memory.enableTeamMemory` setting is on. `QWEN_CODE_MEMORY_TEAM` overrides
    * for tests / power users ('0' forces off, '1' forces on).
@@ -8908,8 +8955,7 @@ export class Config {
    * has been registered (e.g., in SDK mode).
    */
   getModelInvocableCommandsProvider():
-    | (() => ReadonlyArray<{ name: string; description: string }>)
-    | null {
+    (() => ReadonlyArray<{ name: string; description: string }>) | null {
     return this.modelInvocableCommandsProvider;
   }
 
@@ -9100,9 +9146,8 @@ export class Config {
       if (options?.forSubAgent) return;
       const schema = this.jsonSchema;
       await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
-        const { SyntheticOutputTool } = await import(
-          '../tools/syntheticOutput.js'
-        );
+        const { SyntheticOutputTool } =
+          await import('../tools/syntheticOutput.js');
         return new SyntheticOutputTool(schema);
       });
     };
@@ -9151,9 +9196,8 @@ export class Config {
       return new ToolSearchTool(this);
     });
     await registerLazy(ToolNames.READ_MCP_RESOURCE, async () => {
-      const { ReadMcpResourceTool } = await import(
-        '../tools/read-mcp-resource.js'
-      );
+      const { ReadMcpResourceTool } =
+        await import('../tools/read-mcp-resource.js');
       return new ReadMcpResourceTool(this);
     });
     await registerLazy(ToolNames.AGENT, async () => {
@@ -9258,17 +9302,15 @@ export class Config {
       return new TodoWriteTool(this);
     });
     await registerLazy(ToolNames.REPORT_FINDINGS, async () => {
-      const { ReportFindingsTool } = await import(
-        '../tools/report-findings.js'
-      );
+      const { ReportFindingsTool } =
+        await import('../tools/report-findings.js');
       return new ReportFindingsTool();
     });
     const supportsUserInteraction = resolveInteractionMode(this) !== 'headless';
     if (supportsUserInteraction) {
       await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
-        const { AskUserQuestionTool } = await import(
-          '../tools/askUserQuestion.js'
-        );
+        const { AskUserQuestionTool } =
+          await import('../tools/askUserQuestion.js');
         return new AskUserQuestionTool(this);
       });
     }
@@ -9327,17 +9369,15 @@ export class Config {
     await this.registerImageGenerationTool(registry);
     if (this.isArtifactEnabled()) {
       await registerLazy(ToolNames.ARTIFACT, async () => {
-        const { ArtifactTool } = await import(
-          '../tools/artifact/artifact-tool.js'
-        );
+        const { ArtifactTool } =
+          await import('../tools/artifact/artifact-tool.js');
         return new ArtifactTool(this);
       });
     }
     if (this.isRecordArtifactEnabled()) {
       await registerLazy(ToolNames.RECORD_ARTIFACT, async () => {
-        const { RecordArtifactTool } = await import(
-          '../tools/record-artifact.js'
-        );
+        const { RecordArtifactTool } =
+          await import('../tools/record-artifact.js');
         return new RecordArtifactTool(this);
       });
     }
@@ -9390,9 +9430,8 @@ export class Config {
     // silently lose the tool.
     if (this.getSubSessionSpawner()) {
       await registerLazy(ToolNames.CREATE_SUB_SESSION, async () => {
-        const { CreateSubSessionTool } = await import(
-          '../tools/create-sub-session.js'
-        );
+        const { CreateSubSessionTool } =
+          await import('../tools/create-sub-session.js');
         return new CreateSubSessionTool(this);
       });
     }
@@ -9410,9 +9449,8 @@ export class Config {
         return new TeamDeleteTool(this);
       });
       await registerLazy(ToolNames.TEAM_PLAN_APPROVAL, async () => {
-        const { TeamPlanApprovalTool } = await import(
-          '../tools/team-plan-approval.js'
-        );
+        const { TeamPlanApprovalTool } =
+          await import('../tools/team-plan-approval.js');
         return new TeamPlanApprovalTool(this);
       });
       // Leader-only, enforced by absence. `requestShutdown` writes the target's
@@ -9423,9 +9461,8 @@ export class Config {
       // #9276 lost teammate reports when this was a `send_message` field.
       if (!options?.forSubAgent) {
         await registerLazy(ToolNames.REQUEST_SHUTDOWN, async () => {
-          const { RequestShutdownTool } = await import(
-            '../tools/request-shutdown.js'
-          );
+          const { RequestShutdownTool } =
+            await import('../tools/request-shutdown.js');
           return new RequestShutdownTool(this);
         });
       }
@@ -9561,8 +9598,7 @@ export class Config {
   }
 
   getCurrentSessionScheduledTaskCreator():
-    | CurrentSessionScheduledTaskCreator
-    | undefined {
+    CurrentSessionScheduledTaskCreator | undefined {
     return this.currentSessionScheduledTaskCreator;
   }
 }

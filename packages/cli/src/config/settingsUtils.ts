@@ -270,6 +270,10 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'security', key: 'allowedInsecureVoiceBaseUrls' },
   { section: 'agents', key: 'crossSessionMessaging' },
   { section: 'agents', key: 'crossSessionInbound' },
+  { section: 'memory', key: 'cloudBffBaseUrl' },
+  { section: 'memory', key: 'cloudBffTokenEnv' },
+  { section: 'memory', key: 'cloudEnabled' },
+  { section: 'memory', key: 'cloudRecallPreference' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;

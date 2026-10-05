@@ -9,6 +9,7 @@ import { isAbsolute, parse } from 'node:path';
 import { z } from 'zod';
 import type {
   ExternalContextConfig,
+  DataworksBffMemoryConfig,
   GenericHttpProviderConfig,
   Mem0ProviderConfig,
 } from './types.js';
@@ -27,6 +28,13 @@ const providerSchema = z.discriminatedUnion('type', [
   z
     .object({
       type: z.literal('generic-http-search-v1'),
+      baseUrl: z.string().url(),
+      tokenEnv: z.string().regex(ENV_NAME),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('dataworks-bff-memory-v1'),
       baseUrl: z.string().url(),
       tokenEnv: z.string().regex(ENV_NAME),
     })
@@ -114,10 +122,11 @@ export async function loadConfig(
   if (result.data.version === 1) {
     if (
       result.data.write !== undefined &&
-      result.data.provider.type !== 'mem0-platform-v3'
+      result.data.provider.type !== 'mem0-platform-v3' &&
+      result.data.provider.type !== 'dataworks-bff-memory-v1'
     ) {
       throw new ConfigurationError(
-        'External context memory writes require a Mem0 provider.',
+        'External context memory writes require a memory provider.',
       );
     }
     const provider = resolveProvider(result.data.provider, env);
@@ -146,13 +155,17 @@ export async function loadConfig(
 function resolveProvider(
   provider: z.infer<typeof providerSchema>,
   env: NodeJS.ProcessEnv,
-): Mem0ProviderConfig | GenericHttpProviderConfig {
+): Mem0ProviderConfig | GenericHttpProviderConfig | DataworksBffMemoryConfig {
   switch (provider.type) {
     case 'mem0-platform-v3': {
       const apiKey = readCredential(env, provider.apiKeyEnv);
       return { ...provider, apiKey };
     }
     case 'generic-http-search-v1': {
+      const token = readCredential(env, provider.tokenEnv);
+      return { ...provider, token };
+    }
+    case 'dataworks-bff-memory-v1': {
       const token = readCredential(env, provider.tokenEnv);
       return { ...provider, token };
     }

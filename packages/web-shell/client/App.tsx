@@ -129,7 +129,10 @@ import {
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
 import { AgentsManagerPage } from './components/agents/AgentsManagerPage';
-import { MemoryMessage } from './components/messages/MemoryMessage';
+import {
+  MemoryMessage,
+  type MemoryScope,
+} from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { GitDialog, type GitDialogView } from './components/dialogs/GitDialog';
@@ -5841,6 +5844,8 @@ export function App({
     mainView === 'chat' &&
     !artifactPanelFullscreen;
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
+  const [memoryInitialScope, setMemoryInitialScope] =
+    useState<MemoryScope>('workspace');
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const showAuthDialogRef = useRef(showAuthDialog);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
@@ -10359,6 +10364,7 @@ export function App({
               );
               setMemoryAddSignal((signal) => signal + 1);
             }
+            setMemoryInitialScope('workspace');
             setShowMemoryDialog(true);
             return true;
           }
@@ -12324,6 +12330,12 @@ export function App({
                 refreshSignal={memoryRefreshSignal}
                 addSignal={memoryAddSignal}
                 addScope={memoryAddScope}
+                initialScope={memoryInitialScope}
+                onOpenSettings={() => {
+                  setShowMemoryDialog(false);
+                  setSettingsInitialCategory('Memory');
+                  openPanel('settings');
+                }}
                 onMessage={(text, type = 'status') => {
                   store.dispatch([{ type, text }]);
                 }}
@@ -12970,6 +12982,11 @@ export function App({
                           onSelectModel: handleModelSelect,
                           onDeleteModel: handleDeleteModel,
                           onAddModel: () => setShowAuthDialog(true),
+                        }}
+                        onManageCloudMemory={() => {
+                          closePanel();
+                          setMemoryInitialScope('cloud');
+                          setShowMemoryDialog(true);
                         }}
                         onSubDialog={(key, scope) => {
                           // Record the persist scope only for model settings —

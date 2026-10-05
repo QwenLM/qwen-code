@@ -59,7 +59,10 @@ export interface AutoRecallConfig {
   timeoutMs: number;
 }
 
-export type ProviderConfig = Mem0ProviderConfig | GenericHttpProviderConfig;
+export type ProviderConfig =
+  | Mem0ProviderConfig
+  | GenericHttpProviderConfig
+  | DataworksBffMemoryConfig;
 
 export interface Mem0ProviderConfig {
   type: 'mem0-platform-v3';
@@ -70,6 +73,13 @@ export interface Mem0ProviderConfig {
 
 export interface GenericHttpProviderConfig {
   type: 'generic-http-search-v1';
+  baseUrl: string;
+  tokenEnv: string;
+  token: string;
+}
+
+export interface DataworksBffMemoryConfig {
+  type: 'dataworks-bff-memory-v1';
   baseUrl: string;
   tokenEnv: string;
   token: string;

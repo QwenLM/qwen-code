@@ -516,6 +516,23 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async loadCloudMemoryStatus() {
+      const client = requireClient(getClient, 'Load cloud memory failed');
+      return withActionTimeout(
+        client.cloudMemoryStatus(),
+        'Load cloud memory timed out',
+      );
+    },
+
+    async invokeCloudMemory(request) {
+      const client = requireClient(getClient, 'Cloud memory request failed');
+      return withActionTimeout(
+        client.invokeCloudMemory(request),
+        'Cloud memory request timed out',
+        32_000,
+      );
+    },
+
     async readWorkspaceFile(filePath) {
       const client = requireClient(getClient, 'Read workspace file failed');
       return withActionTimeout(

@@ -2189,6 +2189,51 @@ const SETTINGS_SCHEMA = {
           'When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Off by default; requires a configured git upstream.',
         showInDialog: false,
       },
+      cloudBffBaseUrl: {
+        type: 'string',
+        label: 'Cloud Memory BFF Origin',
+        category: 'Memory',
+        requiresRestart: false,
+        default: '',
+        description:
+          'Environment-specific BFF origin, for example https://pre-bff.example.test. QWEN_CLOUD_MEMORY_BFF_ORIGIN overrides this value.',
+        showInDialog: true,
+      },
+      cloudBffTokenEnv: {
+        type: 'string',
+        label: 'Cloud Memory Token Environment Variable',
+        category: 'Memory',
+        requiresRestart: false,
+        default: 'QWEN_CLOUD_MEMORY_TOKEN',
+        description:
+          'Environment variable that contains the personal BFF bearer token. The token itself is never stored in settings or sent to the browser.',
+        showInDialog: true,
+      },
+      cloudEnabled: {
+        type: 'boolean',
+        label: 'Enable Cloud Personal Memory',
+        category: 'Memory',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Allow Qwen Code to add and recall cloud personal memories. Existing memories remain visible while disabled.',
+        showInDialog: true,
+      },
+      cloudRecallPreference: {
+        type: 'enum',
+        label: 'Cloud Memory Recall Preference',
+        category: 'Memory',
+        requiresRestart: false,
+        default: 'balanced',
+        description:
+          'Controls the relevance and amount of cloud memory recalled into conversations.',
+        showInDialog: true,
+        options: [
+          { value: 'precise', label: 'Precise' },
+          { value: 'balanced', label: 'Balanced' },
+          { value: 'rich', label: 'Rich' },
+        ],
+      },
     },
   },
 

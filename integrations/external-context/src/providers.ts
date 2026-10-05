@@ -14,6 +14,7 @@ import type {
   ExternalContextItem,
   ExternalContextProvider,
   ExternalMemoryWriter,
+  DataworksBffMemoryConfig,
   GenericHttpProviderConfig,
   Mem0ProviderConfig,
   ProviderConfig,
@@ -34,6 +35,8 @@ export function createProvider(
       return new Mem0PlatformV3Adapter(config);
     case 'generic-http-search-v1':
       return new GenericHttpSearchV1Adapter(config);
+    case 'dataworks-bff-memory-v1':
+      return new DataworksBffMemoryAdapter(config);
     // no default
   }
 }
@@ -46,6 +49,8 @@ export function createMemoryWriter(
       return new Mem0PlatformV3Adapter(config);
     case 'generic-http-search-v1':
       return undefined;
+    case 'dataworks-bff-memory-v1':
+      return new DataworksBffMemoryAdapter(config);
     // no default
   }
 }
@@ -132,6 +137,153 @@ export class Mem0PlatformV3Adapter
     }
     return parseMem0RememberResult(response);
   }
+}
+
+export class DataworksBffMemoryAdapter
+  implements ExternalContextProvider, ExternalMemoryWriter
+{
+  private readonly baseUrl: URL;
+
+  constructor(private readonly config: DataworksBffMemoryConfig) {
+    this.baseUrl = validateBffBaseUrl(config.baseUrl);
+  }
+
+  async search(input: {
+    query: string;
+    limit: number;
+    signal: AbortSignal;
+  }): Promise<readonly ExternalContextItem[]> {
+    const data = unwrapBffEnvelope(
+      await postJson({
+        url: new URL('/dmai/mem0MemoriesSearch', this.baseUrl),
+        authorization: `Bearer ${this.config.token}`,
+        body: {
+          query: input.query,
+          filters: {},
+          top_k: Math.min(input.limit, 5),
+          threshold: 0.35,
+        },
+        signal: input.signal,
+      }),
+    );
+    const memories = isRecord(data) ? data['results'] : undefined;
+    if (!Array.isArray(memories)) {
+      throw new Error(
+        'External context provider returned an invalid response.',
+      );
+    }
+    return memories
+      .map(parseBffMemoryItem)
+      .filter((value): value is ExternalContextItem => value !== undefined)
+      .slice(0, MAX_PROVIDER_ITEMS);
+  }
+
+  async remember(input: {
+    content: string;
+    signal: AbortSignal;
+  }): Promise<RememberResult> {
+    try {
+      const data = unwrapBffEnvelope(
+        await postJson({
+          url: new URL('/dmai/mem0MemoriesAdd', this.baseUrl),
+          authorization: `Bearer ${this.config.token}`,
+          body: {
+            messages: [{ role: 'user', content: input.content }],
+            source: 'qwen-code',
+            infer: false,
+          },
+          signal: input.signal,
+        }),
+      );
+      const memories = Array.isArray(data)
+        ? data
+        : isRecord(data) && Array.isArray(data['results'])
+          ? data['results']
+          : undefined;
+      return memories && memories.length > 0
+        ? { status: 'stored' }
+        : { status: 'failed' };
+    } catch (error) {
+      if (
+        error instanceof BffEnvelopeRejectionError ||
+        (error instanceof ProviderHttpStatusError &&
+          DEFINITIVE_WRITE_REJECTION_STATUSES.has(error.status))
+      ) {
+        return { status: 'failed' };
+      }
+      return { status: 'unknown' };
+    }
+  }
+}
+
+class BffEnvelopeRejectionError extends Error {}
+
+function validateBffBaseUrl(value: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value.endsWith('/') ? value : `${value}/`);
+  } catch {
+    throw new ConfigurationError('Provider URL is invalid.');
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new ConfigurationError(
+      'Provider URL must not contain credentials, query, or fragment.',
+    );
+  }
+  if (
+    url.protocol !== 'https:' &&
+    !(
+      url.protocol === 'http:' &&
+      (url.hostname === 'localhost' ||
+        url.hostname === '127.0.0.1' ||
+        url.hostname === '[::1]')
+    )
+  ) {
+    throw new ConfigurationError(
+      'Provider URL must use HTTPS or loopback HTTP.',
+    );
+  }
+  return new URL(`${url.origin}/`);
+}
+
+function unwrapBffEnvelope(value: unknown): unknown {
+  if (!isRecord(value)) {
+    throw new Error('External context provider returned an invalid response.');
+  }
+  const code = value['code'];
+  if (
+    code !== undefined &&
+    code !== null &&
+    code !== 0 &&
+    code !== 200 &&
+    code !== '0' &&
+    code !== '200'
+  ) {
+    throw new BffEnvelopeRejectionError(
+      'External context provider rejected the request.',
+    );
+  }
+  return Object.hasOwn(value, 'data') ? value['data'] : value;
+}
+
+function parseBffMemoryItem(value: unknown): ExternalContextItem | undefined {
+  if (!isRecord(value)) return undefined;
+  const id = value['id'] ?? value['memory_id'];
+  const content = value['memory'] ?? value['text'] ?? value['content'];
+  if (typeof id !== 'string' || typeof content !== 'string' || !content) {
+    return undefined;
+  }
+  return {
+    id,
+    content,
+    ...(typeof value['score'] === 'number' ? { score: value['score'] } : {}),
+    ...(typeof value['updated_at'] === 'string' &&
+    Number.isFinite(Date.parse(value['updated_at']))
+      ? {
+          updatedAt: new Date(value['updated_at']).toISOString(),
+        }
+      : {}),
+  };
 }
 
 function parseMem0RememberResult(response: unknown): RememberResult {

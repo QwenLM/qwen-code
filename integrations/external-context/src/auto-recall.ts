@@ -233,6 +233,8 @@ function providerCredential(config: ProviderConfig): string {
       return config.apiKey;
     case 'generic-http-search-v1':
       return config.token;
+    case 'dataworks-bff-memory-v1':
+      return config.token;
     // no default
   }
 }

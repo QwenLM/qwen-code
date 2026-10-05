@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { renderExternalContext } from './context.js';
 import {
   createMemoryWriter,
+  DataworksBffMemoryAdapter,
   GenericHttpSearchV1Adapter,
   Mem0PlatformV3Adapter,
 } from './providers.js';
@@ -284,6 +285,150 @@ describe('GenericHttpSearchV1Adapter', () => {
         signal: AbortSignal.timeout(10),
       }),
     ).rejects.toThrow('External context provider request did not complete.');
+  });
+});
+
+describe('DataworksBffMemoryAdapter', () => {
+  it('uses mem0 BFF paths and payloads for recall and write', async () => {
+    const requests: Array<{
+      path?: string;
+      authorization?: string;
+      body: unknown;
+    }> = [];
+    const baseUrl = await startServer(async (request, response) => {
+      requests.push({
+        path: request.url,
+        authorization: request.headers.authorization,
+        body: JSON.parse(await readBody(request)),
+      });
+      if (request.url === '/dmai/mem0MemoriesSearch') {
+        json(response, {
+          code: 0,
+          data: {
+            results: [
+              {
+                id: 'memory-1',
+                memory: 'Use concise answers',
+                score: 0.9,
+                updated_at: '2023-11-14T22:13:20.000Z',
+              },
+            ],
+          },
+        });
+        return;
+      }
+      json(response, {
+        code: 0,
+        data: { results: [{ id: 'memory-2', memory: 'stored' }] },
+      });
+    });
+    const adapter = new DataworksBffMemoryAdapter({
+      type: 'dataworks-bff-memory-v1',
+      baseUrl,
+      tokenEnv: 'TOKEN',
+      token: 'credential',
+    });
+
+    await expect(
+      adapter.search({
+        query: 'answer style',
+        limit: 20,
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toEqual([
+      {
+        id: 'memory-1',
+        content: 'Use concise answers',
+        score: 0.9,
+        updatedAt: '2023-11-14T22:13:20.000Z',
+      },
+    ]);
+    await expect(
+      adapter.remember({
+        content: 'Remember this exactly',
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toEqual({ status: 'stored' });
+    expect(requests).toEqual([
+      {
+        path: '/dmai/mem0MemoriesSearch',
+        authorization: 'Bearer credential',
+        body: {
+          query: 'answer style',
+          filters: {},
+          top_k: 5,
+          threshold: 0.35,
+        },
+      },
+      {
+        path: '/dmai/mem0MemoriesAdd',
+        authorization: 'Bearer credential',
+        body: {
+          messages: [{ role: 'user', content: 'Remember this exactly' }],
+          source: 'qwen-code',
+          infer: false,
+        },
+      },
+    ]);
+  });
+
+  it('creates a writer and rejects non-loopback plain HTTP', () => {
+    expect(
+      createMemoryWriter({
+        type: 'dataworks-bff-memory-v1',
+        baseUrl: 'https://memory.example.com',
+        tokenEnv: 'TOKEN',
+        token: 'credential',
+      }),
+    ).toBeInstanceOf(DataworksBffMemoryAdapter);
+    expect(
+      () =>
+        new DataworksBffMemoryAdapter({
+          type: 'dataworks-bff-memory-v1',
+          baseUrl: 'http://memory.example.com',
+          tokenEnv: 'TOKEN',
+          token: 'credential',
+        }),
+    ).toThrow('Provider URL must use HTTPS or loopback HTTP.');
+  });
+
+  it('maps a BFF business rejection to failed', async () => {
+    const baseUrl = await startServer((_request, response) => {
+      json(response, {
+        code: 'InvalidParameter',
+        message: 'private upstream detail',
+      });
+    });
+
+    await expect(
+      new DataworksBffMemoryAdapter({
+        type: 'dataworks-bff-memory-v1',
+        baseUrl,
+        tokenEnv: 'TOKEN',
+        token: 'credential',
+      }).remember({
+        content: 'remember this',
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toEqual({ status: 'failed' });
+  });
+
+  it('does not report an empty capture as stored', async () => {
+    const baseUrl = await startServer((_request, response) => {
+      json(response, { code: 200, data: { Memories: [] } });
+    });
+
+    await expect(
+      new DataworksBffMemoryAdapter({
+        type: 'dataworks-bff-memory-v1',
+        baseUrl,
+        tokenEnv: 'TOKEN',
+        token: 'credential',
+      }).remember({
+        content: 'remember this',
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).resolves.toEqual({ status: 'failed' });
   });
 });
 

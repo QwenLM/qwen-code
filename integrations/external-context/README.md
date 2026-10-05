@@ -6,16 +6,17 @@ three managed deployment variants:
 
 - **Read-only on-demand:** version 1 configuration and the MCP
   `context_search({ query })` tool.
-- **Mem0 write:** version 1 Mem0 configuration, the on-demand search tool, and
-  the optional `context_remember({ content })` tool with a separate
-  content-visible confirmation Hook.
+- **Memory write:** version 1 Mem0 or DataWorks BFF memory configuration, the
+  on-demand search tool, and the optional `context_remember({ content })` tool
+  with a separate content-visible confirmation Hook.
 - **Auto-recall:** version 2 configuration and an administrator-installed
   `UserPromptSubmit` Hook, with no external-context MCP server.
 
-The built-in adapters support Mem0 Platform V3 search and a small Generic HTTP
-Search V1 contract for existing knowledge or RAG services. Only Mem0 has an
-optional write path. There is no generic ingestion protocol, personal memory,
-trusted user identity, per-document ACL, or tamper-resistant audit.
+The built-in adapters support Mem0 Platform V3, the POP-compatible DataWorks
+BFF personal-memory contract, and a small Generic HTTP Search V1 contract for
+existing knowledge or RAG services. Mem0 and DataWorks BFF memory have optional
+write paths. There is no generic ingestion protocol, client-selected trusted
+user identity, per-document ACL, or tamper-resistant audit.
 
 Provider teams that need a separately owned and released integration should
 implement the
@@ -31,7 +32,7 @@ controls are required.
 ## Trust boundary
 
 In the read-only on-demand profile, the model can provide only the search
-query. In the Mem0 write variant, it can additionally provide only the exact
+query. In a memory-write variant, it can additionally provide only the exact
 content to store. In the auto-recall profile, the query is derived only from
 Qwen's optional `submitted_prompt` provenance, captured before model-bound
 expansions.
@@ -154,20 +155,22 @@ managed settings disable Qwen's `/cd` command as an accidental-misuse guard,
 but cannot prevent every same-UID action. To switch corpora, terminate the old
 Qwen session and start a new one with a new managed configuration path.
 
-### Managed Mem0 write variant
+### Managed memory write variant
 
 This variant is an explicit opt-in for trusted collaborators who need to save
-repository-shared notes. It uses Mem0 Direct Import with `infer: false`, so the
-validated input is sent unchanged as one `user` message. Direct Import skips
-Mem0 inference and duplicate detection. Repeating an approved write may create
-another copy of the same content.
+memory. Mem0 uses Direct Import with `infer: false`; DataWorks BFF memory uses
+`/dmai/mem0MemoriesAdd` with `infer: false` and `source: "qwen-code"`. In both
+cases the validated input is sent unchanged, and repeating an approved write
+may create another copy of the same content.
 
 1. Provision a dedicated Mem0 Project for the repository. Do not share its key
    with another security domain. Mem0 `app_id` remains classification within
    the Project, not authorization.
-2. Copy `examples/mem0-write.json` to an administrator-owned path and set the
-   referenced `MEM0_API_KEY`. `write` is accepted only for version 1 Mem0
-   configurations. Generic HTTP and version 2 configurations reject it. The
+2. Copy `examples/mem0-write.json` or
+   `examples/dataworks-bff-memory.json` to an administrator-owned path and set
+   its referenced credential environment variable. `write` is accepted for
+   version 1 Mem0 and DataWorks BFF memory configurations. Generic HTTP and
+   version 2 configurations reject it. The
    top-level `timeoutMs` applies to both search and write; choose a write budget
    appropriate for the deployment because a client timeout produces an
    ambiguous `unknown` result.

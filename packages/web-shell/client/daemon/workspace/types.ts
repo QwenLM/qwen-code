@@ -67,6 +67,9 @@ import type {
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
+  DaemonCloudMemoryRequest,
+  DaemonCloudMemoryResponse,
+  DaemonCloudMemoryStatus,
   DaemonWorkspaceCapability,
   DaemonWorkspaceRemovalResult,
   DaemonWorkspaceUpdate,
@@ -490,6 +493,10 @@ export interface DaemonWorkspaceActions {
 
   // Memory
   loadMemoryStatus(): Promise<DaemonWorkspaceMemoryStatus>;
+  loadCloudMemoryStatus(): Promise<DaemonCloudMemoryStatus>;
+  invokeCloudMemory(
+    request: DaemonCloudMemoryRequest,
+  ): Promise<DaemonCloudMemoryResponse>;
   readWorkspaceFile(filePath: string): Promise<DaemonWorkspaceFile>;
   writeMemory(req: DaemonWriteMemoryRequest): Promise<DaemonWriteMemoryResult>;
 

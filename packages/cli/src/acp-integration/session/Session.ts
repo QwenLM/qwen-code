@@ -3678,15 +3678,15 @@ export class Session implements SessionContext {
   #hasActiveTurn(): boolean {
     return Boolean(
       this.pendingPrompt ||
-        this.historyMutationActive ||
-        this.pendingPromptCompletion ||
-        this.goalProcessing ||
-        this.cronProcessing ||
-        this.cronAbortController ||
-        this.cronCompletion ||
-        this.notificationProcessing ||
-        this.notificationAbortController ||
-        this.notificationCompletion,
+      this.historyMutationActive ||
+      this.pendingPromptCompletion ||
+      this.goalProcessing ||
+      this.cronProcessing ||
+      this.cronAbortController ||
+      this.cronCompletion ||
+      this.notificationProcessing ||
+      this.notificationAbortController ||
+      this.notificationCompletion,
     );
   }
 
@@ -5189,6 +5189,7 @@ export class Session implements SessionContext {
               !isContinue &&
               !isRestoreAskUserQuestion &&
               !isRuntimeContinuation;
+            let hookAdditionalContext: string | undefined;
             if (
               !isContinue &&
               !isRestoreAskUserQuestion &&
@@ -5233,6 +5234,7 @@ export class Session implements SessionContext {
               // user-authored text (same shape as the interactive path).
               const additionalContext = hookOutput?.getAdditionalContext();
               if (additionalContext) {
+                hookAdditionalContext = additionalContext;
                 parts = [
                   ...parts,
                   { text: wrapUserPromptSubmitContext(additionalContext) },
@@ -5241,6 +5243,33 @@ export class Session implements SessionContext {
             }
 
             if (isFreshUserTurn) {
+              try {
+                const cloudMemoryContext = await this.config.recallCloudMemory(
+                  promptText,
+                  pendingSend.signal,
+                );
+                if (cloudMemoryContext) {
+                  const combinedContext = [
+                    hookAdditionalContext,
+                    cloudMemoryContext,
+                  ]
+                    .filter((value): value is string => Boolean(value))
+                    .join('\n\n');
+                  parts = [
+                    ...(hookAdditionalContext ? parts.slice(0, -1) : parts),
+                    {
+                      text: wrapUserPromptSubmitContext(combinedContext),
+                    },
+                  ];
+                }
+              } catch (error) {
+                pendingSend.signal.throwIfAborted();
+                debugLogger.warn(
+                  'Cloud memory recall failed; continuing without it.',
+                  error,
+                );
+              }
+
               managedMemoryRecallStarted = true;
               this.config
                 .getLlmClient()
@@ -5531,8 +5560,7 @@ export class Session implements SessionContext {
                   pendingSend.signal,
                 );
                 let channelDeliveryResponseBlock:
-                  | ChannelDeliveryResponseBlock
-                  | undefined;
+                  ChannelDeliveryResponseBlock | undefined;
                 let channelDeliveryCheckpoint = 0;
                 // The send result assigns this before any read; null-stream
                 // paths return before the record site, so a pre-send route
@@ -5873,6 +5901,25 @@ export class Session implements SessionContext {
                 responseCapture.agentOutput.writeToSpan(
                   getActiveInteractionSpan(),
                 );
+              }
+              if (
+                isFreshUserTurn &&
+                result.stopReason === 'end_turn' &&
+                !result.loopProtectionStopped
+              ) {
+                const assistantText = this.#getCurrentChat()
+                  .getLastModelMessageText()
+                  ?.trim();
+                if (assistantText) {
+                  void this.config
+                    .captureCloudMemory(promptText, assistantText)
+                    .catch((error: unknown) => {
+                      debugLogger.warn(
+                        'Failed to capture ACP cloud memory; continuing without it.',
+                        error,
+                      );
+                    });
+                }
               }
               if (
                 isFreshUserTurn &&
@@ -6352,8 +6399,7 @@ export class Session implements SessionContext {
         pendingSend.signal,
       );
       let channelDeliveryResponseBlock:
-        | ChannelDeliveryResponseBlock
-        | undefined;
+        ChannelDeliveryResponseBlock | undefined;
       let channelDeliveryCheckpoint = 0;
       let providerSendChat: LlmChat | undefined;
       let userContentPushCountBeforeSend = 0;
@@ -8614,8 +8660,7 @@ export class Session implements SessionContext {
                 const responseStream = sendResult.responseStream;
                 const requestRouteKey = sendResult.requestRouteKey;
                 const channelDeliveryResponseBlock:
-                  | ChannelDeliveryResponseBlock
-                  | undefined =
+                  ChannelDeliveryResponseBlock | undefined =
                   beginChannelDeliveryResponseBlock(responseCapture);
                 const channelDeliveryCheckpoint =
                   channelDeliveryResponseBlock?.parts.length ?? 0;

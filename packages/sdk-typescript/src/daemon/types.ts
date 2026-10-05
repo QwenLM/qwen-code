@@ -1981,6 +1981,29 @@ export interface DaemonWorkspaceMemoryStatus {
   errors?: DaemonStatusCell[];
 }
 
+export type DaemonCloudMemoryAction =
+  | 'CaptureMemory'
+  | 'SearchMemories'
+  | 'ListMemories'
+  | 'DeleteMemory';
+
+export interface DaemonCloudMemoryStatus {
+  v: 1;
+  configured: boolean;
+  baseUrl?: string;
+  tokenEnv: string;
+  tokenAvailable: boolean;
+}
+
+export interface DaemonCloudMemoryRequest {
+  action: DaemonCloudMemoryAction;
+  params?: Record<string, unknown>;
+}
+
+export interface DaemonCloudMemoryResponse {
+  data: unknown;
+}
+
 /**
  * Body of `POST /workspace/memory`. `mode` defaults to `'append'`
  * server-side when omitted; clients SHOULD send it explicitly so a

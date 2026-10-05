@@ -925,6 +925,8 @@ describe('Session', () => {
       getSkipLoopDetection: vi.fn().mockReturnValue(true),
       getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+      recallCloudMemory: vi.fn().mockResolvedValue(undefined),
+      captureCloudMemory: vi.fn().mockResolvedValue(undefined),
       getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
       getGoalRuntime: vi.fn().mockReturnValue(mockGoalRuntime),
       getGoalRuntimeReady: vi.fn().mockResolvedValue(mockGoalRuntime),
@@ -25424,6 +25426,47 @@ describe('Session', () => {
           expect(
             mockLlmClient.beginManagedAutoMemoryRecall,
           ).toHaveBeenCalledWith('hello', expect.any(AbortSignal));
+        });
+
+        it('injects built-in cloud memory without a configured UserPromptSubmit hook', async () => {
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+          mockConfig.recallCloudMemory = vi
+            .fn()
+            .mockResolvedValue(
+              '## Relevant cloud memories\n\n- Prefer concise answers',
+            );
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response');
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: 'response' }] } }],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello cloud' }],
+          });
+
+          expect(mockConfig.recallCloudMemory).toHaveBeenCalledWith(
+            'hello cloud',
+            expect.any(AbortSignal),
+          );
+          const sent = firstSentMessage();
+          expect(textParts(sent).at(-1)).toContain('Prefer concise answers');
+          expect(
+            core.isUserPromptSubmitContextPartText(textParts(sent).at(-1)!),
+          ).toBe(true);
+          expect(mockConfig.captureCloudMemory).toHaveBeenCalledWith(
+            'hello cloud',
+            'response',
+          );
         });
       });
 

@@ -653,6 +653,8 @@ describe('Gemini Client (client.ts)', () => {
       getSessionRestoreRuntime: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+      recallCloudMemory: vi.fn().mockResolvedValue(undefined),
+      captureCloudMemory: vi.fn().mockResolvedValue(undefined),
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
       getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
       getAutoSkillEnabled: vi.fn().mockReturnValue(false),
@@ -12270,6 +12272,39 @@ Other open files:
             hookContext: 'extra hook context',
           },
         );
+      });
+
+      it('recalls cloud memory for a real user prompt without requiring configurable hooks', async () => {
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(true);
+        vi.mocked(mockConfig.recallCloudMemory).mockResolvedValue(
+          '## Relevant cloud memories\n\n- Prefer concise answers',
+        );
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'ok' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'expanded prompt' }],
+            new AbortController().signal,
+            'prompt-cloud-memory',
+            {
+              type: SendMessageType.UserQuery,
+              submittedPrompt: 'raw prompt',
+            },
+          ),
+        );
+
+        expect(mockConfig.recallCloudMemory).toHaveBeenCalledWith(
+          'raw prompt',
+          expect.any(AbortSignal),
+        );
+        const requestText = getLastTurnRequestText();
+        expect(requestText).toContain('expanded prompt');
+        expect(requestText).toContain('Prefer concise answers');
+        expect(requestText).toContain('qwen:user-prompt-submit-context');
       });
 
       it('uses the pre-injection prompt for managed auto-memory recall', async () => {

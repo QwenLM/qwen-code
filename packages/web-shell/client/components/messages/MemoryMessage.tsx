@@ -5,15 +5,18 @@ import {
   type DaemonWorkspaceMemoryFile,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { CloudMemoryPanel } from './CloudMemoryPanel';
 import styles from './MemoryMessage.module.css';
 
 type MemoryMode = 'view' | 'edit';
-type MemoryScope = 'global' | 'workspace';
+export type MemoryScope = 'global' | 'workspace' | 'cloud';
 
 interface MemoryMessageProps {
   refreshSignal?: number;
   addSignal?: number;
   addScope?: DaemonContextFileScope;
+  initialScope?: MemoryScope;
+  onOpenSettings?: () => void;
   onMessage?: (message: string, type?: 'status' | 'error') => void;
 }
 
@@ -21,7 +24,7 @@ interface MemoryEntry {
   scope: MemoryScope;
   title: string;
   description: string;
-  fallbackPath: string;
+  fallbackPath?: string;
   file?: DaemonWorkspaceMemoryFile;
 }
 
@@ -36,13 +39,19 @@ function scopeLabel(
   scope: MemoryScope,
   t: ReturnType<typeof useI18n>['t'],
 ): string {
-  return scope === 'global' ? t('memory.global') : t('memory.project');
+  return scope === 'global'
+    ? t('memory.global')
+    : scope === 'cloud'
+      ? t('memory.cloud')
+      : t('memory.project');
 }
 
 export function MemoryMessage({
   refreshSignal = 0,
   addSignal = 0,
   addScope = 'workspace',
+  initialScope = 'workspace',
+  onOpenSettings,
   onMessage,
 }: MemoryMessageProps) {
   const { t } = useI18n();
@@ -51,7 +60,7 @@ export function MemoryMessage({
   });
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const loadSeqRef = useRef(0);
-  const [selectedScope, setSelectedScope] = useState<MemoryScope>('workspace');
+  const [selectedScope, setSelectedScope] = useState<MemoryScope>(initialScope);
   const [mode, setMode] = useState<MemoryMode>('view');
   const [content, setContent] = useState('');
   const [draft, setDraft] = useState('');
@@ -78,6 +87,11 @@ export function MemoryMessage({
         fallbackPath: '~/.qwen/QWEN.md',
         file: globalFile,
       },
+      {
+        scope: 'cloud',
+        title: t('memory.cloud'),
+        description: t('memory.cloud.desc'),
+      },
     ];
   }, [files, t]);
 
@@ -91,6 +105,7 @@ export function MemoryMessage({
       setMessage(null);
       setContent('');
       setDraft('');
+      if (entry?.scope === 'cloud') return;
       if (!entry?.file) {
         if (nextMode === 'edit') {
           requestAnimationFrame(() => editorRef.current?.focus());
@@ -129,6 +144,10 @@ export function MemoryMessage({
   }, [selectedEntry?.file?.path, selectedEntry?.scope]);
 
   useEffect(() => {
+    setSelectedScope(initialScope);
+  }, [initialScope]);
+
+  useEffect(() => {
     if (error) setMessage(error.message);
   }, [error]);
 
@@ -162,12 +181,12 @@ export function MemoryMessage({
   };
 
   const handleEdit = () => {
-    if (!selectedEntry) return;
+    if (!selectedEntry || selectedEntry.scope === 'cloud') return;
     loadContent(selectedEntry, 'edit');
   };
 
   const handleSave = () => {
-    if (!selectedEntry) return;
+    if (!selectedEntry || selectedEntry.scope === 'cloud') return;
     if (!draft.trim()) {
       setMessage(t('memory.contentEmpty'));
       return;
@@ -223,66 +242,72 @@ export function MemoryMessage({
         })}
       </nav>
 
-      <section className={styles.detail}>
-        <header className={styles.detailHeader}>
-          <div className={styles.detailTitleWrap}>
-            <div className={styles.detailPath}>{path}</div>
-          </div>
-          <div className={styles.actions}>
-            <button
-              type="button"
-              className={styles.actionButton}
-              onClick={handleEdit}
-            >
-              {t('settings.action.edit')}
-            </button>
-          </div>
-        </header>
-
-        {statusText && <div className={styles.status}>{statusText}</div>}
-
-        {mode === 'edit' ? (
-          <>
-            <textarea
-              ref={editorRef}
-              className={styles.editor}
-              value={draft}
-              disabled={saving || contentLoading}
-              onChange={(event) => setDraft(event.target.value)}
-              placeholder={t('memory.placeholder', {
-                scope: selectedEntry ? scopeLabel(selectedEntry.scope, t) : '',
-              })}
-            />
-            <div className={styles.editorFooter}>
+      {selectedScope === 'cloud' ? (
+        <CloudMemoryPanel onOpenSettings={onOpenSettings} />
+      ) : (
+        <section className={styles.detail}>
+          <header className={styles.detailHeader}>
+            <div className={styles.detailTitleWrap}>
+              <div className={styles.detailPath}>{path}</div>
+            </div>
+            <div className={styles.actions}>
               <button
                 type="button"
-                className={styles.secondaryButton}
-                disabled={saving}
-                onClick={() => {
-                  setDraft(content);
-                  setMode('view');
-                }}
+                className={styles.actionButton}
+                onClick={handleEdit}
               >
-                {t('common.cancel')}
-              </button>
-              <button
-                type="button"
-                className={styles.primaryButton}
-                disabled={saving || contentLoading}
-                onClick={handleSave}
-              >
-                {saving ? t('memory.saving') : t('memory.save')}
+                {t('settings.action.edit')}
               </button>
             </div>
-          </>
-        ) : (
-          <pre className={styles.content}>
-            {contentLoading
-              ? t('memory.loadingFile')
-              : content || t('memory.noFiles')}
-          </pre>
-        )}
-      </section>
+          </header>
+
+          {statusText && <div className={styles.status}>{statusText}</div>}
+
+          {mode === 'edit' ? (
+            <>
+              <textarea
+                ref={editorRef}
+                className={styles.editor}
+                value={draft}
+                disabled={saving || contentLoading}
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder={t('memory.placeholder', {
+                  scope: selectedEntry
+                    ? scopeLabel(selectedEntry.scope, t)
+                    : '',
+                })}
+              />
+              <div className={styles.editorFooter}>
+                <button
+                  type="button"
+                  className={styles.secondaryButton}
+                  disabled={saving}
+                  onClick={() => {
+                    setDraft(content);
+                    setMode('view');
+                  }}
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  type="button"
+                  className={styles.primaryButton}
+                  disabled={saving || contentLoading}
+                  onClick={handleSave}
+                >
+                  {saving ? t('memory.saving') : t('memory.save')}
+                </button>
+              </div>
+            </>
+          ) : (
+            <pre className={styles.content}>
+              {contentLoading
+                ? t('memory.loadingFile')
+                : content || t('memory.noFiles')}
+            </pre>
+          )}
+        </section>
+      )}
     </div>
   );
 }

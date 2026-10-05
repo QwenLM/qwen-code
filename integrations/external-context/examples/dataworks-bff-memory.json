@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "timeoutMs": 5000,
+  "provider": {
+    "type": "dataworks-bff-memory-v1",
+    "baseUrl": "https://pre-bff.example.test",
+    "tokenEnv": "QWEN_CLOUD_MEMORY_TOKEN"
+  },
+  "write": {
+    "enabled": true
+  }
+}

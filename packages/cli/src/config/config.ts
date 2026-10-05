@@ -99,6 +99,10 @@ import {
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
 import { resolveSkillSettings } from './skill-settings.js';
+import {
+  captureCloudMemoryConversation,
+  recallCloudMemoryContext,
+} from '../serve/cloud-memory.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -1984,9 +1988,8 @@ export async function loadCliConfig(
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
     terminalImageRenderSupportProvider: interactive
       ? async () => {
-          const { getTerminalImageRenderSupport } = await import(
-            '../ui/utils/terminal-image-renderer.js'
-          );
+          const { getTerminalImageRenderSupport } =
+            await import('../ui/utils/terminal-image-renderer.js');
           return getTerminalImageRenderSupport();
         }
       : undefined,
@@ -2183,6 +2186,20 @@ export async function loadCliConfig(
       bareMode || safeMode
         ? false
         : (settings.memory?.enableManagedAutoMemory ?? true),
+    cloudMemoryRecallProvider:
+      bareMode || safeMode
+        ? undefined
+        : (query, signal) => recallCloudMemoryContext(cwd, query, signal),
+    cloudMemoryCaptureProvider:
+      bareMode || safeMode
+        ? undefined
+        : (userPrompt, assistantText, signal) =>
+            captureCloudMemoryConversation(
+              cwd,
+              userPrompt,
+              assistantText,
+              signal,
+            ),
     enableManagedAutoDream:
       bareMode || safeMode
         ? false

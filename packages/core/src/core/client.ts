@@ -415,6 +415,7 @@ export class LlmClient {
   private forceFullIdeContext = true;
   private recentCompletedToolNames: string[] = [];
   private pendingMemoryPrefetch: MemoryPrefetchHandle | undefined;
+  private pendingCloudCapturePrompt: string | undefined;
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
   private announcedDeferredToolNames = new Set<string>();
@@ -1061,6 +1062,7 @@ export class LlmClient {
    */
   requestShutdown(): void {
     this.shutdownRequested = true;
+    this.pendingCloudCapturePrompt = undefined;
     this.cancelPendingMemoryPrefetch('shutdown');
   }
 
@@ -1387,6 +1389,7 @@ export class LlmClient {
     this.lastApiCompletionTimestamp = null;
     this.lastHookMicrocompactionTimestamp = null;
     this.recentCompletedToolNames = [];
+    this.pendingCloudCapturePrompt = undefined;
     // startChat() rewrites the chat to its initial state. Any prior
     // read_file tool results the FileReadCache still tracks are no
     // longer in history, so a follow-up Read would serve a placeholder
@@ -2468,6 +2471,23 @@ export class LlmClient {
         // (never 'scheduled'), so without this reset the flag can never clear.
         this.skillsModifiedInSession = false;
       }
+
+      const cloudCapturePrompt = this.pendingCloudCapturePrompt;
+      const assistantText = this.getLastModelMessageText()?.trim();
+      if (cloudCapturePrompt && assistantText) {
+        this.pendingCloudCapturePrompt = undefined;
+        const capturePromise = this.config
+          .captureCloudMemory(cloudCapturePrompt, assistantText)
+          .then(() => 0)
+          .catch((error: unknown) => {
+            debugLogger.warn(
+              'Failed to capture cloud memory; continuing without it.',
+              error,
+            );
+            return 0;
+          });
+        this.pendingMemoryTaskPromises.push(capturePromise);
+      }
     }
 
     // extract and dream keep the original UserQuery-only gate to preserve
@@ -2512,8 +2532,7 @@ export class LlmClient {
         if (schedResult.status === 'scheduled' && schedResult.promise) {
           return schedResult.promise.then((state) => {
             const topics = state.metadata?.['touchedTopics'] as
-              | string[]
-              | undefined;
+              string[] | undefined;
             return topics ? topics.length : 0;
           });
         }
@@ -3112,6 +3131,41 @@ export class LlmClient {
               hookContext: additionalContext,
             };
           }
+        }
+      }
+
+      if (messageType === SendMessageType.UserQuery) {
+        const promptText =
+          typeof options?.submittedPrompt === 'string' &&
+          options.submittedPrompt.trim().length > 0
+            ? options.submittedPrompt
+            : (preHookUserPromptText ?? partToString(request));
+        this.pendingCloudCapturePrompt = promptText;
+        try {
+          const cloudMemoryContext = await this.config.recallCloudMemory(
+            promptText,
+            signal,
+          );
+          if (cloudMemoryContext) {
+            const requestArray = Array.isArray(request) ? request : [request];
+            const priorContext = userPromptRecordPayload?.hookContext;
+            const combinedContext = [priorContext, cloudMemoryContext]
+              .filter((value): value is string => Boolean(value))
+              .join('\n\n');
+            request = [
+              ...(priorContext ? requestArray.slice(0, -1) : requestArray),
+              { text: wrapUserPromptSubmitContext(combinedContext) },
+            ];
+            userPromptRecordPayload = {
+              displayText: options?.submittedPrompt ?? promptText,
+              hookContext: combinedContext,
+            };
+          }
+        } catch (error) {
+          signal.throwIfAborted();
+          this.config
+            .getDebugLogger()
+            .warn('Cloud memory recall failed; continuing without it.', error);
         }
       }
     } catch (error) {
@@ -4589,6 +4643,12 @@ export class LlmClient {
         this.cancelPendingMemoryPrefetch(
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
         );
+        if (
+          messageType === SendMessageType.UserQuery ||
+          messageType === SendMessageType.ToolResult
+        ) {
+          this.pendingCloudCapturePrompt = undefined;
+        }
       }
       if (!normalCompletion) {
         endCurrentInteraction(

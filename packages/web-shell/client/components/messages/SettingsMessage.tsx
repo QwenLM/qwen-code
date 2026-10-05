@@ -91,6 +91,7 @@ interface SettingsMessageProps {
   embedded?: boolean;
   /** Category to select on open (deep link, e.g. 'Daemon'). */
   initialCategory?: string;
+  onManageCloudMemory?: () => void;
 }
 
 export interface SettingsMessageSettingsState {
@@ -120,10 +121,18 @@ const HIDDEN_SETTING_KEYS = new Set([
   // carries the retired setting, so keep it hidden from the panel.
   'ui.compactMode',
   'mcpServers',
+  'memory.cloudEnabled',
+  'memory.cloudRecallPreference',
 ]);
 const LIVE_SETTING_KEYS = new Set([
   'experimental.liveVoice.enabled',
   'experimental.liveVoice.shortcut',
+]);
+const USER_ONLY_SETTING_KEYS = new Set([
+  'memory.cloudBffBaseUrl',
+  'memory.cloudBffTokenEnv',
+  'memory.cloudEnabled',
+  'memory.cloudRecallPreference',
 ]);
 
 type Scope = 'user' | 'workspace';
@@ -251,6 +260,7 @@ type SettingsPageItem =
   | { type: 'setting'; setting: DaemonSettingDescriptor }
   | { type: 'local'; localKey: 'chatWidth' }
   | { type: 'local-control' }
+  | { type: 'cloud-memory' }
   | { type: 'live' };
 
 interface SettingsPageCategory {
@@ -283,17 +293,19 @@ function CategoryIcon({ category }: { category: string }) {
       ? WrenchIcon
       : normalized.includes('context')
         ? DatabaseIcon
-        : normalized.includes('privacy')
-          ? ShieldIcon
-          : normalized.includes('model')
-            ? BotIcon
-            : normalized.includes('daemon')
-              ? ServerIcon
-              : normalized.includes('advanced')
-                ? SlidersHorizontalIcon
-                : normalized.includes('experimental')
-                  ? FlaskConicalIcon
-                  : Settings2Icon;
+        : normalized.includes('memory')
+          ? DatabaseIcon
+          : normalized.includes('privacy')
+            ? ShieldIcon
+            : normalized.includes('model')
+              ? BotIcon
+              : normalized.includes('daemon')
+                ? ServerIcon
+                : normalized.includes('advanced')
+                  ? SlidersHorizontalIcon
+                  : normalized.includes('experimental')
+                    ? FlaskConicalIcon
+                    : Settings2Icon;
   return <Icon data-icon="inline-start" aria-hidden="true" />;
 }
 
@@ -422,6 +434,7 @@ export function SettingsMessage({
   modelManagement,
   embedded = false,
   initialCategory,
+  onManageCloudMemory,
 }: SettingsMessageProps) {
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
@@ -438,7 +451,8 @@ export function SettingsMessage({
     const visibleSettings = settings.filter(
       (setting) =>
         !HIDDEN_SETTING_KEYS.has(setting.key) &&
-        !LIVE_SETTING_KEYS.has(setting.key),
+        !LIVE_SETTING_KEYS.has(setting.key) &&
+        (scope === 'user' || !USER_ONLY_SETTING_KEYS.has(setting.key)),
     );
     const groups: SettingsPageCategory[] = groupByCategory(visibleSettings).map(
       (group) => ({
@@ -485,6 +499,18 @@ export function SettingsMessage({
         });
       }
     }
+    if (scope === 'user' && onManageCloudMemory) {
+      const memory = groups.find((group) => group.id === 'Memory');
+      if (memory) {
+        memory.items.unshift({ type: 'cloud-memory' });
+      } else {
+        groups.push({
+          id: 'Memory',
+          label: formatSettingCategory('Memory', t),
+          items: [{ type: 'cloud-memory' }],
+        });
+      }
+    }
     const daemon = groups.find((group) => group.id === 'Daemon');
     if (daemon) {
       daemon.items.unshift({ type: 'local-control' });
@@ -496,7 +522,7 @@ export function SettingsMessage({
       });
     }
     return groups;
-  }, [liveSetup, settings, t]);
+  }, [liveSetup, onManageCloudMemory, scope, settings, t]);
 
   useEffect(() => {
     if (categories.length === 0) return;
@@ -847,6 +873,29 @@ export function SettingsMessage({
                             <div key="local-control">
                               {separator}
                               <LocalControlSettingsCard />
+                            </div>
+                          );
+                        }
+                        if (item.type === 'cloud-memory') {
+                          return (
+                            <div key="cloud-memory">
+                              {separator}
+                              <SettingsRow
+                                title={t('settings.memory.cloud.title')}
+                                description={t(
+                                  'settings.memory.cloud.description',
+                                )}
+                                control={
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={onManageCloudMemory}
+                                  >
+                                    {t('settings.memory.cloud.manage')}
+                                  </Button>
+                                }
+                              />
                             </div>
                           );
                         }

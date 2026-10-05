@@ -105,6 +105,9 @@ import type {
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
+  DaemonCloudMemoryRequest,
+  DaemonCloudMemoryResponse,
+  DaemonCloudMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceAcpStatusResult,
@@ -2178,6 +2181,24 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonWorkspaceMemoryStatus;
       },
+    );
+  }
+
+  async cloudMemoryStatus(): Promise<DaemonCloudMemoryStatus> {
+    return await this.jsonRequest<DaemonCloudMemoryStatus>(
+      '/workspace/cloud-memory',
+      'GET /workspace/cloud-memory',
+      { method: 'GET' },
+    );
+  }
+
+  async invokeCloudMemory(
+    request: DaemonCloudMemoryRequest,
+  ): Promise<DaemonCloudMemoryResponse> {
+    return await this.jsonRequest<DaemonCloudMemoryResponse>(
+      '/workspace/cloud-memory',
+      'POST /workspace/cloud-memory',
+      { method: 'POST', body: request },
     );
   }
 

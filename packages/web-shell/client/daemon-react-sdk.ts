@@ -377,6 +377,10 @@ export type {
   DaemonWorkspaceMcpResourcesStatus,
   /** Memory file entry: path, scope, byte size. */
   DaemonWorkspaceMemoryFile,
+  DaemonCloudMemoryAction,
+  DaemonCloudMemoryRequest,
+  DaemonCloudMemoryResponse,
+  DaemonCloudMemoryStatus,
   /** Skill status: name, description, level, model-invocable flag. */
   DaemonWorkspaceSkillStatus,
   /** Registered tool: name, displayName, description, enabled flag. */
