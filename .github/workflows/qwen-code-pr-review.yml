@@ -1788,10 +1788,17 @@ jobs:
             # the step's own later writes still hit the real files. This
             # shield is copied inline in 'Resolve conflicts': keep the decoy
             # set aligned, edit both copies together.
+            #
+            # 8 GiB V8 heap for the review agent: run 37286402900 OOMed twice
+            # (2026-10-05) near the ~4 GiB default ceiling when the 17-agent
+            # review fan-out mapped the full PR context; NODE_OPTIONS travels
+            # through timeout(1) into the qwen process and the workflow's
+            # forked children, matching the triage workflow's existing knob.
             GITHUB_PATH="$PROXY_BIN/decoy.github-path" \
             GITHUB_ENV="$PROXY_BIN/decoy.github-env" \
             GITHUB_OUTPUT="$PROXY_BIN/decoy.github-output" \
             GITHUB_STEP_SUMMARY="$PROXY_BIN/decoy.github-step-summary" \
+            NODE_OPTIONS='--max-old-space-size=8192' \
             timeout --kill-after=10s "${attempt_timeout}s" qwen \
               --auth-type openai \
               --approval-mode yolo \
