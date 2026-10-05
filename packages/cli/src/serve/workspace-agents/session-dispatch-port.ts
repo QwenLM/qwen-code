@@ -31,6 +31,7 @@ import type {
   WorkspaceAgent,
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import { PROMPT_CANCEL_REASON_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import { streamAgentTurn } from './stream-agent-turn.js';
 import {
   publishAgentEvent,
@@ -147,7 +148,12 @@ export function createSessionDispatchPort(
         !liveness.waitingOnPerson() &&
         Date.now() - liveness.activityAt() >= AGENT_RUN_STALL_TIMEOUT_MS
       ) {
-        await bridge.cancelSession(sessionId).catch(() => {});
+        await bridge
+          .cancelSession(sessionId, {
+            sessionId,
+            _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+          })
+          .catch(() => {});
         throw new Error(AGENT_RUN_STALLED_ERROR);
       }
       await delay(250);

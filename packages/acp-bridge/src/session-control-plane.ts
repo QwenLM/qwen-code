@@ -3756,7 +3756,12 @@ export function createSessionControlPlane(
       'qwen-code.daemon.acp_channel.unsettled_session_count': unsettled.length,
     });
     for (const entry of unsettled) {
-      void bridgeApi.cancelSession(entry.sessionId).catch(() => undefined);
+      void bridgeApi
+        .cancelSession(entry.sessionId, {
+          sessionId: entry.sessionId,
+          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+        })
+        .catch(() => undefined);
     }
     // Terminating the channel starts its exit check (see
     // `onChannelTerminationStart`).
@@ -4154,7 +4159,12 @@ export function createSessionControlPlane(
           entry.backgroundTurn ||
           entry.goalTurnActive
         ) {
-          void bridgeApi.cancelSession(sessionId).catch(() => undefined);
+          void bridgeApi
+            .cancelSession(sessionId, {
+              sessionId,
+              _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+            })
+            .catch(() => undefined);
         }
       }
     }
@@ -4881,7 +4891,12 @@ export function createSessionControlPlane(
           entry.workspaceChangeFence === undefined
         )
           return;
-        void bridgeApi.cancelSession(sessionId).catch(() => undefined);
+        void bridgeApi
+          .cancelSession(sessionId, {
+            sessionId,
+            _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+          })
+          .catch(() => undefined);
       },
     );
     const connection = harness.createConnection(client, channel);

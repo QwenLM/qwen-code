@@ -102,6 +102,7 @@ import {
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-grants.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { AGENT_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
+import { PROMPT_CANCEL_REASON_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import { startAgentHostSessionOwner } from '../workspace-agents/agent-host-session.js';
 import {
   AGENT_HOST_ONLINE_WINDOW_MS,
@@ -467,7 +468,10 @@ export function registerWorkspaceAgentRoutes(
         .map(async (session) => {
           if (cancelAgentSessions) {
             await runtime.bridge
-              .cancelSession(session.sessionId)
+              .cancelSession(session.sessionId, {
+                sessionId: session.sessionId,
+                _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+              })
               .catch(() => {});
           }
           await runtime.bridge.closeSession(session.sessionId).catch(() => {});

@@ -28,6 +28,7 @@ import {
   ACTIVE_WORK_HOLD_CATEGORIES,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
+  PROMPT_CANCEL_REASON_META_KEY,
   REQUESTED_SESSION_ID_META_KEY,
   type AcpSessionBridge,
   type BridgeRuntimeStopRequest,
@@ -4430,7 +4431,13 @@ describe('workspace change propagation', () => {
     }
     await vi.waitFor(() =>
       expect(p.managed.agent.cancelCalls).toEqual([
-        { sessionId: managed.sessionId },
+        {
+          sessionId: managed.sessionId,
+          // A fence-triggered cancel is an interruption, not user intent: the
+          // child must not stamp the turn as user-cancelled, or the stopped
+          // turn is durably excluded from recovery.
+          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+        },
       ]),
     );
     expect(p.legacy.agent.cancelCalls).toEqual([]);
@@ -4559,7 +4566,10 @@ describe('workspace change propagation', () => {
       if (verdict === 'fences') {
         await vi.waitFor(() =>
           expect(p.managed.agent.cancelCalls).toEqual([
-            { sessionId: 'persisted' },
+            {
+              sessionId: 'persisted',
+              _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+            },
           ]),
         );
       } else {
