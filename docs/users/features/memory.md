@@ -96,6 +96,8 @@ Auto-memory files live at `~/.qwen/projects/<project>/memory/`. All branches of 
 
 Everything saved is plain markdown — you can open, edit, or delete any file at any time.
 
+`MEMORY.md` is a compact index, rather than the full memory store. Its generated body and the portion loaded into prompts share a limit of 200 lines and 25,000 UTF-16 code units; truncation notices are added separately. Line endings are normalized before prompt budgeting. Under size pressure, complete ordinary entries (up to 150 code units) get space before longer entries, and retained entries keep their original order. An entry that cannot fit is skipped whole, so its Markdown link is never cut in the middle. Keep detail in the linked topic files.
+
 #### Pinned memory
 
 Put hand-curated documents that automatic memory maintenance should preserve
@@ -115,8 +117,10 @@ Automatic extraction is instructed to leave pinned records and their valid
 index entries unchanged, while Dream is instructed to skip `pinned/` during
 consolidation. Both automatic extraction and forked Dream workers, including
 background cleanup, enforce the pinned-file boundary on their write and edit
-tools, including paths that resolve through a symlink into `pinned/`; their
-existing read-only shell policy blocks command-line deletion. You still control
+tools, including paths that resolve through a symlink into `pinned/`.
+Command-line deletion is closed off too: only the project Dream worker holds a
+shell, and its policy is read-only, while automatic extraction and the
+user-memory Dream worker hold no shell at all. You still control
 these files directly and can remove them with an explicit `/forget` request.
 
 > **Note:** The visible `/dream` slash command runs on the main Agent. It

@@ -2,8 +2,8 @@
 
 [English](2026-09-27-managed-workspace-recovery.md) | [简体中文](2026-09-27-managed-workspace-recovery.zh-CN.md)
 
-Status: W0e-1 implementation and proposed W0e-2/3 follow-up design, 2026-09-27.
-Production worker adoption and physical reclamation remain follow-up work. Baseline: `e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`.
+Status: W0e-1/2/3 source implementation, 2026-09-28.
+Dedicated Linux physical reboot acceptance remains pending. Baseline: `e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`.
 
 Related: [roadmap #12380](https://github.com/QwenLM/qwen-code/issues/12380),
 [lost executions #12670](https://github.com/QwenLM/qwen-code/issues/12670),
@@ -293,7 +293,7 @@ process metadata out of public Session/Workspace responses.
 
 ## 6a. W0e-1 implementation
 
-This PR implements the first slice. The evidence SPI uses two nullable JSON
+W0e-1 implements the first slice. The evidence SPI uses two nullable JSON
 fields on the original binding: `lossEvidence` and `stopEvidence`. Each contains
 a version, fact, source, observation time, host/writer domain and the original
 seed identities and resource handle, without credentials. The first loss proof
@@ -338,7 +338,7 @@ evidence-preserving operator migration is available. A later `READY` binding,
 row deletion or a synthetic stop receipt is not clearance. Deployments with
 these rows cannot safely resume admission through this slice alone.
 
-The local provisioner can certify journal loss for a process it still owns and
+The W0e-1 local provisioner can certify journal loss for a process it still owns and
 has observed exit, using the exact seed, lease and handle. This proves neither
 that descendants stopped nor that a restarted Broker can adopt the worker.
 A transient attestation transport error against a still-live owned process
@@ -370,6 +370,29 @@ columns and the placement guard. Upgrade tests write pre-change SQL rows before
 migration and verify PREPARED, UNKNOWN and SETTLED receipts afterwards. A
 coordinated rollout remains required before writing ABANDONED rows.
 
+## 6b. W0e-2 implementation
+
+The [durable local adoption implementation](2026-09-27-local-runtime-adoption.md)
+adds a Linux identity store (enabled by default; opt out with
+`runtime-broker.durable-local-process=false` and
+`runtime-broker.trusted-local-reboot-recovery=false`), a boot
+barrier with durable PID/start-tick
+registration, permanent launch locks, and adoption after Broker restart. The
+ephemeral mode retains the W0e-1 behavior and remains available behind that
+opt-out. Neither mode proves stopped
+writers after worker-only death; W0e-3 physical reclamation remains separate.
+
+## 6c. W0e-3 implementation
+
+The [trusted local reboot implementation](2026-09-28-local-reboot-recovery.md)
+adds same-host boot evidence (enabled by default alongside durable local
+provisioning), original-holder cleanup,
+late-acquisition fencing and an independent bounded maintenance scan. Cleanup
+uses saved physical ownership even after grants, product Session or Registry
+change. Loss receipts remain terminal uncertainty. Tests with real workers and
+SQL plus synthetic boot identity exercise the chain; a dedicated Linux reboot
+is still required before physical acceptance can be claimed.
+
 ## 7. Delivery order and boundaries
 
 | Slice          | Deliverable                                                                                                                                                               | Exit condition                                                                                                                  |
@@ -379,7 +402,7 @@ coordinated rollout remains required before writing ABANDONED rows.
 | W0e-3          | Same-host reboot recovery and Workspace holder cleanup, stale-writer fault gates                                                                                          | Real SQL + worker + host/isolation evidence establishes safe progress or explicit blocking in every acceptance case             |
 
 These are implementation slices, not three already completed features. Land
-W0e-1 before enabling W0e-2 reclamation. W0e is complete only after W0e-3; a
+W0e-1 before enabling W0e-2 adoption. W0e is complete only after W0e-3; a
 passing helper-based test does not qualify a production provisioner.
 
 [Hosted file-tool PR #12831](https://github.com/QwenLM/qwen-code/pull/12831)
@@ -426,8 +449,10 @@ physical pins, and implementing W0e-1 before production local recovery. The
 issues still need this decision recorded and reviewed; this document is not a
 claim of maintainer acceptance.
 
-The W0e-2/3 implementation must select a supported OS source of stable host/boot
-identity and prove durable startup registration on that platform. If the
+W0e-2 selects Linux machine/boot/PID/time namespace identity and durable startup
+registration. Its real-process tests use native identity on Linux and a test-only
+identity on macOS. W0e-3 still needs physical reboot verification on a supported
+host. If the
 deployment requires automatic recovery after worker-only death with arbitrary
 Shell descendants, select a killable isolation domain before enabling that
 path. Until then, its correct acceptance result is explicit blocking. These

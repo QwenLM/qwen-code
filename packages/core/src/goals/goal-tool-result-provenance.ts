@@ -31,7 +31,8 @@ export interface GoalToolResultRequest {
  *
  * `get_goal` and `update_goal` are stamped as `goal_runtime` instead: they are
  * the Goal's own bookkeeping, and a catalog that cited its own reads as proof
- * would be circular.
+ * would be circular. `exec` is `execution_output`: the script can rewrite
+ * nested results, so only the separately recorded originals attest tool facts.
  *
  * Every site that records tool results during a Goal turn routes through
  * here -- the interactive scheduler, both TUI recording paths, headless, and
@@ -60,6 +61,9 @@ export function goalToolResultProvenance(
     lowerToolName === ToolNames.UPDATE_GOAL
   ) {
     return { goalContext: { ...goalContext }, provenance: 'goal_runtime' };
+  }
+  if (lowerToolName === ToolNames.EXEC) {
+    return { goalContext: { ...goalContext }, provenance: 'execution_output' };
   }
   return { goalContext: { ...goalContext } };
 }

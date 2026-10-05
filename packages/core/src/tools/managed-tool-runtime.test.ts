@@ -7,6 +7,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import {
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import {
@@ -18,8 +22,10 @@ import {
   type ToolResult,
   type ToolResultDisplay,
 } from './tools.js';
+import { ToolErrorType } from './tool-error.js';
 import {
   ManagedToolRuntime,
+  ManagedToolPreparationError,
   createBuiltinManagedToolRuntime,
   type ManagedToolExecutionResult,
   type ManagedToolRuntimeFileHistory,
@@ -195,6 +201,23 @@ describe('ManagedToolRuntime', () => {
     );
   }
 
+  it('classifies unknown tools and invalid input without poisoning a corrected prepare', async () => {
+    await runtime.beginTurn(identity);
+    await expect(
+      runtime.prepare(identity, 'missing', input),
+    ).rejects.toBeInstanceOf(ManagedToolPreparationError);
+    await expect(
+      runtime.prepare(identity, tool.name, {}),
+    ).rejects.toBeInstanceOf(ManagedToolPreparationError);
+    expect(tool.invocations).toHaveLength(0);
+    await expect(
+      runtime.prepare(identity, tool.name, input),
+    ).resolves.toMatchObject({
+      params: input,
+    });
+    expect(tool.invocations).toHaveLength(1);
+  });
+
   it('waits for the shared parent history without creating child snapshots', async () => {
     const ready = deferred<void>();
     const prepareTurn = vi.fn(() => ready.promise);
@@ -250,6 +273,44 @@ describe('ManagedToolRuntime', () => {
       expect(tool.invocations[0].execute).not.toHaveBeenCalled();
       expect(hooks.post).not.toHaveBeenCalled();
       expect(hooks.failure).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['before', 'after'] as const)(
+    'settles a shared history rejection %s physical execution',
+    async (phase) => {
+      const gate = deferred<void>();
+      const refusal = new Error('Shared history refused execution.');
+      useSharedHistory({
+        prepareTurn: async () => {},
+        execute: async (operation) => {
+          await gate.promise;
+          if (phase === 'after') await operation();
+          throw refusal;
+        },
+      });
+      const ref = await prepare();
+      await runtime.preflight(ref);
+      const pending = runtime.execute(ref);
+      const outcome = pending.catch((error: unknown) => error);
+      expect(runtime.status(ref).state).toBe('executing');
+      expect(runtime.hasActiveWork()).toBe(true);
+      gate.resolve();
+      expect(await outcome).toBe(refusal);
+      expect(runtime.status(ref)).toMatchObject({
+        state: 'settled',
+        result: {
+          executionStatus: phase === 'before' ? 'not_started' : 'success',
+        },
+      });
+      expect(tool.invocations[0].execute).toHaveBeenCalledTimes(
+        phase === 'before' ? 0 : 1,
+      );
+      expect(runtime.hasActiveWork()).toBe(false);
+      expect(runtime.cancel(ref).state).toBe('settled');
+      await expect(runtime.execute(ref)).rejects.toBe(refusal);
+      await expect(runtime.releasePrepared()).resolves.toBeUndefined();
+      await expect(runtime.dispose()).resolves.toBeUndefined();
     },
   );
 
@@ -449,6 +510,107 @@ describe('ManagedToolRuntime', () => {
     expect((await retry).params).toEqual(input);
   });
 
+  it('runs only global and preparation-owner hooks through the real hook pipeline', async () => {
+    const { HookSystem } = await import('../hooks/hookSystem.js');
+    const { HookType, PermissionMode } = await import('../hooks/types.js');
+    const actual = await vi.importActual<
+      typeof import('../core/toolHookTriggers.js')
+    >('../core/toolHookTriggers.js');
+    hooks.pre.mockImplementation(actual.firePreToolUseHook);
+    const seen: string[] = [];
+    const definition = (
+      label: string,
+    ): Array<import('../hooks/types.js').HookDefinition> => [
+      {
+        hooks: [
+          {
+            type: HookType.Function,
+            name: label,
+            errorMessage: 'failed',
+            callback: async () => {
+              seen.push(label);
+              return true;
+            },
+          },
+        ],
+      },
+    ];
+    Object.assign(config, {
+      getAllowedHttpHookUrls: () => [],
+      getAllowPrivateNetworkHooks: () => false,
+      getSystemHooks: () => ({}),
+      getUserHooks: () => ({ PreToolUse: definition('G') }),
+      getProjectHooks: () => ({}),
+      getExtensions: () => [],
+      isTrustedFolder: () => true,
+      getTranscriptPath: () => '/tmp/transcript',
+      getWorkingDir: () => '/tmp',
+      getSessionSourceType: () => undefined,
+      getSessionSourceId: () => undefined,
+    });
+    const system = new HookSystem(config);
+    config.getHookSystem = () => system;
+    await system.initialize();
+    const owner = { runtimeId: system.runtimeId, sessionId, agentId: 'A' };
+    for (const agentId of ['A', 'B'])
+      system
+        .getRegistry()
+        .addAgentHooks({ PreToolUse: definition(agentId) }, agentId, {
+          owner: { ...owner, agentId },
+        });
+    const request = vi.fn(
+      async (
+        message: import('../confirmation-bus/types.js').HookExecutionRequest,
+      ) => {
+        await runWithHookExecutionOwner(message.owner, () =>
+          system.firePreToolUseEvent(
+            String(message.input['tool_name']),
+            message.input['tool_input'] as Record<string, unknown>,
+            String(message.input['tool_use_id']),
+            PermissionMode.Default,
+          ),
+        );
+        return { success: true, output: {} };
+      },
+    );
+    config.getMessageBus = () =>
+      ({ request, publish: vi.fn() }) as unknown as ReturnType<
+        Config['getMessageBus']
+      >;
+    const ref = await runWithHookExecutionOwner(owner, () => prepare());
+    await runWithHookExecutionOwner({ ...owner, agentId: 'B' }, () =>
+      runtime.preflight(ref),
+    );
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(seen.sort()).toEqual(['A', 'G']);
+  });
+
+  it('retains its preparation owner across approval and execution by another agent', async () => {
+    const owner = { runtimeId: 'runtime', sessionId, agentId: 'A' };
+    config.getHookSystem = () =>
+      ({ runtimeId: 'runtime' }) as unknown as ReturnType<
+        Config['getHookSystem']
+      >;
+    tool.setup = (invocation) => {
+      invocation.onConfirm.mockImplementation(async () => {
+        expect(getHookExecutionOwner()).toEqual(owner);
+      });
+      invocation.execute.mockImplementation(async () => {
+        expect(getHookExecutionOwner()).toEqual(owner);
+        return rawResult;
+      });
+    };
+    const ref = await runWithHookExecutionOwner(owner, () => prepare());
+    await runWithHookExecutionOwner({ ...owner, agentId: 'B' }, async () => {
+      await runtime.confirmation(ref);
+      await runtime.confirm(ref, ToolConfirmationOutcome.ProceedOnce);
+      await runtime.preflight(ref);
+      await runtime.execute(ref);
+    });
+    expect(hooks.pre.mock.calls[0][7]).toEqual(owner);
+    expect(hooks.post.mock.calls[0][9]).toEqual(owner);
+  });
+
   it('build, confirmation, preflight and execution carry the original invocation context', async () => {
     const assertContext = () => {
       expect(getInvocationContext()).toEqual({
@@ -538,6 +700,7 @@ describe('ManagedToolRuntime', () => {
     expect(tool.invocations[0].execute).toHaveBeenCalledTimes(1);
     const next = { ...identity, promptId: 'prompt-2' };
     await runtime.beginTurn(next);
+    expect(runtime.findStatus(old)).toBeUndefined();
     expect(() => runtime.status(old)).toThrow('identity does not match');
     expect(() => runtime.execute(old)).toThrow('identity does not match');
     await expect(runtime.prepare(prior, tool.name, input)).rejects.toThrow(
@@ -665,6 +828,11 @@ describe('ManagedToolRuntime', () => {
       expect(() => runtime.cancel(forged)).toThrow('identity');
       expect(() => runtime.status(forged)).toThrow('identity');
       expect(() => runtime.execute(forged)).toThrow('identity');
+      if (field === 'invocationId') {
+        expect(runtime.findStatus(forged)).toBeUndefined();
+      } else {
+        expect(() => runtime.findStatus(forged)).toThrow('identity');
+      }
       expect(runtime.status(ref).cancelRequested).toBe(false);
     },
   );
@@ -818,6 +986,213 @@ describe('ManagedToolRuntime', () => {
       state: 'settled',
       cancelRequested: true,
     });
+  });
+
+  it('preserves an explicit Shell cancellation even when the tool has no error', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    runtime.cancel(ref);
+    gate.resolve({
+      llmContent: 'Command cancelled by user.',
+      returnDisplay: {
+        type: 'shell_result',
+        version: 1,
+        text: 'Command cancelled by user.',
+        output: '',
+        directory: '/scratch',
+        exitCode: null,
+        signal: 15,
+        pid: 123,
+        error: null,
+        outcome: 'cancelled',
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      },
+    });
+    expect((await executing).executionStatus).toBe('cancelled');
+    expect(hooks.failure).toHaveBeenCalledTimes(1);
+    expect(hooks.post).not.toHaveBeenCalled();
+  });
+
+  it('preserves an explicit Shell cancellation when the tool also has an error', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    gate.resolve({
+      llmContent: 'Command failed and was cancelled.',
+      error: {
+        message: 'process terminated with signal',
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+      returnDisplay: {
+        type: 'shell_result',
+        version: 1,
+        text: 'Command failed and was cancelled.',
+        output: '',
+        directory: '/scratch',
+        exitCode: null,
+        signal: 15,
+        pid: 123,
+        error: 'signal 15 (SIGTERM) received',
+        outcome: 'cancelled',
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      },
+    });
+    const settled = await executing;
+    expect(runtime.status(ref)).toMatchObject({
+      state: 'settled',
+      cancelRequested: false,
+    });
+    expect(settled.executionStatus).toBe('cancelled');
+    expect(hooks.failure).toHaveBeenCalledTimes(1);
+    expect(hooks.failure).toHaveBeenCalledWith(
+      undefined,
+      'test-tool-use-id',
+      'fixture_write',
+      { value: 'original' },
+      'process terminated with signal',
+      true,
+      'default',
+      undefined,
+      'call-1',
+      undefined,
+      undefined,
+    );
+    expect(hooks.post).not.toHaveBeenCalled();
+  });
+
+  it('classifies a timed-out Shell result carrying an error as error, not cancelled', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    gate.resolve({
+      llmContent: 'Command timed out.',
+      error: {
+        message: 'command exceeded its timeout',
+        type: ToolErrorType.EXECUTION_TIMEOUT,
+      },
+      returnDisplay: {
+        type: 'shell_result',
+        version: 1,
+        text: 'Command timed out.',
+        output: '',
+        directory: '/scratch',
+        exitCode: null,
+        signal: null,
+        pid: 123,
+        error: 'command exceeded its timeout',
+        outcome: 'timed_out',
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      },
+    });
+    const settled = await executing;
+    expect(runtime.status(ref)).toMatchObject({
+      state: 'settled',
+      cancelRequested: false,
+    });
+    expect(settled.executionStatus).toBe('error');
+    expect(hooks.failure).toHaveBeenCalledTimes(1);
+    expect(hooks.failure).toHaveBeenCalledWith(
+      undefined,
+      'test-tool-use-id',
+      'fixture_write',
+      { value: 'original' },
+      'command exceeded its timeout',
+      false,
+      'default',
+      undefined,
+      'call-1',
+      undefined,
+      undefined,
+    );
+    expect(hooks.post).not.toHaveBeenCalled();
+  });
+
+  it('releases prepared work without changing completed invocation evidence', async () => {
+    const completed = await prepare();
+    await runtime.preflight(completed);
+    await runtime.execute(completed);
+    const prepared = await prepare(input, { ...identity, callId: 'prepared' });
+    await runtime.releasePrepared();
+    expect(runtime.hasActiveWork()).toBe(false);
+    expect(runtime.status(completed)).toMatchObject({
+      state: 'settled',
+      cancelRequested: false,
+      result: { executionStatus: 'success' },
+    });
+    expect(runtime.status(prepared)).toMatchObject({
+      state: 'settled',
+      cancelRequested: true,
+      result: { executionStatus: 'not_started' },
+    });
+    expect(tool.invocations[1].execute).not.toHaveBeenCalled();
+  });
+
+  it('refuses to release an executing invocation without cancelling it', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    await expect(runtime.releasePrepared()).rejects.toThrow(
+      'unfinished execution',
+    );
+    expect(runtime.status(ref)).toMatchObject({
+      state: 'executing',
+      cancelRequested: false,
+    });
+    gate.resolve(rawResult);
+    await executing;
+    await runtime.releasePrepared();
+  });
+
+  it('refuses to release while a turn snapshot is pending', async () => {
+    const gate = deferred<void>();
+    useSharedHistory({
+      prepareTurn: () => gate.promise,
+      execute: (operation) => operation(),
+    });
+    const begin = runtime.beginTurn(identity);
+    begin.catch(() => {});
+    await vi.waitFor(() => expect(runtime.hasActiveWork()).toBe(true));
+    await expect(runtime.releasePrepared()).rejects.toThrow(
+      'unfinished execution',
+    );
+    gate.resolve();
+    await begin;
+    await runtime.releasePrepared();
+  });
+
+  it('refuses to release while a preparation is in flight', async () => {
+    const gate = deferred<'ask'>();
+    tool.setup = (invocation) =>
+      invocation.getDefaultPermission.mockReturnValue(gate.promise);
+    await runtime.beginTurn(identity);
+    const preparing = runtime.prepare(identity, tool.name, input);
+    preparing.catch(() => {});
+    await vi.waitFor(() => expect(tool.invocations).toHaveLength(1));
+    await expect(runtime.releasePrepared()).rejects.toThrow(
+      'unfinished execution',
+    );
+    gate.resolve('ask');
+    await preparing;
+    await runtime.releasePrepared();
   });
 
   it('keeps a prepared cancellation un-settled until its confirmation callback returns', async () => {

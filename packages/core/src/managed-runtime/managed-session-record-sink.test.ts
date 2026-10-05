@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
@@ -23,6 +23,7 @@ import {
 } from './managed-session-record-sink.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import { readManagedSessionTitleInfoSync } from '../utils/sessionStorageUtils.js';
+import { readManagedSessionRecords } from './managed-session-message-projection.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 
 const DIGEST = 'f'.repeat(64);
@@ -204,6 +205,45 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
+  // A caller refuses what canCarry refuses before it queues the write, so
+  // canCarry has to refuse every shape write would reject.
+  it.each<[string, Partial<ChatRecord>]>([
+    [
+      'a title that is empty',
+      { subtype: 'custom_title', systemPayload: { customTitle: '' } as never },
+    ],
+    [
+      'a turn result with no prompt id',
+      {
+        subtype: 'turn_result',
+        systemPayload: { state: 'completed' } as never,
+      },
+    ],
+    [
+      'a turn result with no state',
+      { subtype: 'turn_result', systemPayload: { promptId: 'p1' } as never },
+    ],
+    [
+      'a compaction with no history',
+      { subtype: 'chat_compression', systemPayload: {} as never },
+    ],
+    [
+      'a branch point that does not parse',
+      { subtype: 'branch_checkpoint', systemPayload: {} as never },
+    ],
+    ['a goal state with no payload', { subtype: 'goal_state' }],
+    ['file history with no payload', { subtype: 'file_history_snapshot' }],
+    ['a session source with no payload', { subtype: 'session_source' }],
+  ])('refuses %s before it is written', async (_name, shape) => {
+    const harness = await createHarness();
+    const refused = record({ type: 'system', ...shape });
+    expect(harness.sink.canCarry(refused)).toBe(false);
+    await expect(harness.sink.write(refused)).rejects.toThrow(
+      ManagedSessionUnmappedRecordError,
+    );
+    await harness.close();
+  });
+
   it('refuses shapes that have their own home and are not mapped yet', async () => {
     const harness = await createHarness();
     // A rewind belongs to the history_rewind domain and a parent session to the
@@ -375,6 +415,54 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
+  it('numbers a compaction after a renewal that commits during its summary', async () => {
+    const harness = await createHarness();
+    await harness.sink.write(
+      record({
+        uuid: 'rec-user-1',
+        message: { role: 'user', parts: [{ text: 'summarise the docs' }] },
+      }),
+    );
+    // The session's renewal timer fires while the summary is published.
+    const publish = harness.store.publish.bind(harness.store);
+    vi.spyOn(harness.store, 'publish').mockImplementation(
+      async (kind, bytes) => {
+        const published = await publish(kind, bytes);
+        if (kind === 'managed-compaction-summary') {
+          await harness.authority.renewActivation({ leaseDurationMs: 60_000 });
+        }
+        return published;
+      },
+    );
+    const renewedAt = harness.authority.committedSequence + 1;
+
+    await harness.sink.write(
+      record({
+        uuid: 'rec-compact-1',
+        type: 'system',
+        subtype: 'chat_compression',
+        systemPayload: {
+          info: { originalTokenCount: 100, newTokenCount: 10 },
+          compressedHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+        },
+      } as Partial<ChatRecord>),
+    );
+
+    const events = harness.authority.readEvents();
+    expect(events.find((event) => event.sequence === renewedAt)?.kind).toBe(
+      'activation.changed',
+    );
+    const compacted = events.filter(
+      (event) => event.kind === 'context.compacted',
+    );
+    expect(compacted).toHaveLength(1);
+    // Numbered after the renewal, covering only the history before it.
+    expect(compacted[0].sequence).toBe(renewedAt + 1);
+    expect(compacted[0].payload['toSequence']).toBe(renewedAt - 1);
+    expect(compacted[0].payload['replacedMessageIds']).toEqual(['rec-user-1']);
+    await harness.close();
+  });
+
   it('writes a carried record into the authoritative log only', async () => {
     const harness = await createHarness();
     const carried = record({
@@ -485,6 +573,28 @@ describe('managed session record sink', () => {
         } as Partial<ChatRecord>),
       ),
     ).rejects.toThrow(ManagedSessionUnmappedRecordError);
+    await harness.close();
+  });
+
+  it.each([
+    ['an empty prompt id', { promptId: '', state: 'completed' }],
+    ['an empty state', { promptId: 'turn-1', state: '' }],
+    ['a non-string prompt id', { promptId: 7, state: 'completed' }],
+    ['a non-string state', { promptId: 'turn-1', state: 7 }],
+  ] as const)('refuses a turn result with %s', async (_name, systemPayload) => {
+    const harness = await createHarness();
+    const refused = record({
+      uuid: 'rec-turn-bad',
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload,
+    } as Partial<ChatRecord>);
+    // canCarry refuses before write does: a caller refusing up front must
+    // never be able to queue a write that fails mid-turn.
+    expect(harness.sink.canCarry(refused)).toBe(false);
+    await expect(harness.sink.write(refused)).rejects.toThrow(
+      ManagedSessionUnmappedRecordError,
+    );
     await harness.close();
   });
 
@@ -626,14 +736,132 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
+  it('round-trips a file-history snapshot through the file_history domain', async () => {
+    const harness = await createHarness();
+    const snapshot = record({
+      uuid: 'rec-history-1',
+      type: 'system',
+      subtype: 'file_history_snapshot',
+      systemPayload: { snapshots: [] },
+    } as Partial<ChatRecord>);
+    await harness.sink.write(snapshot);
+
+    const committed = harness.authority
+      .readEvents()
+      .filter((event) => event.kind === 'domain.committed');
+    expect(committed).toHaveLength(1);
+    expect(committed[0].payload['domain']).toBe('file_history');
+    await harness.close();
+
+    await expect(
+      readManagedSessionRecords({
+        transcriptPath: harness.transcriptPath,
+        runtimeBaseDir: harness.runtimeBaseDir,
+        sessionKey,
+      }),
+    ).resolves.toEqual([snapshot]);
+  });
+
+  it('round-trips a session source through the session_source domain', async () => {
+    const harness = await createHarness();
+    const source = record({
+      uuid: 'rec-source-1',
+      type: 'system',
+      subtype: 'session_source',
+      systemPayload: { sourceType: 'web' },
+    } as Partial<ChatRecord>);
+    await harness.sink.write(source);
+
+    const committed = harness.authority
+      .readEvents()
+      .filter((event) => event.kind === 'domain.committed');
+    expect(committed).toHaveLength(1);
+    expect(committed[0].payload['domain']).toBe('session_source');
+    await harness.close();
+
+    await expect(
+      readManagedSessionRecords({
+        transcriptPath: harness.transcriptPath,
+        runtimeBaseDir: harness.runtimeBaseDir,
+        sessionKey,
+      }),
+    ).resolves.toEqual([source]);
+  });
+
+  it.each([
+    ['slash_command', { command: 'about' }],
+    ['at_command', { path: 'README.md' }],
+    ['ui_telemetry', { uiEvent: { event: 'turn_complete' } }],
+    ['attribution_snapshot', { snapshot: { human: 1, assistant: 2 } }],
+  ] as const)(
+    'round-trips a carried %s record through the message channel',
+    async (subtype, systemPayload) => {
+      const harness = await createHarness();
+      const carried = record({
+        type: 'system',
+        subtype,
+        systemPayload,
+      } as Partial<ChatRecord>);
+      await harness.sink.write(carried);
+      // The name names the channel: a carried subtype lands as one
+      // message.committed event and no domain record, or the live
+      // projection silently drops it.
+      const events = harness.authority.readEvents();
+      expect(
+        events.filter((event) => event.kind === 'message.committed'),
+      ).toHaveLength(1);
+      expect(
+        events.filter((event) => event.kind === 'domain.committed'),
+      ).toHaveLength(0);
+      await harness.close();
+
+      await expect(
+        readManagedSessionRecords({
+          transcriptPath: harness.transcriptPath,
+          runtimeBaseDir: harness.runtimeBaseDir,
+          sessionKey,
+        }),
+      ).resolves.toEqual([carried]);
+    },
+  );
+
+  it('preserves original Code Mode facts on the message channel', async () => {
+    const harness = await createHarness();
+    const fact = record({
+      uuid: 'rec-code-mode-result',
+      type: 'tool_result',
+      subtype: 'code_mode_tool_result',
+      provenance: 'tool_result',
+      goalContext: { goalId: 'goal-1', revision: 1, turnId: 'turn-1' },
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'exec-1:code:1',
+              name: 'read_file',
+              response: { output: 'ORIGINAL_FILE_FACT' },
+            },
+          },
+        ],
+      },
+    });
+    await harness.sink.write(fact);
+    expect(await harness.sink.project()).toEqual([fact]);
+    await harness.close();
+  });
+
   it('refuses an unmapped record instead of appending it directly', async () => {
     const harness = await createHarness();
     const before = await fs.readFile(harness.transcriptPath, 'utf8');
+    // rewind is genuinely unmapped; a payload-less mapped subtype would
+    // refuse for a different reason (its shape check, not the mapping).
     await expect(
-      harness.sink.write(
-        record({ type: 'system', subtype: 'file_history_snapshot' }),
-      ),
+      harness.sink.write(record({ type: 'system', subtype: 'rewind' })),
     ).rejects.toThrow(ManagedSessionUnmappedRecordError);
+    await expect(
+      harness.sink.write(record({ type: 'system', subtype: 'rewind' })),
+    ).rejects.toThrow(/no mapping yet.*rewind/);
 
     // A silent fallback would put content in the transcript that the
     // authoritative log does not account for.

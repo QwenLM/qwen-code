@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
+import java.util.List;
 
 /** Persistence boundary for idempotent Tool execution state. */
 public interface ToolExecutionRepository {
@@ -46,6 +47,33 @@ public interface ToolExecutionRepository {
      * construction, so implementations must not add a lease predicate. */
     ToolExecutionRecord resolveUnknown(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime);
+
+    /** Evidence-only settlement of EXECUTING, CANCEL_REQUESTED or UNKNOWN.
+     * Atomically checks identity and version, without claiming or fencing a
+     * dispatch. Preserves the stored dispatch identity and cancellation intent. */
+    ToolExecutionRecord resolveUnsettled(ToolExecutionRecord expected,
+            Map<String, Object> resolutionResult, Instant resolutionTime);
+
+    /** At most 100 potentially dispatched executions belonging to this exact
+     * Session and binding generation, ordered by execution ID hash. The
+     * exclusive cursor is an execution ID, including one already settled. */
+    List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
+            String afterExecutionCallId, int limit);
+
+    /**
+     * At most 100 executions in any state for this exact binding generation,
+     * across all Sessions, ordered by execution ID hash. The exclusive cursor
+     * is an execution ID and need not remain in any particular state.
+     * A null cursor starts the scan; limit must be in [1, 100]. Cursor and
+     * returned execution IDs must be well-formed text for unambiguous hashing.
+     * This inventory is not a snapshot or proof that physical writers stopped.
+     * Custom repositories must implement it before supporting retirement.
+     */
+    default List<ToolExecutionRecord> findByBinding(String bindingId,
+            long runtimeGeneration, String afterExecutionCallId, int limit) {
+        throw new UnsupportedOperationException(
+                "Binding execution inventory is unavailable");
+    }
 
     boolean hasActiveByRuntimeSession(String runtimeSessionId);
 
