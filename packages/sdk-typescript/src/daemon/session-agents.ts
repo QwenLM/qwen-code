@@ -68,7 +68,7 @@ export interface SessionAgentPermissionPrompt {
   }>;
 }
 
-/** Live run frame from `GET /workspaces/:ws/agent/events`. */
+/** Live run frame from `GET /workspaces/:ws/agent/session-events?sessionId=`. */
 export interface SessionAgentRunFrame {
   type: 'run';
   sessionId: string;

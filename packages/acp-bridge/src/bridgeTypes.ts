@@ -19,6 +19,8 @@ import type {
   SessionSourceRemoveResult,
   TurnResultCode,
   TurnResultErrorPayload,
+  SessionExternalRecordRequest,
+  SessionExternalRecordResponse,
 } from '@qwen-code/qwen-code-core';
 import type {
   CancelNotification,
@@ -1795,6 +1797,18 @@ export type BridgeWorkspaceGenerationNotificationEvent = Exclude<
 >;
 
 /** A daemon-owned worker completion injected into its parent session. */
+/**
+ * `SessionExternalRecordRequest` without `sessionId` (the bridge method takes
+ * it separately). Distributive, so `kind` still discriminates `payload`; a
+ * plain `Omit` over the union would collapse it.
+ */
+export type BridgeSessionExternalRecordRequest =
+  SessionExternalRecordRequest extends infer T
+    ? T extends unknown
+      ? Omit<T, 'sessionId'>
+      : never
+    : never;
+
 export interface BridgeBackgroundNotification {
   displayText: string;
   modelText: string;
@@ -2844,6 +2858,18 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
     notification: BridgeBackgroundNotification,
   ): Promise<{ sessionId: string; accepted: boolean }>;
+
+  /**
+   * Session multi-agent: ask the session's ACP child to write an
+   * `agent_mention` / `agent_message` record (durable + main-model history)
+   * without starting a turn. Idempotent per `recordKey` within the child's
+   * lifetime. Rejects with `SessionNotFoundError` for unknown/dying sessions,
+   * and with the child's error otherwise (a Managed session refuses).
+   */
+  appendExternalRecord(
+    sessionId: string,
+    request: BridgeSessionExternalRecordRequest,
+  ): Promise<SessionExternalRecordResponse>;
 
   /**
    * Return the mid-turn reconciliation snapshot for a session: messages still

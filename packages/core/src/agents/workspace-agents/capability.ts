@@ -193,6 +193,80 @@ export function createAgentToolInvocationGuard(
   };
 }
 
+/**
+ * Tool configuration for an agent session started by the session-agents
+ * orchestrator (`agents/session-agents`).
+ *
+ * Product decision 2026-10-05 (plan §8-1): such an agent may use every tool
+ * the session offers; writes and command execution are not removed but go
+ * through the session's ordinary approval flow, which the orchestrator relays
+ * to the chat session. So there is no read-only ceiling here. A linked
+ * definition may still narrow the surface; that narrowing is kept.
+ * Thread tools are never offered: there is no thread behind such a session.
+ */
+export function buildSessionAgentToolConfig(definition?: ToolConfig): ToolConfig {
+  const threadTools = new Set<string>(THREAD_TOOL_NAMES);
+  const definitionNames = definition?.tools.map((tool) =>
+    typeof tool === 'string' ? tool : tool.name,
+  );
+  let executionAllowedTools: string[] | undefined;
+  if (definitionNames !== undefined && !definitionNames.includes('*')) {
+    executionAllowedTools = definitionNames.filter(
+      (name): name is string =>
+        typeof name === 'string' && !threadTools.has(name),
+    );
+  }
+  if (definition?.executionAllowedTools !== undefined) {
+    const executable = new Set(definition.executionAllowedTools);
+    executionAllowedTools = (
+      executionAllowedTools ?? definition.executionAllowedTools
+    ).filter((name) => executable.has(name) && !threadTools.has(name));
+  }
+  return {
+    tools: definition?.tools ?? ['*'],
+    ...(executionAllowedTools !== undefined ? { executionAllowedTools } : {}),
+    disallowedTools: Array.from(
+      new Set([...(definition?.disallowedTools ?? []), ...THREAD_TOOL_NAMES]),
+    ),
+  };
+}
+
+/**
+ * The guard for a session-agents agent session: the upstream guard, the
+ * definition's execution allowlist when it has one, and no thread tools.
+ * Unlike {@link createAgentToolInvocationGuard} there is no read-only
+ * classification; approval of writes is left to the session's approval mode.
+ * TODO(multi-agent): a session whose approval mode is YOLO/auto-edit lets the
+ * agent write without asking. Decide whether agent sessions should pin
+ * `default` approval mode regardless of the user's setting.
+ */
+export function createSessionAgentToolInvocationGuard(
+  upstream?: ToolInvocationGuard,
+  executionAllowedTools?: ReadonlySet<string>,
+): ToolInvocationGuard {
+  const threadTools = new Set<string>(THREAD_TOOL_NAMES);
+  return async (context) => {
+    if (upstream) {
+      const upstreamDecision = await evaluateToolInvocationGuard(
+        upstream,
+        context,
+      );
+      if (!upstreamDecision.allowed) return upstreamDecision;
+    }
+    if (
+      threadTools.has(context.toolName) ||
+      (executionAllowedTools !== undefined &&
+        !executionAllowedTools.has(context.toolName))
+    ) {
+      return {
+        allowed: false,
+        reason: `Tool "${context.toolName}" is not available to this agent.`,
+      };
+    }
+    return { allowed: true };
+  };
+}
+
 export function createAgentHostToolInvocationGuard(
   upstream: ToolInvocationGuard | undefined,
   workspaceCwd: string,

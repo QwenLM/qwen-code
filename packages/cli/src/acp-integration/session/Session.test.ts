@@ -535,6 +535,7 @@ describe('Session', () => {
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
     recordNotificationStrict: ReturnType<typeof vi.fn>;
+    recordExternalAgentRecordStrict: ReturnType<typeof vi.fn>;
     recordRealtimeConversation: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
@@ -918,6 +919,7 @@ describe('Session', () => {
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
       recordNotificationStrict: vi.fn().mockResolvedValue(undefined),
+      recordExternalAgentRecordStrict: vi.fn().mockResolvedValue('record-1'),
       recordRealtimeConversation: vi.fn().mockResolvedValue(undefined),
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
@@ -1154,6 +1156,80 @@ describe('Session', () => {
       mockClient,
       mockSettings,
     );
+  });
+
+  describe('session agent records', () => {
+    const request = {
+      kind: 'agent_message' as const,
+      recordKey: 'run-1:result',
+      modelText: '<agent_message from="claude-B">done</agent_message>',
+      payload: {
+        displayText: 'done',
+        author: { agentId: 'agent-1', name: 'claude-B' },
+        runId: 'run-1',
+        status: 'completed' as const,
+      },
+    };
+
+    it('writes once per recordKey, shows it live, and starts no turn', async () => {
+      let finishWrite!: (recordId: string) => void;
+      mockChatRecordingService.recordExternalAgentRecordStrict.mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishWrite = resolve;
+          }),
+      );
+
+      const first = session.appendExternalRecord(request);
+      // A retry while the first write is still in flight must not write.
+      const retry = session.appendExternalRecord(request);
+      finishWrite('record-1');
+      await expect(first).resolves.toEqual({
+        recordId: 'record-1',
+        created: true,
+      });
+      await expect(retry).resolves.toEqual({
+        recordId: 'record-1',
+        created: false,
+      });
+      await expect(session.appendExternalRecord(request)).resolves.toEqual({
+        recordId: 'record-1',
+        created: false,
+      });
+
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).toHaveBeenCalledOnce();
+      const agentUpdates = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([notification]) => notification.update)
+        .filter((update) => update._meta?.['qwenAgentMessage'] !== undefined);
+      expect(agentUpdates).toHaveLength(1);
+      expect(agentUpdates[0]).toMatchObject({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'done' },
+        _meta: {
+          qwenDiscreteMessage: true,
+          qwenAgentMessage: { kind: 'agent_message', runId: 'run-1' },
+          qwenTranscript: {
+            segmentId: 'agent:run-1',
+            sourceRecordIds: ['record-1'],
+          },
+        },
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(session.pendingExternalAgentContext).toEqual([request.modelText]);
+    });
+
+    it('refuses to write once the session is closing', async () => {
+      session.dispose();
+      await expect(session.appendExternalRecord(request)).rejects.toThrow(
+        /closing/,
+      );
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).not.toHaveBeenCalled();
+    });
   });
 
   describe('MCP App tools', () => {

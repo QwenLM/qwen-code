@@ -85,13 +85,14 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
 // Without an explicit mode a new file lands at 0666 & ~umask (0644 on most
 // hosts), readable by any local account; forceMode also heals files written
 // before this was set. Directories get 0700 so the files are not traversable
-// either.
-const STORE_FILE_OPTIONS = {
+// either. Exported for the session-agents binding store, which keeps its
+// files under the same directory with the same modes.
+export const STORE_FILE_OPTIONS = {
   noFollow: true,
   mode: 0o600,
   forceMode: true,
 } as const;
-const STORE_DIR_MODE = 0o700;
+export const STORE_DIR_MODE = 0o700;
 
 const workspaceMutexes = new Map<string, Mutex>();
 const workspaceTransaction = new AsyncLocalStorage<boolean>();

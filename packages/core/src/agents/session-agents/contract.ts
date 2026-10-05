@@ -138,6 +138,12 @@ export interface SessionExternalRecordResponse {
   recordId: string;
   /** False when the record already existed for this recordKey. */
   created: boolean;
+  /**
+   * True when a main-model turn was running: the child holds the record and
+   * writes it once the turn settles; `recordId` is then empty, so the caller
+   * must not advance a read cursor to it.
+   */
+  deferred?: boolean;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -148,7 +154,7 @@ export interface SessionExternalRecordResponse {
  * `_meta.qwenAgentMessage` on the `agent_message_chunk` / `user_message_chunk`
  * update that the ACP child emits when it writes an external record, and that
  * transcript-replay emits for the same record. The segment id is
- * `agent:<runId>` (or `mention:<recordKey>`), so live and replay reconcile.
+ * `agent:<runId>` (or `mention:<record uuid>`), so live and replay reconcile.
  */
 export interface QwenAgentMessageMeta {
   kind: 'agent_message' | 'agent_mention';
@@ -165,7 +171,7 @@ export const QWEN_AGENT_MESSAGE_META_KEY = 'qwenAgentMessage' as const;
 
 /**
  * In-flight state is NOT in the transcript. The daemon publishes it on the
- * workspace agent event stream (`GET /workspaces/:ws/agent/events`) as `run`
+ * workspace agent event stream (`GET /workspaces/:ws/agent/session-events?sessionId=`) as `run`
  * frames, keyed by session. The browser renders these as live agent messages
  * at the bottom of the session and drops them once the terminal record lands.
  */

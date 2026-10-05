@@ -164,6 +164,8 @@ import {
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
 import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
+import { registerSessionAgentRoutes } from './routes/session-agents.js';
+import { normalizeAgentChainLimit } from '@qwen-code/qwen-code-core/agents/session-agents/chain.js';
 import { strandLocalRuns } from '@qwen-code/qwen-code-core';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
@@ -1613,6 +1615,22 @@ export function createServeApp(
       return enabled;
     } catch {
       return lastAgentCollaborationSetting.get(workspaceCwd) ?? false;
+    }
+  };
+  // `experimental.agentChainLimit` for session agents, read per use like the
+  // opt-in above. Unreadable settings fall back to the default (unlimited).
+  const agentChainLimitFor = (workspaceCwd: string): number => {
+    try {
+      const settings = runWithoutDebugLogSession(() =>
+        loadSettings(workspaceCwd, {
+          preserveInvalidWorkspaceSettings: true,
+        }),
+      );
+      return normalizeAgentChainLimit(
+        settings.merged.experimental?.agentChainLimit,
+      );
+    } catch {
+      return normalizeAgentChainLimit(undefined);
     }
   };
   // Whether the routes and recovery exist at all. Evaluated at call time over
@@ -3601,6 +3619,14 @@ export function createServeApp(
       mutate,
       isAgentCollaborationEnabledFor,
     });
+    // Session multi-agent (agents answering @-mentions in a chat session),
+    // built next to the thread routes until those are removed.
+    registerSessionAgentRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      isAgentCollaborationEnabledFor,
+      agentChainLimitFor,
+    });
     agentCollaborationRoutesMounted = true;
   } else if (!opts.agentHostWorker) {
     // Close out runs the switch left mid-flight. Recovery cannot tell "the
@@ -4079,12 +4105,14 @@ export function createServeApp(
         stopWorkspaceGitState?: () => void;
         stopExtensionGenerationReconciler?: () => void;
         stopWorkspaceAgentRecovery?: () => void;
+        stopSessionAgentOrchestrators?: () => void;
       };
       stopAppResource(locals.stopMcpAppSandbox);
       stopAppResource(locals.stopScheduledTaskKeepalive);
       stopAppResource(locals.stopWorkspaceGitState);
       stopAppResource(locals.stopExtensionGenerationReconciler);
       stopAppResource(locals.stopWorkspaceAgentRecovery);
+      stopAppResource(locals.stopSessionAgentOrchestrators);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

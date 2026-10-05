@@ -417,6 +417,13 @@ const VISIBLE_SYSTEM_RECORD_SUBTYPES = new Set([
   'realtime_message',
   'goal_state',
   'goal_runtime',
+  // Session multi-agent records are `type: 'user'`, so the gate above already
+  // admits them; listed so the set names every visible subtype. Replay
+  // projects their display text (an agent reply as an assistant block).
+  // TODO(multi-agent): the export block schema has no author field, so an
+  // agent reply exports without its agent's name.
+  'agent_mention',
+  'agent_message',
 ]);
 
 function sanitizeBlock(

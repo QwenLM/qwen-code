@@ -15040,6 +15040,55 @@ export function createSessionControlPlane(
       }
     },
 
+    async appendExternalRecord(sessionId, request) {
+      // Same lookup, timeout, transport-closed race and pending-work hold as
+      // `enqueueBackgroundNotification`: the hold keeps a session whose last
+      // client detached (user closed the tab while an agent ran) from being
+      // idle-closed under the write.
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.harness.isDying)
+        throw new SessionNotFoundError(sessionId);
+      entry.pendingAgentNotificationCount++;
+      try {
+        const response = await Promise.race([
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
+              { sessionId, ...request },
+            ),
+            initTimeoutMs,
+            SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
+          ),
+          getTransportClosedReject(entry),
+        ]);
+        const recordId = response['recordId'];
+        if (response['deferred'] === true) {
+          // The child holds the record until its running turn settles.
+          return {
+            sessionId,
+            recordId: typeof recordId === 'string' ? recordId : '',
+            created: response['created'] === true,
+            deferred: true,
+          };
+        }
+        if (typeof recordId !== 'string' || recordId.length === 0) {
+          throw new Error(
+            `${SERVE_CONTROL_EXT_METHODS.sessionExternalRecord} returned no recordId`,
+          );
+        }
+        return { sessionId, recordId, created: response['created'] === true };
+      } finally {
+        entry.pendingAgentNotificationCount = Math.max(
+          0,
+          entry.pendingAgentNotificationCount - 1,
+        );
+        void maybeCloseIdleSession(entry, 'agent_external_record_settled');
+        drainQuarantinedChannelFor(entry);
+      }
+    },
+
     getMidTurnMessages(sessionId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);

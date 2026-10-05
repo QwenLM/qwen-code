@@ -69,6 +69,10 @@ import {
 } from './session-writer-lease.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
 import type {
+  AgentMentionRecordPayload,
+  AgentMessageRecordPayload,
+} from '../agents/session-agents/contract.js';
+import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
   TranscriptCursor,
@@ -274,7 +278,9 @@ export type ChatRecordProvenance =
   | 'execution_output'
   | 'goal_control'
   | 'goal_runtime'
-  | 'system';
+  | 'system'
+  /** Written on behalf of a workspace agent (session multi-agent). */
+  | 'external_agent';
 
 export type RecordToolResultOptions = {
   subtype?: 'code_mode_tool_result';
@@ -391,7 +397,12 @@ export interface ChatRecord {
     | 'turn_result'
     | 'managed_session_header_v1'
     | 'managed_session_event_v1'
-    | 'managed_session_commit_v1';
+    | 'managed_session_commit_v1'
+    // Session multi-agent records (agents/session-agents/contract.ts). Both
+    // are `type: 'user'`: kept in model history, but never a real user
+    // prompt, a turn boundary, a title source, or a cold notification.
+    | 'agent_mention'
+    | 'agent_message';
   /** Explicit source classification used by Goal evidence validation. */
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
@@ -490,7 +501,9 @@ export interface ChatRecord {
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
     | GoalTurnEndRecordPayload
-    | TurnResultRecordPayload;
+    | TurnResultRecordPayload
+    | AgentMessageRecordPayload
+    | AgentMentionRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
   agentId?: string;
@@ -2452,6 +2465,65 @@ export class ChatRecordingService {
     );
   }
 
+  /**
+   * Durably records a session multi-agent record (`agent_mention` or
+   * `agent_message`) the daemon asked the ACP child to write, and returns
+   * its uuid (the agents' read-cursor anchor).
+   *
+   * Written as `type: 'user'` so the main model reads it as input on its next
+   * turn (resume rebuilds it through `appendApiHistoryRecord`). It never
+   * starts a turn, never feeds the auto title (only subtype-less user records
+   * do), and is never trimmed as a cold notification.
+   *
+   * Managed sessions: `ManagedSessionRecordSink.canCarry` has no mapping for
+   * these subtypes, so `appendRecordStrict` throws
+   * `ManagedSessionRecordRefusedError` before queueing. That refusal is left
+   * in place on purpose and propagates to the caller, which reports the
+   * feature as not supported in managed sessions.
+   * TODO(multi-agent): add a managed mapping if managed sessions need agents.
+   */
+  async recordExternalAgentRecordStrict(
+    input:
+      | {
+          kind: 'agent_mention';
+          modelText: string;
+          payload: AgentMentionRecordPayload;
+          recordKey: string;
+        }
+      | {
+          kind: 'agent_message';
+          modelText: string;
+          payload: AgentMessageRecordPayload;
+          recordKey: string;
+        },
+  ): Promise<string> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('user'),
+      subtype: input.kind,
+      provenance:
+        input.kind === 'agent_mention' && input.payload.author === undefined
+          ? 'real_user'
+          : 'external_agent',
+      message: createUserContent([{ text: input.modelText }]),
+      systemPayload: input.payload,
+      ...(input.kind === 'agent_message'
+        ? {
+            agentId: input.payload.author.agentId,
+            agentName: input.payload.author.name,
+            ...(input.payload.author.color
+              ? { agentColor: input.payload.author.color }
+              : {}),
+          }
+        : {}),
+    };
+    // Not part of any background notification turn.
+    delete record.backgroundTurn;
+    // TODO(multi-agent): `recordKey` is not persisted on the record; dedupe
+    // is in-memory in the ACP Session only and does not survive a restart.
+    await this.appendRecordStrict(record);
+    return record.uuid;
+  }
+
   private recordNotificationLike(
     message: PartListUnion,
     subtype: 'notification' | 'cron',
@@ -3040,7 +3112,9 @@ export class ChatRecordingService {
         record.subtype !== 'notification' &&
         record.subtype !== 'cron' &&
         record.subtype !== 'mid_turn_user_message' &&
-        record.subtype !== 'realtime_message'
+        record.subtype !== 'realtime_message' &&
+        record.subtype !== 'agent_mention' &&
+        record.subtype !== 'agent_message'
       ) {
         // Reconstructed histories can start mid-chain; the persisted edge is
         // the source of truth, not the previous item in this sliced list.

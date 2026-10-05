@@ -253,6 +253,7 @@ import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 import {
   createAgentHostToolInvocationGuard,
   createAgentToolInvocationGuard,
+  createSessionAgentToolInvocationGuard,
 } from '../agents/workspace-agents/capability.js';
 import type {
   ExecutionSandboxPolicy,
@@ -2841,6 +2842,12 @@ export class Config {
   private systemPrompt: string | undefined;
   private workspaceAgentName: string | undefined;
   private workspaceAgentExecutionAllowedTools: ReadonlySet<string> | undefined;
+  /**
+   * Set when this `agent` session was started by the session-agents
+   * orchestrator rather than the thread dispatcher. See
+   * {@link markSessionAgentSession}.
+   */
+  private sessionAgentSession = false;
   private readonly appendSystemPrompt: string | undefined;
   private liveAppendSystemPrompt: string | undefined;
   private outputStyle: OutputStyleDefinition | undefined;
@@ -6060,6 +6067,34 @@ export class Config {
    */
   getWorkspaceAgentName(): string | undefined {
     return this.workspaceAgentName;
+  }
+
+  /**
+   * Marks this agent session as one the session-agents orchestrator drives
+   * (an agent answering @-mentions in a chat session), not a thread run.
+   *
+   * Must be called before `initialize()`: it decides whether the thread tools
+   * are registered at all. The caller sets it only after finding a persisted
+   * session-agents binding that names this session for this agent, so it is
+   * a server-side decision, never a client claim.
+   *
+   * Effects (product decision 2026-10-05, plan §8-1): no thread tools, and no
+   * read-only ceiling — every tool is available and writes / command
+   * execution go through the session's ordinary approval flow, which the
+   * orchestrator relays to the chat session.
+   */
+  markSessionAgentSession(): void {
+    if (this.sessionSourceType !== 'agent') {
+      throw new Error(
+        'Only an agent session can be marked as a session-agents session.',
+      );
+    }
+    this.sessionAgentSession = true;
+  }
+
+  /** Whether {@link markSessionAgentSession} was applied to this session. */
+  isSessionAgentSession(): boolean {
+    return this.sessionAgentSession && this.sessionSourceType === 'agent';
   }
 
   setSessionSource(sourceType: string, sourceId?: string): void {
@@ -12074,6 +12109,13 @@ export class Config {
           this.getWorkspaceContext().isPathWithinWorkspace(candidate),
       );
     }
+    if (this.isWorkspaceAgentSession() && this.isSessionAgentSession()) {
+      // Session-agents sessions skip the read-only ceiling (plan §8-1).
+      return createSessionAgentToolInvocationGuard(
+        this.toolInvocationGuard,
+        this.workspaceAgentExecutionAllowedTools,
+      );
+    }
     return this.isWorkspaceAgentSession()
       ? createAgentToolInvocationGuard(
           this.toolInvocationGuard,
@@ -12765,7 +12807,9 @@ export class Config {
     // run context" on first use. Observed both ways with the six-combination
     // probe: dropping the clause takes the plain-subagent row from six tools
     // to zero and leaves the agent-subagent row at six.
-    if (this.isWorkspaceAgentSession()) {
+    // A session-agents session has no thread behind it; its thread tools
+    // would only ever throw "requires an active agent run context".
+    if (this.isWorkspaceAgentSession() && !this.isSessionAgentSession()) {
       await registerLazy(ToolNames.THREAD_POST, async () => {
         const { ThreadPostTool } = await import('../tools/thread-tools.js');
         return new ThreadPostTool(this);
