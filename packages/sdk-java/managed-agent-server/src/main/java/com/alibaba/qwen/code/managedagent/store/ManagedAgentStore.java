@@ -227,15 +227,15 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public Admission insertSessionCommand(String tenantId, String operation,
-            String idempotencyKey, String requestDigest, String agentId,
-            String requestedRevision, String title,
+    public Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
         requireAgentRevision(requestedRevision);
         requireCreationScope(tenantId, idempotencyKey, false);
         return insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                null, null);
+                null, actorId);
     }
 
     @Override
@@ -389,8 +389,10 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " workspace_generation, workspace_storage_id,"
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
-                        + " workspace_policy_ref, tool_profile) VALUES (?, ?, ?, ?, ?,"
-                        + " 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        + " workspace_policy_ref, tool_profile,"
+                        + " creator_actor_key) VALUES"
+                        + " (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,"
+                        + " ?, ?, ?, ?, ?)",
                 tenantId, sessionId, agentId, agentRevision, title, now, now,
                 workspace == null ? null : workspace.getWorkspaceId(),
                 workspace == null ? null : workspace.getWorkspaceGeneration(),
@@ -400,7 +402,10 @@ public class ManagedAgentStore implements AgentStateStore {
                 workspace == null ? null : workspace.getContextRevision(),
                 resolved == null ? null : resolved.configRef(),
                 resolved == null ? null : resolved.policyRef(),
-                workspace == null ? null : "hosted-workspace-files/1");
+                workspace == null ? null : "hosted-workspace-files/1",
+                actorId == null ? null
+                        : ManagedWorkspaceRegistry.actorKey(tenantId,
+                                actorId));
         jdbc.update("INSERT INTO managed_agent_consumer_progress"
                         + " (tenant_id, session_id, consumer_name,"
                         + " covered_sequence, updated_at) VALUES"
@@ -410,7 +415,7 @@ public class ManagedAgentStore implements AgentStateStore {
             insertTurn(tenantId, sessionId, turnId, promptId, input,
                     payloadDigest, now);
         }
-        if (actorId == null) {
+        if (resolved == null) {
             insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                     sessionId, turnId, now);
         } else {
