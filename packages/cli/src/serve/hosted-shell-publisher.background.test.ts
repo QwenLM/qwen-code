@@ -934,3 +934,42 @@ it('replays the lines a monitor wrote before its observer registered', async () 
   await prepared.sink.write('stdout', Buffer.from('-and-a-half\nfour\n'));
   expect(lines).toEqual(['one', 'two', 'three-and-a-half', 'four']);
 });
+
+it('force-emits a truncated observation at the partial-line ceiling instead of discarding it', async () => {
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.monitors.admit({
+    monitorId: 'monitor-cap',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'monitor-cap',
+    args: { command: 'jq -c .', description: 'jq watch' },
+    maxEvents: 100,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+  });
+  await r.monitors.dispatchStarted('monitor-cap', BINDING);
+  const request = backgroundRequest(r.key, '1', true);
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'monitor-cap';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-m',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  prepared.sink.setStarted(9);
+  await prepared.sink.write('stdout', Buffer.from('x'.repeat(5000)));
+  const lines: string[] = [];
+  publisher!.setMonitorObserver('monitor-cap', {
+    onLine: (line) => lines.push(line),
+    onExit: () => undefined,
+  });
+  // Legacy shape: the truncated prefix with an ellipsis is one
+  // observation; the rest of the overlong line is gone by design — never
+  // a silent clear that loses the observation entirely.
+  expect(lines).toEqual(['x'.repeat(4096) + '...']);
+  await prepared.sink.write('stdout', Buffer.from('yyyyy\n'));
+  expect(lines).toEqual(['x'.repeat(4096) + '...', 'yyyyy']);
+});

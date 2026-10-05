@@ -494,7 +494,9 @@ async function recoverCancelledPreToolHook(
   return true;
 }
 
-async function settleCancelledHookTurn(session: HostedSession): Promise<void> {
+export async function settleCancelledHookTurn(
+  session: HostedSession,
+): Promise<void> {
   if (
     !session.blocked ||
     session.active ||
@@ -514,7 +516,10 @@ async function settleCancelledHookTurn(session: HostedSession): Promise<void> {
     );
     const pending = new Map<string, number>();
     for (const event of events) {
-      if (event.kind === 'input.accepted')
+      // A monitor notification is never a parked Turn of its own — the
+      // wake pump consumes it — so it must never count toward the one
+      // pending turn the cancelled Hook settlement may close on.
+      if (event.kind === 'input.accepted' && !isMonitorInput(event))
         pending.set(event.payload['turnId'] as string, event.sequence);
       if (event.kind === 'turn.settled')
         pending.delete(event.payload['turnId'] as string);

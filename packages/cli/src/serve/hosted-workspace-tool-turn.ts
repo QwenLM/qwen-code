@@ -2116,7 +2116,9 @@ export class HostedWorkspaceToolTurn {
       undefined,
       () => this.shell?.monitorWakeKick?.(),
     );
-    loops.set(executionCallId, loop);
+    // Register the loop only after its start went through: a failed resume
+    // leaves no dead entry to short-circuit every later one (the fan-out
+    // rides the remote executor, not this map, so line order is unaffected).
     await loop.resumeAttached({
       ownerScopeId: this.session.authority.sessionHeader.sessionKey.sessionId,
       executionCallId,
@@ -2126,6 +2128,7 @@ export class HostedWorkspaceToolTurn {
       debounceMs: record.debounceMs,
       runtime: record.run.runtime!,
     });
+    loops.set(executionCallId, loop);
   }
 
   /**

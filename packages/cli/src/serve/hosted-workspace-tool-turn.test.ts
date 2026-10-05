@@ -4632,6 +4632,76 @@ describe('hosted Monitor admission arm', () => {
     });
   });
 
+  it('does not let one failed resume poison every later one', async () => {
+    const publisher = {
+      setMonitorObserver: vi
+        .fn()
+        .mockImplementationOnce(() => {
+          throw new Error('observer bridge gone');
+        })
+        .mockImplementation(() => undefined),
+    };
+    const commandRef = await session.resources.publish(
+      'managed-tool-args',
+      Buffer.from(JSON.stringify({ command: 'true' }), 'utf8'),
+    );
+    const record = {
+      monitorId: 'monitor-x',
+      commandRef,
+      maxEvents: 100,
+      idleTimeoutMs: 60_000,
+      debounceMs: 1_000,
+      startReceiptRef: {
+        resourceId: 'receipt-monitor-x',
+        kind: 'managed-runtime-receipt',
+        schemaVersion: 1,
+        byteLength: 2,
+        digest: 'a'.repeat(64),
+      },
+      stopReason: null,
+      run: { runtime: { runtimeBindingId: 'binding-1', generation: '1' } },
+    };
+    const monitors = {
+      record: (id: string) => (id === 'monitor-x' ? record : undefined),
+    } as never;
+    const shell: {
+      monitorLoops: Map<string, unknown>;
+      monitorWakeKick: () => void;
+    } = {
+      monitorLoops: new Map<string, unknown>(),
+      monitorWakeKick: () => undefined,
+    };
+    const bare = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      async () => randomUUID(),
+      () => true,
+      {
+        resources: {} as never,
+        assertWritable: async () => undefined,
+        ...shell,
+      } as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      monitors,
+    );
+    (bare as unknown as { publisher: unknown }).publisher = publisher;
+    const resume = (
+      bare as unknown as { resumeMonitorWatch: (id: string) => Promise<void> }
+    ).resumeMonitorWatch.bind(bare);
+    await expect(resume('monitor-x')).rejects.toThrow('observer bridge gone');
+    // The failed start leaves no dead loop behind to short-circuit the
+    // retry that comes from a fresh accept.
+    expect(shell.monitorLoops.has('monitor-x')).toBe(false);
+    await expect(resume('monitor-x')).resolves.toBeUndefined();
+    expect(shell.monitorLoops.has('monitor-x')).toBe(true);
+  });
+
   it('records a monitor refusal without any funnel call on an empty session', async () => {
     const { call, parts } = monitorCall();
     const bare = new HostedWorkspaceToolTurn(

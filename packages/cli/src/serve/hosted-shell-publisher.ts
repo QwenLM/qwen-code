@@ -588,7 +588,16 @@ export class HostedShellPublisher {
       if (line.length > 0) observer.onLine(line);
       at = background.remainder.indexOf('\n');
     }
-    if (background.remainder.length > 4096) background.remainder = '';
+    if (background.remainder.length > 4096) {
+      // The Legacy partial-line cap force-emits: the truncated prefix with
+      // an ellipsis becomes one observation and the rest of the overlong
+      // line is gone by design — never a silent clear that loses it all,
+      // and never an observation for only some of it later.
+      const truncated = background.remainder.slice(0, 4096) + '...';
+      background.remainder = '';
+      if (observer) observer.onLine(truncated);
+      else background.remainder = truncated;
+    }
   }
 
   /**

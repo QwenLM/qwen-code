@@ -43,6 +43,7 @@ import {
 import {
   attributeShellReceipts,
   registerHostedHarnessSessionRoutes,
+  settleCancelledHookTurn,
 } from './hosted-harness-session.js';
 import {
   HostedHookRecoveryRequiredError,
@@ -390,6 +391,43 @@ describe('attributeShellReceipts', () => {
     ]);
     expect(promptId).toBeNull();
     expect(receipts.map((item) => item.promptId)).toEqual(['prompt']);
+  });
+});
+
+describe('settleCancelledHookTurn', () => {
+  it('does not count a queued monitor notification toward the parked turn', async () => {
+    const events = [
+      {
+        kind: 'input.accepted',
+        sequence: 5,
+        payload: { turnId: 'prompt', source: 'hosted-harness' },
+      } as unknown as ManagedSessionEvent,
+      {
+        kind: 'input.accepted',
+        sequence: 7,
+        payload: { turnId: 'monitor:1:notify:1', source: 'monitor' },
+      } as unknown as ManagedSessionEvent,
+    ];
+    const extensionRecordsInDomain = vi.fn(() => []);
+    const session = {
+      blocked: true,
+      hooks: { hasPendingOperations: false },
+      managed: {
+        authority: {
+          committedSequence: 7,
+          sessionHeader: { sessionKey: { sessionId: 's' } },
+          eventsInSequenceRange: () => events,
+          extensionRecordsInDomain,
+        },
+        resources: { read: async () => Buffer.from('{}') },
+      },
+    } as unknown as Parameters<typeof settleCancelledHookTurn>[0];
+    await settleCancelledHookTurn(session);
+    // The monitor input is never its own parked Turn, so the sole pending
+    // turn is the prompt itself and the Hook execution scan actually ran
+    // — with the notification counted, the early none-of-one exit would
+    // leave this hook turn wedged forever.
+    expect(extensionRecordsInDomain).toHaveBeenCalledWith('hook_execution');
   });
 });
 
