@@ -762,7 +762,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
       // (a declared `profile: 'anthropic-manual'` on a Claude 4.8+ id is a
       // legal capability declaration and buildRequest spreads ...sampling
       // onto the wire without stripping).
-      if (thinking && !this.modelRejectsTemperature()) sampling.temperature = 1;
+      if (
+        thinking &&
+        sampling.temperature !== undefined &&
+        !this.modelRejectsTemperature()
+      )
+        sampling.temperature = 1;
     }
     const isDeepSeek =
       isDeepSeekAnthropicHostname(this.contentGeneratorConfig) ||
