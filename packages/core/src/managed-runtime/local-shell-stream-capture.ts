@@ -401,13 +401,14 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
 
   /**
    * Publishes the next manifest revision: `unknown` and `open` while
-   * running, settled fields once sealed. Only a pending revision gains a
-   * successor, by the shared `isToolResultManifestSuccessor` rules. The
-   * manifest validator requires each descriptor's pages to add up to its
-   * stored byte length, so each stream's descriptor is frozen in its own
-   * queue cell right after its flush — an append on that stream may only
-   * start the next page, never the revision being built here. The publish
-   * itself is single-flight: revision numbers only advance in commit
+   * running, settled fields once sealed. A pending revision's successor
+   * may only extend what it recorded, and a fully sealed revision gets
+   * exactly one settled leg, by the shared `isToolResultManifestSuccessor`
+   * rules. The manifest validator requires each descriptor's pages to sum
+   * to its byte length, so each stream's hash and byte length freeze at
+   * the splice boundary of its own flush — an append after the boundary
+   * opens a fresh page, never lands inside this revision. The publish
+   * itself is single-flight: revision numbers only ever advance in commit
    * order, so two overlapping flushes can never collide or skip.
    */
   private async publish(

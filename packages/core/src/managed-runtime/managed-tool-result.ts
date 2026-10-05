@@ -836,8 +836,9 @@ export function isToolResultManifestChainLink(
 
 /**
  * Whether `next` may follow `previous` as the next revision of one capture:
- * only a pending revision has a successor, and a successor may only extend
- * what the earlier revision recorded.
+ * a pending revision's successor may only extend what it recorded; a fully
+ * sealed revision gets exactly one — the revision that names the physical
+ * end over byte-for-byte identical descriptors, never a newer story.
  */
 export function isToolResultManifestSuccessor(
   previous: unknown,
@@ -848,7 +849,6 @@ export function isToolResultManifestSuccessor(
   if (
     !before ||
     !after ||
-    before.captureStatus !== 'pending' ||
     after.revision !== before.revision + 1 ||
     FIXED_KEYS.some((key) => before[key] !== after[key]) ||
     (before.upstreamTruncated && !after.upstreamTruncated) ||
@@ -856,16 +856,28 @@ export function isToolResultManifestSuccessor(
   ) {
     return false;
   }
-  if (
-    before.executionStatus !== 'unknown' &&
-    (before.executionStatus !== after.executionStatus ||
-      before.exitCode !== after.exitCode ||
-      before.signal !== after.signal)
-  ) {
-    return false;
+  if (before.captureStatus === 'pending') {
+    if (
+      before.executionStatus !== 'unknown' &&
+      (before.executionStatus !== after.executionStatus ||
+        before.exitCode !== after.exitCode ||
+        before.signal !== after.signal)
+    ) {
+      return false;
+    }
+    return before.contents.every((entry, index) =>
+      isDescriptorSuccessor(entry, after.contents[index]),
+    );
   }
-  return before.contents.every((entry, index) =>
-    isDescriptorSuccessor(entry, after.contents[index]),
+  // The settle-family transition, one and only one leg: still previews
+  // nothing of the physical end → exactly the revision that names it.
+  return (
+    before.captureStatus === 'complete' &&
+    before.executionStatus === 'unknown' &&
+    before.exitCode === null &&
+    before.signal === null &&
+    after.executionStatus !== 'unknown' &&
+    sameJson(before.contents, after.contents)
   );
 }
 

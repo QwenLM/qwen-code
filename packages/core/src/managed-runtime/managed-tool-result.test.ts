@@ -469,12 +469,34 @@ describe('Managed tool result contract', () => {
       revision: 2,
       executionStatus: 'success',
       exitCode: 0,
-    };
+    } as ToolResultManifest;
     expect(
       isToolResultManifestChainLink(sealed, { ...sealed, revision: 3 }),
     ).toBe(true);
+    // The settle-leg of the same shape: a fully sealed revision may be
+    // followed once, on byte-for-byte identical descriptors only.
+    // The complete-unknown preview lets exactly one settled leg through;
+    // anything past it stays rejected like before.
     expect(
-      isToolResultManifestSuccessor(sealed, { ...sealed, revision: 3 }),
+      isToolResultManifestSuccessor(
+        { ...sealed, executionStatus: 'unknown', exitCode: null },
+        { ...sealed, revision: 3 },
+      ),
+    ).toBe(true);
+    expect(
+      isToolResultManifestSuccessor(
+        { ...sealed, executionStatus: 'unknown' },
+        { ...sealed, revision: 3 },
+      ),
+    ).toBe(false);
+    expect(
+      isToolResultManifestSuccessor(sealed, {
+        ...sealed,
+        revision: 3,
+        contents: sealed.contents.map((entry, index) =>
+          index === 0 ? { ...entry, streamId: 'stderr' } : entry,
+        ),
+      }),
     ).toBe(false);
   });
 
