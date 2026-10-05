@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../../config/storage.js';
 import { createAssignedThread, postMessage } from './thread-actions.js';
 import { finishRunInTransaction } from './run-lifecycle.js';
@@ -24,6 +24,9 @@ import {
 } from './host-lease.js';
 import {
   authenticateAgentHost,
+  getAgentsFilePath,
+  readAgentHosts,
+  heartbeatAgentHost,
   createThread,
   enrollAgentHost,
   issueAgentHostEnrollment,
@@ -39,6 +42,21 @@ import {
   type ThreadRun,
   type WorkspaceAgent,
 } from './types.js';
+
+const renameFailure = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      if (args[1] === renameFailure.path)
+        throw new Error('binding write failed');
+      return actual.rename(...args);
+    },
+  };
+});
 
 const PROJECT_ROOT = '/host-lease-test';
 const T0 = 1_000_000;
@@ -731,3 +749,173 @@ describe('removeAgentHost', () => {
     expect(agent?.execution).toEqual({ mode: 'managed-host', hostIds: [kept] });
   });
 });
+
+describe('explicit Agent Host replacement', () => {
+  it('migrates only selected bindings, settles old runs and refuses old credentials and late results', async () => {
+    const old = await enroll('worker', ['qwen']);
+    const sibling = await enroll('worker', ['qwen']);
+    await placeAgent([old.id, sibling.id], 'qwen');
+    const runningId = await seedQueued();
+    const assignment = (await pickupRunForHost(PROJECT_ROOT, old.id, T0))!;
+    const finishing = await createThread(PROJECT_ROOT, {
+      title: 'Already finishing',
+    });
+    await writeThread(PROJECT_ROOT, {
+      ...finishing,
+      runs: [
+        {
+          ...assignmentToRun(assignment),
+          id: 'rn_finishing',
+          status: 'finishing',
+          closeKind: 'review',
+        },
+      ],
+    });
+    const { token } = await issueAgentHostEnrollment(PROJECT_ROOT, old.id);
+    await expect(
+      heartbeatAgentHost(PROJECT_ROOT, old.id, old.secret, {
+        workspaceCwd: '/work/worker',
+        providers: ['Qwen Code ACP'],
+        enrollmentToken: token,
+      }),
+    ).rejects.toThrow('Agent Host replacement requires enrollment.');
+    const replacement = await enrollAgentHost(PROJECT_ROOT, {
+      token,
+      name: 'worker',
+      workspaceCwd: '/work/worker',
+      providers: ['Qwen Code ACP'],
+    });
+    expect(replacement.host.id).not.toBe(old.id);
+    expect((await readWorkspaceAgents(PROJECT_ROOT))[0]?.execution).toEqual({
+      mode: 'managed-host',
+      hostIds: [replacement.host.id, sibling.id],
+      provider: 'qwen',
+    });
+    expect((await readThread(PROJECT_ROOT, runningId))?.runs[0]).toMatchObject({
+      status: 'failed',
+      error: AGENT_HOST_REMOVED,
+    });
+    expect(
+      (await readThread(PROJECT_ROOT, finishing.id))?.runs[0]?.status,
+    ).toBe('completed');
+    expect(
+      (await readAgentHosts(PROJECT_ROOT)).map((entry) => entry.id).sort(),
+    ).toEqual([sibling.id, replacement.host.id].sort());
+    await expect(
+      authenticateAgentHost(PROJECT_ROOT, old.id, old.secret),
+    ).resolves.toBeUndefined();
+    await expect(
+      authenticateAgentHost(PROJECT_ROOT, sibling.id, sibling.secret),
+    ).resolves.toMatchObject({ id: sibling.id });
+    await expect(
+      authenticateAgentHost(
+        PROJECT_ROOT,
+        replacement.host.id,
+        replacement.secret,
+      ),
+    ).resolves.toMatchObject({ id: replacement.host.id });
+    expect(
+      (
+        await applyHostRunResult(PROJECT_ROOT, {
+          threadId: runningId,
+          runId: assignment.runId,
+          hostId: old.id,
+          leaseId: assignment.lease.leaseId,
+          attempt: assignment.attempt,
+          status: 'completed',
+        })
+      ).ok,
+    ).toBe(false);
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token,
+        name: 'replay',
+        workspaceCwd: '/work/worker',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).rejects.toThrow('Invalid or expired');
+  });
+
+  it('fails closed for missing, foreign and invalid replacement targets or tokens', async () => {
+    const old = await enroll('old', ['qwen']);
+    await expect(
+      issueAgentHostEnrollment('/another-workspace', old.id),
+    ).rejects.toThrow('not found');
+    const { token } = await issueAgentHostEnrollment(PROJECT_ROOT, old.id);
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token: 'wrong-token',
+        name: 'new',
+        workspaceCwd: '/work/new',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).rejects.toThrow('Invalid or expired');
+    expect(
+      (await readAgentHosts(PROJECT_ROOT)).map((entry) => entry.id),
+    ).toEqual([old.id]);
+    await removeAgentHost(PROJECT_ROOT, old.id);
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token,
+        name: 'new',
+        workspaceCwd: '/work/new',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).rejects.toThrow('not found');
+  });
+
+  it('reuses its staged identity when binding persistence fails, without losing the recovery capability', async () => {
+    const old = await enroll('old', ['qwen']);
+    await placeAgent([old.id]);
+    const { token } = await issueAgentHostEnrollment(PROJECT_ROOT, old.id);
+    renameFailure.path = getAgentsFilePath(PROJECT_ROOT);
+    const input = {
+      token,
+      name: 'new',
+      workspaceCwd: '/work/new',
+      providers: ['Qwen Code ACP'],
+    };
+    try {
+      await expect(enrollAgentHost(PROJECT_ROOT, input)).rejects.toThrow(
+        'binding write failed',
+      );
+    } finally {
+      renameFailure.path = undefined;
+    }
+    const staged = (await readAgentHosts(PROJECT_ROOT)).find(
+      (entry) => entry.id !== old.id,
+    )!;
+    await expect(issueAgentHostEnrollment(PROJECT_ROOT)).rejects.toThrow(
+      'Retry the pending',
+    );
+    await expect(removeAgentHost(PROJECT_ROOT, old.id)).rejects.toThrow(
+      'Retry the pending',
+    );
+    const refreshed = await issueAgentHostEnrollment(PROJECT_ROOT, old.id);
+    expect(refreshed.replacementHostId).toBe(staged.id);
+    const replacement = await enrollAgentHost(PROJECT_ROOT, {
+      ...input,
+      token: refreshed.token,
+    });
+    expect(replacement.host.id).toBe(staged.id);
+    expect(
+      (await readAgentHosts(PROJECT_ROOT)).map((entry) => entry.id),
+    ).toEqual([staged.id]);
+    expect((await readWorkspaceAgents(PROJECT_ROOT))[0]?.execution).toEqual({
+      mode: 'managed-host',
+      hostIds: [staged.id],
+    });
+  });
+});
+
+function assignmentToRun(
+  assignment: NonNullable<Awaited<ReturnType<typeof pickupRunForHost>>>,
+): ThreadRun {
+  return {
+    ...queuedRun(),
+    id: assignment.runId,
+    status: 'running',
+    attempts: assignment.attempt,
+    lease: assignment.lease,
+  };
+}
