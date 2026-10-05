@@ -1327,6 +1327,203 @@ describe('Managed Runtime providers', () => {
     }
   });
 
+  it('retries a failed terminal release as v2 after a failed v2 cold start', async () => {
+    let prepares = 0;
+    const releaseVersions: number[] = [];
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, options?: RequestInit) => {
+        const pathname = new URL(String(input)).pathname;
+        if (pathname.endsWith('/v1/prepare')) {
+          prepares++;
+          return new Response('', { status: 500 });
+        }
+        if (pathname.endsWith('/release')) {
+          const body = JSON.parse(String(options?.body)) as {
+            protocolVersion: number;
+          };
+          releaseVersions.push(body.protocolVersion);
+          if (releaseVersions.length === 1)
+            return new Response('', { status: 500 });
+          return Response.json({
+            protocolVersion: body.protocolVersion,
+            released: true,
+          });
+        }
+        return Response.json({ protocolVersion: 2, result: {} });
+      },
+    );
+    const remote = new RemoteManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:4181',
+      token,
+      lease: { leaseId: 'lease', epoch: 1 },
+      fetch: fetchImpl,
+    });
+    try {
+      // The v2 marker is pinned before the doomed cold start settles, so the
+      // release that follows is terminal — and it fails too.
+      const cold = remote.getToolV2Client(prepareRequest);
+      const failed = remote.release(prepareRequest.sessionId, prepareRequest);
+      await expect(cold).rejects.toThrow('HTTP 500');
+      await expect(failed).rejects.toThrow('HTTP 500');
+      expect(releaseVersions).toEqual([2]);
+      // The failed-cold-start eviction must not drop the entry's recorded
+      // terminal intent: the retry stays a v2 release.
+      await expect(remote.getToolV2Client(prepareRequest)).rejects.toThrow(
+        'HTTP 500',
+      );
+      await expect(
+        remote.release(prepareRequest.sessionId, prepareRequest),
+      ).resolves.toBe(true);
+      expect(releaseVersions).toEqual([2, 2]);
+      expect(() => remote.prepare(prepareRequest)).toThrow(
+        'permanently closed',
+      );
+      expect(prepares).toBe(1);
+    } finally {
+      remote.dispose();
+    }
+  });
+
+  it('keeps the entry for an in-flight release when its cold start fails', async () => {
+    let prepares = 0;
+    const releaseVersions: number[] = [];
+    let settleRelease!: (response: Response) => void;
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, options?: RequestInit) => {
+        const pathname = new URL(String(input)).pathname;
+        if (pathname.endsWith('/v1/prepare')) {
+          if (++prepares === 1) return new Response('', { status: 500 });
+          return Response.json({ protocolVersion: 1, ready: true });
+        }
+        if (pathname.endsWith('/release')) {
+          const body = JSON.parse(String(options?.body)) as {
+            protocolVersion: number;
+          };
+          releaseVersions.push(body.protocolVersion);
+          if (releaseVersions.length === 1)
+            return new Promise<Response>((resolve) => {
+              settleRelease = resolve;
+            });
+          return Response.json({
+            protocolVersion: body.protocolVersion,
+            released: true,
+          });
+        }
+        return Response.json({ protocolVersion: 2, result: {} });
+      },
+    );
+    const remote = new RemoteManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:4181',
+      token,
+      lease: { leaseId: 'lease', epoch: 1 },
+      fetch: fetchImpl,
+    });
+    try {
+      const cold = remote.prepare(prepareRequest).ready;
+      void cold.catch(() => {});
+      const first = remote.release(prepareRequest.sessionId, prepareRequest);
+      // The release POST is in flight before the failed cold start is
+      // observed, so the eviction gate must leave the entry to it.
+      await vi.waitFor(() => expect(releaseVersions).toHaveLength(1));
+      await expect(remote.getToolV2Client(prepareRequest)).rejects.toThrow(
+        'HTTP 500',
+      );
+      // A release started in the window joins the in-flight one rather than
+      // re-creating the entry.
+      const second = remote.release(prepareRequest.sessionId, prepareRequest);
+      settleRelease(new Response('', { status: 500 }));
+      await expect(first).rejects.toThrow('HTTP 500');
+      await expect(second).rejects.toThrow('HTTP 500');
+      // The dropped v2 marker keeps the failed cold start from turning the
+      // next release terminal: it goes out as v1 and the Session stays
+      // re-preparable.
+      await expect(
+        remote.release(prepareRequest.sessionId, prepareRequest),
+      ).resolves.toBe(true);
+      expect(releaseVersions).toEqual([1, 1]);
+      await remote.prepare(prepareRequest).ready;
+      expect(prepares).toBe(2);
+      await expect(cold).rejects.toThrow('HTTP 500');
+    } finally {
+      remote.dispose();
+    }
+  });
+
+  it('delivers a release-abort cleanup failure to the caller without logging it lost', async () => {
+    const runtime = fakeRuntime();
+    let resolveSpawn!: (
+      session: Awaited<ReturnType<AcpSessionBridge['spawnOrAttach']>>,
+    ) => void;
+    vi.mocked(runtime.bridge.spawnOrAttach).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSpawn = resolve;
+      }),
+    );
+    const sentinel = new Error('close exploded');
+    runtime.close.mockRejectedValueOnce(sentinel);
+    const local = new LocalManagedRuntimeProvider(runtime.registry);
+    const ready = local.prepare(prepareRequest).ready;
+    void ready.catch(() => {});
+    debugSpy.error.mockClear();
+    const released = local.release(prepareRequest.sessionId, prepareRequest);
+    // The release aborts the warmup with a ManagedRuntimeReleaseAbortError;
+    // the late-resolving spawn has no client id, so cleanup runs and fails
+    // while the release is still awaiting it — the failure is delivered, not
+    // lost, so the after-abort log must stay silent.
+    resolveSpawn({
+      sessionId: prepareRequest.sessionId,
+      workspaceCwd,
+      attached: false,
+      hasActivePrompt: false,
+      sourceType: 'managed-gateway',
+      sourceId: prepareRequest.sessionId,
+    });
+    await expect(released).rejects.toThrow(
+      'Managed Runtime Session cleanup failed.',
+    );
+    expect(debugSpy.error).not.toHaveBeenCalled();
+    local.dispose();
+  });
+
+  it('logs a restore-path cleanup failure that lands after a dispose abort settled the release', async () => {
+    const runtime = fakeRuntime();
+    let resolveResume!: (
+      session: Awaited<ReturnType<AcpSessionBridge['resumeSession']>>,
+    ) => void;
+    vi.mocked(runtime.bridge.resumeSession).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveResume = resolve;
+      }),
+    );
+    const sentinel = new Error('bridge exploded');
+    runtime.close.mockRejectedValueOnce(sentinel);
+    const local = new LocalManagedRuntimeProvider(runtime.registry);
+    const released = local.release(prepareRequest.sessionId, prepareRequest);
+    // The dispose aborts the restore wait with a plain Error, settling the
+    // release before the cleanup outcome exists: the log is then the only
+    // surviving trace of the cleanup failure.
+    local.dispose();
+    await expect(released).rejects.toThrow(
+      'Managed Runtime provider disposed.',
+    );
+    resolveResume({
+      sessionId: prepareRequest.sessionId,
+      workspaceCwd,
+      attached: false,
+      clientId: 'runtime-client-p8',
+      hasActivePrompt: true,
+      sourceType: 'managed-gateway',
+      sourceId: prepareRequest.sessionId,
+    } as Awaited<ReturnType<AcpSessionBridge['resumeSession']>>);
+    await vi.waitFor(() =>
+      expect(
+        debugSpy.error.mock.calls
+          .flat()
+          .some((argument: unknown) => argument === sentinel),
+      ).toBe(true),
+    );
+  });
+
   it('treats a zero prepare retry window as the default window', async () => {
     let prepares = 0;
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) =>

@@ -957,6 +957,12 @@ class RuntimeBrokerHttpServerTest {
                 // status always comes back.
                 assertEquals(Set.of("state", "cancelRequested", "lastSeq", "firstAvailableSeq", "progressGap",
                         "progress", "result"), status.keySet());
+                assertEquals(1, status.getLongValue("lastSeq"));
+                assertEquals(1, status.getLongValue("firstAvailableSeq"));
+                assertTrue(status.getBooleanValue("progressGap"));
+                assertEquals(List.of(), status.getJSONArray("progress"));
+                assertEquals("success",
+                        status.getJSONObject("result").getString("executionStatus"));
             }
         }
     }
@@ -980,6 +986,8 @@ class RuntimeBrokerHttpServerTest {
                 HttpResponse<String> response = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
                 assertEquals(400, response.statusCode(), response.body());
                 assertTrue(response.body().contains("runtime_broker_invalid_request"), response.body());
+                assertTrue(response.body().contains("afterSeq must be a non-negative integer"),
+                        response.body());
             }
             HttpRequest duplicate = HttpRequest.newBuilder(fixture.uri("/executions/call"
                             + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime&afterSeq=1&afterSeq=2"))
@@ -987,6 +995,7 @@ class RuntimeBrokerHttpServerTest {
             HttpResponse<String> duplicated = fixture.client.send(duplicate, HttpResponse.BodyHandlers.ofString());
             assertEquals(400, duplicated.statusCode(), duplicated.body());
             assertTrue(duplicated.body().contains("runtime_broker_invalid_request"), duplicated.body());
+            assertTrue(duplicated.body().contains("duplicate fields"), duplicated.body());
         }
     }
 

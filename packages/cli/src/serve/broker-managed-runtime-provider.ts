@@ -79,7 +79,7 @@ interface BrokerEntry {
   readonly acquisition: Promise<void>;
   acquisitionFailed?: boolean;
   readonly executions: Map<string, BrokerExecution>;
-  readonly failedDigests: Map<string, string>;
+  readonly failedDigests: Map<string, BrokerExecutionFailure>;
   client?: ManagedToolV2Client;
   release?: Promise<boolean>;
   releasing?: boolean;
@@ -93,6 +93,27 @@ interface BrokerExecution {
     status: ManagedToolInvocationStatus;
   }>;
   started?: Promise<ManagedToolExecutionResult>;
+}
+
+interface BrokerExecutionFailure {
+  readonly referenceDigest: string;
+  readonly error: unknown;
+  readonly executionCallId?: string;
+}
+
+// Eviction is for failures a retry can outrun: a 5xx the Broker did not
+// declare permanent, a 4xx it explicitly marked retryable, or a transport
+// failure (timeout, abort, network). Everything else — a declared refusal,
+// an unclassified 4xx, or a client-side protocol failure — cannot produce a
+// different answer within the session, so it stays cached and later calls
+// replay it instead of re-driving a doomed prepare/start cycle.
+function isTransientBrokerFailure(error: unknown): boolean {
+  if (error instanceof BrokerResponseError) {
+    return error.status >= 500
+      ? error.retryable !== false
+      : error.retryable === true;
+  }
+  return error instanceof TypeError || error instanceof DOMException;
 }
 
 class BrokerResponseError extends Error {
@@ -919,8 +940,10 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         ]),
       );
       if (released !== true) {
-        throw new Error(
-          'Managed Runtime Broker did not confirm Session release.',
+        throw new ManagedRuntimeProviderError(
+          'managed_runtime_unavailable',
+          `Managed Runtime Broker did not confirm Session release for ${sessionId}.`,
+          true,
         );
       }
       this.entries.delete(sessionId);
@@ -993,8 +1016,8 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
           false,
         );
       }
-      const failedDigest = entry.failedDigests.get(reference.invocationId);
-      if (failedDigest !== undefined && failedDigest !== referenceDigest) {
+      const failed = entry.failedDigests.get(reference.invocationId);
+      if (failed !== undefined && failed.referenceDigest !== referenceDigest) {
         throw new ManagedRuntimeProviderError(
           'managed_runtime_identity_conflict',
           'Managed Runtime Broker invocation identity changed.',
@@ -1023,38 +1046,84 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         // or a changed-args retry would pass the identity check on an empty
         // cache.
         void retained.reserved.catch((error: unknown) => {
-          if (
-            error instanceof BrokerResponseError &&
-            error.retryable === false
-          ) {
-            // The Broker refused a retry at the protocol level: keep the
-            // refusal cached instead of re-sending it on every later call.
+          if (!isTransientBrokerFailure(error)) {
+            // The Broker refused a retry, or the failure is deterministic:
+            // keep it cached instead of re-sending it on every later call.
             return;
           }
           if (entry.executions.get(reference.invocationId) === retained) {
             entry.executions.delete(reference.invocationId);
-            entry.failedDigests.set(
-              reference.invocationId,
-              retained.referenceDigest,
-            );
+            entry.failedDigests.set(reference.invocationId, {
+              referenceDigest: retained.referenceDigest,
+              error,
+            });
           }
         });
       }
       return execution;
     };
+    // Read-only resolution for status/cancel: a read must never create a
+    // reservation, so an invocation that is not cached surfaces its recorded
+    // failure, or keeps answering by the call id its reservation produced
+    // before a transient failure evicted it.
+    const resolveReadOnlyExecution = (
+      reference: ManagedToolInvocationReference,
+    ):
+      | { readonly execution: BrokerExecution }
+      | { readonly executionCallId: string } => {
+      assertEntry(true);
+      this.assertReference(entry, reference);
+      const referenceDigest = managedToolDigest(reference);
+      const execution = entry.executions.get(reference.invocationId);
+      if (execution !== undefined) {
+        if (execution.referenceDigest !== referenceDigest) {
+          throw new ManagedRuntimeProviderError(
+            'managed_runtime_identity_conflict',
+            'Managed Runtime Broker invocation identity changed.',
+            false,
+          );
+        }
+        return { execution };
+      }
+      const failed = entry.failedDigests.get(reference.invocationId);
+      if (failed !== undefined) {
+        if (failed.referenceDigest !== referenceDigest) {
+          throw new ManagedRuntimeProviderError(
+            'managed_runtime_identity_conflict',
+            'Managed Runtime Broker invocation identity changed.',
+            false,
+          );
+        }
+        if (failed.executionCallId !== undefined) {
+          return { executionCallId: failed.executionCallId };
+        }
+        throw failed.error;
+      }
+      throw new ManagedRuntimeProviderError(
+        'managed_runtime_unavailable',
+        'Managed Runtime Broker execution is unknown to this Session.',
+        true,
+      );
+    };
     const readExecution = async (
       reference: ManagedToolInvocationReference,
       afterSeq?: number,
     ) => {
-      const execution = ensureExecution(reference, true);
-      const reserved = await execution.reserved;
-      if (reserved.status.state === 'settled' && afterSeq === undefined) {
-        return reserved.status;
+      const resolved = resolveReadOnlyExecution(reference);
+      let executionCallId: string;
+      if ('execution' in resolved) {
+        const reserved = await resolved.execution.reserved;
+        if (reserved.status.state === 'settled' && afterSeq === undefined) {
+          return reserved.status;
+        }
+        executionCallId = reserved.executionCallId;
+      } else {
+        executionCallId = resolved.executionCallId;
       }
       return this.client.getExecution(
         entry.request.sessionId,
         entry.harnessSessionId,
-        reserved.executionCallId,
+        executionCallId,
         afterSeq,
         AbortSignal.any([
           this.lifetime.signal,
@@ -1101,18 +1170,25 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
       // A transiently rejected start must not be cached forever either:
       // re-execution re-prepares under the stable idempotency key, with the
       // failed digest tombstoned for the same reason as above.
-      void execution.started.catch((error: unknown) => {
-        if (error instanceof BrokerResponseError && error.retryable === false) {
-          // Same rule as the reservation: a declared-refusal start stays
-          // cached rather than being re-driven on every later call.
+      void execution.started.catch(async (error: unknown) => {
+        if (!isTransientBrokerFailure(error)) {
+          // Same rule as the reservation: a declared-refusal or deterministic
+          // start stays cached rather than being re-driven on every call.
           return;
         }
+        // The reservation already resolved, so the Broker-side execution
+        // stays addressable by its call id: the tombstone must carry it, or
+        // a draining cancel/status could no longer reach the receipt.
+        const reserved = await startedExecution.reserved.catch(() => undefined);
         if (entry.executions.get(reference.invocationId) === startedExecution) {
           entry.executions.delete(reference.invocationId);
-          entry.failedDigests.set(
-            reference.invocationId,
-            startedExecution.referenceDigest,
-          );
+          entry.failedDigests.set(reference.invocationId, {
+            referenceDigest: startedExecution.referenceDigest,
+            error,
+            ...(reserved === undefined
+              ? {}
+              : { executionCallId: reserved.executionCallId }),
+          });
         }
       });
       return execution.started;
@@ -1159,11 +1235,15 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
       execute: (reference) => startExecution(reference),
       status: (reference, afterSeq) => readExecution(reference, afterSeq),
       cancel: async (reference) => {
-        const reserved = await ensureExecution(reference, true).reserved;
+        const resolved = resolveReadOnlyExecution(reference);
+        const executionCallId =
+          'execution' in resolved
+            ? (await resolved.execution.reserved).executionCallId
+            : resolved.executionCallId;
         return this.client.cancelExecution(
           entry.request.sessionId,
           entry.harnessSessionId,
-          reserved.executionCallId,
+          executionCallId,
           AbortSignal.any([
             this.lifetime.signal,
             AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),

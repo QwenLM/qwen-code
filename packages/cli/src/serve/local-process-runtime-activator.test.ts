@@ -7,7 +7,7 @@
 import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import {
   LocalProcessRuntimeActivator,
   managedWorkerEnvironment,
@@ -23,6 +23,28 @@ process.on('message', b => {
 process.on('disconnect', () => process.exit(0));
 process.on('SIGTERM', () => process.exit(0));
 `;
+// Arms a controllable rm for the close()-window test: while armed, every rm
+// hangs until the test settles it; while disarmed, rm passes through.
+const rmControl = vi.hoisted(() => ({
+  armed: false,
+  calls: 0,
+  settle: undefined as
+    | undefined
+    | { resolve: () => void; reject: (error: unknown) => void },
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    rm: (...args: Parameters<typeof actual.rm>) => {
+      if (!rmControl.armed) return actual.rm(...args);
+      rmControl.calls++;
+      return new Promise<void>((resolve, reject) => {
+        rmControl.settle = { resolve, reject };
+      });
+    },
+  };
+});
 const active: LocalProcessRuntimeActivator[] = [];
 const dirs: string[] = [];
 afterEach(async () => {
@@ -63,6 +85,37 @@ function scope(id = 'a') {
       trusted: true,
     } as WorkspaceRuntime,
   };
+}
+
+// terminate() rejects without proving the exit; the registry's own tracked
+// child is untouched, so it stays committed until shutdown — mirroring the
+// surviving-groups teardown branch. The restore is registered with the test
+// so a rejection before the test body's own teardown cannot leak the stub.
+function stubFailingTerminate(): void {
+  const originalReserve = ProcessRegistry.prototype.reserve;
+  const reserveSpy = vi
+    .spyOn(ProcessRegistry.prototype, 'reserve')
+    .mockImplementation(function (this: ProcessRegistry) {
+      const reservation = originalReserve.call(this);
+      return {
+        ...reservation,
+        attach: (
+          child: Parameters<typeof reservation.attach>[0],
+          options?: Parameters<typeof reservation.attach>[1],
+        ) => {
+          const tracked = reservation.attach(child, options);
+          return {
+            ...tracked,
+            terminate: async () => {
+              throw new Error(
+                'ACP child did not exit with its owned process groups (surviving pgids=[stub])',
+              );
+            },
+          };
+        },
+      };
+    });
+  onTestFinished(() => reserveSpy.mockRestore());
 }
 
 describe('owned Runtime activation', () => {
@@ -312,33 +365,9 @@ process.on('SIGTERM', () => process.exit(0));
   });
 
   it('counts an unreclaimed child toward admission after a failed cleanup', async () => {
-    // terminate() rejects without proving the exit; the registry's own
-    // tracked child is untouched, so it stays committed until shutdown —
-    // mirroring the surviving-groups teardown branch.
     const shutdownSpy = vi.spyOn(ProcessRegistry.prototype, 'shutdown');
-    const originalReserve = ProcessRegistry.prototype.reserve;
-    const reserveSpy = vi
-      .spyOn(ProcessRegistry.prototype, 'reserve')
-      .mockImplementation(function (this: ProcessRegistry) {
-        const reservation = originalReserve.call(this);
-        return {
-          ...reservation,
-          attach: (
-            child: Parameters<typeof reservation.attach>[0],
-            options?: Parameters<typeof reservation.attach>[1],
-          ) => {
-            const tracked = reservation.attach(child, options);
-            return {
-              ...tracked,
-              terminate: async () => {
-                throw new Error(
-                  'ACP child did not exit with its owned process groups (surviving pgids=[stub])',
-                );
-              },
-            };
-          },
-        };
-      });
+    onTestFinished(() => shutdownSpy.mockRestore());
+    stubFailingTerminate();
     const { activator } = await setup(1);
     const workspace = scope();
     const use = activator.activate(workspace);
@@ -347,26 +376,79 @@ process.on('SIGTERM', () => process.exit(0));
       await expect(
         activator.revokeWorkspace(workspace.runtime),
       ).rejects.toThrow();
+      use.release('completed');
+      // The retained generation still occupies the admission slot.
       await expect(
         activator.activate(scope('b')).endpoint,
       ).rejects.toMatchObject({ code: 'managed_runtime_capacity_exhausted' });
-      // An unproven teardown also fails closed for the same workspace and
-      // keeps its activity visible, instead of admitting a second worker
-      // onto the same cwd.
+      // An unproven teardown also fails closed for the same workspace,
+      // instead of admitting a second worker onto the same cwd.
       await expect(
         activator.activate(workspace).endpoint,
       ).rejects.toMatchObject({ code: 'managed_runtime_unavailable' });
-      expect(activator.workspaceActivity(workspace.runtime)).toBeGreaterThan(0);
     } finally {
-      reserveSpy.mockRestore();
-      // close() now aggregates this recorded cleanup failure; the recorded
+      // close() now surfaces this recorded cleanup failure; the recorded
       // assertion above is the full teardown of this one.
       active.splice(active.indexOf(activator), 1);
       await activator.close().catch(() => {});
       // The drain must reach the registry even though the generation's stop
       // already rejected: Promise.all would skip it, allSettled does not.
       expect(shutdownSpy).toHaveBeenCalledOnce();
-      shutdownSpy.mockRestore();
+    }
+  });
+
+  it('fails closed for a workspace whose failed teardown left a retiring generation', async () => {
+    stubFailingTerminate();
+    const { activator } = await setup(1);
+    const workspace = scope();
+    const use = activator.activate(workspace);
+    await use.endpoint;
+    try {
+      // reloadWorkspace stops without revoking, so only the retained
+      // retiring generation can refuse the next activation.
+      await expect(
+        activator.reloadWorkspace(workspace.runtime),
+      ).rejects.toThrow();
+      activator.completeReload(workspace.runtime);
+      await expect(
+        activator.activate(workspace).endpoint,
+      ).rejects.toMatchObject({ code: 'managed_runtime_unavailable' });
+    } finally {
+      active.splice(active.indexOf(activator), 1);
+      await activator.close().catch(() => {});
+    }
+  });
+
+  it('awaits an in-flight stop past the map delete before closing', async () => {
+    const { activator } = await setup(1);
+    const workspace = scope();
+    const use = activator.activate(workspace);
+    await use.endpoint;
+    rmControl.armed = true;
+    try {
+      const revoking = activator.revokeWorkspace(workspace.runtime);
+      void revoking.catch(() => {});
+      // The stop reaches its rm with the generation already off the map.
+      await vi.waitFor(() => expect(rmControl.calls).toBe(1));
+      let closed = 'pending';
+      const closing = activator.close();
+      void closing.then(
+        () => {
+          closed = 'resolved';
+        },
+        () => {
+          closed = 'rejected';
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(closed).toBe('pending');
+      rmControl.settle!.reject(new Error('rm failed'));
+      await expect(closing).rejects.toThrow('rm failed');
+      await expect(revoking).rejects.toThrow('rm failed');
+      expect(closed).toBe('rejected');
+    } finally {
+      rmControl.armed = false;
+      active.splice(active.indexOf(activator), 1);
     }
   });
 
@@ -385,7 +467,9 @@ process.on('SIGTERM', () => process.exit(0));
         ).rejects.toThrow();
         // The failure settled before close() — the stop deletion already
         // dropped it from the map, so only instance state can surface it.
-        await expect(activator.close()).rejects.toThrow();
+        await expect(activator.close()).rejects.toMatchObject({
+          code: 'EACCES',
+        });
       } finally {
         await chmod(workersRoot, 0o700);
         // close() intentionally aggregates the recorded failure; asserted
@@ -394,26 +478,6 @@ process.on('SIGTERM', () => process.exit(0));
       }
     },
   );
-});
-
-describe('admission accounting', () => {
-  it('counts a registry-committed child without a map entry toward admission', async () => {
-    const { activator } = await setup(2);
-    const use = activator.activate(scope());
-    await use.endpoint;
-    // One live generation holds the map count at 1; simulate the registry
-    // still counting a second, unreclaimed child (its map entry is gone).
-    const countSpy = vi
-      .spyOn(ProcessRegistry.prototype, 'committedProcessCount', 'get')
-      .mockReturnValue(2);
-    try {
-      await expect(
-        activator.activate(scope('b')).endpoint,
-      ).rejects.toMatchObject({ code: 'managed_runtime_capacity_exhausted' });
-    } finally {
-      countSpy.mockRestore();
-    }
-  });
 });
 
 describe('worker handshake validation', () => {
@@ -446,6 +510,7 @@ process.on('SIGTERM', () => process.exit(0));
     ['fragment', "ready.url = 'http://127.0.0.1:12345/#f';"],
     ['embedded credentials', "ready.url = 'http://user:pw@127.0.0.1:12345';"],
     ['password only', "ready.url = 'http://:pw@127.0.0.1:12345';"],
+    ['username only', "ready.url = 'http://user@127.0.0.1:12345';"],
     ['query string', "ready.url = 'http://127.0.0.1:12345/?q=1';"],
   ])('rejects the endpoint on %s', async (_label, mutations) => {
     const { activator } = await setup(4, handshakeFixture(mutations));

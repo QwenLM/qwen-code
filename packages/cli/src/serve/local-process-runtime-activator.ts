@@ -89,7 +89,8 @@ export class LocalProcessRuntimeActivator {
   private readonly registry = new ProcessRegistry();
   private readonly generations = new Map<string, Generation>();
   private readonly epochs = new Map<string, number>();
-  private readonly cleanupFailures: unknown[] = [];
+  private firstCleanupFailure?: unknown;
+  private readonly pendingStops = new Set<Promise<void>>();
   private readonly draining = new Set<WorkspaceRuntime>();
   private readonly revoked = new Set<WorkspaceRuntime>();
   private readonly reloading = new Set<WorkspaceRuntime>();
@@ -117,13 +118,10 @@ export class LocalProcessRuntimeActivator {
     }
     if (!generation) {
       const limit = this.options.maxWorkers ?? 4;
-      // A generation whose cleanup failed is deleted from the map, but its
-      // child may still be alive; the registry still counts it until the
-      // known tree is gone, so admission must read the larger figure.
-      const admitted = Math.max(
-        this.generations.size,
-        this.registry.committedProcessCount,
-      );
+      // A generation whose cleanup failed is retained in the map (stop()
+      // rethrows a non-ProcessExitError terminate rejection before the
+      // delete), so the map count is the figure that diverges upward.
+      const admitted = this.generations.size;
       let eviction: Promise<void> | undefined;
       if (admitted > limit)
         return this.unavailable('managed_runtime_capacity_exhausted');
@@ -283,19 +281,20 @@ export class LocalProcessRuntimeActivator {
   close(): Promise<void> {
     this.closed = true;
     this.closePromise ??= (async () => {
-      await Promise.allSettled(
-        [...this.generations.values()].map((g) =>
-          this.stop(
-            g,
-            new ManagedRuntimeReleasedError('Managed Runtime Gateway stopped.'),
-          ),
+      const stops = [...this.generations.values()].map((g) =>
+        this.stop(
+          g,
+          new ManagedRuntimeReleasedError('Managed Runtime Gateway stopped.'),
         ),
       );
+      // A stop whose generation already left the map (the slot is freed
+      // before the fallible rm) is awaited by nobody else; pendingStops is.
+      await Promise.allSettled([...stops, ...this.pendingStops]);
       await this.registry.shutdown();
       // Cleanup failures that settled before close() was called are not in
-      // the map anymore, so the rejection set is instance state, not
-      // membership.
-      if (this.cleanupFailures.length > 0) throw this.cleanupFailures[0];
+      // the map anymore, so the rejection is instance state, not membership.
+      if (this.firstCleanupFailure !== undefined)
+        throw this.firstCleanupFailure;
     })();
     return this.closePromise;
   }
@@ -465,9 +464,12 @@ export class LocalProcessRuntimeActivator {
     })().catch((error) => {
       g.rejectExit(error);
       this.log(g, 'cleanup_failed');
-      this.cleanupFailures.push(error);
+      this.firstCleanupFailure ??= error;
       throw error;
     });
+    const pending = g.stop.catch(() => {});
+    this.pendingStops.add(pending);
+    void pending.finally(() => this.pendingStops.delete(pending));
     return g.stop;
   }
   private log(g: Generation, event: string): void {

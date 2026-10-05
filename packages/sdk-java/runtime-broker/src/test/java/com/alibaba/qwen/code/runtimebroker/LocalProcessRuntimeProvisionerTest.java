@@ -723,6 +723,13 @@ class LocalProcessRuntimeProvisionerTest {
                     repeated.getOutcome());
             assertEquals(lost.getLossEvidence().evidenceId(),
                     repeated.getLossEvidence().evidenceId());
+            // The tombstone's only payload is the dead worker's pid: the
+            // repeat read must carry the same hostDomain the live-dead read
+            // built, not a constant.
+            assertEquals(lost.getLossEvidence().hostDomain(),
+                    repeated.getLossEvidence().hostDomain());
+            assertTrue(repeated.getLossEvidence().hostDomain()
+                    .endsWith(":" + worker.pid()));
             assertFalse(provisioner.isUsable(lease));
             // Only the reaped branch answers NOT_FOUND to a foreign seed; a
             // retained dead entry would answer CONFLICT on the seed check

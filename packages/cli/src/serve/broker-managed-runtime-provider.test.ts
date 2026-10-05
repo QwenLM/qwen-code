@@ -522,13 +522,17 @@ describe('BrokerManagedRuntimeProvider', () => {
     const client = await provider.getToolV2Client(request(), {
       harnessSessionId,
     });
-    await client.prepareExecution!(reference());
-    await client.prepareExecution!({
+    const first = await client.prepareExecution!(reference());
+    const replacement = await client.prepareExecution!({
       ...reference(),
       invocationId: 'replacement-invocation',
     });
     expect(keys).toHaveLength(2);
     expect(new Set(keys).size).toBe(2);
+    // The Broker-assigned call ids are stored and forwarded faithfully — the
+    // mock answers each reservation with a fresh one.
+    expect(first.executionCallId).toBe('execution-1');
+    expect(replacement.executionCallId).toBe('execution-2');
     await provider.release(runtimeSessionId, request());
     const reconnected = await provider.getToolV2Client(request(), {
       harnessSessionId,
@@ -1014,10 +1018,165 @@ describe('BrokerManagedRuntimeProvider', () => {
     });
     await expect(client.execute(reference())).rejects.toThrow('503');
     expect(prepares).toBe(2);
+    // A pure status read must not re-create the reservation the transient
+    // failure evicted: it surfaces the recorded rejection without a POST.
+    await expect(client.status(reference())).rejects.toThrow('503');
+    expect(prepares).toBe(2);
     await expect(client.execute(reference())).resolves.toMatchObject({
       executionStatus: 'success',
     });
     expect(prepares).toBe(3);
+    provider.dispose();
+  });
+
+  it('cancels and reads an evicted execution by its reserved call id while releasing', async () => {
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const requests: string[] = [];
+    let cancelled = false;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare'))
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      if (url.endsWith('/executions/execution-1:start'))
+        return new Response('{}', { status: 503 });
+      if (url.endsWith('/executions/execution-1:cancel')) {
+        cancelled = true;
+        return json(
+          envelope({
+            executionCallId: 'execution-1',
+            status: {
+              ...preparedStatus,
+              state: 'settled',
+              result: { executionStatus: 'cancelled' },
+            },
+          }),
+        );
+      }
+      if (url.includes('/executions/execution-1?'))
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      if (url.endsWith(':release')) {
+        // The Broker still counts the PREPARED execution as active until the
+        // cancel terminalizes it.
+        if (!cancelled)
+          return new Response(
+            JSON.stringify({
+              code: 'runtime_session_busy',
+              error: 'Busy.',
+              retryable: false,
+            }),
+            { status: 409, headers: { 'content-type': 'application/json' } },
+          );
+        return json(envelope({ released: true }));
+      }
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toThrow('503');
+    // The start failure evicted the cached execution; the release is refused
+    // while the Broker still counts the PREPARED receipt as active.
+    await expect(provider.release(runtimeSessionId, request())).rejects.toThrow(
+      '409',
+    );
+    // The tombstone kept the reserved call id, so the draining cancel reaches
+    // it instead of rejecting managed_runtime_unavailable.
+    await expect(client.cancel(reference())).resolves.toMatchObject({
+      state: 'settled',
+    });
+    expect(requests.filter((url) => url.endsWith(':cancel'))).toEqual([
+      expect.stringContaining('/executions/execution-1:cancel'),
+    ]);
+    await expect(client.status(reference())).resolves.toMatchObject({
+      state: 'prepared',
+    });
+    await expect(provider.release(runtimeSessionId, request())).resolves.toBe(
+      true,
+    );
+    provider.dispose();
+  });
+
+  it('does not re-send an execution refused by an unclassified 4xx', async () => {
+    let prepares = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        prepares++;
+        return new Response('denied', {
+          status: 403,
+          headers: { 'content-type': 'text/plain' },
+        });
+      }
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toThrow('403');
+    // An unparseable 4xx cannot carry the Broker's retryable flag, so the
+    // refusal is deterministic and stays cached: no re-drive, and even a
+    // pure status read replays it without a write.
+    await expect(client.execute(reference())).rejects.toThrow('403');
+    await expect(client.status(reference())).rejects.toThrow('403');
+    expect(prepares).toBe(1);
+    provider.dispose();
+  });
+
+  it('does not re-drive an execution after a client-side protocol failure', async () => {
+    let prepares = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        prepares++;
+        return new Response('not json', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toThrow('invalid JSON');
+    // The failure is deterministic: two prepares are the reservation's own
+    // in-band retry, then the rejection stays cached for later calls.
+    expect(prepares).toBe(2);
+    await expect(client.execute(reference())).rejects.toThrow('invalid JSON');
+    expect(prepares).toBe(2);
     provider.dispose();
   });
 
@@ -1090,6 +1249,54 @@ describe('BrokerManagedRuntimeProvider', () => {
     provider.dispose();
   });
 
+  it('rejects a changed-args retry after an evicted start', async () => {
+    let prepares = 0;
+    let starts = 0;
+    const preparedStatus = {
+      state: 'prepared' as const,
+      cancelRequested: false,
+      lastSeq: 0,
+      firstAvailableSeq: 1,
+      progressGap: false,
+      progress: [],
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (url.endsWith('/executions:prepare')) {
+        prepares++;
+        return json(
+          envelope({ executionCallId: 'execution-1', status: preparedStatus }),
+        );
+      }
+      if (url.endsWith('/executions/execution-1:start')) {
+        starts++;
+        return new Response('{}', { status: 503 });
+      }
+      throw new Error(`Unexpected Broker request: ${url}`);
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.execute(reference())).rejects.toThrow('503');
+    expect(starts).toBe(1);
+    expect(prepares).toBe(1);
+    // The start-path tombstone refuses the rebuilt call locally: the Broker
+    // cannot dedup it, since the idempotency key hashes the args digest.
+    await expect(
+      client.execute({ ...reference(), argsDigest: 'c'.repeat(64) }),
+    ).rejects.toMatchObject({ code: 'managed_runtime_identity_conflict' });
+    expect(starts).toBe(1);
+    expect(prepares).toBe(1);
+    provider.dispose();
+  });
+
   it('rejects a changed-args retry after an evicted reservation', async () => {
     let prepares = 0;
     const fetchImpl = vi.fn<typeof fetch>(async (input) => {
@@ -1120,12 +1327,15 @@ describe('BrokerManagedRuntimeProvider', () => {
 
   it('rejects a release the Broker does not confirm and keeps it retryable', async () => {
     let confirm = false;
+    let releases = 0;
     const fetchImpl = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url.endsWith('tool-sessions:acquire'))
         return json(envelope({ acquired: true }));
-      if (url.endsWith(':release'))
+      if (url.endsWith(':release')) {
+        releases++;
         return json(envelope({ released: confirm }));
+      }
       throw new Error(`Unexpected Broker request: ${url}`);
     });
     const provider = new BrokerManagedRuntimeProvider({
@@ -1134,13 +1344,20 @@ describe('BrokerManagedRuntimeProvider', () => {
       fetch: fetchImpl,
     });
     await provider.getToolV2Client(request(), { harnessSessionId });
-    await expect(provider.release(runtimeSessionId, request())).rejects.toThrow(
-      'did not confirm',
-    );
+    await expect(
+      provider.release(runtimeSessionId, request()),
+    ).rejects.toMatchObject({
+      code: 'managed_runtime_unavailable',
+      retryable: true,
+      message: expect.stringContaining('did not confirm'),
+    });
     confirm = true;
     await expect(
       provider.release(runtimeSessionId, request(), { terminal: true }),
     ).resolves.toBe(true);
+    // The retry reached the Broker: the non-confirmation left the Session
+    // unsealed rather than recording a permanent closure.
+    expect(releases).toBe(2);
     provider.dispose();
   });
 });
