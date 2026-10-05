@@ -100,8 +100,11 @@ vi.mock(
     }) => {
       state.storeOptions.push(options);
       if (options.baseUrl.includes('rejected-store')) {
+        // A generic factory refusal. The descriptor under test carries
+        // allowInsecureHttp, so borrowing the real store's plaintext-gate
+        // message would pin a refusal production cannot produce here.
         throw new ManagedSessionRecordError(
-          'baseUrl uses plaintext HTTP on a non-loopback host; writer tokens would cross the wire unencrypted. Pass allowInsecureHttp: true to opt in.',
+          'store factory refused the descriptor.',
         );
       }
       const resourceStore = LocalManagedSessionResourceStore.create({
@@ -3368,7 +3371,25 @@ describe('Hosted Harness no-tool session', () => {
     });
     expect(created.status).toBe(400);
     expect(created.body.error).toBe('invalid_managed_session_store');
-    expect(created.body.message).toContain('plaintext HTTP');
+    expect(created.body.message).toContain('store factory refused');
+  });
+
+  it('answers 400 when the bridge parser refuses a cleartext off-loopback store', async () => {
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: {
+        ...store(),
+        baseUrl: 'http://rejected-store.test',
+      },
+    });
+    // The bridge parser's own refusal fires before the store factory runs.
+    expect(created.status).toBe(400);
+    expect(created.body.error).toBe('invalid_managed_session_store');
+    expect(created.body.message).toContain(
+      'must use HTTPS outside the loopback interface',
+    );
   });
 
   it('answers 400 with the reason when the descriptor itself is rejected', async () => {

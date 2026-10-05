@@ -381,8 +381,6 @@ process.on('SIGTERM', () => process.exit(0));
       await expect(
         activator.activate(scope('b')).endpoint,
       ).rejects.toMatchObject({ code: 'managed_runtime_capacity_exhausted' });
-      // An unproven teardown also fails closed for the same workspace,
-      // instead of admitting a second worker onto the same cwd.
       await expect(
         activator.activate(workspace).endpoint,
       ).rejects.toMatchObject({ code: 'managed_runtime_unavailable' });
@@ -417,6 +415,37 @@ process.on('SIGTERM', () => process.exit(0));
       active.splice(active.indexOf(activator), 1);
       await activator.close().catch(() => {});
     }
+  });
+
+  it('surfaces the recorded cleanup failure over the registry drain aggregate', async () => {
+    stubFailingTerminate();
+    const { activator } = await setup(1);
+    const workspace = scope();
+    const use = activator.activate(workspace);
+    await use.endpoint;
+    await expect(activator.revokeWorkspace(workspace.runtime)).rejects.toThrow(
+      'surviving pgids=[stub]',
+    );
+    use.release('completed');
+    // The registry drains for real, then reports its own aggregate — the
+    // same shape a genuinely unterminatable tracked child produces.
+    const realShutdown = ProcessRegistry.prototype.shutdown;
+    const shutdownSpy = vi
+      .spyOn(ProcessRegistry.prototype, 'shutdown')
+      .mockImplementation(async function (this: ProcessRegistry) {
+        await realShutdown.call(this);
+        throw new AggregateError(
+          [new Error('surviving pgids=[stub]')],
+          'ACP child process shutdown failed',
+        );
+      });
+    onTestFinished(() => shutdownSpy.mockRestore());
+    // close() is the assertion, so keep the activator out of afterEach.
+    active.splice(active.indexOf(activator), 1);
+    const failure = await activator.close().catch((error) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(AggregateError);
+    expect((failure as Error).message).toContain('surviving pgids=[stub]');
   });
 
   it('awaits an in-flight stop past the map delete before closing', async () => {

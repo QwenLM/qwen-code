@@ -45,6 +45,7 @@ describe('parseBridgeManagedSessionStore', () => {
   it.each([
     'http://127.0.0.1:8080',
     'http://localhost:8080',
+    'http://broker.localhost:8080',
     'http://[::1]:8080',
     'http://127.0.0.2:8080',
   ])('accepts cleartext loopback baseUrl %s', (baseUrl) => {

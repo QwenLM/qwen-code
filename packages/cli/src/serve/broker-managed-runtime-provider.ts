@@ -102,18 +102,33 @@ interface BrokerExecutionFailure {
 }
 
 // Eviction is for failures a retry can outrun: a 5xx the Broker did not
-// declare permanent, a 4xx it explicitly marked retryable, or a transport
-// failure (timeout, abort, network). Everything else — a declared refusal,
-// an unclassified 4xx, or a client-side protocol failure — cannot produce a
-// different answer within the session, so it stays cached and later calls
-// replay it instead of re-driving a doomed prepare/start cycle.
+// declare permanent, a 4xx it explicitly marked retryable, a transport
+// failure (timeout, abort, network), or a response whose body could not be
+// decoded — an LB drain page or a truncated reply is a transport-shaped
+// fault the next request can answer correctly. Everything else — a declared
+// refusal, an unclassified 4xx, or a decoded-but-invalid envelope — cannot
+// produce a different answer within the session, so it stays cached and
+// later calls replay it instead of re-driving a doomed prepare/start cycle.
 function isTransientBrokerFailure(error: unknown): boolean {
   if (error instanceof BrokerResponseError) {
     return error.status >= 500
       ? error.retryable !== false
       : error.retryable === true;
   }
-  return error instanceof TypeError || error instanceof DOMException;
+  return (
+    error instanceof TypeError ||
+    error instanceof DOMException ||
+    error instanceof BrokerWireError
+  );
+}
+
+// A response the client could not decode at all: over the size limit or not
+// JSON. Distinct from a decoded-but-invalid envelope, which stays permanent.
+class BrokerWireError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BrokerWireError';
+  }
 }
 
 class BrokerResponseError extends Error {
@@ -152,7 +167,9 @@ async function readBoundedResponseText(
       totalBytes += chunk.value.byteLength;
       if (totalBytes > maxResponseBytes) {
         await reader.cancel().catch(() => undefined);
-        throw new Error('Managed Runtime Broker response exceeded its limit.');
+        throw new BrokerWireError(
+          'Managed Runtime Broker response exceeded its limit.',
+        );
       }
       chunks.push(chunk.value);
     }
@@ -635,7 +652,9 @@ export class ManagedRuntimeBrokerClient {
       contentLength > MAX_BROKER_RESPONSE_BYTES
     ) {
       await response.body?.cancel().catch(() => undefined);
-      throw new Error('Managed Runtime Broker response exceeded its limit.');
+      throw new BrokerWireError(
+        'Managed Runtime Broker response exceeded its limit.',
+      );
     }
     const text = await readBoundedResponseText(
       response,
@@ -644,7 +663,9 @@ export class ManagedRuntimeBrokerClient {
     try {
       return JSON.parse(text) as unknown;
     } catch {
-      throw new Error('Managed Runtime Broker returned invalid JSON.');
+      throw new BrokerWireError(
+        'Managed Runtime Broker returned invalid JSON.',
+      );
     }
   }
 }
@@ -1003,9 +1024,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
     };
     const ensureExecution = (
       reference: ManagedToolInvocationReference,
-      allowDraining = false,
     ): BrokerExecution => {
-      assertEntry(allowDraining);
       this.assertReference(entry, reference);
       const referenceDigest = managedToolDigest(reference);
       let execution = entry.executions.get(reference.invocationId);
@@ -1053,9 +1072,18 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
           }
           if (entry.executions.get(reference.invocationId) === retained) {
             entry.executions.delete(reference.invocationId);
+            // A prior eviction may already have recorded the Broker-side
+            // call id (a failed start): the read-only cancel/status path
+            // still needs it to reach the receipt, so never overwrite it
+            // away. The digests always match here — ensureExecution refused
+            // a changed-digest re-drive before this execution existed.
+            const prior = entry.failedDigests.get(reference.invocationId);
             entry.failedDigests.set(reference.invocationId, {
               referenceDigest: retained.referenceDigest,
               error,
+              ...(prior?.executionCallId === undefined
+                ? {}
+                : { executionCallId: prior.executionCallId }),
             });
           }
         });

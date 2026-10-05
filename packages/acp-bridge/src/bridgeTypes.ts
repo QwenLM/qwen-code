@@ -265,15 +265,20 @@ export function parseBridgeManagedSessionStore(
  * not all numeric (`127.foo.example.test`) survives verbatim, so the
  * per-octet numeric test below is what keeps such a DNS name out of the
  * 127/8 allowance; acp-bridge cannot import the CLI's isLoopbackBind and
- * must keep this minimal. IPv4-mapped loopback
+ * must keep this minimal. The `.localhost` arm mirrors core's
+ * isLoopbackHostname — the plaintext guard of the store this descriptor
+ * feeds, and the policy this parser must agree with; isLoopbackBind
+ * answers a different question (whether a `--hostname` value is a bindable
+ * loopback address) and correctly has no such arm. IPv4-mapped loopback
  * (`[::ffff:127.0.0.1]`, canonicalized to `[::ffff:7f00:1]`) is deliberately
- * outside this allowlist — isLoopbackBind refuses it the same way, so both
- * policies agree that the mapped spelling must use HTTPS.
+ * outside this allowlist — both policies refuse the mapped spelling, so it
+ * must use HTTPS.
  */
 function isManagedSessionStoreLoopback(hostname: string): boolean {
   const normalized = hostname.toLowerCase();
   if (
     normalized === 'localhost' ||
+    normalized.endsWith('.localhost') ||
     normalized === '127.0.0.1' ||
     normalized === '::1' ||
     normalized === '[::1]'

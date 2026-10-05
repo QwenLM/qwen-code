@@ -1163,13 +1163,14 @@ export class RemoteManagedRuntimeProvider implements ManagedRuntimeProvider {
     } catch (error) {
       // A failed cold start must not pin the v2 marker: keep the entry
       // re-preparable instead of converting the next release into a
-      // permanently closing one. An entry that already recorded terminal
-      // intent keeps both — its release retry must recompute terminal from
-      // the live marker and re-send as v2. The map eviction still gates on
-      // the in-flight release promise, not `releasing` — that flag stays
-      // set on the entry a *failed* release leaves behind, and such an
-      // entry must still be evictable.
-      if (entry.terminal !== true && entry.v2 !== undefined) delete entry.v2;
+      // permanently closing one. A terminal entry's release retry re-sends
+      // v2 because `entry.terminal` is latched on the first release
+      // (`entry.terminal ||= terminal`) and read back as `sentTerminal`, not
+      // because the marker survives. The map eviction still gates on the
+      // in-flight release promise, not `releasing` — that flag stays set on
+      // the entry a *failed* release leaves behind, and such an entry must
+      // still be evictable.
+      if (entry.v2 !== undefined) delete entry.v2;
       if (
         this.entries.get(request.sessionId) === entry &&
         entry.release === undefined &&

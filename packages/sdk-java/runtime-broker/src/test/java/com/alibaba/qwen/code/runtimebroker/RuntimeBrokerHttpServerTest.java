@@ -27,6 +27,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class RuntimeBrokerHttpServerTest {
@@ -837,11 +838,12 @@ class RuntimeBrokerHttpServerTest {
     void answersAStoreFailureAsRetryableServiceUnavailable() throws Exception {
         InMemoryToolExecutionRepository inner = new InMemoryToolExecutionRepository(Clock.systemUTC());
         AtomicBoolean failing = new AtomicBoolean(true);
+        AtomicReference<String> failingMethod = new AtomicReference<>("findByIdempotencyKey");
         ToolExecutionRepository gate = (ToolExecutionRepository) Proxy.newProxyInstance(
                 RuntimeBrokerHttpServerTest.class.getClassLoader(),
                 new Class<?>[] { ToolExecutionRepository.class },
                 (proxy, method, args) -> {
-                    if (failing.get() && "findByIdempotencyKey".equals(method.getName())) {
+                    if (failing.get() && failingMethod.get().equals(method.getName())) {
                         throw new IllegalStateException("Runtime Broker database operation failed");
                     }
                     return method.invoke(inner, args);
@@ -866,6 +868,18 @@ class RuntimeBrokerHttpServerTest {
             retryBody.put("requestId", "retry");
             HttpResponse<String> retried = fixture.post("/executions:prepare", retryBody);
             assertEquals(200, retried.statusCode(), retried.body());
+            // The read route maps the same outage class the same way.
+            failingMethod.set("findByExecutionCallId");
+            failing.set(true);
+            String executionCallId = JSON.parseObject(retried.body()).getString("executionCallId");
+            HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + executionCallId
+                            + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime"))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> readResponse = fixture.client.send(read, HttpResponse.BodyHandlers.ofString());
+            assertEquals(503, readResponse.statusCode(), readResponse.body());
+            var readError = JSON.parseObject(readResponse.body());
+            assertEquals("runtime_broker_store_unavailable", readError.getString("code"));
+            assertTrue(readError.getBooleanValue("retryable"));
         }
     }
 

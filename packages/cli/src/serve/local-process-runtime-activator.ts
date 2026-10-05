@@ -290,9 +290,13 @@ export class LocalProcessRuntimeActivator {
       // A stop whose generation already left the map (the slot is freed
       // before the fallible rm) is awaited by nobody else; pendingStops is.
       await Promise.allSettled([...stops, ...this.pendingStops]);
-      await this.registry.shutdown();
+      // A recorded cleanup failure outranks the registry's aggregate: both
+      // describe the same teardown, and the recorded one is the cause.
       // Cleanup failures that settled before close() was called are not in
       // the map anymore, so the rejection is instance state, not membership.
+      await this.registry.shutdown().catch((error: unknown) => {
+        if (this.firstCleanupFailure === undefined) throw error;
+      });
       if (this.firstCleanupFailure !== undefined)
         throw this.firstCleanupFailure;
     })();

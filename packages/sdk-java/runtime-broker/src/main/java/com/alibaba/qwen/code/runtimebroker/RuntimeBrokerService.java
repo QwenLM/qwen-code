@@ -630,8 +630,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         context.unlock();
                     }
                 });
-        return unknownWhenAdmissionClosed(started, harnessSessionId,
-                runtimeSessionId, executionId);
+        return mapFailure(unknownWhenAdmissionClosed(started, harnessSessionId,
+                runtimeSessionId, executionId), "runtime_broker_store_unavailable",
+                "Managed Runtime execution store is unavailable.");
     }
 
     public CompletionStage<ToolExecutionRecord> startExecution(
@@ -657,8 +658,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         context.unlock();
                     }
                 });
-        return unknownWhenAdmissionClosed(started, harnessSessionId,
-                runtimeSessionId, executionId);
+        return mapFailure(unknownWhenAdmissionClosed(started, harnessSessionId,
+                runtimeSessionId, executionId), "runtime_broker_store_unavailable",
+                "Managed Runtime execution store is unavailable.");
     }
 
     private CompletionStage<ToolExecutionRecord> createExecutionReceipt(
@@ -691,7 +693,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return safeStage(() -> {
+        return mapFailure(safeStage(() -> {
             ToolExecutionRecord saved = requireOwnedExecution(harnessSessionId,
                     runtimeSessionId, executionId);
             if (saved.isTerminal()) {
@@ -712,7 +714,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             .thenApply(context -> requireExecution(context,
                                     executionId)),
                     harnessSessionId, runtimeSessionId, executionId);
-        });
+        }), "runtime_broker_store_unavailable",
+                "Managed Runtime execution store is unavailable.");
     }
 
     public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,
