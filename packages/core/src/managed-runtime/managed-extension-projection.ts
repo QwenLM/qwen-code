@@ -9,12 +9,16 @@ import type { ManagedToolInvocationStatus } from '../tools/managed-tool-runtime.
 import {
   isMonitorRunStart,
   isMonitorRunSuccessor,
+  isTerminalRunState,
   parseMonitorRun,
   type ExtensionExecutionState,
   type ExtensionRun,
   type ExtensionRunState,
 } from './managed-extension-record.js';
-import type { ManagedSessionDomain } from './managed-session-records.js';
+import {
+  MANAGED_SESSION_ENVELOPE_DOMAINS,
+  type ManagedSessionDomain,
+} from './managed-session-records.js';
 import {
   isMcpConfigurationStart,
   isMcpConfigurationSuccessor,
@@ -91,7 +95,10 @@ export interface ManagedExtensionRecordBody {
 
 /**
  * The record bodies defined so far. A domain joins when its slice defines
- * its body; enabling it for submission remains a separate step.
+ * its body; enabling it for submission remains a separate step. A body
+ * never joins a domain that is already enabled for envelope commits: the
+ * envelopes `commitDomainRecord` wrote for it predate the body, and every
+ * closed body rejects their keys.
  */
 export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
   Partial<Record<ManagedSessionDomain, ManagedExtensionRecordBody>>
@@ -152,6 +159,20 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
   }),
 });
 
+// An envelope domain's commits predates any body a later slice could
+// register, and every closed body would reject them; refuse the collision
+// at build time rather than at the Sessions' next open.
+const envelopeBodyCollision = Object.keys(
+  MANAGED_EXTENSION_RECORD_BODIES,
+).filter((domain) =>
+  (MANAGED_SESSION_ENVELOPE_DOMAINS as readonly string[]).includes(domain),
+);
+if (envelopeBodyCollision.length > 0) {
+  throw new Error(
+    `record bodies stay out of the envelope domains: ${envelopeBodyCollision.join(', ')}`,
+  );
+}
+
 /**
  * The key of one record's revision chain: SHA-256 over the Session ID, the
  * domain and the record's own identity, joined by NUL. The task ID is the
@@ -188,11 +209,6 @@ export interface ManagedSessionTaskView extends ManagedTaskProjection {
   readonly kind: ManagedTaskKind;
 }
 
-const TERMINAL: readonly ExtensionRunState[] = [
-  'settled',
-  'failed',
-  'cancelled',
-];
 /**
  * Run states that mean the work began. A blocked run may still prove that it
  * never started, so it sets no start of its own.
@@ -227,7 +243,7 @@ function runtimeState(
   run: ExtensionRun,
   stopRequested: boolean,
 ): ManagedTaskRuntimeState | null {
-  if (TERMINAL.includes(run.state) || run.execution === null) return null;
+  if (isTerminalRunState(run.state) || run.execution === null) return null;
   if (run.runtime === null) return 'unbound';
   if (run.execution === 'running_attached') {
     return stopRequested ? 'draining' : 'ready';
@@ -262,7 +278,7 @@ export function projectManagedTask(
     (STARTED.includes(run.state) ? Math.max(occurredAt, createdAt) : null);
   const settledAt =
     previous?.settledAt ??
-    (TERMINAL.includes(run.state)
+    (isTerminalRunState(run.state)
       ? Math.max(occurredAt, startedAt ?? createdAt)
       : null);
   return Object.freeze({

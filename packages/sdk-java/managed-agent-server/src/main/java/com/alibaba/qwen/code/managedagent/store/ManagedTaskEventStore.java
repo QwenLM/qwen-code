@@ -255,28 +255,62 @@ public class ManagedTaskEventStore {
     public long appendArtifact(String tenantId, String sessionId,
             String taskId, String artifactId, long occurredAt) {
         requireOutputAdmission(tenantId, sessionId);
-        CursorPositions positions = positions(tenantId, sessionId, taskId);
-        if (positions.artifactRefs().contains(artifactId)) {
-            throw new ApiException(HttpStatus.CONFLICT, CODE_ADMISSION_REFUSED,
-                    "The task already references Artifact " + artifactId
-                            + ".");
+        // The ref list moves by compare-and-set on its snapshot: two
+        // writers that read the same list see only one's row count change,
+        // the other retries against what actually stands — a lost-write
+        // can never age an Artifact out while its event lives below.
+        for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+            RefsView view = artifactRefsOf(tenantId, sessionId, taskId);
+            if (view.refs().contains(artifactId)) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        CODE_ADMISSION_REFUSED,
+                        "The task already references Artifact " + artifactId
+                                + ".");
+            }
+            if (view.refs().size() >= ARTIFACT_REF_BOUND) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        CODE_ADMISSION_REFUSED,
+                        "The task already references " + ARTIFACT_REF_BOUND
+                                + " Artifacts; rotating past the bound is a"
+                                + " refusal, never a silent eviction.");
+            }
+            ArrayNode refs = JSON.createArrayNode();
+            view.refs().forEach(refs::add);
+            refs.add(artifactId);
+            String next = refs.toString();
+            if (view.text() == null) {
+                try {
+                    jdbc.update("INSERT INTO"
+                                    + " qwen_managed_session_task_journal_cursor"
+                                    + " (session_scope_key, tenant_id, session_id,"
+                                    + " task_id, last_sequence, artifact_refs)"
+                                    + " VALUES (?, ?, ?, ?, 0, ?)",
+                            ManagedSessionStore.sessionScopeKey(tenantId,
+                                    sessionId),
+                            tenantId, sessionId, taskId, next);
+                } catch (DuplicateKeyException raced) {
+                    continue;
+                }
+                break;
+            }
+            int updated = jdbc.update("UPDATE"
+                            + " qwen_managed_session_task_journal_cursor"
+                            + " SET artifact_refs = ? WHERE session_scope_key = ?"
+                            + " AND tenant_id = ? AND session_id = ?"
+                            + " AND task_id = ? AND artifact_refs = ?",
+                    next, ManagedSessionStore.sessionScopeKey(tenantId,
+                            sessionId),
+                    tenantId, sessionId, taskId, view.text());
+            if (updated == 1) {
+                break;
+            }
+            if (attempt + 1 == MAX_CAS_ATTEMPTS) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        CODE_ADMISSION_REFUSED,
+                        "The task's artifact references changed concurrently;"
+                                + " retry the whole append.");
+            }
         }
-        if (positions.artifactRefs().size() >= ARTIFACT_REF_BOUND) {
-            throw new ApiException(HttpStatus.CONFLICT, CODE_ADMISSION_REFUSED,
-                    "The task already references " + ARTIFACT_REF_BOUND
-                            + " Artifacts; rotating past the bound is a"
-                            + " refusal, never a silent eviction.");
-        }
-        ArrayNode refs = JSON.createArrayNode();
-        positions.artifactRefs().forEach(refs::add);
-        refs.add(artifactId);
-        jdbc.update("INSERT INTO qwen_managed_session_task_journal_cursor"
-                        + " (session_scope_key, tenant_id, session_id,"
-                        + " task_id, last_sequence, artifact_refs) VALUES"
-                        + " (?, ?, ?, ?, 0, ?) ON DUPLICATE KEY UPDATE"
-                        + " artifact_refs = VALUES(artifact_refs)",
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId, taskId, refs.toString());
         long sequence = advance(tenantId, sessionId, taskId);
         jdbc.update("INSERT INTO qwen_managed_session_task_journal"
                         + " (session_scope_key, tenant_id, session_id,"
@@ -455,6 +489,27 @@ public class ManagedTaskEventStore {
                     "A Session without capabilities.artifacts admits no"
                             + " output-producing task flow.");
         }
+    }
+
+    private static final int MAX_CAS_ATTEMPTS = 5;
+
+    /** The raw artifact reference list and its exact stored text, which is
+     * what a compare-and-set must match byte for byte. */
+    private record RefsView(List<String> refs, String text) {
+    }
+
+    private RefsView artifactRefsOf(String tenantId, String sessionId,
+            String taskId) {
+        return jdbc.query("SELECT artifact_refs FROM"
+                        + " qwen_managed_session_task_journal_cursor"
+                        + " WHERE session_scope_key = ? AND tenant_id = ?"
+                        + " AND session_id = ? AND task_id = ?",
+                (result, row) -> new RefsView(
+                        refs(result.getString("artifact_refs")),
+                        result.getString("artifact_refs")),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                tenantId, sessionId, taskId).stream().findFirst()
+                .orElse(new RefsView(List.of(), null));
     }
 
     private static List<String> refs(String json) {

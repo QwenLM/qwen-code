@@ -101,7 +101,7 @@ class ManualClock implements MonitorLoopClock {
 
 class FakeExecutor {
   onLine: ((line: string) => void) | undefined;
-  private onExit: ((failed: boolean) => void) | undefined;
+  private onExit: ((failed: boolean) => Promise<void> | void) | undefined;
   terminateCalls = 0;
   commands: Array<Readonly<Record<string, unknown>>> = [];
   failStart: Error | undefined;
@@ -109,7 +109,7 @@ class FakeExecutor {
   start(
     command: Readonly<Record<string, unknown>>,
     onLine: (line: string) => void,
-    onExit: (failed: boolean) => void,
+    onExit: (failed: boolean) => Promise<void> | void,
   ): Promise<MonitorWatchHandle> {
     this.commands.push(command);
     if (this.failStart !== undefined) return Promise.reject(this.failStart);
@@ -124,12 +124,16 @@ class FakeExecutor {
     });
   }
 
-  exitNaturally(): void {
-    this.onExit?.(false);
+  exitNaturally(): Promise<void> {
+    return (
+      (this.onExit?.(false) as Promise<void> | undefined) ?? Promise.resolve()
+    );
   }
 
-  fail(): void {
-    this.onExit?.(true);
+  fail(): Promise<void> {
+    return (
+      (this.onExit?.(true) as Promise<void> | undefined) ?? Promise.resolve()
+    );
   }
 }
 
@@ -228,6 +232,30 @@ function committed(
 }
 
 describe('HostedMonitorLoop', () => {
+  it('does not resume a record the publisher already settled', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    // The watch ended before its observation arm could register; the
+    // publisher's fallback settled the record. A later resume must
+    // recognize the terminal record instead of driving a watch nobody
+    // watches and settling it twice.
+    await rig.session.admit({
+      monitorId: 'monitor-1',
+      ownerScopeId: 'scope-main',
+      executionCallId: 'call-monitor-1',
+      args: { command: 'tail -f build.log' },
+      maxEvents: 100,
+      idleTimeoutMs: 60_000,
+      debounceMs: 1_000,
+    });
+    await rig.session.dispatchStarted('monitor-1', BINDING);
+    await rig.session.attach('monitor-1', BINDING, { watch: 'started' });
+    await rig.session.settleQuiet('monitor-1', 'exited');
+    await rig.loop.resumeAttached(params());
+    expect(rig.executor.commands).toEqual([]);
+    await closeLoop(rig);
+  });
+
   it('aggregates lines into one observation per floored debounce window', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);
@@ -345,6 +373,26 @@ describe('HostedMonitorLoop', () => {
       run: { state: 'settled', execution: 'settled' },
     });
     expect(rig.executor.terminateCalls).toBe(0);
+    await closeLoop(rig);
+  });
+
+  it('prints the successor refusal on its exit chain when an owner settles first', async () => {
+    // Why the publisher now awaits this chain: an owner that settles ahead
+    // of it loses the last window — the successor rule rightly refuses the
+    // observe, and that refusal must surface, never die in the void.
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    await rig.loop.start(params({}));
+
+    rig.executor.onLine?.('lost tail');
+    await rig.session.settleQuiet('monitor-1', 'exited');
+    await expect(rig.executor.exitNaturally()).rejects.toThrow();
+    expect(committed(rig.authority)).toMatchObject({
+      observationSequence: 0,
+      notifiedThrough: 0,
+      stopReason: 'exited',
+      run: { state: 'settled', execution: 'settled' },
+    });
     await closeLoop(rig);
   });
 

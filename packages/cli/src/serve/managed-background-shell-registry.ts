@@ -181,7 +181,12 @@ export class ManagedBackgroundShellRegistry {
                 resolve(null);
               });
             });
-      evidence = await ended;
+      const root = await ended;
+      // The root's exit alone is never proof: the SHELL ended only once its
+      // unit empties. A `setsid` daemon that outlives its launcher keeps
+      // this coroutine — and the hold — until membership drains or a stop
+      // forces it, instead of settling exited over live members.
+      evidence = root === null ? null : await process.settleOnEmpty();
       // A stream seals only after its pipe EOF actually arrived; the exit
       // event may lead it, so wait for each end first. A descendant that
       // inherited the pipes keeps them open past the process's end, so the
@@ -223,9 +228,11 @@ export class ManagedBackgroundShellRegistry {
           ? undefined
           : {
               message:
-                evidence?.exitSignal !== null
-                  ? `Background Shell terminated with ${evidence?.exitSignal}.`
-                  : 'Background Shell exited nonzero.',
+                evidence === null
+                  ? 'Background Shell ended without exit evidence.'
+                  : evidence.exitSignal !== null
+                    ? `Background Shell terminated with ${evidence.exitSignal}.`
+                    : 'Background Shell exited nonzero.',
             },
       );
       try {

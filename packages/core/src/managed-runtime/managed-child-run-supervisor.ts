@@ -20,6 +20,7 @@ import {
 // docs/design/2026-10-03-managed-shell-monitor-runtime.md.
 
 export { HookCommandIsolationUnavailableError };
+export type { HookCommandIsolationUnavailableReason } from '../hooks/hook-command-cgroup.js';
 
 export interface ChildRunExitEvidence {
   readonly exitCode: number | null;
@@ -56,11 +57,21 @@ export class ManagedChildRunProcess {
   }
 
   get exited(): boolean {
-    return this.exitEvidence !== null;
+    return this.evidence !== null;
   }
 
   get evidence(): ChildRunExitEvidence | null {
-    return this.exitEvidence;
+    if (this.exitEvidence !== null) return this.exitEvidence;
+    // An exit inside the membership proof window precedes the constructor's
+    // listener; Node assigns these in the same callback that emits 'exit',
+    // so the evidence survives a missed event.
+    if (this.child.exitCode !== null || this.child.signalCode !== null) {
+      return {
+        exitCode: this.child.exitCode,
+        exitSignal: this.child.signalCode,
+      };
+    }
+    return null;
   }
 
   /**
@@ -70,17 +81,48 @@ export class ManagedChildRunProcess {
    * `null` while nothing is proven, in which case the caller keeps the hold.
    */
   async terminate(graceMs: number): Promise<ChildRunExitEvidence | null> {
-    if (this.settled) return this.exitEvidence;
+    if (this.settled) return this.evidence;
     if (this.exited && this.unit.empty()) {
       this.unit.remove();
       this.settled = true;
-      return this.exitEvidence;
+      return this.evidence;
     }
-    await this.unit.terminate(graceMs);
+    try {
+      await this.unit.terminate(graceMs);
+    } catch (error) {
+      // The natural-end settle raced this stop: it removed the unit first,
+      // so a stale read or the `cgroup.kill` write fails with ENOENT. The
+      // process is proven ended by its settle, so the stop answers that
+      // evidence instead of an "unavailable" after the fact.
+      if (!this.settled) throw error;
+    }
+    if (this.settled) return this.evidence;
     if (!this.unit.empty()) return null;
     this.unit.remove();
     this.settled = true;
-    return this.exitEvidence;
+    return this.evidence;
+  }
+
+  /**
+   * The natural-end twin of `terminate`: the root's exit is evidence only
+   * once the unit proves empty — a `setsid` daemon that outlives its
+   * launcher is still running, never an exit. Waits for membership to drain
+   * (a stop from another owner wins the same wait), then removes the unit
+   * and answers the exit evidence; `null` means nothing proved and the
+   * caller keeps the hold rather than settling over live members.
+   */
+  async settleOnEmpty(): Promise<ChildRunExitEvidence | null> {
+    if (this.settled) return this.evidence;
+    if (!this.exited) return null;
+    await this.unit.waitForEmpty(
+      Number.MAX_SAFE_INTEGER / 2,
+      () => this.settled,
+    );
+    if (this.settled) return this.evidence;
+    if (!this.unit.empty()) return null;
+    this.unit.remove();
+    this.settled = true;
+    return this.evidence;
   }
 }
 
@@ -91,7 +133,7 @@ export class ManagedChildRunSupervisor {
 
   static create(options: { cgroupRoot: string | undefined }) {
     if (options.cgroupRoot === undefined)
-      throw new HookCommandIsolationUnavailableError();
+      throw new HookCommandIsolationUnavailableError('root_missing');
     return new ManagedChildRunSupervisor(options.cgroupRoot);
   }
 
@@ -105,10 +147,12 @@ export class ManagedChildRunSupervisor {
 
   /**
    * Starts a new process under a fresh unit named after the execution, and
-   * resolves only once the launcher's cgroup membership is proven — reading
-   * `cgroup.procs`, never assuming a quiet fd 3 means success. A membership
-   * that cannot be proven is an isolation failure: the child goes, the unit
-   * goes, and the caller records a start that never happened.
+   * resolves only once the launcher's cgroup membership is proven — the
+   * launcher's own `joined` marker on fd 3, or its pid in `cgroup.procs`;
+   * a quiet fd 3 is never success, and neither is a launcher that joined
+   * and already exited by the first listing. A membership that cannot be
+   * proven is an isolation failure: the child goes, the unit goes, and the
+   * caller records a start that never happened.
    */
   async start(
     spec: ChildRunSpawnSpec,
@@ -128,6 +172,9 @@ export class ManagedChildRunSupervisor {
       env: launch.env,
       stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
     });
+    // A spawn failure before the proof settles must never escape as an
+    // unhandled 'error'; the settle path answers it.
+    child.on('error', () => undefined);
     child.stdout?.on('data', (chunk: Buffer) => spec.onOutput('stdout', chunk));
     child.stderr?.on('data', (chunk: Buffer) => spec.onOutput('stderr', chunk));
     let status = '';
@@ -138,6 +185,10 @@ export class ManagedChildRunSupervisor {
       membership?.prove ??
       (async (launched: ChildProcess, inUnit: HookCommandCgroup) => {
         for (let attempt = 0; attempt < 40; attempt++) {
+          // The launcher's marker proves membership the kernel already
+          // accepted; it also covers a fast exit that empties the unit
+          // before the first listing could run.
+          if (status.includes('joined\n')) return true;
           if (status.includes('unavailable\n')) return false;
           try {
             const members = readFileSync(
@@ -160,7 +211,7 @@ export class ManagedChildRunSupervisor {
     if (!(await prove(child, unit))) {
       child.kill('SIGKILL');
       unit.remove();
-      throw new HookCommandIsolationUnavailableError();
+      throw new HookCommandIsolationUnavailableError('membership_unproven');
     }
     const process_ = new ManagedChildRunProcess(spec.unitName, unit, child);
     this.processes.set(spec.unitName, process_);

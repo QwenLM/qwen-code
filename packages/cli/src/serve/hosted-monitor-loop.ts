@@ -7,7 +7,7 @@
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
 import type { ManagedSessionInputRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import type { ManagedChildRunProcess } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
-import { monitorNotificationText } from './hosted-monitor-notification.js';
+import { buildMonitorNotificationInput } from './hosted-monitor-notification.js';
 
 // H3 of #12827: the observation loop of one admitted Monitor. The funnel
 // owns the record line; this loop owns time: stdout lines aggregate into one
@@ -34,18 +34,23 @@ export interface MonitorWatchExecutor {
   start(
     command: Readonly<Record<string, unknown>>,
     onLine: (line: string) => void,
-    onExit: (failed: boolean) => void,
+    /**
+     * Fires exactly once, after the start promise resolved. May return a
+     * promise carrying the exit's flush and settle in order; an owner
+     * that awaits it never settles ahead of the last observation.
+     */
+    onExit: (failed: boolean) => Promise<void> | void,
     identity?: {
       readonly unitName: string;
       readonly cwd?: string;
       /**
-       * Raw stdout bytes, ahead of any line decode: the durable capture
-       * reproduces the command's stdout exactly — no line splitting, no
-       * dropped blanks, no lost tail — while onLine keeps the Legacy
-       * observation-line semantics. (Round-5 finding: a capture rebuilt
-       * from lines cannot do both.)
+       * Raw bytes of both streams, ahead of any line decode: the durable
+       * capture reproduces the command's output exactly — no line
+       * splitting, no dropped blanks, no lost tail — while onLine keeps
+       * the Legacy stdout-only observation-line semantics. (Round-5
+       * finding: a capture rebuilt from lines cannot do both.)
        */
-      readonly onChunk?: (chunk: Buffer) => void;
+      readonly onChunk?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void;
     },
   ): Promise<MonitorWatchHandle>;
 }
@@ -160,7 +165,9 @@ export class HostedMonitorLoop {
    * Resumes the observation lifecycle for a watch whose admission arm
    * already committed intent, dispatch and the start receipt (the hosted
    * turn path). This loop must never re-commit any of those: a record
-   * without its start receipt refuses instead of silently minting one.
+   * without its start receipt refuses instead of silently minting one. A
+   * record the publisher already settled — the watch ended before its
+   * observer could register — has nothing left to resume.
    */
   async resumeAttached(params: MonitorLoopParams): Promise<void> {
     this.params = params;
@@ -170,6 +177,9 @@ export class HostedMonitorLoop {
       throw new Error(
         `Monitor ${this.monitorId} has no attached watch to resume.`,
       );
+    }
+    if (record.stopReason !== null) {
+      return;
     }
     this.handle = await this.executor.start(
       params.args,
@@ -181,9 +191,16 @@ export class HostedMonitorLoop {
     this.armIdle();
   }
 
-  private onExit(failed: boolean): void {
-    if (this.ended && !failed) return;
-    this.enqueue(async () => {
+  /**
+   * The watch's physical end. The returned chain carries the exit's own
+   * flush and settle in order, so an owner that awaits it settles nothing
+   * ahead of the last observation's commit — a caller that settles first
+   * (and lets the successor rule reject the late observe) is exactly how
+   * a final window once died silently between two async hops.
+   */
+  private onExit(failed: boolean): Promise<void> {
+    if (this.ended && !failed) return Promise.resolve();
+    return this.enqueue(async () => {
       if (failed) {
         if (this.ended) return;
         this.ended = true;
@@ -281,7 +298,6 @@ export class HostedMonitorLoop {
     sequence: number,
     lines: readonly string[],
   ): Promise<ManagedSessionInputRequest> {
-    const inputId = `${this.monitorId}:notify:${sequence}`;
     const args = this.params?.args ?? {};
     const description =
       typeof args['description'] === 'string' && args['description'].trim()
@@ -289,32 +305,14 @@ export class HostedMonitorLoop {
         : typeof args['command'] === 'string'
           ? (args['command'] as string)
           : this.monitorId;
-    return {
-      inputId,
-      turnId: inputId,
-      source: 'monitor',
-      contentRef: await this.monitors.resourceStore.publish(
-        'managed-input',
-        Buffer.from(
-          JSON.stringify({
-            text: monitorNotificationText({
-              monitorId: this.monitorId,
-              toolUseId: this.params?.executionCallId ?? null,
-              description,
-              eventCount: sequence,
-              lines,
-            }),
-          }),
-          'utf8',
-        ),
-      ),
-      deadline: null,
-      admissionRef: await this.monitors.resourceStore.publish(
-        'managed-admission',
-        Buffer.from('{}', 'utf8'),
-      ),
-      wakeReason: 'input',
-    };
+    return buildMonitorNotificationInput({
+      monitorId: this.monitorId,
+      toolUseId: this.params?.executionCallId ?? null,
+      description,
+      sequence,
+      lines,
+      resourceStore: this.monitors.resourceStore,
+    });
   }
 
   private async settle(

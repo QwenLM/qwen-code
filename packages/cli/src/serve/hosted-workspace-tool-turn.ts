@@ -243,7 +243,7 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   {
     name: 'monitor',
     description:
-      'Watch a shell command in the saved Workspace working directory and receive its stdout lines as observations while it runs. The watch is admitted only on Sessions whose Monitor path is enabled.',
+      'Watch a shell command in the saved Workspace working directory and receive its stdout lines as observations while it runs. Observations aggregate by one-second-or-longer debounce windows, so `max_events` counts windows, not lines; `idle_timeout_ms` bounds the silent stretch between windows ending the watch. The watch is admitted only on Sessions whose Monitor path is enabled.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -325,6 +325,7 @@ export class HostedWorkspaceToolTurn {
     private readonly hooks?: HostedHookSession,
     childRuns?: HostedChildRunSession,
     monitors?: HostedMonitorSession,
+    private readonly backgroundLane?: HostedShellTurnOptions,
   ) {
     this.childRuns = childRuns;
     this.monitors = monitors;
@@ -865,6 +866,10 @@ export class HostedWorkspaceToolTurn {
             );
           backgroundAdmitted =
             backgroundRequested &&
+            // The admitted family runs v3 only: a shell-mode turn has no
+            // publication to drive it, so admitting there would only re-
+            // send the request into the background-refusing v2 path.
+            this.publication !== undefined &&
             this.childRuns !== undefined &&
             childRunAdmissionsEnabled();
           if (typeof args['command'] !== 'string' || !args['command'].trim()) {
@@ -915,11 +920,12 @@ export class HostedWorkspaceToolTurn {
               ].includes(key),
           );
           // H3: a Monitor request is admitted exactly when this Session
-          // owns its monitor_run orchestrator, a Shell-mode publisher, and
-          // the domain is enabled.
+          // owns its monitor_run orchestrator and the detached family has
+          // its v3 flow — publication — without it the request refuses at
+          // admission rather than travelling v2 and never landing.
           monitorAdmitted =
             this.monitors !== undefined &&
-            this.shell !== undefined &&
+            this.publication !== undefined &&
             monitorRunAdmissionsEnabled();
           if (typeof args['command'] !== 'string' || !args['command'].trim()) {
             validationError = 'Hosted Monitor requires a nonempty command.';
@@ -1080,7 +1086,29 @@ export class HostedWorkspaceToolTurn {
           this.shell!.assertWritable,
           this.childRuns,
           this.monitors,
+          () => this.shell!.monitorWakeKick?.(),
         );
+        this.bindingGeneration = await this.broker.registerPublisher(
+          await this.publisher.start(),
+        );
+      } else if (
+        this.publication &&
+        this.backgroundLane &&
+        requests.some((request) => request.background || request.monitoring) &&
+        !this.publisher
+      ) {
+        // Publication mode: the record funnel of the detached family is
+        // this Session's, exactly like without capture bytes — without it
+        // a background exit's settle and tail could never reach the record.
+        this.publisher = this.backgroundLane.publisher ??=
+          new HostedShellPublisher(
+            this.session,
+            this.backgroundLane.resources,
+            this.backgroundLane.assertWritable,
+            this.childRuns,
+            this.monitors,
+            () => this.backgroundLane!.monitorWakeKick?.(),
+          );
         this.bindingGeneration = await this.broker.registerPublisher(
           await this.publisher.start(),
         );
@@ -1417,7 +1445,16 @@ export class HostedWorkspaceToolTurn {
           attemptId: messageId,
           routeRef,
         });
-        if ((request.isShell || request.monitoring) && this.publisher) {
+        if (
+          (request.isShell || request.monitoring) &&
+          this.publisher &&
+          // A refused request never funnels its identity: what admissions
+          // failed to admit must not be registered either.
+          request.validationError === undefined &&
+          // A publication lane serves only the detached family: foreground
+          // Shell captures stay on the Runtime's publication there.
+          (this.shell !== undefined || request.background || request.monitoring)
+        ) {
           this.publisher!.register(
             {
               reference: {
@@ -1781,6 +1818,7 @@ export class HostedWorkspaceToolTurn {
       for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
         if (!saved) continue;
+        let proven = false;
         try {
           const owner = this.publication!.owner;
           const closed = await owner.request(
@@ -1800,12 +1838,46 @@ export class HostedWorkspaceToolTurn {
             (closed as Record<string, unknown>)['state'] !== 'NOT_STARTED'
           )
             throw new Error('Original execution was not proven unstarted.');
+          proven = true;
         } catch (closeCause) {
           writeStderrLineSafe(
             'qwen serve: Tool publication close was not confirmed: ' +
               String(closeCause),
           );
         }
+        if (!proven) continue;
+        // The grant owner proved this start never happened, yet the run
+        // record admitted for the same execution was already committed
+        // dispatch_started — and nothing beyond this catch can ever settle
+        // it again. Settle it under the same proof so the projection stops
+        // reporting a run that never started.
+        const request = requests.find(
+          (_, index) => reserved.get(index) === executionCallId,
+        );
+        if (request?.background)
+          await this.childRuns
+            ?.settleFailed(executionCallId, {
+              stopReason: 'start_failed',
+              started: false,
+            })
+            .catch((settleCause: unknown) =>
+              writeStderrLineSafe(
+                'qwen serve: Unstarted child run record was not settled: ' +
+                  String(settleCause),
+              ),
+            );
+        if (request?.monitoring)
+          await this.monitors
+            ?.settleFailed(executionCallId, {
+              stopReason: 'start_failed',
+              started: false,
+            })
+            .catch((settleCause: unknown) =>
+              writeStderrLineSafe(
+                'qwen serve: Unstarted monitor run record was not settled: ' +
+                  String(settleCause),
+              ),
+            );
       }
       throw new HostedToolRecoveryRequiredError(cause);
     } finally {
@@ -1864,11 +1936,11 @@ export class HostedWorkspaceToolTurn {
     model: string,
   ): Promise<Part[]> {
     if (result.executionStatus === 'not_started' && result.capture === null) {
-      await this.monitors!.settleFailed(executionCallId, {
-        stopReason: 'start_failed',
-        started: false,
-      });
-      return this.acceptShell(
+      // Prove before settle: the owner's close gate is the authority on
+      // "this start never happened". Settling the record first and then
+      // seeing the proof refused would freeze a run that actually started
+      // into a line no later fact may ever touch.
+      const parts = await this.acceptShell(
         request.call,
         executionCallId,
         saved.publicationId,
@@ -1876,6 +1948,11 @@ export class HostedWorkspaceToolTurn {
         result,
         model,
       );
+      await this.monitors!.settleFailed(executionCallId, {
+        stopReason: 'start_failed',
+        started: false,
+      });
+      return parts;
     }
     if (
       result.executionStatus !== 'success' ||
@@ -1911,8 +1988,17 @@ export class HostedWorkspaceToolTurn {
           },
         );
       }
-      // A fresh accept starts the observation lifecycle; a replay never
-      // reopens it, exactly like a replay never re-attaches.
+      // A watch that ended before this attach left its finalize refused:
+      // with the start receipt now committed, its own settle — tail
+      // observation included — completes without any client retry.
+      await this.publisher?.settleAttached(executionCallId);
+    }
+    // The observation lifecycle lives exactly once per owning process,
+    // keyed on the live record rather than on this call's freshness: a
+    // fresh accept starts it, and a replay after a restart — whose
+    // journal already carries the receipt — must resume it, or the
+    // watch's lines, terminal conditions and settle never arrive.
+    if (this.monitors!.record(executionCallId)?.stopReason === null) {
       await this.resumeMonitorWatch(executionCallId);
     }
     let ref: ManagedSessionDurableRef;
@@ -2053,8 +2139,11 @@ export class HostedWorkspaceToolTurn {
    * record and is fed lines through the Session publisher's fan-out.
    */
   private async resumeMonitorWatch(executionCallId: string): Promise<void> {
-    if (!this.shell || !this.publisher || !this.monitors) return;
-    const loops = (this.shell.monitorLoops ??= new Map());
+    // The lane is Shell-mode or the publication lane, whichever this turn
+    // owns — the detached family's loops park on it either way.
+    const lane = this.shell ?? this.backgroundLane;
+    if (!lane || !this.publisher || !this.monitors) return;
+    const loops = (lane.monitorLoops ??= new Map());
     if (loops.has(executionCallId)) return;
     const record = this.monitors.record(executionCallId);
     if (!record) return;
@@ -2067,9 +2156,11 @@ export class HostedWorkspaceToolTurn {
       executionCallId,
       executor,
       undefined,
-      () => this.shell?.monitorWakeKick?.(),
+      () => lane.monitorWakeKick?.(),
     );
-    loops.set(executionCallId, loop);
+    // Register the loop only after its start went through: a failed resume
+    // leaves no dead entry to short-circuit every later one (the fan-out
+    // rides the remote executor, not this map, so line order is unaffected).
     await loop.resumeAttached({
       ownerScopeId: this.session.authority.sessionHeader.sessionKey.sessionId,
       executionCallId,
@@ -2079,6 +2170,7 @@ export class HostedWorkspaceToolTurn {
       debounceMs: record.debounceMs,
       runtime: record.run.runtime!,
     });
+    loops.set(executionCallId, loop);
   }
 
   /**
@@ -2105,11 +2197,11 @@ export class HostedWorkspaceToolTurn {
     model: string,
   ): Promise<Part[]> {
     if (result.executionStatus === 'not_started' && result.capture === null) {
-      await this.childRuns!.settleFailed(executionCallId, {
-        stopReason: 'start_failed',
-        started: false,
-      });
-      return this.acceptShell(
+      // Prove before settle: the owner's close gate is the authority on
+      // "this start never happened". Settling the record first and then
+      // seeing the proof refused would freeze a run that actually started
+      // into a line no later fact may ever touch.
+      const parts = await this.acceptShell(
         request.call,
         executionCallId,
         saved.publicationId,
@@ -2117,6 +2209,11 @@ export class HostedWorkspaceToolTurn {
         result,
         model,
       );
+      await this.childRuns!.settleFailed(executionCallId, {
+        stopReason: 'start_failed',
+        started: false,
+      });
+      return parts;
     }
     if (
       result.executionStatus !== 'success' ||
@@ -2156,6 +2253,9 @@ export class HostedWorkspaceToolTurn {
           },
         );
       }
+      // A Shell that ended before this attach left its finalize refused:
+      // with the start receipt now committed, the settle completes here.
+      await this.publisher?.settleAttached(executionCallId);
     }
     let ref: ManagedSessionDurableRef;
     let converted: Part[];

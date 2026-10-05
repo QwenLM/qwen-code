@@ -24,7 +24,7 @@ export class HostedMonitorRemoteExecutor implements MonitorWatchExecutor {
   start(
     command: Readonly<Record<string, unknown>>,
     onLine: (line: string) => void,
-    onExit: (failed: boolean) => void,
+    onExit: (failed: boolean) => Promise<void> | void,
     identity: { readonly unitName: string; readonly cwd?: string },
   ): Promise<MonitorWatchHandle> {
     this.publisher.setMonitorObserver(identity.unitName, { onLine, onExit });

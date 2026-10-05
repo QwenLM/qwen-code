@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -17,6 +18,7 @@ import {
   type ManagedSessionInputRequest,
 } from './managed-session-authority.js';
 import {
+  MANAGED_EXTENSION_RECORD_BODIES,
   managedExtensionRecordKey,
   type ManagedTaskProjection,
 } from './managed-extension-projection.js';
@@ -96,7 +98,7 @@ async function createHarness(): Promise<Harness> {
   const transcriptPath = path.join(root, 'chats', `${sessionId}.jsonl`);
   await fs.mkdir(runtimeBaseDir, { recursive: true });
   await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
-  return {
+  const harness: Harness = {
     runtimeBaseDir,
     transcriptPath,
     store: LocalManagedSessionResourceStore.create({
@@ -105,6 +107,8 @@ async function createHarness(): Promise<Harness> {
     }),
     now: 1_000,
   };
+  await publishLifeRefs(harness);
+  return harness;
 }
 
 async function withAuthority<T>(
@@ -173,6 +177,7 @@ function monitor(
   return {
     monitorId: 'monitor-1',
     ownerScopeId: 'scope-main',
+    commandRef: ref('args-monitor-1', 'managed-tool-args'),
     maxEvents: 100,
     idleTimeoutMs: 60_000,
     debounceMs: 1000,
@@ -187,6 +192,98 @@ function monitor(
   };
 }
 
+/** Content the constant LIFE refs describe, exactly as read() verifies. */
+const REF_BYTES = Buffer.alloc(64, 0);
+const REF_DIGEST = createHash('sha256').update(REF_BYTES).digest('hex');
+
+function ref(resourceId: string, kind: string): ManagedSessionDurableRef {
+  return {
+    resourceId,
+    kind,
+    schemaVersion: 1,
+    byteLength: REF_BYTES.byteLength,
+    digest: REF_DIGEST,
+  };
+}
+
+const RECEIPT_1 = ref('receipt-1', 'managed-runtime-receipt');
+const RECEIPT_2 = ref('receipt-2', 'managed-runtime-receipt');
+const OBSERVATION_1 = ref('observation-1', 'managed-monitor-observation');
+
+/**
+ * A watch that starts, observes once, loses its Runtime and is rebuilt —
+ * the static chain main's suite composes from; the bytes each ref names
+ * live in the store, seeded per harness, so commit-time closure reads
+ * them back exactly as the closure rule demands.
+ */
+const LIFE = [
+  monitor({}),
+  monitor({ execution: 'dispatch_started', runtime: BINDING_1 }),
+  monitor(
+    { state: 'running', execution: 'running_attached', runtime: BINDING_1 },
+    { startReceiptRef: RECEIPT_1 },
+  ),
+  monitor(
+    { state: 'running', execution: 'running_attached', runtime: BINDING_1 },
+    {
+      startReceiptRef: RECEIPT_1,
+      observationSequence: 1,
+      lastObservationRef: OBSERVATION_1,
+    },
+  ),
+  monitor(
+    {
+      state: 'recovery_blocked',
+      reason: 'runtime_lost',
+      execution: 'outcome_unknown',
+      runtime: BINDING_1,
+    },
+    {
+      startReceiptRef: RECEIPT_1,
+      observationSequence: 1,
+      lastObservationRef: OBSERVATION_1,
+    },
+  ),
+  monitor(
+    {
+      state: 'running',
+      reason: 'runtime_lost',
+      execution: 'running_attached',
+      runtime: BINDING_2,
+    },
+    {
+      startReceiptRef: RECEIPT_2,
+      observationSequence: 1,
+      lastObservationRef: OBSERVATION_1,
+    },
+  ),
+  monitor(
+    { state: 'cancelled', execution: 'settled', runtime: BINDING_2 },
+    {
+      startReceiptRef: RECEIPT_2,
+      observationSequence: 1,
+      lastObservationRef: OBSERVATION_1,
+      notifiedThrough: 1,
+      stopReason: 'stop_requested',
+    },
+  ),
+];
+
+/** The bytes LIFE's constant refs name, landed once per store root. */
+async function publishLifeRefs(harness: Harness): Promise<void> {
+  await Promise.all(
+    [
+      ['args-monitor-1', 'managed-tool-args'],
+      ['receipt-1', 'managed-runtime-receipt'],
+      ['receipt-2', 'managed-runtime-receipt'],
+      ['observation-1', 'managed-monitor-observation'],
+    ].map(async ([resourceId, kind]) => {
+      const directory = path.join(harness.store.sessionRoot, kind!);
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(path.join(directory, resourceId!), REF_BYTES);
+    }),
+  );
+}
 interface MonitorRefs {
   readonly args: ManagedSessionDurableRef;
   readonly receipt1: ManagedSessionDurableRef;
@@ -223,67 +320,11 @@ function publishMonitorRefs(harness: Harness): Promise<MonitorRefs> {
 }
 
 /** A watch that starts, observes once, loses its Runtime and is rebuilt. */
+
+/** A watch's chain, identical bodies to the static LIFE every test cites. */
 async function monitorLife(harness: Harness) {
-  const refs = await publishMonitorRefs(harness);
-  return [
-    monitor({}, { commandRef: refs.args }),
-    monitor(
-      { execution: 'dispatch_started', runtime: BINDING_1 },
-      { commandRef: refs.args },
-    ),
-    monitor(
-      { state: 'running', execution: 'running_attached', runtime: BINDING_1 },
-      { commandRef: refs.args, startReceiptRef: refs.receipt1 },
-    ),
-    monitor(
-      { state: 'running', execution: 'running_attached', runtime: BINDING_1 },
-      {
-        commandRef: refs.args,
-        startReceiptRef: refs.receipt1,
-        observationSequence: 1,
-        lastObservationRef: refs.observation,
-      },
-    ),
-    monitor(
-      {
-        state: 'recovery_blocked',
-        reason: 'runtime_lost',
-        execution: 'outcome_unknown',
-        runtime: BINDING_1,
-      },
-      {
-        commandRef: refs.args,
-        startReceiptRef: refs.receipt1,
-        observationSequence: 1,
-        lastObservationRef: refs.observation,
-      },
-    ),
-    monitor(
-      {
-        state: 'running',
-        reason: 'runtime_lost',
-        execution: 'running_attached',
-        runtime: BINDING_2,
-      },
-      {
-        commandRef: refs.args,
-        startReceiptRef: refs.receipt2,
-        observationSequence: 1,
-        lastObservationRef: refs.observation,
-      },
-    ),
-    monitor(
-      { state: 'cancelled', execution: 'settled', runtime: BINDING_2 },
-      {
-        commandRef: refs.args,
-        startReceiptRef: refs.receipt2,
-        observationSequence: 1,
-        lastObservationRef: refs.observation,
-        notifiedThrough: 1,
-        stopReason: 'stop_requested',
-      },
-    ),
-  ];
+  await publishLifeRefs(harness);
+  return LIFE;
 }
 
 function command(commandId: string, digest = 'd') {
@@ -316,16 +357,14 @@ async function commitLife(
 
 const TASK_ID = `task_${managedExtensionRecordKey(sessionId, 'monitor_run', 'monitor-1')}`;
 
-async function publishedBodies(harness: Harness): Promise<number> {
+async function publishedBodies(
+  harness: Harness,
+  kind = 'managed-monitor_run',
+): Promise<number> {
   try {
     return (
       await fs.readdir(
-        path.join(
-          harness.runtimeBaseDir,
-          'resources',
-          sessionId,
-          'managed-monitor_run',
-        ),
+        path.join(harness.runtimeBaseDir, 'resources', sessionId, kind),
       )
     ).length;
   } catch (error) {
@@ -706,6 +745,231 @@ describe('managed session authority Stage H records', () => {
         ),
       ).rejects.toThrow(/is not present/);
     });
+  });
+  it('refuses a malformed command identity before publishing it', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      // The commit marker refuses these identities too, but only after the
+      // body is published, so each retry would orphan one more body.
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:\u0001note'),
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        /command\.commandId must not contain control characters/,
+      );
+      await expect(
+        authority.commitExtensionRecord(
+          command('a'.repeat(513)),
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/command\.commandId exceeds 512 UTF-8 bytes/);
+      await expect(
+        authority.commitExtensionRecord(
+          { ...command('monitor-1:op'), operation: 'x'.repeat(4097) },
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/command\.operation exceeds 4096 UTF-8 bytes/);
+      await expect(
+        authority.commitExtensionRecord(
+          { ...command('monitor-1:digest'), contentDigest: 'not-a-digest' },
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        /command\.contentDigest must be a lowercase SHA-256 hex digest/,
+      );
+      await expect(
+        authority.commitDomainRecord(
+          command('rename:goal\u0001'),
+          {
+            domain: 'goal_state',
+            content: { goalId: 'goal-1', title: 'goal' },
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        /command\.commandId must not contain control characters/,
+      );
+      expect(await publishedBodies(harness)).toBe(0);
+      expect(await publishedBodies(harness, 'managed-goal_state')).toBe(0);
+    });
+  });
+  it('refuses the actor or the input before publishing it', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:actor'),
+          { domain: 'monitor_run', record: LIFE[0] },
+          { class: 'authority' },
+        ),
+      ).rejects.toThrow(/must not be requested by authority/);
+      await expect(
+        authority.commitDomainRecord(
+          command('rename:actor'),
+          {
+            domain: 'goal_state',
+            content: { goalId: 'goal-1', title: 'goal' },
+          },
+          { class: 'authority' },
+        ),
+      ).rejects.toThrow(/must not be requested by authority/);
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:input'),
+          {
+            domain: 'monitor_run',
+            record: LIFE[0],
+            input: {
+              inputId: '',
+              turnId: 'monitor-1:input',
+              source: 'monitor',
+              contentRef: await harness.store.publish(
+                'managed-input',
+                Buffer.from('{"text":"changed"}', 'utf8'),
+              ),
+              deadline: null,
+              admissionRef: await harness.store.publish(
+                'managed-admission',
+                Buffer.from('{}', 'utf8'),
+              ),
+              wakeReason: 'input',
+            },
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/inputId/);
+      await expect(
+        authority.commitDomainRecord(
+          { ...command('rename:stale-sequence'), expectedSequence: 99 },
+          {
+            domain: 'goal_state',
+            content: { goalId: 'goal-1', title: 'stale' },
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/expectedSequence 99 does not match/);
+      // Refused before publishing: no monitor or goal-state body landed.
+      expect(await publishedBodies(harness)).toBe(0);
+      expect(await publishedBodies(harness, 'managed-goal_state')).toBe(0);
+      // Positive control: produced commits publish exactly one body each.
+      await authority.commitExtensionRecord(
+        command('monitor-1:1'),
+        { domain: 'monitor_run', record: LIFE[0] },
+        TRUSTED,
+      );
+      expect(await publishedBodies(harness)).toBe(1);
+      await authority.commitDomainRecord(
+        command('rename:goal'),
+        {
+          domain: 'goal_state',
+          content: { goalId: 'goal-1', title: 'grown' },
+        },
+        TRUSTED,
+      );
+      expect(await publishedBodies(harness, 'managed-goal_state')).toBe(1);
+      // An accepted input commits its events once; the same input under a
+      // fresh command is refused by the preflight, before the body lands.
+      const input: ManagedSessionInputRequest = {
+        inputId: 'monitor-1:notify:1',
+        turnId: 'monitor-1:notify:1',
+        source: 'monitor',
+        contentRef: await harness.store.publish(
+          'managed-input',
+          Buffer.from('{"text":"changed"}', 'utf8'),
+        ),
+        deadline: null,
+        admissionRef: await harness.store.publish(
+          'managed-admission',
+          Buffer.from('{}', 'utf8'),
+        ),
+        wakeReason: 'input',
+      };
+      await authority.commitExtensionRecord(
+        command('monitor-1:2'),
+        { domain: 'monitor_run', record: LIFE[1], input },
+        TRUSTED,
+      );
+      const bodiesAfterInput = await publishedBodies(harness);
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:dup'),
+          { domain: 'monitor_run', record: LIFE[2], input },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/is already committed/);
+      expect(await publishedBodies(harness)).toBe(bodiesAfterInput);
+    });
+  });
+  it('reopens over a record committed before its domain had a body', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      // commitDomainRecord serves the envelope domains already enabled: its
+      // body is the envelope, which no closed Stage H body can parse.
+      await authority.commitDomainRecord(
+        command('rename:goal'),
+        {
+          domain: 'goal_state',
+          content: { goalId: 'goal-1', title: 'pre-body' },
+        },
+        TRUSTED,
+      );
+    });
+    const bodies = MANAGED_EXTENSION_RECORD_BODIES as unknown as Record<
+      string,
+      unknown
+    >;
+    bodies['goal_state'] = MANAGED_EXTENSION_RECORD_BODIES['monitor_run'];
+    // The registry is mutable here only because this file's vi.mock of
+    // './managed-extension-projection.js' returns a plain object literal.
+    const reads = vi.spyOn(harness.store, 'read');
+    try {
+      await withAuthority(
+        harness,
+        async (authority) => {
+          // The envelope is skipped as a pre-registration record; nothing
+          // materializes from it.
+          expect(authority.taskViews()).toEqual([]);
+          expect(reads).toHaveBeenCalledTimes(1);
+        },
+        { create: false },
+      );
+    } finally {
+      delete bodies['goal_state'];
+    }
+  });
+  it('reads each committed body once for the same views across a restart', async () => {
+    const harness = await createHarness();
+    const before = await withAuthority(harness, async (authority) => {
+      await commitLife(harness, authority, 3);
+      return {
+        views: authority.taskViews(),
+        extensionRecord: authority.extensionRecord('monitor_run', 'monitor-1'),
+      };
+    });
+    const reads = vi.spyOn(harness.store, 'read');
+    await withAuthority(
+      harness,
+      async (authority) => {
+        expect(authority.taskViews()).toEqual(before.views);
+        expect(
+          authority.extensionRecord('monitor_run', 'monitor-1'),
+        ).toMatchObject({
+          recordId: before.extensionRecord!.recordId,
+          revision: before.extensionRecord!.revision,
+          recordRef: before.extensionRecord!.recordRef,
+        });
+      },
+      { create: false },
+    );
+    // One serialized body read per committed revision — and one per
+    // distinct resource the closures name, verified on the same pass.
+    expect(reads).toHaveBeenCalledTimes(5);
   });
 
   it('keeps the Stage H event IDs for Stage H records', async () => {

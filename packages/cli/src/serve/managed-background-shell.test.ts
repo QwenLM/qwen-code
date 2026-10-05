@@ -86,6 +86,9 @@ function fakeProcess(unitName: string): ManagedChildRunProcess {
       if (evidence === null) child.emitExit(null, 'SIGTERM');
       return evidence;
     },
+    async settleOnEmpty(): Promise<ChildRunExitEvidence | null> {
+      return evidence;
+    },
   };
   return process as unknown as ManagedChildRunProcess;
 }
@@ -166,7 +169,13 @@ interface Rig {
   readonly process: ManagedChildRunProcess;
 }
 
-function rig(options: { withSupervisor?: boolean } = {}): Rig {
+function rig(
+  options: {
+    withSupervisor?: boolean;
+    prepareRejects?: boolean;
+    sleepBlocked?: boolean;
+  } = {},
+): Rig {
   const process = fakeProcess('qwen-bg-call-1');
   const sink = fakeSink();
   const publisher = {
@@ -176,6 +185,9 @@ function rig(options: { withSupervisor?: boolean } = {}): Rig {
     async prepare(request: unknown) {
       publisher.prepares += 1;
       publisher.preparedRequests.push(request);
+      if (options.prepareRejects === true) {
+        throw new Error('publisher route is gone');
+      }
       return { identity: IDENTITY, sink, publisher: undefined };
     },
     async finish(_identity: unknown, envelope: ToolResultEnvelope) {
@@ -190,7 +202,18 @@ function rig(options: { withSupervisor?: boolean } = {}): Rig {
           : fakeProcess(spec.unitName),
     ),
   };
-  const tool = { validateToolParams: () => null };
+  const tool = {
+    validateToolParams: (params: Record<string, unknown>) => {
+      const command = params['command'];
+      if (
+        options.sleepBlocked === true &&
+        typeof command === 'string' &&
+        /^\s*sleep\s/.test(command)
+      )
+        return 'commands cannot run a standalone sleep as a foreground call';
+      return null;
+    },
+  };
   const tools: ManagedToolSet = {
     sessionId: 'runtime-session-1',
     directory,
@@ -300,6 +323,52 @@ describe('managed v3 Monitor watch', () => {
     });
   });
 
+  it('admits an is_monitor long wait past the foreground sleep gate', async () => {
+    const ctx = rig({ sleepBlocked: true });
+    // Mirror the ShellTool foreground guard the wire shape cannot see: a
+    // standalone sleep would be blocked as a foreground long wait, but the
+    // monitor family exists so that wait is durable rather than refused.
+    const sleepInput = { command: 'sleep 3600', is_monitor: true };
+    const view = await ctx.executor.executeV3({
+      reference: {
+        ...REFERENCE,
+        argsDigest: `sha256:${managedToolDigest(sleepInput)}`,
+      },
+      capture: CAPTURE,
+      toolName: 'run_shell_command',
+      input: sleepInput,
+    });
+    expect(view).toMatchObject({
+      state: 'settled',
+      result: {
+        executionStatus: 'success',
+        capture: { captureStatus: 'detached', manifest: null },
+      },
+    });
+    expect(ctx.supervisor.start).toHaveBeenCalledWith(
+      expect.objectContaining({ unitName: 'qwen-mon-call-1' }),
+    );
+  });
+
+  it('refuses a workspace-foreign monitor directory before any capture exists', async () => {
+    const ctx = rig();
+    const view = await execute(ctx, {
+      command: 'tail -f build.log',
+      is_monitor: true,
+      directory: '/tmp/elsewhere-qwen-watch',
+    });
+    expect(view).toMatchObject({
+      result: {
+        executionStatus: 'not_started',
+        error: {
+          message:
+            "Directory '/tmp/elsewhere-qwen-watch' is not within any of the registered workspace directories.",
+        },
+      },
+    });
+    expect(ctx.publisher.prepares).toBe(0);
+  });
+
   it('refuses the watch when the Runtime owns no delegated cgroup', async () => {
     const ctx = rig({ withSupervisor: false });
     const view = await execute(ctx, MONITOR_INPUT);
@@ -313,9 +382,102 @@ describe('managed v3 Monitor watch', () => {
       },
     });
   });
+
+  it('captures the watch’s stderr byte for byte, like the Shell path', async () => {
+    const ctx = rig();
+    await execute(ctx, MONITOR_INPUT);
+    const spec = ctx.supervisor.start.mock.calls[0]![0] as unknown as {
+      onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) => unknown;
+    };
+    spec.onOutput('stdout', Buffer.from('size 42\n'));
+    spec.onOutput('stderr', Buffer.from('du: cannot read\n'));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(ctx.sink.writes).toEqual([
+      ['stdout', 'size 42\n'],
+      ['stderr', 'du: cannot read\n'],
+    ]);
+  });
+
+  it('settles the admission instead of parking it when the capture cannot be prepared', async () => {
+    const ctx = rig({ prepareRejects: true });
+    const view = await execute(ctx, MONITOR_INPUT);
+    expect(view).toMatchObject({
+      state: 'settled',
+      result: {
+        executionStatus: 'not_started',
+        capture: null,
+        error: {
+          message:
+            'Monitor watch capture could not be prepared: publisher route is gone',
+        },
+      },
+    });
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+    // The same call re-answers from the settled journal, never as a parked
+    // 'prepared' entry waiting on nothing.
+    const again = await execute(ctx, MONITOR_INPUT);
+    expect(again.state).toBe('settled');
+  });
+
+  it('holds and drains a live watch on the release route', async () => {
+    const ctx = rig();
+    await execute(ctx, MONITOR_INPUT);
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(true);
+    await ctx.executor.stopBackgroundSession('rs-1');
+    expect(ctx.publisher.finished).toHaveLength(1);
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+  });
+
+  it('drains a live watch when the worker closes', async () => {
+    const ctx = rig();
+    await execute(ctx, MONITOR_INPUT);
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(true);
+    await ctx.executor.close();
+    expect(ctx.publisher.finished).toHaveLength(1);
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+  });
 });
 
 describe('managed v3 background Shell', () => {
+  it('settles the admission instead of parking it when the capture cannot be prepared', async () => {
+    const ctx = rig({ prepareRejects: true });
+    const view = await execute(ctx);
+    expect(view).toMatchObject({
+      state: 'settled',
+      result: {
+        executionStatus: 'not_started',
+        capture: null,
+        error: {
+          message:
+            'Background Shell capture could not be prepared: publisher route is gone',
+        },
+      },
+    });
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+    const again = await execute(ctx);
+    expect(again.state).toBe('settled');
+  });
+
+  it('settles the start when the worker closes mid-admission', async () => {
+    const ctx = rig();
+    // The close lands between the entry gate and the admission recheck:
+    // it must never park the entry either.
+    vi.spyOn(ctx.publisher, 'prepare').mockImplementationOnce(async () => {
+      (ctx.executor as unknown as { closing: boolean }).closing = true;
+      return { identity: IDENTITY, sink: ctx.sink, publisher: undefined };
+    });
+    const view = await execute(ctx);
+    expect(view).toMatchObject({
+      state: 'settled',
+      result: {
+        executionStatus: 'not_started',
+        capture: null,
+        error: { message: 'Managed Runtime worker is no longer active.' },
+      },
+    });
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+  });
+
   it('slows the pipes while the bounded capture drains', async () => {
     const ctx = rig();
     const stdout = ctx.process.child.stdout!;
@@ -444,11 +606,44 @@ describe('managed v3 background Shell', () => {
         error: {
           message:
             'Background Shell requires a delegated Linux cgroup v2 root on this Runtime.',
+          type: 'managed_isolation_root_missing',
         },
       },
     });
     expect(ctx.publisher.prepares).toBe(0);
     expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+  });
+
+  it('records a distinct cause discriminator for a pre-existing non-empty unit', async () => {
+    // One message and no code cannot tell a name collision from a broken
+    // deployment: the recorded refusal carries the discriminator, so the
+    // model and the task surface branch on what actually failed.
+    const ctx = rig();
+    ctx.supervisor.start.mockImplementation(() => {
+      throw new HookCommandIsolationUnavailableError('unit_not_empty');
+    });
+    const view = await execute(ctx);
+    expect(view).toMatchObject({
+      state: 'settled',
+      result: {
+        executionStatus: 'not_started',
+        capture: null,
+        error: {
+          message:
+            'Background Shell requires a delegated Linux cgroup v2 directory: another unit still holds processes under that name on this Runtime.',
+          type: 'managed_isolation_unit_not_empty',
+        },
+      },
+    });
+    expect(ctx.publisher.prepares).toBe(1);
+    expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+    const missing = rig({ withSupervisor: false });
+    const missingView = await execute(missing);
+    expect(missingView).toMatchObject({
+      result: {
+        error: { type: 'managed_isolation_root_missing' },
+      },
+    });
   });
 
   it('records an admission refusal for a directory outside the workspace', async () => {

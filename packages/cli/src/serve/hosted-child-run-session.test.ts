@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -45,6 +46,50 @@ const sessionKey = {
   workspaceId: 'workspace-1',
   sessionId,
 };
+function manifestBody(over: {
+  revision: number;
+  captureId?: string;
+  executionCallId?: string;
+  streamId?: string;
+}): Buffer {
+  const { streamId = 'stdout', ...body } = over;
+  return Buffer.from(
+    JSON.stringify({
+      toolResult: 'managed-tool-result/1',
+      type: 'manifest',
+      tenantId: sessionKey.tenantId,
+      sessionId,
+      turnId: 'turn-1',
+      executionCallId: 'call-shell-1',
+      callId: 'call-1',
+      invocationDigest: 'sha256:' + 'a'.repeat(64),
+      bindingGeneration: '1',
+      captureId: 'capture-1',
+      captureScope: 'process_pipes',
+      capturePolicy: 'complete_required',
+      captureStatus: 'pending',
+      captureReason: null,
+      upstreamTruncated: false,
+      executionStatus: 'unknown',
+      exitCode: null,
+      signal: null,
+      contents: [
+        {
+          streamId,
+          role: 'stdout',
+          mimeType: 'application/octet-stream',
+          state: 'open',
+          byteLength: 0,
+          digest: createHash('sha256').update(Buffer.alloc(0)).digest('hex'),
+          missingRanges: [],
+          body: { pages: [] },
+        },
+      ],
+      ...body,
+    }),
+    'utf8',
+  );
+}
 const TASK_ID = `task_${managedExtensionRecordKey(sessionId, 'child_run', 'shell-1')}`;
 
 const temporaryDirectories = new Set<string>();
@@ -186,18 +231,18 @@ describe('HostedChildRunSession', () => {
         ),
       ).toEqual({ pid: 4242 });
       expect(attached.body.run).toMatchObject({
-        state: 'waiting',
+        state: 'running',
         execution: 'running_attached',
       });
 
       harness.now = 4_000;
       const manifestA = await harness.store.publish(
         'managed-tool-result-manifest',
-        Buffer.from('{"pages":1,"revision":1}', 'utf8'),
+        manifestBody({ revision: 1 }),
       );
       const manifestB = await harness.store.publish(
         'managed-tool-result-manifest',
-        Buffer.from('{"pages":1,"revision":2}', 'utf8'),
+        manifestBody({ revision: 2 }),
       );
       await orchestrator.advanceOutput('shell-1', manifestA);
       await orchestrator.advanceOutput('shell-1', manifestB);
@@ -206,10 +251,18 @@ describe('HostedChildRunSession', () => {
       expect(advanced.body.outputRef).toEqual(manifestB);
       await expect(
         orchestrator.advanceOutput('shell-1', manifestA),
-      ).rejects.toThrow('may only advance forward');
+      ).rejects.toThrow('lineage');
       expect(committed(authority).body.outputRef).toEqual(manifestB);
-      // Live revisions step the run line: waiting after the running before it.
-      expect(advanced.body.run.state).toBe('waiting');
+      // A replay of the very same reference is not a refusal and commits
+      // nothing: a redelivered advance must never wedge the Shell's exit
+      // leg, and since it changes no field, the deep-equal skip owns it.
+      await orchestrator.advanceOutput('shell-1', manifestB);
+      expect(committed(authority).body.outputRef).toEqual(manifestB);
+      expect(committed(authority).revision).toBe(5);
+      // The live run line holds its state through every advance of a
+      // running process — the projection's `waiting` means paused, never
+      // "the second revision".
+      expect(advanced.body.run.state).toBe('running');
 
       harness.now = 5_000;
       await orchestrator.settleExited('shell-1', {
@@ -242,6 +295,66 @@ describe('HostedChildRunSession', () => {
           settledAt: 5_000,
         },
       ]);
+
+      // A replayed advance landing after the exit leg is the
+      // replay-after-restart shape: it may resend the same manifest, but it
+      // must never step the terminal run line back to live.
+      await orchestrator.advanceOutput('shell-1', manifestB);
+      const replayed = committed(authority);
+      expect(replayed.body.outputRef).toEqual(manifestB);
+      expect(replayed.body.run).toMatchObject({
+        state: 'settled',
+        execution: 'settled',
+      });
+    });
+  });
+
+  it('refuses output outside its capture lineage, higher numbers included', async () => {
+    const harness = await createHarness();
+    await withOrchestrator(harness, async (authority, orchestrator) => {
+      await orchestrator.admit({
+        shellId: 'shell-1',
+        ownerScopeId: 'scope-main',
+        executionCallId: 'call-shell-1',
+        args: ARGS,
+      });
+      await orchestrator.dispatchStarted('shell-1', BINDING);
+      await orchestrator.attach('shell-1', BINDING, { pid: 4242 });
+      const publish = (body: Buffer) =>
+        harness.store.publish('managed-tool-result-manifest', body);
+      const rev1 = await publish(manifestBody({ revision: 1 }));
+      await orchestrator.advanceOutput('shell-1', rev1);
+      // A higher number from another capture is a lineage break, never
+      // progress: it would chain the record's view to bytes this capture
+      // never wrote.
+      const foreign = await publish(
+        manifestBody({ revision: 2, captureId: 'capture-9' }),
+      );
+      await expect(
+        orchestrator.advanceOutput('shell-1', foreign),
+      ).rejects.toThrow('lineage');
+      // A jump the funnel missed once lands whole: the contents chain
+      // already carries every skipped revision forward.
+      const leapt = await publish(manifestBody({ revision: 3 }));
+      await orchestrator.advanceOutput('shell-1', leapt);
+      expect(committed(authority).body.outputRef).toEqual(leapt);
+      const backward = await publish(manifestBody({ revision: 2 }));
+      await expect(
+        orchestrator.advanceOutput('shell-1', backward),
+      ).rejects.toThrow('lineage');
+      const brokenChain = await publish(
+        manifestBody({ revision: 4, streamId: 'stderr' }),
+      );
+      await expect(
+        orchestrator.advanceOutput('shell-1', brokenChain),
+      ).rejects.toThrow('lineage');
+      // And no manifest ever anchors another call's capture onto this record.
+      const elsewhere = await publish(
+        manifestBody({ revision: 1, executionCallId: 'call-elsewhere' }),
+      );
+      await expect(
+        orchestrator.advanceOutput('shell-1', elsewhere),
+      ).rejects.toThrow('another call');
     });
   });
 
@@ -259,7 +372,6 @@ describe('HostedChildRunSession', () => {
       await orchestrator.requestStop('shell-1');
       const draining = committed(authority);
       expect(draining.body.stopRequested).toBe(true);
-      // The attach left the line waiting; the stop request steps it back.
       expect(draining.body.run.state).toBe('running');
       await orchestrator.settleStopRequested('shell-1');
       expect(committed(authority).body).toMatchObject({

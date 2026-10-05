@@ -92,7 +92,12 @@ export class WorkspaceActivations {
         }
         const sessionId = request['sessionId'] as string;
         const active = request['operation'] === 'activate';
-        if (active && this.sessions.get(sessionId) === false) {
+        // Admission stays open for a deactivation bearing background work:
+        // its ordered drain below runs first and rechecks before refusing.
+        if (
+          active &&
+          (!executor.isAdmissionOpen || this.sessions.get(sessionId) === false)
+        ) {
           res.status(409).json({ code: 'managed_activation_conflict' });
           return;
         }

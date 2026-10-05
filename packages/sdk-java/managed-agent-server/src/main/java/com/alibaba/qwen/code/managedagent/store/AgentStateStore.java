@@ -30,9 +30,21 @@ import java.util.Optional;
 import java.util.Set;
 
 public interface AgentStateStore {
-    Admission insertSessionCommand(String tenantId, String operation,
+    // The annotation must sit on the default itself: the delegating body runs
+    // on the target instance, so without it the self-call bypasses the proxy.
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertSessionCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
             String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        return insertSessionCommand(tenantId, null, operation,
+                idempotencyKey, requestDigest, agentId, requestedRevision,
+                title, input, payloadDigest);
+    }
+
+    Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest);
 
     Admission insertWorkspaceSessionCommand(String tenantId, String actorId,

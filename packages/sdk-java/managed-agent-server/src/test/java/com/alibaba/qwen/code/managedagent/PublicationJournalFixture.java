@@ -6,22 +6,31 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
+import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
+import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import javax.sql.DataSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -56,6 +65,7 @@ public final class PublicationJournalFixture {
     public long revision;
     public long sequence;
     public String commitDigest;
+    public WorkspaceCsiReservationStore.Reservation csiReservation;
 
     private PublicationJournalFixture(DataSource source,
             boolean journalHeadAuthorization) {
@@ -71,21 +81,44 @@ public final class PublicationJournalFixture {
 
     public static PublicationJournalFixture create(DataSource source,
             boolean journalHeadAuthorization) {
+        return create(source, journalHeadAuthorization, null);
+    }
+
+    public static PublicationJournalFixture create(DataSource source,
+            boolean journalHeadAuthorization, WorkspaceCsiRegistration registration) {
         PublicationJournalFixture fixture =
                 new PublicationJournalFixture(source, journalHeadAuthorization);
-        fixture.populate();
+        fixture.populate(source, registration);
         return fixture;
     }
 
-    private void populate() {
-        var runtime = bindings.findOrCreate(new RuntimeProvisionRequest(
-                new RuntimeScope("tenant-1", "workspace-1", "generation-1",
-                        "/workspace", "capability", "workspace"), null));
-        runtime = bindings.claimOperation(runtime.getBindingId(), "owner",
-                Duration.ofMinutes(1));
-        assertThat(bindings.compareAndSet(runtime, runtime.withState(
-                RuntimeBindingRecord.State.READY, null, Instant.now())))
-                .isNotNull();
+    private void populate(DataSource source, WorkspaceCsiRegistration registration) {
+        boolean csi = registration != null;
+        var scope = new RuntimeScope("tenant-1", "workspace-1", csi ? "1" : "generation-1",
+                "/workspace", csi ? "sha256:" + "a".repeat(64) : "capability", csi ? "session" : "workspace");
+        var runtime = bindings.findOrCreate(csi
+                ? new RuntimeProvisionRequest(scope, "session-1", "kubernetes-workspace", registration.storageId())
+                : new RuntimeProvisionRequest(scope, null));
+        runtime = bindings.claimOperation(runtime.getBindingId(), "owner", Duration.ofMinutes(1));
+        if (csi) {
+            var csiStore = new WorkspaceCsiReservationStore(jdbc, manager, JSON);
+            csiStore.register(registration);
+            csiReservation = csiStore.reserve(registration, bindings, runtime, UUID.randomUUID().toString());
+            var seed = runtime.getProvisionSeed();
+            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
+                    seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+            runtime = bindings.compareAndSet(runtime, runtime.withAttestation(lease,
+                    new RuntimeResourceHandle("kubernetes-workspace", 1, Map.of("fixture", "local-db")),
+                    Instant.now(), Instant.now()));
+            var nativeSessions = new JdbcRuntimeSessionRepository(source);
+            var acquiring = bindings.admitSession(nativeSessions, new RuntimeSessionRecord(
+                    new RuntimeSession("session-1", "runtime-1", "bootstrap", scope), "binding-1", 1,
+                    RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+            nativeSessions.compareAndSet(acquiring, acquiring.withState(RuntimeSessionRecord.State.READY, Instant.now()));
+        } else {
+            runtime = bindings.compareAndSet(runtime, runtime.withState(RuntimeBindingRecord.State.READY, null, Instant.now()));
+        }
+        assertThat(runtime).isNotNull();
         binding = JSON.createObjectNode()
                 .put("publication", ToolPublicationContract.PROTOCOL)
                 .put("publicationId", "pub-1").put("turnId", "turn-1")

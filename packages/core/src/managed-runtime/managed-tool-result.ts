@@ -521,7 +521,7 @@ function parseDescriptor(
 }
 
 /** The capture status that a manifest's descriptors imply. */
-function impliedStatus(
+export function impliedStatus(
   contents: readonly ToolResultContentDescriptor[],
 ): ToolResultCaptureStatus {
   if (contents.some((entry) => entry.state === 'open')) return 'pending';
@@ -806,9 +806,39 @@ function isDescriptorSuccessor(
 }
 
 /**
+ * Whether `next` continues the same capture as `previous`: the same
+ * capture identity, a later revision, and a contents chain that only
+ * extends what the earlier revision recorded. This is the integrity a
+ * record's output advance insists on — a higher number from another
+ * capture would chain the record's view to bytes the capture never wrote.
+ * Unlike `isToolResultManifestSuccessor` this admits a gap: when one
+ * forward inside the funnel throws once, the missed revision carries
+ * nothing the next revision does not already extend, by construction, so
+ * the record goes forward by it.
+ */
+export function isToolResultManifestChainLink(
+  previous: unknown,
+  next: unknown,
+): boolean {
+  const before = attempt(() => parseToolResultManifest(previous));
+  const after = attempt(() => parseToolResultManifest(next));
+  return (
+    !!before &&
+    !!after &&
+    FIXED_KEYS.every((key) => before[key] === after[key]) &&
+    after.revision > before.revision &&
+    after.contents.length >= before.contents.length &&
+    before.contents.every((entry, index) =>
+      isDescriptorSuccessor(entry, after.contents[index]),
+    )
+  );
+}
+
+/**
  * Whether `next` may follow `previous` as the next revision of one capture:
- * only a pending revision has a successor, and a successor may only extend
- * what the earlier revision recorded.
+ * a pending revision's successor may only extend what it recorded; a fully
+ * sealed revision gets exactly one — the revision that names the physical
+ * end over byte-for-byte identical descriptors, never a newer story.
  */
 export function isToolResultManifestSuccessor(
   previous: unknown,
@@ -819,7 +849,6 @@ export function isToolResultManifestSuccessor(
   if (
     !before ||
     !after ||
-    before.captureStatus !== 'pending' ||
     after.revision !== before.revision + 1 ||
     FIXED_KEYS.some((key) => before[key] !== after[key]) ||
     (before.upstreamTruncated && !after.upstreamTruncated) ||
@@ -827,16 +856,28 @@ export function isToolResultManifestSuccessor(
   ) {
     return false;
   }
-  if (
-    before.executionStatus !== 'unknown' &&
-    (before.executionStatus !== after.executionStatus ||
-      before.exitCode !== after.exitCode ||
-      before.signal !== after.signal)
-  ) {
-    return false;
+  if (before.captureStatus === 'pending') {
+    if (
+      before.executionStatus !== 'unknown' &&
+      (before.executionStatus !== after.executionStatus ||
+        before.exitCode !== after.exitCode ||
+        before.signal !== after.signal)
+    ) {
+      return false;
+    }
+    return before.contents.every((entry, index) =>
+      isDescriptorSuccessor(entry, after.contents[index]),
+    );
   }
-  return before.contents.every((entry, index) =>
-    isDescriptorSuccessor(entry, after.contents[index]),
+  // The settle-family transition, one and only one leg: still previews
+  // nothing of the physical end → exactly the revision that names it.
+  return (
+    before.captureStatus === 'complete' &&
+    before.executionStatus === 'unknown' &&
+    before.exitCode === null &&
+    before.signal === null &&
+    after.executionStatus !== 'unknown' &&
+    sameJson(before.contents, after.contents)
   );
 }
 

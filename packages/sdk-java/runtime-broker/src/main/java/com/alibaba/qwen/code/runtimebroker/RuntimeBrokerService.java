@@ -25,6 +25,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -281,26 +282,25 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         var renewal = new BindingRenewal(draining);
         renewal.start();
-        CompletionStage<Void> result = safeStage(() -> {
-            if (executionRepository.hasActiveByBinding(draining.getBindingId(), draining.getGeneration())) {
-                throw conflict("workspace_close_execution_unsettled", "Original execution is unsettled");
-            }
-            return drainSessions(draining, null).thenCompose(ignored -> {
-                if (sessionRepository.countActiveByBinding(draining.getBindingId(), draining.getGeneration()) != 0
-                        || executionRepository.hasActiveByBinding(draining.getBindingId(), draining.getGeneration())) {
-                    throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
-                }
-                return draining.getDrainReceipt() == null ? provisioner.stopDrained(draining)
-                        : CompletableFuture.completedFuture(draining.getDrainReceipt());
-            }).thenAccept(receipt -> {
-                var current = renewal.stopAndGet();
-                if (current == null || bindingRepository.compareAndSet(current, current.withDrainReceipt(receipt)
-                        .withState(RuntimeBindingRecord.State.RELEASED, current.getLease(), clock.instant())) == null) {
-                    throw unavailable("runtime_close_claim_pending", "Drain completion was fenced");
-                }
-                liveBindings.remove(draining.getBindingId());
-            });
-        });
+        CompletionStage<Void> result = safeStage(() ->
+                // The sessions release — and their sweep of provably ended
+                // background exits — run BEFORE the unsettled gate: a row the
+                // sweep can prove never blocks the close on a stale active.
+                drainSessions(draining, null).thenCompose(ignored -> {
+                    if (sessionRepository.countActiveByBinding(draining.getBindingId(), draining.getGeneration()) != 0
+                            || executionRepository.hasActiveByBinding(draining.getBindingId(), draining.getGeneration())) {
+                        throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
+                    }
+                    return draining.getDrainReceipt() == null ? provisioner.stopDrained(draining)
+                            : CompletableFuture.completedFuture(draining.getDrainReceipt());
+                }).thenAccept(receipt -> {
+                    var current = renewal.stopAndGet();
+                    if (current == null || bindingRepository.compareAndSet(current, current.withDrainReceipt(receipt)
+                            .withState(RuntimeBindingRecord.State.RELEASED, current.getLease(), clock.instant())) == null) {
+                        throw unavailable("runtime_close_claim_pending", "Drain completion was fenced");
+                    }
+                    liveBindings.remove(draining.getBindingId());
+                }));
         return result.toCompletableFuture().orTimeout(operationDeadlineMillis(), TimeUnit.MILLISECONDS)
                 .whenComplete((ignored, error) -> {
                     renewal.close();
@@ -389,10 +389,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
         CompletableFuture<SessionContext> current = sessions.get(runtimeId);
         if (current != null) {
             return current.thenApply(context -> {
-                synchronized (context) {
+                context.lock();
+                try {
                     requireSameSession(context.session(), new RuntimeSession(harnessId,
                             runtimeId, turnKind, context.session().getScope()));
                     return requireReadySessionRecord(context);
+                } finally {
+                    context.unlock();
                 }
             });
         }
@@ -419,9 +422,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     if (ManagedHookProtocol.isOperation(immutable)) {
                         ManagedHookProtocol.validateSession(context.session(), immutable);
                     }
-                    synchronized (context) {
+                    context.lock();
+                    try {
                         requireReadySessionRecord(context);
                         context.beginControl();
+                    } finally {
+                        context.unlock();
                     }
                     CompletionStage<Object> result;
                     try {
@@ -549,7 +555,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         CompletionStage<ToolExecutionRecord> started = requireReadySession(
                 harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
-                    synchronized (context) {
+                    context.lock();
+                    try {
                         requireReadySessionRecord(context);
                         ToolExecutionRecord record = requireExecution(context, executionId);
                         boolean v3 = "deferred_v3".equals(record.getReference().get("dispatchMode"));
@@ -592,12 +599,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 || !(payload.get("input") instanceof Map)
                                 || !BrokerValues.isWellFormedJson(payload)
                                 || Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))
-                                    && !"run_shell_command".equals(toolName)) {
+                                    && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
                         if (v3) {
-                            if (!"run_shell_command".equals(payload.get("toolName"))) {
-                                throw invalid("runtime_payload_invalid", "Tool v3 requires Shell");
+                            if (!"run_shell_command".equals(payload.get("toolName"))
+                                    && !"monitor".equals(payload.get("toolName"))) {
+                                throw invalid("runtime_payload_invalid", "Tool v3 requires Shell or Monitor");
                             }
                             RuntimePublicationGrant grant = publicationVerifier.verify(record,
                                     publicationId, publicationToken);
@@ -622,6 +630,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         }
                         ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
                         return CompletableFuture.completedFuture(latest == null ? record : latest);
+                    } finally {
+                        context.unlock();
                     }
                 });
         return unknownWhenAdmissionClosed(started, harnessSessionId,
@@ -635,7 +645,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         CompletionStage<ToolExecutionRecord> started = requireReadySession(
                 harnessSessionId, runtimeSessionId)
                 .thenApply(context -> {
-                    synchronized (context) {
+                    context.lock();
+                    try {
                         requireReadySessionRecord(context);
                         ToolExecutionRecord record = requireExecution(context, executionId);
                         if (!ProviderRuntimeProtocol.isReference(record.getReference())) {
@@ -646,6 +657,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             beginDispatch(context, record);
                         }
                         return requireExecution(context, executionId);
+                    } finally {
+                        context.unlock();
                     }
                 });
         return unknownWhenAdmissionClosed(started, harnessSessionId,
@@ -707,9 +720,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         Map<String, Object> descriptor = immutableMap(publisher, "publisher");
         return requireReadySession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
-            synchronized (context) {
+            context.lock();
+            try {
                 requireReadySessionRecord(context);
                 context.beginControl();
+            } finally {
+                context.unlock();
             }
             return safeStage(() -> {
                 requireUsableLease(context);
@@ -726,7 +742,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         Map<String, Object> savedReceipt = immutableMap(receipt, "receipt");
         return requireReadySession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
             ToolExecutionRecord record;
-            synchronized (context) {
+            context.lock();
+            try {
                 requireReadySessionRecord(context);
                 record = requireExecution(context, executionCallId);
                 if (!record.isSettled()
@@ -735,6 +752,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     throw conflict("runtime_execution_conflict", "Only the original settled Tool v3 result can be acknowledged");
                 }
                 context.beginControl();
+            } finally {
+                context.unlock();
             }
             return safeStage(() -> {
                 requireUsableLease(context);
@@ -759,7 +778,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     if (!"deferred_v3".equals(execution.getReference().get("dispatchMode"))) {
                         return acknowledgeLocalExecution(harnessSessionId, runtimeSessionId, id, receipt);
                     }
-                    synchronized (context) {
+                    context.lock();
+                    try {
                         requireReadySessionRecord(context);
                         execution = requireExecution(context, id);
                         if (!execution.isSettled()
@@ -769,27 +789,32 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             throw conflict("runtime_execution_conflict", "Original Tool v3 execution is unavailable");
                         }
                         context.beginControl();
+                    } finally {
+                        context.unlock();
                     }
                     ToolExecutionRecord original = execution;
                     if (isDetachedCapture(original.getResult())) {
-                        // The detached family has no publication durable of its
-                        // own: the settled handle envelope is canonical, and a
-                        // matching blocked receipt acknowledges exactly it.
-                        if (receipt == null
-                                || !receipt.keySet().equals(Set.of("executionCallId",
-                                        "manifest", "deliveryStatus", "historyRevision"))
-                                || !id.equals(receipt.get("executionCallId"))
-                                || receipt.get("manifest") != null
-                                || !"blocked".equals(receipt.get("deliveryStatus"))
-                                || receipt.get("historyRevision") != null) {
-                            throw conflict("runtime_execution_conflict",
-                                    "Session receipt conflicts with publication");
-                        }
-                        requireUsableLease(context);
-                        return mapFailure(safeStage(() -> transport.acknowledgeV3(
-                                context.lease(), context.session(),
-                                original.getReference(), receipt)),
-                                "runtime_execution_ack_failed", "Tool v3 acknowledgement failed")
+                        return mapFailure(safeStage(() -> {
+                            // The detached family has no publication durable
+                            // of its own: the settled handle envelope is
+                            // canonical, and a matching blocked receipt
+                            // acknowledges exactly it. The refuse-rides the
+                            // stage so the control always ends with it.
+                            if (receipt == null
+                                    || !receipt.keySet().equals(Set.of("executionCallId",
+                                            "manifest", "deliveryStatus", "historyRevision"))
+                                    || !id.equals(receipt.get("executionCallId"))
+                                    || receipt.get("manifest") != null
+                                    || !"blocked".equals(receipt.get("deliveryStatus"))
+                                    || receipt.get("historyRevision") != null) {
+                                throw conflict("runtime_execution_conflict",
+                                        "Session receipt conflicts with publication");
+                            }
+                            requireUsableLease(context);
+                            return transport.acknowledgeV3(context.lease(),
+                                    context.session(), original.getReference(),
+                                    receipt);
+                        }), "runtime_execution_ack_failed", "Tool v3 acknowledgement failed")
                             .whenComplete((ignored, error) -> context.endControl());
                     }
                     return mapFailure(safeStage(() -> {
@@ -885,10 +910,21 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     .thenCompose(context -> {
                         ToolExecutionRecord requested;
                         boolean publicationV3;
-                        synchronized (context) {
+                        context.lock();
+                        try {
                             requireReadySessionRecord(context);
                             ToolExecutionRecord current = requireExecution(
                                     context, executionId);
+                            // A background process row never dispatches, so a
+                            // cancel would settle it immediately — while its
+                            // process provably runs. It settles only on the
+                            // owner's stop evidence; stop goes through the
+                            // maintenance route.
+                            if ("background_v3_process".equals(
+                                    current.getReference().get("dispatchMode"))) {
+                                throw conflict("runtime_execution_conflict",
+                                        "A background process settles only on stop evidence");
+                            }
                             requested = requestCancel(current);
                             if (isPreparedProviderCancellation(requested)) {
                                 context.beginControl();
@@ -911,6 +947,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 return CompletableFuture.completedFuture(
                                         requested);
                             }
+                        } finally {
+                            context.unlock();
                         }
                         if (requested.getState()
                                 == ToolExecutionRecord.State.DISPATCHING) {
@@ -1143,8 +1181,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
             boolean takeover, boolean cooled) {
         requireOpen();
         requireAnswerableBinding(unknown);
-        synchronized (context) {
+        context.lock();
+        try {
             requireReadySessionRecord(context);
+        } finally {
+            context.unlock();
         }
         // Only the binding generation the execution was dispatched to,
         // reached through this process's attested lease, may answer.
@@ -1451,7 +1492,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private ToolExecutionRecord createExecution(SessionContext context,
             String idempotencyKey, Map<String, Object> reference, boolean dispatch) {
         ToolExecutionRecord record;
-        synchronized (context) {
+        context.lock();
+        try {
             requireReadySessionRecord(context);
             Map<String, Object> safeReference = immutableMap(reference,
                     "reference");
@@ -1492,6 +1534,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 throw conflict("runtime_idempotency_conflict",
                         "idempotency key belongs to another request");
             }
+        } finally {
+            context.unlock();
         }
         if (dispatch && shouldDriveDispatch(record)) {
             beginDispatch(context, record);
@@ -1506,7 +1550,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
     // proof — that is what `hasActiveBy*` counts while it lives.
     private void admitBackgroundProcess(SessionContext context,
             ToolExecutionRecord invocation) {
-        synchronized (context) {
+        context.lock();
+        try {
             Map<String, Object> invocationReference = invocation.getReference();
             String callId = referenceString(invocationReference, "callId");
             Map<String, Object> reference = Map.of(
@@ -1535,6 +1580,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         "background process identity is already in use", exception);
             }
             context.backgroundProcesses().add(candidate.getExecutionCallId());
+        } finally {
+            context.unlock();
         }
     }
 
@@ -1561,11 +1608,24 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<ToolExecutionRecord> observeProcessRow(
             SessionContext context, ToolExecutionRecord invocation,
             ToolExecutionRecord process) {
+        return controlProcessRow(context, invocation, process, "shell-status");
+    }
+
+    /**
+     * One maintenance operation against a background process's physical
+     * owner. An `exited` answer settles the row with that evidence —
+     * terminal for both the status read and the stop the release asks
+     * for, whose answer carries the same receipt view; anything else
+     * keeps the row active and holding, exactly the wedge semantics.
+     */
+    private CompletionStage<ToolExecutionRecord> controlProcessRow(
+            SessionContext context, ToolExecutionRecord invocation,
+            ToolExecutionRecord process, String kind) {
         if (process.isTerminal()) {
             return CompletableFuture.completedFuture(process);
         }
         Map<String, Object> operation = new LinkedHashMap<>();
-        operation.put("kind", "shell-status");
+        operation.put("kind", kind);
         operation.put("sessionKey", Map.of(
                 "tenantId", context.session().getScope().getTenantId(),
                 "workspaceId", context.session().getScope().getWorkspaceId(),
@@ -1574,9 +1634,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
         operation.put("targetOperationId",
                 referenceString(invocation.getReference(), "callId"));
         context.beginControl();
-        return mapFailure(safeStage(() -> transport.control(
-                context.lease(), context.session(), operation)),
-                "runtime_shell_status_failed", "Shell status lookup failed")
+        return mapFailure(safeStage(() -> {
+            requireUsableLease(context);
+            return transport.control(context.lease(), context.session(),
+                    operation);
+        }), "runtime_shell_status_failed", "Shell status lookup failed")
             .thenApply(view -> {
                 if (!(view instanceof Map<?, ?> answer)
                         || !"exited".equals(answer.get("state"))) {
@@ -1602,15 +1664,26 @@ public final class RuntimeBrokerService implements AutoCloseable {
             SessionContext context) {
         CompletionStage<Void> chain = CompletableFuture.completedFuture(null);
         List<String> processIds;
-        synchronized (context) {
+        List<ToolExecutionRecord> durable = durableBackgroundProcessRows(
+                context);
+        context.lock();
+        try {
+            for (ToolExecutionRecord row : durable) {
+                context.backgroundProcesses().add(row.getExecutionCallId());
+            }
             processIds = new ArrayList<>(context.backgroundProcesses());
+        } finally {
+            context.unlock();
         }
         for (String processId : processIds) {
             ToolExecutionRecord row = executionRepository
                     .findByExecutionCallId(processId);
             if (row == null || row.isTerminal()) {
-                synchronized (context) {
+                context.lock();
+                try {
                     context.backgroundProcesses().remove(processId);
+                } finally {
+                    context.unlock();
                 }
                 continue;
             }
@@ -1621,12 +1694,25 @@ public final class RuntimeBrokerService implements AutoCloseable {
             } catch (RuntimeException notOurs) {
                 continue;
             }
+            // Status first; a row the owner still counts running gets one
+            // stop it must prove — an unproven stop keeps the hold, and
+            // the busy answer behind it stays accurate.
             chain = chain.thenCompose(ignored -> observeProcessRow(
                     context, invocation, row)
+                    .thenCompose(current -> current.isTerminal()
+                            ? CompletableFuture.completedFuture(current)
+                            : controlProcessRow(context, invocation, current,
+                                    "shell-terminate"))
+                    .thenCompose(current -> current.isTerminal()
+                            ? CompletableFuture.completedFuture(current)
+                            : observeProcessRow(context, invocation, current))
                     .thenApply(current -> {
                         if (current.isTerminal()) {
-                            synchronized (context) {
+                            context.lock();
+                            try {
                                 context.backgroundProcesses().remove(processId);
+                            } finally {
+                                context.unlock();
                             }
                         }
                         return (Void) null;
@@ -1634,6 +1720,82 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     .exceptionally(failure -> null));
         }
         return chain;
+    }
+
+    /**
+     * The durable ledger knows every background process this Session was
+     * ever admitted for; the in-memory index only knows the ones this
+     * Broker process admitted itself. Without the backfill a fresh context
+     * — every release path after a Broker restart — sweeps nothing, and
+     * the non-terminal `:process` row answers busy forever. The scan stays
+     * inside the repository's Session-and-generation fence, so a stale
+     * cross-generation row never enters the sweep or the busy-check
+     * exclusion set.
+     */
+    private List<ToolExecutionRecord> durableBackgroundProcessRows(
+            SessionContext context) {
+        RuntimeSessionRecord session = sessionRepository.findById(
+                context.session().getScope(),
+                context.session().getRuntimeSessionId());
+        if (session == null) {
+            return List.of();
+        }
+        List<ToolExecutionRecord> rows = new ArrayList<>();
+        String after = null;
+        for (;;) {
+            List<ToolExecutionRecord> batch = executionRepository
+                    .findBackgroundProcesses(session, after, 100);
+            if (batch.isEmpty()) {
+                return rows;
+            }
+            rows.addAll(batch);
+            if (batch.size() < 100) {
+                return rows;
+            }
+            after = batch.get(batch.size() - 1).getExecutionCallId();
+        }
+    }
+
+    /**
+     * The Runtime proved no process ever started: without this sibling
+     * settle the `:process` row would count as alive forever, and no
+     * shell release could ever pass busy again (round 6). Every arm that
+     * settles the invocation with that proof — the dispatch poll, and the
+     * reconcile resume — calls it, so no path back to SETTLED keeps the
+     * sibling PREPARED.
+     */
+    private void settleUnstartedBackgroundSiblings(String executionCallId,
+            Map<String, Object> result) {
+        if (!"not_started".equals(result.get("executionStatus"))) {
+            return;
+        }
+        ToolExecutionRecord process = executionRepository
+                .findByExecutionCallId(executionCallId + ":process");
+        if (process == null || process.isTerminal()) {
+            return;
+        }
+        settleUnstartedBackgroundProcess(process, result);
+    }
+
+    private void settleUnstartedBackgroundProcess(ToolExecutionRecord process,
+            Map<String, Object> result) {
+        Map<String, Object> settled = new LinkedHashMap<>();
+        settled.put("state", "not_started");
+        settled.put("executionStatus", "not_started");
+        settled.put("evidence", result.get("error"));
+        for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+            ToolExecutionRecord current = executionRepository
+                    .findByExecutionCallId(process.getExecutionCallId());
+            if (current == null || current.isTerminal()) {
+                return;
+            }
+            if (executionRepository.settlePrepared(current, settled,
+                    clock.instant()) != null) {
+                return;
+            }
+        }
+        throw conflict("runtime_execution_state_conflict",
+                "Background process could not settle with its own generation");
     }
 
     private void settleBackgroundProcess(ToolExecutionRecord process,
@@ -1681,14 +1843,39 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             return releaseUnusableSession(context);
         }
-        return settleUnprovenBackgroundRows(context)
+        CompletableFuture<Boolean> attempt = new CompletableFuture<>();
+        context.lock();
+        try {
+            if (context.releaseAttempt() != null) {
+                return context.releaseAttempt();
+            }
+            context.releaseAttempt(attempt);
+        } finally {
+            context.unlock();
+        }
+        CompletionStage<Boolean> run = settleUnprovenBackgroundRows(context)
                 .thenCompose(ignored -> releaseSessionAfterSweep(context));
+        run.whenComplete((result, error) -> {
+            if (error != null) {
+                context.releaseAttempt(null);
+                attempt.completeExceptionally(unwrap(error));
+            } else {
+                // A negative answer keeps the join but frees the latch, so
+                // the next caller gets a fresh attempt, not this one.
+                if (!Boolean.TRUE.equals(result)) {
+                    context.releaseAttempt(null);
+                }
+                attempt.complete(result);
+            }
+        });
+        return attempt;
     }
 
     private CompletionStage<Boolean> releaseSessionAfterSweep(
             SessionContext context) {
         boolean backgroundBusy;
-        synchronized (context) {
+        context.lock();
+        try {
             if (context.release() != null) {
                 return context.release();
             }
@@ -1703,51 +1890,25 @@ public final class RuntimeBrokerService implements AutoCloseable {
             backgroundBusy = executionRepository.hasActiveByRuntimeSession(
                     context.binding().getBindingId(), context.binding().getGeneration(),
                     context.session().getRuntimeSessionId());
+        } finally {
+            context.unlock();
         }
         if (!backgroundBusy) {
             return completeSessionRelease(context);
         }
-        // A running background Shell is a drain, not an immediate busy
-        // refusal: the worker's release route drains the Session's Shells
-        // first, the sweep then settles whatever the drain ended, and the
-        // complete release converges on what is genuinely still running.
-        return drainBackgroundSession(context)
-                .thenCompose(ignored -> settleUnprovenBackgroundRows(context))
-                .thenCompose(ignored -> completeSessionRelease(context));
-    }
-
-    /**
-     * One transport.release whose busy answer is swallowed: the worker's
-     * route drains BEFORE it refuses, so a 409 `managed_activation_conflict`
-     * still means the drain ran; any other failure stands. The maintenance
-     * routes are not activation-gated, so the sweep afterwards can still
-     * prove what the drain ended.
-     */
-    private CompletionStage<Boolean> drainBackgroundSession(
-            SessionContext context) {
-        return mapFailure(safeStage(() -> transport.release(context.lease(),
-                context.session())), "runtime_session_release_failed",
-                "Runtime Session release failed")
-                .handle((released, error) -> {
-                    if (error == null) {
-                        return released;
-                    }
-                    if (unwrap(error) instanceof RuntimeBrokerException failure
-                            && failure.getStatusCode() == 409
-                            && "managed_activation_conflict".equals(failure.getCode())) {
-                        return (Boolean) null;
-                    }
-                    throw unwrap(error) instanceof RuntimeException runtime
-                            ? runtime
-                            : new RuntimeException(unwrap(error));
-                });
+        // The sweep already issued each row's stop and settled every end
+        // it could prove; what it could not prove keeps its hold — busy
+        // is the accurate answer here, never a speculative teardown.
+        return failed(conflict("runtime_session_busy",
+                "Runtime Session has an active background process"));
     }
 
     private CompletionStage<Boolean> completeSessionRelease(
             SessionContext context) {
         CompletableFuture<Boolean> result;
         RuntimeSessionRecord releasing;
-        synchronized (context) {
+        context.lock();
+        try {
             if (context.release() != null) {
                 return context.release();
             }
@@ -1766,6 +1927,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             result = new CompletableFuture<>();
             context.release(result);
+        } finally {
+            context.unlock();
         }
         mapFailure(safeStage(() -> transport.release(context.lease(),
                 context.session())), "runtime_session_release_failed",
@@ -1819,9 +1982,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     });
         }
         return selected.thenApply(context -> {
-            synchronized (context) {
+            context.lock();
+            try {
                 requireSameSession(context.session(), session);
                 return requireReadySessionRecord(context);
+            } finally {
+                context.unlock();
             }
         });
     }
@@ -2065,7 +2231,35 @@ public final class RuntimeBrokerService implements AutoCloseable {
             return failed(conflict("runtime_broker_recovery_blocked",
                     "Managed Runtime recovery is blocked."));
         }
-        BindingRenewal renewal = new BindingRenewal(claimed);
+        RuntimeBindingRecord admitted;
+        try {
+            provisioner.reserveResource(claimed);
+        } catch (RuntimeException failure) {
+            boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
+                    && ((request.isManagedContext() && brokerFailure.getStatusCode() == 409
+                            && "workspace_csi_busy".equals(brokerFailure.getCode()))
+                            || (!request.isManagedContext() && "kubernetes-scratch".equals(request.getProvisionerKind())
+                                    && brokerFailure.getStatusCode() == 503
+                                    && "runtime_kubernetes_capacity".equals(brokerFailure.getCode())));
+            if (!busy) {
+                blockRecoveryQuietly(claimed, failure);
+            }
+            releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
+            return failed(failure);
+        }
+        try {
+            admitted = bindingRepository.renewOperation(claimed.getBindingId(), brokerOwnerId,
+                    claimed.getOperationGeneration(), operationLeaseDuration);
+        } catch (RuntimeException failure) {
+            blockRecoveryQuietly(claimed, failure);
+            releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
+            return failed(failure);
+        }
+        if (admitted == null) {
+            releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
+            return failed(unavailable("runtime_provision_fenced", "Runtime provisioning claim expired"));
+        }
+        BindingRenewal renewal = new BindingRenewal(admitted);
         renewal.start();
         String bindingId = claimed.getBindingId();
         long operationGeneration = claimed.getOperationGeneration();
@@ -3115,6 +3309,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         } catch (RuntimeException | Error exception) {
             dispatches.remove(prepared.getExecutionCallId(), created);
             created.completeExceptionally(exception);
+            if (exception instanceof RuntimeBrokerException refused) {
+                throw refused;
+            }
             throw unavailable("runtime_execution_dispatch_failed",
                     "Runtime execution dispatch failed", exception);
         }
@@ -3201,6 +3398,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     try {
                         settleExecution(executing.getExecutionCallId(),
                                 executing.getDispatchGeneration(), result);
+                        settleUnstartedBackgroundSiblings(
+                                executing.getExecutionCallId(), result);
                     } catch (RuntimeException exception) {
                         markUnknown(executing.getExecutionCallId(),
                                 executing.getDispatchGeneration());
@@ -3337,6 +3536,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     || !ownsDispatch(current, claimed)) {
                 return current;
             }
+            if (current.getState() != ToolExecutionRecord.State.DISPATCHING) {
+                return null;
+            }
             ToolExecutionRecord replacement;
             if (current.isCancelRequested()) {
                 replacement = current.withResult(
@@ -3346,9 +3548,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 replacement = current.withState(
                         ToolExecutionRecord.State.EXECUTING, false);
             }
-            ToolExecutionRecord updated = executionRepository.compareAndSet(
-                    current, replacement, brokerOwnerId,
-                    claimed.getDispatchGeneration());
+            ToolExecutionRecord updated = current.isCancelRequested()
+                    ? executionRepository.compareAndSet(current, replacement, brokerOwnerId,
+                            claimed.getDispatchGeneration())
+                    : bindingRepository.authorizeDispatch(sessionRepository, executionRepository, current,
+                            brokerOwnerId, claimed.getDispatchGeneration());
             if (updated != null) {
                 return updated;
             }
@@ -3657,6 +3861,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     ? executionRepository.resolveUnsettled(current, result, clock.instant())
                     : executionRepository.resolveUnknown(current, result, clock.instant());
             if (resolved != null) {
+                settleUnstartedBackgroundSiblings(
+                        unknown.getExecutionCallId(), result);
                 return new ExecutionReconciliation(resolved,
                         ExecutionReconciliation.Outcome.RESOLVED,
                         runtimeState);
@@ -4134,6 +4340,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private static final class SessionContext {
+        // One guard for the state below and every context.lock() region at
+        // the callers. Like them it must not pin a virtual-thread carrier
+        // when a repository call inside the guard blocks (JDK 21).
+        private final ReentrantLock guard = new ReentrantLock();
         private final RuntimeSession session;
         private final RuntimeBindingRecord binding;
         private final RuntimeLease lease;
@@ -4142,12 +4352,24 @@ public final class RuntimeBrokerService implements AutoCloseable {
         private final Set<String> backgroundProcesses = new LinkedHashSet<>();
         private int activeControls;
         private CompletableFuture<Boolean> release;
+        // One release attempt at a time per context: the sweep's controls
+        // belong to whoever holds this, so a concurrent caller joins it
+        // instead of sweeping against it and reading its own attempts busy.
+        private CompletableFuture<Boolean> releaseAttempt;
 
         SessionContext(RuntimeSession session, RuntimeBindingRecord binding,
                 RuntimeLease lease) {
             this.session = session;
             this.binding = binding;
             this.lease = lease;
+        }
+
+        void lock() {
+            guard.lock();
+        }
+
+        void unlock() {
+            guard.unlock();
         }
 
         RuntimeSession session() {
@@ -4163,31 +4385,83 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
 
         Set<String> backgroundProcesses() {
-            return backgroundProcesses;
+            lock();
+            try {
+                return backgroundProcesses;
+            } finally {
+                unlock();
+            }
         }
 
-        synchronized void beginControl() {
-            activeControls++;
+        void beginControl() {
+            lock();
+            try {
+                activeControls++;
+            } finally {
+                unlock();
+            }
         }
 
-        synchronized void endControl() {
-            activeControls--;
+        void endControl() {
+            lock();
+            try {
+                activeControls--;
+            } finally {
+                unlock();
+            }
         }
 
-        synchronized boolean hasActiveControl() {
-            return activeControls > 0;
+        boolean hasActiveControl() {
+            lock();
+            try {
+                return activeControls > 0;
+            } finally {
+                unlock();
+            }
         }
 
-        synchronized CompletableFuture<Boolean> release() {
-            return release;
+        CompletableFuture<Boolean> release() {
+            lock();
+            try {
+                return release;
+            } finally {
+                unlock();
+            }
         }
 
-        synchronized void release(CompletableFuture<Boolean> next) {
-            release = next;
+        void release(CompletableFuture<Boolean> next) {
+            lock();
+            try {
+                release = next;
+            } finally {
+                unlock();
+            }
+        }
+
+        CompletableFuture<Boolean> releaseAttempt() {
+            lock();
+            try {
+                return releaseAttempt;
+            } finally {
+                unlock();
+            }
+        }
+
+        void releaseAttempt(CompletableFuture<Boolean> next) {
+            lock();
+            try {
+                releaseAttempt = next;
+            } finally {
+                unlock();
+            }
         }
     }
 
     private final class BindingRenewal implements AutoCloseable {
+        // A monitor here would pin a virtual-thread carrier whenever a
+        // guarded repository call blocks on the database (JDK 21);
+        // the lock parks without pinning instead.
+        private final ReentrantLock monitor = new ReentrantLock();
         private final AtomicReference<RuntimeBindingRecord> current;
         private final AtomicBoolean valid = new AtomicBoolean(true);
         private final AtomicBoolean stopped = new AtomicBoolean();
@@ -4197,70 +4471,100 @@ public final class RuntimeBrokerService implements AutoCloseable {
             current = new AtomicReference<>(claimed);
         }
 
-        synchronized void start() {
-            long delay = renewalDelayMillis(operationLeaseDuration);
-            task = renewalScheduler.scheduleWithFixedDelay(this::renew, delay,
-                    delay, TimeUnit.MILLISECONDS);
-        }
-
-        synchronized RuntimeBindingRecord stopAndGet() {
-            close();
-            return !closed.get() && valid.get() ? current.get() : null;
-        }
-
-        synchronized boolean persistResourceHandle(
-                RuntimeResourceHandle handle) {
-            if (closed.get() || !valid.get()) {
-                return false;
-            }
-            RuntimeBindingRecord expected = current.get();
-            RuntimeBindingRecord updated = bindingRepository.compareAndSet(
-                    expected, expected.withResourceHandle(handle,
-                            clock.instant()));
-            if (updated == null) {
-                valid.set(false);
-                close();
-                return false;
-            }
-            current.set(updated);
-            return true;
-        }
-
-        private synchronized void renew() {
-            // stopped is per-instance: cancel(false) cannot retract a tick
-            // already waiting on this monitor, so once close() ran the tick
-            // must return here rather than renew a claim its owner has
-            // started renewing inline. The window is staged and pinned for
-            // the provision-path shape, where persistResourceHandle can hold
-            // this monitor while a tick queues behind it
-            // (DurableRuntimeRecoveryTest.stoppedFlagRetractsATickQueuedBehindClose);
-            // the LOST-branch shape has no third monitor holder, so there it
-            // remains a timing-only guarantee.
-            if (stopped.get() || closed.get()) {
-                close();
-                return;
-            }
-            RuntimeBindingRecord expected = current.get();
+        void start() {
+            monitor.lock();
             try {
-                RuntimeBindingRecord renewed =
-                        bindingRepository.renewOperation(
-                                expected.getBindingId(), brokerOwnerId,
-                                expected.getOperationGeneration(),
-                                operationLeaseDuration);
-                if (renewed == null) {
-                    valid.set(false);
-                    close();
-                } else {
-                    current.set(renewed);
+                long delay = renewalDelayMillis(operationLeaseDuration);
+                task = renewalScheduler.scheduleWithFixedDelay(this::renew,
+                        delay, delay, TimeUnit.MILLISECONDS);
+            } finally {
+                monitor.unlock();
+            }
+        }
+
+        RuntimeBindingRecord stopAndGet() {
+            monitor.lock();
+            try {
+                closeLocked();
+                return !closed.get() && valid.get() ? current.get() : null;
+            } finally {
+                monitor.unlock();
+            }
+        }
+
+        boolean persistResourceHandle(
+                RuntimeResourceHandle handle) {
+            monitor.lock();
+            try {
+                if (closed.get() || !valid.get()) {
+                    return false;
                 }
-            } catch (RuntimeException exception) {
-                valid.set(false);
-                close();
+                RuntimeBindingRecord expected = current.get();
+                RuntimeBindingRecord updated = bindingRepository.compareAndSet(
+                        expected, expected.withResourceHandle(handle,
+                                clock.instant()));
+                if (updated == null) {
+                    valid.set(false);
+                    closeLocked();
+                    return false;
+                }
+                current.set(updated);
+                return true;
+            } finally {
+                monitor.unlock();
+            }
+        }
+
+        private void renew() {
+            monitor.lock();
+            try {
+                // stopped is per-instance: cancel(false) cannot retract a
+                // tick already waiting on this monitor, so once close() ran
+                // the tick must return here rather than renew a claim its
+                // owner has started renewing inline. The window is staged
+                // and pinned for the provision-path shape, where
+                // persistResourceHandle can hold this monitor while a tick
+                // queues behind it
+                // (DurableRuntimeRecoveryTest.stoppedFlagRetractsATickQueuedBehindClose);
+                // the LOST-branch shape has no third monitor holder, so
+                // there it remains a timing-only guarantee.
+                if (stopped.get() || closed.get()) {
+                    closeLocked();
+                    return;
+                }
+                RuntimeBindingRecord expected = current.get();
+                try {
+                    RuntimeBindingRecord renewed =
+                            bindingRepository.renewOperation(
+                                    expected.getBindingId(), brokerOwnerId,
+                                    expected.getOperationGeneration(),
+                                    operationLeaseDuration);
+                    if (renewed == null) {
+                        valid.set(false);
+                        closeLocked();
+                    } else {
+                        current.set(renewed);
+                    }
+                } catch (RuntimeException exception) {
+                    valid.set(false);
+                    closeLocked();
+                }
+            } finally {
+                monitor.unlock();
             }
         }
 
         @Override
-        public synchronized void close() {
+        public void close() {
+            monitor.lock();
+            try {
+                closeLocked();
+            } finally {
+                monitor.unlock();
+            }
+        }
+
+        private void closeLocked() {
             stopped.set(true);
             if (task != null) {
                 task.cancel(false);
@@ -4269,6 +4573,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private final class DispatchRenewal implements AutoCloseable {
+        // Same virtual-thread rule as BindingRenewal: guarded repository
+        // calls must not pin the caller's carrier while they block.
+        private final ReentrantLock monitor = new ReentrantLock();
         private final String executionCallId;
         private final long dispatchGeneration;
         private ScheduledFuture<?> task;
@@ -4279,34 +4586,54 @@ public final class RuntimeBrokerService implements AutoCloseable {
             this.dispatchGeneration = dispatchGeneration;
         }
 
-        synchronized void start() {
-            long delay = renewalDelayMillis(dispatchLeaseDuration);
-            task = renewalScheduler.scheduleWithFixedDelay(this::renew, delay,
-                    delay, TimeUnit.MILLISECONDS);
+        void start() {
+            monitor.lock();
+            try {
+                long delay = renewalDelayMillis(dispatchLeaseDuration);
+                task = renewalScheduler.scheduleWithFixedDelay(this::renew,
+                        delay, delay, TimeUnit.MILLISECONDS);
+            } finally {
+                monitor.unlock();
+            }
         }
 
-        private synchronized void renew() {
-            if (closed.get()) {
-                close();
-                return;
-            }
+        private void renew() {
+            monitor.lock();
             try {
-                ToolExecutionRecord renewed =
-                        executionRepository.renewDispatch(executionCallId,
-                                brokerOwnerId, dispatchGeneration,
-                                dispatchLeaseDuration);
-                if (renewed == null) {
-                    executionRepository.claimDispatch(executionCallId,
-                            brokerOwnerId, dispatchLeaseDuration);
-                    close();
+                if (closed.get()) {
+                    closeLocked();
+                    return;
                 }
-            } catch (RuntimeException exception) {
-                // A transient repository failure does not prove claim loss.
+                try {
+                    ToolExecutionRecord renewed =
+                            executionRepository.renewDispatch(
+                                    executionCallId, brokerOwnerId,
+                                    dispatchGeneration,
+                                    dispatchLeaseDuration);
+                    if (renewed == null) {
+                        executionRepository.claimDispatch(executionCallId,
+                                brokerOwnerId, dispatchLeaseDuration);
+                        closeLocked();
+                    }
+                } catch (RuntimeException exception) {
+                    // A transient repository failure does not prove claim loss.
+                }
+            } finally {
+                monitor.unlock();
             }
         }
 
         @Override
-        public synchronized void close() {
+        public void close() {
+            monitor.lock();
+            try {
+                closeLocked();
+            } finally {
+                monitor.unlock();
+            }
+        }
+
+        private void closeLocked() {
             if (task != null) {
                 task.cancel(false);
             }

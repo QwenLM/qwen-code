@@ -65,6 +65,9 @@ function fakeProcess(evidence: ChildRunExitEvidence): ManagedChildRunProcess {
     async terminate(): Promise<ChildRunExitEvidence | null> {
       return evidence;
     },
+    async settleOnEmpty(): Promise<ChildRunExitEvidence | null> {
+      return evidence;
+    },
   } as unknown as ManagedChildRunProcess;
 }
 
@@ -235,6 +238,9 @@ describe('ManagedShellRuntime', () => {
         targetChild.emit('exit', null, 'SIGTERM');
         return targetEvidence;
       },
+      async settleOnEmpty(): Promise<ChildRunExitEvidence | null> {
+        return targetEvidence;
+      },
     } as unknown as ManagedChildRunProcess;
     registry.register({
       unitName: 'qwen-bg-target',
@@ -310,6 +316,66 @@ describe('ManagedShellRuntime', () => {
     expect(
       await runtime.control('another-session', operation('shell-status')),
     ).toEqual({ operationId: 'abc.def-ghi', state: 'unknown' });
+  });
+
+  it('supervises a natural end until its unit proves empty, never settling exited over live members', async () => {
+    const registry = new ManagedBackgroundShellRegistry(10);
+    const daemonChild = fakeChild();
+    let evidence: ChildRunExitEvidence | null = null;
+    daemonChild.on('exit', (code, signal) => {
+      evidence = {
+        exitCode: typeof code === 'number' ? code : null,
+        exitSignal: typeof signal === 'string' ? signal : null,
+      };
+    });
+    let drain: () => void = () => undefined;
+    const membership = new Promise<void>((resolve) => {
+      drain = resolve;
+    });
+    // The H7b/H5 shape: the root exits while the unit still holds members —
+    // the settle waits for the drain, never claims exited over live members.
+    const daemon = {
+      unitName: 'qwen-bg-daemon',
+      child: daemonChild,
+      get exited() {
+        return evidence !== null;
+      },
+      get evidence() {
+        return evidence;
+      },
+      async terminate(): Promise<ChildRunExitEvidence | null> {
+        return evidence;
+      },
+      async settleOnEmpty(): Promise<ChildRunExitEvidence | null> {
+        await membership;
+        return evidence;
+      },
+    } as unknown as ManagedChildRunProcess;
+    const stored = doubles();
+    const completion = registry.register({
+      unitName: 'qwen-bg-daemon',
+      sessionId: SESSION,
+      process: daemon,
+      sink: stored.sink as ManagedShellCaptureSink,
+      publisher: stored.publisher,
+      identity: stored.sink.identity as Parameters<
+        typeof registry.register
+      >[0]['identity'],
+    });
+    daemonChild.emit('exit', 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The root's exit alone answered nothing: the hold and the record wait.
+    expect(registry.hasHolds(SESSION)).toBe(true);
+    expect(
+      (await registry.describeFinished('qwen-bg-daemon'))?.receipt,
+    ).toBeUndefined();
+    drain();
+    const finished = await completion;
+    expect(finished.evidence).toEqual({ exitCode: 0, exitSignal: null });
+    expect(registry.hasHolds(SESSION)).toBe(false);
+    expect(
+      (await registry.describeFinished('qwen-bg-daemon'))?.receipt.evidence,
+    ).toEqual({ exitCode: 0, exitSignal: null });
   });
 
   it('stays unknown when the end carried no evidence it could keep', async () => {

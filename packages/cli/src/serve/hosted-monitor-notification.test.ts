@@ -45,6 +45,19 @@ describe('monitor task-notification envelope', () => {
     expect(text).not.toContain('tool-use-id');
     expect(text).toContain('<result>a\nb\nc</result>');
   });
+
+  it('caps each result line at Legacy’s 2000 with the truncated marker', () => {
+    const text = monitorNotificationText({
+      monitorId: 'watch-3',
+      toolUseId: null,
+      description: 'chatty watch',
+      eventCount: 3,
+      lines: ['x'.repeat(2_100), 'short'],
+    });
+    expect(text).toContain('...[truncated]');
+    expect(text).not.toContain('x'.repeat(2_000) + 'x');
+    expect(text).toContain('\nshort</result>');
+  });
 });
 
 describe('pending session inputs', () => {

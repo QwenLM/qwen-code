@@ -157,6 +157,9 @@ class PlannedTaskContractTest {
         tasks.put("has_more", true);
         check("PublicTaskList", "more tasks without any cursor", tasks,
                 false);
+        // Make the instance valid again before the unknown field lands,
+        // or the check answers the cursor rule, not the schema rule.
+        tasks.put("next_cursor", "cursor-1");
         tasks.put("unknown_field", "x");
         check("PublicTaskList", "task list with an unknown field", tasks,
                 false);
@@ -179,6 +182,9 @@ class PlannedTaskContractTest {
         events.remove("next_cursor");
         check("PublicTaskEventList", "more events without any cursor",
                 events, false);
+        // Make the instance valid again before the unknown field lands,
+        // or the check answers the cursor rule, not the schema rule.
+        events.put("next_cursor", "cursor-1");
         events.put("unknown_field", "x");
         check("PublicTaskEventList", "event list with an unknown field",
                 events, false);

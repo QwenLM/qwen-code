@@ -151,24 +151,33 @@ public class ManagedTaskService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_limit",
                     "Limit must be between 1 and 100.");
         }
-        CursorPositions positions = events.positions(tenantId, sessionId,
-                taskId);
         long position;
         if (after == null || after.isEmpty()) {
-            position = positions.expiredThrough();
+            position = events.positions(tenantId, sessionId, taskId)
+                    .expiredThrough();
         } else {
             position = ManagedTaskEventStore.decodeCursor(taskId, after);
-            if (position < positions.expiredThrough()) {
-                throw new ApiException(HttpStatus.CONFLICT, "cursor_expired",
-                        "The task event cursor is below the task's durable"
-                                + " retention floor.");
-            }
         }
         EventPage page = events.read(tenantId, sessionId, taskId, position,
                 limit);
+        // Events are read before the visible floor, and the floor is
+        // monotonic: a floor not above the cursor after the read was not
+        // above it during the read either, so an expiry that crossed the
+        // cursor mid-read must surface as the contract's 409, not a page
+        // that silently skips what the expiry then deleted. The omitted-
+        // after branch never claims a position, so it re-reads the current
+        // floor for its empty-page cursor rather than an older one.
+        long floor = events.positions(tenantId, sessionId, taskId)
+                .expiredThrough();
+        if (after != null && !after.isEmpty() && position < floor) {
+            throw new ApiException(HttpStatus.CONFLICT, "cursor_expired",
+                    "The task event cursor is below the task's durable"
+                            + " retention floor.");
+        }
         String nextCursor;
         if (page.events().isEmpty()) {
-            nextCursor = ManagedTaskEventStore.encodeCursor(taskId, position);
+            nextCursor = ManagedTaskEventStore.encodeCursor(taskId,
+                    Math.max(position, floor));
         } else {
             TaskEvent last = page.events().get(page.events().size() - 1);
             nextCursor = ManagedTaskEventStore.encodeCursor(taskId,

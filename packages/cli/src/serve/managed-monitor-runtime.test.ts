@@ -86,6 +86,9 @@ function fakeWatch(
       }
       return current;
     },
+    async settleOnEmpty(): Promise<ChildRunExitEvidence | null> {
+      return current;
+    },
   } as unknown as ManagedChildRunProcess;
 }
 

@@ -46,5 +46,4 @@ export interface ManagedShellOperationView {
   readonly state: 'exited' | 'running' | 'unknown';
   readonly unitName?: string;
   readonly evidence?: ManagedShellExitEvidence;
-  readonly error?: { readonly code: string };
 }

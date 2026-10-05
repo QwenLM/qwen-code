@@ -38,7 +38,10 @@ import {
   type ManagedToolReference,
 } from './managed-runtime-tool-executor.js';
 import { computeManagedContextDigest } from './managed-workspace-binding.js';
-import { registerManagedContextRoutes } from './managed-context-worker.js';
+import {
+  registerManagedContextRoutes,
+  selectShellCapturePublisher,
+} from './managed-context-worker.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
@@ -1581,5 +1584,74 @@ describe('background Shell supervisor injection', () => {
       (withRoot as unknown as { backgroundSupervisor?: unknown })
         .backgroundSupervisor,
     ).toBeDefined();
+  });
+});
+
+describe('selectShellCapturePublisher', () => {
+  const request = (background: boolean) => ({
+    reference: { sessionId: 's', promptId: 'p', callId: 'c' },
+    capture: { executionCallId: 'e', background },
+  });
+  const doubles = (local: boolean, remote: boolean) => ({
+    remotePublishers: {
+      hasSession: vi.fn(() => local),
+      prepare: vi.fn(async () => ({ identity: { lane: 'local' } })),
+    },
+    remotePublisher: {
+      hasExecution: vi.fn(() => remote),
+      prepare: vi.fn(async () => ({ identity: { lane: 'remote' } })),
+    },
+  });
+
+  it('hands a background capture to its Session publisher', async () => {
+    const { remotePublishers, remotePublisher } = doubles(true, true);
+    const publisher = selectShellCapturePublisher(
+      remotePublishers as never,
+      remotePublisher as never,
+    );
+    const prepared = await publisher.prepare(request(true) as never);
+    expect(remotePublishers.prepare).toHaveBeenCalledOnce();
+    expect(remotePublisher.prepare).not.toHaveBeenCalled();
+    expect(prepared.identity).toEqual({ lane: 'local' });
+    expect(prepared.publisher).toBe(remotePublishers);
+  });
+
+  it('refuses a background capture whose Session never registered a publisher', async () => {
+    const { remotePublishers, remotePublisher } = doubles(false, true);
+    const publisher = selectShellCapturePublisher(
+      remotePublishers as never,
+      remotePublisher as never,
+    );
+    await expect(publisher.prepare(request(true) as never)).rejects.toThrow(
+      'Background captures require their Session publisher.',
+    );
+    expect(remotePublisher.prepare).not.toHaveBeenCalled();
+  });
+
+  it('hands a foreground execution its own publication while the Session lane is registered', async () => {
+    const { remotePublishers, remotePublisher } = doubles(true, true);
+    const publisher = selectShellCapturePublisher(
+      remotePublishers as never,
+      remotePublisher as never,
+    );
+    // The mixed topology is ordinary now: the execution belongs to its
+    // publication grant, the background lane to the Session — sharing them
+    // is never a conflict.
+    const prepared = await publisher.prepare(request(false) as never);
+    expect(remotePublisher.prepare).toHaveBeenCalledOnce();
+    expect(remotePublishers.prepare).not.toHaveBeenCalled();
+    expect(prepared.identity).toEqual({ lane: 'remote' });
+    expect(prepared.publisher).toBe(remotePublisher);
+  });
+
+  it('keeps the Session publisher for a foreground capture when it is the only owner', async () => {
+    const { remotePublishers, remotePublisher } = doubles(true, false);
+    const publisher = selectShellCapturePublisher(
+      remotePublishers as never,
+      remotePublisher as never,
+    );
+    const prepared = await publisher.prepare(request(false) as never);
+    expect(prepared.identity).toEqual({ lane: 'local' });
+    expect(prepared.publisher).toBe(remotePublishers);
   });
 });

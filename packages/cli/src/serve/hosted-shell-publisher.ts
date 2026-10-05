@@ -23,6 +23,7 @@ import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
+import { buildMonitorNotificationInput } from './hosted-monitor-notification.js';
 import type { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import {
   ResourceToolResultSegmentStore,
@@ -59,13 +60,25 @@ interface RegisteredCapture {
   // H3: the open-ended background capture of a proven child_run or
   // monitor_run start, with the manifest revisions it has already
   // forwarded to the record. A Monitor watch also carries the observer
-  // the hosted observation loop registers on it.
+  // the hosted observation loop registers on it. A finalize the record's
+  // state refused is remembered as `refusedBody` until `settleAttached`
+  // re-drives it, so a watch that ended before its start receipt landed
+  // still completes its own settle without any client retry.
   background?: {
     sink?: LocalShellStreamCapture;
     lastManifest: ManagedSessionDurableRef | null;
     recordDomain: 'child_run' | 'monitor_run';
     remainder: string;
     decoder: StringDecoder;
+    refusedBody?: Record<string, unknown>;
+    // A refused finalize whose record is already attached re-drives
+    // itself: the route's stash alone cannot heal a stranded record whose
+    // worker finalized exactly once and moved on. Attempts are bounded,
+    // and any in-flight attempt joins the drain's wait set so a Session
+    // close can never outrun it.
+    redrive?: NodeJS.Timeout;
+    redriveAttempts?: number;
+    redriveInFlight?: Promise<void>;
     observer?: {
       onLine: (line: string) => void;
       onExit: (failed: boolean) => void;
@@ -76,6 +89,11 @@ interface RegisteredCapture {
 type BackgroundCaptureRequest = LocalShellCaptureRequest & {
   readonly capture: { readonly background?: boolean };
 };
+
+// Bounded self re-drive of a refused finalize: one transient 5xx cannot
+// strand an attached record, and neither can a brief store outage.
+const MAX_REDRIVE_ATTEMPTS = 3;
+const REDRIVE_BACKOFF_MS = 250;
 
 export class HostedShellPublisher {
   private readonly token = randomBytes(32).toString('base64url');
@@ -92,6 +110,7 @@ export class HostedShellPublisher {
     private readonly assertWritable: () => Promise<void>,
     private readonly childRuns?: HostedChildRunSession,
     private readonly monitors?: HostedMonitorSession,
+    private readonly onNotification?: () => void,
   ) {}
 
   async start(): Promise<ShellPublisherDescriptor> {
@@ -262,6 +281,12 @@ export class HostedShellPublisher {
         ));
         entry.sink = (await prepared).sink;
         entry.background.sink = entry.sink as LocalShellStreamCapture;
+        entry.background.sink.onBrokenAnnounce = async () => {
+          await this.advanceBackgroundManifest(
+            entry,
+            String(capture['executionCallId']),
+          );
+        };
         // The open manifest is what any reader sees before exit.
         await entry.background.sink.open();
         await this.advanceBackgroundManifest(
@@ -313,7 +338,13 @@ export class HostedShellPublisher {
       }
       entry.offsets[stream] += bytes.byteLength;
       await sink.write(stream, bytes);
-      await this.advanceBackgroundManifest(entry, String(id));
+      try {
+        await this.advanceBackgroundManifest(entry, String(id));
+      } catch {
+        // A record-side forward failure never poisons a byte that already
+        // landed: the next edging write retries the forward. The tray's
+        // settle arms keep their fail-stop, which is where integrity lives.
+      }
       if (
         entry.background?.recordDomain === 'monitor_run' &&
         stream === 'stdout'
@@ -337,7 +368,12 @@ export class HostedShellPublisher {
         throw new Error('Invalid Shell finish.');
       entry.ended[stream] = true;
       await sink.finish(stream, body['complete']);
-      await this.advanceBackgroundManifest(entry, String(id));
+      try {
+        await this.advanceBackgroundManifest(entry, String(id));
+      } catch {
+        // Same retry rule as the write op: the stream's durable seal
+        // landed, the record forward retries on the next arm.
+      }
       return { accepted: true };
     }
     if (body['operation'] === 'finalize') {
@@ -355,11 +391,42 @@ export class HostedShellPublisher {
       if (entry.finalizing) return entry.finalizing;
       if (entry.background) {
         entry.finalizing = this.finalizeBackground(entry, body, String(id));
-        entry.envelope = await entry.finalizing;
+        try {
+          entry.envelope = await entry.finalizing;
+          entry.background.refusedBody = undefined;
+        } catch (cause) {
+          // A rejected finalize must never pin the capture: a retry after
+          // the cause resolved reads a clean settle attempt, not this
+          // permanent refusal. The refused body stays remembered too, so
+          // the settle the record's state missed — a watch that ended
+          // before its start receipt landed — completes on attach without
+          // any client retry.
+          entry.finalizing = undefined;
+          entry.background.refusedBody = body;
+          const owner =
+            entry.background.recordDomain === 'monitor_run'
+              ? this.monitors?.record(String(id))
+              : this.childRuns?.record(String(id));
+          // An attached record that missed the final forward otherwise
+          // strands forever: the worker finalizes once and drops the hold.
+          // The same stash re-drives itself, bounded and drain-aware, so a
+          // brief store outage cannot strand it either; a retry the client
+          // or the attach path already owns guards this out.
+          if (owner?.startReceiptRef) {
+            entry.background.redriveAttempts = 1;
+            this.scheduleRedrive(String(id), entry);
+          }
+          throw cause;
+        }
         return entry.envelope;
       }
       entry.finalizing = this.finalize(entry, body);
-      entry.envelope = await entry.finalizing;
+      try {
+        entry.envelope = await entry.finalizing;
+      } catch (cause) {
+        entry.finalizing = undefined;
+        throw cause;
+      }
       return entry.envelope;
     }
     if (body['operation'] === 'accept') {
@@ -524,6 +591,11 @@ export class HostedShellPublisher {
         `Monitor ${executionCallId} has no registered observation watch.`,
       );
     background.observer = observer;
+    // Lines that arrived before the observation arm attached were kept in
+    // the remainder rather than dropped; they replay here, in order.
+    if (background.remainder.length > 0) {
+      this.fanMonitorLines(background, Buffer.alloc(0));
+    }
   }
 
   /**
@@ -532,7 +604,9 @@ export class HostedShellPublisher {
    * a chunk ends inside it; a blank line consumes no observation, exactly
    * like the Legacy emit path (the durable stream holds its bytes
    * regardless); the watch-side remainder survives across chunks, and the
-   * Legacy partial-line cap is honored.
+   * Legacy partial-line cap is honored. Until an observer registers, the
+   * decoded text accumulates in the remainder — the start-to-attach
+   * window is small — so those lines replay instead of dying unseen.
    */
   private fanMonitorLines(
     background: {
@@ -545,9 +619,9 @@ export class HostedShellPublisher {
     },
     chunk: Buffer,
   ): void {
+    background.remainder += background.decoder.write(chunk);
     const observer = background.observer;
     if (!observer) return;
-    background.remainder += background.decoder.write(chunk);
     let at = background.remainder.indexOf('\n');
     while (at >= 0) {
       const line = background.remainder.slice(0, at);
@@ -557,7 +631,16 @@ export class HostedShellPublisher {
       if (line.length > 0) observer.onLine(line);
       at = background.remainder.indexOf('\n');
     }
-    if (background.remainder.length > 4096) background.remainder = '';
+    if (background.remainder.length > 4096) {
+      // The Legacy partial-line cap force-emits: the truncated prefix with
+      // an ellipsis becomes one observation and the rest of the overlong
+      // line is gone by design — never a silent clear that loses it all,
+      // and never an observation for only some of it later.
+      const truncated = background.remainder.slice(0, 4096) + '...';
+      background.remainder = '';
+      if (observer) observer.onLine(truncated);
+      else background.remainder = truncated;
+    }
   }
 
   /**
@@ -570,11 +653,33 @@ export class HostedShellPublisher {
     executionCallId: string,
   ): Promise<void> {
     const background = entry.background;
-    if (!background?.sink || !this.childRuns) return;
+    if (!background?.sink) return;
     const current = background.sink.currentManifest;
     if (current && current !== background.lastManifest) {
+      // The open manifest exists for readers from its first page on, but
+      // the record quotes it only once a start receipt exists: output
+      // before a start receipt is a parse-level refusal, never a commit.
+      const owner =
+        background.recordDomain === 'monitor_run'
+          ? this.monitors?.record(executionCallId)
+          : this.childRuns?.record(executionCallId);
+      if (!owner) {
+        throw new Error(
+          `The ${background.recordDomain} record for ${executionCallId} is missing.`,
+        );
+      }
+      if (owner.startReceiptRef === null) return;
+      if (background.recordDomain === 'monitor_run') {
+        if (!this.monitors) return;
+        await this.monitors.advanceOutput(executionCallId, current);
+      } else {
+        if (!this.childRuns) return;
+        await this.childRuns.advanceOutput(executionCallId, current);
+      }
+      // Advance mark comes last: a thrown forward is retried by the next
+      // edging write with the same or a newer manifest — never latched
+      // permanently ahead of the record.
       background.lastManifest = current;
-      await this.childRuns.advanceOutput(executionCallId, current);
     }
   }
 
@@ -619,6 +724,12 @@ export class HostedShellPublisher {
         exitCode: physical['exitCode'] as number | null,
         exitSignal: physicalSignalName(physical['signal'] as number | null),
       };
+      // A null pair is no evidence at all: the worker's end-without-proof
+      // path reports exactly that, and settling it as an exit would either
+      // be refused by the record or would record an exit nothing proved.
+      if (evidence.exitCode === null && evidence.exitSignal === null) {
+        evidence = null;
+      }
       sink.setStarted(1);
       sink.setProcessResult({
         exitCode: physical['exitCode'] as number | null,
@@ -654,7 +765,7 @@ export class HostedShellPublisher {
       background.recordDomain === 'monitor_run'
         ? background.observer
         : undefined;
-    if (observer && background.recordDomain === 'monitor_run') {
+    if (background.recordDomain === 'monitor_run') {
       background.remainder += background.decoder.end();
     }
     if (observer && background.remainder.length > 0) {
@@ -662,14 +773,81 @@ export class HostedShellPublisher {
       background.remainder = '';
     }
     if (background.recordDomain === 'monitor_run') {
-      observer?.onExit(evidence === null);
-      if (evidence === null) {
-        await this.monitors?.settleFailed(executionCallId, {
-          stopReason: 'watch_failed',
-          started: true,
-        });
+      const exit = observer?.onExit(evidence === null);
+      if (exit !== undefined) {
+        // An observed capture's loop owns the terminal settle: flush →
+        // settle lands inside this one chain, so the last window is
+        // committed before anything can settle the record, and its
+        // commit failures surface here instead of dying in the void.
+        await exit;
+      } else if (this.monitors) {
+        // An end whose observation arm never attached still commits the
+        // tail its stream already decoded: the final window lands as its
+        // own observation revision with its own wake input, and only then
+        // does the record settle. An empty end takes no observation, as
+        // the Legacy emit-at-zero shape held.
+        const record = this.monitors.record(executionCallId);
+        if (record === undefined) {
+          throw new Error(
+            `The monitor_run record for ${executionCallId} is missing.`,
+          );
+        }
+        const windowLines = background.remainder
+          .split('\n')
+          .filter((line) => line.length > 0);
+        if (windowLines.length > 0) {
+          const args = JSON.parse(
+            (
+              await this.monitors.resourceStore.read(record.commandRef)
+            ).toString('utf8'),
+          ) as Record<string, unknown>;
+          const description =
+            typeof args['description'] === 'string' &&
+            args['description'].trim()
+              ? (args['description'] as string)
+              : typeof args['command'] === 'string'
+                ? (args['command'] as string)
+                : executionCallId;
+          const input = await buildMonitorNotificationInput({
+            monitorId: executionCallId,
+            toolUseId: record.run.executionCallId,
+            description,
+            sequence: record.observationSequence + 1,
+            lines: windowLines,
+            resourceStore: this.monitors.resourceStore,
+          });
+          await this.monitors.observe(
+            executionCallId,
+            { lines: windowLines },
+            { input },
+          );
+          // Consume the tail only once its observation committed: a refused
+          // commit (the record is not attached yet) keeps the lines for the
+          // retry that settles this watch after the start receipt lands.
+          background.remainder = '';
+          this.onNotification?.();
+        }
+        const last =
+          windowLines.length > 0
+            ? record.observationSequence + 1
+            : record.observationSequence;
+        if (last >= record.maxEvents) {
+          await this.monitors.settleQuiet(executionCallId, 'max_events');
+        } else if (evidence === null) {
+          await this.monitors.settleFailed(executionCallId, {
+            stopReason: 'watch_failed',
+            started: true,
+          });
+        } else {
+          await this.monitors.settleQuiet(executionCallId, 'exited');
+        }
       } else {
-        await this.monitors?.settleQuiet(executionCallId, 'exited');
+        // A monitor_run capture is admitted only where its Session record
+        // exists, so a finalize without the Session handle can never
+        // settle it — refuse loudly rather than skipping the settle.
+        throw new Error(
+          `The monitor_run record for ${executionCallId} has no monitor session to settle it.`,
+        );
       }
       return envelope;
     }
@@ -710,6 +888,63 @@ export class HostedShellPublisher {
     return receipt;
   }
 
+  /**
+   * Re-drives a finalize the record's pre-attach state refused. The
+   * refused body stays on the entry, and once the record carries its start
+   * receipt the exact same chain — manifest advance, tail observation,
+   * record settle — completes without any client retry. A retry the client
+   * already drives owns the attempt and is never duplicated here.
+   */
+  async settleAttached(executionCallId: string): Promise<void> {
+    const entry = this.captures.get(executionCallId);
+    const background = entry?.background;
+    const body = background?.refusedBody;
+    if (!entry || !background || body === undefined) return;
+    if (entry.finalizing) return;
+    if (background.redrive !== undefined) {
+      clearTimeout(background.redrive);
+      background.redrive = undefined;
+    }
+    background.redriveAttempts = undefined;
+    background.refusedBody = undefined;
+    entry.finalizing = this.finalizeBackground(entry, body, executionCallId);
+    try {
+      entry.envelope = await entry.finalizing;
+    } catch (cause) {
+      entry.finalizing = undefined;
+      background.refusedBody ??= body;
+      throw cause;
+    }
+  }
+
+  private scheduleRedrive(executionCallId: string, entry: RegisteredCapture) {
+    const background = entry.background;
+    if (!background || background.redrive !== undefined) return;
+    const attempt = background.redriveAttempts ?? 1;
+    const redrive = setTimeout(
+      () => {
+        background.redrive = undefined;
+        background.redriveInFlight = this.settleAttached(executionCallId)
+          .then(() => undefined)
+          .catch(() => {
+            if (
+              background.refusedBody !== undefined &&
+              attempt < MAX_REDRIVE_ATTEMPTS
+            ) {
+              background.redriveAttempts = attempt + 1;
+              this.scheduleRedrive(executionCallId, entry);
+            }
+          })
+          .finally(() => {
+            background.redriveInFlight = undefined;
+          });
+      },
+      (attempt - 1) * REDRIVE_BACKOFF_MS,
+    );
+    if (typeof redrive.unref === 'function') redrive.unref();
+    background.redrive = redrive;
+  }
+
   close(): Promise<void> {
     return (this.closePromise ??= this.drain());
   }
@@ -722,6 +957,16 @@ export class HostedShellPublisher {
       );
     }
     await Promise.allSettled([...this.operations]);
+    // The stranded-write fail stop stands, but a re-drive already on its
+    // way lands inside the drain: no close answers ahead of it either.
+    await Promise.allSettled(
+      [...this.captures.values()].map(
+        (entry) => entry.background?.redriveInFlight,
+      ),
+    );
+    for (const entry of this.captures.values()) {
+      if (entry.background?.redrive) clearTimeout(entry.background.redrive);
+    }
     // The publisher closes only at the Session's ordered close, after the
     // last finalization landed (or accurately did not), so every capture
     // store closes here — background families included.
