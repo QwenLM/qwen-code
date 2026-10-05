@@ -2236,6 +2236,30 @@ describe('WebShellSidebar rail navigation', () => {
     expect(onCollapsedChange).not.toHaveBeenCalled();
   });
 
+  it('closes the rail More popover when the rail unmounts under it', async () => {
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="More"]',
+        )!,
+      ),
+    );
+    await flushSidebar();
+    expect(
+      document.querySelector('[data-web-shell-sidebar-more]'),
+    ).not.toBeNull();
+
+    // The rail subtree owns the popover; a layout change unmounts its
+    // owner, so the round trip must not leave a phantom menu behind.
+    renderSidebar(false, { layout: 'single' });
+    await flushSidebar();
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+    expect(document.querySelector('[data-web-shell-sidebar-more]')).toBeNull();
+  });
+
   it('restores the persisted width from state when a drag collapses the sidebar', async () => {
     window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '420');
     const onCollapsedChange = vi.fn();

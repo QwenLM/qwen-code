@@ -3497,7 +3497,23 @@ export function App({
       window.removeEventListener('keydown', onKey, true);
     };
   }, [mobileDrawerOpen, closeMobileDrawer]);
+  // Shared writer for every collapse entrance — its inputs need refs:
+  // `sidebarCollapsed` would close over the mount-time value, and
+  // `splitFoldedSidebar` (declared around 9447) sits after this callback in
+  // the component body, so a dependency on it would throw TDZ during render.
+  const sidebarCollapsedRef = useRef(sidebarCollapsed);
+  sidebarCollapsedRef.current = sidebarCollapsed;
+  const splitFoldedSidebarRef = useRef(false);
   const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
+    // In the split-view fold band the auto-fold, not the user, owns the
+    // rendered state. Every entrance — the Cmd/Ctrl+B shortcut AND the
+    // rail's Collapse/Expand button — must preserve the stored preference
+    // there: a visually no-op interaction that rewrote it to `false` would
+    // be unrecoverable in the band (the button can only ever request that
+    // value), so the writer re-stores the current preference instead.
+    const target = splitFoldedSidebarRef.current
+      ? sidebarCollapsedRef.current
+      : collapsed;
     const layout = sidebarLayoutRef.current;
     const root = layout?.getRootNode();
     const focused =
@@ -3508,14 +3524,14 @@ export function App({
       layout?.contains(focused) &&
       focused.closest('[data-web-shell-home-column]')
     ) {
-      const target =
+      const focusTarget =
         layout.querySelector<HTMLElement>(
           '[data-web-shell-navigation-rail] [data-web-shell-sidebar-collapse]',
         ) ?? layout.querySelector<HTMLElement>('[data-web-shell-home-trigger]');
-      target?.focus();
+      focusTarget?.focus();
     }
-    setSidebarCollapsed(collapsed);
-    writeSidebarCollapsed(collapsed);
+    setSidebarCollapsed(target);
+    writeSidebarCollapsed(target);
   }, []);
 
   const customization = useMemo(
@@ -9446,6 +9462,7 @@ export function App({
   // stored value (and a stored `true` can never be reached again).
   const splitFoldedSidebar =
     mainView === 'split' && !splitSidebarHasRoom && !mobileDrawerOpen;
+  splitFoldedSidebarRef.current = splitFoldedSidebar;
   // The collapsed value the sidebar actually renders: the split-view
   // auto-fold and the mobile drawer override the persisted preference.
   // Keyboard toggles and dock breakpoints must read this expression, not the
@@ -9582,9 +9599,7 @@ export function App({
         }
         return;
       }
-      handleSidebarCollapsedChange(
-        splitFoldedSidebar ? sidebarCollapsed : !sidebarCollapsedEffective,
-      );
+      handleSidebarCollapsedChange(!sidebarCollapsedEffective);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -9592,9 +9607,7 @@ export function App({
     sidebarOptions.enabled,
     mobileDrawerOpen,
     forceMobileDrawer,
-    sidebarCollapsed,
     sidebarCollapsedEffective,
-    splitFoldedSidebar,
     sidebarLayoutWidth,
     handleSidebarCollapsedChange,
   ]);

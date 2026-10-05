@@ -1063,9 +1063,12 @@ export function WebShellSidebar({
   const [localFilesSlot, setLocalFilesSlot] = useState<HTMLDivElement | null>(
     null,
   );
+  // The rail subtree owns the More popover; a layout change unmounts that
+  // owner, so reset alongside mobileOpen/collapsed/activePage — or the rail
+  // returns with a phantom menu the user never reopened.
   useEffect(() => {
     setMoreOpen(false);
-  }, [mobileOpen, collapsed, activePage]);
+  }, [mobileOpen, collapsed, activePage, layout]);
   const railLayout = layout === 'rail';
   const [navigationHint, setNavigationHint] =
     useState<HTMLButtonElement | null>(null);
