@@ -68,9 +68,10 @@ public class PublicAgentController {
                     "Phase 1 streams through the Session events route.");
         }
         CommandAdmission admission = selection == null
-                ? service.createSession(tenant.tenantId(), idempotencyKey,
-                        request.agentId(), request.agentRevision(), null,
-                        request.metadata(), request.input())
+                ? service.createSession(tenant.tenantId(), tenant.actorId(),
+                        idempotencyKey, request.agentId(),
+                        request.agentRevision(), null, request.metadata(),
+                        request.input())
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), idempotencyKey,
                         request.agentId(), request.agentRevision(), null,

@@ -17,6 +17,7 @@ import {
   type ManagedSessionInputRequest,
 } from './managed-session-authority.js';
 import {
+  MANAGED_EXTENSION_RECORD_BODIES,
   managedExtensionRecordKey,
   type ManagedTaskProjection,
 } from './managed-extension-projection.js';
@@ -284,16 +285,14 @@ async function commitLife(
 
 const TASK_ID = `task_${managedExtensionRecordKey(sessionId, 'monitor_run', 'monitor-1')}`;
 
-async function publishedBodies(harness: Harness): Promise<number> {
+async function publishedBodies(
+  harness: Harness,
+  kind = 'managed-monitor_run',
+): Promise<number> {
   try {
     return (
       await fs.readdir(
-        path.join(
-          harness.runtimeBaseDir,
-          'resources',
-          sessionId,
-          'managed-monitor_run',
-        ),
+        path.join(harness.runtimeBaseDir, 'resources', sessionId, kind),
       )
     ).length;
   } catch (error) {
@@ -368,6 +367,7 @@ describe('managed-extension-projection/1 monitor chains', () => {
         );
       }
       const before = authority.committedSequence;
+      const bodiesBefore = await publishedBodies(harness);
       const next =
         each.reuseCommandOf === undefined
           ? command('chain:next')
@@ -383,6 +383,8 @@ describe('managed-extension-projection/1 monitor chains', () => {
         ),
       ).rejects.toThrow(ManagedSessionRecordError);
       expect(authority.committedSequence).toBe(before);
+      // Refused before publishing, so a retry loop leaves no body behind.
+      expect(await publishedBodies(harness)).toBe(bodiesBefore);
     });
   });
 });
@@ -588,6 +590,168 @@ describe('managed session authority Stage H records', () => {
     });
   });
 
+  it('refuses a malformed command identity before publishing it', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      // The commit marker refuses these identities too, but only after the
+      // body is published, so each retry would orphan one more body.
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:\u0001note'),
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        /command\.commandId must not contain control characters/,
+      );
+      await expect(
+        authority.commitExtensionRecord(
+          command('a'.repeat(513)),
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/command\.commandId exceeds 512 UTF-8 bytes/);
+      await expect(
+        authority.commitExtensionRecord(
+          { ...command('monitor-1:op'), operation: 'x'.repeat(4097) },
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/command\.operation exceeds 4096 UTF-8 bytes/);
+      await expect(
+        authority.commitExtensionRecord(
+          { ...command('monitor-1:digest'), contentDigest: 'not-a-digest' },
+          { domain: 'monitor_run', record: LIFE[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        /command\.contentDigest must be a lowercase SHA-256 hex digest/,
+      );
+      await expect(
+        authority.commitDomainRecord(
+          command('rename:goal\u0001'),
+          {
+            domain: 'goal_state',
+            content: { goalId: 'goal-1', title: 'goal' },
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        /command\.commandId must not contain control characters/,
+      );
+      expect(await publishedBodies(harness)).toBe(0);
+      expect(await publishedBodies(harness, 'managed-goal_state')).toBe(0);
+    });
+  });
+
+  it('refuses the actor or the input before publishing it', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:actor'),
+          { domain: 'monitor_run', record: LIFE[0] },
+          { class: 'authority' },
+        ),
+      ).rejects.toThrow(/must not be requested by authority/);
+      await expect(
+        authority.commitDomainRecord(
+          command('rename:actor'),
+          {
+            domain: 'goal_state',
+            content: { goalId: 'goal-1', title: 'goal' },
+          },
+          { class: 'authority' },
+        ),
+      ).rejects.toThrow(/must not be requested by authority/);
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:input'),
+          {
+            domain: 'monitor_run',
+            record: LIFE[0],
+            input: {
+              inputId: '',
+              turnId: 'monitor-1:input',
+              source: 'monitor',
+              contentRef: await harness.store.publish(
+                'managed-input',
+                Buffer.from('{"text":"changed"}', 'utf8'),
+              ),
+              deadline: null,
+              admissionRef: await harness.store.publish(
+                'managed-admission',
+                Buffer.from('{}', 'utf8'),
+              ),
+              wakeReason: 'input',
+            },
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/inputId/);
+      await expect(
+        authority.commitDomainRecord(
+          { ...command('rename:stale-sequence'), expectedSequence: 99 },
+          {
+            domain: 'goal_state',
+            content: { goalId: 'goal-1', title: 'stale' },
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/expectedSequence 99 does not match/);
+      // Refused before publishing: no monitor or goal-state body landed.
+      expect(await publishedBodies(harness)).toBe(0);
+      expect(await publishedBodies(harness, 'managed-goal_state')).toBe(0);
+      // Positive control: produced commits publish exactly one body each.
+      await authority.commitExtensionRecord(
+        command('monitor-1:1'),
+        { domain: 'monitor_run', record: LIFE[0] },
+        TRUSTED,
+      );
+      expect(await publishedBodies(harness)).toBe(1);
+      await authority.commitDomainRecord(
+        command('rename:goal'),
+        {
+          domain: 'goal_state',
+          content: { goalId: 'goal-1', title: 'grown' },
+        },
+        TRUSTED,
+      );
+      expect(await publishedBodies(harness, 'managed-goal_state')).toBe(1);
+      // An accepted input commits its events once; the same input under a
+      // fresh command is refused by the preflight, before the body lands.
+      const input: ManagedSessionInputRequest = {
+        inputId: 'monitor-1:notify:1',
+        turnId: 'monitor-1:notify:1',
+        source: 'monitor',
+        contentRef: await harness.store.publish(
+          'managed-input',
+          Buffer.from('{"text":"changed"}', 'utf8'),
+        ),
+        deadline: null,
+        admissionRef: await harness.store.publish(
+          'managed-admission',
+          Buffer.from('{}', 'utf8'),
+        ),
+        wakeReason: 'input',
+      };
+      await authority.commitExtensionRecord(
+        command('monitor-1:2'),
+        { domain: 'monitor_run', record: LIFE[1], input },
+        TRUSTED,
+      );
+      const bodiesAfterInput = await publishedBodies(harness);
+      await expect(
+        authority.commitExtensionRecord(
+          command('monitor-1:dup'),
+          { domain: 'monitor_run', record: LIFE[2], input },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/is already committed/);
+      expect(await publishedBodies(harness)).toBe(bodiesAfterInput);
+    });
+  });
+
   it('keeps the Stage H event IDs for Stage H records', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
@@ -782,6 +946,7 @@ describe('managed session authority Stage H records', () => {
           TRUSTED,
         ),
       ).rejects.toThrow(/has no Stage H record body/);
+      expect(await publishedBodies(harness, 'managed-schedule')).toBe(0);
       enablement.monitorRun = false;
       await expect(
         authority.commitExtensionRecord(
@@ -790,6 +955,7 @@ describe('managed session authority Stage H records', () => {
           TRUSTED,
         ),
       ).rejects.toThrow(/not enabled for submission/);
+      expect(await publishedBodies(harness)).toBe(0);
     });
   });
 
@@ -806,6 +972,8 @@ describe('managed session authority Stage H records', () => {
         expect(
           authority.extensionRecord('monitor_run', 'monitor-1'),
         ).toMatchObject({ revision: 5, operationId: 'monitor-1:1' });
+        // A rebuilt authority holds exactly the bodies it committed.
+        expect(await publishedBodies(harness)).toBe(5);
         await expect(
           authority.commitExtensionRecord(
             command('monitor-1:bad'),
@@ -813,6 +981,7 @@ describe('managed session authority Stage H records', () => {
             TRUSTED,
           ),
         ).rejects.toThrow(ManagedSessionConflictError);
+        expect(await publishedBodies(harness)).toBe(5);
         harness.now = 6_000;
         const next = await authority.commitExtensionRecord(
           command('monitor-1:6'),
@@ -827,6 +996,72 @@ describe('managed session authority Stage H records', () => {
       },
       { create: false },
     );
+  });
+
+  it('reopens over a record committed before its domain had a body', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      // commitDomainRecord serves the envelope domains already enabled: its
+      // body is the envelope, which no closed Stage H body can parse.
+      await authority.commitDomainRecord(
+        command('rename:goal'),
+        {
+          domain: 'goal_state',
+          content: { goalId: 'goal-1', title: 'pre-body' },
+        },
+        TRUSTED,
+      );
+    });
+    const bodies = MANAGED_EXTENSION_RECORD_BODIES as unknown as Record<
+      string,
+      unknown
+    >;
+    bodies['goal_state'] = MANAGED_EXTENSION_RECORD_BODIES['monitor_run'];
+    // The registry is mutable here only because this file's vi.mock of
+    // './managed-extension-projection.js' returns a plain object literal.
+    const reads = vi.spyOn(harness.store, 'read');
+    try {
+      await withAuthority(
+        harness,
+        async (authority) => {
+          // The envelope is skipped as a pre-registration record; nothing
+          // materializes from it.
+          expect(authority.taskViews()).toEqual([]);
+          expect(reads).toHaveBeenCalledTimes(1);
+        },
+        { create: false },
+      );
+    } finally {
+      delete bodies['goal_state'];
+    }
+  });
+
+  it('reads each committed body once for the same views across a restart', async () => {
+    const harness = await createHarness();
+    const before = await withAuthority(harness, async (authority) => {
+      await commitLife(harness, authority, 3);
+      return {
+        views: authority.taskViews(),
+        extensionRecord: authority.extensionRecord('monitor_run', 'monitor-1'),
+      };
+    });
+    const reads = vi.spyOn(harness.store, 'read');
+    await withAuthority(
+      harness,
+      async (authority) => {
+        expect(authority.taskViews()).toEqual(before.views);
+        expect(
+          authority.extensionRecord('monitor_run', 'monitor-1'),
+        ).toMatchObject({
+          recordId: before.extensionRecord!.recordId,
+          revision: before.extensionRecord!.revision,
+          recordRef: before.extensionRecord!.recordRef,
+        });
+      },
+      { create: false },
+    );
+    // One serialized body read per committed revision, never a re-read.
+    expect(reads).toHaveBeenCalledTimes(3);
   });
 
   it('fails to reopen when a committed body is missing', async () => {
@@ -871,7 +1106,12 @@ describe('managed session authority Stage H records', () => {
   it('issues grants the Runtime gate installs, renews and replaces', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
-      await commitLife(harness, authority, 5);
+      await commitLife(harness, authority, 4);
+      const fifth = await authority.commitExtensionRecord(
+        command('monitor-1:5'),
+        { domain: 'monitor_run', record: LIFE[4] },
+        TRUSTED,
+      );
       const request = {
         domain: 'monitor_run' as const,
         recordId: 'monitor-1',
@@ -886,9 +1126,10 @@ describe('managed session authority Stage H records', () => {
         operationId: 'monitor-1:1',
         domain: 'monitor_run',
         operationRevision: 5,
+        ownerId: 'runtime-monitor-owner',
+        workspaceGeneration: '3',
         resourceScope: {
-          recordRef: authority.extensionRecord('monitor_run', 'monitor-1')
-            ?.recordRef,
+          recordRef: fifth.recordRef,
           phases: ['rebuild_watch'],
         },
         expiresAt: harness.now + 30_000,
@@ -916,7 +1157,7 @@ describe('managed session authority Stage H records', () => {
       );
 
       harness.now = 6_000;
-      await authority.commitExtensionRecord(
+      const latest = await authority.commitExtensionRecord(
         command('monitor-1:6'),
         { domain: 'monitor_run', record: LIFE[5] },
         TRUSTED,
@@ -926,6 +1167,14 @@ describe('managed session authority Stage H records', () => {
           authority.issueOperationGrant({ ...request, ownerId: 'other-owner' }),
         ),
       ).toBe('installed');
+      // The plan names the revision's own resource, captured independently
+      // across the revision bump, not whatever the map holds when read.
+      expect(authority.issueOperationGrant(request)).toMatchObject({
+        operationRevision: 6,
+        ownerId: 'runtime-monitor-owner',
+        workspaceGeneration: '3',
+        resourceScope: { recordRef: latest.recordRef },
+      });
     });
   });
 

@@ -246,7 +246,12 @@ describe('email admission and delivery', () => {
     ])
       append(raw(header.replace(/\W/g, ''), 'secret', [header]));
     append(raw('good'));
-    await vi.waitFor(() => expect(fixture.sent).toHaveBeenCalledTimes(1));
+    // Nine denied messages are parsed and persist-skipped before the good
+    // one is admitted; the 1s default waitFor budget flakes on contended CI
+    // hosts (#13433).
+    await vi.waitFor(() => expect(fixture.sent).toHaveBeenCalledTimes(1), {
+      timeout: 10_000,
+    });
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(fixture.sourceReads).toEqual([fixture.next - 1]);
   });

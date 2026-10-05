@@ -49,7 +49,7 @@ Runtime Broker repository 已经定义了持久化身份、生命周期状态、
 
 控制操作限定为现有私有 Runtime kind：`bind-history`、`checkpoint`、`history`、`manifest`、`begin-turn`、`prepare`、`confirmation`、`confirm` 和 `preflight`，并要求进程内 Session 对应的 repository 记录仍为 `READY`。
 
-释放操作首先拒绝仍有未结算 execution 的 Session。服务持久化 `RELEASING`，调用 Runtime transport，并仅在收到肯定的释放确认后持久化 `RELEASED`。不确定或否定的释放结果保留为 `RELEASING`，调用方可以重试幂等 Runtime release，而不是重新打开 Session。一旦 `RELEASED` 已持久化，重复 release 无需依赖已移除的进程内路由，也不会再次调用 Runtime，而是直接返回成功。
+释放操作首先拒绝仍有未结算 execution 的 Session。拒绝与 RELEASING 转换在同一事务内提交，事务持有准入同样获取的 Session 行锁，因此共享数据库的两个 Broker 进程无法在检查与转换之间插入准入。服务持久化 `RELEASING`，调用 Runtime transport，并仅在收到肯定的释放确认后持久化 `RELEASED`。不确定或否定的释放结果保留为 `RELEASING`，调用方可以重试幂等 Runtime release，而不是重新打开 Session。一旦 `RELEASED` 已持久化，重复 release 无需依赖已移除的进程内路由，也不会再次调用 Runtime，而是直接返回成功。
 
 ## Tool execution 生命周期
 
@@ -79,7 +79,7 @@ G2 现已在 Broker 获取持久 READY Session 时加入自动分页证据对账
 
 服务只使用进程内 future 合并同一 Broker 实例中的重复供应、Session acquire 和 dispatch 工作。repository version 和 lease 仍是状态变更的权威依据。`brokerOwnerId` 必须标识一个存活 Broker 进程；外部工作活跃期间，operation claim 和 dispatch claim 按配置租期的三分之一间隔续租。
 
-关闭服务后会拒绝新工作、取消内部等待者，并停止服务自身持有的续租 scheduler。关闭并不声明进行中的外部工作已经停止；过期的 repository claim 会保留 fail-closed 的接管语义。
+关闭服务后会拒绝新工作、取消内部等待者，并停止服务自身持有的调度器——续约运行在独立线程池，因此卡住的续约不再占用协调线程，协调运行在单线程。卡住的续约仍持有该 claim 的续约监视器，而围栏与结算路径会取这把监视器，所以一次足够长的存储停顿仍可能通过它阻塞协调。关闭并不声明进行中的外部工作已经停止；过期的 repository claim 会保留 fail-closed 的接管语义。
 
 ## 错误与安全
 
@@ -97,7 +97,7 @@ Runtime token 保留在 `RuntimeLease` 中。服务会把 lease 交给 binding r
 - 不确定的 execution transport 失败进入 `UNKNOWN`。
 - 对账只在查询结果为 `settled` 且结果有效时结算 `UNKNOWN` execution。非终态、`unknown`、格式错误的响应和 transport 失败都保持 `UNKNOWN`，任何情况都不会再次调用 `execute`。
 - 对账只询问原始的、存活且已 attestation 的 binding generation；已无法作答的 generation 以不可重试错误终止轮询；不处于 `UNKNOWN` 的记录不做存活检查即以 `ALREADY_SETTLED` 或 `IN_FLIGHT` 作答；并发查询共享一次有时限的 Runtime 调用；并发取消会在结算前被重新读取。
-- 活跃 execution 阻止 Session release；成功释放后 Session 进入 `RELEASED` 并移除进程内路由。
+- 活跃 execution 阻止 Session release（单进程内与共享数据库的跨进程场景均成立）；成功释放后 Session 进入 `RELEASED` 并移除进程内路由。
 - 超过一个租期间隔的 execution 仍持续续租 dispatch claim。
 - Java 21 下 Maven 单元测试和 Checkstyle 通过。
 
