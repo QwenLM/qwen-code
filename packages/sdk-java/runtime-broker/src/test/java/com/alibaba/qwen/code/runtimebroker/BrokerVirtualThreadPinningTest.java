@@ -35,7 +35,11 @@ import org.junit.jupiter.api.Timeout;
 // SessionContext guard), then proves an unrelated virtual-thread probe
 // still completes — the same mechanism the SSE-reader witness pins in
 // qwencode, asserted for the broker guards. The latched wrapper blocks
-// only that one call; everything else runs at in-memory speed.
+// only that one call; everything else runs at in-memory speed. The
+// arrival latch is sized to the carrier count, not the caller count:
+// under a pinning guard only one caller per carrier can ever arrive, so
+// a caller-sized latch would burn the whole timeout before the probe
+// assert below names the starvation.
 class BrokerVirtualThreadPinningTest {
     private static final RuntimeScope SCOPE = new RuntimeScope("tenant",
             "workspace", "1", "/control", "digest", "session");
@@ -63,7 +67,7 @@ class BrokerVirtualThreadPinningTest {
         int carriers = CarrierCount.resolve();
         int callerCount = carriers + 2;
         sessions = new LatchedSessionRepository(
-                new InMemoryRuntimeSessionRepository(), callerCount);
+                new InMemoryRuntimeSessionRepository(), carriers);
         service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(SCOPE),
                 new InlineProvisioner(), new InlineTransport(),
@@ -100,7 +104,7 @@ class BrokerVirtualThreadPinningTest {
                     }
                 }));
             }
-            // Every caller must reach the latched repository call, parked
+            // Every carrier must reach the latched repository call, parked
             // inside its SessionContext guard, before the probe starts;
             // that is exactly the state a pinning runtime wedges.
             sessions.awaitArrived(60, TimeUnit.SECONDS);
@@ -140,9 +144,9 @@ class BrokerVirtualThreadPinningTest {
         private final AtomicInteger waiting = new AtomicInteger();
 
         LatchedSessionRepository(InMemoryRuntimeSessionRepository delegate,
-                int callers) {
+                int arrivals) {
             this.delegate = delegate;
-            arrived = new CountDownLatch(callers);
+            arrived = new CountDownLatch(arrivals);
             open = new CountDownLatch(1);
         }
 

@@ -212,8 +212,9 @@ class HarnessEventStreamPinningTest {
     // Integer.getInteger resolves through Integer.decode, so "0100" would
     // read as 64 while the JVM builds 100 carriers and the witness would
     // under-size its stream fleet. runtime-broker's CarrierCount is the
-    // same read; this module cannot see that test tree.
-    private static int carrierCount() {
+    // same read; this module cannot see that test tree. Package-private
+    // for HarnessEventStreamCarrierCountTest.
+    static int carrierCount() {
         String configured =
                 System.getProperty("jdk.virtualThreadScheduler.parallelism");
         if (configured != null) {
