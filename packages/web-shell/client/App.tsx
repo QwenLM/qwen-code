@@ -3504,35 +3504,44 @@ export function App({
   const sidebarCollapsedRef = useRef(sidebarCollapsed);
   sidebarCollapsedRef.current = sidebarCollapsed;
   const splitFoldedSidebarRef = useRef(false);
-  const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
-    // In the split-view fold band the auto-fold, not the user, owns the
-    // rendered state. Every entrance — the Cmd/Ctrl+B shortcut AND the
-    // rail's Collapse/Expand button — must preserve the stored preference
-    // there: a visually no-op interaction that rewrote it to `false` would
-    // be unrecoverable in the band (the button can only ever request that
-    // value), so the writer re-stores the current preference instead.
-    const target = splitFoldedSidebarRef.current
-      ? sidebarCollapsedRef.current
-      : collapsed;
-    const layout = sidebarLayoutRef.current;
-    const root = layout?.getRootNode();
-    const focused =
-      root instanceof ShadowRoot ? root.activeElement : document.activeElement;
-    if (
-      collapsed &&
-      focused instanceof Element &&
-      layout?.contains(focused) &&
-      focused.closest('[data-web-shell-home-column]')
-    ) {
-      const focusTarget =
-        layout.querySelector<HTMLElement>(
-          '[data-web-shell-navigation-rail] [data-web-shell-sidebar-collapse]',
-        ) ?? layout.querySelector<HTMLElement>('[data-web-shell-home-trigger]');
-      focusTarget?.focus();
-    }
-    setSidebarCollapsed(target);
-    writeSidebarCollapsed(target);
-  }, []);
+  const handleSidebarCollapsedChange = useCallback(
+    (collapsed: boolean, options?: { exitFoldBand?: boolean }) => {
+      // In the split-view fold band the auto-fold, not the user, owns the
+      // rendered state. Every entrance — the Cmd/Ctrl+B shortcut AND the
+      // rail's Collapse/Expand button — must preserve the stored preference
+      // there: a visually no-op interaction that rewrote it to `false` would
+      // be unrecoverable in the band (the button can only ever request that
+      // value), so the writer re-stores the current preference instead.
+      // The carve-out, `exitFoldBand`, marks entrances that reorganize the
+      // layout away from split view: the write is exactly what the user
+      // asked for, not a no-op tap in place, so it bypasses preservation.
+      const preserve =
+        options?.exitFoldBand !== true && splitFoldedSidebarRef.current;
+      const target = preserve ? sidebarCollapsedRef.current : collapsed;
+      const layout = sidebarLayoutRef.current;
+      const root = layout?.getRootNode();
+      const focused =
+        root instanceof ShadowRoot
+          ? root.activeElement
+          : document.activeElement;
+      if (
+        collapsed &&
+        focused instanceof Element &&
+        layout?.contains(focused) &&
+        focused.closest('[data-web-shell-home-column]')
+      ) {
+        const focusTarget =
+          layout.querySelector<HTMLElement>(
+            '[data-web-shell-navigation-rail] [data-web-shell-sidebar-collapse]',
+          ) ??
+          layout.querySelector<HTMLElement>('[data-web-shell-home-trigger]');
+        focusTarget?.focus();
+      }
+      setSidebarCollapsed(target);
+      writeSidebarCollapsed(target);
+    },
+    [],
+  );
 
   const customization = useMemo(
     () => ({
@@ -20113,15 +20122,24 @@ export function App({
                   containerWidth={sidebarLayoutWidth}
                   activePage={sidebarPage}
                   onOpenHome={() => {
-                    // No handleSidebarCollapsedChange here: the rail's
-                    // openNavigation already restores the column when it is
-                    // actually collapsed; writing from inside the forced-open
-                    // mobile drawer would silently clear the desktop
-                    // preference.
+                    // No handleSidebarCollapsedChange here in the general
+                    // case: the rail's openNavigation already restores the
+                    // column when it is actually collapsed, and writing from
+                    // inside the forced-open mobile drawer would silently
+                    // clear the desktop preference. Leaving split view in the
+                    // fold band is the one exception — the rail's
+                    // restoresColumn call is clamped by design for taps that
+                    // stay in split view, so the exit-split entry points
+                    // must restore the user's column themselves.
                     closeMobileDrawer();
                     setSidebarSection('home');
                     splitFoldedByShrinkRef.current = false;
                     returnToChat();
+                    if (splitFoldedSidebarRef.current) {
+                      handleSidebarCollapsedChange(false, {
+                        exitFoldBand: true,
+                      });
+                    }
                   }}
                   onCollapsedChange={handleSidebarCollapsedChange}
                   onOpenSettings={() => {

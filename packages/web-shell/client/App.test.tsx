@@ -44569,6 +44569,52 @@ describe('App sidebar toggle shortcut (#5074 rail follow-ups)', () => {
           .querySelector('[data-testid="sidebar"]')
           ?.getAttribute('data-collapsed'),
       ).toBe('true');
+
+      // The same fold-band tap that EXITS split view is not a no-op: one
+      // Home click must also restore the column it reveals, while the
+      // in-place arms above keep the preference protected.
+      window.localStorage.setItem(
+        'qwen-code-web-shell-sidebar-collapsed',
+        'true',
+      );
+      const { container: homeContainer } = renderApp();
+      await flush();
+      const homeLayout = homeContainer.querySelector(
+        '[data-sidebar-shell]',
+      )!.parentElement!;
+      const homeResize = observers.get(homeLayout)!;
+      Object.defineProperty(homeLayout, 'clientWidth', {
+        configurable: true,
+        value: 1100,
+      });
+      await act(async () => {
+        homeResize([], {} as ResizeObserver);
+      });
+      await act(async () => {
+        homeContainer
+          .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        homeContainer
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('true');
+      await act(async () => {
+        homeContainer
+          .querySelector<HTMLButtonElement>('[data-testid="open-home"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        homeContainer
+          .querySelector('[data-testid="sidebar"]')
+          ?.getAttribute('data-collapsed'),
+      ).toBe('false');
+      expect(
+        window.localStorage.getItem('qwen-code-web-shell-sidebar-collapsed'),
+      ).toBe('false');
       // Return the shared preference to the expanded default so later tests
       // in this describe mount the same sidebar state as before.
       window.localStorage.removeItem('qwen-code-web-shell-sidebar-collapsed');
