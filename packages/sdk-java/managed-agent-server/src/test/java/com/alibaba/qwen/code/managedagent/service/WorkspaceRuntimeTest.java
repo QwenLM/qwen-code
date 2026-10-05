@@ -458,11 +458,10 @@ class WorkspaceRuntimeTest {
                     fixture.lease(), fixture.record().getSession()));
             verify(fixture.http(), never()).installContext(any(), any(),
                     any(), any());
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                            + " managed_workspace_execution_lease WHERE"
-                            + " tenant_id = ? AND storage_id = ? AND"
-                            + " holder_key IS NOT NULL", Integer.class,
-                    "tenant", "storage")).isZero();
+            // The ordering the name claims: no claim was recorded, so a
+            // rival can still take the storage. A claim-before-validate
+            // mutant strands the rival behind workspace_busy instead.
+            authority.claim(session.workspace(), holder(session, "rival"));
         } finally {
             java.nio.file.Files.setPosixFilePermissions(sealed,
                     java.nio.file.attribute.PosixFilePermissions
@@ -874,9 +873,15 @@ class WorkspaceRuntimeTest {
         return "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8)));
     }
 
+    // Every refusal this helper names is the structural, terminal verdict:
+    // a retryable workspace_unavailable at any of these call sites is a
+    // silently re-classified acquire path, and this is where it goes red.
     private static void assertUnavailable(Runnable operation) {
         assertThatThrownBy(operation::run).isInstanceOfSatisfying(RuntimeBrokerException.class,
-                error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+                error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(error.isRetryable()).isFalse();
+                });
     }
 
     private static void assertBusy(Runnable operation) {

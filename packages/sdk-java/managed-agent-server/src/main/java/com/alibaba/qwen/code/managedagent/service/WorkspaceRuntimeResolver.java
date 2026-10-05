@@ -94,7 +94,8 @@ final class WorkspaceRuntimeResolver {
         verifyMountIntact(mount);
         requireDirectory(mount.root().toString(), targetCwdRelative);
         try {
-            authority.verifyMount(new ContextBinding(binding.getTenantId(),
+            authority.verifyMountForProbe(new ContextBinding(
+                    binding.getTenantId(),
                     binding.getWorkspaceId(),
                     binding.getWorkspaceGeneration(),
                     binding.getStorageId(),
@@ -129,16 +130,27 @@ final class WorkspaceRuntimeResolver {
             Path directory = base.resolve(cwdRelative).normalize();
             // The worker's install runs fs.access(R_OK|X_OK); the shared
             // rule must not pass anything it would refuse later, after the
-            // storage claim, as an untyped wedge.
-            if (!directory.startsWith(base) || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
-                    || !directory.toRealPath().equals(directory)
-                    || !Files.isReadable(directory) || !Files.isExecutable(directory)) {
+            // storage claim, as an untyped wedge. The liveness calls must
+            // throw, not answer false like the Files.is* predicates — only
+            // the catch arms may classify momentary-vs-permanent, and a
+            // predicate that answers false would fold a momentary fault
+            // into the terminal verdict.
+            if (!directory.startsWith(base)
+                    || !Files.readAttributes(directory,
+                            BasicFileAttributes.class,
+                            LinkOption.NOFOLLOW_LINKS).isDirectory()
+                    || !directory.toRealPath().equals(directory)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
-        // A vanished target (or a segment of it) is the structural verdict
-        // a terminal failure_code exists to name — only opaque I/O blips
-        // retry.
-        } catch (java.nio.file.NoSuchFileException error) {
+            directory.getFileSystem().provider().checkAccess(directory,
+                    java.nio.file.AccessMode.READ,
+                    java.nio.file.AccessMode.EXECUTE);
+        // A vanished target (or a segment of it), a permission denial or a
+        // security refusal is the structural verdict a terminal failure_code
+        // exists to name — only opaque I/O blips retry.
+        } catch (java.nio.file.NoSuchFileException
+                | java.nio.file.AccessDeniedException | SecurityException
+                | IllegalArgumentException error) {
             throw WorkspaceExecutionStore.unavailable();
         } catch (IOException error) {
             throw WorkspaceExecutionStore.unavailableTransient(error);

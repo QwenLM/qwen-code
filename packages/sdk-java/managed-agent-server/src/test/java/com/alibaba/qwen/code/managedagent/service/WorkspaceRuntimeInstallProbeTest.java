@@ -109,7 +109,7 @@ class WorkspaceRuntimeInstallProbeTest {
         ContextBinding bound = binding("services/api");
         assertThatCode(() -> guarded.verifyInstallable(bound, "services/b"))
                 .doesNotThrowAnyException();
-        org.mockito.Mockito.verify(guard).verify(
+        org.mockito.Mockito.verify(guard).verifyProbe(
                 org.mockito.ArgumentMatchers.argThat(candidate ->
                         "services/b".equals(candidate.getCwdRelative())));
         // The negative half: no second guard call, in particular none
@@ -117,7 +117,7 @@ class WorkspaceRuntimeInstallProbeTest {
         org.mockito.Mockito.verifyNoMoreInteractions(guard);
 
         org.mockito.Mockito.doThrow(WorkspaceExecutionStore.unavailable())
-                .when(guard).verify(
+                .when(guard).verifyProbe(
                         org.mockito.ArgumentMatchers.any(
                                 ContextBinding.class));
         assertThatThrownBy(() -> guarded.verifyInstallable(bound,
@@ -163,6 +163,34 @@ class WorkspaceRuntimeInstallProbeTest {
         assertProbeRefused(resolver, "services/api");
     }
 
+    // The mirror direction: a MOMENTARY I/O failure classifies retryable,
+    // never the terminal verdict — the shared rule probes with throwing
+    // calls, and only the catch arms classify. A single segment past the
+    // filesystem's name limit throws FileSystemException (ENAMETOOLONG)
+    // from the readAttributes probe: a generic IOException — neither
+    // NoSuchFileException nor AccessDeniedException — deterministic on
+    // POSIX. Collapsing the catch(IOException) arm into unavailable()
+    // turns this red.
+    @Test
+    void aMomentaryIoFailureClassifiesRetryable() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(java.nio.file
+                .FileSystems.getDefault().supportedFileAttributeViews()
+                .contains("posix"));
+        Path root = Files.createDirectory(temporary.resolve("mount"))
+                .toRealPath();
+        WorkspaceRuntimeResolver resolver = resolver(root);
+        assertThatThrownBy(() -> resolver.verifyInstallable(
+                binding("services/api"), "a".repeat(256)))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> {
+                            org.assertj.core.api.Assertions.assertThat(
+                                    error.getCode())
+                                    .isEqualTo("workspace_unavailable");
+                            org.assertj.core.api.Assertions.assertThat(
+                                    error.isRetryable()).isTrue();
+                        });
+    }
+
     // The guard verifies the candidate binding, not the current one: a
     // Session whose present directory is already gone must still be
     // movable — that is the escape this feature exists for.
@@ -187,7 +215,7 @@ class WorkspaceRuntimeInstallProbeTest {
 
         assertThatCode(() -> guarded.verifyInstallable(binding("gone"),
                 "next")).doesNotThrowAnyException();
-        org.mockito.Mockito.verify(guard).verify(
+        org.mockito.Mockito.verify(guard).verifyProbe(
                 org.mockito.ArgumentMatchers.argThat(candidate ->
                         "next".equals(candidate.getCwdRelative())));
         // And never against the destroyed current binding.

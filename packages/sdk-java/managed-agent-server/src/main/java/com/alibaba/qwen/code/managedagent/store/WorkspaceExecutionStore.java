@@ -51,10 +51,13 @@ public class WorkspaceExecutionStore {
     }
 
     // The mount guard of an execution authority, without the Session-level
-    // checks; the W2 settlement probe must not fail a Session it only reads.
-    public void verifyMount(ContextBinding binding) {
+    // checks; the W2 settlement probe must not fail a Session it only
+    // reads. It uses the guard's probe-only entry: momentary I/O failures
+    // classify retryable-with-cause, structural refusals keep the terminal
+    // verdict, and the shared acquire path (claim/assertHeld) is untouched.
+    public void verifyMountForProbe(ContextBinding binding) {
         if (storageGuard != null) {
-            storageGuard.verify(binding);
+            storageGuard.verifyProbe(binding);
         }
     }
 

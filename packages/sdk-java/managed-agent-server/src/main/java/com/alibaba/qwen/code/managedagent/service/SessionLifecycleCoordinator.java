@@ -31,14 +31,24 @@ import org.springframework.stereotype.Component;
  * settled without Harness or worker involvement — a read-only mount probe
  * and one revision-CAS commit. A structural probe refusal or a moved fact
  * is a terminal failure that is never retried; a momentary probe failure
- * retries through the same dispatch backoff (unbounded in count, capped in
- * delay) instead of certifying a never-happened verification.
+ * retries through the same dispatch backoff, bounded at
+ * {@link #CWD_CHANGE_ATTEMPT_BUDGET} attempts — a fault that outlives the
+ * budget settles with the typed terminal failure instead of wedging the
+ * Session behind the admission barriers forever, and a refusal that
+ * exhausts it leaves the Session unchanged and executable.
  */
 @Component
 public class SessionLifecycleCoordinator {
     private static final Logger LOG = LoggerFactory.getLogger(
             SessionLifecycleCoordinator.class);
     private static final int SCAN_LIMIT = 50;
+    // A transient cwd-probe refusal re-arms through the capped dispatch
+    // backoff, but only this many times: a fault lasting past the budget
+    // (a retired NFS/FUSE export, a re-pointed mount) is permanent for the
+    // caller, and only database surgery could free a Session the scan kept
+    // re-arming. Greater than one by contract — the first retry's success
+    // is the documented transient case.
+    private static final int CWD_CHANGE_ATTEMPT_BUDGET = 8;
     private final AgentStateStore store;
     private final ManagedSessionStore sessionStore;
     private final HarnessConnector harness;
@@ -166,7 +176,8 @@ public class SessionLifecycleCoordinator {
                             + " failure={} {}",
                     tenantId, sessionId, operationId,
                     claimed.attemptCount() + 1, delay,
-                    error.getClass().getSimpleName(), error.getMessage());
+                    error.getClass().getSimpleName(), error.getMessage(),
+                    error);
         } finally {
             renewal.cancel(false);
         }
@@ -189,14 +200,28 @@ public class SessionLifecycleCoordinator {
         } catch (RuntimeBrokerException error) {
             // A transient probe failure is not the verdict the terminal
             // refusal promises: hand it to the delivery machine's retry
-            // (unbounded in count, capped in delay) instead of writing a
-            // permanent failure.
+            // (capped in delay, bounded in count) instead of writing a
+            // permanent failure — until the budget runs out, at which point
+            // the typed terminal failure is exactly its verdict.
             if (error.isRetryable()) {
+                if (operation.attemptCount() + 1
+                        >= CWD_CHANGE_ATTEMPT_BUDGET) {
+                    if (store.failCwdChangeOperation(tenantId, sessionId,
+                            operationId, owner, operation.claimGeneration(),
+                            error.getCode())) {
+                        LOG.info("Managed Session cwd change failed after"
+                                        + " the probe budget tenant={}"
+                                        + " session={} operation={} code={}",
+                                tenantId, sessionId, operationId,
+                                error.getCode(), error);
+                    }
+                    return;
+                }
                 LOG.info("Managed Session cwd change probe deferred"
                                 + " tenant={} session={} operation={}"
                                 + " code={} {}", tenantId, sessionId,
                         operationId, error.getCode(),
-                        error.getMessage());
+                        error.getMessage(), error);
                 throw error;
             }
             if (store.failCwdChangeOperation(tenantId, sessionId, operationId,

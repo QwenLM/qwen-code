@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
@@ -1113,6 +1114,64 @@ class ManagedCwdChangeOperationTest {
                 .workspace().getContextRevision()).isEqualTo(2);
     }
 
+    // The budget bounds the wedge: a probe that never stops failing
+    // transiently settles with the typed terminal failure after the attempt
+    // budget runs out — the row leaves the deliverable set and BOTH
+    // admission barriers re-open, so a retired NFS/FUSE export never
+    // strands a Session behind session_context_busy /
+    // session_operation_active with only database surgery as a way out.
+    // Removing the budget turns this red: the operation would stay RUNNING
+    // past 8 attempts. (8 must equal the coordinator's attempt budget.)
+    @Test
+    void coordinatorFailsTerminallyWhenTheProbeBudgetIsExhausted() {
+        Fixture fixture = fixture(true);
+        StubWarmer warmer = new StubWarmer();
+        SessionLifecycleCoordinator coordinator = fixture.coordinator(
+                warmer);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        String operationId = begin(fixture, sessionId, "key", "digest",
+                "services/b", 1).operation().operationId();
+        warmer.refuseAlways(WorkspaceExecutionStore.unavailableTransient(
+                new java.io.IOException("stale mount handle")));
+        coordinator.dispatch(TENANT, sessionId, operationId);
+        for (int attempts = 2; attempts <= 8; attempts++) {
+            OperationRecord waiting = fixture.store.findOperation(TENANT,
+                    sessionId, operationId).orElseThrow();
+            assertThat(waiting.state()).isEqualTo("RUNNING");
+            fixture.jdbc.update("UPDATE managed_agent_operation SET"
+                    + " available_at = 0 WHERE tenant_id = ? AND"
+                    + " session_id = ? AND operation_id = ?", TENANT,
+                    sessionId, operationId);
+            coordinator.recoverOperations();
+        }
+        OperationRecord failed = fixture.store.findOperation(TENANT,
+                sessionId, operationId).orElseThrow();
+        assertThat(failed.state()).isEqualTo("FAILED");
+        assertThat(failed.failureCode()).isEqualTo("workspace_unavailable");
+        // The 8th attempt exhausts the budget and writes the terminal row
+        // instead of scheduling retry number 8 — attempts stay at 7.
+        assertThat(failed.attemptCount()).isEqualTo(7);
+        assertThat(fixture.store.findDeliverableOperations(
+                System.currentTimeMillis(), 10)).isEmpty();
+        // The Session row itself never moved.
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getContextRevision()).isEqualTo(1);
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative()).isEqualTo("services/api");
+        // Both admission barriers re-open: a fresh change admits with a
+        // new key and settles, then the later-Turn route answers again.
+        warmer.clearRefusals();
+        String retry = begin(fixture, sessionId, "key-after",
+                "digest-after", "services/c", 1).operation().operationId();
+        OperationRecord reClaimed = claim(fixture, sessionId, retry,
+                "owner");
+        assertThat(settle(fixture, sessionId, retry, "owner",
+                reClaimed.claimGeneration()).completed()).isTrue();
+        var admitted = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
+                "turn-after", "digest", sessionId, List.of(), "payload");
+        assertThat(admitted.turnId()).isNotBlank();
+    }
+
     @Test
     void coordinatorReclaimsADeadOwnersClaimExactlyOnce() {
         Fixture fixture = fixture(true);
@@ -1366,6 +1425,7 @@ class ManagedCwdChangeOperationTest {
     private static final class StubWarmer implements RuntimeWarmer {
         private final java.util.Queue<RuntimeException> behaviors =
                 new ConcurrentLinkedQueue<>();
+        private volatile RuntimeException sticky;
         private final List<String> verified = new CopyOnWriteArrayList<>();
         private final List<ContextBinding> bindings =
                 new CopyOnWriteArrayList<>();
@@ -1390,7 +1450,8 @@ class ManagedCwdChangeOperationTest {
                 String targetCwdRelative) {
             verified.add(targetCwdRelative);
             bindings.add(binding);
-            RuntimeException behavior = behaviors.poll();
+            RuntimeException behavior = sticky != null ? sticky
+                    : behaviors.poll();
             if (behavior != null) {
                 throw behavior;
             }
@@ -1398,6 +1459,15 @@ class ManagedCwdChangeOperationTest {
 
         void refuse(RuntimeException error) {
             behaviors.add(error);
+        }
+
+        void refuseAlways(RuntimeException error) {
+            sticky = error;
+        }
+
+        void clearRefusals() {
+            sticky = null;
+            behaviors.clear();
         }
     }
 

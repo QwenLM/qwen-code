@@ -83,8 +83,8 @@
 2. **确定性结算探针**。新增 `WorkspaceRuntimeResolver.verifyInstallable(binding, targetCwdRelative)`:
    - 经管理员挂载表按 `(tenant, storageId)` 解析挂载,映射缺失即拒绝;
    - 复核挂载的规范路径与 `fileKey`,并在已启用验证恢复时对**候选**绑定(目标目录)执行存储守卫的挂载校验——与 `resolve()` 对该目标的真实获取所做的完全一致;
-   - 执行 `acquire()` 同样的目录规则(`requireDirectory`:拼接、归一化、包含性、`NOFOLLOW_LINKS` 的 `isDirectory`、`toRealPath` 恒等)。
-   - 失败对该 operation 是终态:`failCwdChangeOperation` 记录 `failure_code=workspace_unavailable`,会话保持原 revision。探针运行在**与 worker 相同的主机与挂载快照**之上:其守卫校验**候选**绑定(离开一个已被摧毁的当前目录仍可达——这正是本特性存在的理由),共享目录规则还带上 worker 自己的 `access(R_OK|X_OK)` 检查,probe 不会放过任何 worker 随后才以无类型化楔死呈现的目标。结构性探针拒绝折入类型化终态判定(调用方可重发),拒绝日志带 broker 错误码、异常类与消息;一时的 I/O 失败保留异常因,经交付机械退避重试,而不是把一次从未发生的校验判定成终态。
+   - 执行 `acquire()` 同样的目录规则(`requireDirectory`:拼接、归一化、包含性,活性探测一律用会抛异常的调用——`NOFOLLOW_LINKS` 的 `readAttributes`、`toRealPath` 恒等,以及取代 `Files.is*` 谓词的 `checkAccess(READ, EXECUTE)`——只有 catch 分支负责区分一时故障与永久事实)。
+   - 结构性失败对该 operation 是终态:`failCwdChangeOperation` 记录 `failure_code=workspace_unavailable`,会话保持原 revision。探针运行在**与 worker 相同的主机与挂载快照**之上:其守卫经**探测专用入口**校验**候选**绑定(共享的 acquire 路径保持原有的终态语义;离开一个已被摧毁的当前目录仍可达——这正是本特性存在的理由),共享目录规则还带上 worker 自己的 `access(R_OK|X_OK)` 检查,probe 不会放过任何 worker 随后才以无类型化楔死呈现的目标。结构性探针拒绝折入类型化终态判定(调用方可重发),拒绝日志带 broker 错误码、异常类、消息与保留的异常因;一时的 I/O 失败保留异常因,经交付机械退避重试,而不是把一次从未发生的校验判定成终态——**以 8 次尝试为界**的封顶退避,用尽后以类型化终态结算:已接纳的 operation 必然以类型化状态终止,行离开可投递集合,两道准入屏障重新放行,会话不变且可执行。
 3. **提交**,单事务:锁会话行;复核 `ACTIVE`、期望 revision、无活动 Turn、无其他未关闭 operation,以及与绑定匹配的 Registry 事实加上创建者仍存的授权(`hasCwdChangeRegistryFacts`——即 passive-attachment 的子集;含冻结 profile 引用的完整执行期集合仍由下一轮的 acquire 准入把关);随后更新 `cwd_relative` 与 `context_revision = expected + 1` 并常规递增 `version`,把 operation 标记为 COMPLETED 并写入 `result_context_revision = expected + 1` 与 `receipt_id`,追加 `session.context.changed`(`data: {sessionId, operationId, workspaceId, cwdRelative, contextRevision}`,按 store 事件 data 的 camelCase 惯例,source 为 `operation:<id>:completed`)。committed-event publisher 在提交后经现有 SSE hub 推送。
    - 若复核事实不再成立——revision 已变动为 `context_revision_conflict`、出现 Turn 或其他 operation 为 `session_context_busy`、授权/Registry 事实变化为 `workspace_unavailable`——operation 以对应 `failure_code` 进入 `failed`;由于该事务之前没有任何写入,会话行可证明地保持原上下文。
    - 其他 `RuntimeException`(传输、SQL、时钟)走现有 `retryOperation` 退避重试,不设上限,与生命周期契约一致:已接纳的 operation 不会悄悄死掉。
@@ -134,7 +134,7 @@ WebShell 请求体携带 `sessionId`、`idempotencyKey`、`cwdRelative`、`expec
 
 - **Java**:JDK 21 下 `packages/sdk-java/managed-agent-server` 的 `mvn test` 与 `mvn checkstyle:check`;聚焦的 store/coordinator/controller/contract 测试。
 - **store 准入矩阵**:准入表每一行,含 CAS 前的重放顺序、摘要冲突、跨租户不可见、无读授权 404 `session_not_found` 与有读授权非创建者 403 `session_operation_forbidden`、授权被撤、Registry draining/removed、generation 漂移、期望 revision 不符、G0 初始 Turn 期间的 busy,以及同目录空变更。
-- **结算**:探针失败时会话原样保留且 `failure_code=workspace_unavailable`;外部 revision 变动后提交以 `context_revision_conflict` 失败;提交时出现新活动 Turn 以 `session_context_busy` 失败;瞬时错误重试后成功一次;属主死亡的 LEASED 行回收后恰好完成一次;legacy 生命周期 operation 与 `ACTION_RESPONSE` 不受影响(其测试保持绿色)。
+- **结算**:探针失败时会话原样保留且 `failure_code=workspace_unavailable`;外部 revision 变动后提交以 `context_revision_conflict` 失败;提交时出现新活动 Turn 以 `session_context_busy` 失败;瞬时错误重试后成功一次;永不停歇的瞬时失败在 8 次尝试预算用尽后以类型化终态结算——可投递集合清空、两道准入屏障重新放行;消失的挂载根或目标判为终态(对照真实删除的目录钉住),一时的 I/O 形态判为可重试(以确定性的 ENAMETOOLONG 探测钉住);属主死亡的 LEASED 行回收后恰好完成一次;legacy 生命周期 operation 与 `ACTION_RESPONSE` 不受影响(其测试保持绿色)。
 - **契约**:映射 vs planned 漂移测试、六个触及 schema 的钉、WebShell 孪生、事件文档一致性。
 - **Hosted 集成(H2,镜像 G0 套件;加入 MySQL CI 车道)**:在目录 A 以初始文件 Turn 创建绑定会话(为后续 Turn 准备一次真实的变更前安装),等待该 Turn 完成,再经两侧 API 变更目录并做归一化重放,轮询 operation 到 `completed` 并断言会话行 revision/cwd 与公开流上的 `session.context.changed` 事件及 `/operations/query` 读取——随后经已合入的 #13112 提交一个绑定后续 Turn,断言其文件写入落在已提交的目录,而初始 Turn 自己的文件保持完整。负向组:开关关闭、legacy 会话、busy、CAS 冲突、幂等重放与冲突,以及 WebShell 失败投影携带 `failureCode`;store 层双向钉住后续 Turn 繁忙屏障(op 未关闭挡 Turn;完成后放行)与两面在终态失败后的释放。
 - **E2E 计划**:`.qwen/e2e-tests/managed-workspace-w2-cwd-change.md`,先用全局 `qwen` CLI 基线做干跑(该路由今天未映射)。

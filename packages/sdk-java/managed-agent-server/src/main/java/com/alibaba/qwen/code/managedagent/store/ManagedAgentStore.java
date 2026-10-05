@@ -3042,9 +3042,8 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     // The cwd columns arrive with V40; an operation read against an
-    // additive-upgrade schema that predates them (the pinned-schema upgrade
-    // ITs construct exactly that) must treat them as absent instead of
-    // erroring the whole query.
+    // additive-upgrade schema that predates them must treat the columns as
+    // absent instead of erroring the whole query.
     private static String additiveString(java.sql.ResultSet result,
             String name) throws java.sql.SQLException {
         return hasColumn(result, name) ? result.getString(name) : null;
