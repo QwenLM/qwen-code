@@ -86,7 +86,16 @@ export class ManagedChildRunProcess {
       this.settled = true;
       return this.evidence;
     }
-    await this.unit.terminate(graceMs);
+    try {
+      await this.unit.terminate(graceMs);
+    } catch (error) {
+      // The natural-end settle raced this stop: it removed the unit first,
+      // so a stale read or the `cgroup.kill` write fails with ENOENT. The
+      // process is proven ended by its settle, so the stop answers that
+      // evidence instead of an "unavailable" after the fact.
+      if (!this.settled) throw error;
+    }
+    if (this.settled) return this.evidence;
     if (!this.unit.empty()) return null;
     this.unit.remove();
     this.settled = true;

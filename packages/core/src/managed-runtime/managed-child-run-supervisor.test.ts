@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { EventEmitter } from 'node:events';
+import type { ChildProcess } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HookCommandCgroup } from '../hooks/hook-command-cgroup.js';
 import {
   HookCommandIsolationUnavailableError,
+  ManagedChildRunProcess,
   ManagedChildRunSupervisor,
 } from './managed-child-run-supervisor.js';
 
@@ -333,6 +336,55 @@ describe.skipIf(process.platform === 'win32')(
         exitSignal: null,
       });
       await expect(settling).resolves.toEqual({
+        exitCode: 0,
+        exitSignal: null,
+      });
+      expect(removed.value).toBe(true);
+    });
+
+    it('answers a stop whose unit vanished behind the racing natural-end settle', async () => {
+      // The review-measured chain, scripted deterministically: mid-grace
+      // the natural-end settle proves the unit empty and removes it, so
+      // the stop's `cgroup.kill` write into the removed directory fails
+      // ENOENT. The stop answers the settle's evidence, never
+      // "unavailable".
+      const drained = { value: false };
+      const removed = { value: false };
+      const enoent = Object.assign(
+        new Error(
+          "ENOENT: no such file or directory, open '/root/qwen-bg-killrace/cgroup.kill'",
+        ),
+        { code: 'ENOENT' },
+      );
+      const killUnit = {
+        empty: () => drained.value,
+        remove: () => {
+          removed.value = true;
+        },
+        waitForEmpty: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          drained.value = true;
+          return true;
+        },
+        terminate: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          throw enoent;
+        },
+      } as unknown as HookCommandCgroup;
+      const child = new EventEmitter() as ChildProcess;
+      const staged = new ManagedChildRunProcess(
+        'qwen-bg-killrace',
+        killUnit,
+        child,
+      );
+      child.emit('exit', 0, null);
+      const settling = staged.settleOnEmpty();
+      const draining = staged.terminate(600);
+      await expect(settling).resolves.toEqual({
+        exitCode: 0,
+        exitSignal: null,
+      });
+      await expect(draining).resolves.toEqual({
         exitCode: 0,
         exitSignal: null,
       });
