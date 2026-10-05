@@ -1502,6 +1502,12 @@ export function registerHostedHarnessSessionRoutes(
               return;
             }
             recovery = recovered.report;
+            // Arm the undriven marker exactly like the first load does: the
+            // re-answer advertises the same drivable recovery, and without
+            // the marker a fresh /prompt is admitted over the parked
+            // executions the report describes. An undrivable report stays
+            // unarmed — its marker would have no discharger.
+            if (recovered.drivable) attached.recoveredTurn = recovered.promptId;
             if (recovered.acquiredRuntime) {
               attached.runtimeLeaseHeld =
                 recovered.report.executions[0]?.runtimeSessionId ??
@@ -3061,16 +3067,27 @@ export function registerHostedHarnessSessionRoutes(
           // Reconcile the pending file-history obligation the recovered turn
           // left behind before inference — a text-only continuation never
           // re-acquires, so without this the marker outlives the turn and
-          // wedges every later cold load. A raw escape (a transient warmup
-          // failure, or a retryable re-acquire refusal acquire() rethrows
-          // as-is) settles terminally below: the 200 is already sent and no
-          // blocked-on-recovery re-drive exists on this route, because the
-          // Session stays registered and the coordinator drops its recovery
-          // tracking on this admission. Only an already-wrapped recovery
-          // error keeps its outer recovery-blocked handling, and a Turn
-          // settling here also drops its pending file-history marker, since
-          // it never resumes to reconcile it.
-          await toolTurn.resumeCommittedResults();
+          // wedges every later cold load.
+          try {
+            await toolTurn.resumeCommittedResults();
+          } catch (cause) {
+            // A retryable Workspace acquisition refusal escapes
+            // resumeCommittedResults() raw (acquire() rethrows it as-is).
+            // This Turn's checkpoint still holds unconsumed Runtime
+            // receipts, so settling it terminally would strand them forever
+            // — classify it into the outer recovery-blocked handler, which
+            // leaves the Turn re-drivable by a later takeover. Any other
+            // raw escape (a transient warmup failure, …) still settles
+            // terminally below: the 200 is already sent and no
+            // blocked-on-recovery re-drive exists on this route for it.
+            // Only a recovery-classified error keeps the outer
+            // recovery-blocked handling, and a Turn settling here also
+            // drops its pending file-history marker, since it never resumes
+            // to reconcile it.
+            if (isRetryableWorkspaceAcquisition(cause))
+              throw new HostedToolRecoveryRequiredError(cause);
+            throw cause;
+          }
           const result = await runHostedHarnessTextTurn({
             sessionId,
             cwd,
@@ -3353,10 +3370,7 @@ export function registerHostedHarnessSessionRoutes(
           // idempotently first (the journaled set journals nothing twice),
           // because the terminal record must not land while a parked
           // execution still lacks its functionResponse. With the record
-          // landed, the admission stays replayable at its own watermark,
-          // louder than a permanent block. Only a settle that could not
-          // finish again leaves the Session recovery-blocked, since nothing
-          // else can clear it.
+          // landed, the admission stays replayable at its own watermark.
           const completed = await settleParkedTurnCancelled({
             session: session.managed,
             sessionId,
@@ -3368,8 +3382,14 @@ export function registerHostedHarnessSessionRoutes(
             () => false,
           );
           if (!completed) {
-            session.blocked = true;
-            session.recoveredTurn = undefined;
+            // Still re-drivable: the settle is idempotent, so drop the
+            // admission and let the coordinator's retry fall through to the
+            // attached-to-unsettled drive and re-run it — a permanent block
+            // would refuse the one retry that can finish the settle. The
+            // armed marker keeps the failure visible to a status poll, and
+            // a genuinely unfinishable settle keeps answering 503 to every
+            // retried cancel.
+            session.admissions.delete(promptId);
           } else {
             let landed = false;
             try {
@@ -3398,15 +3418,33 @@ export function registerHostedHarnessSessionRoutes(
               session.fileHistoryOwed = promptId;
               session.recoveredTurn = undefined;
             } else {
-              // Without the terminal record the Turn still reads unsettled,
-              // so the failure stays as re-drivable as the nothing-moved
-              // path below: the coordinator's retry re-runs the idempotent
-              // settle and re-attempts the record. Keeping the admission
-              // would replay a watermark no turn_complete can ever appear
-              // at, and owing the marker would let a retirement site
-              // destroy the record a later takeover still needs — the armed
-              // recovery marker keeps refusing a fresh prompt meanwhile.
               session.admissions.delete(promptId);
+              // The rejected write is ambiguous: it may have committed and
+              // only lost its acknowledgement. A committed turn.settled
+              // means no attached-to-unsettled retry can ever match again
+              // and the settled replay answers every retry from the
+              // watermark without clearing anything, so treat it like the
+              // landed path — owe the settled Turn's marker and disarm — or
+              // the Session wedges forever on a record that exists.
+              // Without the event the Turn still reads unsettled, so the
+              // failure stays as re-drivable as the nothing-moved path
+              // below: the coordinator's retry re-runs the idempotent
+              // settle and re-attempts the record, while the armed recovery
+              // marker keeps refusing a fresh prompt meanwhile.
+              const settledRecordLanded = session.managed.authority
+                .eventsInSequenceRange(
+                  1,
+                  session.managed.authority.committedSequence,
+                )
+                .some(
+                  (event) =>
+                    event.kind === 'turn.settled' &&
+                    event.payload['turnId'] === promptId,
+                );
+              if (settledRecordLanded) {
+                session.fileHistoryOwed = promptId;
+                session.recoveredTurn = undefined;
+              }
             }
           }
         } else {
