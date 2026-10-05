@@ -1,11 +1,27 @@
 /**
  * @license
- * Copyright 2026 Qwen Team
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parseBridgeManagedSessionStore } from './bridgeTypes.js';
+
+const fixture = JSON.parse(
+  readFileSync(
+    new URL(
+      '../../core/src/managed-runtime/contracts/managed-session-store-v1.fixtures.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
+) as {
+  limits: {
+    minimumWriterTokenLength: number;
+    maximumWriterTokenLength: number;
+  };
+};
 
 const valid = {
   baseUrl: 'https://store.example.com/',
@@ -50,6 +66,16 @@ describe('parseBridgeManagedSessionStore', () => {
     },
   );
 
+  it('accepts a brokered plaintext opt-in on a trusted network', () => {
+    expect(
+      parseBridgeManagedSessionStore({
+        ...valid,
+        baseUrl: 'http://10.0.0.1:8080',
+        allowInsecureHttp: true,
+      }).baseUrl,
+    ).toBe('http://10.0.0.1:8080');
+  });
+
   it.each([
     null,
     'store',
@@ -78,6 +104,19 @@ describe('parseBridgeManagedSessionStore', () => {
     expect(() => parseBridgeManagedSessionStore(input)).toThrow();
   });
 
+  // A dotted-quad check that only read the first label would accept these:
+  // the WHATWG parser leaves a four-label *name* starting with 127 verbatim,
+  // so only the per-octet numeric test refuses them. Assert the message so
+  // the row pins which rule fired.
+  it.each(['http://127.foo.example.test', 'http://127.0.0.a'])(
+    'refuses a four-label 127-prefixed DNS name %s without HTTPS',
+    (baseUrl) => {
+      expect(() =>
+        parseBridgeManagedSessionStore({ ...valid, baseUrl }),
+      ).toThrow('must use HTTPS outside the loopback interface');
+    },
+  );
+
   it('refuses IPv4-mapped loopback without HTTPS', () => {
     // Deliberately outside the loopback allowlist (see the predicate's
     // comment): the mapped spelling canonicalizes to `[::ffff:7f00:1]` and
@@ -100,5 +139,70 @@ describe('parseBridgeManagedSessionStore', () => {
         baseUrl: `https://${'x'.repeat(2100)}`,
       }),
     ).toThrow('baseUrl');
+  });
+
+  it('round-trips the provisioned writer credential and insecure opt-in', () => {
+    const parsed = parseBridgeManagedSessionStore(valid);
+    expect(parsed.writerToken).toBeUndefined();
+    expect(parsed.allowInsecureHttp).toBeUndefined();
+
+    const provisioned = parseBridgeManagedSessionStore({
+      ...valid,
+      writerToken: `qwt1_${'a'.repeat(43)}`,
+      allowInsecureHttp: true,
+    });
+    expect(provisioned.writerToken).toBe(`qwt1_${'a'.repeat(43)}`);
+    expect(provisioned.allowInsecureHttp).toBe(true);
+  });
+
+  it('rejects malformed optional credentials', () => {
+    for (const writerToken of [
+      'short',
+      'has spaces and symbols!! padding',
+      42,
+      null,
+    ]) {
+      expect(() =>
+        parseBridgeManagedSessionStore({ ...valid, writerToken }),
+      ).toThrow(/writerToken is invalid/);
+    }
+    expect(() =>
+      parseBridgeManagedSessionStore({
+        ...valid,
+        allowInsecureHttp: 'yes',
+      }),
+    ).toThrow(/allowInsecureHttp is invalid/);
+    expect(() =>
+      parseBridgeManagedSessionStore({ ...valid, extraField: 1 }),
+    ).toThrow(/unsupported field/);
+  });
+
+  it('bounds writerToken length at the shared fixture limits', () => {
+    const { minimumWriterTokenLength, maximumWriterTokenLength } =
+      fixture.limits;
+    expect(() =>
+      parseBridgeManagedSessionStore({
+        ...valid,
+        writerToken: 'a'.repeat(minimumWriterTokenLength - 1),
+      }),
+    ).toThrow(/writerToken is invalid/);
+    expect(
+      parseBridgeManagedSessionStore({
+        ...valid,
+        writerToken: 'a'.repeat(minimumWriterTokenLength),
+      }).writerToken,
+    ).toHaveLength(minimumWriterTokenLength);
+    expect(
+      parseBridgeManagedSessionStore({
+        ...valid,
+        writerToken: 'a'.repeat(maximumWriterTokenLength),
+      }).writerToken,
+    ).toHaveLength(maximumWriterTokenLength);
+    expect(() =>
+      parseBridgeManagedSessionStore({
+        ...valid,
+        writerToken: 'a'.repeat(maximumWriterTokenLength + 1),
+      }),
+    ).toThrow(/writerToken is invalid/);
   });
 });

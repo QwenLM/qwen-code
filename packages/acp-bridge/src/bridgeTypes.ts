@@ -159,6 +159,10 @@ export interface BridgeManagedSessionStore {
   tenantId: string;
   workspaceId: string;
   writerId: string;
+  /** Broker-provisioned writer credential; the client self-mints when absent. */
+  writerToken?: string;
+  /** Broker opt-in for plaintext http on a trusted network. */
+  allowInsecureHttp?: boolean;
   leaseDurationMs: number;
 }
 
@@ -167,6 +171,8 @@ const MANAGED_SESSION_STORE_FIELDS = new Set([
   'tenantId',
   'workspaceId',
   'writerId',
+  'writerToken',
+  'allowInsecureHttp',
   'leaseDurationMs',
 ]);
 const MANAGED_SESSION_STORE_TENANT_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
@@ -209,10 +215,11 @@ export function parseBridgeManagedSessionStore(
   }
   if (
     parsedBaseUrl.protocol === 'http:' &&
-    !isManagedSessionStoreLoopback(parsedBaseUrl.hostname)
+    !isManagedSessionStoreLoopback(parsedBaseUrl.hostname) &&
+    record['allowInsecureHttp'] !== true
   ) {
     throw new TypeError(
-      'managedSessionStore.baseUrl must use HTTPS outside the loopback interface',
+      'managedSessionStore.baseUrl must use HTTPS outside the loopback interface; pass allowInsecureHttp: true to opt in',
     );
   }
   const leaseDurationMs = record['leaseDurationMs'];
@@ -226,20 +233,39 @@ export function parseBridgeManagedSessionStore(
       'managedSessionStore.leaseDurationMs must be an integer from 1000 through 300000',
     );
   }
+  const writerToken = record['writerToken'];
+  if (
+    writerToken !== undefined &&
+    (typeof writerToken !== 'string' ||
+      !/^[A-Za-z0-9_-]{32,512}$/u.test(writerToken))
+  ) {
+    throw new TypeError('managedSessionStore.writerToken is invalid');
+  }
+  const allowInsecureHttp = record['allowInsecureHttp'];
+  if (
+    allowInsecureHttp !== undefined &&
+    typeof allowInsecureHttp !== 'boolean'
+  ) {
+    throw new TypeError('managedSessionStore.allowInsecureHttp is invalid');
+  }
   return Object.freeze({
     baseUrl: parsedBaseUrl.toString().replace(/\/$/u, ''),
     tenantId,
     workspaceId,
     writerId,
+    ...(writerToken === undefined ? {} : { writerToken }),
+    ...(allowInsecureHttp === undefined ? {} : { allowInsecureHttp }),
     leaseDurationMs,
   });
 }
 
 /**
- * Loopback predicate for the session-store parser. The URL parser has
- * already canonicalized the hostname (inet_aton short forms, case), so the
- * dotted-quad check only needs the 127/8 range; acp-bridge cannot import the
- * CLI's isLoopbackBind and must keep this minimal. IPv4-mapped loopback
+ * Loopback predicate for the session-store parser. The URL parser folds
+ * inet_aton short forms and case, but a four-label *name* whose labels are
+ * not all numeric (`127.foo.example.test`) survives verbatim, so the
+ * per-octet numeric test below is what keeps such a DNS name out of the
+ * 127/8 allowance; acp-bridge cannot import the CLI's isLoopbackBind and
+ * must keep this minimal. IPv4-mapped loopback
  * (`[::ffff:127.0.0.1]`, canonicalized to `[::ffff:7f00:1]`) is deliberately
  * outside this allowlist — isLoopbackBind refuses it the same way, so both
  * policies agree that the mapped spelling must use HTTPS.
