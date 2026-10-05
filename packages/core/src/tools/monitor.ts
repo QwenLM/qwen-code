@@ -351,9 +351,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Check concurrent monitor limit before spawning
     const running = registry.getRunning();
     if (running.length >= MAX_CONCURRENT_MONITORS) {
+      const message = `Cannot start monitor: maximum concurrent monitors (${MAX_CONCURRENT_MONITORS}) reached. Stop an existing monitor first.`;
       return {
-        llmContent: `Cannot start monitor: maximum concurrent monitors (${MAX_CONCURRENT_MONITORS}) reached. Stop an existing monitor first.`,
+        llmContent: message,
         returnDisplay: `Monitor rejected: too many concurrent monitors.`,
+        error: { message },
       };
     }
 
@@ -407,9 +409,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
           },
         });
     } catch (err) {
+      const message = `Monitor failed to start: ${getErrorMessage(err)}`;
       return {
-        llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
+        llmContent: message,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
+        error: { message },
       };
     }
 
@@ -549,9 +553,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
       )?.destroy?.();
       child?.removeListener('error', captureEarlySpawnError);
       child?.on('error', () => {});
+      const message = `Monitor failed to start: ${getErrorMessage(err)}`;
       return {
-        llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
+        llmContent: message,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
+        error: { message },
       };
     }
 
@@ -735,9 +741,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
     if (earlySpawnError) {
       onError(earlySpawnError);
+      const message = `Monitor failed to start: ${getErrorMessage(earlySpawnError)}`;
       return {
-        llmContent: `Monitor failed to start: ${getErrorMessage(earlySpawnError)}`,
+        llmContent: message,
         returnDisplay: `Monitor failed: ${getErrorMessage(earlySpawnError)}`,
+        error: { message },
       };
     }
 

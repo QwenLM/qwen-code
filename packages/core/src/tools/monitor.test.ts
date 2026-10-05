@@ -132,10 +132,14 @@ import type {
   ShellExecutionResult,
   ShellOutputEvent,
 } from '../services/shellExecutionService.js';
-import { MonitorRegistry } from '../services/monitorRegistry.js';
+import {
+  MAX_CONCURRENT_MONITORS,
+  MonitorRegistry,
+} from '../services/monitorRegistry.js';
 import type {
   ToolCallConfirmationDetails,
   ToolExecuteConfirmationDetails,
+  ToolResult,
 } from './tools.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
@@ -243,9 +247,7 @@ describe('MonitorTool', () => {
           getConfirmationDetails: (
             s: AbortSignal,
           ) => Promise<ToolCallConfirmationDetails>;
-          execute: (
-            s: AbortSignal,
-          ) => Promise<{ llmContent: string; returnDisplay: string }>;
+          execute: (s: AbortSignal) => Promise<ToolResult>;
         };
       }
     ).createInvocation(params);
@@ -761,6 +763,46 @@ describe('MonitorTool', () => {
       expect(result.llmContent).toContain('Monitor started');
       expect(result.llmContent).toContain('mon_');
       expect(result.returnDisplay).toContain('watch app logs');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('rejects a full registry without spawning or registering another monitor', async () => {
+      for (let i = 0; i < MAX_CONCURRENT_MONITORS; i++) {
+        monitorRegistry.register({
+          monitorId: `occupied-${i}`,
+          command: 'controlled running monitor',
+          description: 'occupied slot',
+          status: 'running',
+          startTime: Date.now(),
+          abortController: new AbortController(),
+          eventCount: 0,
+          lastEventTime: 0,
+          maxEvents: 100,
+          idleTimeoutMs: 600_000,
+          droppedLines: 0,
+          outputFile: `/test/project/occupied-${i}.log`,
+        });
+      }
+      const registerSpy = vi.spyOn(monitorRegistry, 'register');
+      try {
+        const result = await run('tail -f log');
+        const message =
+          `Cannot start monitor: maximum concurrent monitors (${MAX_CONCURRENT_MONITORS}) reached. ` +
+          'Stop an existing monitor first.';
+
+        expect(result.llmContent).toBe(message);
+        expect(result.error?.message).toBe(message);
+        expect(result.returnDisplay).toBe(
+          'Monitor rejected: too many concurrent monitors.',
+        );
+        expect(mockSpawn).not.toHaveBeenCalled();
+        expect(registerSpy).not.toHaveBeenCalled();
+        expect(monitorRegistry.getRunning()).toHaveLength(
+          MAX_CONCURRENT_MONITORS,
+        );
+      } finally {
+        registerSpy.mockRestore();
+      }
     });
 
     it('uses default pager env for spawned processes when pager is unset', async () => {
@@ -823,6 +865,7 @@ describe('MonitorTool', () => {
       expect(result.llmContent).toContain(
         'Monitor was cancelled before it could start.',
       );
+      expect(result.error).toBeUndefined();
     });
 
     it('truncates long monitor descriptions in display surfaces', async () => {
@@ -901,6 +944,10 @@ describe('MonitorTool', () => {
 
         expect(result.llmContent).toContain('Monitor failed to start');
         expect(result.returnDisplay).toContain('limit reached');
+        expect(result.error?.message).toBe(
+          'Monitor failed to start: limit reached',
+        );
+        expect(result.error?.message).toBe(result.llmContent);
         expectTerminated(killSpy);
         expect(() => {
           mockChild._emitError(new Error('late cleanup error'));
@@ -954,6 +1001,10 @@ describe('MonitorTool', () => {
         expect(result.llmContent).toContain('Monitor failed to start');
         expect(result.llmContent).toContain('spawn failed');
         expect(result.returnDisplay).toContain('spawn failed');
+        expect(result.error?.message).toBe(
+          'Monitor failed to start: spawn failed',
+        );
+        expect(result.error?.message).toBe(result.llmContent);
         expect(registerSpy).not.toHaveBeenCalled();
         expect(registerCallback).not.toHaveBeenCalled();
         expect(monitorRegistry.getAll()).toHaveLength(0);
@@ -973,6 +1024,10 @@ describe('MonitorTool', () => {
       expect(result.llmContent).toContain('Monitor failed to start');
       expect(result.llmContent).toContain('spawn ENOENT');
       expect(result.returnDisplay).toContain('spawn ENOENT');
+      expect(result.error?.message).toBe(
+        'Monitor failed to start: spawn ENOENT',
+      );
+      expect(result.error?.message).toBe(result.llmContent);
       const all = monitorRegistry.getAll();
       expect(all).toHaveLength(1);
       expect(all[0].status).toBe('failed');
@@ -1057,7 +1112,8 @@ describe('MonitorTool', () => {
         () => settle(null, 'SIGTERM'),
       ],
     ])('%s', async (_title, command, act) => {
-      await run(command);
+      const result = await run(command);
+      expect(result.error).toBeUndefined();
       act();
       expect(monitorRegistry.getAll()[0].status).toBe('failed');
     });

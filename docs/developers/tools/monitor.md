@@ -116,6 +116,10 @@ commands without backgrounding instead.
 
 ## Important notes
 
+- **Startup failures:** Rejected admission or a startup failure reported by the
+  initial monitor call returns a tool error with the full failure message and
+  any recovery guidance. In code mode, `await tools.monitor(...)` rejects so callers
+  can handle the failure with `try`/`catch`.
 - **Auto-stop behavior:** Monitors stop automatically when they reach
   `max_events`, when `idle_timeout_ms` elapses without output, or when the
   underlying command exits on its own. A monitor's status reflects the
