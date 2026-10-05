@@ -2683,7 +2683,7 @@ export function registerHostedHarnessSessionRoutes(
   const matchesRecovery = (
     session: HostedSession,
     promptId: string,
-    checkpointId: string,
+    checkpointId: string | undefined,
     activationId: string,
   ): boolean =>
     session.managed.authority.latestCheckpoint?.checkpointId === checkpointId &&
@@ -3175,6 +3175,8 @@ export function registerHostedHarnessSessionRoutes(
         // Settle the parked executions as cancelled so the terminal record
         // can move the checkpoint past the durable wait instead of wedging
         // the session on its next prompt.
+        const settleFromCheckpointId =
+          session.managed.authority.latestCheckpoint?.checkpointId;
         try {
           await settleParkedTurnCancelled({
             session: session.managed,
@@ -3186,13 +3188,15 @@ export function registerHostedHarnessSessionRoutes(
           settledDurable = true;
         } catch (cause) {
           // The checkpoint moves inside the settle, one resolveAwaitRuntime
-          // at a time: a partially applied settle reads no longer like the
-          // recovery identity, and only that identity read can tell a
-          // re-drivable miss from an irrevocable movement.
+          // at a time: a partially applied settle no longer reads like the
+          // identity this drive started from, and only that read — never the
+          // request's load-time checkpointId, which the admission fence
+          // deliberately admitted possibly stale — can tell a re-drivable
+          // miss from an irrevocable movement.
           settledDurable = !matchesRecovery(
             session,
             promptId,
-            checkpointId,
+            settleFromCheckpointId,
             activationId,
           );
           throw cause;
@@ -3264,10 +3268,11 @@ export function registerHostedHarnessSessionRoutes(
           // can ever match the recovery identity again. Finish the settle
           // idempotently first (the journaled set journals nothing twice),
           // because the terminal record must not land while a parked
-          // execution still lacks its functionResponse; the admission then
-          // stays replayable at its own watermark, louder than a permanent
-          // block. Only a settle that could not finish again leaves the
-          // Session recovery-blocked, since nothing else can clear it.
+          // execution still lacks its functionResponse. With the record
+          // landed, the admission stays replayable at its own watermark,
+          // louder than a permanent block. Only a settle that could not
+          // finish again leaves the Session recovery-blocked, since nothing
+          // else can clear it.
           const completed = await settleParkedTurnCancelled({
             session: session.managed,
             sessionId,
@@ -3280,9 +3285,11 @@ export function registerHostedHarnessSessionRoutes(
           );
           if (!completed) {
             session.blocked = true;
+            session.recoveredTurn = undefined;
           } else {
-            await session.managed.sink
-              .write(
+            let landed = false;
+            try {
+              await session.managed.sink.write(
                 record(session, sessionId, 'system', null, {
                   subtype: 'turn_result',
                   systemPayload: {
@@ -3292,15 +3299,32 @@ export function registerHostedHarnessSessionRoutes(
                     endedAt: Date.now(),
                   },
                 }),
-              )
-              .catch(() => undefined);
-            // Only a durably settled Turn's marker may be owed to the
-            // settled-/prompt or close retry: owing an unsettled Turn's
-            // marker would let close retire the very record a later
-            // takeover needs to reconcile the resume.
-            session.fileHistoryOwed = promptId;
+              );
+              landed = true;
+            } catch (writeCause) {
+              writeStderrLineSafe(
+                `qwen serve: Hosted Harness turn ${promptId} settled the cancellation but its terminal record was refused: ${String(writeCause)}`,
+              );
+            }
+            if (landed) {
+              // Only a durably settled Turn's marker may be owed to the
+              // settled-/prompt or close retry: owing an unsettled Turn's
+              // marker would let close retire the very record a later
+              // takeover needs to reconcile the resume.
+              session.fileHistoryOwed = promptId;
+              session.recoveredTurn = undefined;
+            } else {
+              // Without the terminal record the Turn still reads unsettled,
+              // so the failure stays as re-drivable as the nothing-moved
+              // path below: the coordinator's retry re-runs the idempotent
+              // settle and re-attempts the record. Keeping the admission
+              // would replay a watermark no turn_complete can ever appear
+              // at, and owing the marker would let a retirement site
+              // destroy the record a later takeover still needs — the armed
+              // recovery marker keeps refusing a fresh prompt meanwhile.
+              session.admissions.delete(promptId);
+            }
           }
-          session.recoveredTurn = undefined;
         } else {
           // Nothing durable moved, so the failure is fully re-drivable —
           // whether or not a replay already answered 200 while this drive
