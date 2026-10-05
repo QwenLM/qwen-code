@@ -687,22 +687,25 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     };
     connection.capabilities = multiWorkspaceCapabilities;
     workspace.capabilities = multiWorkspaceCapabilities;
-    let running = true;
+    let pageState: 'freshRunning' | 'retainedRunning' | 'freshIdle' =
+      'freshRunning';
     useSessionCatalogQueries.mockImplementation(() => [
       {
         page: {
           sessions: [
             makeSession('secondary-session', {
               workspaceCwd: '/tmp/other',
-              hasActivePrompt: running,
+              hasActivePrompt: pageState !== 'freshIdle',
             }),
           ],
         },
         loading: false,
+        ...(pageState !== 'retainedRunning' ? { updatedAt: Date.now() } : {}),
       },
     ]);
 
-    // A full page records the secondary session as running in the baseline.
+    // A full page records the secondary session as running in the
+    // baseline.
     renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
     await flushSidebar();
     expect(
@@ -712,18 +715,31 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     // Back Home the queries stop, and the session finishes while visible.
     renderSidebar(false, { layout: 'rail', activePage: 'home' });
     await flushSidebar();
-    running = false;
-    renderSidebar(false, { layout: 'rail', activePage: 'home' });
-    await flushSidebar();
+    pageState = 'retainedRunning';
 
-    // Returning to a full page must not compare the refetched idle session
-    // against the frozen running baseline: the completion happened on
-    // screen, so there is nothing unread to show.
+    // Returning to a full page re-subscribes against the store's retained
+    // page: frozen at runnin during the visible window, with no stamp to
+    // prove otherwise. Installing it as the baseline would make the next
+    // poll diff against pre-visible rows.
     renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
     await flushSidebar();
     expect(
       container.querySelector('[data-web-shell-collapsed-session-status]'),
     ).toBeNull();
+
+    // The armed poll then lands the first truly fresh page (idle): the
+    // completion happened on screen, so nothing unread may be painted —
+    // not the badge, not the accessible name.
+    pageState = 'freshIdle';
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-collapsed-session-status]'),
+    ).toBeNull();
+    const homeTrigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-home-trigger]',
+    )!;
+    expect(homeTrigger.getAttribute('aria-label')).not.toContain('Finished');
   });
 
   it('does not certify secondary workspace status while it is not being refreshed', async () => {

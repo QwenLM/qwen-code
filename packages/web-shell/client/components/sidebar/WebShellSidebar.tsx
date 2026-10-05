@@ -2719,6 +2719,17 @@ export function WebShellSidebar({
     sessions,
   ]);
 
+  // A page the store kept from before the visible window is not refetched
+  // on re-subscription, so it must never become the tracker baseline: the
+  // diff below would measure completions against pre-visible rows and
+  // repaint a watched completion as unread on the next poll.
+  const hiddenSinceRef = useRef(0);
+  const previousStatusSurfaceHiddenRef = useRef(statusSurfaceHidden);
+  if (statusSurfaceHidden && !previousStatusSurfaceHiddenRef.current) {
+    hiddenSinceRef.current = Date.now();
+  }
+  previousStatusSurfaceHiddenRef.current = statusSurfaceHidden;
+
   useEffect(() => {
     if (!statusSurfaceHidden) {
       // The secondary queries only run while the surface is hidden, so the
@@ -2732,9 +2743,13 @@ export function WebShellSidebar({
     }
     if (
       secondaryActiveSnapshots.length !== secondaryActiveQueries.length ||
-      secondaryActiveSnapshots.some(
-        (snapshot) => snapshot.loading || snapshot.error,
-      )
+      secondaryActiveSnapshots.some((snapshot) => {
+        if (snapshot.loading || snapshot.error) return true;
+        // An unstamped or pre-hidden snapshot is not fresh yet: the store's
+        // retained page skips refetch on re-subscription, and the first new
+        // data only arrives with the armed poll.
+        return (snapshot.updatedAt ?? 0) < hiddenSinceRef.current;
+      })
     ) {
       return;
     }
