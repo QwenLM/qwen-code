@@ -9,7 +9,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
@@ -52,14 +51,16 @@ class SessionEventHubPinningTest {
     @Timeout(120)
     void parkedSubscribersMustNotStarveOtherVirtualThreads()
             throws Exception {
-        assumeTrue(Integer.getInteger("jdk.virtualThreadScheduler.maxPoolSize",
-                        256) <= SUBSCRIBERS,
+        // The ceiling a pin-capable shape grows the scheduler pool to;
+        // the common pool's parallelism sizes a different pool.
+        int carrierCeiling = Integer.getInteger(
+                "jdk.virtualThreadScheduler.maxPoolSize", 256);
+        assumeTrue(carrierCeiling <= SUBSCRIBERS,
                 "jdk.virtualThreadScheduler.maxPoolSize is above "
                         + SUBSCRIBERS
                         + "; a pin-capable shape would still have a"
                         + " carrier for the probe");
         SessionEventHub hub = new SessionEventHub();
-        int carriers = ForkJoinPool.getCommonPoolParallelism();
         List<SessionEventHub.Subscription> subscriptions =
                 new ArrayList<>();
         for (int index = 0; index < SUBSCRIBERS; index++) {
@@ -145,8 +146,9 @@ class SessionEventHubPinningTest {
         assertTrue(probeFinished,
                 "virtual-thread probe starved within 30 s of "
                         + SUBSCRIBERS + " subscribers parked in"
-                        + " SessionEventHub.await on " + carriers
-                        + " carriers (progress=" + probeProgress.get()
+                        + " SessionEventHub.await; the scheduler may"
+                        + " create up to " + carrierCeiling + " carriers"
+                        + " (progress=" + probeProgress.get()
                         + ") — Object.wait pinned every carrier");
     }
 
