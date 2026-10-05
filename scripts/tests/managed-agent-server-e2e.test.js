@@ -376,7 +376,10 @@ describe('managed-agent-server e2e runner', () => {
     // store descriptor whose writerId differs before any coalescing — so the
     // paragraph must name that rejection: an integrator reading "not
     // rejected" for the generation omits the 409 path and every attach fails
-    // after a Harness restart with no documented way out.
+    // after a Harness restart with no documented way out. Each fence pin
+    // below matches a polarity phrase, not the bare name: the name alone
+    // stays green when the paragraph says the generation is not rejected or
+    // the store fence is shipped behavior.
     const readme = read('packages/sdk-java/managed-agent-server/README.md');
     const anchor = readme.indexOf('The Java connector caches an attachment');
     expect(anchor).toBeGreaterThan(-1);
@@ -386,7 +389,11 @@ describe('managed-agent-server e2e runner', () => {
     expect(paragraph).toContain(
       'keys its in-memory Session by `sessionId` alone',
     );
-    expect(paragraph).toContain('409 hosted_harness_generation_mismatch');
-    expect(paragraph).toContain('managed_session_store_conflict');
+    expect(paragraph).toContain(
+      'fails closed with `409 hosted_harness_generation_mismatch`',
+    );
+    expect(paragraph).toContain(
+      '`managed_session_store_conflict` fence is target design',
+    );
   });
 });
