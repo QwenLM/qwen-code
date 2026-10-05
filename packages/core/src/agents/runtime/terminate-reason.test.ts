@@ -61,6 +61,15 @@ describe('terminateReasonMessage', () => {
     ).toBe('Model timed out');
   });
 
+  it.each(['toString', 'constructor', 'valueOf'])(
+    'passes %s through instead of mistaking it for a mode',
+    (reason) => {
+      // Inherited keys answer `in` but not `hasOwn`; only the latter
+      // matches what the token check claims to test.
+      expect(terminateReasonMessage(reason, 'Dream agent failed')).toBe(reason);
+    },
+  );
+
   it('falls back to the caller text when there is no reason', () => {
     expect(terminateReasonMessage(undefined, 'Dream agent failed')).toBe(
       'Dream agent failed',

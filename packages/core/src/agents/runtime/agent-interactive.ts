@@ -515,13 +515,21 @@ export class AgentInteractive {
   }
 }
 
-const TERMINATE_MODE_LEVEL: Partial<
-  Record<AgentTerminateMode, 'warning' | 'error'>
+// Total on purpose: a new AgentTerminateMode has to pick a severity here,
+// or `tsc` fails. `null` means "worded nowhere, or reported elsewhere" —
+// GOAL never reaches this function, and a level on CANCELLED would
+// double-report what cancelCurrentRound() already warned about.
+const TERMINATE_MODE_LEVEL: Record<
+  AgentTerminateMode,
+  'warning' | 'error' | null
 > = {
   [AgentTerminateMode.MAX_TURNS]: 'warning',
   [AgentTerminateMode.TIMEOUT]: 'warning',
   [AgentTerminateMode.ERROR]: 'error',
   [AgentTerminateMode.LOOP_DETECTED]: 'error',
+  [AgentTerminateMode.GOAL]: null,
+  [AgentTerminateMode.CANCELLED]: null,
+  [AgentTerminateMode.SHUTDOWN]: null,
 };
 
 /**
@@ -539,8 +547,8 @@ function terminateModeMessage(
 ): { text: string; level: 'info' | 'warning' | 'error' } | null {
   const text = describeAgentTerminateReason(mode, loopType);
   const level = TERMINATE_MODE_LEVEL[mode];
-  // A mode that gains wording in the shared helper but no entry here is a
-  // deliberate decision someone still has to make, not a silent 'error'.
+  // Wording and severity live in different files; a mode missing either
+  // stays silent rather than being guessed at.
   if (!text || !level) return null;
   return { text, level };
 }
