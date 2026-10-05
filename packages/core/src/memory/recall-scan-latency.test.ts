@@ -82,8 +82,10 @@ function isHostedLane(env: NodeJS.ProcessEnv): boolean {
 // cold best-of-5 measured 140-149ms there against the 125ms ceiling, which
 // is contention, not a scan regression. CI set with both markers absent is
 // exactly that child, so it takes the hosted lane's shared multiplier; a
-// lane whose markers survived (ecs-win, an autofix job's ambient steps)
-// keeps the strict bound.
+// lane whose markers survived takes its own arm: `ecs-qwen-*` the pool's
+// 10x, a github-hosted fallback the 2.2x multiplier, and a marked non-pool
+// self-hosted lane (`ecs-agent-*`, `ecs-update-hk-*`, `ecs-win`) the
+// strict bound.
 function isMarkerlessCiLane(env: NodeJS.ProcessEnv): boolean {
   return (
     env['CI'] === 'true' &&
@@ -262,8 +264,8 @@ function sessionCacheFor(projectRoot: string): AutoMemoryDocumentCache {
 describe('coldScanCeilingMs lane arms', () => {
   // One arm runs per CI job, and this PR's own `Test (ubuntu-latest)` job lands
   // on the pool, so without these cases the hosted arm never executes anywhere:
-  // dropping or reordering a disjunct, or putting `topicCount >= 1000` back,
-  // would redden fork PRs again with nothing failing at the edit. `env` is
+  // dropping a disjunct, or putting `topicCount >= 1000` back, would
+  // redden fork PRs again with nothing failing at the edit. `env` is
   // passed rather than stubbed, so no case here can leak a lane into the
   // timing tests below.
   const arms: Array<{
@@ -305,7 +307,33 @@ describe('coldScanCeilingMs lane arms', () => {
       large: 275,
     },
     {
-      // Both runner markers present: not the gate child, so the strict bound.
+      // Exactly one marker present: not the env -i child either. With the
+      // next row this pins each marker conjunct of the markerless check —
+      // dropping one must relax nothing.
+      lane: 'CI with one runner marker',
+      env: { CI: 'true', RUNNER_ENVIRONMENT: 'self-hosted' },
+      small: 100,
+      large: 125,
+    },
+    {
+      lane: 'CI with only a runner name',
+      env: { CI: 'true', RUNNER_NAME: 'corp-runner-1' },
+      small: 100,
+      large: 125,
+    },
+    {
+      // CI=false is not CI: pins the `=== 'true'` comparison against a
+      // widening to `!== undefined`.
+      lane: 'CI set to false, no markers',
+      env: { CI: 'false' },
+      small: 100,
+      large: 125,
+    },
+    {
+      // Both runner markers present: not the gate child, so the strict
+      // bound. A markerless check broad enough to swallow a marked lane
+      // reddens this row — the pool row below stays green there, because
+      // the pool arm answers before the markerless check.
       lane: 'marked self-hosted CI',
       env: {
         CI: 'true',
@@ -316,9 +344,8 @@ describe('coldScanCeilingMs lane arms', () => {
       large: 125,
     },
     {
-      // CI set beside the pool marker: the pool arm must still answer, so
-      // deleting it — or a markerless check broad enough to swallow a
-      // marked lane — reddens this row.
+      // CI set beside the pool marker: the pool arm answers before the
+      // markerless check, so deleting the pool arm reddens this row.
       lane: 'ecs pool with CI set',
       env: { RUNNER_NAME: 'ecs-qwen-parity', CI: 'true' },
       small: 1000,
