@@ -3951,6 +3951,24 @@ describe('Hosted Harness no-tool session', () => {
       .send({ prompt, promptId: PROMPT_ID, payloadDigest });
     expect(replayed.status).toBe(202);
     expect(replayed.body.lastEventId).toBe(admitted.body.lastEventId - 1);
+
+    // A replay is only one replays: a different body under the accepted
+    // Id is a conflict, not a watermark (R9-1) — the model gets called
+    // for nothing, and the destination cannot silently stream the
+    // previous Turn's events as this request's answer.
+    const offered = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        prompt: [{ type: 'text', text: 'different' }],
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256')
+          .update(JSON.stringify([{ type: 'text', text: 'different' }]))
+          .digest('hex')}`,
+      });
+    expect(offered.status).toBe(409);
+    expect(offered.body.code).toBe('hosted_prompt_conflict');
     const status = await headers(
       supertest(server).get(`/session/${SESSION_ID}/status`),
     ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
@@ -7417,13 +7435,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(loaded.body.reason).toBeUndefined();
   });
 
-  it('answers a cancellation takeover of a parked no-tool Turn as the plain attach', async () => {
-    // The pre-kernel no-tool guard is shape-blind no longer: the
-    // cancellation arm attaches plain (inapplicable, mirroring the
-    // kernel); the drive shape of the same journal keeps its typed
+  it('refuses a cancellation takeover of a parked no-tool Turn retriably', async () => {
+    // Where the kernel cannot even be called, nothing may answer "nothing
+    // is owed": a minted plain attach would stand a Session whose parked
+    // Turn no route resolves, and the loose latch would then admit input
+    // the authority can never settle (R5-2'). The cancellation arm gets
+    // the baseline retriable refusal instead; drive keeps its typed
     // model_start decline. Surface the connector's workspace==null shape:
-    // a definition lacking any toolProfile, so the load itself stays
-    // tool-free.
+    // a definition lacking any toolProfile, so the load stays tool-free.
     await parkToolTurn();
     const read = LocalManagedSessionResourceStore.prototype.read;
     vi.spyOn(
@@ -7453,22 +7472,16 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(drive.body.reason).toBe('model_start');
 
     // The decline closed its authority, releasing the writer latch for
-    // the cancellation arm's plain attach.
+    // the cancellation arm's load.
     const passive = await replacementHeaders(
       supertest(replacementApp()).post(`/session/${SESSION_ID}/load`),
     ).send({
       managedSessionStore: storeFor(BOOT_ID_2),
       passiveManagedRuntimeRecovery: true,
     });
-    expect(passive.status).toBe(200);
-    expect(
-      passive.body._meta?.['qwen.daemon.managedRuntimeRecovery'],
-    ).toBeUndefined();
-    // An inapplicable attach must NOT latch the blocked flag, or the
-    // 200 answer would refuse every later settlement route verbatim
-    // (R5-2's latch regression — nothing clears the latch on a
-    // non-hooks Session outside settleCancelledHookTurn).
-    expect(passive.body.recoveryRequired).toBeUndefined();
+    expect(passive.status).toBe(409);
+    expect(passive.body.code).toBe('hosted_turn_recovery_required');
+    expect(passive.body.reason).toBeUndefined();
   });
 
   it('replays the snapshot only to a request re-proving its store identity', async () => {

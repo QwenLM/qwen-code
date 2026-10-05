@@ -1801,35 +1801,30 @@ export function registerHostedHarnessSessionRoutes(
         // cancellation) and answer with the recovery snapshot. A Turn with
         // no Runtime work (a model round, or every Turn of a no-tool
         // Session) cannot be driven here: refuse it with a typed terminal
-        // decline rather than a refusal the coordinator retries forever —
-        // on the DRIVE shape. A cancellation-only load meets the kernel's
-        // inapplicable even at this pre-kernel guard: the plain attach
-        // continues, and the coordinator's cancel arm settles what a
-        // decline would have killed.
-        if (
-          (toolProfile === undefined || !brokerOptions) &&
-          body?.['passiveManagedRuntimeRecovery'] !== true
-        ) {
+        // decline rather than a refusal the coordinator retries forever –
+        // on the DRIVE shape. A cancellation-only load of the same shape
+        // CANNOT answer "nothing is owed" either: there is no kernel to
+        // ask, so no plain attach may be minted — the placeholder is the
+        // baseline retriable refusal, and the cancel path re-issues when
+        // the tools to settle exist. Attaching one here would stand up a
+        // Session whose parked Turn no route may resolve (R5-2' round).
+        if (toolProfile === undefined || !brokerOptions) {
           await managed.close();
-          recoveryDeclined(res, 'model_start');
+          if (body?.['passiveManagedRuntimeRecovery'] === true)
+            error(res, 409, 'hosted_turn_recovery_required');
+          else recoveryDeclined(res, 'model_start');
           return;
         }
         try {
-          const outcome =
-            toolProfile !== undefined && brokerOptions !== undefined
-              ? await recoverHostedRuntimeTurn({
-                  session: managed,
-                  sessionId,
-                  cwd,
-                  promptId: unsettled,
-                  brokerOptions,
-                  passive: body?.['passiveManagedRuntimeRecovery'] === true,
-                })
-              : // A cancellation-only load of a no-tool Session has no
-                // Runtime work to owe — by request shape or by ambient
-                // config; the plain attach below is the kernel's answer.
-                undefined;
-          if (outcome === undefined || outcome.kind === 'inapplicable') {
+          const outcome = await recoverHostedRuntimeTurn({
+            session: managed,
+            sessionId,
+            cwd,
+            promptId: unsettled,
+            brokerOptions,
+            passive: body?.['passiveManagedRuntimeRecovery'] === true,
+          });
+          if (outcome.kind === 'inapplicable') {
             inapplicableAnswer = true;
           } else if (outcome.kind === 'declined') {
             await managed.close();
@@ -2194,13 +2189,49 @@ export function registerHostedHarnessSessionRoutes(
         // the point of the journal's commandId idempotency, so answer the
         // original admission with the watermark its own Turn flows from
         // (the sequence of input.accepted itself), rather than a
-        // hint that loops the destination unboundedly.
-        res.status(202).json({
-          promptId,
-          lastEventId: acceptedSequence,
-          eventEpoch: epoch,
-        });
-        return;
+        // hint that loops the destination unboundedly. It is a replay ONLY
+        // when the body proves identity: a different payload under an
+        // accepted Id is a conflict, not an answer (R9-1).
+        const acceptedEvent = session.managed.authority
+          .eventsInSequenceRange(1, session.managed.authority.committedSequence)
+          .findLast(
+            (event) =>
+              event.kind === 'input.accepted' &&
+              event.payload['inputId'] === promptId,
+          );
+        const admissionRef = acceptedEvent?.payload['admissionRef'] as
+          | ManagedSessionDurableRef
+          | undefined;
+        if (admissionRef === undefined) {
+          res.status(202).json({
+            promptId,
+            lastEventId: acceptedSequence,
+            eventEpoch: epoch,
+          });
+          return;
+        }
+        if (admissionRef !== undefined) {
+          void (async () => {
+            const acceptedAdmission = object(
+              JSON.parse(
+                (await session.managed.resources.read(admissionRef)).toString(
+                  'utf8',
+                ),
+              ),
+            );
+            if (acceptedAdmission?.['digest'] !== digest) {
+              if (!res.headersSent) error(res, 409, 'hosted_prompt_conflict');
+              return;
+            }
+            if (!res.headersSent)
+              res.status(202).json({
+                promptId,
+                lastEventId: acceptedSequence,
+                eventEpoch: epoch,
+              });
+          })();
+          return;
+        }
       }
       return error(res, 409, 'hosted_prompt_recovery_required');
     }

@@ -405,7 +405,20 @@ public class HarnessCoordinator {
             // Session close).
             harness.cancel(session.tenantId(), session.sessionId());
             requireLease(leaseLost);
+            // The plain attach minted this generation's own epoch: the
+            // SSE that follows must stream THAT epoch, or the daemon
+            // rejects the channel on epoch mismatch (R8-1').
             current = claimed;
+            String priorEpoch = current.harnessEventEpoch();
+            if (!attachment.eventEpoch().equals(priorEpoch)) {
+                store.recordRecoveryAdmission(current.tenantId(),
+                        current.sessionId(), current.turnId(), owner,
+                        priorEpoch, attachment.eventEpoch(),
+                        attachment.lastEventId());
+                requireLease(leaseLost);
+                current = store.findTurn(current.tenantId(),
+                        current.sessionId(), current.turnId()).orElseThrow();
+            }
             cancelledOnAttach = true;
         } else {
             boolean bound;
@@ -428,6 +441,22 @@ public class HarnessCoordinator {
                 }
                 session = store.requireSession(session.tenantId(),
                         session.sessionId());
+                // The plain attach minted its own epoch: the stream's
+                // epoch must move to this generation as well, or the
+                // follow-on SSE is rejected (R8-1').
+                current = store.findTurn(claimed.tenantId(),
+                        claimed.sessionId(), claimed.turnId()).orElseThrow();
+                String priorEpoch = current.harnessEventEpoch();
+                if (!attachment.eventEpoch().equals(priorEpoch)) {
+                    store.recordRecoveryAdmission(current.tenantId(),
+                            current.sessionId(), current.turnId(), owner,
+                            priorEpoch, attachment.eventEpoch(),
+                            attachment.lastEventId());
+                    requireLease(leaseLost);
+                    current = store.findTurn(current.tenantId(),
+                            current.sessionId(), current.turnId())
+                            .orElseThrow();
+                }
             }
             bound = store.bindHarness(session.tenantId(),
                     session.sessionId(), claimed.turnId(), owner,
