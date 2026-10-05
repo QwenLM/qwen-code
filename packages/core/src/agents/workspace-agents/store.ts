@@ -29,6 +29,7 @@ import {
   MAX_THREAD_MESSAGES,
   MAX_THREAD_RUNS,
   AGENT_HOSTS_SCHEMA_VERSION,
+  AGENT_HOST_REPLACEMENT_REQUIRED,
   AGENTS_SCHEMA_VERSION,
   type AgentHost,
   type AgentHostView,
@@ -644,7 +645,12 @@ function isValidAgentHostsFile(value: unknown): value is AgentHostsFile {
     enrollment === undefined ||
     (isRecord(enrollment) &&
       isNonEmptyString(enrollment['tokenHash']) &&
-      isFiniteTimestamp(enrollment['expiresAt']))
+      isFiniteTimestamp(enrollment['expiresAt']) &&
+      (enrollment['supersedesHostId'] === undefined ||
+        isValidId(enrollment['supersedesHostId'])) &&
+      (enrollment['replacementHostId'] === undefined ||
+        (isValidId(enrollment['supersedesHostId']) &&
+          isValidId(enrollment['replacementHostId']))))
   );
 }
 
@@ -1387,19 +1393,47 @@ export async function readAgentHosts(
   });
 }
 
+function pendingAgentHostReplacementError(registry: AgentHostsFile): Error {
+  const oldId = registry.enrollment?.supersedesHostId;
+  const old = registry.hosts.find((host) => host.id === oldId);
+  return new Error(
+    `Retry the pending Agent Host replacement first: select "${old?.name ?? oldId}" (${oldId}) in Runtimes, choose Replace, generate a fresh join command and run it on the replacement machine. Link expiry does not cancel the pending replacement.`,
+  );
+}
+
 export async function issueAgentHostEnrollment(
   projectRoot: string,
-): Promise<{ token: string; expiresAt: number }> {
+  supersedesHostId?: string,
+): Promise<{ token: string; expiresAt: number; replacementHostId?: string }> {
   return withWorkspaceLock(projectRoot, async () => {
     await ensureMigratedUnlocked(projectRoot);
     const registry = await readAgentHostsUnlocked(projectRoot);
+    if (
+      supersedesHostId !== undefined &&
+      !registry.hosts.some((host) => host.id === supersedesHostId)
+    ) {
+      throw new Error('Agent Host to replace not found.');
+    }
+    const pending = registry.enrollment?.replacementHostId;
+    if (pending && supersedesHostId !== registry.enrollment?.supersedesHostId) {
+      throw pendingAgentHostReplacementError(registry);
+    }
     const token = randomBytes(32).toString('base64url');
     const expiresAt = Date.now() + HOST_ENROLLMENT_TTL_MS;
     await writeAgentHostsUnlocked(projectRoot, {
       ...registry,
-      enrollment: { tokenHash: hashAgentHostSecret(token), expiresAt },
+      enrollment: {
+        tokenHash: hashAgentHostSecret(token),
+        expiresAt,
+        ...(supersedesHostId !== undefined ? { supersedesHostId } : {}),
+        ...(pending ? { replacementHostId: pending } : {}),
+      },
     });
-    return { token, expiresAt };
+    return {
+      token,
+      expiresAt,
+      ...(pending ? { replacementHostId: pending } : {}),
+    };
   });
 }
 
@@ -1428,8 +1462,7 @@ export async function enrollAgentHost(
   ) {
     throw new Error('Invalid Agent Host providers.');
   }
-  return withWorkspaceLock(projectRoot, async () => {
-    await ensureMigratedUnlocked(projectRoot);
+  return withAgentStoreTransaction(projectRoot, async (transaction) => {
     const registry = await readAgentHostsUnlocked(projectRoot);
     if (
       !registry.enrollment ||
@@ -1438,19 +1471,49 @@ export async function enrollAgentHost(
     ) {
       throw new Error('Invalid or expired Agent Host enrollment token.');
     }
+    const supersedesHostId = registry.enrollment.supersedesHostId;
+    if (
+      supersedesHostId !== undefined &&
+      !registry.hosts.some((host) => host.id === supersedesHostId)
+    ) {
+      throw new Error('Agent Host to replace not found.');
+    }
     const secret = randomBytes(32).toString('base64url');
     const host: AgentHost = {
-      id: generateAgentHostId(),
+      id: registry.enrollment.replacementHostId ?? generateAgentHostId(),
       name,
       secretHash: hashAgentHostSecret(secret),
       workspaceCwd,
       providers,
       createdAt: Date.now(),
     };
+    if (supersedesHostId !== undefined) {
+      // Files commit independently. Persist the new identity before moving
+      // bindings, and retain its id in the token so an I/O failure is retryable.
+      await writeAgentHostsUnlocked(projectRoot, {
+        ...registry,
+        hosts: [
+          ...registry.hosts.filter((entry) => entry.id !== host.id),
+          host,
+        ],
+        enrollment: { ...registry.enrollment, replacementHostId: host.id },
+      });
+      const { replaceAgentHostInTransaction } = await import('./host-lease.js');
+      await replaceAgentHostInTransaction(
+        transaction,
+        supersedesHostId,
+        host.id,
+      );
+    }
     const { enrollment: _used, ...rest } = registry;
     await writeAgentHostsUnlocked(projectRoot, {
       ...rest,
-      hosts: [...registry.hosts, host],
+      hosts: [
+        ...registry.hosts.filter(
+          (entry) => entry.id !== supersedesHostId && entry.id !== host.id,
+        ),
+        host,
+      ],
     });
     return { host: publicAgentHost(host), secret };
   });
@@ -1483,6 +1546,12 @@ export async function heartbeatAgentHost(
         ))
     ) {
       return undefined;
+    }
+    if (
+      input.enrollmentToken !== undefined &&
+      registry.enrollment?.supersedesHostId !== undefined
+    ) {
+      throw new Error(AGENT_HOST_REPLACEMENT_REQUIRED);
     }
     const workspaceCwd = input.workspaceCwd.trim();
     const providers = [
@@ -1544,6 +1613,13 @@ export async function removeAgentHostUnlocked(
 ): Promise<boolean> {
   const registry = await readAgentHostsUnlocked(projectRoot);
   if (!registry.hosts.some((host) => host.id === hostId)) return false;
+  if (
+    registry.enrollment?.replacementHostId &&
+    (registry.enrollment.supersedesHostId === hostId ||
+      registry.enrollment.replacementHostId === hostId)
+  ) {
+    throw pendingAgentHostReplacementError(registry);
+  }
   await writeAgentHostsUnlocked(projectRoot, {
     ...registry,
     hosts: registry.hosts.filter((host) => host.id !== hostId),

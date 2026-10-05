@@ -23,7 +23,9 @@ import {
   FolderClosedIcon,
   FolderOpenIcon,
   Globe2Icon,
+  InboxIcon,
 } from 'lucide-react';
+import { Empty, EmptyMedia, EmptyDescription } from '../ui/empty';
 import { useI18n } from '../../i18n';
 import { formatDateTime } from '../../utils/formatDateTime';
 import {
@@ -124,6 +126,7 @@ interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
   remote?: boolean;
   renderHeader?: (expanded: boolean) => ReactNode;
+  hideHeader?: boolean;
   client: DaemonClient;
   reloadToken: number;
   untrustedLabel: string;
@@ -238,6 +241,7 @@ export function WorkspaceSection({
   workspace,
   remote = false,
   renderHeader,
+  hideHeader = false,
   client,
   reloadToken,
   untrustedLabel,
@@ -875,7 +879,7 @@ export function WorkspaceSection({
   );
   return (
     <div className={styles.section}>
-      {overviewEnabled && !renderHeader && !disabled ? (
+      {hideHeader ? null : overviewEnabled && !renderHeader && !disabled ? (
         <WorkspaceDetailsTooltip
           label={workspaceLabel(workspace)}
           cwd={workspace.ssh ? sshWorkspaceLabel(workspace.ssh) : gitPollCwd}
@@ -952,7 +956,17 @@ export function WorkspaceSection({
               // page settles there is no data yet, so the "no sessions" notice
               // would flash for a whole fetch round-trip.
               pendingSession ||
-              (sessionsLoading && sessionsPage === undefined) ? null : (
+              (sessionsLoading &&
+                sessionsPage === undefined) ? null : hideHeader ? (
+                <Empty className="gap-2 py-8">
+                  <EmptyMedia className="mb-0 text-muted-foreground/40">
+                    <InboxIcon size={40} strokeWidth={1} aria-hidden="true" />
+                  </EmptyMedia>
+                  <EmptyDescription className="text-xs">
+                    {noSessionsLabel}
+                  </EmptyDescription>
+                </Empty>
+              ) : (
                 <div className={styles.empty}>{noSessionsLabel}</div>
               )
             ) : channelSessionGroups ? (

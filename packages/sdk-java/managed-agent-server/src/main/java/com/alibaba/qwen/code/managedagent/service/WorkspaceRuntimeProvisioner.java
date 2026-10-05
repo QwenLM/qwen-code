@@ -43,6 +43,11 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     @Override
+    public void reserveResource(RuntimeBindingRecord binding) {
+        delegate.reserveResource(binding);
+    }
+
+    @Override
     public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request) {
         requireReady(request);
         return delegate.provision(request);
