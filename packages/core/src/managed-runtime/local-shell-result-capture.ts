@@ -12,6 +12,7 @@ import type {
 } from '../services/shellExecutionService.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 import {
+  impliedStatus,
   MANAGED_TOOL_RESULT_KINDS,
   MANAGED_TOOL_RESULT_LIMITS,
   MANAGED_TOOL_RESULT_PROTOCOL,
@@ -294,15 +295,7 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
           body: { pages: state.pages },
         }))
       : [];
-    const captureStatus =
-      contents.length === 0 ||
-      contents.every(
-        (entry) => entry.state === 'incomplete' && entry.byteLength === 0,
-      )
-        ? 'unavailable'
-        : contents.every((entry) => entry.state === 'sealed')
-          ? 'complete'
-          : 'partial';
+    const captureStatus = impliedStatus(contents);
     const captureReason =
       captureStatus === 'complete'
         ? null

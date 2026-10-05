@@ -10,6 +10,7 @@ import type { ShellRawCaptureSink } from '../services/shellExecutionService.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 import {
+  impliedStatus,
   MANAGED_TOOL_RESULT_KINDS,
   MANAGED_TOOL_RESULT_LIMITS,
   MANAGED_TOOL_RESULT_PROTOCOL,
@@ -20,6 +21,7 @@ import {
   type ToolResultEnvelope,
   type ToolResultPageReference,
   type ToolResultSegment,
+  type ToolResultStoreOutcome,
 } from './managed-tool-result.js';
 import type {
   ToolResultExpectedIdentity,
@@ -173,14 +175,15 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
       if (!this.broken && state.used > 0)
         await this.publishSegment(state, true);
       if (!this.broken && complete) {
-        const sealed = await this.store.seal({
-          captureId: this.identity.captureId,
-          streamId: state.id,
-          segmentCount: state.ordinal,
-          byteLength: state.byteLength,
-          digest: state.hash.copy().digest('hex'),
-        });
-        if (sealed.status !== 'ok') throw new Error(sealed.code);
+        await this.withConflictRetry(() =>
+          this.store.seal({
+            captureId: this.identity.captureId,
+            streamId: state.id,
+            segmentCount: state.ordinal,
+            byteLength: state.byteLength,
+            digest: state.hash.copy().digest('hex'),
+          }),
+        );
         state.sealed = true;
       }
       // The revision of an ended stream publishes only after its seal
@@ -206,6 +209,46 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
             ? 'quota_exhausted'
             : 'storage_failed',
     };
+    // The latch is silent forever, but the manifest must stop advertising
+    // a healthy open capture the moment the stream goes blind: mark every
+    // stream blind here and queue the announcement behind both streams'
+    // in-flight work, so the degradation revision publishes ahead of every
+    // settle attempt — finalize itself awaits it before publishing.
+    const announcing = Promise.all(
+      BOTH.map((id) => {
+        const state = this.streams[id];
+        state.ended = true;
+        return (state.queue = state.queue.then(() => this.announceBroken()));
+      }),
+    ).then(() => undefined);
+    this.announcing = announcing;
+  }
+
+  private announcing: Promise<void> | undefined;
+  private announced = false;
+
+  private async announceBroken(): Promise<void> {
+    if (this.announced) return;
+    this.announced = true;
+    try {
+      await this.publish('unknown', null, null);
+    } catch {
+      // The announcement is itself best-effort: the last revision that did
+      // publish stands, and finalize stays the sole writer of the settled
+      // envelope — a later successful publish replaces this one's ref.
+    }
+  }
+
+  /** One transient conflict gets two more asks before it latches. */
+  private async withConflictRetry<Result>(
+    call: () => Promise<ToolResultStoreOutcome<Result>>,
+  ): Promise<Result> {
+    for (let attempt = 1; ; attempt++) {
+      const outcome = await call();
+      if (outcome.status === 'ok') return outcome.result;
+      if (outcome.code !== 'managed_tool_result_conflict' || attempt === 3)
+        throw new Error(outcome.code);
+    }
   }
 
   private async publishSegment(
@@ -217,18 +260,19 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
       throw new Error('size_limit');
     }
     const bytes = state.buffer.subarray(0, state.used);
-    const published = await this.store.publish({
-      captureId: this.identity.captureId,
-      streamId: state.id,
-      ordinal: state.ordinal,
-      bytes,
-    });
-    if (published.status !== 'ok') throw new Error(published.code);
+    const published = await this.withConflictRetry(() =>
+      this.store.publish({
+        captureId: this.identity.captureId,
+        streamId: state.id,
+        ordinal: state.ordinal,
+        bytes,
+      }),
+    );
     state.hash.update(bytes);
     state.byteLength += bytes.byteLength;
     state.pendingSegments.push({
-      byteLength: published.result.byteLength,
-      digest: published.result.digest,
+      byteLength: published.byteLength,
+      digest: published.digest,
     });
     state.ordinal++;
     state.used = 0;
@@ -273,21 +317,30 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     if (bytes.byteLength > MANAGED_TOOL_RESULT_LIMITS.maxPageBytes) {
       throw new Error('size_limit');
     }
-    const ref = await this.resources.publish(
-      MANAGED_TOOL_RESULT_KINDS.page,
-      bytes,
-    );
-    const byteLength = segments.reduce(
-      (length, segment) => length + segment.byteLength,
-      0,
-    );
-    state.pages.push({
-      ref,
-      segmentCount: segments.length,
-      byteLength,
-    });
-    state.pageOffset += byteLength;
-    state.pageOrdinal += segments.length;
+    try {
+      const ref = await this.resources.publish(
+        MANAGED_TOOL_RESULT_KINDS.page,
+        bytes,
+      );
+      const byteLength = segments.reduce(
+        (length, segment) => length + segment.byteLength,
+        0,
+      );
+      state.pages.push({
+        ref,
+        segmentCount: segments.length,
+        byteLength,
+      });
+      state.pageOffset += byteLength;
+      state.pageOrdinal += segments.length;
+    } catch (cause) {
+      // A refused page write restores its batch so the degradation
+      // announcement and any later settle flush can try again; a spliced
+      // batch that stayed lost would make every later revision's descriptor
+      // irreconcilable with its pages.
+      state.pendingSegments.unshift(...segments);
+      throw cause;
+    }
   }
 
   /**
@@ -328,7 +381,7 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
       };
     });
     const broken = this.broken;
-    const captureStatus = captureStatusFor(contents);
+    const captureStatus = impliedStatus(contents);
     const manifest = parseToolResultManifest({
       toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
       type: 'manifest',
@@ -394,6 +447,7 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     // admitted bytes. A writability failure at settle time must not escape:
     // the last published revision stands (the cap rule for a dying worker),
     // and the envelope degrades to unavailable with the named reason.
+    await this.announcing;
     try {
       const ref = await this.publish(
         executionStatus,
@@ -439,21 +493,6 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     }
     return this.finalEnvelope;
   }
-}
-
-function captureStatusFor(
-  contents: readonly ToolResultContentDescriptor[],
-): 'pending' | 'complete' | 'partial' | 'unavailable' {
-  if (contents.some((entry) => entry.state === 'open')) return 'pending';
-  if (contents.every((entry) => entry.state === 'sealed')) return 'complete';
-  if (
-    contents.every(
-      (entry) => entry.state === 'incomplete' && entry.byteLength === 0,
-    )
-  ) {
-    return 'unavailable';
-  }
-  return 'partial';
 }
 
 function signalName(value: number | null): string | null {

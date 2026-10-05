@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  isToolResultManifestChainLink,
   isToolResultManifestSuccessor,
   isToolResultPageAt,
   MANAGED_TOOL_RESULT_KINDS,
@@ -49,6 +50,8 @@ interface Rig {
   readonly resources: LocalManagedSessionResourceStore;
   failManifestPublishesAfter: number;
   refuseSegments: boolean;
+  refusePagePublishes: number;
+  refuseSegmentCalls: number;
   holdFirstStderrPage(): void;
   readonly firstStderrPageSeen: Promise<void>;
   releaseFirstStderrPage(): void;
@@ -93,6 +96,8 @@ async function rig(options: { segmentsPerPage?: number } = {}): Promise<Rig> {
     resources: real,
     failManifestPublishesAfter: Number.POSITIVE_INFINITY,
     refuseSegments: false,
+    refusePagePublishes: 0,
+    refuseSegmentCalls: 0,
     holdFirstStderrPage: () => {
       holdStderrPage = true;
     },
@@ -110,8 +115,15 @@ async function rig(options: { segmentsPerPage?: number } = {}): Promise<Rig> {
       ) {
         return Promise.reject(new Error('writable store is gone'));
       }
-      const persist = () =>
-        real.publish(kind, bytes).then((ref) => {
+      const persist = () => {
+        if (
+          kind === MANAGED_TOOL_RESULT_KINDS.page &&
+          rigState.refusePagePublishes > 0
+        ) {
+          rigState.refusePagePublishes -= 1;
+          return Promise.reject(new Error('writable store is gone'));
+        }
+        return real.publish(kind, bytes).then((ref) => {
           if (kind === MANAGED_TOOL_RESULT_KINDS.page) pages.push(bytes);
           if (kind === MANAGED_TOOL_RESULT_KINDS.manifest) {
             manifests.push(
@@ -120,6 +132,7 @@ async function rig(options: { segmentsPerPage?: number } = {}): Promise<Rig> {
           }
           return ref;
         });
+      };
       if (
         kind === MANAGED_TOOL_RESULT_KINDS.page &&
         holdStderrPage &&
@@ -141,7 +154,8 @@ async function rig(options: { segmentsPerPage?: number } = {}): Promise<Rig> {
         ordinal: number;
         bytes: Buffer;
       };
-      if (rigState.refuseSegments) {
+      if (rigState.refuseSegments || rigState.refuseSegmentCalls > 0) {
+        if (rigState.refuseSegmentCalls > 0) rigState.refuseSegmentCalls -= 1;
         return Promise.resolve<
           ToolResultStoreOutcome<ToolResultSegmentReceipt>
         >({ status: 'refused', code: 'managed_tool_result_conflict' });
@@ -441,10 +455,17 @@ describe('LocalShellStreamCapture', () => {
       captureStatus: 'partial',
       captureReason: 'storage_failed',
     });
+    // The latch announces itself as its own revision between the pending
+    // chain and the settled one, so the manifest never reads healthy-open
+    // over a blind stream.
+    const announced = r.manifests.at(-2)!;
+    expect(announced['executionStatus']).toBe('unknown');
+    expect(announced['captureStatus']).toBe('partial');
+    expect(announced['captureReason']).toBe('storage_failed');
     const settled = r.manifests.at(-1)!;
     expect(settled['executionStatus']).toBe('error');
     expect(settled['signal']).toBe('SIGKILL');
-    expect(isToolResultManifestSuccessor(pendingLast, settled)).toBe(true);
+    expect(isToolResultManifestChainLink(pendingLast, settled)).toBe(true);
     // Byte-level: the lost tail never entered any published page or segment.
     const lostDigest = createHash('sha256').update(lost).digest('hex');
     expect(
@@ -513,6 +534,54 @@ describe('LocalShellStreamCapture', () => {
         (entry) => entry['byteLength'],
       ),
     ).toEqual([0, 0]);
+  });
+
+  it('announces the degradation the moment a page publish refuses, ahead of finalize', async () => {
+    // One refused page publish blinds the whole capture: the manifest must
+    // name that now, not at the next writable publish, or a reader keeps
+    // seeing a healthy open capture over a stream that went blind mid-run.
+    const r = await rig({ segmentsPerPage: 1 });
+    await r.captured.open();
+    r.captured.setStarted(1);
+    expect(r.manifests).toHaveLength(1);
+    r.refusePagePublishes = 1;
+    await r.captured.write('stdout', Buffer.alloc(1024 * 1024, 3));
+    expect(r.captured.brokenReason).toEqual({ reason: 'storage_failed' });
+    // The announcement rides the stream's own queue, ahead of finalize.
+    await r.captured.finish('stderr', false);
+    expect(r.manifests).toHaveLength(2);
+    const announced = r.manifests.at(-1)!;
+    expect(announced['executionStatus']).toBe('unknown');
+    expect(announced['captureStatus']).toBe('partial');
+    expect(announced['captureReason']).toBe('storage_failed');
+
+    const final = await r.captured.finalize('success', [], undefined, {
+      exitCode: 0,
+      signalName: null,
+    });
+    expect(final.capture?.captureStatus).toBe('partial');
+    // The announced revision is never the settled envelope's manifest: the
+    // settle publish writes its own revision and owns that ref.
+    const settled = r.manifests.at(-1)!;
+    expect(settled['executionStatus']).toBe('success');
+    expect(settled['revision']).toBe(3);
+  });
+
+  it('retries a transient conflict before it ever latches', async () => {
+    const r = await rig({ segmentsPerPage: 1 });
+    await r.captured.open();
+    r.captured.setStarted(1);
+    r.refuseSegmentCalls = 1;
+    await r.captured.write('stdout', Buffer.alloc(1024 * 1024, 7));
+    expect(r.captured.brokenReason).toBeNull();
+    expect(r.segments).toHaveLength(1);
+    await r.captured.finish('stdout', true);
+    await r.captured.finish('stderr', true);
+    const final = await r.captured.finalize('success', [], undefined, {
+      exitCode: 0,
+      signalName: null,
+    });
+    expect(final.capture?.captureStatus).toBe('complete');
   });
 
   it('settles exit evidence set through the process result', async () => {

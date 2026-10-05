@@ -521,7 +521,7 @@ function parseDescriptor(
 }
 
 /** The capture status that a manifest's descriptors imply. */
-function impliedStatus(
+export function impliedStatus(
   contents: readonly ToolResultContentDescriptor[],
 ): ToolResultCaptureStatus {
   if (contents.some((entry) => entry.state === 'open')) return 'pending';

@@ -14,6 +14,7 @@ import { Ajv2020 } from 'ajv/dist/2020.js';
 import { describe, expect, it } from 'vitest';
 import { ManagedSessionRecordError } from './managed-session-records.js';
 import {
+  impliedStatus,
   MANAGED_TOOL_RESULT_KINDS,
   MANAGED_TOOL_RESULT_LIMITS,
   MANAGED_TOOL_RESULT_PROTOCOL,
@@ -262,6 +263,38 @@ function withChangingField(
   });
   return { value: copy, reads: () => reads };
 }
+
+describe('impliedStatus', () => {
+  const descriptor = (
+    state: 'open' | 'sealed' | 'incomplete',
+    byteLength = 1,
+  ): Parameters<typeof impliedStatus>[0][number] => ({
+    streamId: 'stdout',
+    role: 'full_log',
+    mimeType: 'text/plain',
+    state,
+    byteLength,
+    digest: 'a'.repeat(64),
+    missingRanges: [{ start: 0, end: null }],
+    body: { pages: [] },
+  });
+
+  it('declares the empty descriptor list unavailable, never complete', () => {
+    // The shared rule the stream and result captures both use; a private
+    // re-derivation answered 'complete' here — every([]) vacuously sealed.
+    expect(impliedStatus([])).toBe('unavailable');
+  });
+
+  it('keeps open descriptors pending and full seals complete', () => {
+    expect(impliedStatus([descriptor('open'), descriptor('sealed')])).toBe(
+      'pending',
+    );
+    expect(impliedStatus([descriptor('sealed')])).toBe('complete');
+    expect(impliedStatus([descriptor('sealed', 0)])).toBe('complete');
+    expect(impliedStatus([descriptor('incomplete', 0)])).toBe('unavailable');
+    expect(impliedStatus([descriptor('incomplete', 3)])).toBe('partial');
+  });
+});
 
 describe('Managed tool result contract', () => {
   it('validates the shared fixtures against the shared schema', () => {
