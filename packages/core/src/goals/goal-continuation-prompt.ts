@@ -7,6 +7,7 @@
 import type { Part } from '@google/genai';
 import type { GoalRecord, GoalTurnPermit } from './goal-protocol.js';
 import { escapeJsonTagCharacters } from '../utils/formatters.js';
+import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
 
 export type GoalContinuationUsage = Pick<
   GoalRecord,
@@ -69,6 +70,8 @@ const DATA_CLOSE_TAG = '</goal_runtime_data>';
 const SHARED_LINES = [
   'Continue working on the active Goal.',
   'Use get_goal for the authoritative objective, the budget figures, and any verifier feedback.',
+  `In Direct mode: ${toolSearchBridgeSentence('get_goal or update_goal')}`,
+  'In Code Mode, discover missing Goal tools with tool_search and invoke them through exec using the returned JavaScript name.',
   "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
   'If completion depends on content delivered in this turn, deliver only that content in this turn, before update_goal.',
 ];

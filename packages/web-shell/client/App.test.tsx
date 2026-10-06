@@ -29200,6 +29200,91 @@ describe('App session callbacks', () => {
     expect(container.querySelector('button[title="Side task"]')).not.toBeNull();
   });
 
+  it.each([false, true])(
+    'creates and reopens a side task in the secondary workspace (busy=%s)',
+    async (busy) => {
+      const workspaceCwd = '/tmp/secondary';
+      mockWorkspace.capabilities.workspaces = [
+        { id: 'primary', cwd: '/tmp/project', primary: true },
+        { id: 'secondary', cwd: workspaceCwd, primary: false },
+      ];
+      mockConnection.workspaceCwd = workspaceCwd;
+      mockConnection.capabilities.features = ['session_side_task'];
+      testState.streamingState = busy ? 'responding' : 'idle';
+      testState.sessionHasActivePrompt = busy;
+      mockWorkspace.client.createSideTaskSession.mockResolvedValueOnce({
+        sessionId: 'secondary-side-task',
+        clientId: 'side-client',
+        workspaceCwd,
+        displayName: 'Secondary side task',
+      });
+      const { container } = renderApp();
+      await flush();
+
+      testState.prompt = '/btw side inspect the secondary project';
+      await clickSubmit(container);
+      await flush();
+
+      expect(
+        mockWorkspace.client.createSideTaskSession,
+      ).toHaveBeenCalledExactlyOnceWith(
+        'session-1',
+        { name: 'Side task' },
+        'client-1',
+      );
+      expect(mockSessionActions.btwSession).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(mockWorkspace.client.detachSession).toHaveBeenCalledWith(
+        'secondary-side-task',
+        'side-client',
+      );
+      expect(sessionCatalogController.sessionCreated).toHaveBeenCalledWith(
+        workspaceCwd,
+        'secondary-side-task',
+      );
+      expect(testState.latestArtifactPanelProps?.tabs).toEqual([
+        expect.objectContaining({
+          kind: 'side_task',
+          sessionId: 'secondary-side-task',
+          parentSessionId: 'session-1',
+          workspaceCwd,
+          initialPrompt: 'inspect the secondary project',
+        }),
+      ]);
+      expect(mockWorkspace.client.listWorkspaceSessions).toHaveBeenCalledWith(
+        workspaceCwd,
+        expect.objectContaining({
+          sourceType: 'side_task',
+          sourceId: 'session-1',
+        }),
+      );
+
+      const panel = testState.latestArtifactPanelProps!;
+      act(() => panel.onCloseTab(panel.tabs[0]!.id));
+      await flush();
+      expect(
+        container.querySelector('button[title="Secondary side task"]'),
+      ).toBeNull();
+      act(() => {
+        panel.onOpenSideTask?.({
+          sessionId: 'secondary-side-task',
+          title: 'Secondary side task',
+          workspaceCwd,
+        });
+      });
+      await flush();
+      expect(testState.latestArtifactPanelProps?.tabs).toEqual([
+        expect.objectContaining({
+          kind: 'side_task',
+          sessionId: 'secondary-side-task',
+          parentSessionId: 'session-1',
+          workspaceCwd,
+        }),
+      ]);
+      expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledOnce();
+    },
+  );
+
   it('refuses a host-disabled model setup side task before provisioning', async () => {
     mockConnection.capabilities.features = ['session_side_task'];
     const onToast = vi.fn();

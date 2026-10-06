@@ -2957,6 +2957,7 @@ export class Config {
    * built. See {@link getPromptToolSnapshot}.
    */
   private promptToolSnapshot: ReadonlySet<string> | undefined;
+  private promptAgentReachable = false;
 
   /**
    * Volatile system-prompt layer: the managed auto-memory section
@@ -8922,6 +8923,14 @@ export class Config {
 
   setPromptToolSnapshot(names: ReadonlySet<string> | undefined): void {
     this.promptToolSnapshot = names;
+  }
+
+  getPromptAgentReachable(): boolean {
+    return this.promptAgentReachable;
+  }
+
+  setPromptAgentReachable(reachable: boolean): void {
+    this.promptAgentReachable = reachable;
   }
 
   /**
