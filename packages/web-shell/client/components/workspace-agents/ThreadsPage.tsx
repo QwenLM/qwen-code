@@ -109,7 +109,7 @@ export interface ThreadsPageProps {
   onOpenAgentBuilder?: (hostId?: string) => void;
   onOpenDefinitions?: () => void;
   /** Issues a single-use join token for the Add runtime dialog. */
-  onCreateJoinToken?: () => Promise<JoinToken>;
+  onCreateJoinToken?: (supersedesHostId?: string) => Promise<JoinToken>;
   onRemoveRuntime?: (hostId: string) => void;
   hostServerUrl?: string;
   /** A2A shares of one agent; absent hides Share. */
@@ -320,6 +320,8 @@ export function ThreadsPage({
   const [openAgentId, setOpenAgentId] = useState<string>();
   const { t } = useI18n();
   const [addingRuntime, setAddingRuntime] = useState(false);
+  const [replacingRuntime, setReplacingRuntime] =
+    useState<WorkspaceAgentRuntimeView>();
   const [sharing, setSharing] = useState<{ id: string; name: string }>();
   const [taskAssignee, setTaskAssignee] = useState('');
   const statusLabel = (status: string) =>
@@ -447,7 +449,10 @@ export function ThreadsPage({
             <Button
               variant="outline"
               disabled={pending}
-              onClick={() => setAddingRuntime(true)}
+              onClick={() => {
+                setReplacingRuntime(undefined);
+                setAddingRuntime(true);
+              }}
             >
               <PlusIcon data-icon="inline-start" />
               {t('collab.runtime.addTitle')}
@@ -1030,25 +1035,43 @@ export function ThreadsPage({
                 >
                   {statusLabel(runtimeEntry.status)}
                 </strong>
-                {runtimeEntry.kind === 'external' && onRemoveRuntime ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={pending}
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          t('collab.runtime.removeConfirm', {
-                            name: runtimeEntry.label,
-                          }),
-                        )
-                      ) {
-                        onRemoveRuntime(runtimeEntry.id);
-                      }
-                    }}
-                  >
-                    {t('collab.runtime.remove')}
-                  </Button>
+                {runtimeEntry.kind === 'external' &&
+                (onRemoveRuntime || onCreateJoinToken) ? (
+                  <>
+                    {onCreateJoinToken ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={pending}
+                        onClick={() => {
+                          setReplacingRuntime(runtimeEntry);
+                          setAddingRuntime(true);
+                        }}
+                      >
+                        {t('collab.runtime.replace')}
+                      </Button>
+                    ) : null}
+                    {onRemoveRuntime ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={pending}
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              t('collab.runtime.removeConfirm', {
+                                name: runtimeEntry.label,
+                              }),
+                            )
+                          ) {
+                            onRemoveRuntime(runtimeEntry.id);
+                          }
+                        }}
+                      >
+                        {t('collab.runtime.remove')}
+                      </Button>
+                    ) : null}
+                  </>
                 ) : null}
               </div>
               <dl className={styles.runtimeFacts}>
@@ -1122,11 +1145,16 @@ export function ThreadsPage({
       </div>
       {onCreateJoinToken && (
         <AddRuntimeDialog
+          key={replacingRuntime?.id ?? 'add-host'}
           open={addingRuntime}
-          onOpenChange={setAddingRuntime}
+          onOpenChange={(open) => {
+            setAddingRuntime(open);
+            if (!open) setReplacingRuntime(undefined);
+          }}
           serverUrl={hostServerUrl ?? ''}
           runtimes={runtimeEntries}
           onCreateJoinToken={onCreateJoinToken}
+          replacementTarget={replacingRuntime}
           {...(onConnectRemoteHost
             ? { onConnectExisting: onConnectRemoteHost }
             : {})}
