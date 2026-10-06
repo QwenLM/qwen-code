@@ -201,10 +201,21 @@ accept those Sessions; this PR does not implement compaction recovery.
 
 ## 4. Compatibility and rollout
 
-Add lifecycle migration V46 after the existing V35 tool-profile, V36–V39
-journal/query, V40 creator, V41–V44 CSI/dispatch and V45 H3 task-journal
-migrations; preserve those migrations and V32. The unmerged lifecycle SQL is
-unchanged when its version moves from V45 to V46. This integration preserves
+Add lifecycle migration V47 after the existing V35 tool-profile, V36–V39
+journal/query, V40 creator, V41–V44 CSI/dispatch, V45 H3 task-journal and V46
+W2 directory-change migrations; preserve those migrations and V32. The unmerged
+lifecycle SQL is unchanged when its version moves from V46 to V47. Keep W2's
+directory/revision operation fields alongside the lifecycle protocol field.
+Its read-only probe and settlement remain separate from lifecycle Hook effects,
+drain and detach; the Session-row admission barrier serializes the operations.
+Runtime resolution retains the lifecycle claim on its actual resolved scope.
+W2 admission and commit take placement first and refuse `session_context_busy`
+while any same-tenant/Harness Runtime Session lacks confirmed RELEASED state.
+Hook owners can outlive a completed Turn; their immutable original context must
+remain available for L3 effects and release. Neighbor holders are unaffected,
+and no replacement Runtime or context reinstall is introduced. The existence
+read adds scan cost without a fixed latency guarantee.
+This integration preserves
 H3 background Shell/Monitor behavior and does not add lifecycle support for
 CSI, Shell or MCP profiles. The shared Harness closes its Monitor wake
 scheduler only after detach authorization succeeds, so a refused detach leaves
@@ -212,6 +223,9 @@ the live Session and its scheduler intact. The synchronous closing/busy fence
 still prevents a wake from starting while authorization is pending.
 Historical admitted operations retain their original protocol and evidence,
 without new Hook identities.
+Operation reads before the lifecycle migration treat an absent protocol column
+as legacy protocol-zero; a present protocol-one value remains unchanged.
+This projection compatibility does not grant execution or bypass schema upgrades.
 Live protocol-zero close attachments retain their legacy DELETE and original
 Hook control path only while their persisted close claim is valid. Ordinary
 execution remains fenced; the exception cannot authorize L3 or MCP execution.

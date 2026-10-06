@@ -153,12 +153,20 @@ L3 返回 `workspace_lifecycle_journal_unverified`。未来 compaction 必须
 
 ## 4. 兼容与启用
 
-在已有 V35 工具配置、V36–V39 journal/查询、V40 创建者、V41–V44 CSI/派发及 V45 H3 任务 journal 迁移之后新增 V46 生命周期迁移，
-保留这些迁移和 V32。未合入的生命周期迁移从 V45 顺延为 V46，SQL 内容不变。
+在已有 V35 工具配置、V36–V39 journal/查询、V40 创建者、V41–V44 CSI/派发、V45 H3 任务 journal 及 V46 W2 目录切换迁移之后新增 V47 生命周期迁移，
+保留这些迁移和 V32。未合入的生命周期迁移从 V46 顺延为 V47，SQL 内容不变。
+W2 目录/revision 操作字段与生命周期协议字段同时保留。
+W2 只读探测及结算独立于生命周期 Hook effects、drain 和 detach；Session 行上的准入围栏串行接纳两类操作。
+Runtime 解析在实际返回的 scope 中保留生命周期 claim。
+W2 准入与提交均先取得 placement 锁,在同租户/Harness 任何 Runtime Session 尚非确认 RELEASED 时拒绝 `session_context_busy`。
+Hook owner 可在 Turn 完成后继续保留;其不可变原上下文必须继续供 L3 effects 与释放使用。
+邻居 holder 不受影响,不替换 Runtime、不重装上下文;存在性读取增加扫描成本,不保证固定延迟。
 本次整合保留 H3 后台 Shell/Monitor 行为，不增加 CSI、Shell 或 MCP profile 生命周期支持。
 共享 Harness 仅在 detach 授权成功后关闭 Monitor 唤醒调度器；拒绝 detach 时，存活 Session 及其调度器保持可用。
 同步 closing/busy 围栏仍阻止授权等待期间的新唤醒。
 升级前已接纳的操作沿用原协议与证据，不产生新 Hook 身份。
+生命周期迁移前读取 operation 时，缺少协议列表示历史 protocol-zero；已有 protocol-one 值原样保留。
+此投影兼容不授予执行权限，也不绕过 schema 升级。
 仍存活的 protocol-zero close attachment 仅在持久 close claim 有效时保留原 DELETE
 和原 Hook control 路径。普通执行继续被围栏阻止；此例外不能授权 L3 或 MCP 执行。
 旧 claim 的有效性统一比较数据库 epoch 毫秒，不受 JVM、JDBC 与数据库会话时区影响。
