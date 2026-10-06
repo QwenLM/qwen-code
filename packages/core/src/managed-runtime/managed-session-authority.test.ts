@@ -2749,6 +2749,16 @@ describe('managed session checkpoints', () => {
       detail: () => 'missing sessionId/cwd/version/timestamp',
     },
     {
+      label: 'a record without a version',
+      body: () => turnResultBody({ version: undefined }),
+      detail: () => 'missing sessionId/cwd/version/timestamp',
+    },
+    {
+      label: 'a record with a malformed message payload',
+      body: () => turnResultBody({ message: 'x' }),
+      detail: () => 'Ignored a malformed transcript message payload.',
+    },
+    {
       label: 'non-JSON bytes',
       body: () => Buffer.from('this is not json', 'utf8'),
       detail: () => 'the body is not JSON',

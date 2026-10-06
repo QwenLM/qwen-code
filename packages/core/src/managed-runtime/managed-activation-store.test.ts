@@ -97,6 +97,39 @@ describe('FileManagedActivationStore', () => {
     expect(await readFile(filePath, 'utf8')).not.toContain('event:a2');
   });
 
+  it('enforces the call-time queue limits when the caller mutates them before the write drains', async () => {
+    const store = await openStore();
+    const callLimits = { maxQueued: 10, maxQueuedPerTenant: 5 };
+    const pending = store.enqueue(activation('a1'), callLimits);
+    callLimits.maxQueued = 0;
+    await expect(pending).resolves.toMatchObject({ created: true });
+
+    const reopened = await openStore();
+    expect(reopened.get(activation('a1'))).toMatchObject({
+      status: 'queued',
+    });
+  });
+
+  it('claims from the call-time identity when the caller mutates its input before the write drains', async () => {
+    const store = await openStore();
+    await store.enqueue(activation('a1'), limits);
+    const input = activation('a1');
+    const pending = store.claim(input, 'worker-a', 1000);
+    (input as { activationId: string }).activationId = 'a2';
+    await expect(pending).resolves.toMatchObject({
+      activationId: 'a1',
+      workerId: 'worker-a',
+      expiresAt: 1100,
+    });
+
+    const reopened = await openStore();
+    expect(reopened.get(activation('a1'))).toMatchObject({
+      status: 'assigned',
+      lease: { workerId: 'worker-a', expiresAt: 1100 },
+    });
+    expect(await readFile(filePath, 'utf8')).not.toContain('"a2"');
+  });
+
   it('renews from the call-time lease when the caller mutates its input before the write drains', async () => {
     const store = await openStore();
     await store.enqueue(activation('a1'), limits);
