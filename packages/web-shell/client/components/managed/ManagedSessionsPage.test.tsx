@@ -378,7 +378,8 @@ describe('ManagedSessionsPage', () => {
   ] as const)(
     'shows a literal Action preview and accessible notice (%s, truncated=%s)',
     async (language, truncated, notice) => {
-      const text = '{"toolName":"run_shell_command","input":{"command":"<b>😀';
+      // Leading space: the card must not trim the preview it renders.
+      const text = ' {"toolName":"run_shell_command","input":{"command":"<b>😀';
       mocks.client.getSession.mockResolvedValue(
         summary('s1', {
           capabilities: { canSend: false, canCancel: false, actions: true },

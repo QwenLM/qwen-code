@@ -1,3 +1,4 @@
+import { escapePreviewText } from '../../adapters/transcriptAdapter';
 import type {
   ACPToolCall,
   Message,
@@ -62,7 +63,7 @@ export function toManagedPermissionRequest(
     content: tool?.args
       ? [{ type: 'text', text: JSON.stringify(tool.args, null, 2) }]
       : action.inputPreview
-        ? [{ type: 'text', text: action.inputPreview.text }]
+        ? [{ type: 'text', text: escapePreviewText(action.inputPreview.text) }]
         : [],
     ...(tool?.args
       ? { rawInput: tool.args, contentIsInput: true }
