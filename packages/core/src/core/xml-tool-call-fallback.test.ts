@@ -845,6 +845,30 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     });
   });
 
+  it('recovers a value that mentions the parameter syntax literally', () => {
+    // A value documenting this dialect — a write_file whose content shows the
+    // tag shape — nests an open tag inside an accepted match's value. That is
+    // the same geometry as a borrowed closer, but no later call was swallowed,
+    // so the block is intact and its call must still run.
+    const write = invoke(
+      'write_file',
+      param('file_path', 'a.txt') +
+        param(
+          'content',
+          `Each argument is wrapped in ${PARAM_OPEN} name="x"> tags.`,
+        ),
+    );
+    expect(extractXmlToolCalls(write)).toEqual([
+      {
+        name: 'write_file',
+        args: {
+          file_path: 'a.txt',
+          content: `Each argument is wrapped in ${PARAM_OPEN} name="x"> tags.`,
+        },
+      },
+    ]);
+  });
+
   it('does not run the markdown lexer when the text has no example tag', () => {
     const spy = vi.spyOn(Lexer, 'lexInline');
     try {

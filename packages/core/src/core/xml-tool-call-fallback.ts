@@ -11,10 +11,6 @@ const TOOL_CALL_PATTERN =
   /<invoke\s+name=["']([^"']+)["']>([\s\S]*?)<\/invoke>|<function=([^\s<>]+)>([\s\S]*?)<\/function>/g;
 const PARAMETER_PATTERN =
   /<parameter(?:\s+name=["']([^"']+)["']|=([^\s<>]+))>([\s\S]*?)<\/parameter>/g;
-// Parameter open tags. Scanned over a block body to detect a parameter that
-// was never closed: PARAMETER_PATTERN then borrows the close tag of a later
-// block, which leaves `outsideParameters` empty and slips past the guard.
-const PARAM_OPEN_PATTERN = /<parameter(?:\s+name=["'][^"']*["']|=[^\s<>]+)?>/g;
 
 // marked's inline lexer is quadratic on unterminated emphasis runs and
 // nothing upstream bounds a model turn's length: measured on this build, a
@@ -276,17 +272,17 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       tagEnd === -1 ? match.index + match[0].length : match.index + tagEnd;
     PARAMETER_PATTERN.lastIndex = 0;
     const outsideParameters = paramsBlock.replace(PARAMETER_PATTERN, '');
-    PARAM_OPEN_PATTERN.lastIndex = 0;
     // A missing close must not borrow a later block's parameters or recover
-    // only the arguments preceding a prematurely matched function close. A
-    // borrowed close leaves no residual tag for the second test to see, so
-    // count the open tags the accepted matches did not close.
+    // only the arguments preceding a prematurely matched function close, so
+    // reject a call opener the parameters did not consume. A closer is only
+    // borrowed when the swallowed region contains a nested call: an open tag
+    // inside an accepted value is that value's own text — a value may document
+    // this syntax literally — and counting it as unclosed rejected the intact
+    // call, which then never ran and left its raw markup visible.
     if (
+      /<(?:function|invoke)(?:[\s=>]|$)/.test(paramsBlock) ||
       /<\/?(?:function|invoke|parameter)(?:[\s=>]|$)/.test(outsideParameters) ||
-      /^ {0,3}(?:`{3,}|~{3,})/m.test(outsideParameters) ||
-      paramsBlock.match(PARAM_OPEN_PATTERN)?.length !==
-        (outsideParameters.match(PARAM_OPEN_PATTERN)?.length ?? 0) +
-          (paramsBlock.match(PARAMETER_PATTERN)?.length ?? 0)
+      /^ {0,3}(?:`{3,}|~{3,})/m.test(outsideParameters)
     ) {
       TOOL_CALL_PATTERN.lastIndex = resumeAt;
       continue;
