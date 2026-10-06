@@ -132,6 +132,10 @@
       "status": 404,
       "code": "managed_session_resource_not_found"
     },
+    "writerCredentialInvalid": {
+      "status": 403,
+      "code": "writer_credential_invalid"
+    },
     "ossDisabled": {
       "status": 501,
       "code": "managed_session_oss_disabled"
