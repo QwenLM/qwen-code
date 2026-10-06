@@ -14,7 +14,7 @@ import {
 } from './resumeHistoryUtils.js';
 import { MessageType, ToolCallStatus } from '../types.js';
 import { buildApiHistoryFromConversation } from '@qwen-code/qwen-code-core';
-import { computeApiTruncationIndex , isRealUserTurn } from './historyMapping.js';
+import { computeApiTruncationIndex, isRealUserTurn } from './historyMapping.js';
 import { SUPERSEDED_FINDINGS_MESSAGE } from './findings-coalescing.js';
 import type {
   AnyDeclarativeTool,
