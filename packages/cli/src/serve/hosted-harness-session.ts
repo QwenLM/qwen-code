@@ -533,6 +533,33 @@ async function recoverCancelledPreToolHook(
   return true;
 }
 
+// The cancellation-side settle of a provably ownerless parked Turn: the
+// LoadHarnessSession.cancellationTakeover signal names the user's CANCEL
+// intent, and the load's own writer fence proves the producing generation
+// is dead — no execution anywhere can carry it again, so the cancelled
+// terminal can only be a journal record, written here through the same
+// sink translation the hook settle uses (turn.settled follows from the
+// record). On write failure the caller keeps the baseline retriable
+// refusal: nothing terminal is claimed about what could not be proven.
+async function settleCancelledHarnessTurn(
+  managed: ManagedSession,
+  session: HostedSession,
+  sessionId: string,
+  promptId: string,
+): Promise<void> {
+  await managed.sink.write(
+    record(session, sessionId, 'system', null, {
+      subtype: 'turn_result',
+      systemPayload: {
+        promptId,
+        state: 'cancelled',
+        stopReason: 'cancelled',
+        endedAt: Date.now(),
+      },
+    }),
+  );
+}
+
 export async function settleCancelledHookTurn(
   session: HostedSession,
 ): Promise<void> {
@@ -2287,85 +2314,120 @@ export function registerHostedHarnessSessionRoutes(
         // the tools to settle exist. Attaching one here would stand up a
         // Session whose parked Turn no route may resolve (R5-2' round).
         if (toolProfile === undefined || !brokerOptions) {
-          writeStderrLineSafe(
-            `qwen serve: Hosted Session ${sessionId} load refused (takeover_unavailable): profile=${toolProfile ?? 'none'} broker=${brokerOptions ? 'ready' : 'none'}`,
-          );
-          await managed.close();
-          if (body?.['passiveManagedRuntimeRecovery'] === true)
-            error(res, 409, 'hosted_turn_recovery_required');
-          else recoveryDeclined(res, 'model_start');
-          return;
-        }
-        try {
-          const outcome = await recoverHostedRuntimeTurn({
-            session: managed,
-            sessionId,
-            cwd,
-            promptId: unsettled,
-            brokerOptions,
-            passive: body?.['passiveManagedRuntimeRecovery'] === true,
-          });
-          if (outcome.kind === 'inapplicable') {
-            // R11-2: inapplicable pays only where a settlement route can.
-            // A requested approval keeps the plain attach (the resolve
-            // route writes the decision durably); turn_settled is settled
-            // HERE — the bare branch's projection never ran on this arm,
-            // so the missing terminal record is written by this load
-            // itself — or the load keeps the retriable refusal when the
-            // projection cannot pay either.
-            const inapplicableVerdict = await managed.authority
-              .harnessRunAuthorization()
-              .catch(() => undefined);
-            const approvalPending =
-              inapplicableVerdict?.status === 'runnable' &&
-              inapplicableVerdict.checkpoint.approval?.state === 'requested';
-            if (approvalPending) {
-              inapplicableAnswer = true;
-            } else {
-              const settle = await settleProjectablePromptId(
+          // An explicit cancellation taking over is the one caller that
+          // CAN be paid here: the cancelled terminal of the provably
+          // ownerless park lives nowhere else, so this load writes it
+          // itself (the writer fence on this very load proves the
+          // producing generation is dead), then continues as the plain
+          // attach the replay answers with. Without that signal the arm
+          // keeps its baseline answers — re-issue on cancel, model_start
+          // on drive — because nothing may mint a canned CANCELLED record
+          // for a wait whose owner could still exist (Arm B, R-round 6).
+          if (body?.['cancellationTakeover'] === true) {
+            try {
+              await settleCancelledHarnessTurn(
                 managed,
                 session,
-                fileHistory,
+                sessionId,
                 unsettled,
               );
-              if (settle === null) {
-                await managed.close();
-                writeStderrLineSafe(
-                  `qwen serve: Hosted Session ${sessionId} load refused (takeover_inapplicable_unpayable): prompt=${unsettled}`,
-                );
-                error(res, 409, 'hosted_turn_recovery_required');
-                return;
-              }
-              settlePromptId = settle;
+              writeStderrLineSafe(
+                `qwen serve: Hosted Session ${sessionId} settles the cancelled park on load: prompt=${unsettled}`,
+              );
+              // The journal owes nothing more: the cancelled record is
+              // the plain attach's whole answer, replayed home from the
+              // kept watermark.
               inapplicableAnswer = true;
+            } catch (cause) {
+              writeStderrLineSafe(
+                `qwen serve: Hosted Session ${sessionId} load refused (takeover_unavailable): profile=${toolProfile ?? 'none'} broker=${brokerOptions ? 'ready' : 'none'} settle=${String(cause)}`,
+              );
+              await managed.close();
+              error(res, 409, 'hosted_turn_recovery_required');
+              return;
             }
-          } else if (outcome.kind === 'declined') {
+          } else {
             writeStderrLineSafe(
-              `qwen serve: Hosted Session ${sessionId} load refused (takeover_unrecovered): prompt=${unsettled} reason=${outcome.reason}`,
+              `qwen serve: Hosted Session ${sessionId} load refused (takeover_unavailable): profile=${toolProfile ?? 'none'} broker=${brokerOptions ? 'ready' : 'none'}`,
             );
             await managed.close();
-            recoveryDeclined(res, outcome.reason);
+            if (body?.['passiveManagedRuntimeRecovery'] === true)
+              error(res, 409, 'hosted_turn_recovery_required');
+            else recoveryDeclined(res, 'model_start');
             return;
-          } else if (outcome.kind === 'recovered') {
-            recovery = outcome.turn.report;
-            if (outcome.turn.acquiredRuntime)
-              session.runtimeLeaseHeld =
-                outcome.turn.report.executions[0]?.runtimeSessionId ??
-                outcome.turn.promptId;
           }
-          // inapplicable: nothing a takeover owes this payload — the load
-          // continues as the plain attach it was before G3, so a requested
-          // approval or a cancellation-only load meets its own path.
-        } catch (cause) {
-          await managed.close();
-          writeStderrLineSafe(
-            `qwen serve: Hosted Harness recovery of session ${sessionId} failed: ${String(cause)}`,
-          );
-          // A failed takeover keeps the turn parked for the next attempt:
-          // refuse exactly like a plain recovery refusal so the coordinator
-          // retries instead of failing the Turn.
-          error(res, 409, 'hosted_turn_recovery_required');
-          return;
+        } else {
+          try {
+            const outcome = await recoverHostedRuntimeTurn({
+              session: managed,
+              sessionId,
+              cwd,
+              promptId: unsettled,
+              brokerOptions,
+              passive: body?.['passiveManagedRuntimeRecovery'] === true,
+            });
+            if (outcome.kind === 'inapplicable') {
+              // R11-2: inapplicable pays only where a settlement route can.
+              // A requested approval keeps the plain attach (the resolve
+              // route writes the decision durably); turn_settled is settled
+              // HERE — the bare branch's projection never ran on this arm,
+              // so the missing terminal record is written by this load
+              // itself — or the load keeps the retriable refusal when the
+              // projection cannot pay either.
+              const inapplicableVerdict = await managed.authority
+                .harnessRunAuthorization()
+                .catch(() => undefined);
+              const approvalPending =
+                inapplicableVerdict?.status === 'runnable' &&
+                inapplicableVerdict.checkpoint.approval?.state === 'requested';
+              if (approvalPending) {
+                inapplicableAnswer = true;
+              } else {
+                const settle = await settleProjectablePromptId(
+                  managed,
+                  session,
+                  fileHistory,
+                  unsettled,
+                );
+                if (settle === null) {
+                  await managed.close();
+                  writeStderrLineSafe(
+                    `qwen serve: Hosted Session ${sessionId} load refused (takeover_inapplicable_unpayable): prompt=${unsettled}`,
+                  );
+                  error(res, 409, 'hosted_turn_recovery_required');
+                  return;
+                }
+                settlePromptId = settle;
+                inapplicableAnswer = true;
+              }
+            } else if (outcome.kind === 'declined') {
+              writeStderrLineSafe(
+                `qwen serve: Hosted Session ${sessionId} load refused (takeover_unrecovered): prompt=${unsettled} reason=${outcome.reason}`,
+              );
+              await managed.close();
+              recoveryDeclined(res, outcome.reason);
+              return;
+            } else if (outcome.kind === 'recovered') {
+              recovery = outcome.turn.report;
+              if (outcome.turn.acquiredRuntime)
+                session.runtimeLeaseHeld =
+                  outcome.turn.report.executions[0]?.runtimeSessionId ??
+                  outcome.turn.promptId;
+            }
+            // inapplicable: nothing a takeover owes this payload — the load
+            // continues as the plain attach it was before G3, so a requested
+            // approval or a cancellation-only load meets its own path.
+          } catch (cause) {
+            await managed.close();
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness recovery of session ${sessionId} failed: ${String(cause)}`,
+            );
+            // A failed takeover keeps the turn parked for the next attempt:
+            // refuse exactly like a plain recovery refusal so the coordinator
+            // retries instead of failing the Turn.
+            error(res, 409, 'hosted_turn_recovery_required');
+            return;
+          }
         }
       } else if (
         restore.recoveryStatus === 'ok' &&

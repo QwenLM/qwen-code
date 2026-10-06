@@ -448,6 +448,32 @@ class HostedHarnessClientTest {
                 "\"passiveManagedRuntimeRecovery\":true"));
     }
 
+    // The cancellation flag rides the wire separately: a plain passive
+    // re-attach omits it, and only an explicit cancellation takeover adds
+    // the field — anything else would let the daemon mint a canned
+    // CANCELLED record for a wait whose owner could still exist (Arm B).
+    @Test
+    void carriesTheCancellationTakeoverFlagOnlyOnTheCancellationLoad() {
+        AtomicReference<String> loadBody = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> {
+                    loadBody.set(new String(exchange.getRequestBody()
+                            .readAllBytes(), StandardCharsets.UTF_8));
+                    sendSessionJson(exchange, 200, sessionJson());
+                });
+        try (HostedHarnessClient client = newClient()) {
+            client.loadSession(new LoadHarnessSession(SESSION_ID, null,
+                    true));
+        }
+        assertFalse(loadBody.get().contains("cancellationTakeover"));
+        try (HostedHarnessClient client = newClient()) {
+            client.loadSession(new LoadHarnessSession(SESSION_ID, null,
+                    true, null, false, true));
+        }
+        assertTrue(loadBody.get().contains(
+                "\"cancellationTakeover\":true"));
+    }
+
     @Test
     void parsesAResultsReadyRuntimeRecovery() {
         AtomicReference<String> continuationBody = new AtomicReference<>();

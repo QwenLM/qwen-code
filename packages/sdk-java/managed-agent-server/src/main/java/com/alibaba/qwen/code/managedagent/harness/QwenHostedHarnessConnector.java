@@ -486,11 +486,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private HarnessSessionRef load(SessionRecord session,
             boolean passiveManagedRuntimeRecovery,
             boolean driveRuntimeRecovery) {
+        return load(session, passiveManagedRuntimeRecovery,
+                driveRuntimeRecovery, false);
+    }
+
+    private HarnessSessionRef load(SessionRecord session,
+            boolean passiveManagedRuntimeRecovery,
+            boolean driveRuntimeRecovery, boolean cancellationTakeover) {
         String profile = toolProfile(session);
         ManagedSessionStoreConnection store = managedSessionStore(session);
         return client().loadSession(new LoadHarnessSession(session.sessionId(), store,
                 passiveManagedRuntimeRecovery, profile,
-                driveRuntimeRecovery));
+                driveRuntimeRecovery, cancellationTakeover));
     }
 
     @Override
@@ -536,7 +543,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         HarnessSessionRef cached = attachments.get(key);
         if (cached == null) {
             HarnessSessionRef attached = load(session, cancellation,
-                    !cancellation);
+                    !cancellation, cancellation);
             attachments.put(key, attached);
             if (attached.getRuntimeRecovery() != null) {
                 pendingRecovery.add(key);

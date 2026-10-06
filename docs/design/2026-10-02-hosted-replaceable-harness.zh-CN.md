@@ -231,6 +231,18 @@ passive 重附着与恢复 load 一样携带恢复快照，所以 connector 在�
 boot 条目、再在活 boot 下放入携快照的 attachment，而下一次派发的
 缓存分支会对着它回答「没有停靠」（R11-3）。
 
+残余的无工具取消楔死（Arm B）按同一结算原则关闭，只是这次喂它的是
+**意图**而不是状态：没有 Runtime 工作的 Turn 在其 Harness 代死后
+再也无法被驱动，所以它的取消终态只能是 journal 里的一条记录——而
+只有**显式的取消**才有资格写它。`LoadHarnessSession` 因此增加布尔
+`cancellationTakeover`（只由 `recoverManagedRuntime` 的取消臂设
+置；普通 passive 重附着共享 passive 线型却绝不能代它铸任何记录）。
+带旗信号时，接管分支的无工具臂自己把停靠写进 journal
+（`turn_result`/`cancelled`，该记录随即带来 `turn.settled` 事件）；
+不带时，该臂保持基线：取消侧可重试 409、drive 侧类型化 `model_start`
+decline。这次写入之所以安全，正是同一次 load 自带的 writer fence：
+它证明生产代再也写不了一字（Arm B 2026-10-06）。
+
 抛出的错误保持瞬时，与今天完全一致。load 路由对 decline 回答新的
 409 code `hosted_turn_recovery_declined` 并带 `reason` 字段；在接管
 分支内部，`hosted_turn_recovery_required` 此后只为瞬态发出（路由上

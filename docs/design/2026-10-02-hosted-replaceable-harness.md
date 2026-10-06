@@ -270,6 +270,21 @@ otherwise a boot-identity adoption evicts the stale-boot entry, puts a
 snapshot-carrying attachment under the live boot, and the next dispatch's
 cached branch answers "nothing parked" (R11-3).
 
+The remaining no-tool cancellation wedge (Arm B) is closed with the same
+settlement principle, this time fed by intent rather than by state: a
+Turn with no Runtime work whose Harness generation died can never be
+driven, so its cancelled terminal can only be a journal record — and only
+an EXPLICIT cancellation may write it. `LoadHarnessSession` therefore
+carries the boolean `cancellationTakeover` (set ONLY by
+`recoverManagedRuntime`'s cancellation arm; a plain passive re-attach
+shares the passive wire shape and must never mint anything). With the
+signal present, the no-tool arm of the takeover branch settles the park
+into the journal itself (`turn_result`/`cancelled`, which lands the
+`turn.settled` event); without it, the branch keeps the baseline retriable
+refusal for cancels and the typed `model_start` decline for drives. The
+writer fence on the very load is what makes the settle safe: it proves
+the producing generation can never write again (Arm B 2026-10-06).
+
 Thrown errors stay transient, exactly as today. The load route answers
 declines with new 409 code `hosted_turn_recovery_declined` plus a `reason`
 field; inside the takeover branch, `hosted_turn_recovery_required` is
