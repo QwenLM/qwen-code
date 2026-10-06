@@ -312,8 +312,8 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (12+10+20) leave room for the uncapped setup steps;
-    # a healthy run measured ~20 min end to end.
+    # Step ceilings are per-step backstops, not the budget — the 60-minute
+    # job timeout is; a healthy run measured ~20 min end to end.
     timeout-minutes: 60
     services:
       mysql:
@@ -359,7 +359,12 @@ jobs:
           # `clean verify` invocations (pinned by scripts/tests/spotbugs-gate.test.js).
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        timeout-minutes: 20
+        # Must outlive the hosted-harness-mysql failsafe fork timeout (900 s)
+        # plus the wrapped compile/surefire/spotbugs/checkstyle work: a step
+        # killed before its fork leaves no per-test failure lines, so the
+        # main-CI failure analyzer can only file an undiagnosable per-commit
+        # issue (#13503). hosted-process-ci.test.js pins this ordering.
+        timeout-minutes: 25
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
