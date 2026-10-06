@@ -32,7 +32,8 @@ import {
   useDialogFrameKeys,
   useDialogSelect,
 } from './dialogs-shared.js';
-import type { DialogListItem } from './dialogs-core.js';
+import { regionListWindow, type DialogListItem } from './dialogs-core.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 export const THEME_DIALOG_MAX_ITEMS_TO_SHOW = 12;
 
@@ -176,11 +177,21 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
   );
   const safeInitialThemeIndex = initialThemeIndex >= 0 ? initialThemeIndex : 0;
 
+  const regionHeight = clampDialogHeight(availableTerminalHeight);
+  // The frame (4), the title row and its margin (2) and the footer hint (2)
+  // come off the region first; the list windows from what is left, capped at
+  // the ink constant, instead of painting twelve rows into every region.
+  const themeWindow = regionListWindow(
+    regionHeight,
+    8,
+    themeItems.length,
+    THEME_DIALOG_MAX_ITEMS_TO_SHOW,
+  );
   const themeList = useDialogSelect({
     items: themeItems,
     initialIndex: safeInitialThemeIndex,
     focused: mode === 'theme',
-    maxItemsToShow: THEME_DIALOG_MAX_ITEMS_TO_SHOW,
+    maxItemsToShow: themeWindow.maxItemsToShow,
     // The item list grows/shrinks with the scope's custom themes; re-sync
     // the cursor on scope change like ink's useSelectionList re-clamps.
     resyncKey: selectedScope,
@@ -199,11 +210,13 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
   const initialScopeIndex = scopeItems.findIndex(
     (item) => item.value === selectedScope,
   );
+  const scopeWindow = regionListWindow(regionHeight, 8, scopeItems.length, 10);
   const scopeList = useDialogSelect({
     items: scopeItems,
     initialIndex: initialScopeIndex >= 0 ? initialScopeIndex : 0,
     focused: mode === 'scope',
     numbers: mode === 'scope',
+    maxItemsToShow: scopeWindow.maxItemsToShow,
     onSelect: (scope) => onSelect(highlightedThemeName, scope),
     onHighlight: (scope) => setSelectedScope(scope),
   });
@@ -241,8 +254,8 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
               items={themeItems}
               activeIndex={themeList.activeIndex}
               scrollOffset={themeList.scrollOffset}
-              maxItemsToShow={THEME_DIALOG_MAX_ITEMS_TO_SHOW}
-              showScrollArrows={true}
+              maxItemsToShow={themeWindow.maxItemsToShow}
+              showScrollArrows={themeWindow.showScrollArrows}
               showNumbers={mode === 'theme'}
               focused={mode === 'theme'}
               onHover={themeList.setActiveIndex}
@@ -306,6 +319,8 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
             items={scopeItems}
             activeIndex={scopeList.activeIndex}
             scrollOffset={scopeList.scrollOffset}
+            maxItemsToShow={scopeWindow.maxItemsToShow}
+            showScrollArrows={scopeWindow.showScrollArrows}
             showNumbers={mode === 'scope'}
             focused={mode === 'scope'}
             onHover={scopeList.setActiveIndex}

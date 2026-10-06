@@ -16,7 +16,7 @@
  */
 
 import { useState } from 'react';
-import { useKeyboard } from '@opentui/react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { MCPServerStatus } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
@@ -24,8 +24,17 @@ import { ICON } from '../constants.js';
 import { toOriginalKey } from './key-map.js';
 import { useBatchSafeCursor } from './batch-cursor.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
-import { DialogFrame, FooterHint } from './dialogs-shared.js';
-import { findNextEnabledIndex } from './dialogs-core.js';
+import {
+  DialogFrame,
+  FooterHint,
+  dialogContentWidth,
+} from './dialogs-shared.js';
+import {
+  findNextEnabledIndex,
+  getSelectionScrollOffset,
+} from './dialogs-core.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
+import { truncateToWidth } from '../utils/textUtils.js';
 
 export const MCP_MANAGEMENT_STEPS = {
   SERVER_LIST: 'server-list',
@@ -302,6 +311,9 @@ export function mcpStepFooter(
  * Clamp-style navigation — ink's server/tool/resource steps clamp here; the
  * server-detail action list is a radio list and wraps instead.
  */
+/** ink's VISIBLE_TOOLS_COUNT / VISIBLE_RESOURCES_COUNT. */
+const MCP_LIST_MAX_ROWS = 10;
+
 export function clampNavIndex(
   current: number,
   count: number,
@@ -319,6 +331,8 @@ export interface OpenTuiMcpDialogProps {
   getServerResources?: (server: McpServerInfo) => readonly McpResourceInfo[];
   onClose: () => void;
   onServerAction?: (server: McpServerInfo, action: McpServerAction) => void;
+  /** The popup region's row budget; the tool and resource lists window from it. */
+  availableTerminalHeight?: number;
 }
 
 export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
@@ -365,6 +379,20 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
     cursorRef: resourceCursorRef,
     setCursor: setResourceCursor,
   } = useBatchSafeCursor();
+
+  // The frame (4), the two-row step header, the body's margin row (1) and
+  // the footer hint (2) come off the region first; the tool and resource
+  // lists window from what is left instead of mapping every row into the
+  // clipped frame — where the cursor kept walking rows nothing painted and
+  // Enter opened them. A zero-row window refuses the arrows and Enter the
+  // way the shared list hook does.
+  const regionHeight = clampDialogHeight(props.availableTerminalHeight);
+  const listWindowRows =
+    regionHeight === undefined
+      ? MCP_LIST_MAX_ROWS
+      : Math.max(0, Math.min(MCP_LIST_MAX_ROWS, regionHeight - 9));
+  const { width } = useTerminalDimensions();
+  const contentWidth = dialogContentWidth(width);
 
   const currentStep = (navigationStack[navigationStack.length - 1] ??
     MCP_MANAGEMENT_STEPS.SERVER_LIST) as McpManagementStep;
@@ -454,6 +482,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
     }
 
     if (currentStep === MCP_MANAGEMENT_STEPS.TOOL_LIST) {
+      if (listWindowRows < 1) return;
       if (keyMatchers[Command.SELECTION_UP](original)) {
         setToolCursor(
           clampNavIndex(toolCursorRef.current, serverTools.length, 'up'),
@@ -473,6 +502,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
     }
 
     if (currentStep === MCP_MANAGEMENT_STEPS.RESOURCE_LIST) {
+      if (listWindowRows < 1) return;
       if (keyMatchers[Command.SELECTION_UP](original)) {
         setResourceCursor(
           clampNavIndex(
@@ -778,9 +808,17 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
     if (serverTools.length === 0) {
       return <text fg={C.dim}>{t('No tools available for this server.')}</text>;
     }
+    // ink ToolListStep's following window: the cursor's row is always painted.
+    const offset = getSelectionScrollOffset(
+      toolCursor,
+      serverTools.length,
+      listWindowRows,
+    );
+    const visibleTools = serverTools.slice(offset, offset + listWindowRows);
     return (
       <box flexDirection="column">
-        {serverTools.map((tool, index) => {
+        {visibleTools.map((tool, visibleIndex) => {
+          const index = offset + visibleIndex;
           const isSelected = index === toolCursor;
           const hints: string[] = [];
           if (tool.annotations?.destructiveHint) hints.push(t('destructive'));
@@ -804,7 +842,9 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
                 </text>
               </box>
               <box width={40} flexShrink={0}>
-                <text fg={isSelected ? C.accent : C.text}>{tool.name}</text>
+                <text fg={isSelected ? C.accent : C.text}>
+                  {truncateToWidth(tool.name, 40)}
+                </text>
               </box>
               {!tool.isValid ? (
                 <text fg={C.yellow}>
@@ -838,9 +878,19 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
         <text fg={C.dim}>{t('No resources available for this server.')}</text>
       );
     }
+    const offset = getSelectionScrollOffset(
+      resourceCursor,
+      serverResources.length,
+      listWindowRows,
+    );
+    const visibleResources = serverResources.slice(
+      offset,
+      offset + listWindowRows,
+    );
     return (
       <box flexDirection="column">
-        {serverResources.map((resource, index) => {
+        {visibleResources.map((resource, visibleIndex) => {
+          const index = offset + visibleIndex;
           const isSelected = index === resourceCursor;
           const friendly =
             resource.title && resource.title !== resource.uri
@@ -864,7 +914,15 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
                   {isSelected ? '❯' : ' '}
                 </text>
               </box>
-              <text fg={isSelected ? C.accent : C.text}>{resource.uri}</text>
+              <text fg={isSelected ? C.accent : C.text}>
+                {truncateToWidth(
+                  resource.uri,
+                  Math.max(
+                    0,
+                    contentWidth - 2 - (friendly ? friendly.length + 1 : 0),
+                  ),
+                )}
+              </text>
               {friendly ? <text fg={C.dim}> {friendly}</text> : null}
             </box>
           );

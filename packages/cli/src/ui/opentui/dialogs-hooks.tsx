@@ -15,7 +15,7 @@
  */
 
 import { useMemo, useState } from 'react';
-import { useKeyboard } from '@opentui/react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   HookType,
@@ -42,9 +42,13 @@ import {
   DialogFrame,
   DialogSelect,
   FooterHint,
+  dialogContentWidth,
   useDialogSelect,
   type DialogListItem,
 } from './dialogs-shared.js';
+import { regionListWindow } from './dialogs-core.js';
+import { wrappedRows } from './dialogs-modes.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { readHooksEnabled } from './dialogs-misc.js';
 import { C } from './theme.js';
 
@@ -257,6 +261,8 @@ export interface OpenTuiHooksDialogProps {
   onClose: () => void;
   /** Optional line under the title, for a status such as a reload. */
   notice?: string;
+  /** The popup region's row budget; every list step windows from it. */
+  availableTerminalHeight?: number;
 }
 
 export function OpenTuiHooksDialog({
@@ -264,6 +270,7 @@ export function OpenTuiHooksDialog({
   settings,
   onClose,
   notice,
+  availableTerminalHeight,
 }: OpenTuiHooksDialogProps) {
   // A snapshot for the life of the dialog: it remounts on every open.
   const listing = useMemo(
@@ -314,17 +321,53 @@ export function OpenTuiHooksDialog({
     [handlerRows],
   );
 
+  const regionHeight = clampDialogHeight(availableTerminalHeight);
+  const { width } = useTerminalDimensions();
+  const contentWidth = dialogContentWidth(width);
+  const noticeRows = notice
+    ? notice
+        .split('\n')
+        .reduce((rows, line) => rows + wrappedRows(line, contentWidth), 0)
+    : 0;
+  const banner = hooksBannerText(listing);
+  const bannerRows = banner ? 1 + wrappedRows(banner, contentWidth) : 0;
+  // The events step's read-only note wraps (95 columns at full width), so it
+  // is charged by the row, like the notice and the banner.
+  const eventsNoteRows = wrappedRows(
+    t(
+      'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
+    ),
+    contentWidth,
+  );
+  const eventsWindow = regionListWindow(
+    regionHeight,
+    9 + noticeRows + bannerRows + eventsNoteRows,
+    eventItems.length,
+    MAX_ROWS,
+  );
+  const matchersWindow = regionListWindow(
+    regionHeight,
+    11 + noticeRows + bannerRows,
+    matcherItems.length,
+    MAX_ROWS,
+  );
+  const handlersWindow = regionListWindow(
+    regionHeight,
+    12 + noticeRows + bannerRows,
+    handlerItems.length,
+    MAX_ROWS,
+  );
   const eventSelect = useDialogSelect({
     items: eventItems,
     focused: view.step === 'events',
-    maxItemsToShow: MAX_ROWS,
+    maxItemsToShow: eventsWindow.maxItemsToShow,
     onSelect: (event) => setView(openHookEvent(event)),
   });
   const matcherSelect = useDialogSelect({
     items: matcherItems,
     focused: view.step === 'matchers',
     resyncKey: `matchers:${matcherEvent ?? ''}`,
-    maxItemsToShow: MAX_ROWS,
+    maxItemsToShow: matchersWindow.maxItemsToShow,
     onSelect: (matcher) => {
       if (matcherEvent !== undefined) {
         setView({ step: 'handlers', event: matcherEvent, matcher });
@@ -335,7 +378,7 @@ export function OpenTuiHooksDialog({
     items: handlerItems,
     focused: view.step === 'handlers',
     resyncKey: `handlers:${handlerEvent ?? ''}:${handlerMatcher ?? ''}`,
-    maxItemsToShow: MAX_ROWS,
+    maxItemsToShow: handlersWindow.maxItemsToShow,
     onSelect: (index) => {
       if (handlerEvent !== undefined) {
         setView({
@@ -363,8 +406,6 @@ export function OpenTuiHooksDialog({
     total === 1
       ? t('{{count}} hook configured', { count: String(total) })
       : t('{{count}} hooks configured', { count: String(total) });
-  const banner = hooksBannerText(listing);
-
   const wheel =
     (
       select: {
@@ -396,8 +437,8 @@ export function OpenTuiHooksDialog({
           items={eventItems}
           activeIndex={eventSelect.activeIndex}
           scrollOffset={eventSelect.scrollOffset}
-          maxItemsToShow={MAX_ROWS}
-          showScrollArrows
+          maxItemsToShow={eventsWindow.maxItemsToShow}
+          showScrollArrows={eventsWindow.showScrollArrows}
           focused={view.step === 'events'}
           onHover={eventSelect.highlightIndex}
           onWheel={wheel(eventSelect, eventItems.length)}
@@ -439,7 +480,8 @@ export function OpenTuiHooksDialog({
             items={matcherItems}
             activeIndex={matcherSelect.activeIndex}
             scrollOffset={matcherSelect.scrollOffset}
-            maxItemsToShow={MAX_ROWS}
+            maxItemsToShow={matchersWindow.maxItemsToShow}
+            showScrollArrows={matchersWindow.showScrollArrows}
             focused={view.step === 'matchers'}
             onHover={matcherSelect.highlightIndex}
             onWheel={wheel(matcherSelect, matcherItems.length)}
@@ -483,7 +525,8 @@ export function OpenTuiHooksDialog({
             items={handlerItems}
             activeIndex={handlerSelect.activeIndex}
             scrollOffset={handlerSelect.scrollOffset}
-            maxItemsToShow={MAX_ROWS}
+            maxItemsToShow={handlersWindow.maxItemsToShow}
+            showScrollArrows={handlersWindow.showScrollArrows}
             focused={view.step === 'handlers'}
             onHover={handlerSelect.highlightIndex}
             onWheel={wheel(handlerSelect, handlerItems.length)}

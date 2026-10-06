@@ -116,6 +116,37 @@ export function selectionWindow(
   };
 }
 
+/**
+ * The window a region-mounted dialog's list pays for itself: the region rows
+ * left after the dialog's own chrome, capped the way ink's selection lists
+ * cap, with the scroll arrows paid out of the window itself — ink's rule,
+ * which the mode-list budget also ports: arrows exist only when the window
+ * is a strict subset with more than two rows to spare, so a tighter window
+ * spends its rows on items. The floor is zero, not one: a region that cannot
+ * pay the chrome shows no row at all, and the list hook's zero-row refusals
+ * keep Enter, the digits and the arrows off a row nothing painted.
+ */
+export function regionListWindow(
+  regionHeight: number | undefined,
+  chromeRows: number,
+  itemCount: number,
+  cap: number,
+): { maxItemsToShow: number; showScrollArrows: boolean } {
+  if (regionHeight === undefined) {
+    const maxItemsToShow = Math.min(cap, itemCount);
+    return { maxItemsToShow, showScrollArrows: maxItemsToShow < itemCount };
+  }
+  const rows = regionHeight - chromeRows;
+  if (rows <= 0) {
+    return { maxItemsToShow: 0, showScrollArrows: false };
+  }
+  const showScrollArrows = rows > 2 && Math.min(cap, rows) < itemCount;
+  return {
+    maxItemsToShow: Math.min(cap, itemCount, rows - (showScrollArrows ? 2 : 0)),
+    showScrollArrows,
+  };
+}
+
 /** Parity of `computeInitialIndex` in ui/hooks/useSelectionList.ts. */
 export function computeInitialActiveIndex<T>(
   initialIndex: number,

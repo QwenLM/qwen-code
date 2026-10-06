@@ -38,7 +38,11 @@ import {
 import { formatDuration } from '../utils/formatters.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
 import { toOriginalKey } from './key-map.js';
-import { findNextEnabledIndex } from './dialogs-core.js';
+import {
+  findNextEnabledIndex,
+  getSelectionScrollOffset,
+} from './dialogs-core.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { C } from './theme.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 
@@ -52,6 +56,8 @@ export interface OpenTuiArenaDialogProps {
   notify: (text: string, level?: 'info' | 'error') => void;
   /** ink handleArenaModelsSelected: fill the composer, keep it unsubmitted. */
   onFillInput?: (text: string) => void;
+  /** The popup region's row budget; the model and agent lists window from it. */
+  availableTerminalHeight?: number;
 }
 
 const MODEL_PROVIDERS_DOCUMENTATION_URL =
@@ -137,7 +143,12 @@ function ArenaFrame({
 }
 
 /** `/arena start` — multi-select of configured models → fill the composer. */
-function ArenaStart({ config, onClose, onFillInput }: OpenTuiArenaDialogProps) {
+function ArenaStart({
+  config,
+  onClose,
+  onFillInput,
+  availableTerminalHeight: propsRegionHeight,
+}: OpenTuiArenaDialogProps) {
   const modelItems = useMemo(() => {
     const all = config?.getAllConfiguredModels?.() ?? [];
     return all
@@ -166,13 +177,41 @@ function ArenaStart({ config, onClose, onFillInput }: OpenTuiArenaDialogProps) {
   const needsMoreModels = selectableCount < 2;
   const showMoreModelsHint = selectableCount >= 2 && selectableCount < 3;
 
+  // The frame (7) and the list's margin row come off the region first; the
+  // error and guidance blocks pay their own rows, and the model list windows
+  // from what is left. A zero-row window refuses the cursor keys and Space —
+  // they address a row — while Enter stays live for the checks already made.
+  const regionHeight = clampDialogHeight(propsRegionHeight);
+  const guidanceRows =
+    hasDisabledQwenOauth || needsMoreModels
+      ? 1 + (hasDisabledQwenOauth ? 1 : 0) + (needsMoreModels ? 3 : 0)
+      : 0;
+  const modelWindowRows =
+    regionHeight === undefined
+      ? modelItems.length
+      : Math.max(
+          0,
+          regionHeight -
+            8 -
+            (error ? 2 : 0) -
+            guidanceRows -
+            (showMoreModelsHint ? 3 : 0),
+        );
+  const modelOffset = getSelectionScrollOffset(
+    cursor,
+    modelItems.length,
+    modelWindowRows,
+  );
+
   useKeyboard((key) => {
     const o = toOriginalKey(key);
     if (o.name === 'escape') {
       onClose();
     } else if (o.name === 'up' || o.name === 'down') {
+      if (modelWindowRows < 1) return;
       setCursor(findNextEnabledIndex(modelItems, cursorRef.current, o.name));
     } else if (o.name === 'space') {
+      if (modelWindowRows < 1) return;
       const item = modelItems[cursorRef.current];
       if (!item || item.disabled) return;
       const next = new Set(checkedRef.current);
@@ -205,19 +244,26 @@ function ArenaStart({ config, onClose, onFillInput }: OpenTuiArenaDialogProps) {
         </box>
       ) : (
         <box flexDirection="column" marginTop={1}>
-          {modelItems.map((m, i) => (
-            <box key={m.key} flexDirection="row">
-              <text fg={m.disabled ? C.dim : i === cursor ? C.accent : C.dim}>
-                {checked.has(m.key) ? '[x] ' : '[ ] '}
-              </text>
-              <text
-                fg={m.disabled ? C.dim : i === cursor ? C.text : C.dim}
-                attributes={!m.disabled && i === cursor ? 1 : 0}
-              >
-                {m.label}
-              </text>
-            </box>
-          ))}
+          {modelItems
+            .slice(modelOffset, modelOffset + modelWindowRows)
+            .map((m, i0) => {
+              const i = modelOffset + i0;
+              return (
+                <box key={m.key} flexDirection="row">
+                  <text
+                    fg={m.disabled ? C.dim : i === cursor ? C.accent : C.dim}
+                  >
+                    {checked.has(m.key) ? '[x] ' : '[ ] '}
+                  </text>
+                  <text
+                    fg={m.disabled ? C.dim : i === cursor ? C.text : C.dim}
+                    attributes={!m.disabled && i === cursor ? 1 : 0}
+                  >
+                    {m.label}
+                  </text>
+                </box>
+              );
+            })}
         </box>
       )}
       {error && (
@@ -622,7 +668,12 @@ function AgentDetailedDiff({ result }: { result: ArenaAgentResult }) {
 }
 
 /** `/arena select` — winner picker with preview panes and discard. */
-function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
+function ArenaSelect({
+  config,
+  onClose,
+  notify,
+  availableTerminalHeight,
+}: OpenTuiArenaDialogProps) {
   const manager = config?.getArenaManager?.() ?? null;
   const agents = useMemo(() => manager?.getAgentStates() ?? [], [manager]);
   const result = manager?.getResult();
@@ -734,19 +785,40 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
     }
   };
 
+  // Each agent row paints two physical rows (label, then stats), and the
+  // frame, the task line, the "Select a winner" line and the list's margin
+  // come off the region first (7 + 2 + 2 + 1). The window follows the
+  // cursor; at a zero-row window the cursor keys, Enter and the preview
+  // panes — everything that addresses a row — refuse, while x and Esc stay
+  // live (they address the session, not a row).
+  const regionHeight = clampDialogHeight(availableTerminalHeight);
+  const agentWindowRows =
+    regionHeight === undefined
+      ? rows.length
+      : Math.max(0, Math.floor((regionHeight - 12) / 2));
+  const agentOffset = getSelectionScrollOffset(
+    sel,
+    rows.length,
+    agentWindowRows,
+  );
+
   useKeyboard((key) => {
     const o = toOriginalKey(key);
     if (o.name === 'escape') {
       onClose();
     } else if (o.name === 'up' || o.name === 'down') {
+      if (agentWindowRows < 1) return;
       setSel(findNextEnabledIndex(rows, selRef.current, o.name));
     } else if (o.name === 'return') {
+      if (agentWindowRows < 1) return;
       const row = rows[selRef.current];
       if (row && !row.disabled) void applyWinner(row.key);
     } else if (!o.ctrl && !o.meta) {
-      if (o.name === 'p') setShowPreview((v) => !v);
-      else if (o.name === 'd') setShowDetailedDiff((v) => !v);
-      else if (o.name === 'x') void discardAll();
+      if (o.name === 'p' || o.name === 'd') {
+        if (agentWindowRows < 1) return;
+        if (o.name === 'p') setShowPreview((v) => !v);
+        else setShowDetailedDiff((v) => !v);
+      } else if (o.name === 'x') void discardAll();
     }
   });
 
@@ -777,38 +849,45 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
         <text fg={C.dim}>{'Select a winner to apply changes:'}</text>
       </box>
       <box marginTop={1} flexDirection="column">
-        {rows.map((row, i) => (
-          <box key={row.key} flexDirection="row" alignItems="flex-start">
-            <box minWidth={2} flexShrink={0}>
-              <text fg={i === sel ? C.green : C.text}>
-                {i === sel ? '›' : ' '}
-              </text>
-            </box>
-            <box flexDirection="column" flexGrow={1}>
-              <text fg={row.disabled ? C.dim : i === sel ? C.green : C.text}>
-                {row.label}
-              </text>
-              <box flexDirection="row">
-                <text fg={row.status.color}>{row.status.text}</text>
-                <text
-                  fg={C.dim}
-                >{` · ${row.duration} · ${row.tokens} tokens`}</text>
-                {row.fileCount > 0 && (
-                  <text fg={C.dim}>{` · ${row.fileCount} files`}</text>
-                )}
-                {(row.additions > 0 || row.deletions > 0) && (
-                  <>
-                    <text fg={C.dim}>{' · '}</text>
-                    <text fg={C.green}>{`+${row.additions}`}</text>
-                    <text fg={C.dim}>{'/'}</text>
-                    <text fg={C.red}>{`-${row.deletions}`}</text>
-                    <text fg={C.dim}>{' lines'}</text>
-                  </>
-                )}
+        {rows
+          .slice(agentOffset, agentOffset + agentWindowRows)
+          .map((row, i0) => {
+            const i = agentOffset + i0;
+            return (
+              <box key={row.key} flexDirection="row" alignItems="flex-start">
+                <box minWidth={2} flexShrink={0}>
+                  <text fg={i === sel ? C.green : C.text}>
+                    {i === sel ? '›' : ' '}
+                  </text>
+                </box>
+                <box flexDirection="column" flexGrow={1}>
+                  <text
+                    fg={row.disabled ? C.dim : i === sel ? C.green : C.text}
+                  >
+                    {row.label}
+                  </text>
+                  <box flexDirection="row">
+                    <text fg={row.status.color}>{row.status.text}</text>
+                    <text
+                      fg={C.dim}
+                    >{` · ${row.duration} · ${row.tokens} tokens`}</text>
+                    {row.fileCount > 0 && (
+                      <text fg={C.dim}>{` · ${row.fileCount} files`}</text>
+                    )}
+                    {(row.additions > 0 || row.deletions > 0) && (
+                      <>
+                        <text fg={C.dim}>{' · '}</text>
+                        <text fg={C.green}>{`+${row.additions}`}</text>
+                        <text fg={C.dim}>{'/'}</text>
+                        <text fg={C.red}>{`-${row.deletions}`}</text>
+                        <text fg={C.dim}>{' lines'}</text>
+                      </>
+                    )}
+                  </box>
+                </box>
               </box>
-            </box>
-          </box>
-        ))}
+            );
+          })}
       </box>
       {showPreview && selectedResult && (
         <AgentPreview result={selectedResult} />

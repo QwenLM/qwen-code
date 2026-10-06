@@ -3158,15 +3158,15 @@ What was verified, and how far the verification reaches:
   Decision 67's judgement on it rests on source reading and structural tests
   alone. Recorded so the empty frame is not re-reported as a porting gap, and not
   taken for a usable control either.
-- The session picker's window is derived from the raw terminal height — seven
-  reserved rows, three rows per item — while its box is sized by the fixed
-  region, so on a short terminal the row the clip takes is the last windowed
-  item's metadata line: every session's title and marker still paint, the
-  down-scroll marker with them, and the cursor can reach a session whose
-  second line was never drawn. ink's picker derives the identical window from
-  the same raw rows inside an equally fixed and clipped region, so this is
-  parity with an ink-side limitation, recorded the way Decision 67 records
-  ink's footer wrapping rather than fixed on one leg.
+- The session picker's window is derived from the popup region —
+  `clampDialogHeight(availableTerminalHeight)`, falling back to the raw
+  terminal height only when no budget is handed over — with seven reserved
+  rows and three rows per item, floored at zero rows: a region shorter than
+  the reserved chrome paints no session row, and Enter and Space refuse to
+  commit one. ink's picker derives the identical window from the raw terminal
+  rows inside an equally fixed and clipped region, so on a short terminal its
+  cursor can still reach a session whose second line was never drawn — an
+  ink-side limitation this port closes rather than matches.
 - The stats dialog carries its own copy of the ref mirror rather than calling the
   shared hook, and rebuilds its writer on every render. Both are cosmetic: the copy
   performs the same double write, and nothing memoises on the writer's identity. It

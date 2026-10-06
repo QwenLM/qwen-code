@@ -1032,6 +1032,8 @@ type AuthDialogProps = {
   /** Startup auth failure surfaced by the auto-open (U-6); null when the
    * dialog opened because no auth type is configured. */
   initialError?: string;
+  /** The popup region's row budget; the setup bodies do not window, so it is ignored. */
+  availableTerminalHeight?: number;
 };
 
 export function OpenTuiAuthDialog(props: AuthDialogProps) {
@@ -1039,7 +1041,7 @@ export function OpenTuiAuthDialog(props: AuthDialogProps) {
   // keep the pre-flow read-only summary instead of a broken wizard.
   if (!props.config) {
     return (
-      <Shell title={t('Auth')} onClose={props.onClose}>
+      <Shell title={t('Auth')} onClose={props.onClose} shrinkable>
         <box flexDirection="column" marginTop={1}>
           <text fg={C.dim}>
             {t('Credentials resolved from settings/env; use /model to switch.')}
@@ -1388,7 +1390,7 @@ function AuthDialogFlow({
   // -- Render -------------------------------------------------------------------
 
   return (
-    <Shell title={viewTitle} onClose={onClose} borderStyle="single">
+    <Shell title={viewTitle} onClose={onClose} borderStyle="single" shrinkable>
       {viewLevel === 'main' && (
         <>
           <RadioList items={MAIN_ITEMS} cursor={mainCursor} />

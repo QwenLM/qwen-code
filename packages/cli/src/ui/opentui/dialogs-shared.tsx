@@ -19,11 +19,12 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { MouseButton } from '@opentui/core';
-import { useKeyboard } from '@opentui/react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { useBatchSafeCursor } from './batch-cursor.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import { toOriginalKey } from './key-map.js';
+import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 import {
   applyNumberSelectKey,
   computeInitialActiveIndex,
@@ -97,6 +98,14 @@ export function DialogFrame(props: {
       borderColor={props.borderColor ?? C.borderDefault}
       padding={1}
       flexGrow={props.fill ? 1 : 0}
+      // Region-mounted, like the sibling frames: a shrinkable frame lets a
+      // short region squeeze the body's unsized text rows to zero and paint
+      // them over each other mid-list, while the keys keep committing the
+      // rows that stopped painting (measured on /mcp's tool list). Natural
+      // height keeps the rows contiguous for the region's clip to cut at the
+      // tail, the way ink clips /stats; the list-carrying bodies window
+      // themselves from the region budget instead of relying on the clip.
+      flexShrink={0}
     >
       {props.children}
     </box>
@@ -127,6 +136,13 @@ export function DialogTabBar(props: {
   activeId: string;
   hint?: string;
 }) {
+  const { width } = useTerminalDimensions();
+  // Every caller's chrome budget charges the bar as one row; the hint gets
+  // the columns the tabs leave rather than wrapping onto a second.
+  const tabsWidth = props.tabs.reduce(
+    (total, tab) => total + getCachedStringWidth(` ${tab.label} `) + 2,
+    0,
+  );
   return (
     <box flexDirection="row">
       {props.tabs.map((tab) => {
@@ -143,7 +159,15 @@ export function DialogTabBar(props: {
           </box>
         );
       })}
-      {props.hint ? <text fg={C.dim}> {props.hint}</text> : null}
+      {props.hint ? (
+        <text fg={C.dim}>
+          {' '}
+          {truncateToWidth(
+            props.hint,
+            Math.max(0, dialogAreaWidth(width) - tabsWidth - 1),
+          )}
+        </text>
+      ) : null}
     </box>
   );
 }

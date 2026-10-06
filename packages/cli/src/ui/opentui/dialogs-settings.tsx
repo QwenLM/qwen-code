@@ -67,7 +67,7 @@ import {
   useDialogSelect,
 } from './dialogs-shared.js';
 import { wrappedRows } from './dialogs-modes.js';
-import { truncateToWidth } from '../utils/textUtils.js';
+import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 import { OpenTuiStatsDialog } from './dialogs-stats-skills.js';
 import { followScrollOffset } from './dialogs-core.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
@@ -84,14 +84,18 @@ export const SETTINGS_LIST_MAX_ITEMS = 8;
 
 // Rows the dialog spends outside the settings list: the frame's border and
 // padding (4), the tab bar and its spacer (2), the bordered search box and
-// its spacer (4), the two scroll arrows (2), the description row and its
-// margin (2), and the footer hint's (2) — ink's SettingsDialog charges the
-// same items (its footer is one row; this port's FooterHint carries a margin
-// row) before windowing its list to what is left. The description and the
+// its spacer (4), the description row and its margin (2), and the footer
+// hint's (2) — ink's SettingsDialog charges the same items (its footer is
+// one row; this port's FooterHint carries a margin row) before windowing
+// its list to what is left. The scroll arrows are not in the flat charge:
+// they paint only when the window is a strict subset with rows to spare, so
+// the budget pays them out of the list rows at exactly those sizes (the rule
+// the mode list's budget ports) — charging them flat showed one row fewer
+// than ink at every size the arrows never paint. The description and the
 // footer hint are clipped to the frame's content width at paint time, the
 // way ink's wrap="truncate" keeps them to the charged row; the restart
 // prompt stays wrapped, so its rows are measured and charged on top.
-const SETTINGS_LIST_CHROME_ROWS = 16;
+const SETTINGS_LIST_CHROME_ROWS = 14;
 // The scope step beside it has no search box, arrows, description or restart
 // prompt: its chrome is the frame (4), the tab bar and its spacer (2), the
 // `> Apply To` title and its spacer (2), and the footer hint (2), which this
@@ -382,15 +386,23 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   const restartRows = showRestartPrompt
     ? wrappedRows(restartText, contentWidth)
     : 0;
-  const maxItemsToShow =
+  const listRows =
     regionHeight === undefined
+      ? undefined
+      : regionHeight - SETTINGS_LIST_CHROME_ROWS - restartRows;
+  // The arrows cost two rows and exist only when the window can scroll, so a
+  // window of one or two rows spends them on items instead.
+  const arrowsPaint =
+    listRows === undefined
+      ? true
+      : listRows > 2 &&
+        Math.min(SETTINGS_LIST_MAX_ITEMS, listRows) < items.length;
+  const maxItemsToShow =
+    listRows === undefined
       ? SETTINGS_LIST_MAX_ITEMS
       : Math.max(
           0,
-          Math.min(
-            SETTINGS_LIST_MAX_ITEMS,
-            regionHeight - SETTINGS_LIST_CHROME_ROWS - restartRows,
-          ),
+          Math.min(SETTINGS_LIST_MAX_ITEMS, listRows - (arrowsPaint ? 2 : 0)),
         );
   // Re-follow the highlight when the window's own size changes — a resize,
   // or the restart prompt taking a row — the way useDialogSelect's
@@ -419,9 +431,11 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   }, [maxItemsToShow]);
 
   const visibleItems = items.slice(scrollOffset, scrollOffset + maxItemsToShow);
-  const showScrollUp = maxItemsToShow > 0 && scrollOffset > 0;
+  const showScrollUp = arrowsPaint && maxItemsToShow > 0 && scrollOffset > 0;
   const showScrollDown =
-    maxItemsToShow > 0 && scrollOffset + maxItemsToShow < items.length;
+    arrowsPaint &&
+    maxItemsToShow > 0 &&
+    scrollOffset + maxItemsToShow < items.length;
 
   const applySettingValue = (key: string, value: SettingsValue) => {
     setPendingSettings((prev) => setPendingSettingValueAny(key, value, prev));
@@ -781,6 +795,14 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
     focusZone === 'list' &&
     items[activeSettingIndex]?.description;
 
+  // The bar is charged as one row; the hint gets the columns the tabs leave
+  // rather than wrapping onto a second.
+  const settingsTabsWidth = SETTINGS_TAB_ORDER.reduce(
+    (total, tab) =>
+      total + getCachedStringWidth(` ${settingsTabLabel(tab)} `) + 2,
+    0,
+  );
+
   return (
     <DialogFrame>
       <box flexDirection="row">
@@ -800,9 +822,12 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
         })}
         <text fg={C.dim}>
           {' '}
-          {focusZone === 'tabs'
-            ? t('(←/→ to switch, ↓ to return)')
-            : t('(↑ to switch tabs)')}
+          {truncateToWidth(
+            focusZone === 'tabs'
+              ? t('(←/→ to switch, ↓ to return)')
+              : t('(↑ to switch tabs)'),
+            Math.max(0, contentWidth - settingsTabsWidth - 1),
+          )}
         </text>
       </box>
       <box height={1} />
@@ -874,7 +899,9 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
           >
             <text fg={C.dim}>⌕ </text>
             {searchQuery ? (
-              <text fg={C.text}>{searchQuery}</text>
+              <text fg={C.text}>
+                {truncateToWidth(searchQuery, contentWidth - 6)}
+              </text>
             ) : (
               <text fg={C.dim}>{t('Search settings…')}</text>
             )}
@@ -945,6 +972,25 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
               settings,
             );
 
+            // ink truncates the label and the value (wrap="truncate"); an
+            // unclipped label would wrap the row into a second physical row
+            // the window charged as one. The value box keeps its natural
+            // width (flexShrink 0); the label box gets what the indicator,
+            // the margin and the value leave.
+            const labelBudget = Math.max(
+              0,
+              contentWidth - 3 - getCachedStringWidth(displayValue),
+            );
+            const labelFitsWhole =
+              getCachedStringWidth(item.label) <= labelBudget;
+            const scopeMessageFits =
+              scopeMessage !== undefined &&
+              labelFitsWhole &&
+              getCachedStringWidth(item.label) +
+                1 +
+                getCachedStringWidth(scopeMessage) <=
+                labelBudget;
+
             return (
               <box
                 key={item.key}
@@ -961,8 +1007,10 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
                 </box>
                 <box flexGrow={1} flexShrink={1}>
                   <box flexDirection="row">
-                    <text fg={isActive ? C.green : C.text}>{item.label}</text>
-                    {scopeMessage ? (
+                    <text fg={isActive ? C.green : C.text}>
+                      {truncateToWidth(item.label, labelBudget)}
+                    </text>
+                    {scopeMessageFits ? (
                       <text fg={C.dim}>{` ${scopeMessage}`}</text>
                     ) : null}
                   </box>

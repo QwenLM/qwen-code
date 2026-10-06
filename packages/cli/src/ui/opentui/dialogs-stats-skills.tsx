@@ -107,6 +107,8 @@ export function OpenTuiStatsDialog(props: {
   onClose: () => void;
   /** Embedded hosts pass false while their own focus zone owns the keys. */
   isFocused?: boolean;
+  /** The popup region's row budget; the stats body does not window, so it is ignored. */
+  availableTerminalHeight?: number;
 }) {
   const { config, onClose, isFocused = true } = props;
   const [tab, setTabState] = useState<StatsTabName>('session');
@@ -408,6 +410,8 @@ interface SkillRow {
 export function OpenTuiSkillsDialog(props: {
   config: Config | null | undefined;
   onClose: () => void;
+  /** The popup region's row budget; the skills body does not window, so it is ignored. */
+  availableTerminalHeight?: number;
 }) {
   const { config, onClose } = props;
   const [rows, setRows] = useState<SkillRow[]>([]);

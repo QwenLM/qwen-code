@@ -112,11 +112,23 @@ describe('Shell (ink dialog chrome)', () => {
     // lets the region's clip cut the tail. The clip cuts child text but not
     // the frame's own border strokes, so the sized bodies (/diff, /subagents)
     // window their height from the region budget instead of relying on it.
-    const frame = Shell({ title: 'Auth' }) as unknown as {
+    const frame = Shell({ title: 'Diff' }) as unknown as {
       props: Record<string, unknown>;
     };
     expect(frame.props['marginTop']).toBeUndefined();
     expect(frame.props['flexShrink']).toBe(0);
+  });
+
+  it('lets a static body shed its blank rows instead of clipping the border', () => {
+    // /auth measured the difference at the default 80x24: unshrinkable, its
+    // frame is one row taller than the region and the clip takes the bottom
+    // border; shrinkable, it sheds a blank row like ink and closes cleanly.
+    // Only static bodies opt in — a list-carrying frame would let the region
+    // squeeze text rows to zero mid-list.
+    const frame = Shell({ title: 'Auth', shrinkable: true }) as unknown as {
+      props: Record<string, unknown>;
+    };
+    expect(frame.props['flexShrink']).toBe(1);
   });
 });
 

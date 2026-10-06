@@ -44,6 +44,7 @@ import {
 } from '../hooks/useSessionSearchInput.js';
 import { toOriginalKey } from './key-map.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
+import { truncateToWidth } from '../utils/textUtils.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
@@ -148,8 +149,12 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
   // painted with the down-scroll marker on it, was Enter-committable without
   // ever being shown.
   const listRegionRows = clampDialogHeight(availableTerminalHeight) ?? height;
+  // The floor is zero rows, not one: a region shorter than the reserved
+  // chrome paints no session row, and a one-row floor kept Enter and Space
+  // committing a cursor row nothing painted (the zero-window refusals on
+  // those keys below are the other half of the invariant).
   const maxVisibleItems = Math.max(
-    1,
+    0,
     Math.floor((listRegionRows - RESERVED_LINES) / ITEM_HEIGHT),
   );
 
@@ -403,6 +408,7 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
         if (orderedIds.length > 0) onConfirmMulti(orderedIds);
         return;
       }
+      if (maxVisibleItems < 1) return;
       const session = filteredSessions[selectedIndexRef.current];
       if (session && !disabledIdSet.has(session.sessionId)) {
         onSelect(session.sessionId);
@@ -457,6 +463,7 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
     }
 
     if (name === 'space' || sequence === ' ') {
+      if (maxVisibleItems < 1) return;
       const session = filteredSessions[selectedIndexRef.current];
       if (!session) return;
       if (enableMultiSelect) toggleChecked(session.sessionId);
@@ -680,6 +687,7 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
                 showScrollUp={showScrollUp}
                 showScrollDown={showScrollDown}
                 promptWidth={Math.max(1, maxPromptWidth - checkboxWidth)}
+                metaWidth={maxPromptWidth}
                 isChecked={
                   enableMultiSelect
                     ? checkedIds.has(session.sessionId)
@@ -702,7 +710,10 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
       <box flexDirection="row" paddingLeft={1} paddingRight={1}>
         {isSearchActive ? (
           <text fg={C.dim}>
-            {t('Type to search · Enter to commit · Esc to clear')}
+            {truncateToWidth(
+              t('Type to search · Enter to commit · Esc to clear'),
+              Math.max(0, boxWidth - 4),
+            )}
           </text>
         ) : (
           <text fg={C.dim}>
@@ -714,7 +725,10 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
                 {'Ctrl+B'}
               </span>
             ) : null}
-            {footerTail}
+            {truncateToWidth(
+              footerTail,
+              Math.max(0, boxWidth - 4 - (currentBranch ? 6 : 0)),
+            )}
           </text>
         )}
       </box>
@@ -746,6 +760,8 @@ interface SessionRowProps {
   showScrollUp: boolean;
   showScrollDown: boolean;
   promptWidth: number;
+  /** The meta line sits outside the checkbox column, so it gets the full budget. */
+  metaWidth: number;
   /** `undefined` renders no checkbox column at all. */
   isChecked?: boolean;
   isDisabled: boolean;
@@ -760,6 +776,7 @@ function SessionRow({
   showScrollUp,
   showScrollDown,
   promptWidth,
+  metaWidth,
   isChecked,
   isDisabled,
   disabledHint,
@@ -837,7 +854,10 @@ function SessionRow({
         </box>
       </box>
       <box paddingLeft={2}>
-        <text fg={C.dim}>{meta}</text>
+        {/* The budget counts the meta as one physical row; an unclipped run
+            (a long branch name) wraps it into two, and the frame's last
+            painted row becomes one the budget never paid for. */}
+        <text fg={C.dim}>{truncateToWidth(meta, metaWidth)}</text>
       </box>
     </box>
   );

@@ -115,6 +115,8 @@ export function OpenTuiMemoryDialog(props: {
   config?: Config;
   settings: LoadedSettings;
   onClose: () => void;
+  /** The popup region's row budget; the memory body does not window, so it is ignored. */
+  availableTerminalHeight?: number;
 }) {
   const { config, settings, onClose } = props;
   useEsc(onClose);
@@ -163,6 +165,8 @@ export function OpenTuiMemoryDialog(props: {
 export function OpenTuiStatusLineDialog(props: {
   settings: LoadedSettings;
   onClose: () => void;
+  /** The popup region's row budget; the statusline body does not window, so it is ignored. */
+  availableTerminalHeight?: number;
 }) {
   const { onClose } = props;
   useEsc(onClose);

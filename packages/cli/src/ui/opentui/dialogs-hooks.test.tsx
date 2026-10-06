@@ -73,6 +73,7 @@ vi.mock('@opentui/react', async () => {
       addInputHandler: () => {},
       removeInputHandler: () => {},
     }),
+    useTerminalDimensions: () => ({ width: 100, height: 40 }),
   };
 });
 
@@ -444,6 +445,36 @@ describe('OpenTuiHooksDialog', () => {
 
     expect(screen.queryByText('Stop - Matchers')).toBeNull();
     expect(screen.getByText('[command] ./verify.sh')).toBeTruthy();
+  });
+
+  it('windows the event list to the region, so Enter only opens a painted row', async () => {
+    // The constant twelve-row window overran a short region: the clip took
+    // the tail while the cursor kept walking it. At a fifteen-row region the
+    // chrome (frame, title, the two-row read-only note, margins, footer)
+    // leaves the list four rows, two of them spent on the scroll arrows — so
+    // exactly two events paint.
+    render(
+      <OpenTuiHooksDialog
+        config={configWith({})}
+        settings={settingsWith()}
+        onClose={vi.fn()}
+        availableTerminalHeight={15}
+      />,
+    );
+
+    expect(screen.getByText(DISPLAY_HOOK_EVENTS[0]!)).toBeTruthy();
+    expect(screen.getByText(DISPLAY_HOOK_EVENTS[1]!)).toBeTruthy();
+    expect(screen.queryByText(DISPLAY_HOOK_EVENTS[2]!)).toBeNull();
+
+    // The window follows the cursor: two downs bring the third event into
+    // the window, and Enter opens exactly that event's step.
+    await press('down');
+    await press('down');
+    expect(screen.getByText(DISPLAY_HOOK_EVENTS[2]!)).toBeTruthy();
+    await press('return');
+    // The read-only note only renders on the events step; its absence is the
+    // navigation tell.
+    expect(screen.queryByText(/This menu is read-only/)).toBeNull();
   });
 
   it('says so when an event has no hooks', async () => {

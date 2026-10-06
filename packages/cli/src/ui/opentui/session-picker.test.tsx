@@ -14,7 +14,7 @@
  * so /delete could only ever remove the row under the cursor.
  */
 
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
 
@@ -118,6 +118,7 @@ vi.mock('./key-map.js', () => ({
 
 import { OpenTuiSessionPicker } from './session-picker.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
+import { getCachedStringWidth } from '../utils/textUtils.js';
 
 function press(key: RawKey) {
   if (mocks.state.keyboardHandlers.length === 0) {
@@ -775,6 +776,63 @@ describe('OpenTuiSessionPicker inside the popup region', () => {
       flexShrink: 1,
       overflow: 'hidden',
     });
+  });
+
+  it('commits nothing when the region leaves the window no rows', () => {
+    // A three-row region does not cover the seven reserved chrome rows, so
+    // the window floors at zero. The one-row floor it used to carry kept the
+    // cursor row Enter-committable and Space-checkable over a frame that
+    // paints not one session row — a /delete Enter there removed a session
+    // nobody saw.
+    const sessions = Array.from({ length: 14 }, (_, i) => session(i + 1));
+    const { onSelect, onConfirmMulti } = renderPicker(sessions, {
+      availableTerminalHeight: 3,
+      enableMultiSelect: true,
+    });
+    expect(screen.queryAllByText(/^Session \d\d$/)).toHaveLength(0);
+
+    press({ name: 'space', sequence: ' ' });
+    press({ name: 'return' });
+
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onConfirmMulti).not.toHaveBeenCalled();
+  });
+
+  it('refuses Enter on a zero-row window in single-select mode too', () => {
+    const sessions = Array.from({ length: 14 }, (_, i) => session(i + 1));
+    const { onSelect } = renderPicker(sessions, { availableTerminalHeight: 3 });
+
+    press({ name: 'return' });
+
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('clips the metadata line and the footer hint to the width their row charge pays', () => {
+    // The budget counts three rows per session (title, meta, gap) and one for
+    // the footer; an unclipped run wraps its row and the frame's last painted
+    // row becomes one the budget never paid for. An 80-column branch name
+    // puts the meta past maxPromptWidth (boxWidth - 6) at full width.
+    const wideBranch = `feature/${'very-long-branch-name-'.repeat(4)}`;
+    mocks.state.width = 100;
+    const wide = renderPicker([session(1, { gitBranch: wideBranch })], {
+      currentBranch: 'main',
+    });
+    const meta = within(wide.container).getByText(/just now · 3 messages ·/);
+    const metaBudget = dialogAreaWidth(100) - 6;
+    expect(getCachedStringWidth(meta.textContent ?? '')).toBeLessThanOrEqual(
+      metaBudget,
+    );
+    expect(meta.textContent).toMatch(/…$/);
+
+    // The footer: the Ctrl+B run's five columns come off the row first.
+    mocks.state.width = 40;
+    const narrow = renderPicker([session(1)], { currentBranch: 'main' });
+    const footer = within(narrow.container).getByText(/to toggle branch/);
+    // boxWidth 36, minus border 2 and the row's padding 2.
+    expect(getCachedStringWidth(footer.textContent ?? '')).toBeLessThanOrEqual(
+      32,
+    );
+    expect(footer.textContent).toMatch(/…$/);
   });
 
   it('rebuilds the preview box on a width-only resize too', async () => {

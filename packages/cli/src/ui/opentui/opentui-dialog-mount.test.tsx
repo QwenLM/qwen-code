@@ -340,23 +340,18 @@ describe('OpenTuiDialogMount routing', () => {
     ).toBe(20);
   });
 
-  it('hands the region height to every dialog leg that windows a body from it', () => {
-    // The permissions rule and directory lists, the delete/resume session
-    // picker and the diff/subagents scrollboxes size themselves from the
-    // region; a leg left off this list renders unbudgeted inside the fixed
-    // region, where the clip takes rows the keys still commit.
-    const legs: Array<[string, OpenTuiDialogRequest]> = [
-      ['theme', { dialog: 'theme' }],
-      ['settings', { dialog: 'settings' }],
-      ['approval-mode', { dialog: 'approval-mode' }],
-      ['model', { dialog: 'model', mode: 'primary' }],
-      ['permissions', { dialog: 'permissions' }],
-      ['delete', { dialog: 'delete' }],
-      ['resume', { dialog: 'resume' }],
-      ['diff', { dialog: 'diff' }],
-      ['subagent_list', { dialog: 'subagent_list' }],
-    ];
-    for (const [dialog, request] of legs) {
+  it('hands the region height to every region-mounted dialog leg', () => {
+    // The budget is a property of the region, not of the legs that window:
+    // the legs that window a list size themselves from it (the permission
+    // rule and directory lists, the delete/resume session picker, the diff
+    // and subagents scrollboxes, the hooks and extension lists, the MCP tool
+    // and resource lists, the arena pickers, the theme/effort/output-style
+    // lists) and the rest ignore it. A leg left unforwarded renders
+    // content-height inside the fixed, clipped region, where the clip takes
+    // rows the keys still commit.
+    for (const [dialog, request] of REQUESTS) {
+      // The help overlay's budget arrives as its derived bodyRows.
+      if (dialog === 'help') continue;
       const { unmount } = mount(request, { availableTerminalHeight: 23 });
       expect(
         mocks.state.dialogProps[dialog]?.['availableTerminalHeight'],

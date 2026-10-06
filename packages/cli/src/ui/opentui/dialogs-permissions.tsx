@@ -21,7 +21,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as nodePath from 'node:path';
 import { useState } from 'react';
-import { useKeyboard } from '@opentui/react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
@@ -29,15 +29,18 @@ import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js'
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 import { toOriginalKey } from './key-map.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
-import { matchesSearchQuery } from './dialogs-core.js';
+import { matchesSearchQuery, regionListWindow } from './dialogs-core.js';
 import {
   DialogFrame,
   DialogSelect,
   DialogTabBar,
   FooterHint,
+  dialogAreaWidth,
   useDialogSelect,
 } from './dialogs-shared.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
+import { wrappedRows } from './dialogs-modes.js';
+import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 
 export type PermissionsTabId = 'allow' | 'ask' | 'deny' | 'workspace';
 
@@ -218,6 +221,10 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
     onExit,
   } = props;
 
+  const { width } = useTerminalDimensions();
+  // These views are bare boxes — no DialogFrame — so every run inside them
+  // is charged and clipped against the region's own width.
+  const areaWidth = dialogAreaWidth(width);
   const tabs = getPermissionsTabs();
   const {
     cursor: activeTabIndex,
@@ -275,16 +282,33 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
   // tab description and its margin (2), the bordered search box and its
   // margin (4), the spacer (1) and the footer hint (2). The workspace tab's
   // chrome is the tab bar, its description, a spacer and the footer hint
-  // (5), plus one row per initial directory listed above the list.
+  // (5), plus one row per initial directory listed above the list. Each
+  // description is paid for the rows it actually wraps into at this width —
+  // the workspace tab's takes two at 80 columns — since a run left
+  // uncharged paints over a row the window thinks it owns.
   const regionHeight = clampDialogHeight(props.availableTerminalHeight);
+  const workspaceDescription = t(
+    'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.',
+  );
+  const ruleDescriptionRows = wrappedRows(activeTab.description, areaWidth);
+  const workspaceDescriptionRows = wrappedRows(workspaceDescription, areaWidth);
   const maxRulesToShow =
     regionHeight === undefined
       ? 15
-      : Math.max(0, Math.min(15, regionHeight - 10));
+      : Math.max(0, Math.min(15, regionHeight - 9 - ruleDescriptionRows));
   const maxDirsToShow =
     regionHeight === undefined
       ? 15
-      : Math.max(0, Math.min(15, regionHeight - 5 - initialDirectories.length));
+      : Math.max(
+          0,
+          Math.min(
+            15,
+            regionHeight -
+              4 -
+              workspaceDescriptionRows -
+              initialDirectories.length,
+          ),
+        );
 
   const ruleList = useDialogSelect({
     items: ruleListItems,
@@ -329,10 +353,20 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
     key: s.key,
     value: s.value,
   }));
+  // ink gives every row `wrap="truncate"`; an unclipped rule or path wraps
+  // its row into two physical rows the window charged as one. DialogSelect
+  // sizes the number box from the full list's length, so the label's budget
+  // is the area width minus the `›` box (2) and that box.
+  const rowLabelWidth = (itemCount: number) =>
+    Math.max(0, areaWidth - 2 - (String(itemCount).length + 2));
+  // The scope step's chrome: frame (4), title (1), spacer (1), the rule block
+  // (2), spacer (1), the question (1) and the footer below the frame (2).
+  const scopeWindow = regionListWindow(regionHeight, 12, scopeItems.length, 10);
   const scopeList = useDialogSelect({
     items: scopeItems,
     focused: view === 'add-rule-scope',
     numbers: true,
+    maxItemsToShow: scopeWindow.maxItemsToShow,
     onSelect: (scope) => {
       onAddRule(
         pendingRuleText,
@@ -580,23 +614,26 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
           activeId={activeTab.id}
           hint={t('(←/→ or tab to cycle)')}
         />
-        <text fg={C.dim}>
-          {t(
-            'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.',
-          )}
-        </text>
+        <text fg={C.dim}>{workspaceDescription}</text>
         <box height={1} />
-        {initialDirectories.map((dir, idx) => (
-          <box key={dir} marginLeft={2} flexDirection="row">
-            <text fg={C.dim}>{'- '}</text>
-            <text fg={C.text}>{dir}</text>
-            <text fg={C.dim}>
-              {idx === 0
-                ? t('  (Original working directory)')
-                : t('  (from settings)')}
-            </text>
-          </box>
-        ))}
+        {initialDirectories.map((dir, idx) => {
+          const suffix =
+            idx === 0
+              ? t('  (Original working directory)')
+              : t('  (from settings)');
+          return (
+            <box key={dir} marginLeft={2} flexDirection="row">
+              <text fg={C.dim}>{'- '}</text>
+              <text fg={C.text}>
+                {truncateToWidth(
+                  dir,
+                  Math.max(0, areaWidth - 4 - getCachedStringWidth(suffix)),
+                )}
+              </text>
+              <text fg={C.dim}>{suffix}</text>
+            </box>
+          );
+        })}
         <DialogSelect
           items={dirListItems}
           activeIndex={dirList.activeIndex}
@@ -607,10 +644,14 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
           onHover={dirList.setActiveIndex}
           onSelectIndex={dirList.selectIndex}
           renderLabel={(item, { titleColor }) => (
-            <text fg={titleColor}>{item.label}</text>
+            <text fg={titleColor}>
+              {truncateToWidth(item.label, rowLabelWidth(dirListItems.length))}
+            </text>
           )}
         />
-        {footerText ? <FooterHint text={footerText} /> : null}
+        {footerText ? (
+          <FooterHint text={truncateToWidth(footerText, areaWidth)} />
+        ) : null}
       </box>
     );
   }
@@ -675,6 +716,8 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             items={scopeItems}
             activeIndex={scopeList.activeIndex}
             scrollOffset={scopeList.scrollOffset}
+            maxItemsToShow={scopeWindow.maxItemsToShow}
+            showScrollArrows={scopeWindow.showScrollArrows}
             showNumbers={true}
             focused={true}
             onHover={scopeList.setActiveIndex}
@@ -739,7 +782,21 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             </text>
           </box>
         ))}
-        <text fg={C.dim}>{t('(←/→ or tab to cycle)')}</text>
+        <text fg={C.dim}>
+          {truncateToWidth(
+            t('(←/→ or tab to cycle)'),
+            Math.max(
+              0,
+              areaWidth -
+                getCachedStringWidth(`${t('Permissions:')} `) -
+                tabs.reduce(
+                  (total, tab) =>
+                    total + getCachedStringWidth(` ${tab.label} `) + 2,
+                  0,
+                ),
+            ),
+          )}
+        </text>
       </box>
       <box marginTop={1}>
         <text fg={C.text}>{activeTab.description}</text>
@@ -750,10 +807,13 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         paddingX={1}
         marginTop={1}
         width={60}
+        flexDirection="row"
       >
         <text fg={C.accent}>{'> '}</text>
         {searchQuery ? (
-          <text fg={C.text}>{searchQuery}</text>
+          // A query longer than the box would wrap it onto a second content
+          // row the chrome budget does not pay for.
+          <text fg={C.text}>{truncateToWidth(searchQuery, 54)}</text>
         ) : (
           <text fg={C.dim}>{t('Search…')}</text>
         )}
@@ -769,10 +829,12 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         onHover={ruleList.setActiveIndex}
         onSelectIndex={ruleList.selectIndex}
         renderLabel={(item, { titleColor }) => (
-          <text fg={titleColor}>{item.label}</text>
+          <text fg={titleColor}>
+            {truncateToWidth(item.label, rowLabelWidth(ruleListItems.length))}
+          </text>
         )}
       />
-      <FooterHint text={footerText} />
+      <FooterHint text={truncateToWidth(footerText, areaWidth)} />
     </box>
   );
 }

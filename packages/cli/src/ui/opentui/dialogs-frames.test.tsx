@@ -81,6 +81,7 @@ vi.mock('@opentui/core', () => ({
 }));
 
 import { OpenTuiArenaDialog } from './dialogs-arena.js';
+import { DialogFrame } from './dialogs-shared.js';
 import {
   OpenTuiMemoryDialog,
   OpenTuiStatusLineDialog,
@@ -101,6 +102,20 @@ function layoutOf(node: Element | null | undefined): Record<string, unknown> {
 }
 
 describe('sibling dialog frames (region clips, frame does not shrink)', () => {
+  it('the shared dialog frame keeps its natural height for the clip too', () => {
+    // Measured on /mcp's tool list: a shrinkable frame let a short region
+    // squeeze the unsized tool rows to zero and paint them over each other
+    // mid-list while the cursor kept walking and Enter kept opening them.
+    const { container } = render(
+      <DialogFrame>
+        <span />
+      </DialogFrame>,
+    );
+    expect(layoutOf(container.firstElementChild)).toMatchObject({
+      flexShrink: 0,
+    });
+  });
+
   it('arena frame opens flush and unshrinkable', () => {
     const { container } = render(
       <OpenTuiArenaDialog mode="status" onClose={() => {}} notify={() => {}} />,

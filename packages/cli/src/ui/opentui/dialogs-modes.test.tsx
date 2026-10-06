@@ -1975,7 +1975,7 @@ describe('OpenTuiSettingsDialog region budget', () => {
   });
 
   it('keeps the restart key live when the restart prompt takes the last list row', () => {
-    // Region seventeen paints one list row until a restart-required toggle
+    // Region fifteen paints one list row until a restart-required toggle
     // charges the prompt's row, leaving the window zero. The prompt is not
     // row-budgeted, so it stays on screen naming the `r` key — a guard that
     // swallows that key leaves the instruction live and the key dead, and
@@ -1993,7 +1993,7 @@ describe('OpenTuiSettingsDialog region budget', () => {
         settings={settings}
         onSelect={vi.fn()}
         onRestartRequest={onRestartRequest}
-        availableTerminalHeight={17}
+        availableTerminalHeight={15}
       />,
     );
 
@@ -2038,7 +2038,7 @@ describe('OpenTuiSettingsDialog region budget', () => {
       <OpenTuiSettingsDialog
         settings={settings}
         onSelect={vi.fn()}
-        availableTerminalHeight={17}
+        availableTerminalHeight={15}
       />,
     );
     press('down'); // tools.codeModeOnly
@@ -2101,7 +2101,7 @@ describe('OpenTuiSettingsDialog region budget', () => {
       <OpenTuiSettingsDialog
         settings={settings}
         onSelect={vi.fn()}
-        availableTerminalHeight={17}
+        availableTerminalHeight={15}
       />,
     );
 
@@ -2135,7 +2135,8 @@ describe('OpenTuiSettingsDialog region budget', () => {
     // the window: an edit opened while the region still painted rows kept
     // committing on Escape after the budget collapsed — a write over a frame
     // that no longer shows the row, its value, or the modified marker. The
-    // collapse drops the edit instead.
+    // collapse drops the edit instead. The collapse boundary is region 14:
+    // below the fourteen chrome rows the list gets nothing.
     const setValue = vi.fn();
     const onSelect = vi.fn();
     const settings = {
@@ -2161,7 +2162,7 @@ describe('OpenTuiSettingsDialog region budget', () => {
       <OpenTuiSettingsDialog
         settings={settings}
         onSelect={onSelect}
-        availableTerminalHeight={16}
+        availableTerminalHeight={14}
       />,
     );
     press('escape');

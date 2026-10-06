@@ -61,7 +61,7 @@ import {
   toCodePoints,
   truncateToWidth,
 } from '../utils/textUtils.js';
-import type { DialogListItem } from './dialogs-core.js';
+import { regionListWindow, type DialogListItem } from './dialogs-core.js';
 import { C } from './theme.js';
 import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
@@ -632,6 +632,8 @@ export function OpenTuiEffortDialog(props: {
   settings: LoadedSettings;
   onClose: () => void;
   notify?: (text: string, level?: 'info' | 'error') => void;
+  /** The popup region's row budget; the tier list windows from it. */
+  availableTerminalHeight?: number;
 }) {
   const { config, settings, onClose, notify } = props;
   const tiers = config
@@ -646,9 +648,20 @@ export function OpenTuiEffortDialog(props: {
     value: tier,
     label: `${tier} — ${t(EFFORT_DESCRIPTIONS[tier])}`,
   }));
+  // The frame (4), the title row and its margin (2), the footer hint (2) and
+  // the unconfigured-model note (2) come off the region first; the tier list
+  // windows from what is left instead of the flat ten-row default.
+  const regionHeight = clampDialogHeight(props.availableTerminalHeight);
+  const tierWindow = regionListWindow(
+    regionHeight,
+    configuredIndex === -1 ? 10 : 8,
+    items.length,
+    DEFAULT_MAX_ITEMS_TO_SHOW,
+  );
   const list = useDialogSelect<LabeledItem<ReasoningEffort>>({
     items,
     initialIndex: Math.max(0, configuredIndex),
+    maxItemsToShow: tierWindow.maxItemsToShow,
     onSelect: (effort) => {
       try {
         // Apply at runtime (next turn) and persist for future sessions;
@@ -679,7 +692,12 @@ export function OpenTuiEffortDialog(props: {
         title={t('Reasoning Effort')}
         subtitle={t('(applied across all providers; clamped per model)')}
       />
-      <LabeledRows list={list} focused />
+      <LabeledRows
+        list={list}
+        focused
+        maxItemsToShow={tierWindow.maxItemsToShow}
+        showScrollArrows={tierWindow.showScrollArrows}
+      />
       {configuredIndex === -1 ? (
         <box marginTop={1}>
           <text fg={C.dim}>
@@ -719,6 +737,8 @@ export function OpenTuiOutputStyleDialog(props: {
   settings: LoadedSettings;
   onClose: () => void;
   notify: (text: string, level?: 'info' | 'error') => void;
+  /** The popup region's row budget; the style list windows from it. */
+  availableTerminalHeight?: number;
 }) {
   const { config, settings, onClose, notify } = props;
   // The catalog, not just the built-ins: a custom style can be active under
@@ -789,12 +809,22 @@ export function OpenTuiOutputStyleDialog(props: {
   // (default), so pre-selecting index 0 in that case tells the truth. The name
   // is matched case-insensitively, like every other style lookup.
   const wanted = currentStyle?.name.toLowerCase();
+  // The frame (4), the title row and its margin (2) and the footer hint (2)
+  // come off the region first; the catalog windows from what is left instead
+  // of the flat ten-row default.
+  const styleWindow = regionListWindow(
+    clampDialogHeight(props.availableTerminalHeight),
+    8,
+    items.length,
+    DEFAULT_MAX_ITEMS_TO_SHOW,
+  );
   const list = useDialogSelect<LabeledItem<OutputStyleDefinition | undefined>>({
     items,
     initialIndex: Math.max(
       0,
       items.findIndex((item) => item.key.toLowerCase() === wanted),
     ),
+    maxItemsToShow: styleWindow.maxItemsToShow,
     onSelect: (style) => {
       // Close first, like ink's handleOutputStyleSelect: the apply rebuilds
       // the system instruction, and the dialog should not sit open for it.
@@ -821,7 +851,12 @@ export function OpenTuiOutputStyleDialog(props: {
         subtitle={t('(applies now and persists to settings)')}
       />
       {catalog ? (
-        <LabeledRows list={list} focused />
+        <LabeledRows
+          list={list}
+          focused
+          maxItemsToShow={styleWindow.maxItemsToShow}
+          showScrollArrows={styleWindow.showScrollArrows}
+        />
       ) : (
         <text fg={C.dim}>{t('Loading output styles…')}</text>
       )}

@@ -70,23 +70,31 @@ export function Shell({
   title,
   children,
   borderStyle = 'rounded',
+  shrinkable = false,
 }: {
   title: string;
   onClose?: () => void;
   children?: ReactNode;
   /** ink's AuthDialog frames itself with `borderStyle="single"`; the rest round. */
   borderStyle?: 'rounded' | 'single';
+  /**
+   * Static bodies (auth, trust, the placeholder pickers) set this: with no
+   * windowed list to protect, a short region sheds their blank rows the way
+   * ink's dialogs shed them, instead of clipping the border and footer off a
+   * body that would fit one row later.
+   */
+  shrinkable?: boolean;
 }) {
   return (
-    // The rule measured for every dialog frame in the fixed region: stay
-    // unshrinkable. A shrinkable frame lets a short region take the deficit
-    // out of the body's only unsized child, dropping text rows from the
-    // middle of a list while the keys keep committing them; an unshrinkable
-    // frame keeps its rows contiguous and lets the region's clip cut the
-    // tail, the way ink clips /stats. The clip cuts child text but not the
-    // frame's own border strokes, so a body with an explicit height (/diff's
-    // and /subagents' scrollboxes) must window that height from the region
-    // budget rather than rely on the clip alone.
+    // The rule measured for the list-carrying dialog frames in the fixed
+    // region: stay unshrinkable. A shrinkable frame lets a short region take
+    // the deficit out of the body's only unsized child, dropping text rows
+    // from the middle of a list while the keys keep committing them; an
+    // unshrinkable frame keeps its rows contiguous and lets the region's clip
+    // cut the tail, the way ink clips /stats. The clip cuts child text but
+    // not the frame's own border strokes, so a body with an explicit height
+    // (/diff's and /subagents' scrollboxes) must window that height from the
+    // region budget rather than rely on the clip alone.
     <box
       flexDirection="column"
       borderStyle={borderStyle}
@@ -95,7 +103,7 @@ export function Shell({
       paddingRight={1}
       paddingTop={1}
       paddingBottom={1}
-      flexShrink={0}
+      flexShrink={shrinkable ? 1 : 0}
     >
       <text fg={C.text} attributes={1}>
         {title}
@@ -365,7 +373,7 @@ export function OpenTuiTrustDialog({ config, onClose }: P) {
   useEsc(onClose);
   const trusted = config?.isTrustedFolder?.() ?? false;
   return (
-    <Shell title="Trust" onClose={onClose}>
+    <Shell title="Trust" onClose={onClose} shrinkable>
       <box flexDirection="column" marginTop={1}>
         <Row label="Folder trusted:" value={trusted ? 'yes' : 'no'} />
         <text fg={C.dim}>
@@ -456,7 +464,7 @@ export function OpenTuiResumeDialog({
 export function OpenTuiBranchDialog({ onClose }: P) {
   useEsc(onClose);
   return (
-    <Shell title="Branch" onClose={onClose}>
+    <Shell title="Branch" onClose={onClose} shrinkable>
       <box flexDirection="column" marginTop={1}>
         <text fg={C.dim}>
           {'Creates a fork of the current session to explore a new path.'}
@@ -487,7 +495,7 @@ export function readHooksEnabled(
 export function OpenTuiRewindDialog({ onClose }: P) {
   useEsc(onClose);
   return (
-    <Shell title="Rewind" onClose={onClose}>
+    <Shell title="Rewind" onClose={onClose} shrinkable>
       <box flexDirection="column" marginTop={1}>
         <text fg={C.dim}>
           {'Checkpoints let you rewind the conversation to an earlier turn.'}
@@ -581,7 +589,7 @@ export function OpenTuiDiffDialog({
 export function OpenTuiSubagentCreateDialog({ onClose }: P) {
   useEsc(onClose);
   return (
-    <Shell title="Subagent Create" onClose={onClose}>
+    <Shell title="Subagent Create" onClose={onClose} shrinkable>
       <box flexDirection="column" marginTop={1}>
         <text fg={C.dim}>{'Define a new subagent (name, tools, prompt).'}</text>
       </box>

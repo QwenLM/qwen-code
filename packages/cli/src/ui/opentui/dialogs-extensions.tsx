@@ -24,12 +24,14 @@ import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { toOriginalKey } from './key-map.js';
 import { useKeyboard } from '@opentui/react';
-import { cycleTab } from './dialogs-core.js';
+import { cycleTab, regionListWindow } from './dialogs-core.js';
 import {
+  DEFAULT_MAX_ITEMS_TO_SHOW,
   DialogSelect,
   useDialogSelect,
   type DialogListItem,
 } from './dialogs-shared.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 import type { ExtensionUpdateCheckState } from './dialog-data.js';
 
 export const EXTENSIONS_TABS = {
@@ -151,6 +153,8 @@ export interface OpenTuiExtensionsDialogProps {
     | void;
   /** True while a mutation is in flight (mashing Space is ignored). */
   busy?: boolean;
+  /** The popup region's row budget; the Installed list windows from it. */
+  availableTerminalHeight?: number;
 }
 
 export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
@@ -166,6 +170,7 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     onRowAction,
     onDetailAction,
     busy = false,
+    availableTerminalHeight,
   } = props;
 
   const [activeTab, setActiveTab] = useState<ExtensionsTab>(
@@ -227,10 +232,21 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
       [rows],
     );
 
+  // The single border (2), the tab bar (1), the content margin (1), the
+  // status line when there is one (2) and the footer hint (2) come off the
+  // region first; the list windows from what is left instead of painting
+  // every row while the hook windows at the flat default.
+  const listWindow = regionListWindow(
+    clampDialogHeight(availableTerminalHeight),
+    status ? 8 : 6,
+    listItems.length,
+    DEFAULT_MAX_ITEMS_TO_SHOW,
+  );
   const listSelect = useDialogSelect({
     items: listItems,
     numbers: false,
     focused: activeTab === EXTENSIONS_TABS.INSTALLED && view === 'list',
+    maxItemsToShow: listWindow.maxItemsToShow,
     onSelect: (key) => {
       setSelectedKey(key);
       setCheckedUpdateState(undefined);
@@ -394,6 +410,7 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     } else if (name === 'escape') {
       onClose();
     } else if (activeTab === EXTENSIONS_TABS.INSTALLED && !busy) {
+      if (listWindow.maxItemsToShow < 1) return;
       const row = listItems[listSelect.activeIndexRef.current]?.row;
       if (!row) return;
       if (name === 'space' || original.sequence === ' ') {
@@ -565,8 +582,9 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
         items={listItems}
         activeIndex={listSelect.activeIndex}
         scrollOffset={listSelect.scrollOffset}
+        maxItemsToShow={listWindow.maxItemsToShow}
         showNumbers={false}
-        showScrollArrows
+        showScrollArrows={listWindow.showScrollArrows}
         focused={activeTab === EXTENSIONS_TABS.INSTALLED && view === 'list'}
         onHover={listSelect.highlightIndex}
         onWheel={(direction) =>
