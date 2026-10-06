@@ -2,15 +2,20 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.AccessMode;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
@@ -331,6 +336,84 @@ public class WorkspaceStorageGuard {
             }
         } catch (IOException | IllegalArgumentException error) {
             throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    // Probe-only verification: identical structural checks to verify(), but
+    // the cwd settlement probe classifies by the verdict — a momentary I/O
+    // failure on an identity or marker read, or on the directory liveness
+    // calls, is retryable-with-cause so the delivery machine re-arms the
+    // operation and the refusal log keeps the cause. Everything structural
+    // keeps the terminal unavailable(), and the shared acquire path above
+    // is deliberately untouched: re-classifying inside verify() would flip
+    // tool-turn verdicts.
+    public void verifyProbe(ContextBinding binding) {
+        if (!enabled) {
+            return;
+        }
+        verifyProbe(binding.getTenantId(), binding.getStorageId(),
+                binding.getCwdRelative());
+    }
+
+    private void verifyProbe(String tenantId, String storageId, String cwd) {
+        Path root = root(tenantId, storageId);
+        Identity actual;
+        try {
+            actual = identities.read(root);
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailableTransient(error);
+        } catch (RuntimeException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Registration row = row(key(tenantId, storageId), false);
+        if (row == null || !"READY".equals(row.state()) || row.operationId() != null
+                || row.revision() <= 0) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        requireMatching(row, actual, tenantId, storageId);
+        if (!marker(row).equals(readMarkerProbe(root))) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Path directory = root.resolve(cwd).normalize();
+        try {
+            if (!directory.startsWith(root)
+                    || !Files.readAttributes(directory,
+                            BasicFileAttributes.class,
+                            LinkOption.NOFOLLOW_LINKS).isDirectory()
+                    || !directory.toRealPath().equals(directory)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            directory.getFileSystem().provider().checkAccess(directory,
+                    AccessMode.READ, AccessMode.EXECUTE);
+        } catch (NoSuchFileException | AccessDeniedException
+                | SecurityException | IllegalArgumentException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailableTransient(error);
+        }
+    }
+
+    private Marker readMarkerProbe(Path root) {
+        Path file = root.resolve(MARKER);
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        try (FileChannel channel = FileChannel.open(file,
+                StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            if (channel.size() > 4096) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            ByteBuffer bytes = ByteBuffer.allocate((int) channel.size());
+            while (bytes.hasRemaining()) {
+                if (channel.read(bytes) <= 0) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+            }
+            return json.readValue(bytes.array(), Marker.class);
+        } catch (JsonProcessingException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailableTransient(error);
         }
     }
 
