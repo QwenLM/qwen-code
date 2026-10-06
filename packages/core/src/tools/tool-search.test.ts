@@ -33,6 +33,8 @@ import { LlmChat } from '../core/llm-chat.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 import { truncateLlmContent } from './truncation.js';
 import { finalizeToolResponses } from './tool-response-finalizer.js';
+import { goalToolResultProvenance } from '../goals/goal-tool-result-provenance.js';
+import { buildGoalVerifierEvidenceWindow } from '../goals/goal-evidence.js';
 
 const baseConfigParams: ConfigParameters = {
   cwd: '/tmp',
@@ -152,6 +154,109 @@ const asTeammate = <T>(cb: () => Promise<T>) =>
     },
     cb,
   );
+
+describe.each([false, true])(
+  'Goal discovery evidence (Code Mode: %s)',
+  (codeModeOnly) => {
+    it.each([
+      ['select:update_goal', [ToolNames.UPDATE_GOAL], false, {}],
+      ['select:"update_goal"', [ToolNames.UPDATE_GOAL], false, {}],
+      ["select:'update_goal'", [ToolNames.UPDATE_GOAL], false, {}],
+      ['select:UPDATE_GOAL', [ToolNames.UPDATE_GOAL], false, {}],
+      [' SELECT:update_goal ', [ToolNames.UPDATE_GOAL], false, {}],
+      [
+        'goal',
+        [ToolNames.GET_GOAL, ToolNames.PROPOSE_GOAL, ToolNames.UPDATE_GOAL],
+        false,
+        {},
+      ],
+      [
+        'select:update_goal,read_file',
+        [ToolNames.READ_FILE, ToolNames.UPDATE_GOAL],
+        true,
+        {},
+      ],
+      ['select:update_goal,web_fetch', [ToolNames.UPDATE_GOAL], true, {}],
+      [
+        'select:update_goal,read_file',
+        [ToolNames.UPDATE_GOAL],
+        true,
+        { max_results: 1 },
+      ],
+      ['select:read_file', [ToolNames.READ_FILE], true, {}],
+      ['wiki fetch', [], true, {}],
+    ] as const)(
+      'classifies the actual result of %s',
+      async (query, names, externalFact, extra) => {
+        const { config, registry } = makeConfigWithRegistry({ codeModeOnly });
+        config.setGoalProposalHostSupported(true);
+        config.setGoalProposalTurnKey('user-turn');
+        if (codeModeOnly) add(registry, { name: 'exec' });
+        addDeferred(
+          registry,
+          ToolNames.GET_GOAL,
+          ToolNames.UPDATE_GOAL,
+          ToolNames.PROPOSE_GOAL,
+          ToolNames.READ_FILE,
+        );
+        const result = await search(config, query, extra);
+        const returnedNames = [
+          ...result.content.matchAll(/<function>(.*?)<\/function>/gs),
+        ]
+          .map((match) => JSON.parse(match[1]!).name)
+          .sort();
+        expect(returnedNames).toEqual(names);
+        const permit = { goalId: 'g-1', revision: 2, turnId: 't-1' };
+        const responseParts = [
+          {
+            functionResponse: {
+              name: ToolNames.TOOL_SEARCH,
+              response: { output: result.llmContent },
+            },
+          },
+        ];
+        const options = goalToolResultProvenance(
+          {
+            name: ToolNames.TOOL_SEARCH,
+            args: { query },
+            goalContext: permit,
+          },
+          responseParts,
+        );
+        const window = buildGoalVerifierEvidenceWindow(
+          {
+            permit,
+            goal: {
+              goalId: permit.goalId,
+              revision: permit.revision,
+              objective: 'Read the requested file',
+              status: 'active',
+              evidenceCursor: { recordId: 'cursor' },
+              turnCount: 1,
+              activeTimeMs: 0,
+              tokensUsed: 0,
+              createdAt: 1,
+              updatedAt: 1,
+            },
+            records: [
+              { uuid: 'cursor', type: 'system', provenance: 'goal_control' },
+              {
+                uuid: 'discovery',
+                type: 'tool_result',
+                message: { parts: responseParts },
+                ...options,
+              },
+            ],
+          },
+          { budgetBytes: 256_000 },
+        );
+        expect(window.evidence.map((entry) => entry.proofKind)).toEqual(
+          externalFact ? ['external_fact'] : [],
+        );
+      },
+    );
+  },
+);
 
 describe('Code Mode discovery', () => {
   function setup() {
@@ -471,6 +576,19 @@ describe('ToolSearchTool', () => {
     expect(content).toContain('<functions>');
     expect(content).toContain('"name":"cron_create"');
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
+  });
+
+  it('excludes unavailable goal proposals from keyword candidates', async () => {
+    config.setGoalProposalHostSupported(true);
+    defer(ToolNames.PROPOSE_GOAL);
+    expect(registry.isToolDeclared(ToolNames.PROPOSE_GOAL)).toBe(false);
+    expect((await search(config, 'propose_goal')).content).toContain(
+      'No tools found matching',
+    );
+    config.setGoalProposalTurnKey('user-turn');
+    expect((await search(config, 'propose_goal')).content).toContain(
+      '"name":"propose_goal"',
+    );
   });
 
   it.each(['keyword', 'missing', 'truncated'])(

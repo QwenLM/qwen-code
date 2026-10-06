@@ -121,8 +121,9 @@ revalidation window: [English](../../../docs/design/2026-10-02-managed-agent-que
 - MySQL 8
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
-process. It supports durable no-tool Sessions and the opt-in Workspace file
-Turns described in the G0 section below.
+process (the credentialed launch is spelled out in the Full WebShell
+dual-path development entry below). It supports durable no-tool Sessions and
+the opt-in Workspace file Turns described in the G0 section below.
 
 Install the two sibling libraries once when building this module outside a
 Maven reactor:
@@ -228,9 +229,17 @@ Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
 authority and never initializes one. The Java connector attempts strict create for a new binding and loads on
 conflict or uncertain creation outcome. A known existing binding only loads.
-An in-memory Hosted attachment is bound to one normalized Store endpoint,
-tenant, workspace, and Harness writer generation; an attach or cold-load race
-with a different identity fails closed.
+The Java connector caches an attachment per `(tenantId, sessionId)`,
+so one tenant's cached reference is never handed to another by the connector.
+The Harness itself keys its in-memory Session by `sessionId` alone and does
+not compare the presented tenant, Store endpoint or workspace on attach; the
+only attach-time identity fence is the Harness writer generation, so tenant
+isolation on attach is the caller's responsibility in this slice. A presented
+Harness writer generation _is_ checked: an attach whose `writerId` is not this
+process's boot ID fails closed with `409 hosted_harness_generation_mismatch` —
+the restart-generation failure described above. That
+`managed_session_store_conflict` fence is target design for the integration
+slice, not shipped behavior.
 
 Delete writes a public tombstone: get and list stop returning the Session,
 while its operations stay readable. Completed deletion permanently marks an existing
@@ -362,9 +371,46 @@ Turn then fails with `hosted_harness_rejected` in the panel: a Harness
 `400` means the Session Store wiring in `spring.env` did not load
 (`invalid_managed_session_store` — an env file from an older run), while a
 Harness `401` means a launcher restarted without restarting Spring —
-re-source the new `spring.env` and restart Spring. To wire the pieces by
-hand instead, start an ordinary `qwen serve` on port 4170 in addition to the
-private Hosted Harness used by Spring, then run from the repository root:
+re-source the new `spring.env` and restart Spring.
+
+To wire the pieces by hand instead, keep the ordinary daemon on 4170 (the
+vite proxy's default) and start the private Hosted Harness on a distinct
+port. The profile refuses to start without credentials, so the launch
+reuses the same credential pair the Prerequisites section exports for
+Spring — CLI-side the token travels as `QWEN_SERVER_TOKEN` and the
+capability digest as `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` — plus
+`--no-web`, which the profile requires and no environment variable supplies:
+
+```bash
+QWEN_SERVER_TOKEN="$QWEN_MANAGED_AGENT_HARNESS_TOKEN" \
+QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST="$QWEN_MANAGED_AGENT_CAPABILITY_DIGEST" \
+qwen serve --profile hosted-harness --port 4171 --hostname 127.0.0.1 --no-web
+```
+
+— and Spring must point at it with the matching base URL. Spring's HTTP
+Session Store stays off by default, and the Hosted Harness rejects every
+attach without a store descriptor, so Spring also needs the three values
+the one-shot launcher writes into `spring.env` — the connector refuses to
+start when the store is enabled with a blank base URL or workspace ID.
+Export all four together:
+
+```bash
+export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4171'
+export QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'
+export QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL='http://127.0.0.1:8080'
+export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
+```
+
+All four are read once at JVM startup, so if `mvn spring-boot:run` is
+already up on the 4170 value exported in Prerequisites, restart it with the
+overrides in place.
+
+`--port` is a request, not a guarantee: `qwen serve` moves to the next free
+port on a collision, and 4171 is exactly where a daemon displaced from 4170
+lands. Confirm each server's bound port in its startup line before exporting
+the base URL above.
+
+With both up, run from the repository root:
 
 ```bash
 QWEN_DAEMON_URL=http://127.0.0.1:4170 \
@@ -433,7 +479,8 @@ grants and the Workspace registry's `ACTIVE` state), and the creator may cancel
 the Session's running Turns and rename the Session. Workspace close follows
 its separate close capability and lifecycle admission. Archive, delete and
 unarchive follow their separate retention capabilities after reliable Workspace
-close. Cwd operations and broad Workspace capability advertisement remain gated. Shell and in-flight recovery are separate slices.
+close. Controlled cwd changes ship below (W2); broad Workspace capability
+advertisement remains gated. Shell and in-flight recovery are separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
 
@@ -488,6 +535,46 @@ model-generated commands) should configure a binding key even on loopback.
 
 Design: [English](../../../docs/design/managed-agent-broker-auth.md)
 | [简体中文](../../../docs/design/managed-agent-broker-auth.zh-CN.md).
+
+### Controlled cwd change (W2)
+
+Under the same `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED` opt-in, the creator
+of a bound Session moves its relative directory within the same Workspace:
+
+```bash
+curl -sS -X POST \
+  http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/cwd \
+  -H 'Content-Type: application/json' \
+  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'Idempotency-Key: cwd-1' \
+  -d '{"cwd_relative":"services/api","expected_context_revision":1}'
+```
+
+`202` admits a durable `cwd_change` operation; it does not activate the
+directory. The change is same-Workspace only and creator-only, requires an idle
+Session (`409 session_context_busy` while a Turn or another operation is open)
+and a matching `expected_context_revision` (`409 context_revision_conflict`
+otherwise); a retry with the same key returns the original operation even after
+it completes. A background worker verifies the target against the deployment
+mounts and commits one transaction that bumps `cwd_relative` and
+`context_revision`, marks the operation completed and appends
+`session.context.changed`; poll the operation through the existing query route
+or await the event. A target the mount cannot verify fails the operation with
+`failure_code` and leaves the Session's binding untouched; refused changes
+never retry, while a mount fault the probe cannot reach (a stale export)
+retries internally up to an 8-attempt budget and then fails the same type,
+releasing the Session back to turns and lifecycle operations. Legacy Sessions answer `400 unsupported_feature`, an unreadable
+actor `404 session_not_found` and a readable non-creator `403
+session_operation_forbidden`, matching the sibling lifecycle refusals; a
+probe refusal the turn layer would share also uses `409
+workspace_unavailable`. The WebShell adapter offers the same flow as
+`/api/agent/web-shell/v1/sessions/cwd/change` plus `/operations/query`.
+Subsequent turns acquire a fresh Runtime Session and install the new context
+before tools run, so an unverifiable change can never redirect tool execution.
+
+Design:
+[English](../../../docs/design/2026-10-02-managed-workspace-w2-cwd-change.md) |
+[简体中文](../../../docs/design/2026-10-02-managed-workspace-w2-cwd-change.zh-CN.md).
 
 ### Broker deployment
 

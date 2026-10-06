@@ -155,15 +155,15 @@ describe('Hosted real-process gates', () => {
     );
     expect(run.run).toContain('clean verify checkstyle:check');
     expect(run.run).not.toContain('skip');
-    // 20 min: the measurement basis lives in the hosted-harness-mysql job
+    // 25 min: the measurement basis lives in the hosted-harness-mysql job
     // comment (issue #13471). A bump to any of the six ceilings fails here
     // and prompts updating that comment's sum, which nothing cross-checks
     // against this array.
-    expect(run['timeout-minutes']).toBe(20);
+    expect(run['timeout-minutes']).toBe(25);
     const ceilings = job.steps
       .map((step) => step['timeout-minutes'])
       .filter((minutes) => minutes !== undefined);
-    expect(ceilings).toEqual([20, 10, 10, 10, 10, 12]);
+    expect(ceilings).toEqual([25, 10, 10, 10, 10, 12]);
     // The comment's "the job cap binds first" rests on two operands; pin the
     // cap too, and the sum's direction against it.
     expect(job['timeout-minutes']).toBe(60);
@@ -268,5 +268,23 @@ describe('Hosted real-process gates', () => {
     );
     expect(upload.if).toBe('always()');
     expect(upload.with.path).toContain('failsafe-reports');
+  });
+
+  it('keeps the Hosted verify step ceiling above its failsafe fork timeout', () => {
+    const run = java.jobs['hosted-harness-mysql'].steps.find(
+      (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
+    );
+    const forkSeconds = Number(
+      read('packages/sdk-java/managed-agent-server/pom.xml')
+        .split('<id>hosted-harness-mysql</id>')[1]
+        .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
+    );
+    // A step killed before its fork leaves no per-test failure lines, so the
+    // main-CI failure analyzer can only file an undiagnosable per-commit
+    // issue (#13503). The ceiling must cover the fork plus the wrapped
+    // compile/surefire/spotbugs/checkstyle work.
+    expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
+      forkSeconds + 300,
+    );
   });
 });
