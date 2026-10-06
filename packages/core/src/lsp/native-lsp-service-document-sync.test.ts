@@ -2976,6 +2976,36 @@ describe('NativeLspService disk document synchronization', () => {
       });
     });
 
+    it('keeps a clean Rust file a TypeScript sibling answers -32601 for', async () => {
+      // The owner test must key on the *refusing* server's declaration, not on
+      // the answering side. `languages: ['rust']` derives `{'rust'}` through
+      // the `?? [id]` fallback, which never contains `rs`, so rust-analyzer is
+      // no countable owner of main.rs even though it answered authoritatively;
+      // a rule reading only the answers would let an unrelated push-only
+      // sibling veto that clean report. `rs`, `mts` and `yml` stay outside the
+      // rule, the exclusion `serverDeclaredIrrelevant` already states.
+      const [rsPath] = addFile('main.rs', 'fn main() {}\n');
+      const rustAnalyzer = createConnection();
+      mockDiagnosticsResponses(rustAnalyzer);
+      withServers([
+        ['rust', serverOn('rust-analyzer', ['rust'], rustAnalyzer)],
+        [
+          'typescript',
+          serverOn(
+            'typescript-language-server',
+            ['typescript'],
+            refusingConnection(-32601),
+          ),
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: rsPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
     it('still reports a real problem when a push-only sibling answers -32601', async () => {
       // Excusing the refusal must not blunt the answer that was retrieved.
       const [brokenPath] = addFile('broken.ts', 'const value: number = "";\n');

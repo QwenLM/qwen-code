@@ -2072,8 +2072,14 @@ export class NativeLspService {
     }> = [];
     // Queried servers that answered `-32601`: they do not implement the pull
     // at all, so unlike `failures` they never veto a sibling's answer. They
-    // are kept apart only to be named when nothing else answered.
-    const unsupported: Array<{ name: string; error: unknown }> = [];
+    // are kept apart to be named when nothing else answered, and carry their
+    // handle so the veto below can tell a refusal by a declared owner of the
+    // queried file from a refusal by a server that could never own it.
+    const unsupported: Array<{
+      name: string;
+      error: unknown;
+      handle: LspServerHandle;
+    }> = [];
     // Queried servers that answered with a usable report, including an
     // authoritative empty one, and of those the ones the queried file does not
     // positively exclude. Only the latter can back a clean answer: an empty
@@ -2166,6 +2172,7 @@ export class NativeLspService {
         if (pullUnsupported(error)) {
           unsupported.push({
             name,
+            handle,
             error: new Error(PULL_UNSUPPORTED_REASON),
           });
         } else {
@@ -2198,10 +2205,22 @@ export class NativeLspService {
       // either answers, records a failure or refuses the method outright, so
       // both ledgers are empty here only when an excused server answered and
       // nothing else went wrong — that case needs its own reason string.
-      if (
-        answeredRelevant === 0 ||
-        (unsupported.length > 0 && answeredOwner === 0)
-      ) {
+      //
+      // The owner test keys on the *refusing* server's own declaration, not on
+      // `unsupported.length > 0`. Reading only the answers would fail closed
+      // on every extension whose declared language ID is not the extension —
+      // `languages: ['rust']` derives `{'rust'}` through the `?? [id]`
+      // fallback, which never contains `rs` — so a clean `main.rs` that
+      // rust-analyzer answered authoritatively would be vetoed by an
+      // unrelated push-only sibling. Requiring the refusal to come from a
+      // declared owner keeps `rs`, `mts` and `yml` outside the rule, the same
+      // exclusion `serverDeclaredIrrelevant` states.
+      const refusedOwner =
+        extension !== undefined &&
+        unsupported.some(({ handle: refusing }) =>
+          this.declaredDiagnosticExtensions(refusing).has(extension),
+        );
+      if (answeredRelevant === 0 || (refusedOwner && answeredOwner === 0)) {
         throw failures.length > 0 || unsupported.length > 0
           ? nothingRetrievedForDiagnostics(
               [...failures, ...unsupported],
