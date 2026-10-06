@@ -41,7 +41,7 @@ check_docker_data_root_floor() {
     echo "::warning::docker data root floor gate skipped: .github/scripts/check-disk-floor.sh not present at this ref on ${RUNNER_NAME:-this runner}"
     return 0
   fi
-  docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+  docker_root="$(timeout 60 docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
   if [ -z "$docker_root" ] || [ ! -d "$docker_root" ]; then
     echo "::warning::docker data root floor gate skipped: docker data root '${docker_root:-<unreadable>}' is not a readable directory on ${RUNNER_NAME:-this runner}"
     return 0
@@ -76,19 +76,19 @@ if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
       exit 1
     fi
   fi
-  docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
+  timeout 20m docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
   # The labelled prune cannot reach untagged images, and this lane passes
   # --no-prune to the build: an image that went dangling after the daily
   # 02:30 UTC sweep would otherwise never be reclaimed.
-  docker image prune --force --filter 'until=24h' || echo "::warning::dangling image cleanup failed on ${RUNNER_NAME:-this runner}"
+  timeout 20m docker image prune --force --filter 'until=24h' || echo "::warning::dangling image cleanup failed on ${RUNNER_NAME:-this runner}"
   # Image pruning does not reclaim BuildKit's intermediate install/build
   # layers. The daily host sweep (ecs-runner/qwen-docker-cleanup) bounds them
   # at 30 GB, but this lane builds at the end of the pool's day, hours after
-  # that sweep. Bound the prune so a slow daemon GC cannot hold the host
-  # build mutex past the E2E lane's 30-minute lock wait. No --keep-storage
-  # here: it is a reserve, not a quota, so on a host with less cache than the
-  # reserve — exactly the hosts this line exists for — it would reclaim
-  # nothing.
+  # that sweep. Every daemon call in this branch is bounded so a slow daemon
+  # GC cannot hold the host build mutex past the E2E lane's 30-minute lock
+  # wait. No --keep-storage here: it is a reserve, not a quota, so on a host
+  # with less cache than the reserve — exactly the hosts this line exists
+  # for — it would reclaim nothing.
   timeout 20m docker builder prune --all --force --filter 'until=24h' || echo "::warning::docker build cache cleanup failed on ${RUNNER_NAME:-this runner}"
   check_docker_data_root_floor
   # See e2e.yml: closing the lock descriptors in the child keeps a descendant
@@ -98,10 +98,6 @@ if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
     flock --unlock 7
     exec 7>&-
   fi
-  # Run 37374675168 actually died in the vitest phase, ~15 minutes after the
-  # build finished: re-gate now that the build's peak and the image it leaves
-  # behind have landed on this filesystem.
-  check_docker_data_root_floor
 fi
 sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
 export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
@@ -109,6 +105,14 @@ if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
   flock --unlock 8
   exec 8>&-
 fi
+
+# Run 37374675168 actually died in the vitest phase, ~15 minutes after the
+# build finished: re-gate now that the build's peak and the image it leaves
+# behind have landed on this filesystem. The gate sits outside the
+# image-missing branch so a re-run that finds the image already cached on a
+# still-saturated host is gated before vitest writes container layers to the
+# same filesystem.
+check_docker_data_root_floor
 
 # The package.json docker test scripts each rebuild the sandbox image. Run
 # vitest directly here so this job reuses the image built above.

@@ -2140,19 +2140,19 @@ describe('release workflow', () => {
     );
   });
 
-  it('prunes BuildKit cache and gates the docker data root before the image build', () => {
+  it('prunes BuildKit cache and gates the docker data root before the build and the vitest phase', () => {
     // #13479: run 37374675168 passed the job-start disk floor gate and the
     // runner still died on ENOSPC 24 minutes into the docker test step. The
     // lane prunes the labelled CI images, the dangling images that prune
     // cannot reach, and the BuildKit cache, and gates the docker data root
-    // at a build-sized floor immediately before AND after the build, so a
-    // saturated host fails fast with a legible error instead of the runner
-    // worker crashing mid-step.
+    // at a build-sized floor immediately before the build and again before
+    // the vitest phase, so a saturated host fails fast with a legible error
+    // instead of the runner worker crashing mid-step.
     const imagePrune = dockerIntegrationScript.indexOf(
-      "docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h'",
+      "timeout 20m docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h'",
     );
     const danglingPrune = dockerIntegrationScript.indexOf(
-      "docker image prune --force --filter 'until=24h'",
+      "timeout 20m docker image prune --force --filter 'until=24h'",
     );
     const cachePrune = dockerIntegrationScript.indexOf(
       "timeout 20m docker builder prune --all --force --filter 'until=24h'",
@@ -2160,16 +2160,21 @@ describe('release workflow', () => {
     expect(imagePrune).toBeGreaterThanOrEqual(0);
     expect(danglingPrune).toBeGreaterThan(imagePrune);
     expect(cachePrune).toBeGreaterThan(danglingPrune);
-    // The prune runs inside the exclusive host build mutex, so it must carry
-    // a time bound: a wedged daemon GC cannot be allowed to starve the E2E
-    // lane's 30-minute lock wait (run 33637097713).
+    // The prunes and the gate's `docker info` can execute while the
+    // exclusive host build mutex is held, so each carries a time bound: a
+    // wedged daemon GC cannot be allowed to starve the E2E lane's 30-minute
+    // lock wait (run 33637097713). A `docker info` timeout degrades into
+    // the gate's warn-and-skip path.
     expect(dockerIntegrationScript).toMatch(
       /timeout [0-9]+m docker builder prune --all --force --filter 'until=24h'/,
+    );
+    expect(dockerIntegrationScript).toContain(
+      "timeout 60 docker info --format '{{.DockerRootDir}}'",
     );
     const scriptLines = dockerIntegrationScript.split('\n');
     const gateCallLines = scriptLines
       .map((line, index) =>
-        line === '  check_docker_data_root_floor' ? index : -1,
+        line.trim() === 'check_docker_data_root_floor' ? index : -1,
       )
       .filter((index) => index >= 0);
     const cachePruneLine = scriptLines.findIndex((line) =>
@@ -2178,10 +2183,22 @@ describe('release workflow', () => {
     const buildLine = scriptLines.findIndex((line) =>
       line.includes('npm run build:sandbox'),
     );
+    const firstVitestLine = scriptLines.findIndex((line) =>
+      line.includes('npx vitest'),
+    );
     expect(gateCallLines).toHaveLength(2);
+    // The pre-build gate stays inside the image-missing branch; the second
+    // gate is hoisted out of it, directly before the vitest phase — the
+    // actual #13479 death site — so a re-run that finds the image already
+    // cached on a still-saturated host is gated too.
+    expect(scriptLines[gateCallLines[0]]).toBe(
+      '  check_docker_data_root_floor',
+    );
+    expect(scriptLines[gateCallLines[1]]).toBe('check_docker_data_root_floor');
     expect(gateCallLines[0]).toBeGreaterThan(cachePruneLine);
     expect(buildLine).toBeGreaterThan(gateCallLines[0]);
     expect(gateCallLines[1]).toBeGreaterThan(buildLine);
+    expect(firstVitestLine).toBeGreaterThan(gateCallLines[1]);
     expect(dockerIntegrationScript).toContain(
       'DISK_FLOOR_MIN_FREE_KB:-8388608',
     );
@@ -2418,6 +2435,50 @@ exit 0`,
       expect(calls).not.toContain('disk-floor');
       expect(calls).not.toContain('npm run build:sandbox');
       expect(calls).toContain('npx vitest run --root ./integration-tests cli');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'gates the cached-image re-run path before the vitest phase',
+    () => {
+      const { result, calls, dockerRoot } = runDockerIntegrationScript({
+        imagePresent: true,
+        runnerEnvironment: 'self-hosted',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      // The reclaim and the build are skipped, but a re-run landing on the
+      // same still-saturated host with the image now cached must still pass
+      // the data-root gate before vitest writes container layers to that
+      // filesystem — the actual #13479 death site.
+      expect(calls).not.toContain('docker image prune');
+      expect(calls).not.toContain('docker builder prune');
+      expect(calls).not.toContain('npm run build:sandbox');
+      expect(calls).toContain('docker info --format {{.DockerRootDir}}');
+      const lines = calls.trim().split('\n');
+      const gates = lines
+        .map((line, index) => (line.startsWith('disk-floor') ? index : -1))
+        .filter((index) => index >= 0);
+      const firstVitest = lines.findIndex((line) =>
+        line.startsWith('npx vitest'),
+      );
+      expect(gates).toHaveLength(1);
+      expect(lines[gates[0]]).toBe(`disk-floor ${dockerRoot} floor=8388608`);
+      expect(firstVitest).toBeGreaterThan(gates[0]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'blocks the vitest phase when the cached-image host fails the gate',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        gateExit: '1',
+        imagePresent: true,
+        runnerEnvironment: 'self-hosted',
+      });
+      expect(result.status).not.toBe(0);
+      expect(calls).toContain('disk-floor');
+      expect(calls).not.toContain('npm run build:sandbox');
+      expect(calls).not.toContain('npx vitest');
     },
   );
 
