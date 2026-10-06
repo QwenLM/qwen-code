@@ -17,6 +17,7 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 
@@ -31,6 +32,15 @@ class ManagedSessionStoreContractFixtureTest {
         JsonNode limits = contract.required("limits");
 
         assertEquals(1, contract.required("contractVersion").intValue());
+        // Every header and limit is read: a key nobody asserts cannot hide.
+        assertEquals(Set.of("tenant", "writerToken"),
+                fieldNames(headers).keySet());
+        assertEquals(Set.of("maxInlineResourceBytes",
+                "maxResourcesPerTransaction", "maxTransactionBytes",
+                "maxTransactionEvents", "maxJsonDepth",
+                "minimumWriterTokenLength", "maximumWriterTokenLength",
+                "minimumLeaseDurationMs", "maximumLeaseDurationMs"),
+                fieldNames(limits).keySet());
         assertEquals(TenantContextFilter.HEADER,
                 headers.required("tenant").textValue());
         assertEquals(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
@@ -106,6 +116,9 @@ class ManagedSessionStoreContractFixtureTest {
         expected.put("resourceNotFound", new ExpectedError(
                 HttpStatus.NOT_FOUND.value(),
                 ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND));
+        expected.put("writerCredentialInvalid", new ExpectedError(
+                HttpStatus.FORBIDDEN.value(),
+                ManagedSessionStoreModels.ERROR_WRITER_CREDENTIAL_INVALID));
         expected.put("ossDisabled", new ExpectedError(
                 HttpStatus.NOT_IMPLEMENTED.value(),
                 ManagedSessionStoreModels.ERROR_OSS_DISABLED));
