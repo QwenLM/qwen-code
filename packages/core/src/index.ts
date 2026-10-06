@@ -314,6 +314,7 @@ export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export {
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  describeBridgedArgumentError,
   resolveDeferredToolCall,
 } from './tools/tool-call.js';
 export type {

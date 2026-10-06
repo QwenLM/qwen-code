@@ -18903,109 +18903,132 @@ describe('Session', () => {
         },
       );
 
-      it('routes tool_call through a hidden deferred tool in ACP', async () => {
-        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
-        const execute = vi.fn().mockResolvedValue({
-          llmContent: 'created issue',
-          returnDisplay: 'created issue',
-        });
-        const bridge = {
-          name: core.ToolNames.TOOL_CALL,
-          kind: core.Kind.Other,
-          description: 'Deferred tool bridge',
-          build: vi.fn((params: Record<string, unknown>) => ({ params })),
-        };
-        // The bridge needs both halves registered: resolution rejects a
-        // hidden target when tool_search is unregistered (R1-5 guard).
-        const toolSearch = {
-          name: core.ToolNames.TOOL_SEARCH,
-          kind: core.Kind.Other,
-          description: 'Deferred tool discovery',
-          build: vi.fn((params: Record<string, unknown>) => ({ params })),
-        };
-        const target = {
-          name: 'mcp__github__create_issue',
-          kind: core.Kind.Other,
-          displayName: 'CreateIssue',
-          description: 'Creates an issue',
-          canUpdateOutput: false,
-          isOutputMarkdown: false,
-          build: vi.fn().mockImplementation((params) => ({
-            params,
-            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
-            getDescription: vi.fn().mockReturnValue('create issue'),
-            toolLocations: vi.fn().mockReturnValue([]),
-            execute,
-          })),
-        };
-        mockToolRegistry.getTool.mockImplementation((name: string) =>
-          name === bridge.name
-            ? bridge
-            : name === target.name
-              ? target
-              : name === toolSearch.name
-                ? toolSearch
-                : undefined,
-        );
-        mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
-          name === bridge.name
-            ? bridge
-            : name === target.name
-              ? target
-              : name === toolSearch.name
-                ? toolSearch
-                : undefined,
-        );
-        mockToolRegistry.isDeferredAndHidden.mockImplementation(
-          (name: string) => name === target.name,
-        );
-        const toolLoopState = {
-          totalToolCalls: 0,
-          invalidToolParamErrors: new Map<string, number>(),
-          toolCallKeyCounts: new Map<string, number>(),
-          maxToolCallKeyRepeat: 0,
-          loopDetected: false,
-        };
-
-        const result = await (
-          session as unknown as {
-            runToolCalls: (
-              abortSignal: AbortSignal,
-              promptId: string,
-              calls: FunctionCall[],
-              loopState: typeof toolLoopState,
-            ) => Promise<{ parts: Part[] }>;
+      it.each(['success', 'build error', 'execute error'] as const)(
+        'routes tool_call through a hidden deferred tool in ACP: %s',
+        async (outcome) => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const execute = vi.fn().mockResolvedValue({
+            llmContent: 'created issue',
+            returnDisplay: 'created issue',
+          });
+          const bridge = {
+            name: core.ToolNames.TOOL_CALL,
+            kind: core.Kind.Other,
+            description: 'Deferred tool bridge',
+            build: vi.fn((params: Record<string, unknown>) => ({ params })),
+          };
+          // The bridge needs both halves registered: resolution rejects a
+          // hidden target when tool_search is unregistered (R1-5 guard).
+          const toolSearch = {
+            name: core.ToolNames.TOOL_SEARCH,
+            kind: core.Kind.Other,
+            description: 'Deferred tool discovery',
+            build: vi.fn((params: Record<string, unknown>) => ({ params })),
+          };
+          const target = {
+            name: 'mcp__github__create_issue',
+            kind: core.Kind.Other,
+            displayName: 'CreateIssue',
+            description: 'Creates an issue',
+            canUpdateOutput: false,
+            isOutputMarkdown: false,
+            build: vi.fn().mockImplementation((params) => ({
+              params,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('create issue'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute,
+            })),
+          };
+          if (outcome === 'build error') {
+            target.build.mockImplementation(() => {
+              throw new Error("params must have required property 'title'.");
+            });
+          } else if (outcome === 'execute error') {
+            execute.mockRejectedValue(new Error('Remote service unavailable'));
           }
-        ).runToolCalls(
-          new AbortController().signal,
-          'prompt-tool-call-bridge',
-          [
-            {
-              id: 'bridge-call',
-              name: core.ToolNames.TOOL_CALL,
-              args: {
-                name: target.name,
-                arguments: { title: 'Cache-safe tools' },
-              },
-            },
-          ],
-          toolLoopState,
-        );
+          mockToolRegistry.getTool.mockImplementation((name: string) =>
+            name === bridge.name
+              ? bridge
+              : name === target.name
+                ? target
+                : name === toolSearch.name
+                  ? toolSearch
+                  : undefined,
+          );
+          mockToolRegistry.ensureTool.mockImplementation(
+            async (name: string) =>
+              name === bridge.name
+                ? bridge
+                : name === target.name
+                  ? target
+                  : name === toolSearch.name
+                    ? toolSearch
+                    : undefined,
+          );
+          mockToolRegistry.isDeferredAndHidden.mockImplementation(
+            (name: string) => name === target.name,
+          );
+          const toolLoopState = {
+            totalToolCalls: 0,
+            invalidToolParamErrors: new Map<string, number>(),
+            toolCallKeyCounts: new Map<string, number>(),
+            maxToolCallKeyRepeat: 0,
+            loopDetected: false,
+          };
 
-        expect(execute).toHaveBeenCalledOnce();
-        expect(target.build).toHaveBeenCalledWith({
-          title: 'Cache-safe tools',
-        });
-        expect(result.parts[0]?.functionResponse).toMatchObject({
-          id: 'bridge-call',
-          name: core.ToolNames.TOOL_CALL,
-          response: { output: 'created issue' },
-        });
-        expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
-          target.name,
-          { title: 'Cache-safe tools' },
-        );
-      });
+          const result = await (
+            session as unknown as {
+              runToolCalls: (
+                abortSignal: AbortSignal,
+                promptId: string,
+                calls: FunctionCall[],
+                loopState: typeof toolLoopState,
+              ) => Promise<{ parts: Part[] }>;
+            }
+          ).runToolCalls(
+            new AbortController().signal,
+            'prompt-tool-call-bridge',
+            [
+              {
+                id: 'bridge-call',
+                name: core.ToolNames.TOOL_CALL,
+                args: {
+                  name: target.name,
+                  arguments: { title: 'Cache-safe tools' },
+                },
+              },
+            ],
+            toolLoopState,
+          );
+
+          expect(execute).toHaveBeenCalledTimes(
+            outcome === 'build error' ? 0 : 1,
+          );
+          expect(target.build).toHaveBeenCalledWith({
+            title: 'Cache-safe tools',
+          });
+          expect(result.parts[0]?.functionResponse).toMatchObject({
+            id: 'bridge-call',
+            name: core.ToolNames.TOOL_CALL,
+            response:
+              outcome === 'success'
+                ? { output: 'created issue' }
+                : {
+                    error:
+                      outcome === 'build error'
+                        ? `Deferred tool "${target.name}" (called through tool_call) rejected the arguments: params must have required property 'title'. Pass arguments matching the schema returned by tool_search for "${target.name}".`
+                        : 'Remote service unavailable',
+                  },
+          });
+          expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+            target.name,
+            { title: 'Cache-safe tools' },
+          );
+        },
+      );
 
       it('marks a disabled ACP tool_call as a bridge refusal', async () => {
         mockConfig.getPermissionManager = vi.fn().mockReturnValue({
