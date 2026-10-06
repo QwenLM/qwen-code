@@ -821,14 +821,16 @@ public class ManagedExtensionRecordStore {
         }
         return eventId.length() > domain.length() + 1;
     }
-    /** Whether the Session is being deleted or deleted. A plain read on a
-     * pooled connection sees the latest committed status — including a
-     * deletion that committed after the record transaction's snapshot —
-     * and, never locking, cannot wedge the commit that already holds the
-     * Session row. */
+    /** Whether the Session is being deleted or deleted. The read runs
+     * inside the record commit's own transaction, so a plain SELECT would
+     * read that transaction's own snapshot and silently miss a deletion that
+     * committed later (REPEATABLE READ) — the journal must stay empty once a
+     * deletion began. The lock here is the one this transaction already holds
+     * on the Session row, so FOR UPDATE re-acquires it in-place and can never
+     * wait across connections. */
     private boolean isBeingDeleted(String tenantId, String sessionId) {
         String status = jdbc.query("SELECT status FROM managed_agent_session"
-                        + " WHERE tenant_id = ? AND session_id = ?",
+                        + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                 (result, row) -> result.getString("status"),
                 tenantId, sessionId).stream().findFirst().orElse(null);
         return "DELETING".equals(status) || "DELETED".equals(status);
