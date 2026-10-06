@@ -1930,11 +1930,14 @@ function matchesRestrictiveMcpName(
   const prefix = pattern.slice(0, -1);
   const registeredServerPrefix = `mcp__${identity.serverName.replace(/[^A-Za-z0-9_-]/g, '_')}__`;
   return (
-    toolName.startsWith(prefix) &&
-    (!toolName.startsWith(registeredServerPrefix) ||
-      prefix.startsWith(registeredServerPrefix) ||
-      (registeredServerPrefix.startsWith(prefix) &&
-        !toolName.slice(registeredServerPrefix.length).startsWith('_')))
+    (toolName.startsWith(prefix) &&
+      (!toolName.startsWith(registeredServerPrefix) ||
+        prefix.startsWith(registeredServerPrefix))) ||
+    // A prefix that stops at or inside this key's own separator names the
+    // key in that spelling, whatever the tool segment starts with.
+    mcpSegmentSpellings(identity.serverName).some((server) =>
+      `mcp__${server}__`.startsWith(prefix),
+    )
   );
 }
 

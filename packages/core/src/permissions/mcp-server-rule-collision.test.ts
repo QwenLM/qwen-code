@@ -1492,13 +1492,21 @@ describe('wildcards copied from a budget-cut registration (R18-1)', () => {
   });
 
   it.each([
-    // Verbatim registration (R17-2).
+    // A prefix that stops inside this key's own separator: main restricts
+    // every tool of the key, whatever the tool segment starts with (R26-2).
     ['foo', '_internal', 'mcp__foo_*'],
-    // Normalized (`_<hash>` suffix) but the separator survived the cut.
     ['foo', '_in.ternal', 'mcp__foo_*'],
     ['foo.bar', '_in.ternal', 'mcp__foo_bar_*'],
+    ['github', '_admin_reset', 'mcp__github_*'],
+    // The same stop written in the raw key spelling (`.`/`:` keys).
+    ['zybio.db', 'search_pubmed', 'mcp__zybio.db_*'],
+    ['foo:bar', 'a.b', 'mcp__foo:bar_*'],
+    ['foo.bar', '_in.ternal', 'mcp__foo.bar_*'],
+    // A whole-server rule for `foo` keeps main's over-block of key `foo_`,
+    // as it already does for `foo_`'s ordinary tools.
+    ['foo_', '_internal', 'mcp__foo__*'],
   ])(
-    'an uncut registration never enters the fallback: %s / %s',
+    'a prefix stopping inside the own separator restricts: %s / %s',
     async (server, name, rule) => {
       const tool = prodTool(server, name);
       const ctx = producerContext(tool);
@@ -1509,12 +1517,43 @@ describe('wildcards copied from a budget-cut registration (R18-1)', () => {
           tool.permissionAliases,
           ctx.mcpIdentity,
         ),
+      ).toBe(true);
+      expect(await makePm({ permissionsDeny: [rule] }).evaluate(ctx)).toBe(
+        'deny',
+      );
+      expect(
+        await makePm({ permissionsDeny: [rule] }).isToolEnabled(
+          tool.name,
+          tool.permissionAliases,
+          ctx.mcpIdentity,
+        ),
       ).toBe(false);
-      const deny = makePm({ permissionsDeny: [rule] });
-
-      expect(await deny.evaluate(ctx)).toBe('default');
+      expect(await makePm({ permissionsAsk: [rule] }).evaluate(ctx)).toBe(
+        'ask',
+      );
+      expect(
+        matchesAgentToolBlocklist(
+          [rule],
+          tool.name,
+          tool.permissionAliases,
+          ctx.mcpIdentity,
+        ),
+      ).toBe(true);
+      // Restrictive-only: the same spelling still never grants (R17-2).
+      expect(await makePm({ permissionsAllow: [rule] }).evaluate(ctx)).toBe(
+        'default',
+      );
     },
   );
+
+  it('a foreign key sharing the stop is not restricted through it', async () => {
+    // `mcp__foo_*` stops inside `foo`'s separator; `foobar` never spells it.
+    const tool = prodTool('foobar', '_internal');
+    const ctx = producerContext(tool);
+    expect(
+      await makePm({ permissionsDeny: ['mcp__foo_*'] }).evaluate(ctx),
+    ).toBe('default');
+  });
 
   it.each([
     ['a bare `*`', () => '*'],
