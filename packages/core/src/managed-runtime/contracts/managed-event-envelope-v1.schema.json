@@ -43,7 +43,8 @@
         "config.bound",
         "lifecycle.changed",
         "domain.committed",
-        "message.delta"
+        "message.delta",
+        "message.retracted"
       ]
     },
     "forbiddenFields": {
@@ -206,7 +207,8 @@
             "config.bound",
             "lifecycle.changed",
             "domain.committed",
-            "message.delta"
+            "message.delta",
+            "message.retracted"
           ]
         },
         "occurredAt": {
