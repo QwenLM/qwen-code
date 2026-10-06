@@ -4,7 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -281,9 +292,19 @@ describe('main CI failure issue workflow', () => {
       // The default is filing: the flag flips only inside the guarded block.
       expect(infraScript).toContain('infra_only=false');
       // An errored annotations fetch must degrade to "not infrastructure",
-      // never abort the step or fabricate a match.
+      // never abort the step or fabricate a match: the fetch rides the `if`
+      // condition so its exit status survives, and the silent `|| true` form
+      // — which made a 403 indistinguishable from a signature-free job —
+      // must not come back.
       expect(infraScript).toContain(
-        '--jq \'[.[].message] | join("\\n")\' 2>/dev/null || true',
+        'if [[ -n "${check_run_id}" ]] && annotations="$( gh api --paginate "repos/${REPO}/check-runs/${check_run_id}/annotations" --jq \'[.[].message] | join("\\n")\' 2>/dev/null )"; then',
+      );
+      expect(infraScript).not.toContain('2>/dev/null || true');
+      // A read that never happened (or failed) must not print the "no
+      // infrastructure annotation" line — that claim is reserved for a fetch
+      // that actually succeeded, which is what the read_ok branch expresses.
+      expect(infraScript).toContain(
+        '::warning::Could not read the annotations of failed job ${job_id}',
       );
     });
 
@@ -296,6 +317,13 @@ describe('main CI failure issue workflow', () => {
       expect(oneLine(rerunJob.steps[0].run)).toContain(
         'gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"',
       );
+      // The suppression's durable record: without it a chronic pool
+      // degradation leaves zero queryable trace (the run_attempt bump is
+      // indistinguishable from a manual rerun), and a silently-dead lane
+      // stays green. The record needs no scope beyond actions:write — the
+      // permissions pin above is exact-equality, so anything heavier fails
+      // there first.
+      expect(oneLine(rerunJob.steps[0].run)).toContain('GITHUB_STEP_SUMMARY');
     });
 
     it('files the issue unless the infra rerun actually ran', () => {
@@ -310,6 +338,294 @@ describe('main CI failure issue workflow', () => {
       // A rerun that could not be dispatched must not swallow the report:
       // the issue is then the only record of a red main.
       expect(condition).toContain("needs.rerun_infra.result != 'success'");
+    });
+
+    // The pins above see the classifier's TEXT, not its behaviour: a loop
+    // body moved into a pipeline subshell, a deleted `infra_only=true`, or a
+    // producer/consumer rename of run-jobs.json each leave every pin green
+    // while the verdict goes dead. So the step bodies are executed verbatim
+    // against a stubbed gh (the qwen-autofix-workflow.test.js idiom), with
+    // the jobs fixture written at the path the PRODUCER step declares so the
+    // cross-step handoff is pinned too. The step needs bash AND jq, so gate
+    // on a capability probe rather than process.platform — gating on the
+    // platform would force this whole file into the win32 exclude and cost
+    // the pure-YAML pins their Windows coverage.
+    const canExecute =
+      spawnSync('bash', ['-c', 'command -v jq'], { stdio: 'ignore' }).status ===
+      0;
+    const execute = canExecute ? describe : describe.skip;
+
+    execute('the classifier step, executed under a stubbed gh', () => {
+      const INFRA_MESSAGE =
+        'The self-hosted runner lost communication with the server.';
+      const CODE_MESSAGE = 'a real test failed: expected 1 to be 2';
+
+      const failedJob = (id, checkRunId) => ({
+        id,
+        conclusion: 'failure',
+        ...(checkRunId === undefined
+          ? {}
+          : {
+              check_run_url: `https://api.github.com/repos/o/r/check-runs/${checkRunId}`,
+            }),
+      });
+
+      const runClassifier = ({
+        jobs: jobList = [],
+        annotations = {},
+        attempt = '1',
+        jobsPayload,
+      }) => {
+        const dir = mkdtempSync(join(tmpdir(), 'infra-step-'));
+        try {
+          const bin = join(dir, 'bin');
+          mkdirSync(bin);
+          const callsLog = join(dir, 'calls.log');
+          // The stub answers the annotations fetch per check-run id (a null
+          // entry fails the way a 403 does) and records every call; anything
+          // else exits 0 silently.
+          const arms = Object.entries(annotations).map(([id, message]) =>
+            message === null
+              ? `  *"/check-runs/${id}/annotations"*) exit 1;;`
+              : `  *"/check-runs/${id}/annotations"*) printf '%s' ${JSON.stringify(message)}; exit 0;;`,
+          );
+          writeFileSync(
+            join(bin, 'gh'),
+            [
+              '#!/usr/bin/env bash',
+              `echo "$*" >> ${JSON.stringify(callsLog)}`,
+              'args="$*"',
+              'case "$args" in',
+              ...arms,
+              'esac',
+              'exit 0',
+            ].join('\n'),
+          );
+          chmodSync(join(bin, 'gh'), 0o755);
+
+          const runnerTemp = join(dir, 'runner-temp');
+          mkdirSync(runnerTemp);
+          // The fixture lands at the path the producer step declares, so a
+          // one-sided rename of run-jobs.json on either side turns the
+          // all-infra case red instead of silently reading an empty list.
+          const download = jobs.analyze.steps.find(
+            (step) => step.name === 'Download failed job logs',
+          ).run;
+          const jobsFile = download.match(
+            /jobs_json="\$\{RUNNER_TEMP\}\/([^"]+)"/,
+          )?.[1];
+          expect(
+            jobsFile,
+            'the producer step declares the jobs payload path',
+          ).toBeTruthy();
+          writeFileSync(
+            join(runnerTemp, jobsFile),
+            jobsPayload ?? JSON.stringify({ jobs: jobList }),
+          );
+
+          const outputFile = join(dir, 'github-output');
+          writeFileSync(outputFile, '');
+          let status = 0;
+          let stdout = '';
+          try {
+            stdout = execFileSync(
+              'bash',
+              ['-c', `set -eo pipefail\n${infraStep.run}`],
+              {
+                env: {
+                  PATH: `${bin}:${process.env.PATH}`,
+                  GH_TOKEN: 'stub',
+                  REPO: 'o/r',
+                  RUN_ATTEMPT: String(attempt),
+                  INFRA_FAILURE_SIGNATURES:
+                    infraStep.env.INFRA_FAILURE_SIGNATURES,
+                  RUNNER_TEMP: runnerTemp,
+                  GITHUB_OUTPUT: outputFile,
+                },
+                encoding: 'utf8',
+              },
+            );
+          } catch (error) {
+            status = error.status ?? 1;
+            stdout = error.stdout ?? '';
+          }
+          const output = readFileSync(outputFile, 'utf8');
+          const calls = existsSync(callsLog)
+            ? readFileSync(callsLog, 'utf8')
+            : '';
+          return { status, stdout, output, calls };
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      };
+
+      it('reruns when every failed job died on infrastructure (attempt 1)', () => {
+        const result = runClassifier({
+          jobs: [
+            failedJob(101, 9001),
+            failedJob(102, 9002),
+            { id: 103, conclusion: 'success' },
+          ],
+          annotations: { 9001: INFRA_MESSAGE, 9002: 'No space left on device' },
+        });
+        expect(result.status).toBe(0);
+        expect(result.output).toContain('infra_only=true');
+        // One annotations fetch per failed job — the green job's check run
+        // is never queried.
+        expect(result.calls.trim().split('\n')).toHaveLength(2);
+      });
+
+      it('files when a real failure stands beside an infrastructure one', () => {
+        const result = runClassifier({
+          jobs: [failedJob(101, 9001), failedJob(102, 9002)],
+          annotations: { 9001: INFRA_MESSAGE, 9002: CODE_MESSAGE },
+        });
+        expect(result.status).toBe(0);
+        expect(result.output).toContain('infra_only=false');
+        expect(result.stdout).toContain(
+          'Failed job 102 carries no infrastructure annotation; the run gets an issue.',
+        );
+      });
+
+      it('files on the second attempt without reading any annotation', () => {
+        // The attempt guard is the rerun-loop breaker: a persistent break
+        // re-fails the rerun and must file on that second pass.
+        const result = runClassifier({
+          jobs: [failedJob(101, 9001)],
+          annotations: { 9001: INFRA_MESSAGE },
+          attempt: '2',
+        });
+        expect(result.status).toBe(0);
+        expect(result.output).toContain('infra_only=false');
+        expect(result.calls).toBe('');
+      });
+
+      it('files when the failed-job list is empty or unreadable', () => {
+        for (const jobsPayload of [
+          JSON.stringify({ jobs: [] }),
+          '{"message":"Not Found"}',
+        ]) {
+          const result = runClassifier({ jobsPayload });
+          expect(result.status).toBe(0);
+          expect(result.output).toContain('infra_only=false');
+        }
+      });
+
+      it('warns and files when the annotations fetch fails', () => {
+        // A 403 and a signature-free job must read differently in the log:
+        // here the read never succeeded, so the log says so — and the
+        // verdict still fails closed.
+        const result = runClassifier({
+          jobs: [failedJob(101, 9001)],
+          annotations: { 9001: null },
+        });
+        expect(result.status).toBe(0);
+        expect(result.output).toContain('infra_only=false');
+        expect(result.stdout).toContain(
+          '::warning::Could not read the annotations of failed job 101; treating it as a code failure, so the run gets an issue.',
+        );
+        expect(result.stdout).not.toContain(
+          'carries no infrastructure annotation',
+        );
+      });
+
+      it('warns and files for a failed job with no check-run id', () => {
+        const result = runClassifier({ jobs: [failedJob(101)] });
+        expect(result.status).toBe(0);
+        expect(result.output).toContain('infra_only=false');
+        expect(result.stdout).toContain(
+          '::warning::Could not read the annotations of failed job 101',
+        );
+        expect(result.calls).toBe('');
+      });
+
+      it('reports a genuinely signature-free read as such', () => {
+        // The truthful arm of the diagnostic: the fetch succeeded and the
+        // annotations carried no signature — the message a failed read must
+        // not print.
+        const result = runClassifier({
+          jobs: [failedJob(101, 9001)],
+          annotations: { 9001: CODE_MESSAGE },
+        });
+        expect(result.status).toBe(0);
+        expect(result.output).toContain('infra_only=false');
+        expect(result.stdout).toContain(
+          'Failed job 101 carries no infrastructure annotation; the run gets an issue.',
+        );
+        expect(result.stdout).not.toContain('::warning::');
+      });
+    });
+
+    execute('the rerun step, executed under a stubbed gh', () => {
+      const runRerun = (dispatchOk) => {
+        const dir = mkdtempSync(join(tmpdir(), 'infra-rerun-'));
+        try {
+          const bin = join(dir, 'bin');
+          mkdirSync(bin);
+          writeFileSync(
+            join(bin, 'gh'),
+            [
+              '#!/usr/bin/env bash',
+              'case "$*" in',
+              `  *"rerun-failed-jobs"*) exit ${dispatchOk ? 0 : 1};;`,
+              'esac',
+              'exit 0',
+            ].join('\n'),
+          );
+          chmodSync(join(bin, 'gh'), 0o755);
+          const summaryFile = join(dir, 'step-summary');
+          writeFileSync(summaryFile, '');
+          let status = 0;
+          let stdout = '';
+          try {
+            stdout = execFileSync(
+              'bash',
+              ['-c', `set -eo pipefail\n${rerunJob.steps[0].run}`],
+              {
+                env: {
+                  PATH: `${bin}:${process.env.PATH}`,
+                  GH_TOKEN: 'stub',
+                  REPO: 'o/r',
+                  WORKFLOW_RUN_ID: '12345',
+                  GITHUB_STEP_SUMMARY: summaryFile,
+                },
+                encoding: 'utf8',
+              },
+            );
+          } catch (error) {
+            status = error.status ?? 1;
+            stdout = error.stdout ?? '';
+          }
+          return {
+            status,
+            stdout,
+            summary: readFileSync(summaryFile, 'utf8'),
+          };
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      };
+
+      it('records the suppression in the step summary on success', () => {
+        const result = runRerun(true);
+        expect(result.status).toBe(0);
+        expect(result.summary).toContain(
+          'Every failed job of run 12345 died on infrastructure; reran them and filed no issue.',
+        );
+        expect(result.stdout).toContain('::notice::');
+      });
+
+      it('still records — and still fails the step — when the rerun dispatch is refused', () => {
+        // The record must not die with the step: a refused rerun is exactly
+        // the run a maintainer needs to find, and the non-zero exit is what
+        // lets file_issue fire (needs.rerun_infra.result != 'success').
+        const result = runRerun(false);
+        expect(result.status).not.toBe(0);
+        expect(result.summary).toContain(
+          'Run 12345 looked infrastructure-only, but dispatching the rerun failed; the run gets an issue.',
+        );
+        expect(result.stdout).toContain('::notice::');
+      });
     });
   });
 

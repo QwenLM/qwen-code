@@ -144,17 +144,28 @@ jobs:
             while IFS=$'\t' read -r job_id check_run_id; do
               total=$((total + 1))
               annotations=''
-              if [[ -n "${check_run_id}" ]]; then
-                annotations="$(
-                  gh api --paginate \
-                    "repos/${REPO}/check-runs/${check_run_id}/annotations" \
-                    --jq '[.[].message] | join("\n")' 2>/dev/null || true
-                )"
+              # Match at EVERY annotation level on purpose: only one of the
+              # nine signatures has ever been observed (at `failure`), so a
+              # failure-only projection could silently no-op the rest; the
+              # accepted cost is a one-attempt delay when a warning-level
+              # line matches. The exit status rides the `if` so a failed read
+              # warns instead of claiming the job carried no infrastructure
+              # annotation — a 403 and a signature-free job are different
+              # diagnoses with different fixes.
+              read_ok=false
+              if [[ -n "${check_run_id}" ]] && annotations="$(
+                gh api --paginate \
+                  "repos/${REPO}/check-runs/${check_run_id}/annotations" \
+                  --jq '[.[].message] | join("\n")' 2>/dev/null
+              )"; then
+                read_ok=true
               fi
               if grep -qiE "${INFRA_FAILURE_SIGNATURES}" <<< "${annotations}"; then
                 infra=$((infra + 1))
-              else
+              elif [[ "${read_ok}" == 'true' ]]; then
                 echo "Failed job ${job_id} carries no infrastructure annotation; the run gets an issue."
+              else
+                echo "::warning::Could not read the annotations of failed job ${job_id}; treating it as a code failure, so the run gets an issue."
               fi
             done < <(
               jq -r '.jobs[] | select(.conclusion == "failure") | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
@@ -263,8 +274,21 @@ jobs:
           REPO: '${{ github.repository }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
         run: |-
-          gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"
-          echo "Every failed job of run ${WORKFLOW_RUN_ID} died on infrastructure; reran them and filed no issue."
+          # A suppression's only durable record is this summary line: the
+          # run_attempt bump it leaves on the target run is indistinguishable
+          # from a manual rerun. record() runs on BOTH dispatch outcomes, so a
+          # refused rerun — the run a maintainer most needs to find — is
+          # documented too; the step still fails then, so the issue is filed.
+          record() {
+            echo "$1" >> "${GITHUB_STEP_SUMMARY}"
+            echo "::notice::$1"
+          }
+          if gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"; then
+            record "Every failed job of run ${WORKFLOW_RUN_ID} died on infrastructure; reran them and filed no issue."
+          else
+            record "Run ${WORKFLOW_RUN_ID} looked infrastructure-only, but dispatching the rerun failed; the run gets an issue."
+            exit 1
+          fi
 
   # Every ISSUE write happens here, as the autofix bot — the one other write
   # is rerun_infra's rerun, which holds no PAT. This job deliberately checks
