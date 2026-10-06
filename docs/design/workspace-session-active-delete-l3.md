@@ -201,10 +201,13 @@ accept those Sessions; this PR does not implement compaction recovery.
 
 ## 4. Compatibility and rollout
 
-Add lifecycle migration V47 after the existing V35 tool-profile, V36–V39
+Add lifecycle migration V48 after the existing V35 tool-profile, V36–V39
 journal/query, V40 creator, V41–V44 CSI/dispatch, V45 H3 task-journal and V46
-W2 directory-change migrations; preserve those migrations and V32. The unmerged
-lifecycle SQL is unchanged when its version moves from V46 to V47. Keep W2's
+W2 directory-change and V47 H5 channel route/delivery migrations; preserve those
+migrations and V32. The unmerged lifecycle SQL is unchanged when its version
+moves from V47 to V48. Main's `/2` search profiles coexist with L3, but lifecycle
+admission still requires `hosted-workspace-files/1`. H5 channel contracts and
+persistence do not enable channel execution or lifecycle effects. Keep W2's
 directory/revision operation fields alongside the lifecycle protocol field.
 Its read-only probe and settlement remain separate from lifecycle Hook effects,
 drain and detach; the Session-row admission barrier serializes the operations.

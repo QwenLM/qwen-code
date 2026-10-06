@@ -153,8 +153,10 @@ L3 返回 `workspace_lifecycle_journal_unverified`。未来 compaction 必须
 
 ## 4. 兼容与启用
 
-在已有 V35 工具配置、V36–V39 journal/查询、V40 创建者、V41–V44 CSI/派发、V45 H3 任务 journal 及 V46 W2 目录切换迁移之后新增 V47 生命周期迁移，
-保留这些迁移和 V32。未合入的生命周期迁移从 V46 顺延为 V47，SQL 内容不变。
+在已有 V35 工具配置、V36–V39 journal/查询、V40 创建者、V41–V44 CSI/派发、V45 H3 任务 journal、V46 W2 目录切换及 V47 H5 channel route/delivery 迁移之后新增 V48 生命周期迁移，
+保留这些迁移和 V32。未合入的生命周期迁移从 V47 顺延为 V48，SQL 内容不变。
+主线 `/2` 搜索画像与 L3 共存，但生命周期准入仍仅接受 `hosted-workspace-files/1`。
+H5 channel 契约和持久化不启用 channel 执行或生命周期 effects。
 W2 目录/revision 操作字段与生命周期协议字段同时保留。
 W2 只读探测及结算独立于生命周期 Hook effects、drain 和 detach；Session 行上的准入围栏串行接纳两类操作。
 Runtime 解析在实际返回的 scope 中保留生命周期 claim。
