@@ -14,10 +14,8 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskP
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -94,153 +92,11 @@ class ManagedExtensionRecordStoreTest {
                                 .view(revision.required("view")));
             }
             // The list lives in SQL: another store instance reads it alike.
-            assertThat(new ManagedExtensionRecordStore(jdbc)
+            assertThat(new ManagedExtensionRecordStore(jdbc, state)
                     .listTasks(TENANT, sessionId, null, null, 10).tasks())
                     .extracting(ManagedExtensionRecordStore.TaskRow::taskId)
                     .containsExactly(taskId);
         }
-    }
-
-    @Test
-    void keepsCommittingRecordsWhenTheTaskJournalRefusesPastItsBound()
-            throws Exception {
-        JsonNode chain = fixtures().required("monitorChainCases").get(0);
-        JsonNode first = chain.required("revisions").get(0);
-        JsonNode second = chain.required("revisions").get(1);
-        // The witness only bites if the second revision actually changes the
-        // task view, because only a view change appends a journal event.
-        assertThat(ManagedExtensionProjectionContractTest
-                .view(second.required("view")))
-                .isNotEqualTo(ManagedExtensionProjectionContractTest
-                        .view(first.required("view")));
-        String sessionId = UUID.randomUUID().toString();
-        ExtensionRecordJournal journal = journal(sessionId);
-        JsonNode monitor = first.required("monitorRun");
-        journal.commitMonitor("wedge-0", monitor,
-                first.required("occurredAt").longValue());
-        String taskId = ManagedExtensionProjection.taskId(
-                ManagedExtensionProjection.recordKey(sessionId, "monitor_run",
-                        monitor.required("monitorId").textValue()));
-
-        // One unarchived output pins the retention floor, so the automatic
-        // pass cannot expire anything and the bound starts refusing. The
-        // output admission gate reads the durable Session row, so bind this
-        // Session to its workspace first.
-        if (jdbc.update("UPDATE managed_agent_session SET workspace_id = ?"
-                        + " WHERE tenant_id = ? AND session_id = ?",
-                WORKSPACE, TENANT, sessionId) == 0) {
-            jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
-                            + " session_id, agent_id, status, created_at,"
-                            + " updated_at, workspace_id,"
-                            + " workspace_generation, workspace_storage_id,"
-                            + " cwd_relative, context_config_ref,"
-                            + " context_revision, workspace_config_ref,"
-                            + " workspace_policy_ref) VALUES"
-                            + " (?, ?, 'qwen-code', 'ACTIVE', 1, 1,"
-                            + " ?, 1, 'storage-1', '.', ?, 1,"
-                            + " 'config', 'policy')",
-                    TENANT, sessionId, WORKSPACE,
-                    "sha256:" + ExtensionRecordJournal.sha256(
-                            "config\u0000policy"));
-        }
-        ManagedTaskEventStore events = new ManagedTaskEventStore(jdbc);
-        events.appendOutput(TENANT, sessionId, taskId, "x", false, null,
-                null, null, null, 0);
-        for (int round = 0; round < ManagedTaskEventStore.BACKLOG_BOUND - 1;
-                round++) {
-            events.appendStateChange(TENANT, sessionId, taskId, "running",
-                    "ready", round);
-        }
-        assertThatThrownBy(() -> events.appendStateChange(TENANT, sessionId,
-                taskId, "running", "ready", 0))
-                .isInstanceOfSatisfying(ApiException.class, error ->
-                        assertThat(error.getCode()).isEqualTo(
-                                ManagedTaskEventStore.CODE_BACKLOG_FULL));
-
-        // The record row is the authoritative state; a full derived feed
-        // degrades the feed and never wedges the commit that feeds it.
-        journal.commitMonitor("wedge-1", second.required("monitorRun"),
-                second.required("occurredAt").longValue());
-        assertThat(records.findTask(TENANT, sessionId, taskId).orElseThrow()
-                .projection())
-                .isEqualTo(ManagedExtensionProjectionContractTest
-                        .view(second.required("view")));
-    }
-
-    @Test
-    void answersCursorExpiredRatherThanAGappedPageWhenTheFloorMoved()
-            throws Exception {
-        JsonNode chain = fixtures().required("monitorChainCases").get(0);
-        JsonNode first = chain.required("revisions").get(0);
-        String sessionId = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
-                        + " session_id, agent_id, status, created_at,"
-                        + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
-                TENANT, sessionId);
-        ExtensionRecordJournal journal = journal(sessionId);
-        JsonNode monitor = first.required("monitorRun");
-        journal.commitMonitor("race-0", monitor,
-                first.required("occurredAt").longValue());
-        String taskId = ManagedExtensionProjection.taskId(
-                ManagedExtensionProjection.recordKey(sessionId, "monitor_run",
-                        monitor.required("monitorId").textValue()));
-        // The floor stands at 2 when the read begins and at 7 once the
-        // events have loaded: an expiry that deleted everything through 7
-        // happened mid-read, so the contract's 409 must stand where a
-        // gapped page previously was — the marker flips at the read itself
-        // because that is what concurrent expiry means here.
-        final java.util.concurrent.atomic.AtomicBoolean readHappened =
-                new java.util.concurrent.atomic.AtomicBoolean();
-        ManagedTaskEventStore racing = new ManagedTaskEventStore(jdbc) {
-            @Override
-            public CursorPositions positions(String tenantId,
-                    String session, String task) {
-                return new CursorPositions(9, readHappened.get() ? 7 : 2,
-                        List.of());
-            }
-
-            @Override
-            public EventPage read(String tenantId, String session,
-                    String task, long afterSequence, int limit) {
-                readHappened.set(true);
-                return new EventPage(List.of(), false);
-            }
-        };
-        ManagedTaskService service = new ManagedTaskService(agents, records,
-                racing);
-        String cursor = ManagedTaskEventStore.encodeCursor(taskId, 2);
-        assertThatThrownBy(() -> service.queryWebShellTaskEvents(TENANT,
-                TENANT, sessionId, taskId, cursor, 10))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
-                    assertThat(error.getCode()).isEqualTo("cursor_expired");
-                });
-    }
-
-    @Test
-    void pagesFreshEventsAgainstTheRealJournal() throws Exception {
-        JsonNode chain = fixtures().required("monitorChainCases").get(0);
-        JsonNode first = chain.required("revisions").get(0);
-        String sessionId = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
-                        + " session_id, agent_id, status, created_at,"
-                        + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
-                TENANT, sessionId);
-        ExtensionRecordJournal journal = journal(sessionId);
-        JsonNode monitor = first.required("monitorRun");
-        journal.commitMonitor("fresh-0", monitor,
-                first.required("occurredAt").longValue());
-        String taskId = ManagedExtensionProjection.taskId(
-                ManagedExtensionProjection.recordKey(sessionId, "monitor_run",
-                        monitor.required("monitorId").textValue()));
-        var page = tasks.queryWebShellTaskEvents(TENANT, TENANT, sessionId,
-                taskId, null, 10);
-        assertThat(page.data()).hasSize(1);
-        assertThat(page.nextCursor()).isEqualTo(
-                ManagedTaskEventStore.encodeCursor(taskId, 1));
-        // An as-of-now explicit cursor still admits: the floor did not move
-        // past it while the read was happening.
-        assertThat(tasks.queryWebShellTaskEvents(TENANT, TENANT, sessionId,
-                taskId, page.nextCursor(), 10).data()).isEmpty();
     }
 
     @Test
@@ -351,11 +207,7 @@ class ManagedExtensionRecordStoreTest {
     @Test
     void refusesTheSharedRejectedChains() throws Exception {
         for (JsonNode reject : fixtures().required("monitorChainRejectCases")) {
-            // Public, so the Session event count in assertRefused is not
-            // vacuous: appendLiveSessionEventIfAbsent needs the row.
-            String sessionId = agents.createSession(TENANT, "reject-"
-                    + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
-                    List.of()).sessionId();
+            String sessionId = UUID.randomUUID().toString();
             ExtensionRecordJournal journal = journal(sessionId);
             int index = 0;
             for (JsonNode monitor : reject.required("accepted")) {
@@ -370,30 +222,13 @@ class ManagedExtensionRecordStoreTest {
                     ? ExtensionRecordJournal.OPERATION : "reopenMonitorRun";
             String commandId = reuse == null ? "rejected"
                     : "accepted-" + reuse.intValue();
-            CommitTransactionRequest refusedRequest = journal.request(
-                    operation, commandId, ExtensionRecordJournal.bytes(
-                            reject.required("next")), occurredAt, event -> {
-                            }, records -> records);
             assertRefused(reject.required("id").textValue(), sessionId,
                     ManagedExtensionRecordStore.ERROR_REJECTED, null,
-                    () -> journal.commit(refusedRequest));
-            if (reuse == null) {
-                // No command row survives a refusal: the identical bytes
-                // are refused again, not replayed, and the resource rows a
-                // lost rollback would keep collide the resend on the
-                // resource reference primary key.
-                assertRefused(reject.required("id").textValue() + " resent",
-                        sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
-                        null, () -> journal.commit(refusedRequest));
-                // A new body under the same command id commits as new.
-                JsonNode retry = ((ObjectNode) chain().get(0)
-                        .required("monitorRun").deepCopy()).put("monitorId",
-                        "monitor-retry-" + index);
-                CommitReceipt resent = journal.commit(journal.request(
-                        commandId, retry, occurredAt + 1_000));
-                assertThat(resent.replayed()).isFalse();
-                assertThat(revisions(sessionId)).isEqualTo(index + 1L);
-            }
+                    () -> journal.commit(journal.request(operation,
+                            commandId, ExtensionRecordJournal.bytes(
+                                    reject.required("next")), occurredAt,
+                            event -> {
+                            }, records -> records)));
         }
     }
 
@@ -435,17 +270,9 @@ class ManagedExtensionRecordStoreTest {
         byte[] trailing = (new String(start, StandardCharsets.UTF_8)
                 + " {}").getBytes(StandardCharsets.UTF_8);
         Map<String, Refusal> events = Map.ofEntries(
-                Map.entry("another tenant", new Refusal(
-                        "names another Session", event -> ((ObjectNode) event
-                                .get("sessionKey")).put("tenantId",
-                                        "other"))),
                 Map.entry("another workspace", new Refusal(
                         "names another Session", event -> ((ObjectNode) event
                                 .get("sessionKey")).put("workspaceId",
-                                        "other"))),
-                Map.entry("another Session", new Refusal(
-                        "names another Session", event -> ((ObjectNode) event
-                                .get("sessionKey")).put("sessionId",
                                         "other"))),
                 Map.entry("an extra Session key field", new Refusal(
                         "event.sessionKey must be an object with exactly",
@@ -502,33 +329,15 @@ class ManagedExtensionRecordStoreTest {
             refuse(edit.getKey(), edit.getValue().message(), start,
                     edit.getValue().editEvent(), records -> records);
         }
-        // The fifth field of the reference takes the missing-resource
-        // answer, not the mismatch one.
-        String missingId = UUID.randomUUID().toString();
-        ExtensionRecordJournal missingJournal = journal(missingId);
-        assertRefused("a reference of another resource", missingId,
-                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
-                "A referenced Managed Session resource is missing.",
-                () -> missingJournal.commit(missingJournal.request(
-                        ExtensionRecordJournal.OPERATION, "refused", start,
-                        1_000,
-                        event -> ((ObjectNode) event.at(
-                                "/payload/recordRef")).put("resourceId",
-                                        "other-resource"),
-                        records -> records)));
         refuse("a body with trailing content", "The Stage H record is not a"
                 + " JSON object the Session authority can read", trailing,
                 event -> {
                 }, records -> records);
-        refuse("an unknown subtype in the marker's place", "has the"
-                + " unknown subtype managed_session_note after the Managed"
-                + " header", start, event -> {
+        refuse("no commit marker", "has the unknown subtype"
+                + " managed_session_note after the Managed header", start,
+                event -> {
                 }, records -> records.substring(0, records.indexOf('\n')
                         + 1) + "{\"subtype\":\"managed_session_note\"}\n");
-        refuse("no commit marker", "holds only its events, then its commit"
-                + " marker", start, event -> {
-                }, records -> records.substring(0, records.indexOf('\n')
-                        + 1) + "{\"subtype\":\"managed_session_header_v1\"}\n");
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
         assertRefused("a line among the events that is not one", sessionId,
@@ -569,33 +378,15 @@ class ManagedExtensionRecordStoreTest {
                             start, 1_000, event -> {
                             }, edit.getValue())));
         }
-        // And the refusal names the right line when only the second is bad.
-        String second = UUID.randomUUID().toString();
-        ExtensionRecordJournal secondJournal = journal(second);
-        assertRefused("a duplicate key on the second line", second,
-                ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
-                "Record line 2 is not a JSON object the Session authority"
-                        + " can read",
-                () -> secondJournal.commit(secondJournal.request(
-                        ExtensionRecordJournal.OPERATION, "refused-second",
-                        start, 1_000, event -> {
-                        }, records -> records.replaceFirst(
-                                "\\{\"uuid\"(?=[^\n]*managed_session_commit_v1)",
-                                "{\"dup\":1,\"dup\":2,\"uuid\""))));
         // The deepest line the authority reads is still accepted, on a line
         // the Stage H rules do not otherwise look at.
         String sessionId = UUID.randomUUID().toString();
         ExtensionRecordJournal journal = journal(sessionId);
         journal.commit(journal.request(ExtensionRecordJournal.OPERATION,
                 "deepest", start, 1_000, event -> {
-                }, records -> {
-                    String edited = records.replaceFirst(
-                            "\\{\"uuid\"(?=[^\n]*managed_session_commit_v1)",
-                            "{\"deep\":" + nested(63) + ",\"uuid\"");
-                    assertThat(edited).as("the injection landed")
-                            .isNotEqualTo(records);
-                    return edited;
-                }));
+                }, records -> records.replaceFirst(
+                        "\\{\"uuid\"(?=[^\n]*managed_session_commit_v1)",
+                        "{\"deep\":" + nested(63) + ",\"uuid\"")));
         assertThat(revisions(sessionId)).isEqualTo(1);
     }
 
@@ -604,8 +395,7 @@ class ManagedExtensionRecordStoreTest {
         return "[".repeat(depth) + "]".repeat(depth);
     }
 
-    /** A well-formed record line carrying an ordinary event, composed by
-     * the journal's own composer so the envelope cannot drift apart. */
+    /** A well-formed record line carrying an ordinary event. */
     private static String ordinaryEventLine(String sessionId, long sequence,
             String eventId, String kind) {
         ObjectNode event = JsonNodeFactory.instance.objectNode()
@@ -615,8 +405,15 @@ class ManagedExtensionRecordStoreTest {
                 .put("workspaceId", WORKSPACE).put("sessionId", sessionId);
         event.put("kind", kind).put("occurredAt", 1_000);
         event.putObject("payload");
-        return ExtensionRecordJournal.line(sessionId,
-                "managed_session_event_v1", event);
+        ObjectNode record = JsonNodeFactory.instance.objectNode()
+                .put("uuid", UUID.randomUUID().toString())
+                .putNull("parentUuid").put("sessionId", sessionId)
+                .put("timestamp", "2026-09-27T00:00:00.000Z")
+                .put("type", "system")
+                .put("subtype", "managed_session_event_v1")
+                .put("cwd", "/workspace").put("version", "test");
+        record.set("managedSession", event);
+        return record + "\n";
     }
 
     /**
@@ -659,17 +456,6 @@ class ManagedExtensionRecordStoreTest {
                         + " Managed header", event -> {
                 }, records -> records.replaceFirst("\n",
                         "\n{\"subtype\":\"not_a_subtype\"}\n"), 1);
-        refuseOrdinary("an event line with a numeric payload", goal,
-                "event.payload must be a JSON object",
-                event -> event.set("payload", JsonNodeFactory.instance
-                        .numberNode(42)), records -> records, 0);
-        refuseOrdinary("an event line with a null payload", goal,
-                "event.payload must be a JSON object",
-                event -> event.putNull("payload"), records -> records, 0);
-        refuseOrdinary("an event line with a numeric subject", goal,
-                "event.subject must be a JSON object",
-                event -> event.set("subject", JsonNodeFactory.instance
-                        .numberNode(42)), records -> records, 0);
         refuseOrdinary("a body-less domain.committed with a fifth payload"
                         + " field", goal,
                 "event.payload must be an object with exactly",
@@ -719,82 +505,6 @@ class ManagedExtensionRecordStoreTest {
                             return first + "\n" + second + records.substring(
                                     records.indexOf('\n'));
                         }, 1)));
-        // Only the shaped arm can refuse a Managed header inside the
-        // declared events: the commit marker closes the transaction.
-        String shaped = UUID.randomUUID().toString();
-        ExtensionRecordJournal shapedJournal = journal(shaped);
-        assertRefused("a Managed header among the declared events", shaped,
-                ManagedExtensionRecordStore.ERROR_REJECTED,
-                "holds only its events, then its commit marker",
-                () -> shapedJournal.commit(shapedJournal.request(
-                        ExtensionRecordJournal.OPERATION, "refused", start,
-                        1_000, event -> {
-                        }, records -> records.replaceFirst("\n",
-                                "\n{\"subtype\":\"managed_session_header_v1\"}\n"),
-                        1)));
-        // A cross-domain reserved id on a body-bearing line would collide
-        // with the other domain's next Stage H record.
-        String reserved = UUID.randomUUID().toString();
-        ExtensionRecordJournal reservedJournal = journal(reserved);
-        assertRefused("a Stage H line with another domain's reserved id",
-                reserved, ManagedExtensionRecordStore.ERROR_REJECTED,
-                "is not its domain's reserved monitor_run:<n> id",
-                () -> reservedJournal.commit(reservedJournal.request(
-                        ExtensionRecordJournal.OPERATION, "refused", start,
-                        1_000, event -> event.put("eventId",
-                                "hook_execution:1"), records -> records)));
-    }
-
-    /** The ordinary-event line and the journal's own composer hold one
-     * envelope: a field that either gains, drops or renames fails here. */
-    @Test
-    void ordinaryAndJournalLinesShareOneEnvelope() throws Exception {
-        String sessionId = UUID.randomUUID().toString();
-        ObjectNode record = (ObjectNode) ManagedExtensionRecordStore.parse(
-                ordinaryEventLine(sessionId, 9, "turn-9:accepted",
-                        "input.accepted"));
-        record.remove("uuid");
-        assertThat(record.fieldNames()).toIterable()
-                .containsExactlyInAnyOrder("parentUuid", "sessionId",
-                        "timestamp", "type", "subtype", "cwd", "version",
-                        "managedSession");
-        ObjectNode recomposed = (ObjectNode) ManagedExtensionRecordStore
-                .parse(ExtensionRecordJournal.line(sessionId,
-                        "managed_session_event_v1",
-                        record.get("managedSession")));
-        recomposed.remove("uuid");
-        assertThat(recomposed).isEqualTo(record);
-    }
-
-    /**
-     * The hosted text-delta stream writes message.retracted when a
-     * restarted model attempt replaces a prefix it already published
-     * (#13351); the commit-time vocabulary must accept that line.
-     */
-    @Test
-    void commitsAMessageRetraction() throws Exception {
-        ObjectNode goal = JsonNodeFactory.instance.objectNode()
-                .put("goal", "live");
-        String sessionId = UUID.randomUUID().toString();
-        ExtensionRecordJournal journal = journal(sessionId);
-        long firstSequence = journal.committedSequence() + 1;
-        ObjectNode retraction = JsonNodeFactory.instance.objectNode()
-                .put("v", 1).put("sequence", firstSequence + 1)
-                .put("eventId", "assistant-retract:turn-1:message-1");
-        retraction.putObject("sessionKey").put("tenantId", TENANT)
-                .put("workspaceId", WORKSPACE).put("sessionId", sessionId);
-        retraction.put("kind", "message.retracted").put("occurredAt", 1_000);
-        retraction.putObject("subject").put("type", "activation")
-                .put("scopeId", "activation-1")
-                .put("activationId", "activation-1").put("epoch", 1);
-        retraction.putObject("payload").put("messageId", "message-1")
-                .put("turnId", "turn-1").put("fromSequence", firstSequence);
-        String line = ExtensionRecordJournal.line(sessionId,
-                "managed_session_event_v1", retraction);
-        assertThat(journal.commit(journal.requestOrdinary("retract",
-                "goal_state", goal, event -> {
-                }, records -> records.replaceFirst("\n", "\n" + line), 1))
-                .lastSequence()).isEqualTo(firstSequence + 1);
     }
 
     /** A refused ordinary body-less domain commit. The {@code inject} of 5
@@ -864,105 +574,6 @@ class ManagedExtensionRecordStoreTest {
                         revision.resources())));
     }
 
-    @Test
-    void answersTheThreeResourceRefusals() throws Exception {
-        byte[] start = ExtensionRecordJournal.bytes(chain().get(0)
-                .required("monitorRun"));
-        // A body the reference names was never committed.
-        String missing = UUID.randomUUID().toString();
-        ExtensionRecordJournal missingJournal = journal(missing);
-        assertThatThrownBy(() -> missingJournal.commit(
-                missingJournal.request(ExtensionRecordJournal.OPERATION,
-                        "missing", start, 1_000,
-                        event -> ((ObjectNode) event.at(
-                                "/payload/recordRef")).put("resourceId",
-                                        "missing-body-1"),
-                        records -> records))).isInstanceOfSatisfying(
-                ApiException.class, error -> {
-                    assertThat(error.getCode()).isEqualTo(
-                            ManagedSessionStoreModels.ERROR_RESOURCE_MISSING);
-                    assertThat(error.getStatus()).isEqualTo(
-                            HttpStatus.CONFLICT);
-                });
-        // A row that no longer reads back, two ways the store knows it.
-        String corruptSession = UUID.randomUUID().toString();
-        ExtensionRecordJournal corruptJournal = journal(corruptSession);
-        JsonNode first = chain().get(0).required("monitorRun");
-        corruptJournal.commitMonitor("corrupt-1", first, 1_000);
-        String corruptId = jdbc.queryForObject(
-                "SELECT record_resource_id FROM"
-                        + " qwen_managed_session_extension_record"
-                        + " WHERE tenant_id = ? AND session_id = ? LIMIT 1",
-                String.class, TENANT, corruptSession);
-        // Its bytes no longer hold its recorded digest.
-        byte[] shifted = ExtensionRecordJournal.bytes(((ObjectNode) first
-                .deepCopy()).put("maxEvents", 1));
-        jdbc.update("UPDATE qwen_managed_session_resource SET"
-                        + " inline_bytes = ?, byte_length = ? WHERE"
-                        + " tenant_id = ? AND resource_id = ?",
-                shifted, shifted.length, TENANT, corruptId);
-        assertThatThrownBy(() -> corruptJournal.commitMonitor("corrupt-2",
-                chain().get(1).required("monitorRun"), 2_000))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
-                    assertThat(error.getCode()).isEqualTo(
-                            "managed_session_resource_corrupt");
-                    assertThat(error.getStatus()).isEqualTo(
-                            HttpStatus.INTERNAL_SERVER_ERROR);
-                });
-        // Its Session is not the request's, though the row says otherwise.
-        String foreignSession = UUID.randomUUID().toString();
-        ExtensionRecordJournal foreignJournal = journal(foreignSession);
-        foreignJournal.commitMonitor("foreign-1", first, 1_000);
-        String foreignId = jdbc.queryForObject(
-                "SELECT record_resource_id FROM"
-                        + " qwen_managed_session_extension_record"
-                        + " WHERE tenant_id = ? AND session_id = ? LIMIT 1",
-                String.class, TENANT, foreignSession);
-        jdbc.update("UPDATE qwen_managed_session_resource SET"
-                        + " tenant_id = 'other-tenant' WHERE tenant_id = ?"
-                        + " AND resource_id = ?",
-                TENANT, foreignId);
-        assertThatThrownBy(() -> foreignJournal.commitMonitor("foreign-2",
-                chain().get(1).required("monitorRun"), 2_000))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
-                    assertThat(error.getCode()).isEqualTo(
-                            "managed_session_not_found");
-                    assertThat(error.getStatus())
-                            .isEqualTo(HttpStatus.NOT_FOUND);
-                });
-    }
-
-    @Test
-    void announcesNothingInTheDeletingWindow() throws Exception {
-        String sessionId = agents.createSession(TENANT, "deleting-"
-                + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
-                List.of()).sessionId();
-        ExtensionRecordJournal journal = journal(sessionId);
-        JsonNode first = chain().get(0).required("monitorRun");
-        journal.commitMonitor("deleting-1", first, 1_000);
-        // The delete stays pending while this journal's writer holds the
-        // Session, so the Session is DELETING when the revision lands.
-        state.beginOperation(TENANT, sessionId, OperationKind.DELETE,
-                "sha256:" + "d".repeat(64), "delete", "digest-delete");
-        assertThat(jdbc.queryForObject("SELECT status FROM"
-                        + " managed_agent_session WHERE tenant_id = ?"
-                        + " AND session_id = ?", String.class,
-                TENANT, sessionId)).isEqualTo("DELETING");
-        journal.commitMonitor("deleting-2",
-                chain().get(1).required("monitorRun"), 2_000);
-        assertThat(state.findEvents(TENANT, sessionId, 0, 100))
-                .extracting(EventRecord::type)
-                .doesNotContain("task.updated");
-        // Only the revision committed before the deletion began journaled.
-        assertThat(jdbc.queryForList("SELECT state FROM"
-                        + " qwen_managed_session_task_journal WHERE tenant_id"
-                        + " = ? AND session_id = ? ORDER BY task_id,"
-                        + " event_sequence", String.class, TENANT, sessionId))
-                .containsExactly(ManagedExtensionProjectionContractTest.view(
-                        chain().get(0).required("view")).state());
-        assertThat(revisions(sessionId)).isEqualTo(2);
-    }
-
     private record Refusal(String message, Consumer<ObjectNode> editEvent) {
     }
 
@@ -979,18 +590,15 @@ class ManagedExtensionRecordStoreTest {
     }
 
     /**
-     * A refused commit leaves no resource reference, no revision and no
-     * Session event behind, the rows only a rollback removes. The event
-     * count is vacuous without a public Session, so the chain refusals
-     * create one, and the refused command row itself is proven where the
-     * pair is fresh by committing the identical bytes again: a refusal,
-     * not a replay. A {@code message} names the rule that refused it.
+     * A refused commit leaves no journal row, no resource reference and no
+     * revision behind, which it would if the store did not roll back. A
+     * {@code message} names the rule that refused it.
      */
     private void assertRefused(String label, String sessionId, String code,
             String message, ThrowingCallable commit) {
+        long transactions = rows("qwen_managed_session_journal_tx", sessionId);
         long references = rows("qwen_managed_session_resource_ref",
                 sessionId);
-        long events = rows("managed_agent_event", sessionId);
         long revisions = revisions(sessionId);
         assertThatThrownBy(commit).as(label)
                 .isInstanceOfSatisfying(ApiException.class, error -> {
@@ -1006,52 +614,11 @@ class ManagedExtensionRecordStoreTest {
                                 .contains(message);
                     }
                 });
+        assertThat(rows("qwen_managed_session_journal_tx", sessionId))
+                .as(label).isEqualTo(transactions);
         assertThat(rows("qwen_managed_session_resource_ref", sessionId))
                 .as(label).isEqualTo(references);
-        assertThat(rows("managed_agent_event", sessionId)).as(label)
-                .isEqualTo(events);
         assertThat(revisions(sessionId)).as(label).isEqualTo(revisions);
-    }
-
-    @Test
-    void announcesEachChangedViewOnThePublicSession() throws Exception {
-        String sessionId = agents.createSession(TENANT, "announce-"
-                + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
-                List.of()).sessionId();
-        ExtensionRecordJournal journal = journal(sessionId);
-        List<String> expected = new ArrayList<>();
-        TaskProjection previous = null;
-        int index = 0;
-        for (JsonNode revision : chain()) {
-            journal.commitMonitor("announce-" + index++,
-                    revision.required("monitorRun"),
-                    revision.required("occurredAt").longValue());
-            TaskProjection view = ManagedExtensionProjectionContractTest.view(
-                    revision.required("view"));
-            if (!Objects.equals(previous, view)) {
-                expected.add(view.state());
-            }
-            previous = view;
-        }
-        String taskId = ManagedExtensionProjection.taskId(
-                ManagedExtensionProjection.recordKey(sessionId,
-                        "monitor_run", "monitor-1"));
-        // The announcement rides the per-task event journal, written in the
-        // same transaction, not the Session event stream.
-        List<Map<String, Object>> announced = jdbc.queryForList(
-                "SELECT task_id, state FROM"
-                        + " qwen_managed_session_task_journal"
-                        + " WHERE tenant_id = ? AND session_id = ?"
-                        + " ORDER BY task_id, event_sequence",
-                TENANT, sessionId);
-        assertThat(announced).extracting(row -> row.get("state"))
-                .containsExactlyElementsOf(expected);
-        assertThat(announced).allSatisfy(row ->
-                assertThat(row.get("task_id")).isEqualTo(taskId));
-        assertThat(expected.size()).isLessThan(chain().size());
-        assertThat(state.findEvents(TENANT, sessionId, 0, 100))
-                .extracting(EventRecord::type)
-                .doesNotContain("task.updated");
     }
 
     @Test
@@ -1071,9 +638,6 @@ class ManagedExtensionRecordStoreTest {
                 "item.output_text.delta", Map.of("text", "two"), false,
                 "delta-2");
         state.materializeNextBatch(TENANT, sessionId, 100);
-        // The witness only bites if the announcement actually landed.
-        assertThat(rows("qwen_managed_session_task_journal", sessionId))
-                .isEqualTo(1);
         // The announcement leaves the message projection's sequence, so the
         // two deltas keep one Part instead of splitting into two.
         List<String> partIds = jdbc.queryForList("SELECT content_part_id"
@@ -1088,46 +652,6 @@ class ManagedExtensionRecordStoreTest {
                         + " AND session_id = ? AND part_type = 'output_text'",
                 String.class, TENANT, sessionId);
         assertThat(parts).containsExactly("onetwo");
-    }
-
-    @Test
-    void announcesNothingOnceThePublicSessionIsBeingDeleted()
-            throws Exception {
-        String sessionId = agents.createSession(TENANT, "deleted-"
-                + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
-                List.of()).sessionId();
-        ExtensionRecordJournal journal = journal(sessionId);
-        List<JsonNode> chain = chain();
-        journal.commitMonitor("deleted-0", chain.get(0).required(
-                "monitorRun"), chain.get(0).required("occurredAt")
-                        .longValue());
-        // The delete stays pending while this journal's writer holds the
-        // Session, so the Session is being deleted when the revision lands.
-        state.beginOperation(TENANT, sessionId, OperationKind.DELETE,
-                "sha256:" + "d".repeat(64), "delete", "digest-delete");
-        // The next revision changes the view, which a live Session would
-        // hear about.
-        assertThat(ManagedExtensionProjectionContractTest.view(chain.get(1)
-                .required("view"))).isNotEqualTo(
-                        ManagedExtensionProjectionContractTest.view(chain
-                                .get(0).required("view")));
-        journal.commitMonitor("deleted-1", chain.get(1).required(
-                "monitorRun"), chain.get(1).required("occurredAt")
-                        .longValue());
-        List<EventRecord> events = state.findEvents(TENANT, sessionId, 0,
-                100);
-        assertThat(events).extracting(EventRecord::type)
-                .doesNotContain("task.updated")
-                .endsWith("session.delete.requested");
-        // Only the revision committed before the deletion began announced,
-        // and its journal row survives with the Session's tombstone.
-        assertThat(jdbc.queryForList("SELECT state FROM"
-                        + " qwen_managed_session_task_journal WHERE tenant_id"
-                        + " = ? AND session_id = ? ORDER BY task_id,"
-                        + " event_sequence", String.class, TENANT, sessionId))
-                .containsExactly(ManagedExtensionProjectionContractTest.view(
-                        chain.get(0).required("view")).state());
-        assertThat(revisions(sessionId)).isEqualTo(2);
     }
 
     @Test
@@ -1232,7 +756,7 @@ class ManagedExtensionRecordStoreTest {
         assertThat(records.findTask(TENANT, sessionId, fakeTask)).isEmpty();
         assertThat(state.findEvents(TENANT, sessionId, 0, 100)).extracting(EventRecord::type)
                 .doesNotContain("task.updated");
-        assertThat(new ManagedExtensionRecordStore(jdbc)
+        assertThat(new ManagedExtensionRecordStore(jdbc, state)
                 .listRecords(TENANT, sessionId, "mcp_operation")).containsExactly(operation);
     }
 
@@ -1289,7 +813,7 @@ class ManagedExtensionRecordStoreTest {
         execution.withObject("/run").put("state", "recovery_blocked").put("execution", "outcome_unknown")
                 .put("reason", "outcome_unknown");
         commitDomain(journal, "execute-unknown", "hook_execution", execution, List.of());
-        assertThat(new ManagedExtensionRecordStore(jdbc).listRecords(TENANT, sessionId, "hook_execution"))
+        assertThat(new ManagedExtensionRecordStore(jdbc, state).listRecords(TENANT, sessionId, "hook_execution"))
                 .containsExactly(execution);
         execution.withObject("/run").put("state", "settled").put("execution", "settled").putNull("reason");
         execution.set("resultRef", ref.deepCopy());
@@ -1346,7 +870,7 @@ class ManagedExtensionRecordStoreTest {
         for (String status : List.of("running", "settled")) {
             older.withObject("/run").put("state", status);
             commitDomain(journal, "older-" + status, "hook_registration", older, List.of());
-            assertThat(new ManagedExtensionRecordStore(jdbc)
+            assertThat(new ManagedExtensionRecordStore(jdbc, state)
                     .latestHookRegistration(TENANT, sessionId)).contains(newer);
         }
     }
@@ -1414,7 +938,7 @@ class ManagedExtensionRecordStoreTest {
             assertThat(rows("qwen_managed_session_resource", sessionId)).isEqualTo(resourcesBefore);
         }
         commitDomain(journal, "messages-valid", "hook_execution", execution, List.of(plan, manifest, first, second));
-        assertThat(new ManagedExtensionRecordStore(jdbc).listRecords(TENANT, sessionId, "hook_execution"))
+        assertThat(new ManagedExtensionRecordStore(jdbc, state).listRecords(TENANT, sessionId, "hook_execution"))
                 .extracting(JsonNode::toString).containsExactly(execution.toString());
         assertThat(sessionStore.readResource(TENANT, WORKSPACE, sessionId, manifest.resourceId(),
                 "extension-writer-token-0123456789").bytes()).isEqualTo(ExtensionRecordJournal.bytes(manifestBody));

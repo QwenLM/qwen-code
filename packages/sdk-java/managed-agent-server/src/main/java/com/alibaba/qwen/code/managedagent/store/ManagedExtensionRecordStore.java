@@ -49,6 +49,9 @@ public class ManagedExtensionRecordStore {
             ManagedExtensionRecordStore.class);
     public static final String ERROR_REJECTED =
             "managed_session_extension_record_rejected";
+    public static final String OPENING_COMMAND_QUERY = "SELECT COUNT(*) FROM"
+            + " qwen_managed_session_extension_record WHERE"
+            + " session_scope_key = ? AND operation_hash = ?";
     private static final String EVENT_SUBTYPE = "managed_session_event_v1";
     private static final String HEADER_SUBTYPE = "managed_session_header_v1";
     private static final String COMMIT_SUBTYPE = "managed_session_commit_v1";
@@ -91,8 +94,8 @@ public class ManagedExtensionRecordStore {
     }
 
     /** A store beside no public Session table, which announces nothing. */
-    ManagedExtensionRecordStore(JdbcTemplate jdbc) {
-        this(jdbc, null);
+    public ManagedExtensionRecordStore(JdbcTemplate jdbc) {
+        this(jdbc, (AgentStateStore) null);
     }
 
     /** A store that journals its own task events beside the table. */
@@ -251,11 +254,19 @@ public class ManagedExtensionRecordStore {
                     : ManagedExtensionProjection.RECORD_BODIES.get(domain);
             long occurredAt = requireEvent(event, tenantId, workspaceId,
                     sessionId, firstSequence + index, body == null);
+            String eventId = event.path("eventId").textValue();
             if (body == null) {
-                String eventId = event.path("eventId").textValue();
                 require(!RESERVED_EVENT_ID.matcher(eventId).matches(),
                         "event id " + eventId
                                 + " is reserved for Stage H records.");
+            } else {
+                // A Stage H line carries its own domain's reserved id;
+                // holding another domain's would collide with that domain's
+                // next record, which could then never commit.
+                require(ownReservedId(eventId, domain),
+                        "The Stage H record's event id " + eventId
+                                + " is not its domain's reserved " + domain
+                                + ":<n> id.");
             }
             if ("activation.changed".equals(kind)) {
                 lastActivation = payload;
@@ -339,7 +350,8 @@ public class ManagedExtensionRecordStore {
                 ? EVENT_FIELDS_WITH_SUBJECT : EVENT_FIELDS;
         boolean closed = event != null && event.isObject()
                 && EVENT_FIELDS.stream().allMatch(event::has)
-                && event.size() <= allowed.size();
+                && event.size() <= allowed.size()
+                && (!event.has("subject") || event.get("subject").isObject());
         if (closed) {
             for (Iterator<String> names = event.fieldNames();
                     names.hasNext();) {
@@ -349,6 +361,9 @@ public class ManagedExtensionRecordStore {
                 }
             }
         }
+        require(event == null || !event.isObject() || !event.has("subject")
+                || event.get("subject").isObject(),
+                "event.subject must be a JSON object");
         require(closed, "event must be an object with exactly "
                 + EVENT_FIELDS
                 + (allowSubject ? " and an optional subject" : ""));
@@ -668,31 +683,27 @@ public class ManagedExtensionRecordStore {
         if (body.taskKind() != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
             String taskId = ManagedExtensionProjection.taskId(recordKey);
-            announce(tenantId, sessionId, taskId, projection.state(),
-                    revision);
-            taskEvents.appendStateChange(tenantId, sessionId, taskId,
-                    projection.state(), projection.runtimeState(),
-                    occurredAt);
+            if (isBeingDeleted(tenantId, sessionId)) {
+                return;
+            }
+            try {
+                taskEvents.appendStateChange(tenantId, sessionId, taskId,
+                        projection.state(), projection.runtimeState(),
+                        occurredAt);
+            } catch (ApiException refused) {
+                // The record row above is the authoritative state and it is
+                // already written; the event journal is a derived, bounded
+                // feed. A journal that refuses past its backlog bound — or
+                // whose retention floor is pinned behind unarchived output —
+                // degrades the feed, never the record commit, or one task's
+                // output backlog would wedge every later revision of it.
+                LOG.warn("Managed Stage H task event was refused by the journal"
+                                + " tenant={} session={} task={} revision={}"
+                                + " code={}",
+                        tenantId, sessionId, taskId, revision,
+                        refused.getCode());
+            }
         }
-    }
-
-    /**
-     * Announces a changed task view on the task-event outbox, in the same
-     * transaction, when the Session has a public resource that is not
-     * deleted or being deleted, so a deleted Session's outbox says nothing
-     * more. The outbox stays out of the Session event stream, whose
-     * sequence the message projection reads, so an announcement between
-     * two streamed text deltas cannot split their part; the task-events
-     * route drains it when H3 serves it.
-     */
-    private void announce(String tenantId, String sessionId, String taskId,
-            String state, long revision) {
-        if (sessions == null) {
-            return;
-        }
-        sessions.appendLiveSessionEventIfAbsent(tenantId, sessionId,
-                "task.updated", Map.of("taskId", taskId, "state", state),
-                "task:" + taskId + ":" + revision);
     }
 
     private static TaskRow taskRow(ResultSet result, String tenantId,
@@ -794,5 +805,32 @@ public class ManagedExtensionRecordStore {
 
     private record StoredRow(String domain, String recordId, long revision,
             String resourceId, TaskProjection projection) {
+    }
+
+    /** Whether the event id sits in the domain's own reserved
+     * {@code <domain>:<n>} namespace. */
+    private static boolean ownReservedId(String eventId, String domain) {
+        if (eventId == null || !eventId.startsWith(domain + ":")) {
+            return false;
+        }
+        for (int index = domain.length() + 1; index < eventId.length();
+                index++) {
+            if (!Character.isDigit(eventId.charAt(index))) {
+                return false;
+            }
+        }
+        return eventId.length() > domain.length() + 1;
+    }
+    /** Whether the Session is being deleted or deleted. A plain read on a
+     * pooled connection sees the latest committed status — including a
+     * deletion that committed after the record transaction's snapshot —
+     * and, never locking, cannot wedge the commit that already holds the
+     * Session row. */
+    private boolean isBeingDeleted(String tenantId, String sessionId) {
+        String status = jdbc.query("SELECT status FROM managed_agent_session"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                (result, row) -> result.getString("status"),
+                tenantId, sessionId).stream().findFirst().orElse(null);
+        return "DELETING".equals(status) || "DELETED".equals(status);
     }
 }
