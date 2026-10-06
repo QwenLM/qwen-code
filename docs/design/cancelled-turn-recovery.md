@@ -31,3 +31,9 @@ Also verify that transport-close and prompt deadlines remain recoverable, while 
 ## Risks and remaining work
 
 Legacy transcripts without authoritative daemon identity remain on the existing heuristic. This change covers recorded daemon cancellation; it does not invent terminal provenance for older or independent TUI cancellation paths. Model response and tool repair semantics remain unchanged.
+
+Two accepted losses follow from the rules above. Neither is closed here, and both are tracked outside this change.
+
+`cancelledAt` is read as proof of user intent, but builds before this change stamped it for every controlled admission abort, so a pre-change transcript whose turn died on a deadline, a response-close or a superseding prompt now reads as explicitly cancelled and its recovery is permanently refused. Separating the two needs a new provenance field on the persisted `turn_result` — a record-contract change spanning the CLI and core packages.
+
+The unmarked-entry rule is fail-open by construction. Four producers of unmarked user-shaped entries are known: a reminder-bearing notification, because only a bare task-notification envelope is trimmed; a cron or loop echo, which is neither marked nor trimmed; a pushed mid-turn steering message; and a steering entry pushed after a dropped code-mode tool result. When one lands after a cancelled turn the lookup resolves no prompt identity, recovery stays available, and a restart can re-offer work the user stopped. Walking back to the last marked entry instead would re-suppress exactly the legitimate newer input this rule protects, so the direction is a product decision rather than a repair.
