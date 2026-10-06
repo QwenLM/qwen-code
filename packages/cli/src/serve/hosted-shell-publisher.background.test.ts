@@ -1005,6 +1005,160 @@ it('waits an in-flight redrive inside the drain instead of closing past it (P2-A
   });
 });
 
+it('waits a redrive whose backoff fires only while the drain is already waiting (P2-3)', async () => {
+  // Round-17 P2-3: the drain's one-shot snapshot of in-flight re-drives
+  // misses a sibling whose backoff timer fires during the wait. Capture A
+  // parks its in-flight re-drive on a gate; capture B sits in its real
+  // 250 ms backoff; the close starts, and B's timer fires INSIDE the
+  // drain. The close must keep collecting rounds until that attempt has
+  // landed too — answering after A alone strands B's record on a Session
+  // whose own teardown then eats B's settle with SessionWriterLostError.
+  // Real timers the whole way: close() drains an HTTP server whose
+  // keep-alive bookkeeping runs on real time.
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  const finalizeBody = (executionCallId: string) => ({
+    operation: 'finalize',
+    executionCallId,
+    started: true,
+    failed: false,
+    process: { exitCode: 0, signal: null, previewBytes: 0 },
+    executionStatus: 'success',
+    responseParts: [],
+    previewTruncated: false,
+    error: null,
+  });
+  const postFinalize = (executionCallId: string) =>
+    fetch(r.descriptor.url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${r.descriptor.token}`,
+        'cache-control': 'no-store',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(finalizeBody(executionCallId)),
+    });
+  const admissions = ['execution-a', 'execution-b'].map(
+    async (executionCallId) => {
+      await r.orchestrator.admit({
+        shellId: executionCallId,
+        ownerScopeId: r.key.sessionId,
+        executionCallId,
+        args: { command: 'echo bye', is_background: true },
+      });
+      await r.orchestrator.dispatchStarted(executionCallId, BINDING);
+      await r.orchestrator.attach(executionCallId, BINDING, { pid: 7 });
+      const request = backgroundRequest(r.key, '1');
+      (request.capture as Record<string, unknown>)['executionCallId'] =
+        executionCallId;
+      publisher!.register(
+        { reference: request.reference, capture: request.capture },
+        `model-call-${executionCallId}`,
+        request.reference.sessionId,
+      );
+      const prepared = await r.registry.prepare(
+        request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+      );
+      prepared.sink.setStarted(7);
+      await prepared.sink.setProcessResult({
+        rawOutput: Buffer.alloc(0),
+        output: '',
+        error: null,
+        aborted: false,
+        exitCode: 0,
+        signal: null,
+        pid: undefined,
+        executionMethod: 'child_process',
+      });
+      await prepared.sink.finish('stdout', true);
+      await prepared.sink.finish('stderr', true);
+    },
+  );
+  for (const admission of admissions) await admission;
+  // A's route forward fails once, healing on its re-drive; B's route
+  // forward and its 0 ms attempt both fail, arming the 250 ms backoff.
+  const advances = new Map<string, number>();
+  const originalAdvance = r.orchestrator.advanceOutput.bind(r.orchestrator);
+  vi.spyOn(r.orchestrator, 'advanceOutput').mockImplementation(
+    async (shellId, ref) => {
+      const count = (advances.get(shellId) ?? 0) + 1;
+      advances.set(shellId, count);
+      const budget = shellId === 'execution-a' ? 1 : 2;
+      if (count <= budget) throw new Error(`transient store 5xx #${count}`);
+      return originalAdvance(shellId, ref);
+    },
+  );
+  // A's re-drive in flight and B's backoff-fired attempt each hold a gate.
+  let releaseGateA!: () => void;
+  let releaseGateB!: () => void;
+  const gateA = new Promise<void>((resolve) => {
+    releaseGateA = resolve;
+  });
+  const gateB = new Promise<void>((resolve) => {
+    releaseGateB = resolve;
+  });
+  const settleCalls = new Map<string, number>();
+  const originalSettle = publisher!.settleAttached.bind(publisher!);
+  vi.spyOn(publisher!, 'settleAttached').mockImplementation(
+    async (executionCallId: string) => {
+      const count = (settleCalls.get(executionCallId) ?? 0) + 1;
+      settleCalls.set(executionCallId, count);
+      if (executionCallId === 'execution-a') await gateA;
+      if (executionCallId === 'execution-b' && count >= 2) await gateB;
+      await originalSettle(executionCallId);
+    },
+  );
+  expect((await postFinalize('execution-a')).status).toBeGreaterThanOrEqual(
+    400,
+  );
+  expect((await postFinalize('execution-b')).status).toBeGreaterThanOrEqual(
+    400,
+  );
+  // Attempt one ticks (0 ms): A's settle parks on its gate before ever
+  // calling the store again; B's attempt fails onto the flap and re-arms
+  // as the real 250 ms backoff B still owns.
+  await vi.waitFor(() => {
+    expect(settleCalls.get('execution-a')).toBe(1);
+    expect(advances.get('execution-a')).toBe(1);
+    expect(settleCalls.get('execution-b')).toBe(1);
+    expect(advances.get('execution-b')).toBe(2);
+  });
+  // Close with A in flight and B's timer armed; B fires inside the drain.
+  const closing = publisher!.close();
+  let answered = false;
+  void closing.then(() => {
+    answered = true;
+  });
+  await vi.waitFor(() => {
+    expect(settleCalls.get('execution-b')).toBe(2);
+  });
+  releaseGateA();
+  await vi.waitFor(() => {
+    expect(
+      parseChildRun(
+        session!.authority.extensionRecord('child_run', 'execution-a')!.record,
+      ).stopReason,
+    ).toBe('exited');
+  });
+  // Give every close step behind A's landing its honest wall clock: the
+  // one-shot drain would be fully answered by now.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  // A landed; its sibling's drain-started attempt must still hold the
+  // answer: a one-shot snapshot would have closed past B here.
+  expect(answered).toBe(false);
+  releaseGateB();
+  await closing;
+  for (const executionCallId of ['execution-a', 'execution-b']) {
+    const record = parseChildRun(
+      session!.authority.extensionRecord('child_run', executionCallId)!.record,
+    );
+    expect(record).toMatchObject({
+      stopReason: 'exited',
+      run: { state: 'settled', execution: 'settled' },
+    });
+  }
+});
+
 it('advances the record when a blind-capture revision lands, without waiting for another output (P2-B)', async () => {
   // The boxed failure lands its own manifest revision — the record stops
   // advertising the still-pending last healthy forward the moment the

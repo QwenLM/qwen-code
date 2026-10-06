@@ -1009,7 +1009,7 @@ export class ManagedToolExecutor {
         unitName,
         executable: shellConfig.executable,
         args: [...shellConfig.argsPrefix, command],
-        env: backgroundEnv(),
+        env: backgroundEnv(tools.sessionId),
         cwd: directory,
         onOutput: (stream, chunk) => {
           bufferedBytes += chunk.byteLength;
@@ -1807,11 +1807,13 @@ export class ManagedToolExecutor {
   }
 }
 
-function backgroundEnv(): NodeJS.ProcessEnv {
+function backgroundEnv(sessionId: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     // The session context every managed command in this Runtime receives,
-    // resolved by context like the Hook command environment does.
-    ...getShellContextEnvVars(),
+    // resolved for this call's session: the worker serves many, no session
+    // context runs on the v3 path, and the process-global slot only ever
+    // reflects the first session created in this process.
+    ...sessionIdContext.run(sessionId, getShellContextEnvVars),
   };
   for (const key of [
     'PATH',

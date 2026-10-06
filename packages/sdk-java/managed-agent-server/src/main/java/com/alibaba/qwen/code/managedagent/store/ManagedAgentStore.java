@@ -2118,6 +2118,29 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
+    @Transactional
+    public void appendLiveSessionEventIfAbsent(String tenantId,
+            String sessionId, String type, Map<String, Object> data,
+            String sourceKey) {
+        // A locking read sees the latest committed status, where a plain one
+        // could still see the snapshot taken before a deletion committed.
+        Optional<SessionRecord> session = jdbc.query("SELECT * FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513)) AND"
+                        + " session_id = ? FOR UPDATE",
+                sessionMapper, tenantId, tenantId, sessionId).stream()
+                .findFirst();
+        if (session.isEmpty() || "DELETING".equals(session.get().status())
+                || "DELETED".equals(session.get().status())) {
+            return;
+        }
+        if (!hasSourceEvent(tenantId, sessionId, sourceKey)) {
+            appendEvent(tenantId, sessionId, null, type, data, false,
+                    sourceKey, clock.millis());
+        }
+    }
+
     public SessionRecord requireSession(String tenantId, String sessionId) {
         return findSession(tenantId, sessionId).orElseThrow(() ->
                 new ApiException(HttpStatus.NOT_FOUND, "session_not_found",

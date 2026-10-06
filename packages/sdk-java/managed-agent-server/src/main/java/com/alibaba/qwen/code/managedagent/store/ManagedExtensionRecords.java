@@ -929,8 +929,7 @@ public final class ManagedExtensionRecords {
                 && value.compareTo(BigDecimal.valueOf(min)) >= 0
                 && value.compareTo(BigDecimal.valueOf(Math.min(max,
                         MAX_COUNT))) <= 0,
-                () -> label + " must be an integer from " + min + " to "
-                        + max);
+                label + " must be an integer from " + min + " to " + max);
         return value.longValueExact();
     }
 

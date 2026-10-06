@@ -958,12 +958,25 @@ export class HostedShellPublisher {
     }
     await Promise.allSettled([...this.operations]);
     // The stranded-write fail stop stands, but a re-drive already on its
-    // way lands inside the drain: no close answers ahead of it either.
-    await Promise.allSettled(
-      [...this.captures.values()].map(
-        (entry) => entry.background?.redriveInFlight,
-      ),
-    );
+    // way lands inside the drain: no close answers ahead of it either. A
+    // backoff timer armed before the close may fire while these waits run
+    // and start its own in-flight attempt behind the first snapshot, so
+    // the drain keeps collecting until a whole round shows no in-flight
+    // attempt anywhere. Each attempt's own finally clears its slot before
+    // allSettled settles the observed promise, so a quiet round is exact.
+    for (;;) {
+      await Promise.allSettled(
+        [...this.captures.values()].map(
+          (entry) => entry.background?.redriveInFlight,
+        ),
+      );
+      if (
+        [...this.captures.values()].every(
+          (entry) => entry.background?.redriveInFlight === undefined,
+        )
+      )
+        break;
+    }
     for (const entry of this.captures.values()) {
       if (entry.background?.redrive) clearTimeout(entry.background.redrive);
     }

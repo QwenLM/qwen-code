@@ -59,6 +59,11 @@ interface StreamState {
   ended: boolean;
   sealed: boolean;
   queue: Promise<void>;
+  /** Serializes every page flush of this stream — its own page closes and
+   * the flush a manifest build performs — so a descriptor is only ever
+   * frozen at a point where pages, digest, byte length and the pending
+   * batch form one consistent boundary. */
+  flushChain: Promise<void>;
   /** The descriptor as its last flush froze it: an append after the
    * boundary opens a fresh page rather than touching the snapshot. */
   frozenSnapshot: ToolResultContentDescriptor;
@@ -79,6 +84,7 @@ function stream(id: StreamId): StreamState {
     ended: false,
     sealed: false,
     queue: Promise.resolve(),
+    flushChain: Promise.resolve(),
     frozenSnapshot: {
       streamId: id,
       role: id,
@@ -302,8 +308,21 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
 
   private async publishPage(state: StreamState): Promise<void> {
     if (state.pendingSegments.length === 0) return;
-    await this.flushPage(state);
+    await this.flushQueued(state);
     await this.publish('unknown', null, null);
+  }
+
+  /**
+   * Every page flush runs on the stream's own chain: a flush arriving
+   * while another is mid-publish runs strictly after it, so the empty-
+   * pending early return never freezes live counters against pages an
+   * in-flight sibling has not yet committed. The chain itself must never
+   * latch on one flush's refusal — flushPage already restored its batch.
+   */
+  private flushQueued(state: StreamState): Promise<void> {
+    const task = state.flushChain.then(() => this.flushPage(state));
+    state.flushChain = task.catch(() => undefined);
+    return task;
   }
 
   /**
@@ -436,7 +455,7 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     const contents: ToolResultContentDescriptor[] = [];
     for (const id of BOTH) {
       const state = this.streams[id];
-      await this.flushPage(state);
+      await this.flushQueued(state);
       contents.push(state.frozenSnapshot);
     }
     const broken = this.broken;
