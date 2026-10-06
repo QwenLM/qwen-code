@@ -1465,6 +1465,39 @@
     {
       "template": "child_agent",
       "domain": "child_run",
+      "id": "agent-child-run-id-empty",
+      "patch": {
+        "childRunId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "childRunId must be a non-empty string"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-owner-scope-number",
+      "patch": {
+        "ownerScopeId": 42
+      },
+      "valid": false,
+      "start": false,
+      "error": "ownerScopeId must be a non-empty string"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-root-session-nfd",
+      "patch": {
+        "rootSessionId": "café"
+      },
+      "valid": false,
+      "start": false,
+      "error": "rootSessionId must use NFC normalization"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
       "id": "agent-completion-unknown",
       "patch": {
         "completion": "answer"

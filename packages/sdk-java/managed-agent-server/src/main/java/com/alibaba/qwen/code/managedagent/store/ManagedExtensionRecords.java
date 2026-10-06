@@ -931,6 +931,11 @@ public final class ManagedExtensionRecords {
         require(!"child_failed".equals(stopReason)
                 || "settled".equals(execution),
                 "Child run child_failed needs its settled execution");
+        // The identities last, as the TypeScript validator reads them, so a
+        // doubly broken body reports the same clause in both languages.
+        id(child.get("childRunId"), "childRunId");
+        id(child.get("ownerScopeId"), "ownerScopeId");
+        id(child.get("rootSessionId"), "rootSessionId");
     }
 
     /** A normalized relative directory: `.` or NFC text without `.`/`..` segments. */

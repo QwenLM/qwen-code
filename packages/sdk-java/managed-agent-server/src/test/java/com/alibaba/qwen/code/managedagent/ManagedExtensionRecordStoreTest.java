@@ -417,6 +417,72 @@ class ManagedExtensionRecordStoreTest {
                         List.of(otherContent, receiptResource), 1_000)));
     }
 
+    @Test
+    void bindsAChildAcceptanceToItsRunKindCallReceiptAndClosure()
+            throws Exception {
+        CommitResource argsResource = hookResource("args-w",
+                "managed-tool-args",
+                "{\"command\":\"yes\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource inputResource = hookResource("input-w", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-w",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-w",
+                "managed-runtime-receipt", "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource otherReceipt = hookResource("receipt-v",
+                "managed-runtime-receipt",
+                "{\"other\":1}".getBytes(StandardCharsets.UTF_8));
+        // An acceptance naming a background Shell's record is not a child
+        // agent's acceptance, whatever it carries.
+        String shellSession = UUID.randomUUID().toString();
+        ExtensionRecordJournal shellJournal = journal(shellSession);
+        commitDomain(shellJournal, "shell-1", "child_run",
+                childRun("admitted", "intent", null, argsResource),
+                List.of(argsResource));
+        ObjectNode namingShell = acceptance(resultResource, receiptResource,
+                "accepted");
+        namingShell.put("childRunId", "shell-x");
+        assertRefused("an acceptance naming a background Shell", shellSession,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must name a child agent run of this Session",
+                () -> shellJournal.commit(shellJournal.requestDomain(
+                        "accept-1", "child_acceptance", namingShell,
+                        List.of(resultResource, receiptResource), 1_000)));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(journal, inputResource, resultResource,
+                receiptResource);
+        // A "sent" child returns through a notification input, never a call.
+        ObjectNode withCall = acceptance(resultResource, receiptResource,
+                "accepted");
+        withCall.put("parentExecutionCallId", "call-x");
+        assertRefused("an acceptance attaching a call to a sent child",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must attach the completion call its child run names",
+                () -> journal.commit(journal.requestDomain("accept-1",
+                        "child_acceptance", withCall,
+                        List.of(resultResource, receiptResource), 1_000)));
+        // Same content, another receipt: the receipt binds on its own.
+        assertRefused("an acceptance citing another terminal receipt",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must bind the result and receipt",
+                () -> journal.commit(journal.requestDomain("accept-1",
+                        "child_acceptance",
+                        acceptance(resultResource, otherReceipt, "accepted"),
+                        List.of(resultResource, otherReceipt), 1_000)));
+        // A child agent's launch input closes over the Session's resources.
+        String unheld = UUID.randomUUID().toString();
+        ExtensionRecordJournal unheldJournal = journal(unheld);
+        assertRefused("a child agent launch citing an input the Session"
+                        + " does not hold", unheld,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> unheldJournal.commit(unheldJournal.requestDomain(
+                        "agent-1", "child_run",
+                        childAgent("admitted", "intent", null, inputResource),
+                        List.of(), 1_000)));
+    }
+
     /** Commits a sent-completion child agent through its settled result. */
     private static void settleChildAgentChain(ExtensionRecordJournal journal,
             CommitResource inputResource, CommitResource resultResource,

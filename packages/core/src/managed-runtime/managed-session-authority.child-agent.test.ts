@@ -728,6 +728,53 @@ describe('managed session authority child_agent records', () => {
     });
   });
 
+  it('binds the terminal receipt on its own', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const otherReceipt = await harness.store.publish(
+      'managed-runtime-receipt',
+      Buffer.from('{"outcome":"other"}', 'utf8'),
+    );
+    await withAuthority(harness, async (authority) => {
+      await settleChild(harness, authority, life(refs));
+      // Same content, another receipt: the receipt binds independently.
+      await expect(
+        authority.commitExtensionRecord(
+          command('accept-1:1'),
+          {
+            domain: 'child_acceptance',
+            record: acceptance(refs, 'accepted', {
+              terminalReceiptRef: otherReceipt,
+            }),
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow('must bind the result and receipt');
+    });
+  });
+
+  it('closes a child agent launch over the Session resources', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const unheld = {
+      ...refs.input,
+      resourceId: 'input-never-published',
+    };
+    await withAuthority(harness, async (authority) => {
+      await expect(
+        authority.commitExtensionRecord(
+          command('run-1:1'),
+          {
+            domain: 'child_run',
+            record: childAgent({ ...refs, input: unheld }, {}),
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow('resource input-never-published is not present');
+      expect(await publishedBodies(harness, 'child_run')).toBe(0);
+    });
+  });
+
   it('replays a repeated acceptance command with the original receipt', async () => {
     const harness = await createHarness();
     const refs = await publishRefs(harness);
