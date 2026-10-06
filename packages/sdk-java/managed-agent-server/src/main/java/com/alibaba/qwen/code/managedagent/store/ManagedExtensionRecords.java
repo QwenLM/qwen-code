@@ -125,7 +125,8 @@ public final class ManagedExtensionRecords {
     private static final Pattern DIGEST = Pattern.compile("[0-9a-f]{64}");
     private static final Pattern PHASE = Pattern.compile(
             "[a-z][a-z0-9_]{0," + (MAX_PHASE_LENGTH - 1) + "}");
-    private static final List<String> TERMINAL = List.of("settled", "failed",
+    /** Run states after which no observation, output or run change may land. */
+    static final List<String> TERMINAL = List.of("settled", "failed",
             "cancelled");
     private static final Set<String> GRANT_KEYS = Set.of("sessionKey",
             "operationId", "domain", "operationRevision", "ownerId",
@@ -142,11 +143,26 @@ public final class ManagedExtensionRecords {
     private static final List<String> MONITOR_FIXED = List.of("monitorId",
             "ownerScopeId", "commandRef", "maxEvents", "idleTimeoutMs",
             "debounceMs");
+    private static final Set<String> CHILD_KEYS = Set.of("kind", "shellId",
+            "ownerScopeId", "commandRef", "startReceiptRef", "outputRef",
+            "stopReason", "stopRequested", "exitCode", "exitSignal", "run");
+    private static final List<String> CHILD_FIXED = List.of("kind", "shellId",
+            "ownerScopeId", "commandRef");
     private static final List<String> RUN_IDENTITIES = List.of("definition",
             "executionCallId", "effectId", "dispatchId", "deliveryId");
 
     private ManagedExtensionRecords() {
     }
+
+    /** Why a background Shell ended, by the state its run ended in. */
+    public static final Map<String, List<String>> CHILD_STOP_REASONS =
+            Map.of("settled", List.of("exited"), "failed",
+                    List.of("start_failed", "process_failed",
+                            "quota_exceeded"),
+                    "cancelled", List.of("stop_requested"));
+
+    private static final Pattern EXIT_SIGNAL = Pattern.compile(
+            "[A-Z][A-Z0-9]{0,15}");
 
     /** A record that breaks the contract. */
     public static final class InvalidRecordException
@@ -604,6 +620,178 @@ public final class ManagedExtensionRecords {
     }
 
     /**
+     * Checks the body of a managed-child_run schema version 1 record
+     * ({@code kind: "shell"}): one background Shell per record (H3 of
+     * #12827; see managed-child-run-record.ts for the same rules).
+     */
+    public static void requireChildRun(JsonNode child) {
+        closed(child, CHILD_KEYS, "childRun");
+        require("shell".equals(child.get("kind").textValue()),
+                "childRun.kind must be 'shell' in schema version 1");
+        JsonNode run = child.get("run");
+        requireRun(run);
+        // A background Shell is started by one tool call and is observed
+        // through its task projection and output Artifact; it has no
+        // delivery line.
+        require(!run.get("executionCallId").isNull()
+                && run.get("effectId").isNull()
+                && run.get("dispatchId").isNull()
+                && run.get("deliveryId").isNull()
+                && run.get("delivery").isNull()
+                && run.get("definition").isNull(),
+                "childRun.run must name its start call and nothing else");
+        id(child.get("shellId"), "childRun.shellId");
+        id(child.get("ownerScopeId"), "childRun.ownerScopeId");
+        durableRef(child.get("commandRef"), "childRun.commandRef");
+        String execution = text(run, "execution");
+        JsonNode startReceipt = child.get("startReceiptRef");
+        if (!startReceipt.isNull()) {
+            durableRef(startReceipt, "childRun.startReceiptRef");
+        }
+        require(startReceipt.isNull() || execution != null
+                && !"intent".equals(execution)
+                && !"dispatch_started".equals(execution)
+                && !"not_started_proven".equals(execution),
+                "childRun.startReceiptRef must be null before the process "
+                        + "starts");
+        require(!startReceipt.isNull()
+                || !"running_attached".equals(execution)
+                        && !"settled".equals(execution),
+                "childRun.startReceiptRef must be set once the process "
+                        + "started");
+        require(startReceipt.isNull() || !run.get("runtime").isNull(),
+                "childRun.startReceiptRef needs the Runtime binding that "
+                        + "started it");
+        JsonNode output = child.get("outputRef");
+        if (!output.isNull()) {
+            durableRef(output, "childRun.outputRef");
+            require(MONITOR_OUTPUT_KIND.equals(output.get("kind").textValue())
+                    && output.get("schemaVersion").asLong() == 1,
+                    "childRun.outputRef must reference "
+                            + MONITOR_OUTPUT_KIND + " version 1");
+        }
+        // Output needs a started process: nothing writes the manifest
+        // before one.
+        require(output.isNull() || !startReceipt.isNull(),
+                "childRun.outputRef needs a start receipt");
+        String stopReason = nullableOneOf(child.get("stopReason"),
+                concat(concat(CHILD_STOP_REASONS.get("settled"),
+                        CHILD_STOP_REASONS.get("failed")),
+                        CHILD_STOP_REASONS.get("cancelled")),
+                "childRun.stopReason");
+        JsonNode stopRequested = child.get("stopRequested");
+        require(stopRequested.isBoolean(),
+                "childRun.stopRequested must be boolean");
+        require(!"stop_requested".equals(stopReason)
+                || stopRequested.booleanValue(),
+                "childRun stop_requested needs its stop request");
+        JsonNode exitCode = child.get("exitCode");
+        if (!exitCode.isNull()) {
+            count(exitCode, 0, 255, "childRun.exitCode");
+        }
+        JsonNode exitSignal = child.get("exitSignal");
+        require(exitSignal.isNull()
+                || exitSignal.isTextual()
+                        && EXIT_SIGNAL.matcher(exitSignal.textValue())
+                                .matches(),
+                "childRun.exitSignal must be an uppercase signal name");
+        String state = text(run, "state");
+        String reason = text(run, "reason");
+        require((stopReason == null) != TERMINAL.contains(state),
+                "childRun.stopReason is set exactly when the run ends");
+        require(stopReason == null
+                || CHILD_STOP_REASONS.get(state).contains(stopReason),
+                "childRun.stopReason does not fit the " + state + " state");
+        // Every terminal run names the ending execution line: a natural
+        // exit is proven only by an observed settled execution under its
+        // receipt, a pre-start failure lands on not_started_proven, and an
+        // honored stop or a later failure settles the execution that the
+        // receipt proves started.
+        require(!"settled".equals(state) || "settled".equals(execution),
+                "childRun settled needs its settled execution");
+        require(!"cancelled".equals(state) || "settled".equals(execution),
+                "childRun cancelled needs its settled execution");
+        require(!"failed".equals(state)
+                || "settled".equals(execution)
+                || "not_started_proven".equals(execution),
+                "childRun failed needs settled or not_started_proven "
+                        + "execution");
+        require(!"start_failed".equals(stopReason)
+                || startReceipt.isNull() && "not_started_proven".equals(execution),
+                "childRun.stopReason start_failed needs a process that "
+                        + "never started");
+        require(!"process_failed".equals(stopReason) || !startReceipt.isNull(),
+                "childRun.stopReason process_failed needs a process that "
+                        + "started");
+        require(!("process_failed".equals(stopReason)
+                        || "quota_exceeded".equals(stopReason))
+                || "settled".equals(execution),
+                "childRun.stopReason process failure needs its settled "
+                        + "execution");
+        require("quota_exceeded".equals(stopReason)
+                == (reason != null && QUOTA_REASONS.contains(reason)),
+                "childRun.stopReason is quota_exceeded exactly for a "
+                        + "quota reason");
+        // Exit evidence is proven exactly when a Shell exits: any other
+        // end carries no exit status.
+        require("exited".equals(stopReason)
+                ? !exitCode.isNull() || !exitSignal.isNull()
+                : exitCode.isNull() && exitSignal.isNull(),
+                "childRun exitCode or exitSignal is proven exactly when it "
+                        + "exits");
+    }
+
+    /**
+     * Whether {@code child} may be the first revision of a background
+     * Shell: its run opens, nobody has asked it to stop yet, and it has
+     * written no output, which needs a started process.
+     */
+    public static boolean isChildRunStart(JsonNode child) {
+        return accepts(() -> requireChildRun(child))
+                && isRunStart(child.get("run"))
+                && !child.get("stopRequested").booleanValue()
+                && child.get("outputRef").isNull();
+    }
+
+    /**
+     * Whether {@code next} may follow {@code previous} as the next revision
+     * of one background Shell: its identity is fixed, its run moves
+     * forward, its start receipt is set once and never changes — a
+     * re-attach under a later generation keeps the receipt whose process
+     * it proves, while a changed receipt is refused as the shape of a
+     * rerun — its stop request is set but never cleared, its output may
+     * grow but is never removed, and once the run is terminal the total
+     * freeze enforces everything, including that exit evidence can never
+     * have been set beforehand.
+     */
+    public static boolean isChildRunSuccessor(JsonNode previous,
+            JsonNode next) {
+        if (!accepts(() -> requireChildRun(previous))
+                || !accepts(() -> requireChildRun(next))) {
+            return false;
+        }
+        for (String key : CHILD_FIXED) {
+            if (!same(previous.get(key), next.get(key))) {
+                return false;
+            }
+        }
+        if (!isRunSuccessor(previous.get("run"), next.get("run"))
+                || !previous.get("outputRef").isNull()
+                        && next.get("outputRef").isNull()
+                || previous.get("stopRequested").booleanValue()
+                        && !next.get("stopRequested").booleanValue()
+                || !previous.get("startReceiptRef").isNull()
+                        && !same(previous.get("startReceiptRef"),
+                                next.get("startReceiptRef"))) {
+            return false;
+        }
+        if (TERMINAL.contains(text(previous.get("run"), "state"))) {
+            return same(previous, next);
+        }
+        return true;
+    }
+
+    /**
      * Equality that compares numbers by value, so a record built in Java,
      * where 4 may be a long, matches the same record parsed from JSON.
      */
@@ -664,6 +852,44 @@ public final class ManagedExtensionRecords {
     }
 
     /**
+     * A millisecond timestamp read leniently, shared by the commit-side
+     * extraction and the authorization journal scans: an integral number or
+     * an integral numeric string of at most 19 integer digits and at most 19
+     * decimal places, else absent. Anything fractional, out of range, or
+     * otherwise shaped is absent, so the scans and the head columns can never
+     * disagree about whether a payload was representable. The width and scale
+     * pre-checks run before any BigInteger materialization, so an
+     * exponent-form string cannot tax the reader in either direction
+     * (1e+N needs the giant integer; 1e-N expands 10^N before dividing).
+     */
+    public static Long millisLenient(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        try {
+            if (node.isNumber() || node.isTextual()) {
+                BigDecimal value = node.isTextual()
+                        ? new BigDecimal(node.textValue().trim())
+                        : node.decimalValue();
+                // A long holds at most 19 integer digits; never materialize
+                // anything wider. Widen to long first: precision - scale can
+                // itself overflow int on an extreme exponent. A scale beyond
+                // 19 decimal places is likewise absent: toBigIntegerExact on
+                // 1e-N expands 10^N before dividing, and a representable
+                // long never needs more places.
+                if ((long) value.precision() - value.scale() > 19
+                        || value.scale() > 19) {
+                    return null;
+                }
+                return value.toBigIntegerExact().longValueExact();
+            }
+        } catch (ArithmeticException | NumberFormatException error) {
+            return null;
+        }
+        return null;
+    }
+
+    /**
      * A JSON number equal to an integer in range. As in JSON Schema and in
      * JavaScript, 1.0 counts as 1; a number past the double range, which
      * Jackson reads as an infinity, counts as none.
@@ -677,7 +903,7 @@ public final class ManagedExtensionRecords {
                 && value.compareTo(BigDecimal.valueOf(min)) >= 0
                 && value.compareTo(BigDecimal.valueOf(Math.min(max,
                         MAX_COUNT))) <= 0,
-                label + " is out of range");
+                label + " must be an integer from " + min + " to " + max);
         return value.longValueExact();
     }
 

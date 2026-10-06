@@ -9,6 +9,7 @@ import type {
   AgentConfigPatch,
   NewThread,
   NewWorkspaceAgent,
+  WorkspaceAgentRuntimeView,
   WorkspaceAgentSummaryView,
 } from './ThreadsPage';
 import type { ThreadDetailView } from './ThreadView';
@@ -21,6 +22,7 @@ import {
   type AgentLiveEvent,
   type AgentStreamState,
 } from './agent-events';
+import type { JoinToken } from './add-runtime-dialog';
 import type { AgentShare, AgentShareSummary } from './share-agent-dialog';
 
 interface CreateThreadResult {
@@ -28,10 +30,23 @@ interface CreateThreadResult {
 }
 
 export interface ThreadsApi {
+  connectRemoteHost?(input: {
+    remoteUrl: string;
+    remoteToken: string;
+    remoteCwd: string;
+    serverUrl: string;
+    provider: 'qwen';
+    allowHttp: boolean;
+  }): Promise<unknown>;
   listAgents(): Promise<{
     agents: WorkspaceAgentSummaryView[];
+    runtime?: WorkspaceAgentRuntimeView;
+    runtimes?: WorkspaceAgentRuntimeView[];
     capabilities?: AgentCapabilitiesView;
   }>;
+  /** A single-use token for `qwen serve --join` on another machine. */
+  createJoinToken?(supersedesHostId?: string): Promise<JoinToken>;
+  removeHost?(hostId: string): Promise<unknown>;
   createShare?(agentId: string): Promise<AgentShare>;
   listShares?(agentId: string): Promise<{ shares: AgentShareSummary[] }>;
   revokeShare?(agentId: string, callerId: string): Promise<unknown>;
@@ -96,7 +111,12 @@ export function createThreadsHttpApi(
     request<T>(path, { method: 'POST', body: JSON.stringify(body) });
 
   return {
+    connectRemoteHost: (input) => post('/hosts/remote-connect', input),
     listAgents: () => request('/agents'),
+    createJoinToken: (supersedesHostId) =>
+      post('/hosts/enrollment', supersedesHostId ? { supersedesHostId } : {}),
+    removeHost: (hostId) =>
+      request(`/hosts/${encodeURIComponent(hostId)}`, { method: 'DELETE' }),
     createShare: (agentId) =>
       post(`/agents/${encodeURIComponent(agentId)}/shares`, {}),
     listShares: (agentId) =>

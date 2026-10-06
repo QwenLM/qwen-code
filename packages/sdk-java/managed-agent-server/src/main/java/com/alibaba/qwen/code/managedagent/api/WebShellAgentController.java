@@ -14,6 +14,8 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellStreamRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSubmitRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEvent;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEventQueryRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskGetRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskQueryRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
@@ -66,6 +68,15 @@ public class WebShellAgentController {
             @Valid @RequestBody WebShellTaskGetRequest request) {
         return tasks.getWebShellTask(tenant.tenantId(), tenant.actorId(),
                 request.sessionId(), request.taskId());
+    }
+
+    @PostMapping("/tasks/events/query")
+    public WebShellPage<WebShellTaskEvent> taskEvents(TenantContext tenant,
+            @Valid @RequestBody WebShellTaskEventQueryRequest request) {
+        return tasks.queryWebShellTaskEvents(tenant.tenantId(),
+                tenant.actorId(), request.sessionId(), request.taskId(),
+                request.after(),
+                request.limit() == null ? 20 : request.limit());
     }
 
     @PostMapping("/sessions/query")
@@ -127,7 +138,7 @@ public class WebShellAgentController {
         }
         validateTraceMetadata(request.metadata());
         WebShellAdmission admission = webShell(selection == null
-                ? service.createSession(tenant.tenantId(),
+                ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         request.idempotencyKey(), request.agentId(), null,
                         request.title(), null, request.input())
                 : service.createWorkspaceSession(tenant.tenantId(),
@@ -183,6 +194,15 @@ public class WebShellAgentController {
             TenantContext tenant,
             @Valid @RequestBody WebShellLifecycleRequest request) {
         return operation(tenant, request, OperationKind.DELETE);
+    }
+
+    @PostMapping("/sessions/unarchive")
+    public ResponseEntity<WebShellSession> unarchive(TenantContext tenant,
+            @Valid @RequestBody WebShellLifecycleRequest request) {
+        var result = service.unarchiveWebShellSession(tenant.tenantId(), tenant.actorId(),
+                request.idempotencyKey(), request.sessionId());
+        return ResponseEntity.ok().header("X-Qwen-Idempotent-Replay", Boolean.toString(result.replayed()))
+                .body(result.body());
     }
 
     @PostMapping("/operations/query")

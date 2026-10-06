@@ -53,6 +53,62 @@ class ToolPublicationConfigurationTest {
                 .hasMessageContaining("Invalid publication verification size");
     }
 
+    @Test
+    void sharedOssFactoryPreservesEndpointSigningAndRetryPolicy() {
+        var properties = new ManagedAgentProperties();
+        var settings = properties.getToolPublication();
+        settings.setOssRegion("cn-hangzhou");
+        settings.setOssEndpoint("https://oss-cn-hangzhou.aliyuncs.com");
+        settings.setOssBucket("private-test-bucket");
+        settings.setServiceBaseUrl("https://test.invalid");
+        var credentials = new com.aliyun.oss.common.auth.DefaultCredentialProvider(
+                new com.aliyun.oss.common.auth.DefaultCredentials("test", "test"));
+        var client = (com.aliyun.oss.OSSClient) ToolPublicationConfiguration.buildOss(properties, credentials);
+        try {
+            assertThat(client.getCredentialsProvider()).isSameAs(credentials);
+            assertThat(client.getClientConfiguration().getSignatureVersion())
+                    .isEqualTo(com.aliyun.oss.common.comm.SignVersion.V4);
+            assertThat(client.getClientConfiguration().getMaxErrorRetry()).isEqualTo(1);
+            var request = new com.aliyun.oss.common.comm.RequestMessage("private-test-bucket", "key");
+            request.setMethod(com.aliyun.oss.HttpMethod.PUT);
+            var response = new com.aliyun.oss.common.comm.ResponseMessage(
+                    new com.aliyun.oss.common.comm.ServiceClient.Request());
+            response.setStatusCode(503);
+            assertThat(client.getClientConfiguration().getRetryStrategy().shouldRetry(
+                    new com.aliyun.oss.OSSException("write failure"), request, response, 0)).isFalse();
+        } finally { client.shutdown(); }
+        settings.setOssEndpoint("http://oss-cn-hangzhou.aliyuncs.com");
+        assertThatThrownBy(() -> ToolPublicationConfiguration.buildOss(properties, credentials))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("regional HTTPS");
+    }
+
+    @Test
+    void theJournalHeadAuthorizationFlagReachesTheStore() {
+        var configuration = new ToolPublicationConfiguration();
+        var properties = new ManagedAgentProperties();
+        var settings = properties.getToolPublication();
+        settings.setExecutionBytes(1024L * 1024 * 1024);
+        settings.setSessionBytes(1024L * 1024 * 1024);
+        settings.setTenantBytes(1024L * 1024 * 1024);
+        settings.setActiveCaptures(4L);
+        settings.setEntryConcurrency(4);
+        assertThat(storeOf(configuration, properties).journalHeadAuthorization())
+                .isFalse();
+        settings.setJournalHeadAuthorization(true);
+        assertThat(storeOf(configuration, properties).journalHeadAuthorization())
+                .isTrue();
+    }
+
+    private ToolPublicationStore storeOf(ToolPublicationConfiguration configuration,
+            ManagedAgentProperties properties) {
+        return configuration.toolPublicationStore(mock(JdbcTemplate.class),
+                mock(PlatformTransactionManager.class),
+                mock(ManagedSessionStore.class),
+                mock(com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository.class),
+                mock(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class),
+                properties);
+    }
+
     private ToolPublicationDataStore data(ManagedAgentProperties properties) {
         return new ToolPublicationConfiguration().toolPublicationDataStore(mock(JdbcTemplate.class),
                 mock(PlatformTransactionManager.class), mock(ToolPublicationStore.class),

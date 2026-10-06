@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
     CONSTRAINT uq_runtime_binding_generation
         UNIQUE (request_key, runtime_generation),
     INDEX idx_runtime_binding_scope
-        (scope_key, isolation_key, binding_state)
+        (scope_key, isolation_key, binding_state),
+    INDEX qwen_runtime_harness_bindings_idx (isolation_key, isolation_class)
 );
 
 CREATE TABLE IF NOT EXISTS managed_workspace_operator_recovery (
@@ -130,10 +131,20 @@ CREATE TABLE IF NOT EXISTS qwen_tool_execution (
     settled_at DATETIME(6),
     abandoned_at DATETIME(6),
     loss_evidence_id VARCHAR(512),
+    authorized_dispatch_generation BIGINT,
+    authorized_binding_version BIGINT,
     CONSTRAINT uq_tool_execution_idempotency
         UNIQUE (idempotency_key_hash),
     INDEX idx_tool_execution_session
         (runtime_session_key, execution_state),
     INDEX idx_tool_execution_binding
         (binding_id, runtime_generation, execution_state)
+);
+
+CREATE TABLE IF NOT EXISTS qwen_runtime_harness_drain (
+    tenant_key VARCHAR(64) NOT NULL,
+    harness_key VARCHAR(64) NOT NULL,
+    tenant_id VARCHAR(512) NOT NULL,
+    harness_session_id VARCHAR(512) NOT NULL,
+    PRIMARY KEY (tenant_key, harness_key)
 );

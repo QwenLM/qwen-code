@@ -54,7 +54,11 @@ export function normalizeSessionData(
 
   // Merge tool result information into tool call messages
   for (const record of originalRecords) {
-    if (record.type !== 'tool_result') continue;
+    if (
+      record.type !== 'tool_result' ||
+      record.subtype === 'code_mode_tool_result'
+    )
+      continue;
 
     const toolCallMessage = buildToolCallMessageFromResult(record, config);
     if (!toolCallMessage?.toolCall) continue;

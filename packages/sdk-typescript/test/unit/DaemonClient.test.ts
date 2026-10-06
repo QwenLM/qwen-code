@@ -7729,6 +7729,37 @@ describe('DaemonClient', () => {
         reason: 'remote user request',
       });
     });
+
+    it('grantWorkspaceTrust posts to /workspace/trust/grant', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, trustStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.grantWorkspaceTrust({ clientId: 'client-1' });
+
+      expect(result).toEqual(trustStatus);
+      expect(calls[0]?.url).toBe('http://daemon/workspace/trust/grant');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('workspace-scoped grantWorkspaceTrust targets the qualified route', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, trustStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client
+        .workspaceByCwd('/work/secondary')
+        .grantWorkspaceTrust();
+
+      expect(result).toEqual(trustStatus);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Fwork%2Fsecondary/trust/grant',
+      );
+      expect(calls[0]?.method).toBe('POST');
+    });
   });
 
   describe('workspacePermissions', () => {
@@ -8465,6 +8496,33 @@ describe('DaemonClient', () => {
   });
 
   describe('extension operations', () => {
+    it('loads extension summaries without changing the full status endpoint', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { extensions: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.workspaceExtensionSummaries();
+      await client.workspaceExtensions();
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspace/extensions/summary',
+        'http://daemon/workspace/extensions',
+      ]);
+      expect(calls.every((call) => call.method === 'GET')).toBe(true);
+    });
+
+    it('encodes the extension name in a targeted details request', async () => {
+      const entry = { name: '@scope/demo', details: { skills: ['review'] } };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, entry));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.workspaceExtensionDetails('@scope/demo'),
+      ).resolves.toEqual(entry);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/extensions/%40scope%2Fdemo/details',
+      );
+      expect(calls[0]?.method).toBe('GET');
+    });
+
     it.each(['/tmp/demo-extension', 'C:\\demo-extension'])(
       'sends daemon-local extension path %s unchanged',
       async (source) => {
