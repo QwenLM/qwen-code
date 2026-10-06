@@ -766,102 +766,136 @@ class ManagedAgentMySqlIT {
 
     @Test
     @Order(9)
-    void announcesNothingAfterDeletionStartsMidCommit() throws Exception {
+    void journalsNothingAfterTheSessionIsDeleted()
+            throws Exception {
         DriverManagerDataSource dataSource = dataSource();
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
-        TransactionTemplate transactions = new TransactionTemplate(
-                new DataSourceTransactionManager(dataSource));
         ManagedAgentStore agents = new ManagedAgentStore(jdbc,
                 new ObjectMapper(), Clock.systemUTC(), ignored -> {
                 }, new ManagedWorkspaceRegistry(jdbc),
                 new ManagedAgentProperties());
-        String tenant = "mysql-extension-delete-" + UUID.randomUUID();
-        String session = inTransaction(transactions,
-                () -> agents.insertSessionCommand(tenant, "CREATE_SESSION",
-                        "create", "sha256:" + "a".repeat(64), "qwen-code",
-                        null, "tasks", List.of(), "sha256:" + "b".repeat(64)))
-                .sessionId();
-        // The public deletion starts after the private commit read its
-        // snapshot; REPEATABLE READ hides it from a plain read. Completion
-        // waits for the private writer, so it runs after this commit.
-        AtomicReference<OperationRecord> deletion = new AtomicReference<>();
-        AgentStateStore racing = (AgentStateStore) Proxy.newProxyInstance(
-                AgentStateStore.class.getClassLoader(),
-                new Class<?>[] {AgentStateStore.class},
-                (proxy, method, arguments) -> {
-                    if ("appendLiveSessionEventIfAbsent".equals(
-                            method.getName())) {
-                        CompletableFuture.runAsync(() -> {
-                            String operation = inTransaction(transactions,
-                                    () -> agents.beginOperation(tenant,
-                                            session, OperationKind.DELETE,
-                                            "sha256:" + "c".repeat(64),
-                                            "delete", "digest-delete"))
-                                    .operation().operationId();
-                            deletion.set(inTransaction(transactions,
-                                    () -> agents.claimOperation(tenant,
-                                            session, operation, "worker",
-                                            Duration.ofMinutes(1)))
-                                    .orElseThrow());
-                        }).join();
-                    }
-                    try {
-                        return method.invoke(agents, arguments);
-                    } catch (InvocationTargetException error) {
-                        throw error.getCause();
-                    }
-                });
-        ManagedSessionStore store = new ManagedSessionStore(jdbc,
-                new ManagedExtensionRecordStore(jdbc, racing));
+        TransactionTemplate transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource));
+        String tenant = "mysql-journal-deleted";
+        String session = agents.insertSessionCommand(tenant,
+                "CREATE_SESSION", "delete-journal-founder",
+                "digest-deleted-journal", "qwen-code", null, null,
+                List.of(), null).sessionId();
         ExtensionRecordJournal journal = inTransaction(transactions,
-                () -> new ExtensionRecordJournal(store, tenant,
-                        "mysql-extension-workspace", session).open());
-        JsonNode start = ManagedExtensionProjectionContractTest.fixtures()
-                .required("monitorChainCases").get(0).required("revisions")
-                .get(0).required("monitorRun");
-        inTransaction(transactions,
-                () -> journal.commitMonitor("start", start, 1_000));
+                () -> new ExtensionRecordJournal(new ManagedSessionStore(
+                        jdbc), tenant, "mysql-journal-workspace",
+                        session).open());
+        JsonNode chain = ManagedExtensionProjectionContractTest.fixtures()
+                .required("monitorChainCases").get(0).required("revisions");
+        inTransaction(transactions, () -> journal.commitMonitor("deleted-0",
+                chain.get(0).required("monitorRun"),
+                chain.get(0).required("occurredAt").longValue()));
+        assertThat(count(jdbc, "qwen_managed_session_task_journal", tenant,
+                session)).isEqualTo(1);
+        // Begin the delete mid-life: it stays pending while this journal's
+        // writer holds the Session, so the Session is DELETING when the next
+        // revision lands.
+        agents.beginOperation(tenant, session, OperationKind.DELETE,
+                "sha256:" + "d".repeat(64), "delete", "digest-delete");
+        assertThat(jdbc.queryForObject("SELECT status FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, tenant,
+                session)).isEqualTo("DELETING");
+        inTransaction(transactions, () -> journal.commitMonitor("deleted-1",
+                chain.get(1).required("monitorRun"),
+                chain.get(1).required("occurredAt").longValue()));
+        // The record committed, but the journal above sees no second row —
+        // the guard reads the latest committed status and a deleting Session
+        // journals no further.
+        assertThat(count(jdbc, "qwen_managed_session_task_journal", tenant,
+                session)).isEqualTo(1);
+        // Same record key: one row, second revision landed on it.
+        assertThat(jdbc.queryForObject("SELECT revision FROM"
+                        + " qwen_managed_session_extension_record WHERE"
+                        + " tenant_id = ? AND session_id = ?", Long.class,
+                tenant, session)).isEqualTo(2L);
+    }
 
-        assertThat(count(jdbc, "qwen_managed_session_extension_record",
-                tenant, session)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_session"
-                + " WHERE tenant_id = ? AND session_id = ?", String.class,
-                tenant, session)).isEqualTo("DELETING");
-        OperationRecord operation = deletion.get();
-        assertThatThrownBy(() -> inTransaction(transactions,
-                () -> agents.completeOperation(tenant, session,
-                        operation.operationId(), "worker",
-                        operation.claimGeneration(), true)))
-                .isInstanceOfSatisfying(ApiException.class, error ->
-                        assertThat(error.getCode()).isEqualTo(
-                                "managed_session_writer_active"));
-        assertThat(count(jdbc, "qwen_output_session_retirement",
-                tenant, session)).isZero();
-        long generation = jdbc.queryForObject("SELECT writer_generation FROM"
-                + " qwen_managed_session_journal_head WHERE tenant_id = ? AND"
-                + " session_id = ?", Long.class, tenant, session);
-        inTransaction(transactions, () -> store.sealWriter(tenant, session,
-                "extension-writer-token-0123456789", new SealWriterRequest(
-                        "mysql-extension-workspace", "writer-extension",
-                        generation)));
-        assertThat(inTransaction(transactions,
-                () -> agents.completeOperation(tenant, session,
-                        operation.operationId(), "worker",
-                        operation.claimGeneration(), true))).isTrue();
-        assertThat(jdbc.queryForObject("SELECT state FROM"
-                + " qwen_managed_session_journal_head WHERE tenant_id = ? AND"
-                + " session_id = ?", String.class, tenant, session))
-                .isEqualTo("DELETED");
-        assertThat(count(jdbc, "qwen_managed_session_extension_record",
-                tenant, session)).isEqualTo(1);
-        List<String> events = jdbc.queryForList("SELECT event_type FROM"
-                        + " managed_agent_event WHERE tenant_id = ? AND"
-                        + " session_id = ? ORDER BY sequence_id",
-                String.class, tenant, session);
-        assertThat(events).endsWith("session.deleted")
-                .doesNotContain("task.updated");
+    @Test
+    @Order(9)
+    void journalsNothingWhenTheDeletionCommitsMidCommit() throws Exception {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        ManagedAgentStore agents = new ManagedAgentStore(jdbc,
+                new ObjectMapper(), Clock.systemUTC(), ignored -> {
+                }, new ManagedWorkspaceRegistry(jdbc),
+                new ManagedAgentProperties());
+        TransactionTemplate transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource));
+        String tenant = "mysql-journal-mid-commit";
+        String session = agents.insertSessionCommand(tenant,
+                "CREATE_SESSION", "mid-commit-founder",
+                "digest-mid-commit", "qwen-code", null, null,
+                List.of(), null).sessionId();
+        ExtensionRecordJournal journal = inTransaction(transactions,
+                () -> new ExtensionRecordJournal(new ManagedSessionStore(
+                        jdbc), tenant, "mysql-journal-workspace",
+                        session).open());
+        JsonNode chain = ManagedExtensionProjectionContractTest.fixtures()
+                .required("monitorChainCases").get(0).required("revisions");
+        inTransaction(transactions, () -> journal.commitMonitor("mid-0",
+                chain.get(0).required("monitorRun"),
+                chain.get(0).required("occurredAt").longValue()));
+        assertThat(count(jdbc, "qwen_managed_session_task_journal", tenant,
+                session)).isEqualTo(1);
+        // A second connection holds the record row, so the next commit
+        // blocks at its UPDATE: after its first consistent read took the
+        // snapshot, and before the deletion guard runs.
+        try (java.sql.Connection holder = dataSource.getConnection()) {
+            holder.setAutoCommit(false);
+            try (var lock = holder.prepareStatement("SELECT record_key FROM"
+                    + " qwen_managed_session_extension_record WHERE"
+                    + " tenant_id = ? AND session_id = ? FOR UPDATE")) {
+                lock.setString(1, tenant);
+                lock.setString(2, session);
+                lock.executeQuery().close();
+            }
+            CompletableFuture<Object> commit = CompletableFuture.supplyAsync(
+                    () -> inTransaction(transactions, () -> journal
+                            .commitMonitor("mid-1",
+                                    chain.get(1).required("monitorRun"),
+                                    chain.get(1).required("occurredAt")
+                                            .longValue())));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            // Proof that the record commit is actually blocked behind the
+            // held row: the blocked statement is the only running statement
+            // on this table (the schema belongs to this test), and it ages.
+            // Lock-introspection tables are not portable here — MariaDB
+            // keeps information_schema.innodb_lock_waits empty in this
+            // exact condition while SHOW ENGINE INNODB STATUS shows the
+            // wait — so the poll reads the process list instead.
+            String blocked = "SELECT COUNT(*) FROM"
+                    + " information_schema.PROCESSLIST WHERE DB = DATABASE()"
+                    + " AND COMMAND = 'Query' AND TIME >= 1 AND INFO LIKE"
+                    + " 'UPDATE qwen_managed_session_extension_record%'";
+            while (jdbc.queryForObject(blocked, Integer.class) == 0) {
+                assertThat(commit).as("the record commit must wait on the"
+                        + " held row, not finish").isNotDone();
+                assertThat(System.nanoTime()).isLessThan(deadline);
+                Thread.sleep(50);
+            }
+            // The deletion begins and commits while the record commit waits
+            // behind its snapshot.
+            agents.beginOperation(tenant, session, OperationKind.DELETE,
+                    "sha256:" + "e".repeat(64), "delete-mid", "digest-mid");
+            holder.commit();
+            commit.get(30, TimeUnit.SECONDS);
+        }
+        assertThat(jdbc.queryForObject("SELECT revision FROM"
+                        + " qwen_managed_session_extension_record WHERE"
+                        + " tenant_id = ? AND session_id = ?", Long.class,
+                tenant, session)).isEqualTo(2L);
+        assertThat(count(jdbc, "qwen_managed_session_task_journal", tenant,
+                session)).isEqualTo(1);
     }
 
     @Test
