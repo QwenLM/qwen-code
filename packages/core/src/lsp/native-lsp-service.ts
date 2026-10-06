@@ -73,12 +73,15 @@ function describeLspServerState(name: string, handle: LspServerHandle): string {
   if (handle.status === 'READY' && !handle.connection) {
     return `${name} has no active connection`;
   }
-  // Rendered through `getErrorMessage` so this arm is capped and cause-aware
-  // like the `failures` arm it is joined with: a crash-exhausted FAILED handle
-  // records no `error`, leaving the raw stderr tail as the only cause.
-  const tail = handle.processDiagnostics?.stderrTail?.trim();
-  const cause = handle.error ?? (tail ? { message: tail } : undefined);
-  const raw = cause && getErrorMessage(cause);
+  // Only a FAILED handle's stderr tail is a cause — on a starting server it
+  // is ordinary vendor logging. The tail is a suffix of everything the
+  // subprocess printed, so the cause sits at its END: take the last non-empty
+  // line before any head-bounded cap can cut the actionable line away.
+  const tail =
+    handle.status === 'FAILED'
+      ? handle.processDiagnostics?.stderrTail
+      : undefined;
+  const raw = handle.error ? getErrorMessage(handle.error) : tail?.trim();
   const lines = raw
     ?.split('\n')
     .map((line) => line.trim())
@@ -101,6 +104,35 @@ function describeLspServerState(name: string, handle: LspServerHandle): string {
 const MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH = 1000;
 
 /**
+ * Join rejection entries under the aggregate budget without dropping a server
+ * name: the join pays `'; '` separators and the shrink ellipsis, so the
+ * per-entry share is what remains after both. When the separators alone
+ * exceed the budget (hundreds of servers) a final hard cut keeps the ceiling
+ * absolute.
+ */
+function boundedRejectionDetail(entries: string[]): string {
+  const detail = entries.join('; ');
+  if (detail.length <= MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH) {
+    return detail;
+  }
+  const share = Math.max(
+    1,
+    Math.floor(
+      (MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH - 2 * (entries.length - 1)) /
+        entries.length,
+    ) - 1,
+  );
+  const shrunk = entries
+    .map((entry) =>
+      entry.length > share ? `${entry.slice(0, share)}…` : entry,
+    )
+    .join('; ');
+  return shrunk.length > MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH
+    ? `${shrunk.slice(0, MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH - 1)}…`
+    : shrunk;
+}
+
+/**
  * Build the rejection for a diagnostics query that retrieved nothing while
  * something was wrong: a selected server whose pull failed or answered
  * unusably, or a configured server that was never queried because it is not
@@ -115,21 +147,9 @@ function nothingRetrievedForDiagnostics(
     ...failures.map(({ name, error }) => `${name}: ${getErrorMessage(error)}`),
     ...skipped,
   ];
-  let detail = entries.join('; ');
-  if (detail.length > MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH) {
-    // Bound the aggregate without dropping a server name: every over-long
-    // entry shrinks to an equal share of the budget.
-    const share = Math.max(
-      40,
-      Math.floor(MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH / entries.length),
-    );
-    detail = entries
-      .map((entry) =>
-        entry.length > share ? `${entry.slice(0, share)}…` : entry,
-      )
-      .join('; ');
-  }
-  return new Error(`No LSP diagnostics could be retrieved (${detail})`);
+  return new Error(
+    `No LSP diagnostics could be retrieved (${boundedRejectionDetail(entries)})`,
+  );
 }
 
 /** JSON-RPC "method not found": the server does not implement the request. */
@@ -765,7 +785,7 @@ export class NativeLspService {
       .map(([name, handle]) => describeLspServerState(name, handle));
     if (skipped.length > 0) {
       throw new Error(
-        `No LSP server is ready to provide diagnostics (${skipped.join('; ')})`,
+        `No LSP server is ready to provide diagnostics (${boundedRejectionDetail(skipped)})`,
       );
     }
     if (uri && configured.length > 0) {
@@ -2290,11 +2310,19 @@ export class NativeLspService {
           this.declaredOwnerExtensions(refusing).has(extension),
         );
       if (answeredRelevant === 0 || (refusedOwner && answeredOwner === 0)) {
-        throw failures.length > 0 || unsupported.length > 0
-          ? nothingRetrievedForDiagnostics(
-              [...failures, ...unsupported],
-              unreachable,
-            )
+        // Name only servers the file does not provably exclude: an irrelevant
+        // server's failure or refusal says nothing about this file, and
+        // naming it would suppress the coverage fallback that exists for
+        // exactly this state. A server that set `refusedOwner` declares the
+        // queried extension, so it always survives this filter.
+        const blame = [
+          ...relevantFailures,
+          ...unsupported.filter(
+            ({ handle }) => !this.serverDeclaredIrrelevant(handle, extension),
+          ),
+        ];
+        throw blame.length > 0
+          ? nothingRetrievedForDiagnostics(blame, unreachable)
           : new Error(
               'No LSP diagnostics could be retrieved (no configured server covers the queried file)',
             );

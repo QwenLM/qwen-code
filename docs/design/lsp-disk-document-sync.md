@@ -120,16 +120,22 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   message rather than claiming a clean or complete result. Successful empty
   diagnostics still display as clean. For the two diagnostics pulls the error
   result design is now in place: a failed pull and an unusable response (no
-  response, or no reported item surviving normalization) are recorded per
-  server; a query that retrieves nothing rejects when a selected pull failed
-  or a server that could own the queried file was unreachable, and the tool
-  surfaces the rejection as `ToolErrorType.EXECUTION_FAILED`. A server that
-  could never own the queried file does not veto a document query; a workspace
-  query refuses an unbacked clean report while any configured server is
-  unreachable. That relevance rule excuses a server from vetoing _another_
-  server's answer, never from being the only answer: a document query that no
-  queried server answered rejects even when every recorded failure belongs to
-  a server the queried file excludes. Other request/pull catches and public
+  response, or reported items none of which survive normalization) are
+  recorded per server. A `-32601` refusal is not a failure: the server never
+  implemented the pull, so it is recorded on a separate `unsupported` ledger
+  and vetoes a document answer only when the refusing server declares the
+  queried extension and no answering server owns it. A document query that
+  retrieves nothing rejects when a recorded failure belongs to a server the
+  queried file does not exclude, when a declared owner's refusal stands
+  unbacked, or when a server that could own the queried file was unreachable;
+  the tool surfaces the rejection as `ToolErrorType.EXECUTION_FAILED`. A
+  server that could never own the queried file does not veto a document query;
+  a workspace query refuses an unbacked clean report while any configured
+  server is unreachable. That relevance rule excuses a server from vetoing
+  _another_ server's answer, never from being the only answer: a document
+  query that no queried server answered rejects even when every recorded
+  failure belongs to a server the queried file excludes. Other request/pull
+  catches and public
   query catches other than hierarchy provenance handling are unchanged and can
   return empty arrays or null; these are **not evidence of clean diagnostics**.
 - Notification delivery is not acknowledged by the transport. This change does
@@ -191,7 +197,16 @@ server's tracking (`retains the unchanged server snapshot when only its sibling
 reloads`); R1-15, forced warmup passes `false` instead of the force flag
 (`forces unchanged TypeScript warmup with a monotonic didChange before retry`).
 R1-14 is the negative control: raising `DEFAULT_LSP_WARMUP_DELAY_MS` to 300 in
-`constants.ts` must leave `preserves replayed snapshots` green.
+`constants.ts` must leave `preserves replayed snapshots` green. The refusal
+gate adds four more: the `rust` row leaves `DIAGNOSTIC_LANGUAGE_ALIASES`
+(`lets a -32601 refusal from the rust owner veto a non-owner empty answer`);
+`declaredOwnerExtensions` gains the JS/TS family widening (`does not let a
+javascript-only answerer back a typescript refusal`);
+`declaredDiagnosticExtensions` stops reading the `extensionToLanguage` values
+(`clears a clean answer through a partial extensionToLanguage mapping` and
+`names the failed owner a partial mapping leaves unanswered`); the second
+rejection names the unfiltered `failures`/`unsupported` ledgers (`does not
+blame an irrelevant server whose pull resolved to nothing`).
 
 The touched service and manager and their collocated unit tests were renamed to
 kebab-case per AGENTS.md. Their barrel exports, native client type imports,

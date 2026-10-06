@@ -635,17 +635,25 @@ export class LspServerManager {
     if (!handle.process) {
       return;
     }
-    handle.process.once('exit', (code) => {
+    handle.process.once('exit', (code, signal) => {
       if (handle.stopRequested) {
         return;
       }
       handle.processExitedUnexpectedly = true;
+      // The exit the diagnostics surfaces render as the cause: without it a
+      // crash-exhausted handle reads as a bare `failed`, indistinguishable
+      // from a missing binary.
+      const exitCause = () =>
+        new Error(
+          `server process exited (code ${code ?? 'unknown'}, signal ${signal ?? 'unknown'})`,
+        );
       // Only unexpected process exits can trigger restart. Explicit stops set
       // stopRequested before terminating the process.
       if (!handle.config.restartOnCrash) {
         debugLogger.warn(
           `LSP server ${name} exited but restartOnCrash is disabled`,
         );
+        handle.error = exitCause();
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
@@ -655,6 +663,7 @@ export class LspServerManager {
         debugLogger.warn(
           `LSP server ${name} exited but maxRestarts is ${maxRestarts}`,
         );
+        handle.error = exitCause();
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
@@ -664,6 +673,7 @@ export class LspServerManager {
         debugLogger.warn(
           `LSP server ${name} reached max restart attempts (${maxRestarts}), stopping restarts`,
         );
+        handle.error = exitCause();
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;

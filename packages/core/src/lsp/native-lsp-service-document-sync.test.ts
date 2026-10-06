@@ -2521,6 +2521,62 @@ describe('NativeLspService disk document synchronization', () => {
     );
 
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'keeps the %s rejection bounded when many servers fail at once',
+      async (operation) => {
+        // Thirty failing servers: per-entry caps leave a 30 KB join, so the
+        // aggregate budget must divide what the separators leave — without
+        // dropping a server name.
+        const servers: Array<[string, LspServerHandle]> = [['test', handle]];
+        connection.request.mockRejectedValue(new Error('x'.repeat(5000)));
+        for (let i = 0; i < 29; i++) {
+          const failing = createConnection();
+          failing.request.mockRejectedValue(new Error('y'.repeat(5000)));
+          servers.push([
+            `extra-${i}`,
+            {
+              ...handle,
+              config: { ...handle.config, name: `extra-${i}` },
+              connection: failing,
+            },
+          ]);
+        }
+        withServers(servers);
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error!.message.length).toBeLessThan(1100);
+        expect(result.error!.message).toContain('extra-28');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'keeps the %s no-server-ready rejection bounded over many failed servers',
+      async (operation) => {
+        // Thirty FAILED handles with crash tails: the skipped join answers to
+        // the same aggregate budget as the failures join.
+        withServers(
+          Array.from({ length: 30 }, (_, i): [string, LspServerHandle] => [
+            `down-${i}`,
+            {
+              ...handle,
+              config: { ...handle.config, name: `down-${i}` },
+              status: 'FAILED',
+              connection: undefined,
+              processDiagnostics: { stderrTail: 'y'.repeat(8192) },
+            },
+          ]),
+        );
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error!.message.length).toBeLessThan(1100);
+        expect(result.error!.message).toContain('down-29');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
       'caps a huge stderr tail rendered for a crashed server in %s',
       async (operation) => {
         // The skipped arm renders the recorded cause next to the failures
@@ -3312,7 +3368,8 @@ describe('NativeLspService disk document synchronization', () => {
       // The sole configured server declares python only, so the relevance
       // rule excuses its failed pull for main.ts — but nothing else was asked
       // and nothing answered, so the empty result would certify a file no
-      // server analyzed.
+      // server analyzed. The rejection states the coverage fact rather than
+      // blaming a server that could never own the file.
       const failingConnection = createConnection();
       failingConnection.request.mockRejectedValue(
         new Error('method not found'),
@@ -3335,8 +3392,41 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.error).toMatchObject({
         type: ToolErrorType.EXECUTION_FAILED,
       });
-      expect(result.error?.message).toContain('method not found');
+      expect(result.error?.message).toContain(
+        'no configured server covers the queried file',
+      );
+      expect(result.error?.message).not.toContain('pyright');
       expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('does not blame an irrelevant server whose pull resolved to nothing', async () => {
+      // A disposed connection resolves `undefined` instead of rejecting; the
+      // excused server's non-answer must not suppress the coverage fallback
+      // either.
+      const silentConnection = createConnection();
+      silentConnection.request.mockResolvedValue(undefined);
+      withServers([
+        [
+          'pyright',
+          {
+            ...handle,
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['python'],
+            },
+            connection: silentConnection,
+          },
+        ],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'no configured server covers the queried file',
+      );
+      expect(result.error?.message).not.toContain('pyright');
     });
 
     it('keeps a clean answer from the only queried server that answered', async () => {
@@ -3437,10 +3527,10 @@ describe('NativeLspService disk document synchronization', () => {
     );
 
     it('does not excuse a failed server whose config key is capitalized', async () => {
-      // `.lsp.json` keys reach `languages` unnormalized, so `"Python"` has to
-      // derive `py` exactly like `"python"` does. Otherwise the relevance rule
-      // excuses the only Python-capable server for a `.py` file and the
-      // sibling's empty report certifies it clean.
+      // `.lsp.json` keys reach `languages` unnormalized. `"Python"` derives
+      // no attributable extension, so the relevance rule fails CLOSED: the
+      // downed server keeps its veto on the `.py` query and its failure is
+      // named, instead of the sibling's empty report certifying the file.
       addFile('main.py', 'x = 1\n');
       mockDiagnosticsResponses(connection);
       const failingConnection = createConnection();
@@ -3475,6 +3565,29 @@ describe('NativeLspService disk document synchronization', () => {
       });
       expect(result.error?.message).toContain('method not found');
       expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('counts a capitalized TypeScript key as owning the .ts file it answered', async () => {
+      // The case the lowercase normalization actually decides: `TypeScript`
+      // must derive `ts` on the OWNER side exactly like `typescript` does, or
+      // its authoritative empty report stops backing main.ts and the
+      // sibling's -32601 refusal flips a clean file to a hard tool error.
+      const [tsPath] = addFile('main.ts', 'const x: number = 1;\n');
+      const answerer = createConnection();
+      mockDiagnosticsResponses(answerer);
+      withServers([
+        [
+          'TypeScript',
+          serverOn('typescript-language-server', ['TypeScript'], answerer),
+        ],
+        ['ts', serverOn('tsls', ['typescript'], refusingConnection(-32601))],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: tsPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
     });
 
     it('does not excuse a downed typescript server from a .js query it serves', async () => {

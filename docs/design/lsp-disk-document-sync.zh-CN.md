@@ -81,11 +81,17 @@ incoming/outgoing 调用在预热前后及请求后进行验证。陈旧、缺�
   TypeScript 预热错误；其他预热文件失败不会阻止查询已同步目标。传播的失败使用
   工具已有的失败提示，而不是声称结果干净或完整。成功的空诊断仍显示为干净。
   两个诊断拉取的错误结果设计现已落地：拉取失败与不可用响应（无响应，或报告的
-  item 无一通过归一化）按服务器记录；当查询一无所获、且所选拉取失败或某个
+  item 无一通过归一化）按服务器记录。`-32601` 拒绝不算失败：服务器从未实现该
+  拉取，因此记入单独的 `unsupported` 账本，且仅当拒绝方声明了被查扩展名、且
+  没有任何应答服务器负责该文件时，才能否决文档级答案。当查询一无所获、且存在
+  属于未被查文件排除的服务器的失败记录、或某个声明方的拒绝无人背书、或某个
   可能负责被查文件的服务器不可达时，查询拒绝，工具以
   `ToolErrorType.EXECUTION_FAILED` 暴露该拒绝。不可能负责被查文件的服务器
   不会否决文档级查询；工作区级查询在任一已配置服务器不可达时，拒绝给出无依据的
-  干净报告。除调用层次来源处理外，其余请求/拉取及公共查询的捕获逻辑不变，可能
+  干净报告。相关性规则只能豁免一个服务器对*另一台*服务器答案的否决，绝不能豁免
+  唯一的答案本身：没有任何被查询服务器应答的文档级查询必须拒绝，即使所有已记录
+  的失败都属于被查文件所排除的服务器。除调用层次来源处理外，其余请求/拉取及
+  公共查询的捕获逻辑不变，可能
   返回空数组或 null；这些**不能证明诊断干净**。
 - 传输不确认通知交付。本变更不重构异步写入或已关闭连接的处理。
 
@@ -128,7 +134,14 @@ for two documents`）；R1-12，委托的语言 ID 失去相对扩展名推导�
 its sibling reloads`）；R1-15，强制预热传入 `false` 而非强制标志（`forces
 unchanged TypeScript warmup with a monotonic didChange before retry`）。R1-14 是
 阴性对照：将 `constants.ts` 中的 `DEFAULT_LSP_WARMUP_DELAY_MS` 提高到 300 后，
-`preserves replayed snapshots` 仍须通过。
+`preserves replayed snapshots` 仍须通过。拒绝闸门另增四项：`DIAGNOSTIC_LANGUAGE_ALIASES`
+删掉 `rust` 行（`lets a -32601 refusal from the rust owner veto a non-owner empty
+answer`）；`declaredOwnerExtensions` 被加上 JS/TS 家族扩展（`does not let a
+javascript-only answerer back a typescript refusal`）；`declaredDiagnosticExtensions`
+不再读取 `extensionToLanguage` 的值（`clears a clean answer through a partial
+extensionToLanguage mapping` 与 `names the failed owner a partial mapping leaves
+unanswered`）；第二个拒绝改用未过滤的 `failures`/`unsupported` 账本指名（`does not
+blame an irrelevant server whose pull resolved to nothing`）。
 
 按照 AGENTS.md，涉及的服务、管理器及其相邻单元测试此前已重命名为 kebab-case。
 其聚合导出、原生客户端类型导入、集成测试和直接 E2E 测试框架导入已更新。公共类名
