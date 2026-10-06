@@ -77,6 +77,7 @@ import {
 } from './runtime/agent-core.js';
 import { toolConfigAllowsSkill } from './runtime/subagent-plan-tool-policy.js';
 import { ToolMode } from '../tools/code-mode.js';
+import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type {
   AgentExternalInput,
@@ -444,7 +445,8 @@ function buildRecoveredModelNotice(count: number): string {
   return (
     `${count} background agent${count === 1 ? ' was' : 's were'} restored ` +
     `from this session. Use list_agents to inspect ${count === 1 ? 'it' : 'them'} ` +
-    'and send_message with a task_id to continue one.'
+    'and send_message with a task_id to continue one. ' +
+    `In Direct mode: ${toolSearchBridgeSentence('list_agents')}`
   );
 }
 

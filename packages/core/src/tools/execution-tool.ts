@@ -166,6 +166,7 @@ class ExecutionToolInvocation extends BaseToolInvocation<object, ToolResult> {
               },
             }
           : {}),
+        ...(this.callId === undefined ? {} : { callId: this.callId }),
       },
       AbortSignal.any([signal, this.preparationAbort.signal]),
     );
