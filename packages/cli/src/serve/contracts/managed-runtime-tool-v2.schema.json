@@ -6,19 +6,27 @@
   "additionalProperties": false,
   "required": ["contractVersion", "routes", "identity", "suites"],
   "properties": {
-    "contractVersion": { "const": 1 },
+    "contractVersion": {
+      "const": 1
+    },
     "routes": {
       "type": "array",
-      "minItems": 3,
-      "maxItems": 3,
-      "items": { "$ref": "#/$defs/route" }
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "$ref": "#/$defs/route"
+      }
     },
-    "identity": { "$ref": "#/$defs/identity" },
+    "identity": {
+      "$ref": "#/$defs/identity"
+    },
     "suites": {
       "type": "array",
-      "minItems": 3,
-      "maxItems": 3,
-      "items": { "$ref": "#/$defs/suite" },
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "$ref": "#/$defs/suite"
+      },
       "allOf": [
         {
           "contains": {
@@ -58,6 +66,19 @@
           },
           "minContains": 1,
           "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": {
+              "route": {
+                "const": "acknowledge"
+              }
+            },
+            "required": ["route"]
+          },
+          "minContains": 1,
+          "maxContains": 1
         }
       ]
     }
@@ -76,16 +97,28 @@
         "cacheControl"
       ],
       "properties": {
-        "key": { "enum": ["execute", "status", "cancel"] },
-        "method": { "const": "POST" },
+        "key": {
+          "enum": ["execute", "status", "cancel", "acknowledge"]
+        },
+        "method": {
+          "const": "POST"
+        },
         "path": {
           "type": "string",
-          "pattern": "^/internal/managed-runtime/v2/(execute|status|cancel)$"
+          "pattern": "^/internal/managed-runtime/v2/(execute|status|cancel|acknowledge)$"
         },
-        "protocolVersion": { "const": 2 },
-        "requestBodyLimitBytes": { "type": "integer" },
-        "responseBodyLimitBytes": { "const": 1048576 },
-        "cacheControl": { "const": "no-store" }
+        "protocolVersion": {
+          "const": 2
+        },
+        "requestBodyLimitBytes": {
+          "type": "integer"
+        },
+        "responseBodyLimitBytes": {
+          "const": 1048576
+        },
+        "cacheControl": {
+          "const": "no-store"
+        }
       },
       "allOf": [
         {
@@ -119,9 +152,18 @@
       "additionalProperties": false,
       "required": ["token", "leaseId", "epoch"],
       "properties": {
-        "token": { "type": "string", "minLength": 1 },
-        "leaseId": { "type": "string", "minLength": 1 },
-        "epoch": { "type": "integer", "minimum": 1 }
+        "token": {
+          "type": "string",
+          "minLength": 1
+        },
+        "leaseId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "reference": {
@@ -129,10 +171,22 @@
       "additionalProperties": false,
       "required": ["sessionId", "promptId", "callId", "argsDigest"],
       "properties": {
-        "sessionId": { "type": "string", "minLength": 1 },
-        "promptId": { "type": "string", "minLength": 1 },
-        "callId": { "type": "string", "minLength": 1 },
-        "argsDigest": { "type": "string", "minLength": 1 }
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "promptId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "callId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "argsDigest": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "result": {
@@ -143,14 +197,22 @@
         "executionStatus": {
           "enum": ["not_started", "success", "error", "cancelled"]
         },
-        "responseParts": { "type": "array" },
+        "responseParts": {
+          "type": "array"
+        },
         "error": {
           "type": "object",
           "additionalProperties": false,
           "required": ["message"],
           "properties": {
-            "message": { "type": "string", "minLength": 1 },
-            "type": { "type": "string", "minLength": 1 }
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "type": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         }
       }
@@ -160,10 +222,19 @@
       "additionalProperties": false,
       "required": ["protocolVersion", "reference", "toolName", "input"],
       "properties": {
-        "protocolVersion": { "const": 2 },
-        "reference": { "$ref": "#/$defs/reference" },
-        "toolName": { "type": "string", "minLength": 1 },
-        "input": { "type": "object" }
+        "protocolVersion": {
+          "const": 2
+        },
+        "reference": {
+          "$ref": "#/$defs/reference"
+        },
+        "toolName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "input": {
+          "type": "object"
+        }
       }
     },
     "statusRequestBody": {
@@ -171,9 +242,16 @@
       "additionalProperties": false,
       "required": ["protocolVersion", "reference"],
       "properties": {
-        "protocolVersion": { "const": 2 },
-        "reference": { "$ref": "#/$defs/reference" },
-        "afterSequence": { "type": "integer", "minimum": 0 }
+        "protocolVersion": {
+          "const": 2
+        },
+        "reference": {
+          "$ref": "#/$defs/reference"
+        },
+        "afterSequence": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "cancelRequestBody": {
@@ -181,8 +259,12 @@
       "additionalProperties": false,
       "required": ["protocolVersion", "reference"],
       "properties": {
-        "protocolVersion": { "const": 2 },
-        "reference": { "$ref": "#/$defs/reference" }
+        "protocolVersion": {
+          "const": 2
+        },
+        "reference": {
+          "$ref": "#/$defs/reference"
+        }
       }
     },
     "toolResponseBody": {
@@ -190,36 +272,54 @@
       "additionalProperties": false,
       "required": ["protocolVersion", "state"],
       "properties": {
-        "protocolVersion": { "const": 2 },
+        "protocolVersion": {
+          "const": 2
+        },
         "state": {
           "enum": [
             "prepared",
             "executing",
             "cancel_requested",
             "settled",
-            "unknown"
+            "unknown",
+            "acknowledged"
           ]
         },
-        "result": { "$ref": "#/$defs/result" },
-        "lastSequence": { "type": "integer", "minimum": 0 }
+        "result": {
+          "$ref": "#/$defs/result"
+        },
+        "lastSequence": {
+          "type": "integer",
+          "minimum": 0
+        }
       },
       "allOf": [
         {
           "if": {
             "type": "object",
-            "properties": { "state": { "not": { "const": "settled" } } },
+            "properties": {
+              "state": {
+                "not": {
+                  "const": "settled"
+                }
+              }
+            },
             "required": ["state"]
           },
           "then": {
             "not": {
               "type": "object",
-              "properties": { "result": true },
+              "properties": {
+                "result": true
+              },
               "required": ["result"]
             }
           },
           "else": {
             "type": "object",
-            "properties": { "result": true },
+            "properties": {
+              "result": true
+            },
             "required": ["result"]
           }
         }
@@ -236,10 +336,20 @@
         "x-qwen-managed-lease-epoch"
       ],
       "properties": {
-        "authorization": { "type": "string", "pattern": "^Bearer .+$" },
-        "cache-control": { "const": "no-store" },
-        "content-type": { "const": "application/json" },
-        "x-qwen-managed-lease-id": { "type": "string", "minLength": 1 },
+        "authorization": {
+          "type": "string",
+          "pattern": "^Bearer .+$"
+        },
+        "cache-control": {
+          "const": "no-store"
+        },
+        "content-type": {
+          "const": "application/json"
+        },
+        "x-qwen-managed-lease-id": {
+          "type": "string",
+          "minLength": 1
+        },
         "x-qwen-managed-lease-epoch": {
           "type": "string",
           "pattern": "^[0-9]+$"
@@ -251,21 +361,35 @@
       "additionalProperties": false,
       "required": ["id", "expected"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
         "request": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "headers": { "$ref": "#/$defs/headers" },
-            "body": { "type": "object" },
-            "omitHeader": { "type": "string" },
+            "headers": {
+              "$ref": "#/$defs/headers"
+            },
+            "body": {
+              "type": "object"
+            },
+            "omitHeader": {
+              "type": "string"
+            },
             "replaceHeader": {
               "type": "object",
               "additionalProperties": false,
               "required": ["name", "value"],
               "properties": {
-                "name": { "type": "string", "minLength": 1 },
-                "value": { "type": "string" }
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "value": {
+                  "type": "string"
+                }
               }
             },
             "replaceBody": {
@@ -273,15 +397,29 @@
               "additionalProperties": false,
               "required": ["name", "value"],
               "properties": {
-                "name": { "type": "string", "minLength": 1 },
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
                 "value": true
               }
             },
-            "paddingBytes": { "type": "integer", "minimum": 1 },
-            "rawBody": { "type": "string" },
-            "pathSuffix": { "type": "string" },
-            "pathOverride": { "type": "string" },
-            "method": { "type": "string" }
+            "paddingBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "rawBody": {
+              "type": "string"
+            },
+            "pathSuffix": {
+              "type": "string"
+            },
+            "pathOverride": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            }
           }
         },
         "expected": {
@@ -289,7 +427,11 @@
           "additionalProperties": false,
           "required": ["status", "classification"],
           "properties": {
-            "status": { "type": "integer", "minimum": 200, "maximum": 599 },
+            "status": {
+              "type": "integer",
+              "minimum": 200,
+              "maximum": 599
+            },
             "classification": {
               "enum": [
                 "ok",
@@ -307,18 +449,26 @@
                 "managed_runtime_unauthorized"
               ]
             },
-            "body": { "$ref": "#/$defs/toolResponseBody" }
+            "body": {
+              "$ref": "#/$defs/toolResponseBody"
+            }
           },
           "allOf": [
             {
               "if": {
                 "type": "object",
-                "properties": { "classification": { "const": "ok" } },
+                "properties": {
+                  "classification": {
+                    "const": "ok"
+                  }
+                },
                 "required": ["classification"]
               },
               "then": {
                 "type": "object",
-                "properties": { "body": true },
+                "properties": {
+                  "body": true
+                },
                 "required": ["body"]
               }
             }
@@ -331,8 +481,12 @@
       "additionalProperties": false,
       "required": ["headers", "body"],
       "properties": {
-        "headers": { "$ref": "#/$defs/headers" },
-        "body": { "type": "object" }
+        "headers": {
+          "$ref": "#/$defs/headers"
+        },
+        "body": {
+          "type": "object"
+        }
       }
     },
     "suite": {
@@ -340,19 +494,29 @@
       "additionalProperties": false,
       "required": ["route", "canonicalRequest", "cases"],
       "properties": {
-        "route": { "enum": ["execute", "status", "cancel"] },
-        "canonicalRequest": { "$ref": "#/$defs/canonicalRequest" },
+        "route": {
+          "enum": ["execute", "status", "cancel", "acknowledge"]
+        },
+        "canonicalRequest": {
+          "$ref": "#/$defs/canonicalRequest"
+        },
         "cases": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/case" }
+          "items": {
+            "$ref": "#/$defs/case"
+          }
         }
       },
       "allOf": [
         {
           "if": {
             "type": "object",
-            "properties": { "route": { "const": "execute" } },
+            "properties": {
+              "route": {
+                "const": "execute"
+              }
+            },
             "required": ["route"]
           },
           "then": {
@@ -361,7 +525,9 @@
               "canonicalRequest": {
                 "type": "object",
                 "properties": {
-                  "body": { "$ref": "#/$defs/executeRequestBody" }
+                  "body": {
+                    "$ref": "#/$defs/executeRequestBody"
+                  }
                 }
               },
               "cases": {
@@ -372,7 +538,9 @@
                     "request": {
                       "type": "object",
                       "properties": {
-                        "body": { "$ref": "#/$defs/executeRequestBody" }
+                        "body": {
+                          "$ref": "#/$defs/executeRequestBody"
+                        }
                       }
                     },
                     "expected": {
@@ -381,7 +549,9 @@
                         "body": {
                           "not": {
                             "type": "object",
-                            "properties": { "lastSequence": true },
+                            "properties": {
+                              "lastSequence": true
+                            },
                             "required": ["lastSequence"]
                           }
                         }
@@ -396,7 +566,11 @@
         {
           "if": {
             "type": "object",
-            "properties": { "route": { "const": "status" } },
+            "properties": {
+              "route": {
+                "const": "status"
+              }
+            },
             "required": ["route"]
           },
           "then": {
@@ -405,7 +579,9 @@
               "canonicalRequest": {
                 "type": "object",
                 "properties": {
-                  "body": { "$ref": "#/$defs/statusRequestBody" }
+                  "body": {
+                    "$ref": "#/$defs/statusRequestBody"
+                  }
                 }
               },
               "cases": {
@@ -416,7 +592,9 @@
                     "request": {
                       "type": "object",
                       "properties": {
-                        "body": { "$ref": "#/$defs/statusRequestBody" }
+                        "body": {
+                          "$ref": "#/$defs/statusRequestBody"
+                        }
                       }
                     }
                   }
@@ -428,7 +606,11 @@
         {
           "if": {
             "type": "object",
-            "properties": { "route": { "const": "cancel" } },
+            "properties": {
+              "route": {
+                "const": "cancel"
+              }
+            },
             "required": ["route"]
           },
           "then": {
@@ -437,7 +619,9 @@
               "canonicalRequest": {
                 "type": "object",
                 "properties": {
-                  "body": { "$ref": "#/$defs/cancelRequestBody" }
+                  "body": {
+                    "$ref": "#/$defs/cancelRequestBody"
+                  }
                 }
               },
               "cases": {
@@ -448,7 +632,9 @@
                     "request": {
                       "type": "object",
                       "properties": {
-                        "body": { "$ref": "#/$defs/cancelRequestBody" }
+                        "body": {
+                          "$ref": "#/$defs/cancelRequestBody"
+                        }
                       }
                     },
                     "expected": {
@@ -457,7 +643,63 @@
                         "body": {
                           "not": {
                             "type": "object",
-                            "properties": { "lastSequence": true },
+                            "properties": {
+                              "lastSequence": true
+                            },
+                            "required": ["lastSequence"]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "route": {
+                "const": "acknowledge"
+              }
+            },
+            "required": ["route"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "canonicalRequest": {
+                "type": "object",
+                "properties": {
+                  "body": {
+                    "$ref": "#/$defs/acknowledgeRequestBody"
+                  }
+                }
+              },
+              "cases": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "object",
+                      "properties": {
+                        "body": {
+                          "$ref": "#/$defs/acknowledgeRequestBody"
+                        }
+                      }
+                    },
+                    "expected": {
+                      "type": "object",
+                      "properties": {
+                        "body": {
+                          "not": {
+                            "type": "object",
+                            "properties": {
+                              "lastSequence": true
+                            },
                             "required": ["lastSequence"]
                           }
                         }
@@ -470,6 +712,19 @@
           }
         }
       ]
+    },
+    "acknowledgeRequestBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "reference"],
+      "properties": {
+        "protocolVersion": {
+          "const": 2
+        },
+        "reference": {
+          "$ref": "#/$defs/reference"
+        }
+      }
     }
   }
 }
