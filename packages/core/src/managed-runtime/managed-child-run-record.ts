@@ -543,6 +543,12 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
   ) {
     fail('Child run childSessionId needs its admitted creation dispatch.');
   }
+  if (
+    childSessionId === null &&
+    (run.execution === 'running_attached' || run.execution === 'settled')
+  ) {
+    fail('Child run childSessionId is set once creation is proven.');
+  }
   const predecessorChildRunId = nullable(body.predecessorChildRunId, (each) =>
     id(each, 'predecessorChildRunId'),
   );
@@ -554,20 +560,15 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
   const terminalReceiptRef = nullable(body.terminalReceiptRef, (each) =>
     ref(each, 'terminalReceiptRef'),
   );
-  if (
-    (run.state === 'settled') !==
-    (resultRef !== null && terminalReceiptRef !== null)
-  ) {
+  // The result and its receipt appear only together, in the revision that
+  // settles the run: a half-result can never be committed early, and a
+  // settled run carries both.
+  if ((resultRef !== null) !== (terminalReceiptRef !== null)) {
+    fail('Child run resultRef and terminalReceiptRef change only together.');
+  }
+  if ((resultRef !== null) !== (run.state === 'settled')) {
     fail(
       'Child run resultRef and terminalReceiptRef are set exactly when the run settles.',
-    );
-  }
-  if (
-    (run.state === 'failed' || run.state === 'cancelled') &&
-    (resultRef !== null || terminalReceiptRef !== null)
-  ) {
-    fail(
-      'Child run that ends without a result keeps resultRef and terminalReceiptRef null.',
     );
   }
   if (
@@ -708,6 +709,17 @@ export function isChildRunSuccessor(previous: unknown, next: unknown): boolean {
     }
     if (before.kind !== 'child_agent' || after.kind !== 'child_agent') {
       return false;
+    }
+    // Once the run is terminal the record changes only its delivery line:
+    // the run's own freeze confines movement to the delivery, and nothing
+    // outside the run may change at all.
+    if (TERMINAL_RUN_STATES.includes(before.run.state)) {
+      const beforeRest = { ...before, run: null };
+      const afterRest = { ...after, run: null };
+      return (
+        same(beforeRest, afterRest) &&
+        isExtensionRunSuccessor(before.run, after.run)
+      );
     }
     return (
       CHILD_AGENT_FIXED_KEYS.every((key) => same(before[key], after[key])) &&

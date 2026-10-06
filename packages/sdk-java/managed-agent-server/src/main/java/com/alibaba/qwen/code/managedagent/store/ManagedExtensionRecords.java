@@ -847,6 +847,10 @@ public final class ManagedExtensionRecords {
                 && !CHILD_UNSTARTED_EXECUTIONS.contains(execution),
                 "Child run childSessionId needs its admitted creation"
                         + " dispatch");
+        require(!session.isNull()
+                || !"running_attached".equals(execution)
+                        && !"settled".equals(execution),
+                "Child run childSessionId is set once creation is proven");
         JsonNode predecessor = child.get("predecessorChildRunId");
         if (!predecessor.isNull()) {
             id(predecessor, "predecessorChildRunId");
@@ -865,14 +869,15 @@ public final class ManagedExtensionRecords {
             durableRef(terminalReceipt, "terminalReceiptRef");
         }
         String state = text(run, "state");
-        require("settled".equals(state)
-                == (!resultRef.isNull() && !terminalReceipt.isNull()),
+        // The result and its receipt appear only together, in the revision
+        // that settles the run: a half-result can never be committed early,
+        // and a settled run carries both.
+        require(resultRef.isNull() == terminalReceipt.isNull(),
+                "Child run resultRef and terminalReceiptRef change only"
+                        + " together");
+        require(!resultRef.isNull() == "settled".equals(state),
                 "Child run resultRef and terminalReceiptRef are set exactly"
                         + " when the run settles");
-        require(!"failed".equals(state) && !"cancelled".equals(state)
-                || resultRef.isNull() && terminalReceipt.isNull(),
-                "Child run that ends without a result keeps resultRef and"
-                        + " terminalReceiptRef null");
         require(("failed".equals(state) || "cancelled".equals(state))
                 == "cancelled".equals(text(delivery, "state")),
                 "Child run delivery cancelled is set exactly when the run"
@@ -1013,6 +1018,13 @@ public final class ManagedExtensionRecords {
                 return same(previous, next);
             }
             return true;
+        }
+        // Once the run is terminal the record changes only its delivery
+        // line: the run's own freeze confines movement to the delivery, and
+        // nothing outside the run may change at all.
+        if (TERMINAL.contains(text(previous.get("run"), "state"))) {
+            return same(without(previous, "run"), without(next, "run"))
+                    && isRunSuccessor(previous.get("run"), next.get("run"));
         }
         for (String key : CHILD_AGENT_FIXED) {
             if (!same(previous.get(key), next.get(key))) {
