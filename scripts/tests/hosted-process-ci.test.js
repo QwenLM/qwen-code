@@ -155,15 +155,15 @@ describe('Hosted real-process gates', () => {
     );
     expect(run.run).toContain('clean verify checkstyle:check');
     expect(run.run).not.toContain('skip');
-    // The step runs the unit tests, SpotBugs, Checkstyle and the Hosted*IT
-    // suite in one Maven invocation. Green main runs measured 8.4-11.7 min on
-    // the GitHub-hosted pool (Oct 2026), so a 12-minute ceiling left as
-    // little as 18 s of headroom. Run 37346072729 hit it: Maven printed
-    // BUILD SUCCESS at 12:03 with all 19 Hosted*IT green and the failsafe
-    // reports written, and the runner killed the step 93 ms later (issue
-    // #13471). 20 minutes restores ~1.7x headroom over the slowest observed
-    // green run.
+    // 20 min: the measurement basis lives in the hosted-harness-mysql job
+    // comment (issue #13471). Pin the job's whole ceiling enumeration so a
+    // bump to any of the other five cannot leave that comment's sum stale.
     expect(run['timeout-minutes']).toBe(20);
+    expect(
+      job.steps
+        .map((step) => step['timeout-minutes'])
+        .filter((minutes) => minutes !== undefined),
+    ).toEqual([20, 10, 10, 10, 10, 12]);
     expect(run['continue-on-error']).toBeUndefined();
     const pom = read('packages/sdk-java/managed-agent-server/pom.xml').replace(
       /<!--[\s\S]*?-->/g,
@@ -192,7 +192,17 @@ describe('Hosted real-process gates', () => {
         .split('</profile>')[0]
         .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
     );
-    expect(run['timeout-minutes'] * 60).toBeGreaterThan(forkSeconds);
+    // 0 is failsafe's documented 'wait forever' sentinel: it would disarm
+    // the fork timeout entirely, not relax the ceiling's reachability.
+    expect(forkSeconds).toBeGreaterThan(0);
+    // The fork timer starts at failsafe's fork launch, and this one
+    // invocation compiles and runs the surefire unit tests first: measured
+    // 213-220 s from step start to failsafe:integration-test across three
+    // CI runs (run 37346072729: 17:15:29Z -> 17:19:05Z).
+    const PRE_FORK_SECONDS = 240;
+    expect(run['timeout-minutes'] * 60 - PRE_FORK_SECONDS).toBeGreaterThan(
+      forkSeconds,
+    );
     // The MariaDB job must not narrow its selection either, or an IT outside
     // the Hosted family would silently run nowhere.
     const mariadbRun = java.jobs['mysql-integration'].steps.find(

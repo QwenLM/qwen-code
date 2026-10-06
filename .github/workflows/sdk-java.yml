@@ -312,19 +312,23 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The six step ceilings (20+10+10+10+10+12) sum to 72 min against this
-    # 60-min job cap: each ceiling is a per-step hang guard, not a share of a
-    # budget, so on a uniformly slow pool the job cap binds first and the
-    # always() report uploads are skipped. A healthy run measures ~28 min end
-    # to end. The Verify step runs the unit tests, SpotBugs, Checkstyle and
-    # the Hosted*IT suite in one Maven invocation; green main runs measured
-    # 8.4-11.7 min (Oct 2026), so the old 12-minute ceiling left as little as
-    # 18 s of headroom. Run 37346072729 hit it: Maven printed BUILD SUCCESS
-    # at 12:03 with all 19 Hosted*IT green and the failsafe reports written,
-    # and the runner killed the step 93 ms later, so the six gate steps after
-    # it were skipped. 20 minutes restores ~1.7x headroom over the slowest
-    # green run and puts the ceiling back above the hosted profile's 900 s
-    # fork timeout, so failsafe's own hang diagnostic is reachable again.
+    # The six step ceilings (20+10+10+10+10+12, pinned by
+    # scripts/tests/hosted-process-ci.test.js) sum to 72 min against this
+    # 60-min job cap: each ceiling is a per-step hang guard, not a share of
+    # a budget, so on a uniformly slow pool the job cap binds first. A
+    # job-cap cancellation still runs the always() report uploads; only a
+    # hard runner kill skips them. Green jobs measure 25-34 min end to end
+    # (median ~30, Oct 2026). The Verify step runs the unit tests, SpotBugs,
+    # Checkstyle and the Hosted*IT suite in one Maven invocation; green main
+    # runs measured 8.4-11.7 min for it (Oct 2026), so the old 12-minute
+    # ceiling left as little as 18 s of headroom. Run 37346072729 hit it:
+    # Maven printed BUILD SUCCESS at 12:03 with all 19 Hosted*IT green and
+    # the failsafe reports written, and the runner killed the step 93 ms
+    # later, so the six gate steps after it were skipped. 20 minutes
+    # restores ~1.7x headroom over the slowest green Verify step and keeps
+    # the ceiling above the measured pre-fork phases (~220 s) plus the
+    # hosted profile's fork timeout, so failsafe's own hang diagnostic stays
+    # reachable.
     timeout-minutes: 60
     services:
       mysql:
