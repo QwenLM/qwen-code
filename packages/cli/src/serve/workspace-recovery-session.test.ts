@@ -39,7 +39,11 @@ const KEY = {
 const hash = (bytes: Buffer) =>
   createHash('sha256').update(bytes).digest('hex');
 
-function fixture() {
+function fixture(
+  definition: Record<string, unknown> = {
+    toolProfile: 'hosted-workspace-files/1',
+  },
+) {
   const resources = new Map<string, Buffer>();
   const refs = new Map<string, ManagedSessionDurableRef>();
   const complete = new Set<string>();
@@ -204,7 +208,7 @@ function fixture() {
         definitionRef: resource('managed-definition', {
           engine: 'managed',
           sessionId: SESSION,
-          toolProfile: 'hosted-workspace-files/1',
+          ...definition,
         }),
         rootSnapshotRef: resource('managed-root', { cwd: '/original/cwd' }),
         createdBy: 'hosted-harness',
@@ -1348,6 +1352,30 @@ describe('verifyRecoverySession', () => {
     });
     expect(f.complete.size).toBe(f.refs.size);
     expect(f.io.publicationReceipt).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { toolProfile: 'hosted-workspace-files/1' },
+    { toolProfile: 'hosted-workspace-files/2' },
+    { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
+  ])('recovers every saved Workspace profile (%j)', async (definition) => {
+    // One refused profile would abort recovery for the whole Workspace,
+    // so recovery reads the same profile vocabulary creation persists.
+    const f = fixture(definition);
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+  });
+
+  it.each([
+    { toolProfile: 'hosted-workspace-files/3' },
+    { toolProfile: 'hosted-workspace-files/2', captureBytes: 1024 },
+  ])('still refuses an unknown Hosted definition (%j)', async (definition) => {
+    const f = fixture(definition);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      /unsupported Hosted profile|invalid frozen Hosted definition/u,
+    );
   });
 
   it('rejects changed bytes even when the stored transaction metadata was not changed', async () => {

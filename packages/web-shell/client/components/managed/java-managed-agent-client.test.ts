@@ -99,6 +99,42 @@ describe('JavaManagedAgentClient', () => {
     });
   });
 
+  it('reports the stream as open once the response arrives, and not when it fails', async () => {
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+          status: 200,
+        }),
+      ),
+    });
+    const onOpen = vi.fn();
+    const iterator = client.streamEvents(
+      { sessionId: 'session-1', afterSequence: 6 },
+      undefined,
+      onOpen,
+    );
+    // The stream idles without a single frame, yet the open signal fires:
+    // establishment is what a silent-but-healthy connection reports. The
+    // generator stays parked on the idle stream when the test is done.
+    void iterator.next();
+    await vi.waitFor(() => expect(onOpen).toHaveBeenCalledOnce());
+
+    const failing = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockRejectedValue(new TypeError('Failed to fetch')),
+    });
+    const onOpenFailure = vi.fn();
+    await expect(
+      failing
+        .streamEvents({ sessionId: 'session-1' }, undefined, onOpenFailure)
+        .next(),
+    ).rejects.toThrow('Failed to fetch');
+    expect(onOpenFailure).not.toHaveBeenCalled();
+  });
+
   it('decodes the resync frame that ends an expired stream', async () => {
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example',
