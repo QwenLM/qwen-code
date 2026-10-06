@@ -546,6 +546,7 @@ function agentMessagesEqual(
     prev.totalTokens === next.totalTokens &&
     prev.squadOutcome === next.squadOutcome &&
     prev.author?.squadName === next.author?.squadName &&
+    prev.author?.memberSquadName === next.author?.memberSquadName &&
     (prev.steps ?? []).length === (next.steps ?? []).length &&
     (prev.steps ?? []).every(
       (step, index) =>

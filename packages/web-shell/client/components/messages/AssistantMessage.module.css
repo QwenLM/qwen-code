@@ -32,10 +32,33 @@
   font-size: 13px;
 }
 
-/* A squad leader's "no action needed": a muted line, not a message. */
+/* A squad leader's "no action needed": a muted line, not a message. Spaced
+   like a message so it does not read as the next one's header; the icon sits
+   in the avatar's column so the text lines up with the author names. */
 .squadNoAction {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 4px 0 12px;
   color: var(--muted-foreground);
   font-size: 12px;
+}
+
+.squadNoActionIcon {
+  display: inline-flex;
+  width: 20px;
+  flex: 0 0 auto;
+  justify-content: center;
+}
+
+.squadNoActionIcon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.squadNoActionText {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

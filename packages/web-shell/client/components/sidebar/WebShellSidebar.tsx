@@ -432,7 +432,7 @@ interface WebShellSidebarProps {
   onOpenHome?: () => void;
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
-  onOpenAgents?: (view?: 'agents' | 'runtime') => void;
+  onOpenAgents?: (view?: 'agents' | 'squads' | 'runtime') => void;
   onOpenPlugins: () => void;
   onOpenChannels: () => void;
   onOpenLive?: () => void;

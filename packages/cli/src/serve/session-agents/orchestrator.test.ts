@@ -1359,6 +1359,20 @@ describe('SessionAgentOrchestrator squads', () => {
     expect(wake).toContain('<squad_briefing squad="crew">');
     expect(wake).toContain('Fixed in auth.ts.');
     const aliceRecord = h.messageOf('ag_alice')!;
+    // The member's reply names the squad it answered for, without the
+    // leader's mark; its last frame still belongs to the engagement.
+    const aliceAuthor = (
+      aliceRecord.systemPayload as {
+        author: { memberSquadName?: string; squadName?: string };
+      }
+    ).author;
+    expect(aliceAuthor.memberSquadName).toBe('crew');
+    expect(aliceAuthor.squadName).toBeUndefined();
+    expect(h.lastFrame(aliceRunId)).toMatchObject({
+      status: 'completed',
+      squadId: 'sq_1',
+      squadName: 'crew',
+    });
     expect(
       (await fileFor()).runs.find(
         (run) => run.agentId === 'ag_lead' && run.id !== leaderRunId,
@@ -1394,6 +1408,13 @@ describe('SessionAgentOrchestrator squads', () => {
     await vi.waitFor(() => expect(h.turnOf('ag_alice', 1)).toBeDefined());
     h.turnOf('ag_alice', 1)!.finish({ outputText: 'Done.' });
     await vi.waitFor(() => expect(h.messageOf('ag_alice', 1)).toBeDefined());
+    expect(
+      (
+        h.messageOf('ag_alice', 1)!.systemPayload as {
+          author: { memberSquadName?: string };
+        }
+      ).author.memberSquadName,
+    ).toBeUndefined();
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(h.turnOf('ag_lead', 2)).toBeUndefined();
   });

@@ -78,7 +78,7 @@ import type { EmbeddedManagerPage } from '../plugins/manager-page';
 import styles from './AgentsManagerPage.module.css';
 
 interface AgentsManagerPageProps {
-  initialAgentView?: 'agents' | 'runtime' | 'new-agent';
+  initialAgentView?: 'agents' | 'squads' | 'runtime' | 'new-agent';
   onClose: () => void;
   embedded?: EmbeddedManagerPage;
   initialCreateScope?: 'workspace' | 'global' | null;

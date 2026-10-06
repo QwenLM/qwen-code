@@ -47,12 +47,10 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.session.cancelled': (v) => `${v?.agent} was stopped`,
   'collab.session.stopAll': 'Stop all agents',
   // --- squads ---
-  'collab.squad.section': 'Squads',
-  'collab.squad.sectionHint':
-    'A leader agent and its members. @ the squad in a chat: the leader hands the work to members and reports back.',
   'collab.squad.new': 'New squad',
   'collab.squad.empty': 'No squads yet.',
-  'collab.squad.name': 'Name (used as @name in chat)',
+  'collab.squad.name': 'Name',
+  'collab.squad.namePlaceholder': 'Called as @name in chats',
   'collab.squad.description': 'Description (optional)',
   'collab.squad.instructions': 'Instructions for the leader (optional)',
   'collab.squad.leader': 'Leader',
@@ -69,8 +67,9 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.squad.leaderPaused': 'Leader is paused',
   'collab.squad.summary': (v) => `Leader ${v?.leader} · ${v?.count} member(s)`,
   'collab.squad.engagement': (v) => `Squad ${v?.squad}`,
-  'collab.squad.engagementMembers': (v) => `working: ${v?.names}`,
-  'collab.squad.engagementLeader': (v) => `${v?.leader} is deciding`,
+  'collab.squad.memberWorking': 'working',
+  'collab.squad.memberReplied': 'replied',
+  'collab.squad.leaderDeciding': 'deciding',
   'collab.mention.squad': 'Squad',
   // --- end squads ---
   'collab.mention.noSession':
@@ -143,11 +142,14 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.share.revoke': 'Revoke',
   'collab.agent.share': 'Share',
   'collab.tabs.agents': 'Agents',
+  'collab.tabs.squads': 'Squads',
   'collab.tabs.runtime': 'Runtimes',
   'collab.tabs.agentsHint':
     'Agents are teammates you create. Each runs on a runtime with one program. @ an agent in any conversation to bring it in; it can bring in others.',
   'collab.tabs.runtimeHint':
     'Runtimes are the computers agents run on: this one, and any that joined with a link.',
+  'collab.tabs.squadsHint':
+    'A leader agent and its members. @ the squad in a chat: the leader hands the work to members and reports back.',
   'collab.agent.new': 'New agent',
   'collab.agent.roles': 'Role templates',
   'collab.agent.mentionIt': 'Mention in chat',
@@ -285,12 +287,10 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.session.cancelled': (v) => `${v?.agent} 已停止`,
   'collab.session.stopAll': '停止全部 Agent',
   // --- squads ---
-  'collab.squad.section': '小队',
-  'collab.squad.sectionHint':
-    '一个负责人 Agent 加若干成员。在对话里 @ 小队，负责人把工作分给成员并汇报结果。',
   'collab.squad.new': '新建小队',
   'collab.squad.empty': '还没有小队。',
-  'collab.squad.name': '名字（在对话里用 @名字 调用）',
+  'collab.squad.name': '名字',
+  'collab.squad.namePlaceholder': '在对话里用 @名字 调用',
   'collab.squad.description': '说明（可选）',
   'collab.squad.instructions': '给负责人的指令（可选）',
   'collab.squad.leader': '负责人',
@@ -307,8 +307,9 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.squad.leaderPaused': '负责人已停用',
   'collab.squad.summary': (v) => `负责人 ${v?.leader} · ${v?.count} 名成员`,
   'collab.squad.engagement': (v) => `小队 ${v?.squad}`,
-  'collab.squad.engagementMembers': (v) => `进行中：${v?.names}`,
-  'collab.squad.engagementLeader': (v) => `${v?.leader} 正在决定下一步`,
+  'collab.squad.memberWorking': '进行中',
+  'collab.squad.memberReplied': '已回复',
+  'collab.squad.leaderDeciding': '决定中',
   'collab.mention.squad': '小队',
   // --- end squads ---
   'collab.mention.noSession': '没能为这条消息创建会话，请重试。',
@@ -376,11 +377,14 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.share.revoke': '撤销',
   'collab.agent.share': '分享',
   'collab.tabs.agents': 'Agent',
+  'collab.tabs.squads': '小队',
   'collab.tabs.runtime': 'Runtime',
   'collab.tabs.agentsHint':
     'Agent 是你新建的队友，每个都跑在某个 Runtime 上、用一个程序。在任何对话里 @ 它就能叫它来，它也能再叫别的 Agent。',
   'collab.tabs.runtimeHint':
     'Runtime 是运行 Agent 的电脑：这台电脑，以及用链接加入的其他电脑。',
+  'collab.tabs.squadsHint':
+    '一个负责人 Agent 加若干成员。在对话里 @ 小队，负责人把工作分给成员并汇报结果。',
   'collab.agent.new': '新建 Agent',
   'collab.agent.roles': '角色模板',
   'collab.agent.mentionIt': '在对话中 @',

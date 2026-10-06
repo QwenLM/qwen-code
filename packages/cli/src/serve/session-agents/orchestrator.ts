@@ -362,6 +362,12 @@ interface LiveRun {
   sendChain: Promise<void>;
   /** Name of the squad this run leads (`run.squadId`), once known. */
   squadName?: string;
+  /**
+   * The squad whose leader waited on this (member) run, kept once the run
+   * finishes and is released from the engagement: its record and last frame
+   * still name the squad.
+   */
+  memberSquadId?: string;
   /** Lease, attempt and last sequence live on `run.lease` (persisted). */
   remote?: {
     hostId: string;
@@ -2512,6 +2518,10 @@ export class SessionAgentOrchestrator {
     // hop and is charged to the budget like any other.
     const wakes: Array<{ squadId: string; leader: WorkspaceAgent }> = [];
     const waiting = this.releaseOutstanding(state, run.id);
+    if (!run.squadId && waiting.length > 0) live.memberSquadId = waiting[0];
+    const memberSquadName = live.memberSquadId
+      ? this.squadNames.get(live.memberSquadId)
+      : undefined;
     // A run a person stopped does not wake anyone.
     if (waiting.length > 0 && outcome.status !== 'cancelled' && !this.stopped) {
       try {
@@ -2551,7 +2561,13 @@ export class SessionAgentOrchestrator {
 
     const payload: AgentMessageRecordPayload = {
       displayText,
-      author: { ...this.authorOf(live), runtimeId },
+      author: {
+        ...this.authorOf(live),
+        runtimeId,
+        // A member's reply carries its squad for display; `squadName` stays
+        // the leader's mark.
+        ...(memberSquadName ? { memberSquadName } : {}),
+      },
       runId: run.id,
       status: outcome.status,
       ...(error ? { error } : {}),
@@ -3117,7 +3133,8 @@ export class SessionAgentOrchestrator {
     };
     if (position !== undefined) frame.queuePosition = position;
     else delete frame.queuePosition;
-    const squadId = live.run.squadId ?? this.memberSquadOf(live);
+    const squadId =
+      live.run.squadId ?? this.memberSquadOf(live) ?? live.memberSquadId;
     const squadName = squadId ? this.squadNames.get(squadId) : undefined;
     if (squadId) frame.squadId = squadId;
     else delete frame.squadId;

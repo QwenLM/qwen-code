@@ -43,7 +43,11 @@ import {
   runtimePrograms,
   type AgentProgramView,
 } from './agents-view-logic';
-import { SquadsSection, type SquadsSectionProps } from './squads-section';
+import {
+  SquadsEmpty,
+  SquadsSection,
+  type SquadsSectionProps,
+} from './squads-section';
 import styles from './ThreadsPage.module.css';
 
 /**
@@ -98,7 +102,10 @@ export interface ThreadsPageProps {
     list: (agentId: string) => Promise<AgentShareSummary[]>;
     revoke: (agentId: string, callerId: string) => Promise<unknown>;
   };
-  /** The workspace's squads and their actions; absent hides the section. */
+  /**
+   * The workspace's squads and their actions. Absent (a daemon without squad
+   * routes, or not loaded yet) shows the Squads view empty, with no New squad.
+   */
   squads?: Pick<
     SquadsSectionProps,
     'squads' | 'onCreate' | 'onUpdate' | 'onRetire'
@@ -148,7 +155,7 @@ export interface WorkspaceAgentRuntimeView {
   queuedTaskCount?: number;
 }
 
-export type AgentWorkspaceView = 'agents' | 'runtime';
+export type AgentWorkspaceView = 'agents' | 'squads' | 'runtime';
 
 export interface NewWorkspaceAgent {
   name: string;
@@ -169,7 +176,8 @@ const AGENT_STATUSES = new Set([
 ]);
 
 /**
- * The Agents page: the workspace's agent roster and the runtimes they run on.
+ * The Agents page: the workspace's agent roster, its squads, and the runtimes
+ * agents run on.
  * Agents are addressed by @-mention in a chat session; this page only manages
  * who they are and where they run.
  */
@@ -203,6 +211,7 @@ export function ThreadsPage({
   const [replacingRuntime, setReplacingRuntime] =
     useState<WorkspaceAgentRuntimeView>();
   const [sharing, setSharing] = useState<{ id: string; name: string }>();
+  const [creatingSquad, setCreatingSquad] = useState(false);
   const statusLabel = (status: string) =>
     AGENT_STATUSES.has(status) ? t(`collab.agentStatus.${status}`) : status;
   const hostLabel = (entry?: WorkspaceAgentRuntimeView) =>
@@ -275,6 +284,7 @@ export function ThreadsPage({
   const openView = (next: AgentWorkspaceView) => {
     onViewChange(next);
     setConfiguring(undefined);
+    setCreatingSquad(false);
   };
 
   // Laid out as the role templates view it swaps with: title and actions,
@@ -302,6 +312,12 @@ export function ThreadsPage({
               {t('collab.agent.new')}
             </Button>
           ) : null}
+          {view === 'squads' && squads ? (
+            <Button disabled={pending} onClick={() => setCreatingSquad(true)}>
+              <PlusIcon data-icon="inline-start" />
+              {t('collab.squad.new')}
+            </Button>
+          ) : null}
           {view === 'runtime' && onCreateJoinToken ? (
             <Button
               variant="outline"
@@ -327,7 +343,7 @@ export function ThreadsPage({
         size="sm"
         aria-label={t('agents.title')}
       >
-        {(['agents', 'runtime'] as const).map((item) => (
+        {(['agents', 'squads', 'runtime'] as const).map((item) => (
           <ToggleGroupItem key={item} value={item}>
             {t(`collab.tabs.${item}`)}
           </ToggleGroupItem>
@@ -601,13 +617,19 @@ export function ThreadsPage({
           )}
         </section>
 
-        {view === 'agents' && squads ? (
-          <SquadsSection
-            {...squads}
-            agents={agents}
-            pending={pending}
-            {...(onMentionAgent ? { onMention: onMentionAgent } : {})}
-          />
+        {view === 'squads' ? (
+          squads ? (
+            <SquadsSection
+              {...squads}
+              agents={agents}
+              pending={pending}
+              creating={creatingSquad}
+              onCreatingChange={setCreatingSquad}
+              {...(onMentionAgent ? { onMention: onMentionAgent } : {})}
+            />
+          ) : (
+            <SquadsEmpty />
+          )
         ) : null}
 
         {view === 'runtime' && runtimeEntries.length > 0 ? (

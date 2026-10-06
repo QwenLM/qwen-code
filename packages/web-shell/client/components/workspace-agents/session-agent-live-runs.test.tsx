@@ -232,6 +232,12 @@ describe('SessionAgentLiveRuns', () => {
     expect(node.textContent).toContain('Partial answer');
     expect(node.textContent).toContain('Read: a.ts');
     expect(node.textContent).toContain(`${(1500).toLocaleString()} tokens`);
+    // Tokens sit in the steps' muted block, as on the recorded reply, not
+    // loose in the message at body size.
+    const tokens = [...node.querySelectorAll('span')].find(
+      (span) => span.textContent === `${(1500).toLocaleString()} tokens`,
+    );
+    expect(tokens?.parentElement?.querySelector('ol')).not.toBeNull();
     const stop = [...node.querySelectorAll('button')].find(
       (button) => button.textContent === 'Stop',
     );
@@ -409,7 +415,7 @@ describe('squad engagements', () => {
     author: { agentId: 'ag_b', name: 'bob' },
   });
 
-  it('groups live runs by squad: the leader and the members still working', () => {
+  it('groups live runs by squad: the leader and its members', () => {
     expect(
       squadEngagements([
         alice,
@@ -423,23 +429,48 @@ describe('squad engagements', () => {
         squadId: 'sq_1',
         squadName: 'crew',
         leader: 'lead',
-        members: ['alice', 'bob'],
+        // alice is working again on a second ask.
+        members: [
+          { name: 'alice', state: 'working' },
+          { name: 'bob', state: 'working' },
+        ],
       },
     ]);
-    // Nothing live, nothing shown.
-    expect(squadEngagements([run({ ...alice, status: 'completed' })])).toEqual(
-      [],
-    );
+    // A member whose reply is being recorded has replied.
+    expect(
+      squadEngagements([
+        leader,
+        run({ ...alice, status: 'completed', recorded: false }),
+      ]),
+    ).toEqual([
+      {
+        squadId: 'sq_1',
+        squadName: 'crew',
+        leader: 'lead',
+        members: [{ name: 'alice', state: 'replied' }],
+      },
+    ]);
+    // A finished leader, or a member that did not complete, shows nothing.
+    expect(
+      squadEngagements([
+        run({ ...leader, status: 'completed' }),
+        run({ ...bob, status: 'failed', retryable: true, recorded: false }),
+      ]),
+    ).toEqual([]);
   });
 
-  it('renders one bar per engagement above the runs', () => {
+  it('renders one bar per engagement above the runs, a chip per participant', () => {
     const node = document.createElement('div');
     const root = createRoot(node);
     act(() =>
       root.render(
         <I18nProvider language="en">
           <SessionAgentLiveRuns
-            runs={[leader, alice]}
+            runs={[
+              leader,
+              alice,
+              run({ ...bob, status: 'completed', recorded: false }),
+            ]}
             onCancel={vi.fn()}
             onRespond={vi.fn()}
           />
@@ -447,11 +478,19 @@ describe('squad engagements', () => {
       ),
     );
     const bar = node.querySelector('[data-squad-id="sq_1"]');
-    expect(bar?.textContent).toContain('Squad crew');
-    expect(bar?.textContent).toContain('working: alice');
+    expect(bar?.getAttribute('role')).toBe('status');
+    expect(bar?.getAttribute('aria-label')).toBe('Squad crew');
+    const chips = [...(bar?.querySelectorAll('[data-state]') ?? [])].map(
+      (chip) => [chip.getAttribute('data-state'), chip.textContent],
+    );
+    expect(chips).toEqual([
+      ['deciding', 'leaddeciding'],
+      ['working', 'aliceworking'],
+      ['replied', 'bobreplied'],
+    ]);
     act(() =>
       root.render(
-        <I18nProvider language="en">
+        <I18nProvider language="zh-CN">
           <SessionAgentLiveRuns
             runs={[leader]}
             onCancel={vi.fn()}
@@ -460,9 +499,9 @@ describe('squad engagements', () => {
         </I18nProvider>,
       ),
     );
-    expect(node.querySelector('[data-squad-id="sq_1"]')?.textContent).toContain(
-      'lead is deciding',
-    );
+    const zhBar = node.querySelector('[data-squad-id="sq_1"]');
+    expect(zhBar?.textContent).toBe('crewlead决定中');
+    expect(zhBar?.querySelectorAll('[data-state]')).toHaveLength(1);
     act(() => root.unmount());
   });
 });

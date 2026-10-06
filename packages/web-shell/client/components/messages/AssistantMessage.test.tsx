@@ -906,6 +906,49 @@ describe('AssistantMessage squad replies', () => {
     expect(container.textContent).toContain('@alice please take it');
   });
 
+  it('labels a member reply with the squad it answered for', () => {
+    const container = render(
+      <AssistantMessage
+        content="Fixed in auth.ts."
+        author={{ name: 'alice' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-9',
+          status: 'completed',
+          author: {
+            agentId: 'ag_alice',
+            name: 'alice',
+            memberSquadName: 'crew',
+          },
+        }}
+      />,
+    );
+    expect(container.textContent).toContain('alice· crew');
+    expect(container.textContent).toContain('Fixed in auth.ts.');
+  });
+
+  it('never renders an empty member reply as no_action', () => {
+    // Only a leader's empty reply means "nothing to do".
+    const container = render(
+      <AssistantMessage
+        content={'\u200B'}
+        author={{ name: 'alice' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-10',
+          status: 'completed',
+          author: {
+            agentId: 'ag_alice',
+            name: 'alice',
+            memberSquadName: 'crew',
+          },
+        }}
+      />,
+    );
+    expect(container.querySelector('[data-squad-outcome]')).toBeNull();
+    expect(container.textContent).toContain('alice· crew');
+  });
+
   it('renders a no_action reply as one muted line', () => {
     const container = render(
       <AssistantMessage
@@ -926,7 +969,9 @@ describe('AssistantMessage squad replies', () => {
     // Not a message: no avatar row, no footer.
     expect(container.querySelector('button')).toBeNull();
     expect(container.childElementCount).toBe(1);
-    expect(line?.childElementCount).toBe(0);
+    // A muted squad icon, then the text: no avatar.
+    expect(line?.querySelector('svg')).not.toBeNull();
+    expect(line?.childElementCount).toBe(2);
   });
 
   it('renders a leader reply of only invisible characters as no_action', () => {

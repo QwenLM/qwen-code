@@ -310,6 +310,37 @@ describe('createTranscriptReplayMachine', () => {
     ).toEqual(projected[0]);
   });
 
+  it('keeps the squad a member reply answered for on its author', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('agent-rec-2', 'user', {
+        subtype: 'agent_message',
+        message: {
+          role: 'user',
+          parts: [{ text: '<agent_message from="alice">…' }],
+        },
+        systemPayload: {
+          displayText: 'Fixed in auth.ts.',
+          author: {
+            agentId: 'ag_alice',
+            name: 'alice',
+            memberSquadName: 'crew',
+          },
+          runId: 'run-8',
+          status: 'completed',
+        },
+      }),
+    );
+    const meta = projected[0]?._meta as
+      | { qwenAgentMessage?: { author?: Record<string, unknown> } }
+      | undefined;
+    expect(meta?.qwenAgentMessage?.author).toEqual({
+      agentId: 'ag_alice',
+      name: 'alice',
+      memberSquadName: 'crew',
+    });
+  });
+
   it('replays an agent_mention record as a user message, not the envelope', () => {
     const projected = updates(
       createTranscriptReplayMachine(),

@@ -5,7 +5,13 @@
  */
 
 import { useEffect, useState } from 'react';
-import { RefreshCwIcon, SquareIcon, UsersIcon } from 'lucide-react';
+import {
+  CheckIcon,
+  LoaderCircleIcon,
+  RefreshCwIcon,
+  SquareIcon,
+  UsersIcon,
+} from 'lucide-react';
 import type {
   SessionAgentPermissionPrompt,
   SessionAgentRunFrame,
@@ -25,6 +31,7 @@ import { useI18n } from '../../i18n';
 import { formatElapsed } from './agents-view-logic';
 import { isTerminalRunStatus } from './use-session-agent-runs';
 import assistantStyles from '../messages/AssistantMessage.module.css';
+import detailStyles from '../messages/agent-message-details.module.css';
 import styles from './session-agent-live-runs.module.css';
 
 type Translate = ReturnType<typeof useI18n>['t'];
@@ -354,11 +361,18 @@ function LiveRun({
           onDismiss={onCancel}
         />
       )}
-      <AgentStepList
-        steps={run.steps ?? []}
-        label={t('collab.run.steps', { agent: run.author.name })}
-        settled={isTerminalRunStatus(run.status)}
-      />
+      {/* Steps and tokens in the recorded reply's muted block, so the card
+          reads the same before and after its record lands. */}
+      {((run.steps?.length ?? 0) > 0 || (run.totalTokens ?? 0) > 0) && (
+        <div className={detailStyles.details}>
+          <AgentStepList
+            steps={run.steps ?? []}
+            label={t('collab.run.steps', { agent: run.author.name })}
+            settled={isTerminalRunStatus(run.status)}
+          />
+          <AgentTokenUsage totalTokens={run.totalTokens} />
+        </div>
+      )}
       {permission && (
         <div className={styles.approval}>
           <ToolApproval
@@ -375,7 +389,6 @@ function LiveRun({
           />
         </div>
       )}
-      <AgentTokenUsage totalTokens={run.totalTokens} />
       {terminal && run.recorded === false && !run.retryable && (
         // Finished, but its record waits for the main reply to settle; the
         // record then replaces this card.
@@ -387,27 +400,39 @@ function LiveRun({
   );
 }
 
+/** A delegated member in a squad engagement. */
+export interface SquadMemberView {
+  name: string;
+  /** `replied`: its run completed and its reply is on the way to the leader. */
+  state: 'working' | 'replied';
+}
+
 /** One squad engagement as the live runs show it. */
 export interface SquadEngagementView {
   squadId: string;
   squadName: string;
   /** The leader, while its squad-mode run is queued or running. */
   leader?: string;
-  /** Delegated members still working, in arrival order. */
-  members: string[];
+  /** Delegated members, in arrival order. */
+  members: SquadMemberView[];
 }
 
 /**
  * Squad engagements under way in this session, derived from live run frames
  * carrying `squadId`: a leader run names its squad on its author; a member
- * run the leader waits on carries the squad id (and name) on the frame.
+ * run the leader waits on carries the squad id (and name) on the frame. A
+ * member's completed frame keeps them while its record is pending, which is
+ * the only time a finished run is still in the list: that member `replied`.
  */
 export function squadEngagements(
   runs: readonly SessionAgentRunFrame[],
 ): SquadEngagementView[] {
   const byId = new Map<string, SquadEngagementView>();
   for (const run of runs) {
-    if (!run.squadId || isTerminalRunStatus(run.status)) continue;
+    if (!run.squadId) continue;
+    const leads = !!run.author.squadName;
+    const replied = !leads && run.status === 'completed';
+    if (isTerminalRunStatus(run.status) && !replied) continue;
     const name = run.squadName ?? run.author.squadName;
     let view = byId.get(run.squadId);
     if (!view) {
@@ -415,15 +440,25 @@ export function squadEngagements(
       byId.set(run.squadId, view);
     }
     if (!view.squadName && name) view.squadName = name;
-    if (run.author.squadName) view.leader = run.author.name;
-    else if (!view.members.includes(run.author.name)) {
-      view.members.push(run.author.name);
+    if (leads) {
+      view.leader = run.author.name;
+      continue;
     }
+    const state = replied ? 'replied' : 'working';
+    const member = view.members.find(
+      (candidate) => candidate.name === run.author.name,
+    );
+    // A member asked again is working again.
+    if (!member) view.members.push({ name: run.author.name, state });
+    else if (state === 'working') member.state = 'working';
   }
   return [...byId.values()].filter((view) => view.squadName);
 }
 
-/** A small bar per active squad engagement: its name and who is working. */
+/**
+ * A small bar per active squad engagement: the squad's name, then a chip per
+ * participant (the leader deciding, each member working or replied).
+ */
 export function SquadEngagementBar({
   runs,
 }: {
@@ -439,26 +474,47 @@ export function SquadEngagementBar({
           key={engagement.squadId}
           className={styles.squadBar}
           role="status"
+          aria-label={t('collab.squad.engagement', {
+            squad: engagement.squadName,
+          })}
           data-squad-id={engagement.squadId}
         >
           <UsersIcon aria-hidden="true" className={styles.squadIcon} />
-          <span className={styles.squadName}>
-            {t('collab.squad.engagement', { squad: engagement.squadName })}
-          </span>
-          {engagement.members.length > 0 && (
-            <span>
-              {t('collab.squad.engagementMembers', {
-                names: engagement.members.join(', '),
-              })}
+          <span className={styles.squadName}>{engagement.squadName}</span>
+          {engagement.leader && (
+            <span className={styles.squadChip} data-state="deciding">
+              <span className={styles.squadDot} aria-hidden="true" />
+              {engagement.leader}
+              <span className={styles.squadChipState}>
+                {t('collab.squad.leaderDeciding')}
+              </span>
             </span>
           )}
-          {engagement.leader && engagement.members.length === 0 && (
-            <span>
-              {t('collab.squad.engagementLeader', {
-                leader: engagement.leader,
-              })}
+          {engagement.members.map((member) => (
+            <span
+              key={member.name}
+              className={styles.squadChip}
+              data-state={member.state}
+            >
+              {member.state === 'working' ? (
+                <LoaderCircleIcon
+                  aria-hidden="true"
+                  className={`${styles.squadChipIcon} ${styles.squadChipSpin}`}
+                />
+              ) : (
+                <CheckIcon
+                  aria-hidden="true"
+                  className={`${styles.squadChipIcon} ${styles.squadChipDone}`}
+                />
+              )}
+              {member.name}
+              <span className={styles.squadChipState}>
+                {member.state === 'working'
+                  ? t('collab.squad.memberWorking')
+                  : t('collab.squad.memberReplied')}
+              </span>
             </span>
-          )}
+          ))}
         </div>
       ))}
     </div>

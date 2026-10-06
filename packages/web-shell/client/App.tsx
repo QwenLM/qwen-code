@@ -9189,7 +9189,7 @@ export function App({
 
   const activePanelRef = useRef(activePanel);
   const [agentsNav, setAgentsNav] = useState<{
-    view: 'agents' | 'runtime' | 'new-agent';
+    view: 'agents' | 'squads' | 'runtime' | 'new-agent';
     request: number;
   }>({ view: 'agents', request: 0 });
   // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local

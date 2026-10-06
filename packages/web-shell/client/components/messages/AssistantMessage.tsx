@@ -7,7 +7,12 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from 'react';
-import { LightbulbIcon, ThumbsDownIcon, ThumbsUpIcon } from 'lucide-react';
+import {
+  LightbulbIcon,
+  ThumbsDownIcon,
+  ThumbsUpIcon,
+  UsersIcon,
+} from 'lucide-react';
 import { Markdown } from './Markdown';
 import { TurnSources } from '../sources/TurnSources';
 import {
@@ -155,6 +160,13 @@ export const AssistantMessage = memo(function AssistantMessage({
     agentMessage?.kind === 'agent_message'
       ? agentMessage.author?.squadName
       : undefined;
+  // The squad shown beside the author: the one it leads, or the one whose
+  // leader it answered as a member. Only the leader's counts for no_action.
+  const squadLabel =
+    squadName ??
+    (agentMessage?.kind === 'agent_message'
+      ? agentMessage.author?.memberSquadName
+      : undefined);
   if (
     agentMessage?.kind === 'agent_message' &&
     (agentMessage.squadOutcome === 'no_action' ||
@@ -173,13 +185,18 @@ export const AssistantMessage = memo(function AssistantMessage({
         data-squad-outcome="no_action"
         role="note"
       >
-        {[
-          author?.name ?? agentMessage.author?.name,
-          squadName,
-          noActionLabel === noActionKey ? '—' : noActionLabel,
-        ]
-          .filter(Boolean)
-          .join(' · ')}
+        <span className={styles.squadNoActionIcon} aria-hidden="true">
+          <UsersIcon />
+        </span>
+        <span className={styles.squadNoActionText}>
+          {[
+            author?.name ?? agentMessage.author?.name,
+            squadName,
+            noActionLabel === noActionKey ? '—' : noActionLabel,
+          ]
+            .filter(Boolean)
+            .join(' · ')}
+        </span>
       </div>
     );
   }
@@ -189,8 +206,8 @@ export const AssistantMessage = memo(function AssistantMessage({
         <div className={styles.author}>
           <AuthorAvatar name={author.name} color={author.color} />
           <span className={styles.authorName}>{author.name}</span>
-          {squadName && (
-            <span className={styles.authorSquad}>· {squadName}</span>
+          {squadLabel && (
+            <span className={styles.authorSquad}>· {squadLabel}</span>
           )}
         </div>
       )}

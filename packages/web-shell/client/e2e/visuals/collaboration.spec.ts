@@ -5,12 +5,19 @@
  */
 
 import { expect, test, type Page } from '@playwright/test';
+import type {
+  DaemonEvent,
+  QwenAgentMessageMeta,
+  SessionAgentRunFrame,
+  SessionSquadView,
+} from '@qwen-code/sdk/daemon';
 import { createWebShellDaemonScenario } from '../utils/mockDaemon';
 import {
   captureScreenshot,
   clearFocus,
   FIXED_CAPTURE_TIME,
   gotoNewSession,
+  gotoSession,
   installScenario,
   resolveBaseURL,
   VISUAL_VIEWPORT,
@@ -18,8 +25,9 @@ import {
 } from './harness';
 
 /**
- * Agent collaboration: the @ picker in an ordinary chat, and the Agents page
- * (roster, runtimes, adding a runtime, a new agent on a runtime, sharing).
+ * Agent collaboration: the @ picker in an ordinary chat, the Agents page
+ * (roster, squads, runtimes, adding a runtime, a new agent on a runtime,
+ * sharing), and a squad at work in a chat.
  *
  * Agents answer inside the chat session they were mentioned in, so there is
  * no separate conversation surface to capture here.
@@ -371,5 +379,289 @@ for (const theme of THEMES) {
     await expect(dialog.getByText(/a2a_s+/).first()).toBeVisible();
     await captureScreenshot(page, `collab-share-${theme}`);
     await page.keyboard.press('Escape');
+  });
+}
+
+/** `GET …/agent/squads` entries, as `toSquadView` resolves them. */
+const squads: SessionSquadView[] = [
+  {
+    id: 'sq_review',
+    name: 'review-squad',
+    description: 'Reviews a change and updates the docs.',
+    instructions: 'Ask reviewer first; docs only after it passes.',
+    leaderAgentId: 'ag_lead',
+    leaderName: 'lead',
+    members: [
+      { agentId: 'ag_reviewer', role: 'checks correctness', name: 'reviewer' },
+      { agentId: 'ag_docs', role: 'updates the changelog', name: 'docs' },
+    ],
+    createdAt: NOW - 3 * 24 * 60 * MIN,
+    updatedAt: NOW - 60 * MIN,
+  },
+  {
+    // No description and no roles: the card shows only the chips.
+    id: 'sq_release',
+    name: 'release-crew',
+    leaderAgentId: 'ag_docs',
+    leaderName: 'docs',
+    members: [
+      { agentId: 'ag_lead', name: 'lead' },
+      { agentId: 'ag_reviewer', name: 'reviewer' },
+    ],
+    createdAt: NOW - 2 * 24 * 60 * MIN,
+    updatedAt: NOW - 2 * 24 * 60 * MIN,
+  },
+];
+
+async function setupSquads(
+  page: Page,
+  baseURL: string,
+  /** Live run frames of the scenario's session, given its id. */
+  framesFor: (sessionId: string) => SessionAgentRunFrame[] = () => [],
+  events: DaemonEvent[] = [],
+) {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: { features: ['session_events', 'agent_collaboration_v1'] },
+    ...(events.length > 0 ? { transcriptPage: { events } } : {}),
+  });
+  const daemon = await installScenario(page, scenario, baseURL);
+  // A frame of another session is dropped by the client, so the frames are
+  // stamped with this scenario's.
+  const frames = framesFor(scenario.sessionId);
+  await page.route('**/workspaces/*/agent/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (isAgentStream(path)) return route.abort();
+    if (path.endsWith('/agents')) return route.fulfill({ json: { agents } });
+    if (path.endsWith('/squads')) return route.fulfill({ json: { squads } });
+    if (/\/sessions\/[^/]+\/runs$/.test(path))
+      return route.fulfill({ json: { frames } });
+    return route.fulfill({ status: 404, json: { error: 'not in fixture' } });
+  });
+  return { scenario, daemon };
+}
+
+async function openSquads(page: Page, theme: VisualTheme): Promise<void> {
+  await openAgents(page, theme);
+  await page.getByRole('radio', { name: 'Squads', exact: true }).click();
+  await expect(page.getByTestId('squad-card')).toHaveCount(2);
+}
+
+/** A transcript update in the shape `createAgentRecordTranscriptUpdate` emits. */
+function agentRecord(
+  recordId: string,
+  role: 'user' | 'assistant',
+  text: string,
+  agentMessage: QwenAgentMessageMeta,
+  offsetMin: number,
+): DaemonEvent {
+  const segmentId =
+    agentMessage.kind === 'agent_mention'
+      ? `mention:${recordId}`
+      : `agent:${agentMessage.runId}`;
+  return {
+    v: 1,
+    type: 'session_update',
+    data: {
+      sessionUpdate:
+        role === 'user' ? 'user_message_chunk' : 'agent_message_chunk',
+      content: { type: 'text', text },
+      _meta: {
+        source: agentMessage.kind,
+        qwenAgentMessage: agentMessage,
+        qwenDiscreteMessage: true,
+        timestamp: NOW - offsetMin * MIN,
+        qwenTranscript: { sourceRecordIds: [recordId], segmentId },
+      },
+    },
+  } as unknown as DaemonEvent;
+}
+
+const lead = { agentId: 'ag_lead', name: 'lead', program: 'qwen' as const };
+const reviewer = {
+  agentId: 'ag_reviewer',
+  name: 'reviewer',
+  program: 'qwen' as const,
+};
+
+/**
+ * A squad in a chat: an earlier ask the leader had nothing to do for (its
+ * no_action line), then an ask it hands to two members; reviewer has replied
+ * under the squad's name, docs is still working.
+ */
+function squadChatEvents(): DaemonEvent[] {
+  return [
+    agentRecord(
+      'rec-mention-1',
+      'user',
+      '@review-squad anything waiting for review?',
+      {
+        kind: 'agent_mention',
+        mentionedAgentIds: [],
+        mentionedSquadIds: ['sq_review'],
+      },
+      30,
+    ),
+    agentRecord(
+      'rec-lead-1',
+      'assistant',
+      // What replay shows for a leader's empty reply.
+      'No action needed.',
+      {
+        kind: 'agent_message',
+        author: { ...lead, runtimeId: 'local', squadName: 'review-squad' },
+        runId: 'run-lead-1',
+        status: 'completed',
+        totalTokens: 3_210,
+        squadOutcome: 'no_action',
+      },
+      29,
+    ),
+    agentRecord(
+      'rec-mention-2',
+      'user',
+      '@review-squad check the login fix and note it in the changelog',
+      {
+        kind: 'agent_mention',
+        mentionedAgentIds: [],
+        mentionedSquadIds: ['sq_review'],
+      },
+      12,
+    ),
+    agentRecord(
+      'rec-lead-2',
+      'assistant',
+      '@reviewer please review the token check in `auth.ts`.\n\n@docs once it passes, add a changelog line.',
+      {
+        kind: 'agent_message',
+        author: { ...lead, runtimeId: 'local', squadName: 'review-squad' },
+        runId: 'run-lead-2',
+        status: 'completed',
+        totalTokens: 4_820,
+      },
+      11,
+    ),
+    agentRecord(
+      'rec-reviewer-1',
+      'assistant',
+      'Looks good: the expired-token branch now returns 401 and has a test.',
+      {
+        kind: 'agent_message',
+        author: {
+          ...reviewer,
+          runtimeId: 'local',
+          memberSquadName: 'review-squad',
+        },
+        runId: 'run-reviewer-1',
+        status: 'completed',
+        steps: [
+          { id: 's1', title: 'ReadFile: src/auth.ts', status: 'completed' },
+          { id: 's2', title: 'Shell: npm test -- auth', status: 'completed' },
+        ],
+        totalTokens: 58_466,
+      },
+      4,
+    ),
+  ];
+}
+
+/** docs, delegated by the leader, still working: the engagement is open. */
+const docsRun = (sessionId: string): SessionAgentRunFrame => ({
+  type: 'run',
+  sessionId,
+  runId: 'run-docs-1',
+  author: {
+    agentId: 'ag_docs',
+    name: 'docs',
+    program: 'qwen',
+    runtimeId: 'local',
+  },
+  status: 'running',
+  outputText: 'Adding the entry under **Fixes**…',
+  steps: [
+    { id: 's1', title: 'ReadFile: CHANGELOG.md', status: 'completed' },
+    { id: 's2', title: 'Edit: CHANGELOG.md', status: 'running' },
+  ],
+  totalTokens: 12_480,
+  activityAt: NOW - 20_000,
+  squadId: 'sq_review',
+  squadName: 'review-squad',
+});
+
+for (const theme of THEMES) {
+  test(`collaboration squads (${theme})`, async ({ page }, testInfo) => {
+    await setupSquads(page, resolveBaseURL(testInfo));
+    await openSquads(page, theme);
+    // Squads have their own view: the agent roster is not under it.
+    await expect(
+      page.getByText('Paused while the archive moves.'),
+    ).toBeHidden();
+    const review = page
+      .getByTestId('squad-card')
+      .filter({ hasText: 'review-squad' });
+    await expect(review.locator('[data-squad-role="leader"]')).toContainText(
+      'lead',
+    );
+    await expect(review.locator('[data-squad-role="member"]')).toHaveText([
+      /reviewer.*checks correctness/,
+      /docs.*updates the changelog/,
+    ]);
+    // An empty description leaves no placeholder line.
+    await expect(
+      page.getByTestId('squad-card').filter({ hasText: 'release-crew' }),
+    ).not.toContainText('—');
+    await clearFocus(page);
+    await captureScreenshot(page, `collab-squads-${theme}`);
+  });
+
+  test(`collaboration new squad (${theme})`, async ({ page }, testInfo) => {
+    await setupSquads(page, resolveBaseURL(testInfo));
+    await openSquads(page, theme);
+    await page.getByRole('button', { name: 'New squad', exact: true }).click();
+    const form = page.getByTestId('squad-form');
+    await expect(form).toBeVisible();
+    await form.getByPlaceholder('Called as @name in chats').fill('triage');
+    await form.locator('select').selectOption('ag_lead');
+    // The leader is not offered as its own member; roles wait for a check.
+    await expect(form.getByRole('checkbox')).toHaveCount(3);
+    await expect(form.getByLabel('lead', { exact: true })).toHaveCount(0);
+    await form.getByLabel('reviewer', { exact: true }).check();
+    await expect(form.getByLabel('reviewer Role (optional)')).toBeEnabled();
+    await expect(form.getByLabel('docs Role (optional)')).toBeDisabled();
+    await clearFocus(page);
+    await captureScreenshot(page, `collab-new-squad-${theme}`);
+  });
+
+  test(`collaboration squad in chat (${theme})`, async ({ page }, testInfo) => {
+    const { scenario, daemon } = await setupSquads(
+      page,
+      resolveBaseURL(testInfo),
+      (sessionId) => [docsRun(sessionId)],
+      squadChatEvents(),
+    );
+    await gotoSession(page, scenario, daemon, theme);
+    const noAction = page.locator('[data-squad-outcome="no_action"]');
+    await expect(noAction).toHaveText('lead · review-squad · no action needed');
+    // A member's reply carries the squad it answered for.
+    await expect(
+      page.getByText('Looks good: the expired-token branch'),
+    ).toBeVisible();
+    // The leader's dispatch and the member's reply; the no_action line
+    // words it in one string.
+    await expect(page.getByText('· review-squad', { exact: true })).toHaveCount(
+      2,
+    );
+    const bar = page.getByTestId('squad-engagements');
+    await expect(bar.getByRole('status')).toHaveAttribute(
+      'aria-label',
+      'Squad review-squad',
+    );
+    await expect(bar.locator('[data-state="working"]')).toHaveText(
+      'docsworking',
+    );
+    await expect(
+      page.locator('[data-run-id="run-docs-1"]').getByText('12,480 tokens'),
+    ).toBeVisible();
+    await clearFocus(page);
+    await captureScreenshot(page, `collab-squad-chat-${theme}`);
   });
 }

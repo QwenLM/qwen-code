@@ -80,6 +80,11 @@ export interface SessionAgentAuthor {
   runtimeId?: string;
   /** Set when the agent ran as the leader of this squad. */
   squadName?: string;
+  /**
+   * Set on a member's reply its squad's leader was waiting on: the squad it
+   * answered for. Display only; leader logic keys on `squadName`.
+   */
+  memberSquadName?: string;
 }
 
 /**

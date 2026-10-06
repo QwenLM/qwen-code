@@ -176,3 +176,62 @@
   color: var(--muted-foreground);
   font-size: 12px;
 }
+
+/* Squads: the leader and members as wrapping chips. */
+.squadChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.squadChip {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 2px 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 8px);
+  font-size: 12px;
+}
+
+.squadChipName {
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.squadChipRole {
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.squadLeaderMark {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+
+/* Checkbox · name · role, the role field always present so rows hold still. */
+.squadMemberRow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 10rem) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.squadMemberName {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.squadMemberRow .field:disabled {
+  opacity: 0.5;
+}

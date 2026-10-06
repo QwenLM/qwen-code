@@ -114,7 +114,7 @@ export function AgentsRoute({
     try {
       const [next, squadList] = await Promise.all([
         client.listAgents(),
-        // An older daemon has no squad routes: the section stays hidden.
+        // An older daemon has no squad routes: the Squads view shows empty.
         client.listSquads
           ? client.listSquads().catch(() => undefined)
           : Promise.resolve(undefined),

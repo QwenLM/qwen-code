@@ -331,6 +331,9 @@ function parseAgentAuthor(value: unknown): SessionAgentAuthor | undefined {
     ...(typeof value['squadName'] === 'string' && value['squadName']
       ? { squadName: value['squadName'] }
       : {}),
+    ...(typeof value['memberSquadName'] === 'string' && value['memberSquadName']
+      ? { memberSquadName: value['memberSquadName'] }
+      : {}),
   };
 }
 

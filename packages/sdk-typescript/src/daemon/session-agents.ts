@@ -42,6 +42,11 @@ export interface SessionAgentAuthor {
   runtimeId?: string;
   /** Set when the agent ran as the leader of this squad. */
   squadName?: string;
+  /**
+   * Set on a member's reply its squad's leader was waiting on: the squad it
+   * answered for. Display only; leader logic keys on `squadName`.
+   */
+  memberSquadName?: string;
 }
 
 /** `no_action`: a squad leader's empty reply, rendered as a muted line. */
@@ -184,6 +189,9 @@ export function parseQwenAgentMessageMeta(
           : {}),
         ...(typeof a['squadName'] === 'string' && a['squadName']
           ? { squadName: a['squadName'] }
+          : {}),
+        ...(typeof a['memberSquadName'] === 'string' && a['memberSquadName']
+          ? { memberSquadName: a['memberSquadName'] }
           : {}),
       };
     }

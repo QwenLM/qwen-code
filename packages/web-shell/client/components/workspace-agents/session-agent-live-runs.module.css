@@ -66,7 +66,7 @@
   font-size: 12px;
 }
 
-/* One bar per squad engagement under way: the squad and who is working. */
+/* One bar per squad engagement under way: the squad and its participants. */
 .squadBars {
   display: flex;
   flex-direction: column;
@@ -93,6 +93,57 @@
 .squadName {
   color: var(--foreground);
   font-weight: 600;
+}
+
+/* One participant: the leader deciding, or a member working / replied. */
+.squadChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--foreground);
+  white-space: nowrap;
+}
+
+.squadChipState {
+  color: var(--muted-foreground);
+}
+
+.squadChipIcon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.squadChipSpin {
+  color: var(--muted-foreground);
+  animation: squad-chip-spin 1s linear infinite;
+}
+
+.squadChipDone {
+  color: var(--success-color);
+}
+
+.squadDot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--muted-foreground);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .squadChipSpin {
+    animation: none;
+  }
+}
+
+@keyframes squad-chip-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* A deferred @-mention, shown until its record lands. */
