@@ -12,6 +12,7 @@ import { validateTranscriptRecord } from '../utils/transcript-records.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import {
   isDefinitionPinConsistent,
+  parseMonitorRun,
   parseOperationGrant,
   type ExtensionRun,
   type OperationGrant,
@@ -71,6 +72,7 @@ import {
   parseHookRegistration,
   parseHookExecution,
 } from './managed-hook-record.js';
+import { parseChildRun } from './managed-child-run-record.js';
 import {
   managedSessionActivationStateFrom,
   managedSessionCommandKey,
@@ -393,6 +395,15 @@ export class LocalManagedSessionAuthority {
     string,
     { revision: number; recordRef: ManagedSessionDurableRef }
   >();
+  /**
+   * The domain, revision and reference each committed domain record event
+   * carried, by sequence: a command identity is unique per session, not per
+   * domain, so the replay check compares the domain before answering.
+   */
+  private readonly domainEvents = new Map<
+    number,
+    { domain: string; revision: number; recordRef: ManagedSessionDurableRef }
+  >();
   private readonly actions = new Map<string, ManagedSessionAction>();
   /** The latest revision of each Stage H record, by its chain key. */
   private readonly extensionRecords = new Map<
@@ -458,6 +469,11 @@ export class LocalManagedSessionAuthority {
 
   get sessionHeader(): ManagedSessionHeader {
     return this.header;
+  }
+
+  /** The envelope fields every record of this session states. */
+  get recordEnvelope(): { readonly cwd: string; readonly version: string } {
+    return { cwd: this.cwd, version: this.version };
   }
 
   /**
@@ -1302,6 +1318,15 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
+   * Every domain may commit into any header this writer creates: readers
+   * since #12837 parse them all, so nothing here distinguishes Sessions
+   * by their minimumReader. Only the enablement list gates a domain.
+   */
+  private assertDomainAdmittable(domain: ManagedSessionDomain): void {
+    assertManagedSessionDomainEnabled(domain);
+  }
+
+  /**
    * Commits one registered domain record. The body is published as a resource
    * first, because the event carries only a reference to it; the authority
    * composes the envelope so a caller cannot choose its own revision or break
@@ -1315,7 +1340,6 @@ export class LocalManagedSessionAuthority {
     },
     actor: ManagedSessionActor,
   ): Promise<ManagedSessionDomainReceipt> {
-    assertManagedSessionDomainEnabled(request.domain);
     const store = this.resources;
     if (store === undefined) {
       throw new ManagedSessionRecordError(
@@ -1323,8 +1347,13 @@ export class LocalManagedSessionAuthority {
       );
     }
     return this.runSerial(async () => {
+      // A retry returns what it committed even if the domain was disabled
+      // since.
+      const replayed = this.replayedDomain(command, request.domain);
+      if (replayed !== undefined) return replayed;
       assertExtensionActor(actor.class);
       assertCommandIdentity(command);
+      this.assertDomainAdmittable(request.domain);
       // Refused before publishing, so a retry loop leaves no body behind.
       this.assertCommandWritable(command);
       this.assertExpectedSequence(command);
@@ -1422,7 +1451,7 @@ export class LocalManagedSessionAuthority {
           }
         });
       }
-      assertManagedSessionDomainEnabled(request.domain);
+      this.assertDomainAdmittable(request.domain);
       const parsed = body.parse(request.record);
       await this.verifyExtensionResources(request.domain, parsed.record);
       this.assertExtensionRevision(
@@ -1590,6 +1619,53 @@ export class LocalManagedSessionAuthority {
       leaseDurationMs: request.leaseDurationMs,
       expiresAt: this.now() + request.leaseDurationMs,
     });
+  }
+
+  /**
+   * A retried command returns what it committed, before anything is
+   * published again.
+   */
+  private replayedDomain(
+    command: ManagedSessionCommand,
+    domain: ManagedSessionDomain,
+  ): ManagedSessionDomainReceipt | undefined {
+    const previous = this.transactions.get(
+      managedSessionCommandKey(command.operation, command.commandId),
+    );
+    if (
+      previous === undefined ||
+      !managedSessionKeysEqual(command.sessionKey, this.sessionKey)
+    ) {
+      return undefined;
+    }
+    if (previous.contentDigest !== command.contentDigest) {
+      throw new ManagedSessionConflictError(
+        `command ${command.commandId} was already committed with different content.`,
+      );
+    }
+    for (
+      let sequence = previous.receipt.firstSequence;
+      sequence <= previous.receipt.lastSequence;
+      sequence++
+    ) {
+      const committed = this.domainEvents.get(sequence);
+      // A retry naming another domain falls through to the conflict below
+      // rather than resolving with the record its own domain committed.
+      if (committed !== undefined && committed.domain === domain) {
+        return {
+          receipt: {
+            ...previous.receipt,
+            committedSequence: this.committed,
+            replayed: true,
+          },
+          revision: committed.revision,
+          recordRef: committed.recordRef,
+        };
+      }
+    }
+    throw new ManagedSessionConflictError(
+      `command ${command.commandId} was committed without a domain record.`,
+    );
   }
 
   /**
@@ -1782,6 +1858,9 @@ export class LocalManagedSessionAuthority {
                 previous?.task ?? null,
                 parsed.run,
                 occurredAt,
+                domain === 'child_run'
+                  ? parseChildRun(parsed.record).stopRequested
+                  : false,
               ),
             }),
     });
@@ -1944,6 +2023,17 @@ export class LocalManagedSessionAuthority {
     } else if (domain === 'hook_execution') {
       const execution = parseHookExecution(record);
       refs = [execution.planRef, execution.inputRef, execution.resultRef];
+    } else if (domain === 'child_run') {
+      const child = parseChildRun(record);
+      refs = [child.commandRef, child.startReceiptRef, child.outputRef];
+    } else if (domain === 'monitor_run') {
+      const monitor = parseMonitorRun(record);
+      refs = [
+        monitor.commandRef,
+        monitor.startReceiptRef,
+        monitor.outputRef,
+        monitor.lastObservationRef,
+      ];
     }
     // Every read settles before a failure is reported, so none outlives
     // the commit or the open it belongs to.
@@ -2098,7 +2188,7 @@ export class LocalManagedSessionAuthority {
       // Only an enabled domain commits records, whatever the path: the
       // generic appends would otherwise take any name in the index.
       if (event.kind === 'domain.committed') {
-        assertManagedSessionDomainEnabled(
+        this.assertDomainAdmittable(
           event.payload['domain'] as ManagedSessionDomain,
         );
       }
@@ -2651,12 +2741,14 @@ export class LocalManagedSessionAuthority {
   private recordDomainEvent(event: ManagedSessionEvent): void {
     const domain = event.payload['domain'] as string;
     const previous = this.domainRecords.get(domain);
-    this.domainRecords.set(domain, {
+    const committed = {
       revision: (previous?.revision ?? 0) + 1,
       recordRef: event.payload[
         'recordRef'
       ] as unknown as ManagedSessionDurableRef,
-    });
+    };
+    this.domainRecords.set(domain, committed);
+    this.domainEvents.set(event.sequence, { domain, ...committed });
   }
 
   /** The latest committed record for a registered domain, if any. */

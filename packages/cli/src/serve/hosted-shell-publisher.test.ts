@@ -239,14 +239,9 @@ async function fixture(runtimeCallId = 'worker-call-a') {
     },
   };
   const writable = vi.fn(async () => {});
-  publisher = new HostedShellPublisher(
-    session,
-    resources,
-    writable,
-    'runtime-a',
-  );
+  publisher = new HostedShellPublisher(session, resources, writable);
   const descriptor = await publisher.start();
-  publisher.register(request, 'model-call-a');
+  publisher.register(request, 'model-call-a', 'runtime-a');
   const registry = new ManagedShellPublisherRegistry();
   const app = express();
   registry.register(

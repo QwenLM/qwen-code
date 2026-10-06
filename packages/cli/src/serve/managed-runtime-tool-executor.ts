@@ -5,7 +5,12 @@
  */
 
 import path from 'node:path';
+import { lstat, readlink, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
+import {
+  checkHostedGlobPattern,
+  HOSTED_GLOB_TOO_COMPLEX,
+} from './hosted-glob-pattern.js';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import type { RawFileHistoryOperation } from './hosted-file-history-protocol.js';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
@@ -13,6 +18,7 @@ import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js'
 import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
+import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
@@ -29,8 +35,11 @@ import {
   registerSessionProjectDir,
   sessionIdContext,
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
+import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
+import { getShellContextEnvVars } from '@qwen-code/qwen-code-core/services/shellContextEnv.js';
 import type {
   AnyDeclarativeTool,
+  AnyToolInvocation,
   ToolResult,
 } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES } from './managed-runtime-attestation-contract.js';
@@ -54,8 +63,52 @@ import {
   type ManagedCsiBoot,
   type ManagedCsiPodIdentity,
 } from './managed-csi-envelope.js';
+import {
+  HookCommandIsolationUnavailableError,
+  type HookCommandIsolationUnavailableReason,
+  type ManagedChildRunProcess,
+  type ManagedChildRunSupervisor,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
+import { ManagedBackgroundShellRegistry } from './managed-background-shell-registry.js';
+import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
+import { ManagedMonitorWatcher } from './managed-monitor-watcher.js';
 
 export class ManagedMcpToolUnknownError extends Error {}
+
+const ISOLATION_REFUSAL_CLAUSES: Record<
+  HookCommandIsolationUnavailableReason,
+  string
+> = {
+  platform: 'this Runtime does not run Linux with cgroup v2',
+  root_missing: 'no delegated cgroup v2 root is configured on this Runtime',
+  root_shape:
+    'the delegated root on this Runtime is not a cgroup v2 domain directory',
+  root_unreadable:
+    'the delegated cgroup v2 root on this Runtime is missing or unreadable',
+  unit_name_invalid: 'its cgroup unit name is not valid on this Runtime',
+  unit_name_taken:
+    'a cgroup unit with the same name already exists on this Runtime',
+  unit_not_empty:
+    'another unit still holds processes under that name on this Runtime',
+  membership_unproven:
+    'the process never proved its cgroup membership on this Runtime',
+};
+
+/** The recorded refusal carries the discriminator; the message names it. */
+function isolationRefusal(
+  tool: 'Background Shell' | 'Monitor watch',
+  cause: HookCommandIsolationUnavailableError,
+): { message: string; type?: string } {
+  const { reason } = cause;
+  if (reason === undefined)
+    return {
+      message: `${tool} requires a delegated Linux cgroup v2 directory on this Runtime.`,
+    };
+  return {
+    message: `${tool} requires a delegated Linux cgroup v2 directory: ${ISOLATION_REFUSAL_CLAUSES[reason]}.`,
+    type: `managed_isolation_${reason}`,
+  };
+}
 
 export interface ManagedToolReference {
   readonly sessionId: string;
@@ -69,6 +122,7 @@ export type ManagedToolExecutionState =
   | 'executing'
   | 'cancel_requested'
   | 'settled'
+  | 'acknowledged'
   | 'unknown';
 
 export interface ManagedToolResultPayload {
@@ -111,6 +165,12 @@ export interface ManagedToolSet {
    */
   readonly sessionId: string;
   readonly directory?: string;
+  /**
+   * The mount root the Workspace-wide reads are confined to (the Session
+   * directory can be a subdirectory of it). Resolve its realpath before
+   * comparing it with a resolved file path.
+   */
+  readonly workspaceRoot?: string;
   readonly tools: ReadonlyMap<string, AnyDeclarativeTool>;
   /**
    * Whether a shell `directory` lies inside the tools' workspace. Calls run
@@ -133,14 +193,32 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   WriteFileTool.Name,
   EditTool.Name,
   ShellTool.Name,
+  GlobTool.Name,
 ]);
+
+/** Live background Shells one Session may hold, by the H3 design contract. */
+const MANAGED_BACKGROUND_MAX_SHELLS = 8;
+/** Live Monitor watches one Session may hold, by the H3 design contract. */
+const MANAGED_MONITOR_MAX_WATCHES = 4;
+// The bounded capture publishes asynchronously; the pipe feeding it must
+// slow down instead of queueing unboundedly. Sixteen MiB covers a store
+// writing several seconds slower than the process produces, and resume
+// re-arms well before the drain fully empties so a steady producer never
+// stalls against the floor.
+const MANAGED_BACKGROUND_OUTPUT_PAUSE_BYTES = 16 * 1024 * 1024;
+const MANAGED_BACKGROUND_OUTPUT_RESUME_BYTES = 4 * 1024 * 1024;
 
 interface JournalEntry {
   readonly version: 2 | 3;
   readonly reference: ManagedToolReference;
   readonly toolName: string;
-  readonly input: Record<string, unknown>;
-  readonly inputJson: string;
+  /**
+   * Dropped with the result on acknowledgement: the caller that settled the
+   * call durably owns the payload from then on, so the journal keeps only the
+   * fact that proves a repeat is a repeat.
+   */
+  input?: Record<string, unknown>;
+  inputJson?: string;
   state: ManagedToolExecutionState;
   lastSequence: number;
   result?: ManagedToolResultPayload;
@@ -206,6 +284,9 @@ export interface ManagedShellCapturePublisher {
  */
 export class ManagedToolExecutor {
   private readonly entries = new Map<string, JournalEntry>();
+  private readonly backgroundRegistry: ManagedBackgroundShellRegistry;
+  private readonly monitorRegistry: ManagedMonitorRegistry;
+  private readonly monitorWatcher: ManagedMonitorWatcher | undefined;
   private readonly mcpCalls = new Map<
     string,
     {
@@ -269,6 +350,9 @@ export class ManagedToolExecutor {
       if (entry.toolName === ShellTool.Name)
         blockers.add('shell_lifecycle_unqualified');
       if (entry.state === 'unknown') blockers.add('execution_outcome_unknown');
+      // An acknowledged call is settled and its outcome durably committed by
+      // the caller: it holds neither pending work nor a result to check.
+      else if (entry.state === 'acknowledged') continue;
       else if (entry.state !== 'settled') pendingInvocations++;
       else if (entry.version === 2 && !entry.result)
         blockers.add('execution_result_missing');
@@ -442,7 +526,33 @@ export class ManagedToolExecutor {
     private readonly capturePublisher?: ManagedShellCapturePublisher,
     private readonly mcp?: ManagedMcpRuntime,
     private readonly hooks?: ManagedHookRuntime,
-  ) {}
+    /**
+     * True when a realpath lands inside ANOTHER installed Session's
+     * directory. The file-tool boundary is the Session directory for that
+     * case (a sibling Session's files are never this Session's business);
+     * anywhere else inside the mount — a linked dependency's real location
+     * — keeps the pre-containment behavior of reading through the symlink.
+     * `ownDirectory` is the caller's canonical Session directory: a sibling
+     * bound exactly at the mount root delimits no private area and never
+     * vets, while a caller bound there holds none either, so its targets —
+     * however spelled — are judged against every non-root sibling.
+     */
+    private readonly ownsAnotherSessionDir?: (
+      sessionId: string,
+      realPath: string,
+      ownDirectory: string,
+    ) => Promise<boolean>,
+    private readonly backgroundSupervisor?: ManagedChildRunSupervisor,
+    backgroundRegistry?: ManagedBackgroundShellRegistry,
+    monitorRegistry?: ManagedMonitorRegistry,
+  ) {
+    this.backgroundRegistry =
+      backgroundRegistry ?? new ManagedBackgroundShellRegistry();
+    this.monitorRegistry = monitorRegistry ?? new ManagedMonitorRegistry();
+    this.monitorWatcher = backgroundSupervisor
+      ? new ManagedMonitorWatcher(backgroundSupervisor)
+      : undefined;
+  }
 
   static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
     // Boot v1 configures its one directory at startup, as it always has.
@@ -715,7 +825,10 @@ export class ManagedToolExecutor {
       return v3View(existing);
     }
     this.assertAdmissionOpen();
-    if (!this.capturePublisher || toolName !== ShellTool.Name) {
+    if (
+      !this.capturePublisher ||
+      (toolName !== ShellTool.Name && toolName !== 'monitor')
+    ) {
       throw new ManagedToolUnavailableError(
         'Tool v3 capture is not available.',
       );
@@ -729,18 +842,25 @@ export class ManagedToolExecutor {
         'Managed context directory is unavailable.',
       );
     }
+    // The native Monitor wire shape names its own tool: it needs no Shell
+    // tool instance — the monitor admission owns its validation.
+    if (toolName === 'monitor') {
+      return this.executeV3Monitor(request, tools, structuredClone(input));
+    }
+    const normalized = structuredClone(input);
+    // The background and monitor families reject long waits' shell-side
+    // policies such as the foreground sleep guard — they exist exactly so
+    // that a wait is durable rather than blocked. Validate with their own
+    // admission instead of the foreground Shell tool's parameters.
+    if (normalized['is_background'] === true) {
+      return this.executeV3Background(request, tools, normalized);
+    }
+    if (normalized['is_monitor'] === true) {
+      return this.executeV3Monitor(request, tools, normalized);
+    }
     const tool = tools.tools.get(toolName);
     if (!tool)
       throw new ManagedToolUnavailableError('Foreground Shell is unavailable.');
-    const normalized = structuredClone(input);
-    if (
-      tool.validateToolParams(normalized) === null &&
-      normalized['is_background'] === true
-    ) {
-      throw new ManagedToolConflictError(
-        'Background Shell capture is unavailable.',
-      );
-    }
     let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
     try {
       this.capturePreparationStarted = true;
@@ -774,6 +894,450 @@ export class ManagedToolExecutor {
     entry.promise = this.run(entry, tool, tools);
     if (!entry.capturePublisher?.finish) await entry.promise;
     return v3View(entry);
+  }
+
+  /**
+   * H3 background Shell (v3): admission shares the foreground parameter and
+   * directory gates, the supervised process starts under its named cgroup
+   * unit, and the call settles with the durable handle while the registry
+   * keeps the Runtime hold. A refusal before any effect settles as an
+   * ordinary error result; it is never a transport error.
+   */
+  private async executeV3Background(
+    request: LocalShellCaptureRequest & {
+      readonly toolName: string;
+      readonly input: Record<string, unknown>;
+    },
+    tools: ManagedToolSet,
+    normalized: Record<string, unknown>,
+  ): Promise<ManagedToolV3View> {
+    const { reference, capture, input } = request;
+    // The dispatch journal leads every effect: a repeat of this callId joins
+    // it exactly like the foreground path, before any process exists.
+    if (this.entries.has(reference.callId)) return this.executeV3(request);
+    const entry: JournalEntry = {
+      version: 3,
+      reference,
+      toolName: request.toolName,
+      input,
+      inputJson: JSON.stringify(input),
+      v3Capture: capture,
+      state: 'prepared',
+      lastSequence: 0,
+      controller: new AbortController(),
+    };
+    this.entries.set(reference.callId, entry);
+    const settle = (result: ToolResultEnvelope): ManagedToolV3View => {
+      entry.v3Result = result;
+      entry.state = 'settled';
+      entry.lastSequence = 1;
+      this.entries.set(reference.callId, entry);
+      return v3View(entry);
+    };
+    if (!this.backgroundSupervisor) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message:
+            'Background Shell requires a delegated Linux cgroup v2 root on this Runtime.',
+          type: 'managed_isolation_root_missing',
+        },
+      });
+    }
+    let directory: string;
+    const requestedDirectory = normalized['directory'];
+    if (typeof requestedDirectory === 'string' && requestedDirectory !== '') {
+      if (!tools.admitsDirectory(requestedDirectory)) {
+        return settle({
+          executionStatus: 'not_started',
+          responseParts: [],
+          capture: null,
+          error: {
+            message: `Directory '${requestedDirectory}' is not within any of the registered workspace directories.`,
+          },
+        });
+      }
+      directory = requestedDirectory;
+    } else if (tools.directory !== undefined) {
+      directory = tools.directory;
+    } else {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: 'Managed Runtime Session has no workspace directory.',
+        },
+      });
+    }
+    const command = normalized['command'];
+    if (typeof command !== 'string' || !command.trim()) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: { message: 'Hosted Shell requires a nonempty command.' },
+      });
+    }
+    if (
+      this.backgroundRegistry.countBySession(reference.sessionId) >=
+      MANAGED_BACKGROUND_MAX_SHELLS
+    ) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: `Session already runs ${MANAGED_BACKGROUND_MAX_SHELLS} background Shells.`,
+        },
+      });
+    }
+    let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
+    try {
+      prepared = await this.capturePublisher!.prepare({
+        reference,
+        capture: { ...capture, background: true },
+      });
+    } catch (cause) {
+      // A refusal before any effect settles as an ordinary result, never a
+      // transport error: parking the entry here would hold the Session's
+      // Runtime forever and wedge its close.
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: `Background Shell capture could not be prepared: ${cause instanceof Error ? cause.message : String(cause)}`,
+        },
+      });
+    }
+    if (this.closing || tools.isActive?.() === false) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: 'Managed Runtime worker is no longer active.',
+        },
+      });
+    }
+    const sink = prepared.sink;
+    const publisher = prepared.publisher ?? this.capturePublisher!;
+    const unitName = `qwen-bg-${reference.callId.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
+    const shellConfig = getShellConfiguration();
+    let process: ManagedChildRunProcess | undefined;
+    let bufferedBytes = 0;
+    let paused = false;
+    const applyPause = (next: boolean) => {
+      paused = next;
+      const child = process?.child;
+      if (!child) return;
+      for (const stream of [child.stdout, child.stderr]) {
+        if (!stream) continue;
+        if (next) {
+          if (!stream.isPaused()) stream.pause();
+        } else if (stream.isPaused()) {
+          stream.resume();
+        }
+      }
+    };
+    try {
+      process = await this.backgroundSupervisor.start({
+        unitName,
+        executable: shellConfig.executable,
+        args: [...shellConfig.argsPrefix, command],
+        env: backgroundEnv(tools.sessionId),
+        cwd: directory,
+        onOutput: (stream, chunk) => {
+          bufferedBytes += chunk.byteLength;
+          // flushStdio resumes the paused pipes when the launcher exits;
+          // re-assert the pause behind every delivered chunk so a writer
+          // that outlives its launcher never balloons the queue (R5 G5).
+          if (paused) applyPause(true);
+          const written = sink.write(stream, chunk);
+          void written.then(
+            () => {
+              bufferedBytes -= chunk.byteLength;
+              if (
+                paused &&
+                bufferedBytes <= MANAGED_BACKGROUND_OUTPUT_RESUME_BYTES
+              )
+                applyPause(false);
+            },
+            () => {
+              bufferedBytes -= chunk.byteLength;
+              if (
+                paused &&
+                bufferedBytes <= MANAGED_BACKGROUND_OUTPUT_RESUME_BYTES
+              )
+                applyPause(false);
+            },
+          );
+          if (!paused && bufferedBytes >= MANAGED_BACKGROUND_OUTPUT_PAUSE_BYTES)
+            applyPause(true);
+        },
+      });
+    } catch (cause) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error:
+          cause instanceof HookCommandIsolationUnavailableError
+            ? isolationRefusal('Background Shell', cause)
+            : {
+                message: `Background Shell could not start: ${cause instanceof Error ? cause.message : String(cause)}`,
+              },
+      });
+    }
+    sink.setStarted(process.child.pid ?? 0);
+    if (paused) applyPause(true);
+    this.backgroundRegistry.register({
+      unitName,
+      sessionId: reference.sessionId,
+      process,
+      sink,
+      publisher,
+      identity: prepared.identity,
+    });
+    return settle({
+      executionStatus: 'success',
+      responseParts: [
+        {
+          text: `Background shell started under unit ${unitName}. It keeps running after this result and holds its Runtime until it exits; read its status and output through the task surface.`,
+        },
+      ],
+      // The handle owns no capture: the live output streams through the
+      // child_run record's output manifest instead, and the exit facts
+      // settle there, with the same physical evidence.
+      capture: {
+        captureStatus: 'detached',
+        captureReason: null,
+        manifest: null,
+        previewTruncated: false,
+        deliveryStatus: 'pending',
+      },
+    });
+  }
+
+  /**
+   * H3 Monitor watch (v3): the mirror of the background Shell admission —
+   * journaled first, the supervised watch spawns under its own cgroup
+   * unit inside the Session's four-watch quota, its stdout rides the same
+   * bounded capture family, and the call settles with its durable handle
+   * while the registry keeps the Runtime hold. Refusals before any effect
+   * settle as ordinary error results, never as transport errors.
+   */
+  private async executeV3Monitor(
+    request: LocalShellCaptureRequest & {
+      readonly toolName: string;
+      readonly input: Record<string, unknown>;
+    },
+    tools: ManagedToolSet,
+    normalized: Record<string, unknown>,
+  ): Promise<ManagedToolV3View> {
+    const { reference, capture, input } = request;
+    if (this.entries.has(reference.callId)) return this.executeV3(request);
+    const entry: JournalEntry = {
+      version: 3,
+      reference,
+      toolName: request.toolName,
+      input,
+      inputJson: JSON.stringify(input),
+      v3Capture: capture,
+      state: 'prepared',
+      lastSequence: 0,
+      controller: new AbortController(),
+    };
+    this.entries.set(reference.callId, entry);
+    const settle = (result: ToolResultEnvelope): ManagedToolV3View => {
+      entry.v3Result = result;
+      entry.state = 'settled';
+      entry.lastSequence = 1;
+      this.entries.set(reference.callId, entry);
+      return v3View(entry);
+    };
+    if (this.monitorWatcher === undefined) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message:
+            'Monitor watch requires a delegated Linux cgroup v2 root on this Runtime.',
+          type: 'managed_isolation_root_missing',
+        },
+      });
+    }
+    const command = normalized['command'];
+    if (typeof command !== 'string' || !command.trim()) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: { message: 'Monitor watch requires a nonempty command.' },
+      });
+    }
+    if (this.capturePublisher === undefined) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: { message: 'Monitor watch capture is unavailable.' },
+      });
+    }
+    if (
+      this.monitorRegistry.countBySession(reference.sessionId) >=
+      MANAGED_MONITOR_MAX_WATCHES
+    ) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: `Session already runs ${MANAGED_MONITOR_MAX_WATCHES} Monitor watches.`,
+        },
+      });
+    }
+    // Directory admission before any side effect: a refused watch is a
+    // plain not_started answer, never an attached capture abandoned by the
+    // refusal.
+    let directory = tools.directory;
+    if (
+      typeof normalized['directory'] === 'string' &&
+      normalized['directory'] !== ''
+    ) {
+      if (!tools.admitsDirectory(normalized['directory'])) {
+        return settle({
+          executionStatus: 'not_started',
+          responseParts: [],
+          capture: null,
+          error: {
+            message: `Directory '${normalized['directory']}' is not within any of the registered workspace directories.`,
+          },
+        });
+      }
+      directory = normalized['directory'];
+    }
+    let prepared: Awaited<ReturnType<ManagedShellCapturePublisher['prepare']>>;
+    try {
+      prepared = await this.capturePublisher.prepare({
+        reference,
+        capture: { ...capture, background: true, monitoring: true },
+      });
+    } catch (cause) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: `Monitor watch capture could not be prepared: ${cause instanceof Error ? cause.message : String(cause)}`,
+        },
+      });
+    }
+    if (this.closing || tools.isActive?.() === false) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: {
+          message: 'Managed Runtime worker is no longer active.',
+        },
+      });
+    }
+    const sink = prepared.sink;
+    const publisher = prepared.publisher ?? this.capturePublisher;
+    const unitName = `qwen-mon-${reference.callId.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
+    let watchHandle: Awaited<ReturnType<ManagedMonitorWatcher['start']>>;
+    let bufferedBytes = 0;
+    let paused = false;
+    const applyPause = (next: boolean) => {
+      paused = next;
+      const child = watchHandle?.process?.child;
+      if (!child) return;
+      for (const stream of [child.stdout, child.stderr]) {
+        if (!stream) continue;
+        if (next) {
+          if (!stream.isPaused()) stream.pause();
+        } else if (stream.isPaused()) {
+          stream.resume();
+        }
+      }
+    };
+    const acceptChunk = (stream: 'stdout' | 'stderr', chunk: Buffer) => {
+      bufferedBytes += chunk.byteLength;
+      // The launcher-exit flushStdio resumes the paused pipe; re-assert
+      // the pause behind every delivered chunk, like the Shell path.
+      if (paused) applyPause(true);
+      const written = sink.write(stream, chunk);
+      const release = () => {
+        bufferedBytes -= chunk.byteLength;
+        if (paused && bufferedBytes <= MANAGED_BACKGROUND_OUTPUT_RESUME_BYTES)
+          applyPause(false);
+      };
+      void written.then(release, release);
+      if (!paused && bufferedBytes >= MANAGED_BACKGROUND_OUTPUT_PAUSE_BYTES)
+        applyPause(true);
+    };
+    try {
+      watchHandle = await this.monitorWatcher.start(
+        { command },
+        (_observationLine) => {
+          // Observations ride the remote executor and the hosted fan-out;
+          // the durable capture below never goes through a line.
+        },
+        () => undefined,
+        { unitName, cwd: directory, onChunk: acceptChunk },
+      );
+    } catch (cause) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error:
+          cause instanceof HookCommandIsolationUnavailableError
+            ? isolationRefusal('Monitor watch', cause)
+            : {
+                message: `Monitor watch could not start: ${cause instanceof Error ? cause.message : String(cause)}`,
+              },
+      });
+    }
+    const watchProcess = watchHandle.process;
+    if (watchProcess === undefined) {
+      return settle({
+        executionStatus: 'not_started',
+        responseParts: [],
+        capture: null,
+        error: { message: 'Monitor watch reported no supervised unit.' },
+      });
+    }
+    sink.setStarted(watchProcess.child.pid ?? 0);
+    if (paused) applyPause(true);
+    this.monitorRegistry.register({
+      unitName,
+      sessionId: reference.sessionId,
+      process: watchProcess,
+      sink,
+      publisher,
+      identity: prepared.identity,
+    });
+    return settle({
+      executionStatus: 'success',
+      responseParts: [
+        {
+          text: `Monitor watch started under unit ${unitName}. It keeps running after this result and holds its Runtime until it exits; read its status and output through the task surface.`,
+        },
+      ],
+      capture: {
+        captureStatus: 'detached',
+        captureReason: null,
+        manifest: null,
+        previewTruncated: false,
+        deliveryStatus: 'pending',
+      },
+    });
   }
 
   statusV3(reference: ManagedToolReference): ManagedToolV3View {
@@ -823,15 +1387,39 @@ export class ManagedToolExecutor {
       );
     }
     const actual = entry.v3Result.capture;
+    if (receipt.executionCallId !== entry.v3Capture?.executionCallId) {
+      throw new ManagedToolConflictError(
+        'Tool result receipt conflicts.',
+        'managed_tool_result_conflict',
+      );
+    }
+    // A result that owns no managed capture (a background start handle)
+    // acknowledges exactly with a null manifest.
     if (
-      !actual ||
-      receipt.executionCallId !== entry.v3Capture?.executionCallId ||
-      JSON.stringify(receipt.manifest) !== JSON.stringify(actual.manifest) ||
-      (receipt.deliveryStatus === 'committed' &&
-        (actual.captureStatus !== 'complete' ||
-          !Number.isSafeInteger(receipt.historyRevision) ||
-          (receipt.historyRevision ?? 0) < 1)) ||
-      (receipt.deliveryStatus === 'blocked' && receipt.historyRevision !== null)
+      actual === null
+        ? receipt.manifest !== null
+        : JSON.stringify(receipt.manifest) !== JSON.stringify(actual.manifest)
+    ) {
+      throw new ManagedToolConflictError(
+        'Tool result receipt conflicts.',
+        'managed_tool_result_conflict',
+      );
+    }
+    if (
+      actual !== null &&
+      receipt.deliveryStatus === 'committed' &&
+      (actual.captureStatus !== 'complete' ||
+        !Number.isSafeInteger(receipt.historyRevision) ||
+        (receipt.historyRevision ?? 0) < 1)
+    ) {
+      throw new ManagedToolConflictError(
+        'Tool result receipt conflicts.',
+        'managed_tool_result_conflict',
+      );
+    }
+    if (
+      receipt.deliveryStatus === 'blocked' &&
+      receipt.historyRevision !== null
     ) {
       throw new ManagedToolConflictError(
         'Tool result receipt conflicts.',
@@ -850,7 +1438,16 @@ export class ManagedToolExecutor {
     entry.acknowledgement = receipt;
     entry.v3Result = {
       ...entry.v3Result,
-      capture: { ...actual, deliveryStatus: receipt.deliveryStatus },
+      capture:
+        actual === null
+          ? null
+          : {
+              captureStatus: actual.captureStatus,
+              captureReason: actual.captureReason,
+              manifest: actual.manifest,
+              previewTruncated: actual.previewTruncated,
+              deliveryStatus: receipt.deliveryStatus,
+            },
     };
     return v3View(entry);
   }
@@ -945,10 +1542,13 @@ export class ManagedToolExecutor {
     return (
       this.mcp?.hasHolds(sessionId) === true ||
       this.provider?.hasActiveSession(sessionId) === true ||
+      this.backgroundRegistry.hasHolds(sessionId) ||
+      this.monitorRegistry.hasHolds(sessionId) ||
       [...this.entries.values()].some(
         (entry) =>
           entry.reference.sessionId === sessionId &&
           entry.state !== 'settled' &&
+          entry.state !== 'acknowledged' &&
           entry.state !== 'unknown',
       )
     );
@@ -1007,6 +1607,38 @@ export class ManagedToolExecutor {
     return view(entry);
   }
 
+  /**
+   * The caller committed the call's outcome in its own durable store: drop
+   * the payload this journal holds for it. Only a settled call may be
+   * forgotten — an in-flight one's payload is not the caller's yet — and an
+   * acknowledged call stays acknowledged. Afterwards `execute` of the same
+   * reference no longer matches the entry, so a repeat is refused as an
+   * identity conflict.
+   */
+  acknowledge(
+    reference: ManagedToolReference,
+  ): ManagedToolInvocationView | null {
+    const entry = this.entries.get(reference.callId);
+    if (entry && entry.version !== 2) {
+      throw new ManagedToolConflictError('Managed Runtime protocol conflicts.');
+    }
+    if (!entry || !sameReference(entry.reference, reference)) {
+      return null;
+    }
+    if (entry.state !== 'settled') {
+      if (entry.state === 'acknowledged') return view(entry);
+      throw new ManagedToolConflictError(
+        'Managed Runtime tool call has not settled.',
+      );
+    }
+    entry.input = undefined;
+    entry.inputJson = undefined;
+    entry.result = undefined;
+    entry.state = 'acknowledged';
+    entry.lastSequence += 1;
+    return view(entry);
+  }
+
   async close(): Promise<void> {
     this.closing = true;
     await Promise.all([this.mcp?.close(), this.hooks?.close()]);
@@ -1021,6 +1653,21 @@ export class ManagedToolExecutor {
         entry.promise ? [entry.promise] : [],
       ),
       this.provider?.close(),
+      this.backgroundRegistry.stopAll(5_000),
+      this.monitorRegistry.stopAll(5_000),
+    ]);
+  }
+
+  /**
+   * Ordered close of one Session's background Shells and Monitor watches,
+   * bounded per drain. The activation release gate calls this before
+   * refusing, so a close that can prove its stops never wedges on holds
+   * that ended.
+   */
+  async stopBackgroundSession(sessionId: string): Promise<void> {
+    await Promise.all([
+      this.backgroundRegistry.stopSession(sessionId, 5_000),
+      this.monitorRegistry.stopSession(sessionId, 5_000),
     ]);
   }
 
@@ -1064,17 +1711,158 @@ export class ManagedToolExecutor {
     let payload: ManagedToolResultPayload;
     let invocationStarted = false;
     try {
-      const params = structuredClone(entry.input);
+      // Runs start only from a fresh journal entry, which still carries its
+      // input; only an acknowledged entry loses it, and nothing runs that.
+      const params = structuredClone(entry.input!);
+      let fileInvocation: AnyToolInvocation | undefined;
       if (
         directory &&
         entry.toolName !== ShellTool.Name &&
-        typeof params['file_path'] === 'string' &&
-        !path.isAbsolute(params['file_path'].trim())
+        // Glob declares no `file_path`, so a stray one — schema confusion with
+        // the file tools that share the turn, or a hook that stamps the key on
+        // every call it sees — must not refuse the search: the tool never reads
+        // it, and glob's own pattern/output containment below covers every path
+        // it does consume.
+        entry.toolName !== GlobTool.Name &&
+        typeof params['file_path'] === 'string'
       ) {
+        // Only a relative input needs resolving, and `path.resolve` hands an
+        // absolute one back unchanged — so the containment below judges every
+        // spelling a producer can send, not just the Harness's normalized one.
         params['file_path'] = path.resolve(
           directory,
           params['file_path'].trim(),
         );
+        // Validation unescapes file_path. Check and record the path this
+        // invocation consumes without applying that normalization twice.
+        // Validation mutates `params` before it can fail, and the tool's own
+        // text quotes the resolved host path — so a build failure is held
+        // until the boundary below has answered: an out-of-boundary target
+        // must get the sanitized refusal, not the tool's diagnosis of it.
+        let buildError: unknown;
+        try {
+          fileInvocation = sessionIdContext.run(sessionId, () =>
+            tool.build(params),
+          );
+        } catch (error) {
+          buildError = error;
+        }
+        // The glob admission makes an in-context symlink enumerable, so the
+        // lexical resolve is no longer sufficient: realpath the result and
+        // refuse anything that lands outside the boundary. A create's leaf
+        // does not exist yet, so resolve the deepest ancestor that does —
+        // a genuinely absent path stays lexical and keeps the tool's own
+        // not-found answer rather than a traversal accusation.
+        const realTarget = await realpathDeepestExisting(
+          params['file_path'] as string,
+        );
+        const realDirectory = await realpathDeepestExisting(directory);
+        const relative = path.relative(realDirectory, realTarget);
+        let outOfBoundary = false;
+        if (
+          relative === '..' ||
+          relative.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(relative)
+        ) {
+          // The boundary is the Session directory only when the target lands
+          // in ANOTHER installed Session's directory; anywhere else inside
+          // the mount — a linked dependency's real location — stays
+          // reachable, the behavior /1 Sessions had before containment.
+          const workspaceRoot = tools.workspaceRoot;
+          outOfBoundary =
+            workspaceRoot === undefined ||
+            escapesSession(
+              path.relative(
+                await realpathDeepestExisting(workspaceRoot),
+                realTarget,
+              ),
+            );
+        }
+        outOfBoundary ||= Boolean(
+          await this.ownsAnotherSessionDir?.(
+            tools.sessionId,
+            realTarget,
+            realDirectory,
+          ),
+        );
+        if (outOfBoundary) {
+          // A non-escaping target is judged too: a Session bound at the
+          // mount root holds no private directory, so even a target spelled
+          // inside it can belong to a sibling. The callback answers false
+          // for any other caller's own-directory target before consulting a
+          // single binding.
+          throw new Error(
+            `Path '${entry.input!['file_path'] as string}' is not within the Session working directory.`,
+          );
+        }
+        if (buildError !== undefined) throw buildError;
+      }
+      if (entry.toolName === GlobTool.Name) {
+        // Glob's own validation admits external paths, so the executor pins
+        // the search to the Session's installed context: the workspace-wide
+        // includeDirectories would otherwise reach sibling Sessions' files.
+        const root = tools.directory;
+        if (root === undefined)
+          throw new ManagedToolUnavailableError(
+            'Managed context directory is unavailable.',
+          );
+        // `pattern` is a second search root, and glob searches every brace
+        // alternative: the same check as the harness refuses absolute/`..`
+        // shapes and patterns too large to search before anything expands
+        // them. The walk is contained regardless (`containmentRoot`).
+        const pattern =
+          typeof params['pattern'] === 'string' ? params['pattern'] : '';
+        const check = checkHostedGlobPattern(pattern);
+        if (check === 'too-complex') throw new Error(HOSTED_GLOB_TOO_COMPLEX);
+        if (check === 'escapes') {
+          throw new Error(
+            'Glob pattern must stay within the Session working directory.',
+          );
+        }
+        // Validation unescapes `path`, and `unescapePath` is not idempotent
+        // for a real name that contains a backslash — so build first and
+        // certify the spelling the walk consumes, exactly as the file arm
+        // above does. Re-normalizing here instead would judge one string and
+        // search another. A build failure is held for the same reason the
+        // file arm holds one.
+        let globBuildError: unknown;
+        try {
+          fileInvocation = sessionIdContext.run(sessionId, () =>
+            tool.build(params),
+          );
+        } catch (error) {
+          globBuildError = error;
+        }
+        const requested =
+          typeof params['path'] === 'string' ? params['path'].trim() : '';
+        const resolved =
+          requested === '' || requested === '.'
+            ? root
+            : path.resolve(root, requested);
+        // Containment compares realpaths: a lexical compare cannot see a
+        // symlink inside the Session context that leaves it.
+        const realRoot = await realpathDeepestExisting(root);
+        const realResolved = await realpathDeepestExisting(resolved);
+        // The ownership arm belongs on the input as well as the output. A
+        // Session bound at the mount root holds the whole mount as its
+        // containment root, so the escape test alone admits a search over a
+        // sibling's private estate and answers, per pattern, whether that
+        // sibling holds a match — while the same caller's `read_file` of the
+        // path is refused.
+        if (
+          escapesSession(path.relative(realRoot, realResolved)) ||
+          (await this.ownsAnotherSessionDir?.(
+            tools.sessionId,
+            realResolved,
+            realRoot,
+          ))
+        ) {
+          throw new Error(
+            `Path '${requested}' is not within the Session working directory.`,
+          );
+        }
+        if (globBuildError !== undefined) throw globBuildError;
+        params['path'] = resolved;
       }
       if (
         entry.toolName === ShellTool.Name &&
@@ -1089,7 +1877,7 @@ export class ManagedToolExecutor {
       const invoke = () => {
         this.assertAdmissionOpen();
         return sessionIdContext.run(sessionId, () => {
-          const invocation = tool.build(params);
+          const invocation = fileInvocation ?? tool.build(params);
           invocationStarted = true;
           return entry.version === 3 && entry.captureSink
             ? (invocation as ShellToolInvocation).execute(
@@ -1137,8 +1925,55 @@ export class ManagedToolExecutor {
       } else {
         result = await invoke();
       }
+      if (entry.toolName === GlobTool.Name) {
+        const root = tools.directory;
+        if (root === undefined)
+          throw new ManagedToolUnavailableError(
+            'Managed context directory is unavailable.',
+          );
+        // Contain the OUTPUT, over glob's full collected set — not the
+        // display slice: the header's count certifies every collected hit,
+        // and a Session's own recent files systematically fill the slice,
+        // so containing only `resultFilePaths` would certify a count drawn
+        // from outside the boundary. Each hit is judged by its lexical path
+        // plus its parent's realpath: realpathing the hit itself would
+        // punish an ordinary outward symlink that is merely listed, while
+        // the parent arm still refuses a file reached *through* a
+        // symlinked directory.
+        const resultPaths =
+          (result as { collectedFilePaths?: unknown }).collectedFilePaths ??
+          (result as { resultFilePaths?: unknown }).resultFilePaths;
+        if (Array.isArray(resultPaths)) {
+          const realRoot = await realpathDeepestExisting(root);
+          for (const hit of resultPaths) {
+            if (typeof hit !== 'string') continue;
+            const effective = path.join(
+              await realpathDeepestExisting(path.dirname(hit)),
+              path.basename(hit),
+            );
+            const relative = path.relative(realRoot, effective);
+            if (
+              escapesSession(relative) ||
+              (await this.ownsAnotherSessionDir?.(
+                tools.sessionId,
+                effective,
+                realRoot,
+              ))
+            ) {
+              // The sibling-ownership arm carries the same message: it names
+              // no hit, and a root-bound caller's effective boundary excludes
+              // sibling estates even though they sit inside its own root.
+              throw new Error(
+                'Glob results must stay within the Session working directory.',
+              );
+            }
+          }
+        }
+        result = relativizeGlobResult(result, root);
+      }
       payload = toPayload(result, ManagedToolExecutor.isCancelRequested(entry));
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       payload = {
         executionStatus:
           !invocationStarted &&
@@ -1150,7 +1985,12 @@ export class ManagedToolExecutor {
               : 'error',
         responseParts: [],
         error: {
-          message: error instanceof Error ? error.message : String(error),
+          // A refused or failed glob reaches the model and the durable record
+          // the same way its results do, so it is rewritten the same way.
+          message:
+            entry.toolName === GlobTool.Name && tools.directory !== undefined
+              ? relativizeGlobText(message, tools.directory)
+              : message,
         },
       };
     }
@@ -1232,6 +2072,29 @@ export class ManagedToolExecutor {
   }
 }
 
+function backgroundEnv(sessionId: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    // The session context every managed command in this Runtime receives,
+    // resolved for this call's session: the worker serves many, no session
+    // context runs on the v3 path, and the process-global slot only ever
+    // reflects the first session created in this process.
+    ...sessionIdContext.run(sessionId, getShellContextEnvVars),
+  };
+  for (const key of [
+    'PATH',
+    'HOME',
+    'LANG',
+    'LC_ALL',
+    'TMPDIR',
+    'USER',
+    'SHELL',
+  ]) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 function mcpView(view: ManagedMcpOperationView): ManagedToolInvocationView {
   return {
     state:
@@ -1299,6 +2162,7 @@ export function createManagedToolSet(
   return {
     sessionId,
     directory,
+    workspaceRoot,
     admitsDirectory: (candidate) =>
       config.getWorkspaceContext().isPathWithinWorkspace(candidate),
     tools: new Map(
@@ -1306,6 +2170,11 @@ export function createManagedToolSet(
         new ReadFileTool(config),
         new WriteFileTool(config),
         new EditTool(config),
+        // The walk never leaves the Session, whatever the pattern spells.
+        new GlobTool(config, {
+          containmentRoot: directory,
+          executionTimeoutMs: 5_000,
+        }),
         new ShellTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),
@@ -1371,11 +2240,113 @@ function sameInvocation(
   toolName: string,
   inputJson: string,
 ): boolean {
+  // An acknowledged entry holds no encoded input, so it matches nothing: a
+  // repeat of its reference is a conflict, as the design refuses re-dispatch.
   return (
+    entry.inputJson !== undefined &&
     sameReference(entry.reference, reference) &&
     entry.toolName === toolName &&
     entry.inputJson === inputJson
   );
+}
+
+/**
+ * Glob results list absolute paths, but a Hosted model must not see the
+ * Runtime host's physical layout: every path under the Session's installed
+ * context becomes Workspace-relative, and the root itself becomes ".".
+ */
+export function relativizeGlobText(text: string, directory: string): string {
+  const root = path.resolve(directory);
+  // A Session installed at the filesystem root is its own boundary: every
+  // absolute path legitimately starts with it, so there is nothing to strip
+  // and a one-character prefix would only eat separators (the echoed pattern
+  // included).
+  if (root === path.sep) return text;
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  const escape = (value: string) =>
+    value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // ponytail: strip the root only where it begins a path token. An unanchored
+  // split/join also ate the separators of a nested directory whose name
+  // repeats the root, fusing two real paths into one that does not exist.
+  const tokenPrefix = new RegExp(`(?<![\\w./\\\\-])${escape(prefix)}`, 'g');
+  // The bare-root rewrite needs the same leading boundary: without it a hit
+  // whose text merely ends with the root string is truncated mid-token.
+  const bareRoot = new RegExp(
+    `(?<![\\w./\\-])${escape(root)}(?![/\\w.-])`,
+    'g',
+  );
+  return text.replace(tokenPrefix, '').replace(bareRoot, '.');
+}
+
+/** Both of glob's model-facing channels carry paths, so both are rewritten. */
+function relativizeGlobResult(
+  result: ToolResult,
+  directory: string,
+): ToolResult {
+  const next: ToolResult = { ...result };
+  if (typeof next.llmContent === 'string') {
+    next.llmContent = relativizeGlobText(next.llmContent, directory);
+  }
+  if (typeof next.error?.message === 'string') {
+    next.error = {
+      ...next.error,
+      message: relativizeGlobText(next.error.message, directory),
+    };
+  }
+  return next;
+}
+
+/** The relative-shape test every containment check shares. */
+function escapesSession(relative: string): boolean {
+  return (
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  );
+}
+
+/**
+ * A create's leaf does not exist yet, so a bare realpath cannot see a symlink
+ * mid-path (`peek/pwned.txt` through `peek -> ../web`): resolve the deepest
+ * ancestor that does exist and re-attach the lexical tail below it. A dangling
+ * link is resolved to its intended target before any tail is re-attached. A path
+ * with no symlink in its ancestry keeps its lexical value, so the tool keeps
+ * its own not-found answer rather than being accused as traversal; any
+ * non-ENOENT failure to resolve is not something containment may assume away.
+ */
+export async function realpathDeepestExisting(
+  candidate: string,
+): Promise<string> {
+  let resolved = candidate;
+  const tail: string[] = [];
+  try {
+    for (;;) {
+      try {
+        return path.join(await realpath(resolved), ...tail);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      }
+      // A dangling link exists even though realpath cannot resolve its leaf.
+      try {
+        if ((await lstat(resolved)).isSymbolicLink()) {
+          resolved = path.resolve(
+            await realpath(path.dirname(resolved)),
+            await readlink(resolved),
+          );
+          continue;
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+      }
+      const parent = path.dirname(resolved);
+      if (parent === resolved) return path.join(resolved, ...tail);
+      tail.unshift(path.basename(resolved));
+      resolved = parent;
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    throw new Error(`Path could not be resolved (${code ?? 'unknown error'}).`);
+  }
 }
 
 function toPayload(
