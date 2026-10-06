@@ -32,7 +32,10 @@ import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
-import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
+import {
+  publicProviderBaseUrl,
+  sanitizeProviderBaseUrl,
+} from '../../utils/acpModelUtils.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -43,7 +46,10 @@ import {
   checkAdvisorModelAvailability,
   isAdvisorModelEligible,
 } from '../../config/advisor-model.js';
-import { isCleanPublicProviderBaseUrl } from '../../utils/aux-model-selector.js';
+import {
+  hasBaseUrlCredentials,
+  isCleanPublicProviderBaseUrl,
+} from '../../utils/aux-model-selector.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -228,7 +234,13 @@ function persistModelSelection(
   // has no baseUrl, write an empty-string tombstone (not undefined): undefined
   // is dropped from JSON, so it would not override a stale model.baseUrl left
   // in a lower-priority scope, whereas '' is a present value that does.
-  settings.setValue(scope, 'model.baseUrl', baseUrl ?? '');
+  const persistedBaseUrl =
+    scope === SettingScope.Workspace &&
+    baseUrl &&
+    hasBaseUrlCredentials(baseUrl)
+      ? ''
+      : (baseUrl ?? '');
+  settings.setValue(scope, 'model.baseUrl', persistedBaseUrl);
 }
 
 function persistAuthTypeSelection(
@@ -291,7 +303,10 @@ function handleModelSwitchSuccess({
     persistAuthTypeSelection(settings, effectiveAuthType, persistScope);
   }
 
-  const baseUrl = after?.baseUrl ?? t('(default)');
+  const rawBaseUrl = after?.baseUrl;
+  const baseUrl = rawBaseUrl
+    ? sanitizeProviderBaseUrl(rawBaseUrl)
+    : t('(default)');
   const maskedKey = maskApiKey(after?.apiKey);
   const scopeSuffix =
     persistScope === 'workspace'
