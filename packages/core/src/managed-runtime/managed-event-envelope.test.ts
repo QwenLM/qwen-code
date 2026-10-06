@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 import {
   MANAGED_EVENT_ENVELOPE_FORBIDDEN_FIELDS,
   MANAGED_EVENT_ENVELOPE_FORMAT_VERSION,
+  MANAGED_EVENT_ENVELOPE_STREAMS,
   isManagedEventEnvelopeRedelivered,
   managedEventEnvelopeFrom,
   managedEventEnvelopeKey,
@@ -37,6 +38,7 @@ interface FixtureSuite {
   readonly contractVersion: 1;
   readonly formatVersion: 1;
   readonly kinds: unknown;
+  readonly streams: unknown;
   readonly forbiddenFields: unknown;
   readonly limits: unknown;
   readonly envelope: unknown;
@@ -159,6 +161,10 @@ describe('Managed event envelope contract', () => {
     expect(fixtures.contractVersion).toBe(1);
     expect(fixtures.formatVersion).toBe(MANAGED_EVENT_ENVELOPE_FORMAT_VERSION);
     expect(fixtures.kinds).toStrictEqual([...MANAGED_SESSION_EVENT_KINDS]);
+    expect(
+      (schema.$defs['envelope'].properties?.['kind'] as { enum: unknown }).enum,
+    ).toStrictEqual([...MANAGED_SESSION_EVENT_KINDS]);
+    expect(fixtures.streams).toStrictEqual([...MANAGED_EVENT_ENVELOPE_STREAMS]);
     expect(fixtures.forbiddenFields).toStrictEqual([
       ...MANAGED_EVENT_ENVELOPE_FORBIDDEN_FIELDS,
     ]);
@@ -251,6 +257,7 @@ describe('Managed event envelope contract', () => {
     expect(managedEventEnvelopeKey(parsed)).toStrictEqual({
       tenantId: 'tenant-1',
       sessionId: 'session-1',
+      stream: 'authoritative_journal',
       sequence: 42,
     });
   });
@@ -354,8 +361,9 @@ describe('Managed event envelope contract', () => {
           continue;
         }
         if (
-          !entry.name.endsWith('.ts') ||
+          !/\.(?:ts|tsx|mts|js)$/.test(entry.name) ||
           entry.name.endsWith('.test.ts') ||
+          entry.name.endsWith('.test.tsx') ||
           entry.name === 'managed-event-envelope.ts'
         ) {
           continue;

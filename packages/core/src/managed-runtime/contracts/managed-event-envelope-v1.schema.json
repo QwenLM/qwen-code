@@ -14,7 +14,8 @@
     "formatVersion",
     "fromEventCases",
     "kinds",
-    "limits"
+    "limits",
+    "streams"
   ],
   "properties": {
     "contract": {
@@ -46,6 +47,9 @@
         "message.delta",
         "message.retracted"
       ]
+    },
+    "streams": {
+      "const": ["authoritative_journal"]
     },
     "forbiddenFields": {
       "const": [
@@ -165,6 +169,7 @@
         "payloadRef",
         "sequence",
         "sessionId",
+        "stream",
         "tenantId",
         "v",
         "workspaceId"
@@ -181,6 +186,9 @@
         },
         "workspaceId": {
           "$ref": "#/$defs/stableId"
+        },
+        "stream": {
+          "enum": ["authoritative_journal"]
         },
         "sequence": {
           "type": "integer",

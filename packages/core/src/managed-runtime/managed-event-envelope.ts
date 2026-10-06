@@ -33,6 +33,20 @@ import {
 export const MANAGED_EVENT_ENVELOPE_FORMAT_VERSION = 1;
 
 /**
+ * The committed source whose sequence an envelope names. A Session keeps two
+ * independent counters — the journal's commit sequence and the public
+ * `managed_agent_event.sequence_id` — that reuse the same numbers for
+ * different facts, so a sequence is only an identity together with its
+ * stream. v1 distributes journal facts only.
+ */
+export const MANAGED_EVENT_ENVELOPE_STREAMS = Object.freeze([
+  'authoritative_journal',
+] as const);
+
+export type ManagedEventEnvelopeStream =
+  (typeof MANAGED_EVENT_ENVELOPE_STREAMS)[number];
+
+/**
  * The field names an envelope must never carry: the internals and secrets
  * the design bars from every public surface (`SessionTaskView` hides
  * `runtimeBindingId`, generation, Runtime endpoint, Pod, absolute path, raw
@@ -80,6 +94,7 @@ export interface ManagedEventEnvelope {
   readonly sessionId: string;
   readonly tenantId: string;
   readonly workspaceId: string;
+  readonly stream: ManagedEventEnvelopeStream;
   readonly sequence: number;
   readonly eventId: string;
   readonly kind: ManagedSessionEventKind;
@@ -94,6 +109,7 @@ export interface ManagedEventEnvelope {
 export interface ManagedEventEnvelopeKey {
   readonly tenantId: string;
   readonly sessionId: string;
+  readonly stream: ManagedEventEnvelopeStream;
   readonly sequence: number;
 }
 
@@ -102,6 +118,7 @@ const ENVELOPE_KEYS = [
   'sessionId',
   'tenantId',
   'workspaceId',
+  'stream',
   'sequence',
   'eventId',
   'kind',
@@ -182,6 +199,11 @@ export function parseManagedEventEnvelope(
       body.workspaceId,
       'envelope.workspaceId',
     ),
+    stream: assertEnum(
+      body.stream,
+      MANAGED_EVENT_ENVELOPE_STREAMS,
+      'envelope.stream',
+    ),
     sequence,
     eventId: assertManagedSessionStableId(body.eventId, 'envelope.eventId'),
     kind: assertEnum(body.kind, MANAGED_SESSION_EVENT_KINDS, 'envelope.kind'),
@@ -212,6 +234,7 @@ export function managedEventEnvelopeFrom(
     sessionId: event.sessionKey.sessionId,
     tenantId: event.sessionKey.tenantId,
     workspaceId: event.sessionKey.workspaceId,
+    stream: 'authoritative_journal',
     sequence: event.sequence,
     eventId: event.eventId,
     kind: event.kind,
@@ -223,13 +246,14 @@ export function managedEventEnvelopeFrom(
 }
 
 /** The idempotence key of a parsed envelope: `(tenantId, sessionId,
- * sequence)`. */
+ * stream, sequence)`. */
 export function managedEventEnvelopeKey(
   envelope: ManagedEventEnvelope,
 ): ManagedEventEnvelopeKey {
   return Object.freeze({
     tenantId: envelope.tenantId,
     sessionId: envelope.sessionId,
+    stream: envelope.stream,
     sequence: envelope.sequence,
   });
 }
@@ -261,6 +285,7 @@ export function isManagedEventEnvelopeRedelivered(
     right !== null &&
     left.tenantId === right.tenantId &&
     left.sessionId === right.sessionId &&
+    left.stream === right.stream &&
     left.sequence === right.sequence
   );
 }
