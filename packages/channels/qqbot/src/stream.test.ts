@@ -193,6 +193,7 @@ function streamState(ch: QQChannelClass) {
       sourceLabel?: string;
       msgId?: string;
       turn: number;
+      sealedPre?: string;
     }
   >;
 }
@@ -2707,7 +2708,7 @@ describe('buffer limit flush (#11)', () => {
     const chp = ch as unknown as Record<string, unknown>;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
       string,
-      { turn: number; text: string; pre?: string }
+      { turn: number; text: string; pre?: string; capDropped?: number }
     >;
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')
@@ -6404,9 +6405,9 @@ describe('an in-flight flush must not clear a newer seal', () => {
       // The predecessor head rides the handoff exactly once: the duplicate the
       // flag gate prevents ('PAP'/'APA') appears in no attempt.
       expect(c.attempts.map((a) => a.text)).toEqual(['A', 'AB', 'P', 'AP']);
-      expect(c.attempts.some((a) => a.text === 'PAP' || a.text === 'APA')).toBe(
-        false,
-      );
+      // The head left the entry with the handoff: the exact sequence above is
+      // the whole story, and nothing stays parked to be delivered a second time.
+      expect(stateMap.has('s1')).toBe(false);
     });
 
     it('re-buffers a widened transient failure in the seal order and delivers the head once', async () => {
@@ -6438,8 +6439,9 @@ describe('an in-flight flush must not clear a newer seal', () => {
         'AP',
         'AP',
       ]);
-      expect(c.attempts.filter((a) => a.text === 'A')).toHaveLength(1);
-      expect(c.attempts.some((a) => a.text === 'PA')).toBe(false);
+      // The delivered retry leaves no entry behind: the exactly-once reading of
+      // 'A' above is the whole story.
+      expect(stateMap.has('s1')).toBe(false);
     });
 
     it('keeps the head the widened success strip leaves instead of re-delivering it', async () => {
@@ -6493,7 +6495,9 @@ describe('an in-flight flush must not clear a newer seal', () => {
       // delivered head reaches the wire exactly once across the sequence.
       await settle(4);
       expect(c.attempts.map((a) => a.text)).toEqual(['R', 'P', 'P']);
-      expect(c.attempts.filter((a) => a.text.includes('R'))).toHaveLength(1);
+      // The residual was flushed out of the entry, so 'R' cannot be delivered
+      // again from a stash left parked behind the sequence.
+      expect(orphanBuffer.has('s1')).toBe(false);
     });
 
     it('never narrows a residual seal the widened success strip would otherwise drop', async () => {
@@ -6506,7 +6510,7 @@ describe('an in-flight flush must not clear a newer seal', () => {
       // the give-up site drops its only copy.
       const c = widenedController();
       c.setSeq('pending', 'pending', 'pending', 'transient', 'transient', 'ok');
-      const { stateMap } = await scheduleWidening(c);
+      const { chp, stateMap } = await scheduleWidening(c);
       const state = stateMap.get('s1')!;
       expect(state.sealedPre).toBe('AP');
       expect(state.sealWidenedInFlight).toBe(true);
@@ -6522,9 +6526,39 @@ describe('an in-flight flush must not clear a newer seal', () => {
       // The guard keeps it: narrowed here, the residual would be dropped.
       expect(state.sealedPre).toBe('AP');
 
-      // And it is still delivered, exactly once, by the residual's own chain.
+      // The kept seal is delivered, once, as the only resolved send — and the
+      // entry leaves nothing parked behind it.
       await settle(8);
-      expect(c.attempts.map((a) => a.text)).toContain('AP');
+      expect(
+        c.attempts.filter((a) => a.outcome === 'ok').map((a) => a.text),
+      ).toEqual(['AP']);
+      expect(stateMap.has('s1')).toBe(false);
+      expect(
+        (chp['streamOrphanBuffer'] as Map<string, unknown>).has('s1'),
+      ).toBe(false);
+
+      // The same widened state WITHOUT the residual marker is where the strip
+      // does its own work: the delivered suffix 'P' goes and the prepended head
+      // 'A' — its only copy — stays, then reaches the wire once. This cell is
+      // what makes the test a witness for the widened strip itself: on a tree
+      // without it the 'residual' cell above also reads 'AP', for the wrong
+      // reason (nothing ever narrows), so neither cell may be dropped.
+      const c2 = widenedController();
+      c2.setSeq('pending', 'pending', 'pending', 'ok', 'ok', 'ok');
+      const second = await scheduleWidening(c2);
+      const plain = second.stateMap.get('s1')!;
+      expect(plain.sealedPre).toBe('AP');
+      expect(plain.sealWidenedInFlight).toBe(true);
+
+      c2.pending[2].resolve(mockResponse(true));
+      await drain();
+      expect(plain.sealedPre).toBe('A');
+
+      await settle(8);
+      expect(
+        c2.attempts.filter((a) => a.outcome === 'ok').map((a) => a.text),
+      ).toEqual(['A']);
+      expect(second.stateMap.has('s1')).toBe(false);
     });
 
     it('re-buffers a widened transient failure in the seal order around a newer in-flight chunk', async () => {
@@ -6552,7 +6586,7 @@ describe('an in-flight flush must not clear a newer seal', () => {
       expect(
         c.attempts.filter((a) => a.outcome === 'ok').map((a) => a.text),
       ).toEqual(['APC']);
-      expect(c.attempts.some((a) => a.text === 'ACP')).toBe(false);
+      expect(stateMap.has('s1')).toBe(false);
     });
 
     it('does not drop a character when the newer in-flight chunk starts with the failed payload', async () => {
@@ -6575,7 +6609,7 @@ describe('an in-flight flush must not clear a newer seal', () => {
       expect(
         c.attempts.filter((a) => a.outcome === 'ok').map((a) => a.text),
       ).toEqual(['APPZ']);
-      expect(c.attempts.some((a) => a.text === 'AZP')).toBe(false);
+      expect(stateMap.has('s1')).toBe(false);
     });
 
     it('prepends the stashed head in front of chunks that arrived during the widened flight', async () => {
@@ -6640,9 +6674,7 @@ describe('an in-flight flush must not clear a newer seal', () => {
       expect(
         c.attempts.filter((a) => a.outcome === 'ok').map((a) => a.text),
       ).toEqual(['APC']);
-      expect(c.attempts.some((a) => a.text === 'PAC' || a.text === 'ACP')).toBe(
-        false,
-      );
+      expect(stateMap.has('s1')).toBe(false);
     });
 
     it('keeps the prepended head when a boundary fires before the widened merge', async () => {
@@ -7055,14 +7087,27 @@ describe('an in-flight flush must not clear a newer seal', () => {
           await drain();
         }
         const stash = orphanBuffer.get('s1')?.text ?? '';
-        return { wire: [...c.wire], stash, combined: c.wire.join('') + stash };
+        return {
+          wire: [...c.wire],
+          stash,
+          // Observables the wire/stash readings do not cover: the entry's
+          // teardown, and every attempt the wire never resolved (a transposed
+          // re-buffer that a later rebuild corrects is invisible in the wire).
+          stateHas: (chp['streamState'] as Map<string, unknown>).has('s1'),
+          attempts: c.attempts.map((a) => a.text),
+          combined: c.wire.join('') + stash,
+        };
       }
 
       async function expectEnumCell(row: EnumRow) {
         const r = await enumCell(row);
         expect(r.wire, row.label).toEqual(row.wire);
         expect(r.stash, row.label).toBe(row.stash);
-        expect(r.combined, row.label).toBe(row.wire.join('') + row.stash);
+        // Independent of both readings: the window leaves no entry behind, and
+        // the widened reconstruction never charges the ledger for text it kept
+        // in the seal (the pre-reconstruction arithmetic did).
+        expect(r.stateHas, row.label).toBe(false);
+        expect(capturedStderr(), row.label).not.toContain('buffered in flight');
         // Each character of the ideal window reaches the operator exactly
         // once, whether it came from the wire or from the stash.
         expect([...r.combined].sort().join(''), row.label).toBe(
@@ -7070,8 +7115,12 @@ describe('an in-flight flush must not clear a newer seal', () => {
         );
         if (row.ordered !== false) {
           expect(r.combined, row.label).toBe(row.window);
-          expect(r.combined, row.label).not.toContain('PA');
-          expect(r.combined, row.label).not.toContain('PAC');
+          // Stronger than the resolved reading: no attempt at all — discarded
+          // or delivered — ever asked the wire to carry the transposition.
+          expect(
+            r.attempts.filter((t) => t.includes('PA') || t.includes('PAC')),
+            row.label,
+          ).toEqual([]);
         }
         return r;
       }
@@ -7372,7 +7421,7 @@ describe('an in-flight flush must not clear a newer seal', () => {
     const chp = ch as unknown as Record<string, unknown>;
     const stateMap = chp['streamState'] as Map<
       string,
-      { sealedPre?: string; boundaryClearedInFlight?: string }
+      { sealedPre?: string; boundaryClearedInFlight?: string; buffer?: string }
     >;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
       string,
@@ -7601,7 +7650,7 @@ describe('an in-flight flush must not clear a newer seal', () => {
     const chp = ch as unknown as Record<string, unknown>;
     const stateMap = chp['streamState'] as Map<
       string,
-      { sealedPre?: string; boundaryClearedInFlight?: string }
+      { sealedPre?: string; boundaryClearedInFlight?: string; buffer?: string }
     >;
     setReplyMsgId(ch, 'test-chat', 'msg-A');
     onPromptStart(ch, 'test-chat', 's1', 'msg-A');
@@ -7649,7 +7698,7 @@ describe('an in-flight flush must not clear a newer seal', () => {
     const chp = ch as unknown as Record<string, unknown>;
     const stateMap = chp['streamState'] as Map<
       string,
-      { sealedPre?: string; boundaryClearedInFlight?: string }
+      { sealedPre?: string; boundaryClearedInFlight?: string; buffer?: string }
     >;
     const orphanBuffer = chp['streamOrphanBuffer'] as Map<
       string,
@@ -7712,7 +7761,7 @@ describe('an in-flight flush must not clear a newer seal', () => {
     const chp = ch as unknown as Record<string, unknown>;
     const stateMap = chp['streamState'] as Map<
       string,
-      { sealedPre?: string; boundaryClearedInFlight?: string }
+      { sealedPre?: string; boundaryClearedInFlight?: string; buffer?: string }
     >;
     setReplyMsgId(ch, 'test-chat', 'msg-A');
     onPromptStart(ch, 'test-chat', 's1', 'msg-A');
@@ -7749,11 +7798,11 @@ describe('an in-flight flush must not clear a newer seal', () => {
     const chp = ch as unknown as Record<string, unknown>;
     const stateMap = chp['streamState'] as Map<
       string,
-      { sealedPre?: string; boundaryClearedInFlight?: string }
+      { sealedPre?: string; boundaryClearedInFlight?: string; buffer?: string }
     >;
     const flushing = chp['flushingSessions'] as Map<
       string,
-      { sealedPre?: string; boundaryClearedInFlight?: string }
+      { sealedPre?: string; boundaryClearedInFlight?: string; buffer?: string }
     >;
     setReplyMsgId(ch, 'test-chat', 'msg-A');
     onPromptStart(ch, 'test-chat', 's1', 'msg-A');
@@ -8772,6 +8821,99 @@ describe('flush-chain guards pinned by witness tests', () => {
       (chp['streamOrphanBuffer'] as Map<string, { text: string }>).get('sess-1')
         ?.text,
     ).toBe('SEALED-HEAD ');
+  });
+
+  it('delivers the head a terminal settle would strand by dropping the turn counter', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; pre?: string }
+    >;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+
+    // Turn 1 seals its head at a boundary and flushes it as the payload of a
+    // send that stays in flight.
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    onResponseChunk(ch, 'test-chat', 'T1-HD', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectTurn1!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectTurn1 = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // Turn 2 starts while that send is still in flight and its first chunk
+    // replaces the entry. The superseded branch cannot hand the seal off yet —
+    // the in-flight chain still owns the marker and the head it carries — so
+    // the seal survives on the orphaned entry.
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-B');
+    onResponseChunk(ch, 'test-chat', 'T2-BODY ', 's1');
+
+    // Turn 1's send fails transiently. No retry can be armed for a superseded
+    // entry, so its chain hands the sealed head off and it is re-stashed under
+    // the live turn 2 for that turn's own teardown to deliver.
+    rejectTurn1(new Error('transient network failure'));
+    await drain();
+    expect(orphanBuffer.get('s1')).toEqual({
+      turn: 2,
+      text: 'T1-HD',
+      pre: 'T1-HD',
+    });
+
+    // Turn 2's send takes the entry and stays in flight, so completion parks
+    // the session on that chain before ChannelBase reaches onPromptEnd.
+    let resolveTurn2!: (v: MockResponse) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((resolve) => {
+        resolveTurn2 = resolve;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+    await onResponseComplete(ch, 'test-chat', 'T2-BODY ', 's1');
+    expect(pendingStreamDelete.has('s1')).toBe(true);
+
+    // The parked chain's send succeeds. Its terminal settle runs in the
+    // microtask window before onPromptEnd and drops the flush record, the
+    // stream entry and the turn generation. The counter is this turn's only
+    // handle on the head it re-stashed above: without it onPromptEnd reads the
+    // stash's turn against 0 and discards the head as superseded, so the
+    // reply's opening reaches no wire, no buffer and no stash.
+    const sendsBefore = mockSendQQMessage.mock.calls.length;
+    resolveTurn2(mockResponse(true));
+    await drain();
+    expect(pendingStreamDelete.has('s1')).toBe(false);
+
+    // onPromptEnd now runs with the stash still parked: it must deliver the
+    // head, exactly once. The spy covers only this window — the gate logs the
+    // drop here — and is restored before any assertion, so a failure cannot
+    // leave it swallowing the tests that follow.
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    onPromptEnd(ch, 'test-chat', 's1');
+    await drain();
+    const dropLines = stderrSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((line) => line.includes('superseded turn 2'));
+    stderrSpy.mockRestore();
+
+    // The reported shape first: the mutant discards the head as a superseded
+    // stash and says so, so the failure names the defect rather than only a
+    // missing delivery.
+    expect(dropLines.join('')).toBe('');
+    expect(
+      sentContents()
+        .slice(sendsBefore)
+        .filter((c) => c.includes('T1-HD')),
+    ).toHaveLength(1);
+    expect(orphanBuffer.has('s1')).toBe(false);
   });
 });
 

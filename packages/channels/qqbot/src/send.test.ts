@@ -55,7 +55,7 @@ const {
     mockSendQQMessage: vi.fn(),
     mockFetchAccessToken: vi.fn(),
     mockFetchGatewayUrl: vi.fn(),
-    mockBaseHandleInbound: vi.fn(() => Promise.resolve()),
+    mockBaseHandleInbound: vi.fn((_env: Envelope) => Promise.resolve()),
     MockWebSocket,
     mockWebSockets,
   };
@@ -124,7 +124,7 @@ vi.mock('@qwen-code/channel-base', async () => {
         this.router = (options?.['router'] as Record<string, unknown>) ?? {};
         this.baseOptions = options ?? ({} as Record<string, unknown>);
       }
-      protected handleInbound(env: unknown): Promise<void> {
+      protected handleInbound(env: Envelope): Promise<void> {
         return mockBaseHandleInbound(env) as Promise<void>;
       }
       protected getResponseMessageId(_sessionId: string): string | undefined {
@@ -155,8 +155,11 @@ vi.mock('@qwen-code/channel-base', async () => {
     // key-shape coupling test drives the real routingKey, and every other
     // test either supplies its own duck-typed router or builds no session.
     SessionRouter: class extends real.SessionRouter {
-      override restoreSessions(): Promise<void> {
-        return Promise.resolve();
+      override restoreSessions(): Promise<{
+        restored: number;
+        failed: number;
+      }> {
+        return Promise.resolve({ restored: 0, failed: 0 });
       }
     },
     getGlobalQwenDir: () => '/tmp/test-qwen',
@@ -172,6 +175,16 @@ const { QQChannel } = await import('./QQChannel.js');
 type QQChannelInstance = InstanceType<typeof QQChannel>;
 type QQChannelOptions = ConstructorParameters<typeof QQChannel>[3];
 type QQChannelRouter = NonNullable<QQChannelOptions>['router'];
+
+/**
+ * The resolved ChannelConfig of a channel built by the adapter's own
+ * constructor. `config` is a protected ChannelBase field with no public
+ * accessor; the rows that assert the constructor's scope decision read it
+ * through this one typed door instead of the protected member directly.
+ */
+function channelConfig(ch: QQChannelInstance): Record<string, unknown> {
+  return (ch as unknown as { config: Record<string, unknown> }).config;
+}
 
 afterEach(() => {
   vi.useRealTimers();
@@ -379,17 +392,17 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
     vi.restoreAllMocks();
   });
 
-  // The verdict these rows assert (`ch.config.sessionScope`) is a protected
-  // ChannelBase field, read here because the channel under test IS the
-  // adapter's own construction: the constructor's decision is the subject, and
-  // no public accessor exposes the resolved scope. The warning text the same
-  // decision writes is asserted alongside, so the outcome is observable even
-  // where the field is not public.
+  // The verdict these rows assert (`config.sessionScope`) is a protected
+  // ChannelBase field, read here through channelConfig because the channel
+  // under test IS the adapter's own construction: the constructor's decision is
+  // the subject, and no public accessor exposes the resolved scope. The warning
+  // text the same decision writes is asserted alongside, so the outcome is
+  // observable even where the field is not public.
   it('does NOT force sessionScope when groupAllPolicy=all and scope is not thread; emits warning', () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const ch = makeChannel({ groupAllPolicy: 'all', sessionScope: 'user' });
     // The user's scope choice is preserved — no forced flattening to 'single'.
-    expect(ch.config.sessionScope).toBe('user');
+    expect(channelConfig(ch)['sessionScope']).toBe('user');
     const logged = capturedStderr();
     expect(logged).toContain('WARNING');
     expect(logged).toContain("needs sessionScope: 'thread'");
@@ -399,7 +412,7 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
   it('does NOT force sessionScope when groupAllPolicy=keyword and scope is not thread; emits warning', () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const ch = makeChannel({ groupAllPolicy: 'keyword', sessionScope: 'user' });
-    expect(ch.config.sessionScope).toBe('user');
+    expect(channelConfig(ch)['sessionScope']).toBe('user');
     expect(capturedStderr()).toContain('WARNING');
   });
 
@@ -409,7 +422,7 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
       groupAllPolicy: 'all',
       sessionScope: 'thread' as const,
     });
-    expect(ch.config.sessionScope).toBe('thread');
+    expect(channelConfig(ch)['sessionScope']).toBe('thread');
     expect(capturedStderr()).not.toContain('WARNING');
   });
 
@@ -423,7 +436,7 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
       groupAllPolicy: 'all',
       sessionScope: 'chat_thread' as const,
     });
-    expect(ch.config.sessionScope).toBe('chat_thread');
+    expect(channelConfig(ch)['sessionScope']).toBe('chat_thread');
     const logged = capturedStderr();
     expect(logged).toContain('groupAllPolicy is');
     expect(logged).toContain('makes every direct message a shared session');
@@ -438,7 +451,7 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
     // reports — so it must not be exempt from the scope warning.
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const ch = makeChannel({ groupAllPolicy: 'all', sessionScope: 'single' });
-    expect(ch.config.sessionScope).toBe('single');
+    expect(channelConfig(ch)['sessionScope']).toBe('single');
     const logged = capturedStderr();
     expect(logged).toContain('groupAllPolicy is');
     expect(logged).toContain(
@@ -458,7 +471,7 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
       sessionScope: 'user',
       multiSession: true,
     });
-    expect(ch.config.sessionScope).toBe('user');
+    expect(channelConfig(ch)['sessionScope']).toBe('user');
     const logged = capturedStderr();
     expect(logged).toContain('WARNING');
     expect(logged).toContain('multiSession requires sessionScope');
@@ -471,7 +484,7 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
   it('without multiSession, the groupAllPolicy advice still prescribes sessionScope: thread', () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const ch = makeChannel({ groupAllPolicy: 'keyword', sessionScope: 'user' });
-    expect(ch.config.sessionScope).toBe('user');
+    expect(channelConfig(ch)['sessionScope']).toBe('user');
     const logged = capturedStderr();
     expect(logged).toContain("needs sessionScope: 'thread'");
     expect(logged).not.toContain('mutually exclusive');
@@ -480,7 +493,7 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
   it('emits NO warning for log policy with non-thread scope (baseline)', () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const ch = makeChannel({ groupAllPolicy: 'log', sessionScope: 'user' });
-    expect(ch.config.sessionScope).toBe('user');
+    expect(channelConfig(ch)['sessionScope']).toBe('user');
     expect(capturedStderr()).not.toContain('WARNING');
   });
 
@@ -499,7 +512,7 @@ describe('groupAllPolicy session-scope warning (no forcing)', () => {
       groupAllPolicy: 'all',
       sessionScope: plugin.defaultSessionScope as 'thread',
     });
-    expect(ch.config.sessionScope).toBe('thread');
+    expect(channelConfig(ch)['sessionScope']).toBe('thread');
     expect(capturedStderr()).not.toContain('WARNING');
   });
 });
@@ -561,7 +574,7 @@ describe('shared-session operator warning', () => {
     // No group access at all: 'single' shares direct-message sessions too, so
     // the lockout is identical and must be warned about.
     const ch = makeChannel({ sessionScope: 'single' });
-    expect(ch.config.groupPolicy).toBe('disabled');
+    expect(channelConfig(ch)['groupPolicy']).toBe('disabled');
     const logged = capturedStderr();
     expect(logged).toContain('makes every session shared');
     expect(logged).toContain('no operators are configured');
@@ -707,7 +720,10 @@ describe('purgeSingleScopeOrphans', () => {
     // SessionRouter's key templates or to the message-route wrapper must
     // redden here rather than silently leave the purge matching a shape the
     // router no longer writes.
-    const routerKey = (scope: string, ...args: [string, string, string?]) =>
+    const routerKey = (
+      scope: string,
+      ...args: [string, string, string?, string?]
+    ) =>
       (
         SessionRouter.prototype as unknown as {
           routingKey: (
@@ -4788,6 +4804,7 @@ describe('replyMsgId cleanup timer', () => {
         retryCount: number;
         msgId?: string;
         turn?: number;
+        boundaryClearedInFlight?: 'payload' | 'residual';
       };
 
       /**

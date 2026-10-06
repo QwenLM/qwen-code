@@ -75,10 +75,9 @@ vi.mock('./login.js', () => ({
 
 // The purge's routing-key shape helpers and the sanitizers are pure: keep the
 // shipped implementations in the double below rather than mirrors, so the mock
-// cannot diverge from what production imports. `truncateUtf16Units` is the one
-// hand-written mirror; the test double suite at the bottom of this file pins it
-// to the real module and pins the sanitizer exports to the shipped functions,
-// so a reintroduced hand mirror reddens instead of silently drifting.
+// cannot diverge from what production imports. The test double suite at the
+// bottom of this file pins every one of those exports to the real module, so a
+// reintroduced hand mirror reddens instead of silently drifting.
 const realChannelBase = await vi.importActual<
   typeof import('@qwen-code/channel-base')
 >('@qwen-code/channel-base');
@@ -137,18 +136,7 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
-  // Mirrors @qwen-code/channel-base: at most `max` UTF-16 units, cut on
-  // code-point boundaries, so a pair is never split. Pinned to the real module
-  // by the test double suite at the bottom of this file.
-  truncateUtf16Units: (text: string, max: number): string => {
-    if (text.length <= max) return text;
-    let kept = '';
-    for (const ch of text) {
-      if (kept.length + ch.length > max) break;
-      kept += ch;
-    }
-    return kept;
-  },
+  truncateUtf16Units: realChannelBase.truncateUtf16Units,
   sanitizeLogText: realChannelBase.sanitizeLogText,
   sanitizeSenderName: realChannelBase.sanitizeSenderName,
   sanitizePromptText: realChannelBase.sanitizePromptText,
@@ -3478,34 +3466,27 @@ describe('inbound media', () => {
   });
 });
 
-// The channel-base mock above keeps the shipped sanitizer implementations and
-// mirrors only `truncateUtf16Units`. Pin both sides to the real module: the
-// mirror so a semantics change on either side reddens here instead of leaving
-// the surrogate-boundary tests green against a stale double, and the sanitizer
-// exports so reintroducing a hand-written mirror is caught rather than silently
-// drifting from the shipped behaviour.
+// The channel-base mock above keeps the shipped implementations rather than
+// mirrors, so the double cannot diverge from what production imports. Pin the
+// exports to the real module — a reintroduced hand mirror reddens here instead
+// of silently drifting — and keep the shipped truncation contract, which the
+// channel's own surrogate handling depends on, as explicit expectations rather
+// than a comparison of the double against itself.
 describe('channel-base test double', () => {
-  it('truncateUtf16Units mirror matches the real implementation', async () => {
+  it('truncateUtf16Units keeps whole code points inside the unit bound', async () => {
     const actual = await vi.importActual<
       typeof import('@qwen-code/channel-base')
     >('@qwen-code/channel-base');
-    const mirrored = await import('@qwen-code/channel-base');
     // `a𠮷b` at max 2 keeps the BMP char and drops the astral pair whole; a
-    // plain `text.slice(0, max)` mirror returns a split surrogate here. The
-    // astral cases also catch a mirror that charges a surrogate pair one unit.
-    const cases: Array<[string, number]> = [
-      ['a𠮷b', 2],
-      ['a𠮷b', 3],
-      ['𠮷𠮷', 3],
-      ['abc', 5],
-      ['😀', 1],
-      ['a😀b😀c', 5],
-    ];
-    for (const [text, max] of cases) {
-      expect(mirrored.truncateUtf16Units(text, max)).toBe(
-        actual.truncateUtf16Units(text, max),
-      );
-    }
+    // plain `text.slice(0, max)` returns a split surrogate here. The astral
+    // cases also catch an implementation that charges a surrogate pair one
+    // unit.
+    expect(actual.truncateUtf16Units('a𠮷b', 2)).toBe('a');
+    expect(actual.truncateUtf16Units('a𠮷b', 3)).toBe('a𠮷');
+    expect(actual.truncateUtf16Units('𠮷𠮷', 3)).toBe('𠮷');
+    expect(actual.truncateUtf16Units('abc', 5)).toBe('abc');
+    expect(actual.truncateUtf16Units('😀', 1)).toBe('');
+    expect(actual.truncateUtf16Units('a😀b😀c', 5)).toBe('a😀b');
   });
 
   it('sanitizer exports are the shipped implementations, not mirrors', async () => {
@@ -3517,5 +3498,6 @@ describe('channel-base test double', () => {
     expect(mocked.sanitizeSenderName).toBe(actual.sanitizeSenderName);
     expect(mocked.sanitizePromptText).toBe(actual.sanitizePromptText);
     expect(mocked.truncateCodePoints).toBe(actual.truncateCodePoints);
+    expect(mocked.truncateUtf16Units).toBe(actual.truncateUtf16Units);
   });
 });

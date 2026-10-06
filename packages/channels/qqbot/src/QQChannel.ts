@@ -2922,16 +2922,31 @@ export class QQChannel extends ChannelBase {
    * bumped the counter and cleared the completion record already (see
    * onPromptStart); deleting them here would reset the successor's stale-state
    * detection to 0 and let a stale completion record alias onto its turn.
+   *
+   * The counter is kept while this session still has a prompt in flight. A
+   * settle can run in the microtask window between onResponseComplete parking
+   * the session and ChannelBase's onPromptEnd (which clears the active marker
+   * first), and onPromptEnd then recognises the turn's own re-stashed sealed
+   * head by comparing the stash's turn against this counter — as does the
+   * parked-stash service before its early return. Deleting the counter here
+   * makes that gate read 0 and discard the head as superseded: the reply's
+   * opening reaches no wire, no buffer and no stash while the turn reports
+   * completed. The completion record still goes: it is turn-scoped, and a
+   * later prompt reusing the number must not alias it. onPromptEnd,
+   * onPromptStart and onSessionDied all still delete the counter once the
+   * prompt is over, so it stays bounded by the live sessions and can never be
+   * inherited by a successor turn.
    */
   private deleteTurnGenerationIfOwned(
     state: { turn: number },
     sessionId: string,
   ): void {
     if (state.turn !== (this.turnCounter.get(sessionId) ?? 0)) return;
-    this.turnCounter.delete(sessionId);
     if (this.completedTurns.get(sessionId) === state.turn) {
       this.completedTurns.delete(sessionId);
     }
+    if (this.activePromptSessions.has(sessionId)) return;
+    this.turnCounter.delete(sessionId);
   }
 
   override onToolCall(_chatId: string, event: ToolCallEvent): void {
