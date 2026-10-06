@@ -609,7 +609,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
           priority: {
             type: 'string',
             description:
-              'Delivery urgency to another Qwen Code session. "now" asks the receiver to steer its running turn at the next tool-round boundary; "next" (default) delivers when its turn ends. The receiver must have agents.crossSessionMidTurn enabled or this is ignored. Ignored for teammates and background tasks.',
+              'Delivery urgency to another Qwen Code session. "now" asks the receiver to steer its running turn at the next tool-round boundary; "next" (default) delivers when its turn ends. Steering needs the receiver\'s agents.crossSessionMidTurn on, and even then the receiver holds the grant: a per-window budget, its own queued user input, and an active Goal turn can each leave the message for the turn boundary. Ignored for teammates and background tasks.',
             enum: ['now', 'next'],
           },
         },
