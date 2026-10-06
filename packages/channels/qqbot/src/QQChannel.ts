@@ -2486,11 +2486,47 @@ export class QQChannel extends ChannelBase {
             this.ownsSession(sessionId, state)
               ? Math.min(carriedSeal.length, buffer.length)
               : 0;
-          const preservedInFlight = payloadFoldedIntoSeal
-            ? buffer.length
-            : payloadPreservedBySeal;
+          // The widened reconstruction below (else arm) rebuilds the whole
+          // undelivered window from this flight's payload, so every character
+          // of `buffer` is preserved even when the entry is superseded — a
+          // carried seal is not required for that and the old gate on it made
+          // the arm report a loss it no longer causes. Gated on ownsSession
+          // like the handoff itself: an unowned entry's reconstruction is
+          // dropped (and logged) by handOffSealedPre.
+          //
+          // It is owed whenever a boundary cleared the bridge's collection
+          // during the widened flight AND the widened seal does not already
+          // hold the payload: 'residual' means the boundary overwrote the
+          // widened value, and `carriedSeal === undefined` means the flight
+          // started with no seal at all, so onPromptEnd's merge could only
+          // prepend the older head. With a carried seal and marker 'payload'
+          // the live seal already ends with the widened value, so rebuilding
+          // there would duplicate the payload.
+          const widenedWindowReconstructionOwed =
+            !payloadFoldedIntoSeal &&
+            state.sealWidenedInFlight === true &&
+            state.boundaryClearedInFlight !== undefined &&
+            (state.boundaryClearedInFlight === 'residual' ||
+              carriedSeal === undefined);
+          const payloadReconstructedIntoSeal =
+            widenedWindowReconstructionOwed &&
+            this.ownsSession(sessionId, state);
+          const preservedInFlight =
+            payloadFoldedIntoSeal || payloadReconstructedIntoSeal
+              ? buffer.length
+              : payloadPreservedBySeal;
+          // A widened in-flight seal already folds the whole `state.buffer`
+          // window into the handoff below, so every character counted here is
+          // delivered (or re-stashed) and the subtraction would report them as
+          // lost: the widened reconstruction is `head + payload + residual`, of
+          // which only the residual is the captured, separately-preserved part.
+          // Nothing is dropped in flight on that arm, so report zero. Without a
+          // widening the subtraction is the pre-existing arithmetic and every
+          // un-widened log line stays byte for byte what it was.
           const droppedInFlight =
-            state.buffer.length - this.capturedResidual(state).length;
+            state.sealWidenedInFlight === true
+              ? 0
+              : state.buffer.length - this.capturedResidual(state).length;
           const droppedParts: string[] = [];
           const lostInFlight = buffer.length - preservedInFlight;
           if (lostInFlight > 0) {
@@ -2550,6 +2586,42 @@ export class QQChannel extends ChannelBase {
             // the live seal as its suffix (sealWidenedInFlight), so passing it
             // again would prepend the delivered head a second time in
             // handOffSealedPre's merge. Same rule resealOnRebuffer applies.
+            //
+            // EXCEPT when the widened seal does not already hold the payload.
+            // Two explicit states say so, and neither is a text comparison:
+            //
+            //  * marker 'residual' — the boundary overwrote the widened seal
+            //    with its own live residual, which is the OLDER stashed head
+            //    plus whatever arrived since the boundary. The in-flight payload
+            //    belongs BETWEEN those two portions: the exact
+            //    `head + payload + newer` window rebufferAfterStashMerge
+            //    rebuilds. Suppressing `carriedSeal` would drop the payload (it
+            //    is on no wire and in no seal) while a plain prepend would
+            //    transpose it in front of the older head ('PA').
+            //
+            //  * `carriedSeal === undefined` with any boundary marker — the
+            //    flight started with no seal, so onPromptEnd's merge could only
+            //    prepend the older head; the widened seal is the head alone and
+            //    misses the payload the boundary stripped from the collection.
+            //
+            // With a carried seal and marker 'payload' (or no marker) the live
+            // seal still ends with the widened value and already holds the
+            // carried head as its suffix, so rebuilding there would duplicate
+            // the payload (the very 'PAP' this branch prevents). No marker at
+            // all means no boundary cleared the collection, so the payload is
+            // still in fullText and must not be welded into the seal.
+            //
+            // The window is rebuilt from THIS FLIGHT's payload, not from
+            // `carriedSeal`: the send may have started with no seal at all, and
+            // `buffer` is what the wire was asked to carry either way. Both arms
+            // therefore ask sealForClearedWindow with the same payload, so they
+            // cannot drift — the payloadFoldedIntoSeal arm above uses exactly
+            // the same expression.
+            if (widenedWindowReconstructionOwed) {
+              state.sealedPre = this.sealForClearedWindow(state, buffer, () =>
+                this.rebufferAfterStashMerge(state, buffer),
+              );
+            }
             this.handOffSealedPre(
               state,
               sessionId,
@@ -2639,6 +2711,7 @@ export class QQChannel extends ChannelBase {
               buffer,
               carriedSeal,
             );
+            this.carryWidenedWindowIntoSeal(current);
             current.retryCount++;
             if (
               this.maxFlushRetries <= 0 ||
@@ -2706,6 +2779,7 @@ export class QQChannel extends ChannelBase {
               buffer,
               carriedSeal,
             );
+            this.carryWidenedWindowIntoSeal(current);
             // #3: If re-buffer exceeds max length, flush immediately
             if (current.buffer.length >= this.streamBufferLimit(current)) {
               current.retryCount++;
@@ -3488,6 +3562,37 @@ export class QQChannel extends ChannelBase {
     ) {
       current.sealedPre = carriedSeal + (current.sealedPre ?? '');
     }
+  }
+
+  /**
+   * Carry a widened, boundary-cleared re-buffer into the seal the NEXT flight
+   * captures, so the knowledge survives the per-flight resets and a permanent
+   * failure on a retry re-stashes the whole window instead of the stale
+   * residual.
+   *
+   * resealOnRebuffer writes exactly this for a live turn, but its live-turn
+   * gate skips a superseded entry — whose re-buffer would otherwise keep the
+   * residual the boundary overwrote ('AC') while `current.buffer` already holds
+   * the reconstruction ('APC'). The retry flight then starts with `sealedPre`
+   * 'AC' and, because flushAndTrack resets sealWidenedInFlight /
+   * boundaryClearedInFlight at every flight start, its permanent arm can no
+   * longer rebuild the window: the payload 'P' is on no wire and in no seal and
+   * the entry is deleted. Recording the reconstruction on the entry hands the
+   * retry flight the one value it needs: its success path still clears it
+   * without delivering, and only a give-up re-stashes it (or delivers it), the
+   * same handoff the widened permanent arm performs.
+   *
+   * Gated on the boundary marker AND the widening, not on the buffer alone: a
+   * widened re-buffer with NO boundary leaves the newer text in the bridge's
+   * collection, so welding it into the seal would deliver it twice. The value
+   * is the reconstruction `rebufferAfterStashMerge` just wrote to
+   * `current.buffer` — no seal/buffer text comparison anywhere.
+   */
+  private carryWidenedWindowIntoSeal(current: QQStreamState): void {
+    if (current.sealWidenedInFlight !== true) return;
+    if (current.boundaryClearedInFlight === undefined) return;
+    if (!current.buffer) return;
+    current.sealedPre = current.buffer;
   }
 
   /**

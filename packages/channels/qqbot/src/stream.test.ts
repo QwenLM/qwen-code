@@ -6762,6 +6762,520 @@ describe('an in-flight flush must not clear a newer seal', () => {
       expect(wire).toBe('APC');
       expect(c.attempts.some((a) => a.text === 'PAC')).toBe(false);
     });
+
+    it('keeps one copy and one order when a superseded widened send fails after a boundary residual', async () => {
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'ok', 'ok', 'ok');
+      // 'C' arrives during the widened 'P' flight and the boundary then captures
+      // it as a residual, overwriting the widened seal with 'C'; onPromptEnd's
+      // merge prepends the OLDER stashed head, so the entry reads 'AC' for both
+      // seal and buffer while the in-flight payload 'P' is in NEITHER portion.
+      const { ch, stateMap, orphanBuffer } = await scheduleWidening(c, {
+        duringFlight: 'C',
+        boundaryDuringFlight: true,
+      });
+      const state = stateMap.get('s1')!;
+      expect(state.boundaryClearedInFlight).toBe('residual');
+      expect(state.sealedPre).toBe('AC');
+      expect(state.buffer).toBe('AC');
+      expect(state.sealWidenedInFlight).toBe(true);
+
+      // A SUCCESSOR supersedes the entry while its widened send is still in
+      // flight, so ownsLiveTurn is now false and the permanent failure takes the
+      // else branch (the folded-into-seal arm is gated on the live turn). Before
+      // the fix that branch suppressed the carried seal and dropped 'P' with the
+      // entry: the re-stash read 'AC' and no wire ever carried it.
+      onPromptStart(ch, 'test-chat', 's1', 'msg-A'); // turn 3 supersedes
+      c.pending[2].reject(new DeliveryError('RETRY_EXHAUSTED', 'permanent'));
+      await settle();
+
+      // The reconstruction slots the payload between the older head 'A' and the
+      // residual 'C': one copy of each, in the seal's order. A plain prepend
+      // would transpose it ('PAC') and the suppression alone drops it.
+      const stash = orphanBuffer.get('s1')!;
+      expect(stash.text).toBe('APC');
+      expect(stash.pre).toBe('APC');
+      expect(stash.text.split('').filter((ch) => ch === 'P')).toHaveLength(1);
+      expect(stash.text).not.toContain('PAC');
+      // The superseded entry's payload reached no wire of its own: the only
+      // attempts are the three pre-supersede sends.
+      expect(c.attempts.map((a) => a.text)).toEqual(['A', 'AB', 'P']);
+    });
+
+    it('recovers the payload a superseded widened send fails after the boundary overwrote the seal', async () => {
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'ok', 'ok', 'ok');
+      // No chunk arrives during the widened 'P' flight, so onPromptEnd's merge
+      // widens the seal to 'AP' with the buffer 'A'. The boundary then fires
+      // while that send is still in flight: it captures the buffer as its
+      // residual, OVERWRITING the widened seal with 'A' and marking 'residual'.
+      // The in-flight payload 'P' is now in neither the seal nor the buffer.
+      const { ch, stateMap, orphanBuffer } = await scheduleWidening(c);
+      const state = stateMap.get('s1')!;
+      expect(state.sealedPre).toBe('AP');
+      expect(state.buffer).toBe('A');
+      expect(state.sealWidenedInFlight).toBe(true);
+
+      onResponseBoundary(ch, 'test-chat', 's1');
+      const overwritten = stateMap.get('s1')!;
+      expect(overwritten.boundaryClearedInFlight).toBe('residual');
+      expect(overwritten.sealedPre).toBe('A');
+
+      // A successor supersedes before the widened send settles, so the permanent
+      // failure takes the else branch. Suppressing the carried seal there drops
+      // 'P' (the pre-fix re-stash read 'A'); the boundary's residual must be
+      // combined with the payload, not replace it.
+      onPromptStart(ch, 'test-chat', 's1', 'msg-A'); // turn 3 supersedes
+      c.pending[2].reject(new DeliveryError('RETRY_EXHAUSTED', 'permanent'));
+      await settle();
+
+      const stash = orphanBuffer.get('s1')!;
+      expect(stash.text).toBe('AP');
+      expect(stash.pre).toBe('AP');
+      expect(stash.text.split('').filter((ch) => ch === 'P')).toHaveLength(1);
+      expect(stash.text).not.toContain('PAC');
+      expect(c.attempts.map((a) => a.text)).toEqual(['A', 'AB', 'P']);
+    });
+
+    it('does not rebuild a widened seal a superseded send fails with no boundary', async () => {
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'ok', 'ok', 'ok');
+      // 'C' arrives during the widened 'P' flight and NO boundary fires, so the
+      // widened seal still ends with the delivered payload ('AP') and the merge
+      // leaves the buffer reading 'AC'. The residual marker stays unset.
+      const { ch, stateMap, orphanBuffer } = await scheduleWidening(c, {
+        duringFlight: 'C',
+      });
+      const state = stateMap.get('s1')!;
+      expect(state.boundaryClearedInFlight).toBeUndefined();
+      expect(state.sealedPre).toBe('AP');
+      expect(state.buffer).toBe('AC');
+      expect(state.sealWidenedInFlight).toBe(true);
+
+      onPromptStart(ch, 'test-chat', 's1', 'msg-A'); // turn 3 supersedes
+      c.pending[2].reject(new DeliveryError('RETRY_EXHAUSTED', 'permanent'));
+      await settle();
+
+      // No boundary cleared the collection, so the live seal was not overwritten
+      // and already holds the carried head as its suffix. It is handed off
+      // untouched: rebuilding the window here would fold in the newer 'C' that
+      // the bridge still holds and hand it off a second time. The marker check
+      // is what separates this arm from the residual arm above; both cells pin
+      // it, so neither may be dropped.
+      const stash = orphanBuffer.get('s1')!;
+      expect(stash.text).toBe('AP');
+      expect(stash.pre).toBe('AP');
+      expect(stash.text.split('').filter((ch) => ch === 'P')).toHaveLength(1);
+      expect(stash.text).not.toContain('PAC');
+    });
+
+    it('reports a widened permanent failure as preserved, not buffered in flight', async () => {
+      const c = widenedController();
+      c.setSeq('pending', 'pending', 'pending', 'ok', 'ok', 'ok');
+      // The boundary fires while the widened 'P' send is in flight and the flush
+      // already took the buffer, so the entry keeps the widened seal 'AP' and
+      // the re-buffered head 'A' — the whole buffer is folded into the handoff.
+      const { stateMap } = await scheduleWidening(c, {
+        boundaryDuringFlight: true,
+      });
+      const state = stateMap.get('s1')!;
+      expect(state.sealWidenedInFlight).toBe(true);
+      expect(state.boundaryClearedInFlight).toBe('payload');
+      expect(state.buffer).toBe('A');
+
+      // Isolate this failure's log line from the earlier handoff's.
+      vi.mocked(process.stderr.write).mockClear();
+      c.pending[2].reject(new DeliveryError('RETRY_EXHAUSTED', 'permanent'));
+      await settle();
+
+      const logged = capturedStderr();
+      // The widened reconstruction folds the whole buffer into the seal that is
+      // delivered below, so nothing in it is lost in flight. The pre-fix
+      // arithmetic subtracted only the captured residual and reported this as
+      // 'dropping 1 chars buffered in flight' while 'AP' reached the wire.
+      expect(logged).not.toContain('buffered in flight');
+      // Qualitative only: the handoff seal in this cell is the two-character
+      // 'AP' (three with a residual), while the reported count is the flight
+      // payload alone. That 'N chars preserved' arithmetic predates this
+      // sequence and under-counts the seal, so pinning the number would
+      // enshrine the under-count and break the moment it is corrected.
+      expect(logged).toContain('preserved in the handoff seal');
+    });
+
+    // ── Exhaustive enumeration of the widened-window family ──────────────
+    //
+    // Every reachable combination of boundary marker, entry ownership and
+    // flight outcome, for the first widened flight, a retry after a transient
+    // failure, and a second retry. `wire` is the concatenated RESOLVED-send
+    // text (an attempt that never resolves ok is not on the wire); `stash` is
+    // the final handoff seal. On every failure arm the two together must read
+    // the window head → payload → newer with each character exactly once.
+    describe('enumerates the full widened-window state space', () => {
+      type EnumMode = 'pending' | 'ok' | 'transient' | 'permanent';
+      type EnumBoundary = 'none' | 'payload' | 'residual';
+      type EnumRow = {
+        label: string;
+        marker: EnumBoundary;
+        superseded: boolean;
+        outcomes: EnumMode[];
+        wire: string[];
+        stash: string;
+        /** Ideal head → payload → newer reading of wire + stash. */
+        window: string;
+        /**
+         * false for a cell whose successful flight already put the payload on
+         * the wire before the older head was merged: the head can then only
+         * be delivered afterwards, so the reading is 'PA'/'PAC' by
+         * construction. Pre-existing on 0b17510ae7 and not a loss — the
+         * exactly-once check still applies.
+         */
+        ordered?: boolean;
+        /** Omit the turn-2 boundary so the widened flight starts seal-less. */
+        carrySeal?: boolean;
+        /** A chunk that arrives with NO boundary, so it stays in fullText. */
+        newer?: string;
+        maxFlushRetries?: number;
+        /** Clear captured stderr just before the widened flight settles. */
+        clearStderrBeforeSettle?: boolean;
+      };
+
+      function enumController(seq: EnumMode[]) {
+        const attempts: Array<{ n: number; text: string; mode: EnumMode }> = [];
+        const pending: Array<{
+          text: string;
+          resolve: (v: MockResponse) => void;
+          reject: (e: unknown) => void;
+        }> = [];
+        const wire: string[] = [];
+        let i = 0;
+        mockSendQQMessage.mockImplementation((...args: unknown[]) => {
+          const body = args[3] as
+            | { markdown?: { content?: string } }
+            | undefined;
+          const text = body?.markdown?.content ?? '';
+          const mode: EnumMode = seq[i] ?? 'ok';
+          i++;
+          attempts.push({ n: i, text, mode });
+          if (mode === 'pending') {
+            return new Promise<MockResponse>((resolve, reject) => {
+              pending.push({
+                text,
+                resolve: (v) => {
+                  wire.push(text);
+                  resolve(v);
+                },
+                reject,
+              });
+            });
+          }
+          if (mode === 'ok') {
+            wire.push(text);
+            return Promise.resolve(mockResponse(true));
+          }
+          if (mode === 'transient') {
+            return Promise.reject(new Error('transient'));
+          }
+          return Promise.reject(
+            new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'),
+          );
+        });
+        return { attempts, pending, wire };
+      }
+
+      /**
+       * Drive the DEEP-RETRY shape to its settle. Turn 1's sealed head 'A' is
+       * re-stashed by a permanent failure and merged into turn 2's reply, whose
+       * payload 'P' is on the widened flight. The marker shapes what a boundary
+       * cleared during that flight; 'residual' adds the newer 'C'.
+       */
+      async function enumCell(row: EnumRow) {
+        const carrySeal = row.carrySeal ?? true;
+        const newer = row.newer ?? (row.marker === 'residual' ? 'C' : '');
+        const c = enumController([
+          'pending',
+          'pending',
+          'pending',
+          ...row.outcomes.slice(1),
+        ]);
+        const ch = makeChannel({ maxFlushRetries: row.maxFlushRetries ?? 2 });
+        const chp = ch as unknown as Record<string, unknown>;
+        const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+          string,
+          { text: string; pre?: string }
+        >;
+        setReplyMsgId(ch, 'test-chat', 'msg-A');
+
+        onPromptStart(ch, 'test-chat', 's1', 'msg-A'); // turn 1
+        onResponseChunk(ch, 'test-chat', 'A', 's1');
+        onResponseBoundary(ch, 'test-chat', 's1'); // turn-1 seal 'A'
+        await vi.advanceTimersByTimeAsync(2000);
+        await drain(); // send 1 'A' in flight
+        onResponseChunk(ch, 'test-chat', 'B', 's1');
+        c.pending[0].reject(new Error('transient')); // re-buffer, retry armed
+        await drain();
+        await vi.advanceTimersByTimeAsync(2000);
+        await drain(); // send 2 'AB' in flight
+        onPromptStart(ch, 'test-chat', 's1', 'msg-A'); // turn 2 supersedes
+        onResponseChunk(ch, 'test-chat', 'P', 's1');
+        if (carrySeal) onResponseBoundary(ch, 'test-chat', 's1'); // seal 'P'
+        c.pending[1].reject(new DeliveryError('RETRY_EXHAUSTED', 'permanent'));
+        await drain(); // handoff: stash {turn 2, 'A'} in front of 'P'
+        await vi.advanceTimersByTimeAsync(2000);
+        await drain(); // send 3 'P' — the widened flight — in flight
+
+        if (row.marker === 'payload') {
+          onResponseBoundary(ch, 'test-chat', 's1'); // '' -> marker 'payload'
+        } else if (row.marker === 'residual') {
+          onResponseChunk(ch, 'test-chat', newer || 'C', 's1');
+          onResponseBoundary(ch, 'test-chat', 's1'); // -> marker 'residual'
+        } else if (newer) {
+          onResponseChunk(ch, 'test-chat', newer, 's1'); // stays in fullText
+        }
+        onPromptEnd(ch, 'test-chat', 's1'); // merge widens the live entry
+
+        if (row.superseded) {
+          onPromptStart(ch, 'test-chat', 's1', 'msg-A'); // turn 3
+        }
+
+        const first = row.outcomes[0] ?? 'ok';
+        if (row.clearStderrBeforeSettle) {
+          vi.mocked(process.stderr.write).mockClear();
+        }
+        if (first === 'ok') {
+          c.pending[2].resolve(mockResponse(true));
+        } else if (first === 'permanent') {
+          c.pending[2].reject(
+            new DeliveryError('RETRY_EXHAUSTED', 'permanent'),
+          );
+        } else {
+          c.pending[2].reject(new Error('transient'));
+        }
+        for (let k = 0; k < 14; k++) {
+          await vi.advanceTimersByTimeAsync(2000);
+          await drain();
+        }
+        const stash = orphanBuffer.get('s1')?.text ?? '';
+        return { wire: [...c.wire], stash, combined: c.wire.join('') + stash };
+      }
+
+      async function expectEnumCell(row: EnumRow) {
+        const r = await enumCell(row);
+        expect(r.wire, row.label).toEqual(row.wire);
+        expect(r.stash, row.label).toBe(row.stash);
+        expect(r.combined, row.label).toBe(row.wire.join('') + row.stash);
+        // Each character of the ideal window reaches the operator exactly
+        // once, whether it came from the wire or from the stash.
+        expect([...r.combined].sort().join(''), row.label).toBe(
+          [...row.window].sort().join(''),
+        );
+        if (row.ordered !== false) {
+          expect(r.combined, row.label).toBe(row.window);
+          expect(r.combined, row.label).not.toContain('PA');
+          expect(r.combined, row.label).not.toContain('PAC');
+        }
+        return r;
+      }
+
+      // 3 markers x {live, superseded} x {permanent, success} — the first
+      // widened flight. `none`/`payload` reconstruct 'A' + 'P'; `residual`
+      // adds the cleared 'C'. The successful cells are the two readings the
+      // merge cannot reorder (the payload is already resolved).
+      const firstFlightRows: EnumRow[] = [];
+      for (const marker of ['none', 'payload', 'residual'] as EnumBoundary[]) {
+        const window = marker === 'residual' ? 'APC' : 'AP';
+        for (const superseded of [false, true]) {
+          firstFlightRows.push({
+            label: `${marker}/superseded=${superseded}/permanent`,
+            marker,
+            superseded,
+            outcomes: ['permanent'],
+            wire: superseded ? [] : [window],
+            stash: superseded ? window : '',
+            window,
+          });
+          firstFlightRows.push({
+            label: `${marker}/superseded=${superseded}/success`,
+            marker,
+            superseded,
+            outcomes: ['ok'],
+            wire: marker === 'residual' ? ['P', 'AC'] : ['P', 'A'],
+            stash: '',
+            window,
+            ordered: false,
+          });
+        }
+      }
+
+      // 3 markers x {live, superseded} x retry {ok, permanent, exhausted}.
+      const retryRows: EnumRow[] = [];
+      for (const marker of ['none', 'payload', 'residual'] as EnumBoundary[]) {
+        const window = marker === 'residual' ? 'APC' : 'AP';
+        for (const superseded of [false, true]) {
+          for (const retry of ['ok', 'permanent', 'transient'] as EnumMode[]) {
+            const deliveredHere = !superseded || retry === 'ok';
+            retryRows.push({
+              label: `${marker}/superseded=${superseded}/transient->${retry}`,
+              marker,
+              superseded,
+              outcomes: ['transient', retry],
+              wire: deliveredHere ? [window] : [],
+              stash: deliveredHere ? '' : window,
+              window,
+            });
+          }
+        }
+      }
+
+      // 3 markers x {live, superseded} x a second retry after two transients.
+      const secondRetryRows: EnumRow[] = [];
+      for (const marker of ['none', 'payload', 'residual'] as EnumBoundary[]) {
+        const window = marker === 'residual' ? 'APC' : 'AP';
+        for (const superseded of [false, true]) {
+          for (const second of ['ok', 'permanent'] as EnumMode[]) {
+            const deliveredHere = !superseded || second === 'ok';
+            secondRetryRows.push({
+              label: `${marker}/superseded=${superseded}/transient->transient->${second}`,
+              marker,
+              superseded,
+              outcomes: ['transient', 'transient', second],
+              maxFlushRetries: 3,
+              wire: deliveredHere ? [window] : [],
+              stash: deliveredHere ? '' : window,
+              window,
+            });
+          }
+        }
+      }
+
+      // 3 markers x {live, superseded} with no turn-2 seal at all: the widened
+      // flight starts `carriedSeal === undefined`, which is the synthesis'
+      // third-guard cell. With no boundary (`none`) the payload stays in
+      // fullText, so only the head is observable here.
+      const noCarrierRows: EnumRow[] = [];
+      for (const marker of ['none', 'payload', 'residual'] as EnumBoundary[]) {
+        const window =
+          marker === 'residual' ? 'APC' : marker === 'payload' ? 'AP' : 'A';
+        for (const superseded of [false, true]) {
+          for (const mode of [
+            ['permanent'],
+            ['transient', 'permanent'],
+          ] as EnumMode[][]) {
+            noCarrierRows.push({
+              label: `${marker}/superseded=${superseded}/carrier=undefined/${mode.join(',')}`,
+              marker,
+              superseded,
+              carrySeal: false,
+              outcomes: mode,
+              wire: superseded ? [] : [window],
+              stash: superseded ? window : '',
+              window,
+            });
+          }
+        }
+      }
+
+      // A newer chunk with NO boundary: the bridge's collection still holds
+      // it, so the seal must not weld it in and the final stash must exclude
+      // it. (The transient re-buffer of the same shape legitimately re-sends
+      // it on the retry, pinned by the 'around a newer in-flight chunk' test
+      // above.)
+      const noBoundaryNewerRows: EnumRow[] = [
+        {
+          label: 'none/newer/first-permanent',
+          marker: 'none',
+          superseded: false,
+          newer: 'C',
+          outcomes: ['permanent'],
+          wire: ['AP'],
+          stash: '',
+          window: 'AP',
+        },
+        {
+          label: 'none/newer/superseded/first-permanent',
+          marker: 'none',
+          superseded: true,
+          newer: 'C',
+          outcomes: ['permanent'],
+          wire: [],
+          stash: 'AP',
+          window: 'AP',
+        },
+        {
+          label: 'none/newer/retry-permanent',
+          marker: 'none',
+          superseded: false,
+          newer: 'C',
+          outcomes: ['transient', 'permanent'],
+          wire: ['AP'],
+          stash: '',
+          window: 'AP',
+        },
+        {
+          label: 'none/newer/superseded/retry-permanent',
+          marker: 'none',
+          superseded: true,
+          newer: 'C',
+          outcomes: ['transient', 'permanent'],
+          wire: [],
+          stash: 'AP',
+          window: 'AP',
+        },
+      ];
+
+      it.each(firstFlightRows)('first flight: $label', async (row: EnumRow) => {
+        await expectEnumCell(row);
+      });
+
+      it.each(retryRows)('retry flight: $label', async (row: EnumRow) => {
+        await expectEnumCell(row);
+      });
+
+      it.each(secondRetryRows)('second retry: $label', async (row: EnumRow) => {
+        await expectEnumCell(row);
+      });
+
+      it.each(noCarrierRows)(
+        'no carried seal: $label',
+        async (row: EnumRow) => {
+          await expectEnumCell(row);
+        },
+      );
+
+      it.each(noBoundaryNewerRows)(
+        'no boundary, newer chunk stays in fullText: $label',
+        async (row: EnumRow) => {
+          const r = await expectEnumCell(row);
+          // Explicit: the newer 'C' is neither on this cell's wire nor in the
+          // handoff seal — it is still in the bridge's fullText, which
+          // onResponseComplete is the reader for.
+          expect(r.wire.join(''), row.label).not.toContain('C');
+          expect(r.stash, row.label).not.toContain('C');
+        },
+      );
+
+      it('reports the reconstructed superseded window as preserved, not dropped', async () => {
+        // The DEEP-NOCARRIER shape: the widened flight starts with no seal at
+        // all, a boundary captures the residual 'C', and the successor
+        // supersedes before the send fails permanently. The reconstruction
+        // re-stashes the whole 'APC' window, so the loss log must not charge
+        // the payload as dropped — it is on no wire but it is in the seal.
+        await expectEnumCell({
+          label: 'residual/superseded/carrier=undefined/permanent (log)',
+          marker: 'residual',
+          superseded: true,
+          carrySeal: false,
+          outcomes: ['permanent'],
+          wire: [],
+          stash: 'APC',
+          window: 'APC',
+          clearStderrBeforeSettle: true,
+        });
+        const logged = capturedStderr();
+        expect(logged).not.toContain('buffered in flight');
+        expect(logged).not.toContain('dropping 1 chars');
+        expect(logged).toContain('preserved in the handoff seal');
+      });
+    });
   });
 
   it('re-seals the whole payload a boundary cleared while a transient send was in flight', async () => {
