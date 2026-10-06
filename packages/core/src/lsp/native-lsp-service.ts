@@ -172,6 +172,43 @@ const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
 };
 
 /**
+ * Diagnostics-local aliases for language IDs that do not name their
+ * extension (`rust` serves `.rs`, `yaml` serves `.yml`): the `?? [id]`
+ * fallback would otherwise guess the ID as the extension and an ownership
+ * check misreads the server. Kept OUT of LANGUAGE_ID_TO_EXTENSIONS, which
+ * also feeds the warmup-file chooser — these rows exist only for veto
+ * decisions.
+ */
+const DIAGNOSTIC_LANGUAGE_ALIASES: Record<string, string[]> = {
+  rust: ['rs'],
+  yaml: ['yml', 'yaml'],
+  markdown: ['md', 'markdown'],
+  kotlin: ['kt', 'kts'],
+  elixir: ['ex', 'exs'],
+  erlang: ['erl', 'hrl'],
+  haskell: ['hs'],
+  ocaml: ['ml', 'mli'],
+  perl: ['pl', 'pm'],
+  terraform: ['tf'],
+  fortran: ['f', 'for', 'f90', 'f95'],
+  'objective-c': ['m', 'mm'],
+  objectivec: ['m', 'mm'],
+  shellscript: ['sh', 'bash'],
+  protobuf: ['proto'],
+  xml: ['xml'],
+  vue: ['vue'],
+  svelte: ['svelte'],
+  lua: ['lua'],
+  r: ['r'],
+  dart: ['dart'],
+  swift: ['swift'],
+  scala: ['scala', 'sc'],
+  groovy: ['groovy', 'gvy'],
+  clojure: ['clj', 'cljs'],
+  zig: ['zig'],
+};
+
+/**
  * Extensions positively attributable to a language through the mapping above.
  * A file whose extension is outside this set cannot prove any server
  * irrelevant for it — a declared language ID is not always an extension
@@ -769,7 +806,15 @@ export class NativeLspService {
    */
   private declaredDiagnosticExtensions(handle: LspServerHandle): Set<string> {
     const owned = new Set(this.getWorkspaceSymbolExtensions(handle));
-    for (const language of handle.config.languages) {
+    // The mapping's VALUES are language ids: a partial user mapping (only
+    // `.tsx` for a `typescript` server) must not hide the declared
+    // language's other extensions.
+    const languageIds = [...handle.config.languages];
+    const extMapping = handle.config.extensionToLanguage;
+    if (extMapping) {
+      for (const value of Object.values(extMapping)) languageIds.push(value);
+    }
+    for (const language of languageIds) {
       // `.lsp.json` keys reach `languages` unnormalized, while every extension
       // this set is compared against is lowercase.
       const id = language.toLowerCase();
@@ -779,7 +824,31 @@ export class NativeLspService {
         }
         continue;
       }
-      for (const ext of LANGUAGE_ID_TO_EXTENSIONS[id] ?? [id]) {
+      for (const ext of DIAGNOSTIC_LANGUAGE_ALIASES[id] ??
+        LANGUAGE_ID_TO_EXTENSIONS[id] ?? [id]) {
+        owned.add(ext);
+      }
+    }
+    return owned;
+  }
+
+  /**
+   * The owner test for a veto: stricter than relevance — no JS/TS family
+   * widening, so a javascript-only server does not own `.ts` (a family
+   * widened set would let its empty answer back a refusal it knows nothing
+   * about), and the diagnostics-local alias map so `rust` owns `.rs`.
+   */
+  private declaredOwnerExtensions(handle: LspServerHandle): Set<string> {
+    const owned = new Set(this.getWorkspaceSymbolExtensions(handle));
+    const ids = [...handle.config.languages];
+    const extMapping = handle.config.extensionToLanguage;
+    if (extMapping) {
+      for (const value of Object.values(extMapping)) ids.push(value);
+    }
+    for (const language of ids) {
+      const id = language.toLowerCase();
+      for (const ext of DIAGNOSTIC_LANGUAGE_ALIASES[id] ??
+        LANGUAGE_ID_TO_EXTENSIONS[id] ?? [id]) {
         owned.add(ext);
       }
     }
@@ -2141,7 +2210,7 @@ export class NativeLspService {
               answeredRelevant++;
               if (
                 extension !== undefined &&
-                this.declaredDiagnosticExtensions(handle).has(extension)
+                this.declaredOwnerExtensions(handle).has(extension)
               ) {
                 answeredOwner++;
               }
@@ -2218,7 +2287,7 @@ export class NativeLspService {
       const refusedOwner =
         extension !== undefined &&
         unsupported.some(({ handle: refusing }) =>
-          this.declaredDiagnosticExtensions(refusing).has(extension),
+          this.declaredOwnerExtensions(refusing).has(extension),
         );
       if (answeredRelevant === 0 || (refusedOwner && answeredOwner === 0)) {
         throw failures.length > 0 || unsupported.length > 0

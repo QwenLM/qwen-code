@@ -2857,10 +2857,11 @@ describe('NativeLspService disk document synchronization', () => {
       name: string,
       languages: string[],
       target: ReturnType<typeof createConnection>,
+      extra?: Partial<LspServerHandle['config']>,
     ): LspServerHandle {
       return {
         ...handle,
-        config: { ...handle.config, name, languages },
+        config: { ...handle.config, name, languages, ...extra },
         connection: target,
       };
     }
@@ -2922,6 +2923,149 @@ describe('NativeLspService disk document synchronization', () => {
       });
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('lets a -32601 refusal from the rust owner veto a non-owner empty answer', async () => {
+      // rust-analyzer declares `rust`, which serves `.rs` — the mapping must
+      // know that, or the refusal reads as no-owner and the non-owner's empty
+      // report certifies a broken file clean.
+      const [rsPath] = addFile('main.rs', 'fn main() { let x: i32 = ""; }\n');
+      const pyright = createConnection();
+      mockDiagnosticsResponses(pyright);
+      withServers([
+        [
+          'rust',
+          serverOn('rust-analyzer', ['rust'], refusingConnection(-32601)),
+        ],
+        ['python', serverOn('pyright', ['python'], pyright)],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: rsPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'does not support pull diagnostics',
+      );
+    });
+
+    it('keeps the refusal veto when a partial extensionToLanguage mapping exists', async () => {
+      // The mapping lists only .ts/.tsx; its values still declare the
+      // typescriptreact language, which owns .jsx — the refusal on App.jsx
+      // must not be excused as irrelevant. (languages is empty, so only
+      // the mapping can attribute anything.)
+      const [jsxPath] = addFile('App.jsx', 'export const x = "";\n');
+      const pyright = createConnection();
+      mockDiagnosticsResponses(pyright);
+      withServers([
+        [
+          'tsls',
+          serverOn('tsls', [], refusingConnection(-32601), {
+            extensionToLanguage: {
+              '.ts': 'typescript',
+              '.tsx': 'typescriptreact',
+            },
+          }),
+        ],
+        ['python', serverOn('pyright', ['python'], pyright)],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: jsxPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+    });
+
+    it('clears a clean answer through a partial extensionToLanguage mapping', async () => {
+      // Same server-name-keyed mapping, but the server ANSWERS: its values
+      // declare the typescriptreact language, whose family owns .jsx, so the
+      // empty report for App.jsx is relevant and authoritative — the query
+      // must return clean, not reject as uncovered.
+      const [jsxPath] = addFile('App.jsx', 'export const x = "";\n');
+      const tsls = createConnection();
+      mockDiagnosticsResponses(tsls);
+      withServers([
+        [
+          'tsls',
+          serverOn('tsls', [], tsls, {
+            extensionToLanguage: {
+              '.ts': 'typescript',
+              '.tsx': 'typescriptreact',
+            },
+          }),
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: jsxPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('names the failed owner a partial mapping leaves unanswered', async () => {
+      // Same mapping, but the owner FAILS outright: the server-name-keyed
+      // sibling's empty report attributes nothing, so it must not excuse the
+      // failure — the rejection names tsls, the server that owns App.jsx.
+      const [jsxPath] = addFile('App.jsx', 'export const x = "";\n');
+      const remote = createConnection();
+      mockDiagnosticsResponses(remote);
+      const failing = createConnection();
+      failing.request.mockRejectedValue(new Error('connection lost'));
+      withServers([
+        [
+          'tsls',
+          serverOn('tsls', [], failing, {
+            extensionToLanguage: {
+              '.ts': 'typescript',
+              '.tsx': 'typescriptreact',
+            },
+          }),
+        ],
+        ['remote', serverOn('remote-lsp', ['remote-lsp'], remote)],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: jsxPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('tsls');
+    });
+
+    it('does not let a javascript-only answerer back a typescript refusal', async () => {
+      // The JS/TS family widening is a relevance device only: a server
+      // declaring `javascript` does not OWN `.ts`, so its empty report must
+      // not back the typescript server's -32601 refusal on main.ts.
+      const [tsPath] = addFile('main.ts', 'const x: number = "";\n');
+      const jsTools = createConnection();
+      mockDiagnosticsResponses(jsTools);
+      withServers([
+        ['js', serverOn('js-tools', ['javascript'], jsTools)],
+        [
+          'ts',
+          serverOn(
+            'typescript-language-server',
+            ['typescript'],
+            refusingConnection(-32601),
+          ),
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: tsPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'does not support pull diagnostics',
+      );
     });
 
     it('lets an excused -32601 refusal veto when no answering server owns the file', async () => {
