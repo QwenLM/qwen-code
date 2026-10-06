@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { WorkspaceAgent } from '@qwen-code/qwen-code-core';
+import { PROMPT_CANCEL_REASON_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import { agentThreadSessionId } from '../../runtime/agent-session-source.js';
 
 import {
@@ -309,7 +310,14 @@ describe('session dispatch port', () => {
             }),
           { timeout: 3_000 },
         );
-        expect(bridge.cancelSession).toHaveBeenCalled();
+        // A stall timeout is an interruption, not user intent.
+        expect(bridge.cancelSession).toHaveBeenCalledWith(
+          agentThreadSessionId(AGENT.id, TURN.threadId),
+          {
+            sessionId: agentThreadSessionId(AGENT.id, TURN.threadId),
+            _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+          },
+        );
       } finally {
         vi.useRealTimers();
       }

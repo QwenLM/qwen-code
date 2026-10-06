@@ -11474,6 +11474,11 @@ describe('Session', () => {
           ),
         ).rejects.toThrow('model exploded');
 
+        // An ordinary prompt continues no work chain, so it writes no
+        // ownership link — the strict append stays off the normal path.
+        expect(
+          mockChatRecordingService.recordTurnAttempt,
+        ).not.toHaveBeenCalled();
         expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
