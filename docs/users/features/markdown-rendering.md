@@ -18,8 +18,8 @@ visual previews where possible:
 - fenced code blocks with syntax highlighting
 
 Markdown tables use the delimiter row immediately after the header to set column
-alignment. Later rows containing only hyphens and optional colons remain table
-data.
+alignment. Later pipe-delimited rows (`| ... |`) containing only hyphens and
+optional colons remain table data.
 
 Press `Alt/Option+M` to toggle the current session between modes. On macOS,
 the terminal must send Option as Meta for this shortcut; otherwise Option+M is
