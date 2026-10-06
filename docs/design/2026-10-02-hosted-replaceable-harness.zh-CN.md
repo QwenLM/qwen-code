@@ -289,6 +289,13 @@ continuation——expired/cancelled 保持瞬态（路由的可重试 409），
   一族）；决定是用户本人的，没有东西续跑——Turn 之后立即死亡。
   只有已结束的记录能过这道闸，正是调用方闸门已经做过的那次
   交叉读。
+- 升级本身需要步距（R9-4）：对一道还不能结算的等待按 ~500ms
+  lease-续期节奏强制发出取消接管 load，买到的只是每秒约 4 次
+  请求的 daemon 开销——coordinator 现在按 Turn 为该 load 定步距
+  （最短 5 秒），间歇里由廉价 plain-cancel 重试扛着等待。取消
+  结算写入前也先回读 journal 自己的终态：落在事件流归途窗口
+  内的重发 load 是 re-answer，绝不是撞上 event-id CAS 的第二条
+  `turn_result`（`turn:<id> is already committed`）。
 
 抛出的错误保持瞬时，与今天完全一致。load 路由对 decline 回答新的
 409 code `hosted_turn_recovery_declined` 并带 `reason` 字段；在接管

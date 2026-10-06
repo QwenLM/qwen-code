@@ -861,6 +861,61 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString(), anyString());
     }
 
+    // The coded refusal paces its takeover loads per Turn:
+    // cancelAdmittedTurn reruns on every ~500ms lease-renewal tick, and a
+    // wedged requested wait must not pay ~4 requests/s of daemon work for
+    // it (the round-10 hot loop). Within the interval only the cheap
+    // plain cancel retries; the next paced window forces the load again.
+    @Test
+    void cancelRefusedOnAdmittedTurnPacesTheTakeoverLoads() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        java.util.concurrent.atomic.AtomicLong now =
+                new java.util.concurrent.atomic.AtomicLong(1_000_000L);
+        Clock clock = mock(Clock.class);
+        when(clock.millis()).thenAnswer(invocation -> now.get());
+        TurnRecord cancelling = turn("tenant", "session", "turn", "prompt",
+                "epoch-new", 4, "CANCELLING");
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(cancelling));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-new", null, 0, 0, 1, 1, null, 1));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-new"))).thenReturn(true);
+        DaemonHttpException refused = mock(DaemonHttpException.class);
+        when(refused.getStatusCode()).thenReturn(409);
+        when(refused.getErrorCode())
+                .thenReturn("hosted_turn_recovery_required");
+        doThrow(refused).when(harness).cancel("tenant", "session");
+        when(harness.recoverManagedCancellation("tenant", "session"))
+                .thenReturn(new Attachment("boot-new", null, 5L,
+                        "epoch-new"));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), clock, new ManagedAgentProperties());
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+            // The next ~500ms tick meets the same coded refusal — and
+            // pays only the cheap plain cancel for it.
+            now.addAndGet(500);
+            coordinator.cancel("tenant", "session", "turn");
+            // The paced window over, the load is forced once more: a wait
+            // that ended meanwhile settles without burning the tick.
+            now.addAndGet(4_600);
+            coordinator.cancel("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(harness, times(3)).cancel("tenant", "session");
+        verify(harness, times(2)).recoverManagedCancellation("tenant",
+                "session");
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
     // Only the coded park refusal earns the takeover load: any other
     // cancel failure stays on the lease-renewal retry, so a transient
     // daemon answer never mints one.

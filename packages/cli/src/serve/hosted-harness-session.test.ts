@@ -9691,6 +9691,30 @@ describe('Hosted Harness Runtime turn takeover', () => {
             line.includes('settles the cancelled park on the redriven load'),
           ),
       ).toBe(true);
+      // The same signal redriven inside the stream's landing window is a
+      // re-answer, not a second settle: one Cancelled record total, and
+      // no `turn:<id> is already committed` conflict in its place
+      // (the round-10 minor).
+      const raced = await replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: storeFor(BOOT_ID_2),
+        passiveManagedRuntimeRecovery: true,
+        cancellationTakeover: true,
+      });
+      expect(raced.status).toBe(200);
+      expect(
+        log.mock.calls
+          .map(([line]) => line)
+          .filter((line) =>
+            line.includes('settles the cancelled park on the redriven load'),
+          ),
+      ).toHaveLength(1);
+      expect(
+        log.mock.calls
+          .map(([line]) => line)
+          .some((line) => line.includes('takeover_unavailable')),
+      ).toBe(false);
       // The cancelled terminal is durable: the plain cancel route reads
       // settled-at-tail (204, nothing left to abort).
       const cancelled = await replacementHeaders(

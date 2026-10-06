@@ -573,6 +573,20 @@ async function settleCancelledHarnessTurn(
       await createManagedHarnessHandle(managed).resolveDurableWait();
     }
   }
+  // A settle that already landed answers idempotently: the coordinator's
+  // next paced takeover load may race the stream home (the Turn row
+  // stays CANCELLING until the replay lands), and a second write meets
+  // the authority's event-id CAS — `event id turn:<id> is already
+  // committed` — unless the answer re-reads what is already committed
+  // (the terminal event this helper itself just wrote).
+  const authority = session.managed.authority;
+  const alreadySettled = authority
+    .eventsInSequenceRange(1, authority.committedSequence)
+    .some(
+      (event) =>
+        event.kind === 'turn.settled' && event.payload['turnId'] === promptId,
+    );
+  if (alreadySettled) return;
   await managed.sink.write(
     record(session, sessionId, 'system', null, {
       subtype: 'turn_result',

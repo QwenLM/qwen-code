@@ -79,6 +79,11 @@ public class HarnessCoordinator {
     private final int batchMaxBytes;
     private final String owner = UUID.randomUUID().toString();
     private final Set<String> active = ConcurrentHashMap.newKeySet();
+    // See cancelAdmittedTurn: forced cancellation takeover loads are paced
+    // per Turn, far below the ~500ms lease-renewal cadence that re-runs
+    // the coded-refusal pair (the round-10 hot loop).
+    private static final long TAKEOVER_LOAD_MIN_INTERVAL_MS = 5_000;
+    private final Map<String, Long> takeoverPace = new ConcurrentHashMap<>();
     private final ScheduledExecutorService renewer =
             Executors.newSingleThreadScheduledExecutor(runnable -> {
                 Thread thread = new Thread(runnable,
@@ -887,7 +892,23 @@ public class HarnessCoordinator {
                     // settles nothing (the round-9 wedge). The cancellation
                     // takeover load is the only route that pays it, so it
                     // goes out inline over THIS attachment — the stream the
-                    // coordination already runs then lands the settle.
+                    // coordination already runs then lands the settle. A
+                    // load the daemon can only answer with a plain attach
+                    // pays nothing at that moment, and this method runs
+                    // once per lease-renewal tick (~500ms): pace the load
+                    // per Turn or every wedged wait costs ~4 requests/s of
+                    // daemon work against the same Session (the round-10
+                    // hot loop).
+                    String paceKey = tenantId + '/' + sessionId + '/'
+                            + turnId;
+                    long now = clock.millis();
+                    Long lastAttempt = takeoverPace.get(paceKey);
+                    if (lastAttempt != null
+                            && now - lastAttempt
+                                    < TAKEOVER_LOAD_MIN_INTERVAL_MS) {
+                        return;
+                    }
+                    takeoverPace.put(paceKey, now);
                     Attachment takeover = harness.recoverManagedCancellation(
                             tenantId, sessionId);
                     HarnessRuntimeRecovery recovery =

@@ -343,6 +343,15 @@ its readings (R9):
   phase); the decision is the USER's and nothing resumes — the Turn
   dies immediately after. Only an ENDED record crosses the gate here,
   exactly the cross-read the caller's gate already made.
+- The escalation itself is paced (R9-4): a cancellation takeover load
+  forced per ~500 ms lease-renewal tick against a wait that cannot
+  settle yet only buys daemon work at ~4 requests/s — the coordinator
+  paces it per Turn (5 s minimum interval), letting the cheap
+  plain-cancel retry carry the wait between attempts. And the cancelled
+  settle re-reads the journal's own terminal before writing: a redriven
+  load that lands inside the stream's landing window is a re-answer,
+  never a second `turn_result` meeting the event-id CAS
+  (`turn:<id> is already committed`).
 
 Thrown errors stay transient, exactly as today. The load route answers
 declines with new 409 code `hosted_turn_recovery_declined` plus a `reason`
