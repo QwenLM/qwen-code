@@ -19019,7 +19019,7 @@ describe('Session', () => {
                 : {
                     error:
                       outcome === 'build error'
-                        ? `${core.DEFERRED_TOOL_CALL_REFUSAL_PREFIX}Deferred tool "${target.name}" (called through tool_call) rejected the arguments: params must have required property 'title'. Pass arguments matching the schema returned by tool_search for "${target.name}".`
+                        ? `[tool_call bridge refused] Deferred tool "${target.name}" (called through tool_call) rejected the arguments: params must have required property 'title'. Pass arguments matching the schema returned by tool_search for "${target.name}".`
                         : 'Remote service unavailable',
                   },
           });
