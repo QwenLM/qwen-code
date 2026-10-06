@@ -56,6 +56,11 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
     void setUp() throws Exception {
         database = new DriverManagerDataSource("jdbc:h2:mem:snapshot-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
+        initialize(database);
+    }
+
+    void initialize(DataSource sourceDatabase) throws Exception {
+        database = sourceDatabase;
         Flyway.configure().dataSource(database).load().migrate();
         jdbc = new JdbcTemplate(database);
         var protector = new AesGcmSecretProtector("test-key", new byte[32]);
@@ -393,6 +398,167 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
 
     private static String hash(byte[] bytes) {
         return ToolPublicationContract.sha256(bytes);
+    }
+
+    @Test
+    void enumeratesEveryExecutionStateAndReleasedSessionBeyondFirstPage() {
+        for (int index = 0; index < 101; index++) {
+            var row = copyRow("qwen_tool_execution");
+            String id = "extra-" + index;
+            row.put("execution_call_id", id);
+            row.put("execution_call_id_hash", brokerHash(id));
+            row.put("idempotency_key", id);
+            row.put("idempotency_key_hash", brokerHash(id));
+            row.put("execution_state", ToolExecutionRecord.State.values()[index % 7].name());
+            insertRow("qwen_tool_execution", row);
+            var session = copyRow("qwen_runtime_session");
+            session.put("runtime_session_id", id);
+            session.put("session_state", "RELEASED");
+            insertRow("qwen_runtime_session", session);
+        }
+        JsonNode inventory = store.exportRetirementInventory(retirementId);
+        assertThat(inventory.path("format").asText()).isEqualTo(WorkspaceCsiCheckpointSnapshotStore.INVENTORY_FORMAT);
+        assertThat(inventory.path("executions").size()).isEqualTo(102);
+        assertThat(inventory.path("runtimeSessions").size()).isEqualTo(102);
+        var states = new java.util.HashSet<String>();
+        inventory.path("executions").forEach(row -> states.add(row.path("state").asText()));
+        assertThat(states).containsExactlyInAnyOrder("PREPARED", "DISPATCHING", "EXECUTING", "CANCEL_REQUESTED",
+                "SETTLED", "UNKNOWN", "ABANDONED");
+        assertThat(source.connections).isEqualTo(1);
+        assertThat(source.starts).isEqualTo(1);
+        assertThat(source.rollbacks).isEqualTo(1);
+        assertThat(source.statements).allMatch(sql -> sql.startsWith("SELECT") && !sql.contains("FOR UPDATE"));
+        assertThat(source.statements.stream().filter(sql -> sql.contains("qwen_tool_execution") && sql.contains("LIMIT 100")).count())
+                .isEqualTo(2);
+        assertThat(inventory.toString()).doesNotContain("must-never-escape", "tokenHash", "leaseTokenHash", "writerTokenHash");
+    }
+
+    @Test
+    void preservesOrphansAndNonReferencedResourcesInsteadOfHidingThemBehindJoins() {
+        var publication = copyRow("qwen_tool_publication");
+        publication.put("publication_id", "orphan-publication");
+        publication.put("execution_key", hash("orphan-execution".getBytes(StandardCharsets.UTF_8)));
+        publication.put("capture_id", "orphan-capture");
+        insertRow("qwen_tool_publication", publication);
+        var object = copyRow("qwen_tool_publication_object");
+        object.put("publication_id", "missing-parent");
+        object.put("resource_id", "orphan-object");
+        insertRow("qwen_tool_publication_object", object);
+        jdbc.update("INSERT INTO managed_workspace_csi_worker_ack (retirement_id, execution_call_id_hash, execution_call_id,"
+                        + " evidence_json, evidence_digest, recorded_at_epoch_micros) VALUES (?, ?, 'orphan-execution', '{}', ?, 1)",
+                retirementId, hash("orphan-execution".getBytes(StandardCharsets.UTF_8)), hash("{}".getBytes(StandardCharsets.UTF_8)));
+        var resource = copyRow("qwen_managed_session_resource");
+        resource.put("resource_id", "orphan-resource");
+        resource.put("state", "PUBLISHED");
+        insertRow("qwen_managed_session_resource", resource);
+        JsonNode inventory = store.exportRetirementInventory(retirementId);
+        assertThat(inventory.path("publications").size()).isEqualTo(2);
+        assertThat(inventory.path("workerAcks").get(0).path("executionCallId").asText()).isEqualTo("orphan-execution");
+        assertThat(inventory.path("publicationObjects").toString()).contains("missing-parent", "orphan-object");
+        assertThat(inventory.path("sessionResourceInventory").toString()).contains("orphan-resource", "PUBLISHED");
+        assertThat(inventory.has("drained")).isFalse();
+        assertThat(inventory.has("releasable")).isFalse();
+    }
+
+    @Test
+    void discoversAnOtherwiseOrphanSessionFromTheActualPersistentAckSchema() {
+        ObjectNode evidence = JSON.createObjectNode().put("schemaVersion", 1);
+        evidence.putObject("original").putObject("sessionKey").put("tenantId", "tenant")
+                .put("workspaceId", "workspace").put("sessionId", "ack-only-session");
+        String encoded = evidence.toString();
+        jdbc.update("INSERT INTO managed_workspace_csi_worker_ack (retirement_id, execution_call_id_hash, execution_call_id,"
+                        + " evidence_json, evidence_digest, recorded_at_epoch_micros) VALUES (?, ?, 'ack-only-execution', ?, ?, 1)",
+                retirementId, brokerHash("ack-only-execution"), encoded, hash(encoded.getBytes(StandardCharsets.UTF_8)));
+        var inventory = store.exportRetirementInventory(retirementId);
+        assertThat(inventory.path("sessionSnapshots").size()).isEqualTo(2);
+        assertThat(inventory.path("sessionSnapshots").get(0).path("sessionKey").path("sessionId").asText()).isEqualTo("ack-only-session");
+        assertThat(inventory.path("sessionSnapshots").get(0).path("status").asText()).isEqualTo("unresolved");
+        assertThat(inventory.path("workerAcks").size()).isEqualTo(1);
+    }
+
+    @Test
+    void observesPublicationFreeWorkAndMissingSessionHistoryWithoutInventingEmptyProof() {
+        jdbc.update("DELETE FROM qwen_tool_publication_object");
+        jdbc.update("DELETE FROM qwen_tool_publication");
+        var session = copyRow("qwen_runtime_session");
+        session.put("runtime_session_id", "released-runtime");
+        session.put("harness_session_id", "missing-harness");
+        session.put("session_state", "RELEASED");
+        insertRow("qwen_runtime_session", session);
+        JsonNode inventory = store.exportRetirementInventory(retirementId);
+        assertThat(inventory.path("publications")).isEmpty();
+        assertThat(inventory.path("executions").size()).isEqualTo(1);
+        assertThat(inventory.path("sessionSnapshots").size()).isEqualTo(2);
+        assertThat(inventory.path("sessionSnapshots").get(1).path("reason").asText()).isEqualTo("session_snapshot_unavailable");
+        JsonNode proof = store.exportOriginalExecution(retirementId, "execution");
+        assertThat(proof.path("format").asText()).isEqualTo(WorkspaceCsiCheckpointSnapshotStore.SESSION_FORMAT);
+        assertThat(proof.path("originalExecution").path("authorizedBindingVersion").isTextual()).isTrue();
+        assertThat(proof.path("originalExecution").path("reference").path("dispatchMode").asText()).isEqualTo("deferred_v3");
+        assertThat(proof.toString()).doesNotContain("must-never-escape", "tokenHash", "runtimeEndpoint");
+    }
+
+    @Test
+    void refusesInventoryOverflowRatherThanReturningTheFirst4096Members() {
+        for (int index = 0; index < 4096; index++) {
+            var row = copyRow("qwen_tool_execution");
+            String id = "overflow-" + index;
+            row.put("execution_call_id", id);
+            row.put("execution_call_id_hash", brokerHash(id));
+            row.put("idempotency_key", id);
+            row.put("idempotency_key_hash", brokerHash(id));
+            insertRow("qwen_tool_execution", row);
+        }
+        assertThatThrownBy(() -> store.exportRetirementInventory(retirementId))
+                .isInstanceOf(IllegalStateException.class).hasMessage("Original CSI checkpoint snapshot is unavailable.");
+        assertThat(source.rollbacks).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {64, 272})
+    void budgetsInlinePublicationBytesAcrossSessionScopes(int objectsPerScope) {
+        var session = copyRow("qwen_runtime_session");
+        session.put("runtime_session_id", "budget-runtime");
+        session.put("harness_session_id", "budget-harness");
+        insertRow("qwen_runtime_session", session);
+        byte[] bytes = new byte[64 * 1024];
+        for (String sessionId : List.of("harness", "budget-harness")) {
+            String scope = ToolPublicationDataStore.scope(JSON.createObjectNode().put("tenantId", "tenant")
+                    .put("workspaceId", "workspace").put("sessionId", sessionId));
+            for (int index = 0; index < objectsPerScope; index++) {
+                var row = copyRow("qwen_tool_publication_object");
+                row.put("scope_key", scope);
+                row.put("publication_id", "budget-" + index / 40);
+                row.put("slot_key", "content-" + index);
+                row.put("resource_id", "content-" + index);
+                row.put("byte_length", bytes.length);
+                row.put("sha256", hash(bytes));
+                row.put("inline_bytes", bytes);
+                insertRow("qwen_tool_publication_object", row);
+            }
+        }
+        if (objectsPerScope == 272) {
+            assertThatThrownBy(() -> store.exportRetirementInventory(retirementId))
+                    .isInstanceOf(IllegalStateException.class).hasMessage("Original CSI checkpoint snapshot is unavailable.");
+        } else {
+            JsonNode inventory = store.exportRetirementInventory(retirementId);
+            assertThat(inventory.path("publicationObjects").size()).isEqualTo(2 * objectsPerScope + 3);
+            assertThat(inventory.path("publicationObjects").findValues("inlineBytes")).allMatch(JsonNode::isTextual);
+        }
+        assertThat(source.rollbacks).isEqualTo(1);
+    }
+
+    private Map<String, Object> copyRow(String table) {
+        return new java.util.LinkedHashMap<>(jdbc.queryForList("SELECT * FROM " + table + " LIMIT 1").getFirst());
+    }
+
+    private void insertRow(String table, Map<String, Object> row) {
+        jdbc.update("INSERT INTO " + table + " (" + String.join(",", row.keySet()) + ") VALUES ("
+                + String.join(",", java.util.Collections.nCopies(row.size(), "?")) + ")", row.values().toArray());
+    }
+
+    private static String brokerHash(String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        return hash(java.nio.ByteBuffer.allocate(4 + bytes.length).putInt(bytes.length).put(bytes).array());
     }
 
     /** H2 maps rows only; this adapter does not qualify MySQL transaction semantics. */

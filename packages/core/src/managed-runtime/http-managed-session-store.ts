@@ -148,7 +148,10 @@ export function createHttpManagedSessionStores(
 /** Fixed inline observation; never opens the HTTP store or acquires a writer. */
 export function readOnlyManagedSessionSnapshot(value: unknown) {
   const snapshot = asRecord(value, 'snapshot');
-  if (snapshot['format'] !== 'qwen-csi-receipt-checkpoint-snapshot/1') {
+  if (
+    snapshot['format'] !== 'qwen-csi-receipt-checkpoint-snapshot/1' &&
+    snapshot['format'] !== 'qwen-csi-session-checkpoint-snapshot/1'
+  ) {
     throw corrupt('snapshot format is unsupported.');
   }
   const sessionKey = assertManagedSessionKey(
