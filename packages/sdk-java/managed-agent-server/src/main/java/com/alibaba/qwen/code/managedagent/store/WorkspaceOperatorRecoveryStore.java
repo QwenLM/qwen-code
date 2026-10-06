@@ -194,7 +194,7 @@ public final class WorkspaceOperatorRecoveryStore {
     public void requireHeld(Operation operation) {
         List<Boolean> holders = jdbc.query("SELECT holder_key, binding_id, runtime_generation,"
                 + " runtime_session_id FROM managed_workspace_execution_lease"
-                + " WHERE storage_key = ? FOR UPDATE",
+                + " WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE",
                 (row, index) -> operation.holderKey().equals(row.getString("holder_key"))
                         && operation.bindingId().equals(row.getString("binding_id"))
                         && operation.generation() == row.getLong("runtime_generation")
@@ -262,6 +262,8 @@ public final class WorkspaceOperatorRecoveryStore {
                 || binding.getProvisionSeed() == null || binding.getLease() == null) {
             throw blocked();
         }
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getRequest().getScope().getTenantId(),
+                binding.getRequest().getStorageId());
         return binding;
     }
 
@@ -280,7 +282,7 @@ public final class WorkspaceOperatorRecoveryStore {
                 + "\u0000" + binding.getRequest().getStorageId());
         String sql = "SELECT storage_key, holder_key, binding_id, runtime_generation,"
                 + " runtime_session_id FROM managed_workspace_execution_lease"
-                + " WHERE storage_key = ?" + (locked ? " FOR UPDATE" : "");
+                + " WHERE storage_key = ? AND storage_kind = 'LOCAL' " + (locked ? " FOR UPDATE" : "");
         List<Holder> holders = jdbc.query(sql, (row, index) -> new Holder(
                 row.getString("storage_key"), row.getString("holder_key"),
                 row.getString("binding_id"), row.getLong("runtime_generation"),

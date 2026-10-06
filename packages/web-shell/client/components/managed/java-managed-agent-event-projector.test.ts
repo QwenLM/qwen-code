@@ -96,6 +96,63 @@ describe('java managed agent event projector', () => {
     });
   });
 
+  it('rebuilds a durable user message prompt from its input_text parts', () => {
+    // The durable user branch was only asserted on {id, type}: its prompt
+    // must be rebuilt from every input_text part, in order.
+    const projected = projectJavaAgentItem({
+      itemId: 'user-1',
+      sessionId: 's',
+      turnId: 't',
+      type: 'message',
+      role: 'user',
+      status: 'completed',
+      content: [
+        {
+          partId: 'part-1',
+          type: 'input_text',
+          text: 'first',
+          firstSequence: 1,
+          lastSequence: 1,
+        },
+        {
+          partId: 'part-2',
+          type: 'output_text',
+          text: 'ignored',
+          firstSequence: 2,
+          lastSequence: 2,
+        },
+        {
+          partId: 'part-3',
+          type: 'input_text',
+          text: 'second',
+          firstSequence: 3,
+          lastSequence: 3,
+        },
+      ],
+      attributes: {},
+      firstSequence: 1,
+      lastSequence: 3,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toEqual(
+      expect.objectContaining({
+        type: 'accepted',
+        sessionId: 's',
+        turnId: 't',
+        assembledFromItem: true,
+        data: expect.objectContaining({
+          itemId: 'user-1',
+          prompt: [
+            { type: 'text', text: 'first' },
+            { type: 'text', text: 'second' },
+          ],
+        }),
+      }),
+    );
+  });
+
   it('preserves pending tool state in a snapshot', () => {
     expect(
       projectJavaAgentItem({
@@ -114,6 +171,30 @@ describe('java managed agent event projector', () => {
       })[0]?.type,
     ).toBe('tool_requested');
   });
+  it('maps a stream.reconciled event to a stream_gap resynchronization', () => {
+    // The Java side emits stream.reconciled on continuation retraction;
+    // deleting this mapping once stayed invisible to every test.
+    expect(
+      projectJavaAgentEvent({
+        sequence: 9,
+        eventId: 'evt_9',
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        type: 'stream.reconciled',
+        createdAt: '2026-09-18T00:00:00Z',
+        data: {},
+        terminal: false,
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        id: 9,
+        type: 'stream_gap',
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+      }),
+    );
+  });
+
   it('maps canonical events without exposing Java event names', () => {
     expect(
       projectJavaAgentEvent({
