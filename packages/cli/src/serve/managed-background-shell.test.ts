@@ -580,28 +580,32 @@ describe('managed v3 background Shell', () => {
   });
 
   it('spawns the background child with this Session’s own shell context', async () => {
+    // The worker registers the tool set under its composite runtime
+    // session key (managed-context-worker.ts: runtimeSessionKey), so the
+    // spawn must resolve by tools.sessionId — resolving by the call's
+    // raw reference.sessionId would pick that other registration, and a
+    // lookup finding nothing would fall back to the worker's
+    // first-session global slot.
+    registerSessionProjectDir('runtime-session-1', '/proj/runtime-session-1');
     registerSessionProjectDir('rs-1', '/proj/rs-1');
     try {
       const ctx = rig();
       await execute(ctx);
-      // No session context ever runs on the v3 path, so the spawn must
-      // resolve the shell context for the call's own session — never the
-      // worker process's first-session global slot (which holds nothing
-      // in production).
       const env = (
         ctx.supervisor.start.mock.calls[0]![0] as unknown as {
           env: NodeJS.ProcessEnv;
         }
       ).env;
-      expect(env['QWEN_CODE_SESSION_ID']).toBe('rs-1');
-      expect(env['QWEN_CODE_PROJECT_DIR']).toBe('/proj/rs-1');
+      expect(env['QWEN_CODE_SESSION_ID']).toBe('runtime-session-1');
+      expect(env['QWEN_CODE_PROJECT_DIR']).toBe('/proj/runtime-session-1');
     } finally {
+      unregisterSessionProjectDir('runtime-session-1');
       unregisterSessionProjectDir('rs-1');
     }
   });
 
   it('prefers the call’s own session over an ambient context for the environment', async () => {
-    registerSessionProjectDir('rs-1', '/proj/rs-1');
+    registerSessionProjectDir('runtime-session-1', '/proj/runtime-session-1');
     registerSessionProjectDir('rs-ambient', '/proj/rs-ambient');
     try {
       const ctx = rig();
@@ -611,10 +615,10 @@ describe('managed v3 background Shell', () => {
           env: NodeJS.ProcessEnv;
         }
       ).env;
-      expect(env['QWEN_CODE_SESSION_ID']).toBe('rs-1');
-      expect(env['QWEN_CODE_PROJECT_DIR']).toBe('/proj/rs-1');
+      expect(env['QWEN_CODE_SESSION_ID']).toBe('runtime-session-1');
+      expect(env['QWEN_CODE_PROJECT_DIR']).toBe('/proj/runtime-session-1');
     } finally {
-      unregisterSessionProjectDir('rs-1');
+      unregisterSessionProjectDir('runtime-session-1');
       unregisterSessionProjectDir('rs-ambient');
     }
   });

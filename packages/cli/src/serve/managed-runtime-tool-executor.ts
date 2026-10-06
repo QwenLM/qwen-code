@@ -1009,7 +1009,7 @@ export class ManagedToolExecutor {
         unitName,
         executable: shellConfig.executable,
         args: [...shellConfig.argsPrefix, command],
-        env: backgroundEnv(reference.sessionId),
+        env: backgroundEnv(tools.sessionId),
         cwd: directory,
         onOutput: (stream, chunk) => {
           bufferedBytes += chunk.byteLength;
