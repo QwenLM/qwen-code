@@ -1,8 +1,10 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.api.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCommandOperation;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
@@ -142,11 +144,22 @@ public class PublicAgentController {
     }
 
     @GetMapping("/{sessionId}/operations/{operationId}")
-    public PublicCommandOperation getOperation(TenantContext tenant,
+    public Object getOperation(TenantContext tenant,
             @PathVariable String sessionId,
             @PathVariable String operationId) {
-        return lifecycle.getPublic(tenant.tenantId(), tenant.actorId(),
-                sessionId, operationId);
+        return lifecycle.getPublicOperation(tenant.tenantId(),
+                tenant.actorId(), sessionId, operationId);
+    }
+
+    @PostMapping("/{sessionId}/cwd")
+    public ResponseEntity<PublicCwdOperation> changeCwd(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody ChangeCwdRequest request) {
+        return ResponseEntity.accepted().body(lifecycle.admitPublicCwdChange(
+                tenant.tenantId(), tenant.actorId(), sessionId,
+                idempotencyKey, request.cwdRelative(),
+                request.expectedContextRevision()));
     }
 
     @PostMapping("/{sessionId}/events")

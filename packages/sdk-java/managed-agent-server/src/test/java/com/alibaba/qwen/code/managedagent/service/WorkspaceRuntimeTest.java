@@ -434,6 +434,41 @@ class WorkspaceRuntimeTest {
         authority.assertHeld(session.workspace(), fixture.record());
     }
 
+    // The shared directory rule also fences the acquire path before the
+    // storage claim: a sealed directory refuses before installContext or
+    // ownership.claim can run.
+    @Test
+    void refusesAnUnreadableSessionDirectoryBeforeClaimingStorage() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(java.nio.file
+                .FileSystems.getDefault().supportedFileAttributeViews()
+                .contains("posix"));
+        SessionRecord session = createSession("storage", "sealed");
+        java.nio.file.Path sealed = java.nio.file.Files.createDirectory(
+                temp.resolve("sealed"));
+        java.nio.file.Files.setPosixFilePermissions(sealed,
+                java.nio.file.attribute.PosixFilePermissions
+                        .fromString("---------"));
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                !java.nio.file.Files.isReadable(sealed)
+                        || !java.nio.file.Files.isExecutable(sealed),
+                "POSIX permission checks are not enforced for this uid");
+        try {
+            var fixture = transport(session);
+            assertUnavailable(() -> fixture.transport().acquire(
+                    fixture.lease(), fixture.record().getSession()));
+            verify(fixture.http(), never()).installContext(any(), any(),
+                    any(), any());
+            // The ordering the name claims: no claim was recorded, so a
+            // rival can still take the storage. A claim-before-validate
+            // mutant strands the rival behind workspace_busy instead.
+            authority.claim(session.workspace(), holder(session, "rival"));
+        } finally {
+            java.nio.file.Files.setPosixFilePermissions(sealed,
+                    java.nio.file.attribute.PosixFilePermissions
+                            .fromString("rwx------"));
+        }
+    }
+
     @Test
     void refusesMissingOrLinkedSessionDirectoryBeforeClaimingStorage() throws Exception {
         for (String cwd : List.of("missing", "link")) {
@@ -446,6 +481,23 @@ class WorkspaceRuntimeTest {
             verify(fixture.http(), never()).installContext(any(), any(), any(), any());
             authority.claim(session.workspace(), holder(session, "rival"));
         }
+    }
+
+    // The ENOTDIR shape on the acquire path: a persisted cwd under a plain
+    // file is structural data, and the Turn must fail immediately with the
+    // accurate terminal code — never 31 seconds of retries recorded as
+    // hosted_harness_unavailable, nor a RECOVERY_BLOCKED park. assertUnavailable
+    // pins both the code and isRetryable()==false, so folding the anomaly
+    // into the probe's transient arm here reddens this test.
+    @Test
+    void refusesAPlainFileDescendantCwdTerminallyBeforeClaimingStorage() throws Exception {
+        Files.writeString(temp.resolve("plain-file"), "nothing inside");
+        SessionRecord session = createSession("storage", "plain-file/sub");
+        var fixture = transport(session);
+        assertUnavailable(() -> fixture.transport().acquire(
+                fixture.lease(), fixture.record().getSession()));
+        verify(fixture.http(), never()).installContext(any(), any(), any(), any());
+        authority.claim(session.workspace(), holder(session, "rival"));
     }
 
     @Test
@@ -838,9 +890,15 @@ class WorkspaceRuntimeTest {
         return "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8)));
     }
 
+    // Every refusal this helper names is the structural, terminal verdict:
+    // a retryable workspace_unavailable at any of these call sites is a
+    // silently re-classified acquire path, and this is where it goes red.
     private static void assertUnavailable(Runnable operation) {
         assertThatThrownBy(operation::run).isInstanceOfSatisfying(RuntimeBrokerException.class,
-                error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+                error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(error.isRetryable()).isFalse();
+                });
     }
 
     private static void assertBusy(Runnable operation) {
