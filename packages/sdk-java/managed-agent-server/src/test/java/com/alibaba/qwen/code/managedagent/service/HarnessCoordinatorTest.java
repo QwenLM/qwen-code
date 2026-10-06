@@ -891,6 +891,60 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyLong());
     }
 
+    // The session-level wedge code names SOMEONE ELSE's parked Turn, not
+    // this one's lost admission — no adoption may be forged from it even
+    // with the mark standing (R11-1). It is also a pre-admission failure:
+    // the epoch-null Turn provably admitted nothing, so the budget fires
+    // and the exhaustion records the wedge's own code, not the generic
+    // unavailable.
+    @Test
+    void sessionBusyRefusalMeetsTheRetryBudgetWithoutBridging() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "RUNNING", true, 5);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot-new", null, 5L,
+                        "epoch-new"));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-new"))).thenReturn(true);
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        DaemonHttpException busy = mock(DaemonHttpException.class);
+        when(busy.getStatusCode()).thenReturn(409);
+        when(busy.getErrorCode())
+                .thenReturn("hosted_turn_recovery_required");
+        when(harness.submit(eq("tenant"), eq("session"), eq("prompt"),
+                any(), anyString())).thenThrow(busy);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store, never()).recordRecoveryAdmission(anyString(),
+                anyString(), anyString(), anyString(), any(), anyString(),
+                any(), anyLong());
+        verify(store, never()).recordAdmission(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyLong());
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_turn_recovery_required"),
+                anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+    }
+
     // The withdrawal is a CAS: losing it (the mark is gone, or the lease
     // was lost) must end the Turn terminally rather than resubmit a prompt
     // another owner may already have admitted.

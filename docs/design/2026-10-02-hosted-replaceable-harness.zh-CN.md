@@ -211,8 +211,25 @@ restore 守卫在接管分支之前做同一次判读，因为 restore bundle �
 类型化 decline，而裸 load 与一切纯取消 load 保持可重试的 409。plain
 attach 绝不会让 journal 的未结算状态变成可写：无论接管回答了什么，
 prompt 路由自身都会在**任一**输入未结算时拒绝新的 promptId
-（`hosted_prompt_recovery_required`），任何准入都不可能叠上停靠
+（`hosted_turn_recovery_required`——**会话级**楔死码：prompt 级
+`hosted_prompt_recovery_required` 只指名所请 promptId 自身未结算的
+重复，coordinator 靠它证明丢失回复的采纳；会话范围的拒绝绝不能铸出
+那份证明（R11-1）），任何准入都不可能叠上停靠
 Turn 的飞行中 checkpoint（R10-2）。
+
+R11 随即收窄了 `inapplicable` 本身：只在 plain attach 真正付得起的
+两处存活——被请求的审批（resolve 路由把决定耐久落笔）与
+`turn_settled`（checkpoint 称已结算而 journal 从未落记录）。裸分支的
+结算条件从未在 takeover 两条臂上运行过，所以两臂现在就地算同一份
+投影：缺失的终态记录由本次 load 自己写入；投影也付不起时，则保留
+基线可重试 409 而不是铸出外观健康的 attach（R11-2）。其余一切停靠
+状态（`initial`、耐久 `blocked`、model-start 或未知相位、指向另一个
+Turn 的 checkpoint）在取消侧一律改成抛入同一可重试 409——takeover
+铸出的 attach 于是只剩有结算路由真正能付的。经 createOrLoad 的
+passive 重附着与恢复 load 一样携带恢复快照，所以 connector 在那里
+恢复 `pendingRecovery` 标记——否则一次按 boot 身份的接纳先驱逐旧
+boot 条目、再在活 boot 下放入携快照的 attachment，而下一次派发的
+缓存分支会对着它回答「没有停靠」（R11-3）。
 
 抛出的错误保持瞬时，与今天完全一致。load 路由对 decline 回答新的
 409 code `hosted_turn_recovery_declined` 并带 `reason` 字段；在接管

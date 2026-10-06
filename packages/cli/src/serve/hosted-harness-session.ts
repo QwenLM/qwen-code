@@ -11,6 +11,7 @@ import {
   HostedFileHistoryRefusedError,
   HOSTED_UUID,
   canSettleHostedFileHistory,
+  type HostedFileHistoryRecord,
 } from './hosted-file-history.js';
 import { parseHostedFileHistoryState } from './hosted-file-history-protocol.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -599,6 +600,109 @@ async function settleCancelledHookTurn(session: HostedSession): Promise<void> {
   } finally {
     session.hooksBusy = false;
   }
+}
+
+// Projection payability for an inapplicable takeover (R11-2): the kernel
+// answered "nothing is owed" because the checkpoint names turn_settled,
+// while the journal never landed the terminal record. Return the promptId
+// this load must settle itself — the bare branch's exact conditions — or
+// null when no route can pay it, so the caller keeps the retriable
+// refusal instead of attaching a healthy-looking wedge. A requested
+// approval never lands here (its phase is outside the settle set): that
+// wait the resolve route pays, so its caller treats null as its own
+// answer instead of a refusal.
+async function settleProjectablePromptId(
+  managed: ManagedSession,
+  session: HostedSession,
+  fileHistory: HostedFileHistoryRecord | null | undefined,
+  promptId: string,
+): Promise<string | null> {
+  // Shell-receipt turns settle through recoverShellReceipts, Hooks through
+  // their own recovery routes; nothing else projects here (mirroring the
+  // bare branch's outer condition).
+  if (!session.publication && !session.hooks && !fileHistory) return null;
+  if (session.publication || session.hooks) return null;
+  const authorization = await managed.authority.harnessRunAuthorization();
+  if (authorization.status !== 'runnable') return null;
+  const checkpoint = authorization.checkpoint;
+  if (checkpoint.identity.promptId !== promptId) return null;
+  const phase = checkpoint.continuation.phase;
+  if (phase !== 'results_ready' && phase !== 'turn_settled') return null;
+  if (
+    !checkpoint.tools?.items.every(
+      (item) =>
+        item.state === 'settled' && (phase === 'turn_settled' || item.consumed),
+    )
+  )
+    return null;
+  const current = (await managed.sink.project()).filter(
+    (item) => item.daemonPromptId === promptId,
+  );
+  const lastAssistant = current.findLastIndex(
+    (item) => item.type === 'assistant',
+  );
+  if (lastAssistant < 0) return null;
+  if (current.slice(lastAssistant + 1).length !== 0) return null;
+  if (
+    !current[lastAssistant].message?.parts?.every((part) => !part.functionCall)
+  )
+    return null;
+  if (
+    fileHistory &&
+    !(await canSettleHostedFileHistory(managed, {
+      ...fileHistory,
+      pendingTurn: promptId,
+      pendingMessageId: current[lastAssistant].uuid,
+    }))
+  )
+    return null;
+  return promptId;
+}
+
+// The terminal projection an inapplicable takeover needs: exactly what the
+// plain load runs when the bare branch computes settlePromptId. On failure
+// the Session keeps its latch and the refusal/retry cycle does the rest.
+function runSettleProjection(
+  session: HostedSession,
+  sessionId: string,
+  promptId: string,
+  brokerOptions: HostedWorkspaceBrokerOptions | undefined,
+): void {
+  const abort = new AbortController();
+  session.active = { promptId, digest: '', abort };
+  void (async () => {
+    const harness = createManagedHarnessHandle(session.managed);
+    await harness.run(async () => {
+      await harness.settleConsumedRuntimeContinuation();
+      if (!session.hooks && !session.mcp)
+        await new HostedWorkspaceBroker(
+          brokerOptions!,
+          session.managed.authority.sessionHeader.sessionKey,
+          promptId,
+        ).release();
+      await session.managed.sink.write(
+        record(session, sessionId, 'system', null, {
+          subtype: 'turn_result',
+          systemPayload: {
+            promptId,
+            state: 'completed',
+            stopReason: 'end_turn',
+            endedAt: Date.now(),
+          },
+        }),
+      );
+    });
+  })()
+    .catch((cause: unknown) => {
+      session.blocked = true;
+      writeStderrLineSafe(
+        'qwen serve: Hosted Harness final settlement remained blocked: ' +
+          String(cause),
+      );
+    })
+    .finally(() => {
+      session.active = undefined;
+    });
 }
 
 async function readShellReceipt(
@@ -1542,7 +1646,39 @@ export function registerHostedHarnessSessionRoutes(
               return;
             }
             if (outcome.kind === 'inapplicable') {
+              // R11-2: a requested approval keeps the plain attach (the
+              // resolve route writes the decision durably); turn_settled
+              // must be settled HERE — this arm had no settle block at
+              // all, so the missing terminal record is projected inline —
+              // or the redrive keeps the retriable refusal when the
+              // projection cannot pay either.
+              const inapplicableVerdict = await attached.managed.authority
+                .harnessRunAuthorization()
+                .catch(() => undefined);
+              const approvalPending =
+                inapplicableVerdict?.status === 'runnable' &&
+                inapplicableVerdict.checkpoint.approval?.state === 'requested';
+              if (approvalPending) {
+                res.status(200).json(attachmentReply(attached));
+                return;
+              }
+              const inapplicableFileHistory =
+                (await readHostedFileHistory(attached.managed)) ?? null;
+              const settle = await settleProjectablePromptId(
+                attached.managed,
+                attached,
+                inapplicableFileHistory,
+                parked,
+              );
+              if (settle === null) {
+                writeStderrLineSafe(
+                  `qwen serve: Hosted Session ${sessionId} redrive refused (takeover_inapplicable_unpayable): prompt=${parked}`,
+                );
+                error(res, 409, 'hosted_turn_recovery_required');
+                return;
+              }
               res.status(200).json(attachmentReply(attached));
+              runSettleProjection(attached, sessionId, settle, brokerOptions);
               return;
             }
             const recovery = outcome.turn.report;
@@ -1908,7 +2044,39 @@ export function registerHostedHarnessSessionRoutes(
             passive: body?.['passiveManagedRuntimeRecovery'] === true,
           });
           if (outcome.kind === 'inapplicable') {
-            inapplicableAnswer = true;
+            // R11-2: inapplicable pays only where a settlement route can.
+            // A requested approval keeps the plain attach (the resolve
+            // route writes the decision durably); turn_settled is settled
+            // HERE — the bare branch's projection never ran on this arm,
+            // so the missing terminal record is written by this load
+            // itself — or the load keeps the retriable refusal when the
+            // projection cannot pay either.
+            const inapplicableVerdict = await managed.authority
+              .harnessRunAuthorization()
+              .catch(() => undefined);
+            const approvalPending =
+              inapplicableVerdict?.status === 'runnable' &&
+              inapplicableVerdict.checkpoint.approval?.state === 'requested';
+            if (approvalPending) {
+              inapplicableAnswer = true;
+            } else {
+              const settle = await settleProjectablePromptId(
+                managed,
+                session,
+                fileHistory,
+                unsettled,
+              );
+              if (settle === null) {
+                await managed.close();
+                writeStderrLineSafe(
+                  `qwen serve: Hosted Session ${sessionId} load refused (takeover_inapplicable_unpayable): prompt=${unsettled}`,
+                );
+                error(res, 409, 'hosted_turn_recovery_required');
+                return;
+              }
+              settlePromptId = settle;
+              inapplicableAnswer = true;
+            }
           } else if (outcome.kind === 'declined') {
             writeStderrLineSafe(
               `qwen serve: Hosted Session ${sessionId} load refused (takeover_unrecovered): prompt=${unsettled} reason=${outcome.reason}`,
@@ -2131,44 +2299,8 @@ export function registerHostedHarnessSessionRoutes(
       // A Harness older than approvals omits approvalMode, so a caller can
       // tell.
       res.status(200).json(attachmentReply(session, recovery));
-      if (settlePromptId) {
-        const originalPromptId = settlePromptId;
-        const abort = new AbortController();
-        session.active = { promptId: originalPromptId, digest: '', abort };
-        void (async () => {
-          const harness = createManagedHarnessHandle(session.managed);
-          await harness.run(async () => {
-            await harness.settleConsumedRuntimeContinuation();
-            if (!session.hooks && !session.mcp)
-              await new HostedWorkspaceBroker(
-                brokerOptions!,
-                session.managed.authority.sessionHeader.sessionKey,
-                originalPromptId,
-              ).release();
-            await session.managed.sink.write(
-              record(session, sessionId, 'system', null, {
-                subtype: 'turn_result',
-                systemPayload: {
-                  promptId: originalPromptId,
-                  state: 'completed',
-                  stopReason: 'end_turn',
-                  endedAt: Date.now(),
-                },
-              }),
-            );
-          });
-        })()
-          .catch((cause: unknown) => {
-            session.blocked = true;
-            writeStderrLineSafe(
-              'qwen serve: Hosted Harness final settlement remained blocked: ' +
-                String(cause),
-            );
-          })
-          .finally(() => {
-            session.active = undefined;
-          });
-      }
+      if (settlePromptId)
+        runSettleProjection(session, sessionId, settlePromptId, brokerOptions);
     } catch (cause) {
       await managed?.close().catch(() => undefined);
       await stores.close().catch(() => undefined);
@@ -2344,9 +2476,13 @@ export function registerHostedHarnessSessionRoutes(
     // every latch above) would run the new prompt from the parked Turn's
     // mid-flight checkpoint, and its commit would erase that Turn's only
     // checkpoint while two unsettled inputs make every later takeover load
-    // fail closed.
+    // fail closed. The code is the SESSION-level wedge, NOT the
+    // prompt-scoped one: `hosted_prompt_recovery_required` names exactly
+    // one parked prompt (this promptId's own unsettled duplicate, emitter
+    // above), because the coordinator proves a lost-reply adoption from it
+    // (R11-1); a session-scope refusal must never mint that proof.
     if (unsettledInputs(session).size !== 0)
-      return error(res, 409, 'hosted_prompt_recovery_required');
+      return error(res, 409, 'hosted_turn_recovery_required');
     const abort = new AbortController();
     const deadline =
       deadlineMs === undefined ? null : Date.now() + (deadlineMs as number);

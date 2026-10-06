@@ -682,10 +682,11 @@ describe('recoverHostedRuntimeTurn', () => {
     },
   );
 
-  it('answers inapplicable for a model-round wait on a cancellation load', async () => {
-    // A cancellation-only load needs no Runtime bookkeeping for a Turn
-    // parked in its first model round: declining would fail a Turn the
-    // user asked to CANCEL. The plain attach proceeds to the cancel path.
+  it('stays retriable for a model-round wait on a cancellation load', async () => {
+    // R11 narrowing: a plain attach on this shape stands a Session no
+    // settlement route can pay — no live waiter, no projection. The
+    // cancellation side throws into the route's retriable refusal instead
+    // of minting it; the drive side keeps its typed model_start decline.
     await parkAtAwaitRuntime();
     const replacement = await open('boot-2', false);
     vi.spyOn(
@@ -693,15 +694,16 @@ describe('recoverHostedRuntimeTurn', () => {
       'harnessRunAuthorization',
     ).mockResolvedValue({ status: 'initial' } as never);
     try {
-      const outcome = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
-      expect(outcome.kind).toBe('inapplicable');
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      ).rejects.toThrow('first model round');
     } finally {
       await replacement.close();
     }
@@ -762,10 +764,11 @@ describe('recoverHostedRuntimeTurn', () => {
     },
   );
 
-  it('answers inapplicable for a durable verdict on a cancellation load', async () => {
-    // The cancellation route settles through its own fences even for a
-    // checkpoint inapplicable parses cannot prove; the takeover load may
-    // only refuse retriably (baseline parity), never terminally.
+  it('stays retriable for a durable verdict on a cancellation load', async () => {
+    // R11 narrowing: a durably blocked checkpoint cannot be driven and no
+    // plain attach settles it — the cancellation side throws into the
+    // route's retriable refusal (never terminally), while the drive side
+    // declines with the typed checkpoint_blocked reason.
     await parkAtAwaitRuntime();
     const replacement = await open('boot-2', false);
     vi.spyOn(
@@ -776,15 +779,16 @@ describe('recoverHostedRuntimeTurn', () => {
       reason: 'opaque_state',
     } as never);
     try {
-      const outcome = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
-      expect(outcome.kind).toBe('inapplicable');
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      ).rejects.toThrow('durably blocked');
     } finally {
       await replacement.close();
     }

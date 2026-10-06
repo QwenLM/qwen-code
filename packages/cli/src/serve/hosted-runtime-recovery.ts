@@ -370,12 +370,16 @@ export async function stopParkedRuntimeExecutions(input: {
  *
  * A parked state that can be taken over answers `recovered`; one that is
  * deterministically unrecoverable answers `declined` with a typed reason.
- * A wait someone else owns — a requested approval (either shape), anything
- * a cancellation-only (`passive`) load does not need Runtime bookkeeping
- * for — answers `inapplicable`: the route then answers the plain attach,
- * the pre-G3 behavior for these shapes, so a cancellation or an approval
- * is never turned into a terminal failure. Thrown errors are transient:
- * the caller keeps its plain retriable refusal for them.
+ * `inapplicable` is narrowed to the two states a plain attach pays: a
+ * requested approval (either shape), resolvable durably by the user; and
+ * `turn_settled`, which the load route settles by writing the missing
+ * terminal record itself (R11-2) — or refuses retriably when the
+ * projection cannot pay. Any other parked state (`initial`, a durably
+ * blocked checkpoint, a model-start or unknown phase, a checkpoint naming
+ * another Turn) throws on the cancellation side into the caller's
+ * retriable refusal, because a plain attach there stands a Session no
+ * settlement route can pay (R10-2/R10-1 re-checks). Thrown errors are
+ * transient: the caller keeps its plain retriable refusal for them.
  */
 export async function recoverHostedRuntimeTurn(input: {
   session: ManagedSession;
@@ -396,11 +400,23 @@ export async function recoverHostedRuntimeTurn(input: {
   const authorization = await session.authority.harnessRunAuthorization();
   // A submitted prompt with no checkpoint yet is parked in its first model
   // round; one whose checkpoint no longer parses cannot be driven either.
-  if (authorization.status === 'initial')
-    return passive ? inapplicable() : declined('model_start');
+  // The cancellation-side answers below deliberately throw into the
+  // caller's retriable refusal instead of answering inapplicable (R11):
+  // a plain attach on these shapes stands a Session no settlement route
+  // can pay — no live waiter, no projection, only a durable-looking 200.
+  if (authorization.status === 'initial') {
+    if (passive) throw new Error('Parked in the first model round');
+    return declined('model_start');
+  }
   if (authorization.status === 'blocked') {
-    if (isDurableBlockedVerdict(authorization))
-      return passive ? inapplicable() : declined('checkpoint_blocked');
+    if (isDurableBlockedVerdict(authorization)) {
+      if (passive)
+        throw new Error(
+          authorization.message ??
+            `Checkpoint read is durably blocked (${authorization.reason})`,
+        );
+      return declined('checkpoint_blocked');
+    }
     // A store glitch while reading the staged state erased into the same
     // status as a durable verdict: transient, so the caller retries.
     if (isTransientStoreBlock(authorization))
@@ -417,8 +433,13 @@ export async function recoverHostedRuntimeTurn(input: {
     );
   }
   const checkpoint = authorization.checkpoint;
-  if (checkpoint.identity.turnId !== promptId)
-    return passive ? inapplicable() : declined('unresolved_after_settle');
+  if (checkpoint.identity.turnId !== promptId) {
+    if (passive)
+      throw new Error(
+        `Checkpoint names a different Turn (${checkpoint.identity.turnId})`,
+      );
+    return declined('unresolved_after_settle');
+  }
   if (
     checkpoint.continuation.phase !== 'await_runtime' &&
     checkpoint.continuation.phase !== 'results_ready'
@@ -432,19 +453,27 @@ export async function recoverHostedRuntimeTurn(input: {
       checkpoint.approval.state === 'requested'
     )
       return inapplicable();
-    // Settled in the journal with the terminal record still unprojected:
-    // it completed and must never be recorded as a failure — answering the
-    // plain attach lets the daemon's own journal projection write the
-    // terminal record below, instead of a decline the coordinator would
-    // stamp as a false terminal (R8-2). The rebind-and-keep-reading
-    // rationale stays Step 3's explicit row; the route ignores this phase
-    // on both load shapes now.
+    // Settled in the checkpoint while the journal never landed the settle:
+    // it completed and must never be recorded as a failure — answering
+    // inapplicable hands the load route the one case it DOES project
+    // directly (it writes the missing terminal record itself now, or
+    // refuses retriably when the projection cannot pay — R11-2). Never a
+    // decline the coordinator would stamp as a false terminal (R8-2).
     if (checkpoint.continuation.phase === 'turn_settled') return inapplicable();
-    if (HARNESS_MODEL_START_PHASES.has(checkpoint.continuation.phase))
-      return passive ? inapplicable() : declined('model_start');
+    if (HARNESS_MODEL_START_PHASES.has(checkpoint.continuation.phase)) {
+      if (passive)
+        throw new Error(
+          `Parked at model start (${checkpoint.continuation.phase})`,
+        );
+      return declined('model_start');
+    }
     // A phase outside the model-start vocabulary is not one a takeover
     // may drive: classify by the durable verdict rather than by name.
-    return passive ? inapplicable() : declined('checkpoint_blocked');
+    if (passive)
+      throw new Error(
+        `Parked at an unknown phase (${checkpoint.continuation.phase})`,
+      );
+    return declined('checkpoint_blocked');
   }
   const items = (checkpoint.tools?.items ?? []).filter(
     (item) => item.outcomeSource === 'runtime',

@@ -8180,7 +8180,12 @@ describe('Hosted Harness Runtime turn takeover', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       });
     expect(stacked.status).toBe(409);
-    expect(stacked.body.code).toBe('hosted_prompt_recovery_required');
+    // The session-level wedge code, deliberately NOT the prompt-scoped
+    // one: `hosted_prompt_recovery_required` names the REQUESTED prompt's
+    // own unsettled duplicate, and the coordinator proves a lost-reply
+    // adoption from it (R11-1); a refusal about someone else's parked
+    // work must never mint that proof.
+    expect(stacked.body.code).toBe('hosted_turn_recovery_required');
     // Re-posting the PARKED promptId itself is not a replay either: the
     // journal holds it accepted AND unsettled, where only a takeover may
     // settle — answering the replay's 202 would certify an admission the
@@ -8197,6 +8202,67 @@ describe('Hosted Harness Runtime turn takeover', () => {
       });
     expect(reposted.status).toBe(409);
     expect(reposted.body.code).toBe('hosted_prompt_recovery_required');
+  });
+
+  it('refuses an inapplicable takeover whose projection cannot settle the park', async () => {
+    // The checkpoint claims turn_settled while the journal never landed
+    // the record: the bare branch's settle conditions do not hold (the
+    // executions are still unsettled, the assistant tail carries a
+    // functionCall), so no route pays — the load keeps the retriable
+    // refusal instead of minting a healthy-looking plain attach (R11-2).
+    await parkToolTurn();
+    mockAuthorizationWithPhase('turn_settled', undefined);
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    for (const passive of [false, true]) {
+      const refused = await replacementHeaders(
+        supertest(replacementApp()).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: storeFor(BOOT_ID_2),
+        toolProfile: FILE_PROFILE,
+        [passive ? 'passiveManagedRuntimeRecovery' : 'driveRuntimeRecovery']:
+          true,
+      });
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    }
+    expect(
+      log.mock.calls
+        .map(([line]) => line)
+        .some((line) => line.includes('takeover_inapplicable_unpayable')),
+    ).toBe(true);
+  });
+
+  it('refuses the attached redrive of an inapplicable takeover it cannot settle', async () => {
+    // Stage 1: the requested approval answers inapplicable and the Session
+    // attaches (the resolve route can pay that wait). Stage 2: the parked
+    // state has since become turn_settled-with-missing-record whose
+    // projection cannot pay — the redrive must refuse retriably rather
+    // than restate a 200 over a Turn nothing terminalizes (R11-2).
+    await parkToolTurn();
+    mockAuthorizationWithPhase('await_approval', { state: 'requested' });
+    const { server, loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(200);
+    expect(loaded.body.recoveryRequired).toBeUndefined();
+    mockAuthorizationWithPhase('turn_settled', null);
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const redriven = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(redriven.status).toBe(409);
+    expect(redriven.body.code).toBe('hosted_turn_recovery_required');
+    expect(
+      log.mock.calls
+        .map(([line]) => line)
+        .some((line) => line.includes('takeover_inapplicable_unpayable')),
+    ).toBe(true);
   });
 
   it('keeps the held Runtime lease when a redriven load fails transiently', async () => {

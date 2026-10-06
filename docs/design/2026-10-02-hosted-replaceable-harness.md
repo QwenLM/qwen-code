@@ -246,8 +246,29 @@ takeover, while a bare load and every cancellation-only load keep the
 retriable 409. A plain attach never makes the journal's unsettled state
 writable: whatever the takeover answered, the prompt route itself refuses
 a fresh promptId while ANY input is unsettled
-(`hosted_prompt_recovery_required`), so no admission can stack onto a
-parked Turn's mid-flight checkpoint (R10-2).
+(`hosted_turn_recovery_required` — the SESSION-level wedge: the
+prompt-scoped code `hosted_prompt_recovery_required` names only the
+requested prompt's own unsettled duplicate, so the coordinator proves a
+lost-reply adoption from it; a session-scope refusal must never mint
+that proof (R11-1)), so no admission can stack onto a parked Turn's
+mid-flight checkpoint (R10-2).
+
+R11 narrowed `inapplicable` itself: it survives only where a plain attach
+pays — a requested approval (the resolve route writes the decision
+durably) and `turn_settled` (checkpoint says settled, journal never
+landed the record). The bare branch's settle conditions never ran on the
+takeover arms, so both arms now compute the same projection inline: the
+load writes the missing terminal record itself, or keeps the baseline
+retriable refusal when the projection cannot pay either (R11-2). Every
+other parked state (`initial`, durably `blocked`, model-start or unknown
+phase, a checkpoint naming another Turn) THROWS on the cancellation side
+into that same retriable refusal, so the only attach a takeover mints is
+one a settlement route genuinely pays. A passive re-attach through
+createOrLoad carries the recovery snapshot exactly like the recovery
+load, so the connector restores the `pendingRecovery` marker there —
+otherwise a boot-identity adoption evicts the stale-boot entry, puts a
+snapshot-carrying attachment under the live boot, and the next dispatch's
+cached branch answers "nothing parked" (R11-3).
 
 Thrown errors stay transient, exactly as today. The load route answers
 declines with new 409 code `hosted_turn_recovery_declined` plus a `reason`

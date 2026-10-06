@@ -195,6 +195,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     "Hosted Harness did not confirm the Session approval mode");
         }
         attachments.put(key, attached);
+        // A passive re-attach (rename / close / the adoptGeneration notices)
+        // carries the takeover recovery snapshot exactly like the
+        // recovery-load path that re-mints it: restore the pending marker
+        // or the next dispatch's cached branch answers "nothing parked"
+        // over the snapshot it still holds (R11-3). The marker is safe
+        // here: it was minted under the live boot, so a boot-identity
+        // eviction drops the attachment itself first.
+        if (attached.getRuntimeRecovery() != null) {
+            pendingRecovery.add(key);
+        } else {
+            pendingRecovery.remove(key);
+        }
         return new Attachment(attached.getHarnessBootId(),
                 attached.getRuntimeRecovery(),
                 attached.getHarnessLastEventId(),

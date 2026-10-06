@@ -729,6 +729,47 @@ class QwenHostedHarnessConnectorTest {
                 .anyMatch(text -> text.contains(SESSION_ID));
     }
 
+    // A passive re-attach carries the takeover recovery snapshot exactly
+    // like the recovery-load path that re-mints it: the pending marker
+    // must follow it, or the next dispatch's cached branch answers
+    // "nothing parked" over the snapshot it still holds (R11-3).
+    @Test
+    void passiveReattachmentRestoresThePendingRecoveryMarker() {
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(
+                new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
+                        "ACTIVE", null, null, 0, 0, 1, 1, null, 1));
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        HarnessSessionRef withRecovery = mock(HarnessSessionRef.class);
+        when(withRecovery.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(withRecovery.getRuntimeRecovery())
+                .thenReturn(mock(HarnessRuntimeRecovery.class));
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(withRecovery);
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions,
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        // The rename plate goes through doCreateOrLoad's passive arm.
+        connector.rename("tenant-a", SESSION_ID, "a carried title");
+
+        @SuppressWarnings("unchecked")
+        java.util.Set<Object> pendingRecovery =
+                (java.util.Set<Object>)
+                        org.springframework.test.util.ReflectionTestUtils
+                                .getField(connector, "pendingRecovery");
+        assertThat(pendingRecovery.stream().map(String::valueOf))
+                .anyMatch(text -> text.contains(SESSION_ID));
+        assertThat(connector
+                .recoverManagedRuntime("tenant-a", SESSION_ID, false)
+                .runtimeRecovery()).isNotNull();
+    }
+
     // The shared bean must rebuild exactly once when two attempts surface a
     // generation change at the same time.
     @Test

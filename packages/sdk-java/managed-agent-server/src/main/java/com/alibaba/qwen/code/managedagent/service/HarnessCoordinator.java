@@ -258,11 +258,19 @@ public class HarnessCoordinator {
                 // failure from the budget — without the exemption any
                 // Turn stuck behind another Session Turn's unsettled input
                 // would re-mark and re-POST the identical refusal forever.
+                // The session-level wedge code is pre-admission as well
+                // when the Turn provably never recorded an epoch (a
+                // continue past admission keeps the budget exempt — and
+                // the prompt-scoped naming stays what it was (R11-1).
                 String errorCode = error.getErrorCode();
                 terminal = transientFailure(claimed,
                         submissionAttempted.get()
                                 && !"hosted_prompt_recovery_required"
-                                        .equals(errorCode),
+                                        .equals(errorCode)
+                                && !("hosted_turn_recovery_required"
+                                                .equals(errorCode)
+                                        && claimed.harnessEventEpoch()
+                                                == null),
                         error,
                         recoveryPath.get() && errorCode != null
                                 && LEASE_BOUNDED_409_CODES.contains(errorCode));
@@ -915,14 +923,21 @@ public class HarnessCoordinator {
                                 + " Turn admission.");
             }
             if (error instanceof DaemonHttpException http
-                    && "hosted_prompt_recovery_required"
-                            .equals(http.getErrorCode())) {
-                // R10-4: the duplicate-admission refusal is a named,
-                // fail-closed verdict on THIS prompt — record its own code
-                // like the named load refusal above, not the generic
-                // unavailable. Any other coded body keeps the older
-                // convention (it was reviewed that way).
-                return fail(turn, "hosted_prompt_recovery_required",
+                    && ("hosted_prompt_recovery_required"
+                                    .equals(http.getErrorCode())
+                            || ("hosted_turn_recovery_required"
+                                            .equals(http.getErrorCode())
+                                    && turn.submissionAttempted()))) {
+                // The coded refusal is a named, fail-closed verdict from
+                // the daemon — this prompt's duplicate, or the Session's
+                // unsettled wedge against a Turn already claiming a
+                // submission — so record its own code like the named load
+                // refusal above. Without that mark the same code arrives
+                // from the open-LOAD path, whose reviewed exhaustion
+                // answer is the generic unavailable.
+                return fail(turn, http.getErrorCode().length() > 128
+                        ? http.getErrorCode().substring(0, 128)
+                        : http.getErrorCode(),
                         "Hosted Harness refused the Turn before Turn"
                                 + " admission.");
             }
