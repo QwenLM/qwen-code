@@ -197,28 +197,31 @@ class ManagedAgentPropertiesTest {
         // timeUnit() — milliseconds by default — so these placeholders
         // deliberately did not move to seconds with the typed Duration
         // fields, and a one-sided timeUnit change turns this red too.
+        // hasSize(1) is load-bearing: getDeclaredMethods() order is
+        // unspecified, so a second scan-delay sweep on one coordinator
+        // must fail here, not slip past a sampled first match.
         String expected = "${qwen.managed-agent.dispatch.scan-delay:1s}";
-        assertThat(scanDelaySchedule(ActionResponseCoordinator.class)
-                .fixedDelayString()).isEqualTo(expected);
-        assertThat(scanDelaySchedule(HarnessCoordinator.class)
-                .fixedDelayString()).isEqualTo(expected);
-        assertThat(scanDelaySchedule(SessionLifecycleCoordinator.class)
-                .fixedDelayString()).isEqualTo(expected);
-        assertThat(scanDelaySchedule(ActionResponseCoordinator.class)
-                .timeUnit()).isEqualTo(TimeUnit.MILLISECONDS);
-        assertThat(scanDelaySchedule(HarnessCoordinator.class)
-                .timeUnit()).isEqualTo(TimeUnit.MILLISECONDS);
-        assertThat(scanDelaySchedule(SessionLifecycleCoordinator.class)
-                .timeUnit()).isEqualTo(TimeUnit.MILLISECONDS);
+        for (Class<?> coordinator : List.of(ActionResponseCoordinator.class,
+                HarnessCoordinator.class, SessionLifecycleCoordinator.class)) {
+            assertThat(scanDelaySchedules(coordinator))
+                    .as(coordinator.getSimpleName())
+                    .hasSize(1)
+                    .allSatisfy(scheduled -> {
+                        assertThat(scheduled.fixedDelayString())
+                                .isEqualTo(expected);
+                        assertThat(scheduled.timeUnit())
+                                .isEqualTo(TimeUnit.MILLISECONDS);
+                    });
+        }
     }
 
-    private static Scheduled scanDelaySchedule(Class<?> coordinator) {
+    private static List<Scheduled> scanDelaySchedules(Class<?> coordinator) {
         return java.util.Arrays.stream(coordinator.getDeclaredMethods())
                 .map(method -> method.getAnnotation(Scheduled.class))
                 .filter(java.util.Objects::nonNull)
                 .filter(scheduled -> scheduled.fixedDelayString()
                         .contains("dispatch.scan-delay"))
-                .findFirst().orElseThrow();
+                .toList();
     }
 
     @Test
