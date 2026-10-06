@@ -58,7 +58,7 @@ function hasAgentFor(
 function uniqueAgentName(
   base: string,
   agents: readonly WorkspaceAgent[],
-  squads: readonly Pick<SessionSquad, 'name'>[],
+  squads: ReadonlyArray<Pick<SessionSquad, 'name'>>,
 ): string | undefined {
   // Retired agents and squads keep their names (the create route refuses
   // them too).
@@ -92,7 +92,7 @@ export function planHostProgramAgents(
   options: {
     now?: number;
     newId?: () => string;
-    squads?: readonly Pick<SessionSquad, 'name'>[];
+    squads?: ReadonlyArray<Pick<SessionSquad, 'name'>>;
   } = {},
 ): WorkspaceAgent[] {
   const added: WorkspaceAgent[] = [];
