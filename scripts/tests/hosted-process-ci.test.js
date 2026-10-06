@@ -189,31 +189,6 @@ describe('Hosted real-process gates', () => {
     expect(mariadb).toContain('<exclude>**/Hosted*IT.java</exclude>');
     expect(hosted).toContain('<include>**/Hosted*IT.java</include>');
     expect(hosted).toContain('<failIfNoTests>true</failIfNoTests>');
-    // The step ceiling must outlive the profile's own fork timeout, or
-    // GitHub cancels the step before failsafe kills a hung fork and writes
-    // its diagnostic (issue #13471): the old 12-minute ceiling sat below the
-    // 900 s fork timeout, leaving it dead config. This guard covers the
-    // hosted profile only; the job's two other timed Maven steps violate the
-    // same invariant on pre-existing values -- fault-gates (600 s ceiling
-    // against a 600 s surefire fork timeout) and o4-mysql-gates (720 s
-    // against a 600 s failsafe fork timeout after a ~210 s pre-fork phase)
-    // -- and re-timing them is deferred to a follow-up.
-    const forkSeconds = Number(
-      hosted
-        .split('</profile>')[0]
-        .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
-    );
-    // 0 is failsafe's documented 'wait forever' sentinel: it would disarm
-    // the fork timeout entirely, not relax the ceiling's reachability.
-    expect(forkSeconds).toBeGreaterThan(0);
-    // The fork timer starts at failsafe's fork launch, and this one
-    // invocation compiles and runs the surefire unit tests first: measured
-    // 213-220 s from step start to failsafe:integration-test across three
-    // CI runs (run 37346072729: 17:15:29Z -> 17:19:05Z).
-    const PRE_FORK_SECONDS = 240;
-    expect(run['timeout-minutes'] * 60 - PRE_FORK_SECONDS).toBeGreaterThan(
-      forkSeconds,
-    );
     // The MariaDB job must not narrow its selection either, or an IT outside
     // the Hosted family would silently run nowhere.
     const mariadbRun = java.jobs['mysql-integration'].steps.find(
@@ -274,15 +249,31 @@ describe('Hosted real-process gates', () => {
     const run = java.jobs['hosted-harness-mysql'].steps.find(
       (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
     );
+    // Read the timeout from the hosted profile only: an unbounded read would
+    // silently match another profile's value if this one lost its own, and
+    // the assertions below would pass against the wrong profile.
+    const hostedProfile = read('packages/sdk-java/managed-agent-server/pom.xml')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .split('<id>hosted-harness-mysql</id>')[1]
+      .split('</profile>')[0];
     const forkSeconds = Number(
-      read('packages/sdk-java/managed-agent-server/pom.xml')
-        .split('<id>hosted-harness-mysql</id>')[1]
-        .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
+      hostedProfile.match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
     );
+    // 0 is failsafe's documented 'wait forever' sentinel: it would disarm
+    // the fork timeout entirely, not relax the ceiling's reachability.
+    expect(forkSeconds).toBeGreaterThan(0);
     // A step killed before its fork leaves no per-test failure lines, so the
     // main-CI failure analyzer can only file an undiagnosable per-commit
     // issue (#13503). The ceiling must cover the fork plus the wrapped
-    // compile/surefire/spotbugs/checkstyle work.
+    // compile/surefire/spotbugs/checkstyle work, which measured 213-220 s
+    // from step start to failsafe:integration-test across three CI runs (run
+    // 37346072729: 17:15:29Z -> 17:19:05Z); the +300 s margin covers it.
+    // This guard covers the hosted profile only; the job's two other timed
+    // Maven steps violate the same invariant on pre-existing values --
+    // fault-gates (600 s ceiling against a 600 s surefire fork timeout) and
+    // o4-mysql-gates (720 s against a 600 s failsafe fork timeout after a
+    // ~210 s pre-fork phase) -- and re-timing them is deferred to a
+    // follow-up.
     expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
       forkSeconds + 300,
     );

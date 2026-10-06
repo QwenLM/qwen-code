@@ -512,8 +512,8 @@ jobs:
     # hard runner kill skips them. Green jobs measure 25-34 min end to end
     # (median ~30, Oct 2026). The Verify step runs the unit tests, SpotBugs,
     # Checkstyle and the Hosted*IT suite in one Maven invocation; green main
-    # runs measured 8.4-11.7 min for it (Oct 2026), so the old 12-minute
-    # ceiling left as little as 18 s of headroom. Run 37346072729 hit it:
+    # runs measured 8.4-11.95 min for it (Oct 2026), so the old 12-minute
+    # ceiling left as little as 5 s of headroom. Run 37346072729 hit it:
     # Maven printed BUILD SUCCESS at 12:03 with all 19 Hosted*IT green and
     # the failsafe reports written, and the runner killed the step 93 ms
     # later, so the six gate steps after it were skipped. 25 minutes
