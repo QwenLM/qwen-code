@@ -72,6 +72,10 @@ import {
 } from './managed-hook-record.js';
 import { parseChildRun } from './managed-child-run-record.js';
 import {
+  parseChildAcceptance,
+  type ChildAcceptance,
+} from './managed-child-acceptance-record.js';
+import {
   managedSessionActivationStateFrom,
   managedSessionCommandKey,
   type ManagedSessionActivationState,
@@ -1741,6 +1745,45 @@ export class LocalManagedSessionAuthority {
         );
       }
     }
+    if (domain === 'child_acceptance') {
+      const acceptance = parsed.record as ChildAcceptance;
+      const target = this.extensionRecord('child_run', acceptance.childRunId);
+      const child =
+        target === undefined ? undefined : parseChildRun(target.record);
+      if (child === undefined || child.kind !== 'child_agent') {
+        reject('Child acceptance must name a child agent run of this Session.');
+      }
+      if (child.run.state !== 'settled' || child.stopReason !== 'completed') {
+        reject(
+          'Child acceptance must name a run that ended with its result committed.',
+        );
+      }
+      if (
+        child.ownerScopeId !== acceptance.parentScopeId ||
+        child.resultVersion !== acceptance.resultVersion
+      ) {
+        reject(
+          'Child acceptance must match its child run scope and result version.',
+        );
+      }
+      const expectedCall =
+        child.completion === 'tool' ? child.run.executionCallId : null;
+      if (acceptance.parentExecutionCallId !== expectedCall) {
+        reject(
+          'Child acceptance must attach the completion call its child run names.',
+        );
+      }
+      if (
+        child.resultRef === null ||
+        acceptance.contentDigest !== child.resultRef.digest ||
+        child.terminalReceiptRef === null ||
+        acceptance.terminalReceiptRef.digest !== child.terminalReceiptRef.digest
+      ) {
+        reject(
+          'Child acceptance must bind the result and receipt its child run committed.',
+        );
+      }
+    }
     if (previous === undefined) {
       if (!body.isStart(parsed.record)) {
         reject(
@@ -1773,7 +1816,9 @@ export class LocalManagedSessionAuthority {
     const sessionId = this.sessionKey.sessionId;
     const key = managedExtensionRecordKey(sessionId, domain, parsed.recordId);
     const previous = this.extensionRecords.get(key);
-    const taskKind = MANAGED_EXTENSION_RECORD_BODIES[domain]!.taskKind;
+    const taskKind = MANAGED_EXTENSION_RECORD_BODIES[domain]!.taskKindOf(
+      parsed.record,
+    );
     const taskId = taskKind === null ? null : managedTaskId(key);
     const record: ManagedSessionExtensionRecord = Object.freeze({
       domain,
@@ -1961,7 +2006,13 @@ export class LocalManagedSessionAuthority {
       refs = [execution.planRef, execution.inputRef, execution.resultRef];
     } else if (domain === 'child_run') {
       const child = parseChildRun(record);
-      refs = [child.commandRef, child.startReceiptRef, child.outputRef];
+      refs =
+        child.kind === 'shell'
+          ? [child.commandRef, child.startReceiptRef, child.outputRef]
+          : [child.inputRef, child.resultRef, child.terminalReceiptRef];
+    } else if (domain === 'child_acceptance') {
+      const acceptance = parseChildAcceptance(record);
+      refs = [acceptance.contentRef, acceptance.terminalReceiptRef];
     } else if (domain === 'monitor_run') {
       const monitor = parseMonitorRun(record);
       refs = [

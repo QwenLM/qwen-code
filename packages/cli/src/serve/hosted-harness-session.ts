@@ -43,7 +43,7 @@ import {
   parseToolResultManifestBytes,
   type ToolResultManifest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
-import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import { parseChildShellRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   ResourceToolResultSegmentStore,
@@ -931,7 +931,7 @@ async function verifyWorkspaceRestore(
     );
     const record =
       domain === 'child_run'
-        ? parseChildRun(
+        ? parseChildShellRun(
             JSON.parse((await resources.read(recordRef)).toString('utf8')),
           )
         : parseMonitorRun(

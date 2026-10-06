@@ -148,6 +148,27 @@ public final class ManagedExtensionRecords {
             "stopReason", "stopRequested", "exitCode", "exitSignal", "run");
     private static final List<String> CHILD_FIXED = List.of("kind", "shellId",
             "ownerScopeId", "commandRef");
+    private static final Set<String> CHILD_AGENT_KEYS = Set.of("kind",
+            "childRunId", "ownerScopeId", "rootSessionId", "depth",
+            "completion", "inputRef", "workspaceMode", "workingDirectory",
+            "childSessionId", "predecessorChildRunId", "resultVersion",
+            "resultRef", "terminalReceiptRef", "stopReason", "stopRequested",
+            "run");
+    private static final List<String> CHILD_AGENT_FIXED = List.of("kind",
+            "childRunId", "ownerScopeId", "rootSessionId", "depth",
+            "completion", "inputRef", "workspaceMode", "workingDirectory",
+            "predecessorChildRunId", "resultVersion");
+    private static final List<String> CHILD_WORKSPACE_MODES = List.of(
+            "shared", "snapshot", "worktree");
+    private static final long CHILD_MAX_DEPTH = 8;
+    private static final List<String> CHILD_UNSTARTED_EXECUTIONS = List.of(
+            "intent", "dispatch_started", "not_started_proven");
+    private static final Set<String> ACCEPTANCE_KEYS = Set.of("childRunId",
+            "parentScopeId", "parentExecutionCallId", "resultVersion",
+            "contentRef", "contentDigest", "terminalReceiptRef", "run");
+    private static final List<String> ACCEPTANCE_FIXED = List.of("childRunId",
+            "parentScopeId", "parentExecutionCallId", "resultVersion",
+            "contentRef", "contentDigest", "terminalReceiptRef");
     private static final List<String> RUN_IDENTITIES = List.of("definition",
             "executionCallId", "effectId", "dispatchId", "deliveryId");
 
@@ -158,6 +179,13 @@ public final class ManagedExtensionRecords {
     public static final Map<String, List<String>> CHILD_STOP_REASONS =
             Map.of("settled", List.of("exited"), "failed",
                     List.of("start_failed", "process_failed",
+                            "quota_exceeded"),
+                    "cancelled", List.of("stop_requested"));
+
+    /** Why a child agent ended, by the state its run ended in. */
+    public static final Map<String, List<String>> CHILD_AGENT_STOP_REASONS =
+            Map.of("settled", List.of("completed"), "failed",
+                    List.of("creation_failed", "child_failed",
                             "quota_exceeded"),
                     "cancelled", List.of("stop_requested"));
 
@@ -620,14 +648,47 @@ public final class ManagedExtensionRecords {
     }
 
     /**
-     * Checks the body of a managed-child_run schema version 1 record
-     * ({@code kind: "shell"}): one background Shell per record (H3 of
-     * #12827; see managed-child-run-record.ts for the same rules).
+     * Checks the body of a managed-child_run schema version 1 record by its
+     * own {@code kind} field: {@code "shell"} (H3) or {@code "child_agent"}
+     * (H4), each a closed shape (see managed-child-run-record.ts for the
+     * same rules).
      */
     public static void requireChildRun(JsonNode child) {
+        JsonNode kind = child == null ? null : child.get("kind");
+        if (kind != null && kind.isTextual()) {
+            if ("shell".equals(kind.textValue())) {
+                requireChildShell(child);
+                return;
+            }
+            if ("child_agent".equals(kind.textValue())) {
+                requireChildAgent(child);
+                return;
+            }
+        }
+        require(false, "Child run kind must be one of shell, child_agent in"
+                + " schema version 1");
+    }
+
+    /** The task kind one child run projects, by its own kind. */
+    public static String childRunTaskKind(JsonNode child) {
+        return "shell".equals(child.get("kind").textValue())
+                ? "background_shell" : "child_agent";
+    }
+
+    /** The identity that keys a child run's revision chain, by its kind. */
+    public static String childRunRecordId(JsonNode child) {
+        return "shell".equals(child.get("kind").textValue())
+                ? child.get("shellId").textValue()
+                : child.get("childRunId").textValue();
+    }
+
+    /**
+     * Checks the body of a managed-child_run schema version 1 record
+     * ({@code kind: "shell"}): one background Shell per record (H3 of
+     * #12827).
+     */
+    private static void requireChildShell(JsonNode child) {
         closed(child, CHILD_KEYS, "childRun");
-        require("shell".equals(child.get("kind").textValue()),
-                "childRun.kind must be 'shell' in schema version 1");
         JsonNode run = child.get("run");
         requireRun(run);
         // A background Shell is started by one tool call and is observed
@@ -742,15 +803,173 @@ public final class ManagedExtensionRecords {
     }
 
     /**
-     * Whether {@code child} may be the first revision of a background
-     * Shell: its run opens, nobody has asked it to stop yet, and it has
-     * written no output, which needs a started process.
+     * Checks the body of a managed-child_run schema version 1 record
+     * ({@code kind: "child_agent"}): one child Session per record (H4 of
+     * #12827; the checks run in the same order as the TypeScript validator
+     * so both report the same clause of a doubly broken body).
+     */
+    private static void requireChildAgent(JsonNode child) {
+        closed(child, CHILD_AGENT_KEYS, "childRun");
+        JsonNode run = child.get("run");
+        requireRun(run);
+        // A child agent is started by one tool call; its result travels
+        // the session delivery line its relay scans, never an effect
+        // identity or an external delivery.
+        require(!run.get("executionCallId").isNull()
+                && run.get("effectId").isNull()
+                && run.get("deliveryId").isNull(),
+                "Child run must name its start call, never an effect or a"
+                        + " channel delivery");
+        JsonNode delivery = run.get("delivery");
+        require(!delivery.isNull()
+                && "session".equals(delivery.get("target").textValue()),
+                "Child run delivery must target the parent session");
+        count(child.get("depth"), 1, CHILD_MAX_DEPTH, "Child run depth");
+        require(child.get("completion").isTextual()
+                && List.of("tool", "sent").contains(
+                        child.get("completion").textValue()),
+                "Child run completion must be 'tool' or 'sent'");
+        durableRef(child.get("inputRef"), "inputRef");
+        require(child.get("workspaceMode").isTextual()
+                && CHILD_WORKSPACE_MODES.contains(
+                        child.get("workspaceMode").textValue()),
+                "Child run workspaceMode must be one of "
+                        + String.join(", ", CHILD_WORKSPACE_MODES));
+        requireWorkingDirectory(child.get("workingDirectory"));
+        JsonNode session = child.get("childSessionId");
+        if (!session.isNull()) {
+            id(session, "childSessionId");
+        }
+        String execution = text(run, "execution");
+        // The Session exists only once the control plane admitted its
+        // creation.
+        require(session.isNull() || execution != null
+                && !CHILD_UNSTARTED_EXECUTIONS.contains(execution),
+                "Child run childSessionId needs its admitted creation"
+                        + " dispatch");
+        JsonNode predecessor = child.get("predecessorChildRunId");
+        if (!predecessor.isNull()) {
+            id(predecessor, "predecessorChildRunId");
+        }
+        JsonNode resultVersion = child.get("resultVersion");
+        require(resultVersion.isNumber()
+                && resultVersion.decimalValue()
+                        .compareTo(java.math.BigDecimal.ONE) == 0,
+                "Child run resultVersion must be 1 in schema version 1");
+        JsonNode resultRef = child.get("resultRef");
+        if (!resultRef.isNull()) {
+            durableRef(resultRef, "resultRef");
+        }
+        JsonNode terminalReceipt = child.get("terminalReceiptRef");
+        if (!terminalReceipt.isNull()) {
+            durableRef(terminalReceipt, "terminalReceiptRef");
+        }
+        String state = text(run, "state");
+        require("settled".equals(state)
+                == (!resultRef.isNull() && !terminalReceipt.isNull()),
+                "Child run resultRef and terminalReceiptRef are set exactly"
+                        + " when the run settles");
+        require(!"failed".equals(state) && !"cancelled".equals(state)
+                || resultRef.isNull() && terminalReceipt.isNull(),
+                "Child run that ends without a result keeps resultRef and"
+                        + " terminalReceiptRef null");
+        require(("failed".equals(state) || "cancelled".equals(state))
+                == "cancelled".equals(text(delivery, "state")),
+                "Child run delivery cancelled is set exactly when the run"
+                        + " ends without a result");
+        JsonNode stopReasonNode = child.get("stopReason");
+        require(stopReasonNode.isNull() || stopReasonNode.isTextual()
+                && CHILD_AGENT_STOP_REASONS.values().stream()
+                        .flatMap(List::stream)
+                        .anyMatch(stopReasonNode.textValue()::equals),
+                "Child run stopReason is not a closed stop reason");
+        String stopReason = stopReasonNode.isNull() ? null
+                : stopReasonNode.textValue();
+        require((stopReason == null) != TERMINAL.contains(state),
+                "Child run stopReason is set exactly when the run ends");
+        require(stopReason == null
+                || CHILD_AGENT_STOP_REASONS.getOrDefault(state, List.of())
+                        .contains(stopReason),
+                "Child run stopReason " + stopReason
+                        + " does not fit the " + state + " state");
+        JsonNode stopRequested = child.get("stopRequested");
+        require(stopRequested.isBoolean(),
+                "Child run stopRequested must be boolean");
+        require(!"stop_requested".equals(stopReason)
+                || stopRequested.booleanValue(),
+                "Child run stop_requested needs its stop request");
+        String reason = text(run, "reason");
+        require("quota_exceeded".equals(stopReason)
+                == (reason != null && QUOTA_REASONS.contains(reason)),
+                "Child run stopReason is quota_exceeded exactly for a quota"
+                        + " reason");
+        // Every terminal run names the ending execution line: a completion
+        // is the child's own settled execution, a failure before creation
+        // lands on not_started_proven, and an honored stop or a later
+        // failure settles the execution that the child Session's existence
+        // proves started.
+        require(!"settled".equals(state) || "settled".equals(execution),
+                "Child run settled needs its settled execution");
+        require(!"cancelled".equals(state) || "settled".equals(execution)
+                || "not_started_proven".equals(execution),
+                "Child run cancelled needs settled or not_started_proven"
+                        + " execution");
+        require(!"failed".equals(state) || "settled".equals(execution)
+                || "not_started_proven".equals(execution),
+                "Child run failed needs settled or not_started_proven"
+                        + " execution");
+        require(!"creation_failed".equals(stopReason)
+                || "not_started_proven".equals(execution)
+                        && session.isNull(),
+                "Child run creation_failed needs a creation that never"
+                        + " started");
+        require(!"child_failed".equals(stopReason)
+                || "settled".equals(execution),
+                "Child run child_failed needs its settled execution");
+    }
+
+    /** A normalized relative directory: `.` or NFC text without `.`/`..` segments. */
+    private static void requireWorkingDirectory(JsonNode directory) {
+        String message = "Child run workingDirectory must be a normalized"
+                + " relative directory";
+        require(directory != null && directory.isTextual(), message);
+        String value = directory.textValue();
+        require(".".equals(value)
+                || !value.startsWith("/") && !value.endsWith("/")
+                        && !value.contains("\\")
+                        && Stream.of(value.split("/", -1))
+                                .noneMatch(segment -> segment.isEmpty()
+                                        || segment.equals(".")
+                                        || segment.equals("..")),
+                message);
+        if (!".".equals(value)) {
+            try {
+                id(directory, "workingDirectory");
+            } catch (InvalidRecordException error) {
+                require(false, message);
+            }
+        }
+    }
+
+    /**
+     * Whether {@code child} may open its chain: a Shell's run opens with no
+     * stop request and no output; a child agent's run opens with the
+     * delivery planned, no Session created, no result and no stop request.
      */
     public static boolean isChildRunStart(JsonNode child) {
-        return accepts(() -> requireChildRun(child))
-                && isRunStart(child.get("run"))
-                && !child.get("stopRequested").booleanValue()
-                && child.get("outputRef").isNull();
+        if (!accepts(() -> requireChildRun(child))
+                || !isRunStart(child.get("run"))
+                || child.get("stopRequested").booleanValue()) {
+            return false;
+        }
+        if ("shell".equals(child.get("kind").textValue())) {
+            return child.get("outputRef").isNull();
+        }
+        return "planned".equals(text(child.get("run").get("delivery"),
+                "state"))
+                && child.get("childSessionId").isNull()
+                && child.get("resultRef").isNull()
+                && child.get("terminalReceiptRef").isNull();
     }
 
     /**
@@ -770,25 +989,133 @@ public final class ManagedExtensionRecords {
                 || !accepts(() -> requireChildRun(next))) {
             return false;
         }
-        for (String key : CHILD_FIXED) {
+        String kind = previous.get("kind").textValue();
+        if (!kind.equals(next.get("kind").textValue())) {
+            return false;
+        }
+        if ("shell".equals(kind)) {
+            for (String key : CHILD_FIXED) {
+                if (!same(previous.get(key), next.get(key))) {
+                    return false;
+                }
+            }
+            if (!isRunSuccessor(previous.get("run"), next.get("run"))
+                    || !previous.get("outputRef").isNull()
+                            && next.get("outputRef").isNull()
+                    || previous.get("stopRequested").booleanValue()
+                            && !next.get("stopRequested").booleanValue()
+                    || !previous.get("startReceiptRef").isNull()
+                            && !same(previous.get("startReceiptRef"),
+                                    next.get("startReceiptRef"))) {
+                return false;
+            }
+            if (TERMINAL.contains(text(previous.get("run"), "state"))) {
+                return same(previous, next);
+            }
+            return true;
+        }
+        for (String key : CHILD_AGENT_FIXED) {
+            if (!same(previous.get(key), next.get(key))) {
+                return false;
+            }
+        }
+        return isRunSuccessor(previous.get("run"), next.get("run"))
+                && (!previous.get("stopRequested").booleanValue()
+                        || next.get("stopRequested").booleanValue())
+                && setOnce(previous.get("childSessionId"),
+                        next.get("childSessionId"))
+                && setOnce(previous.get("resultRef"), next.get("resultRef"))
+                && setOnce(previous.get("terminalReceiptRef"),
+                        next.get("terminalReceiptRef"));
+    }
+
+    private static boolean setOnce(JsonNode before, JsonNode after) {
+        return before.isNull() || same(before, after);
+    }
+
+    /**
+     * Checks the body of a managed-child_acceptance schema version 1 record
+     * (H4 of #12827): the parent's receipt of one child run's terminal
+     * result. The acceptance is purely logical — no physical identity, no
+     * execution, no Runtime — and every revision is settled with the
+     * delivery a session delivery at {@code accepted} or {@code consumed}
+     * (decision 9 of docs/design/2026-10-06-managed-child-agent-runtime.md).
+     */
+    public static void requireChildAcceptance(JsonNode acceptance) {
+        closed(acceptance, ACCEPTANCE_KEYS, "Child acceptance");
+        JsonNode run = acceptance.get("run");
+        requireRun(run);
+        require(run.get("executionCallId").isNull()
+                && run.get("effectId").isNull()
+                && run.get("dispatchId").isNull()
+                && run.get("deliveryId").isNull()
+                && run.get("runtime").isNull()
+                && run.get("execution").isNull()
+                && run.get("definition").isNull(),
+                "Child acceptance run must be purely logical");
+        require("settled".equals(text(run, "state")),
+                "Child acceptance run must be settled");
+        JsonNode delivery = run.get("delivery");
+        require(!delivery.isNull()
+                && "session".equals(delivery.get("target").textValue())
+                && List.of("accepted", "consumed").contains(
+                        delivery.get("state").textValue()),
+                "Child acceptance delivery must be accepted or consumed");
+        durableRef(acceptance.get("contentRef"), "contentRef");
+        digest(acceptance.get("contentDigest"), "contentDigest");
+        require(acceptance.get("contentDigest").textValue().equals(
+                acceptance.get("contentRef").get("digest").textValue()),
+                "Child acceptance contentDigest must name the content's"
+                        + " digest");
+        durableRef(acceptance.get("terminalReceiptRef"), "terminalReceiptRef");
+        JsonNode resultVersion = acceptance.get("resultVersion");
+        require(resultVersion.isNumber()
+                && resultVersion.decimalValue()
+                        .compareTo(java.math.BigDecimal.ONE) == 0,
+                "Child acceptance resultVersion must be 1 in schema version 1");
+        id(acceptance.get("childRunId"), "childRunId");
+        id(acceptance.get("parentScopeId"), "parentScopeId");
+        JsonNode call = acceptance.get("parentExecutionCallId");
+        if (!call.isNull()) {
+            id(call, "parentExecutionCallId");
+        }
+    }
+
+    /**
+     * Whether {@code acceptance} may open an acceptance chain: a settled
+     * run whose delivery is accepted — never already consumed.
+     */
+    public static boolean isChildAcceptanceStart(JsonNode acceptance) {
+        return accepts(() -> requireChildAcceptance(acceptance))
+                && "accepted".equals(text(acceptance.get("run")
+                        .get("delivery"), "state"));
+    }
+
+    /**
+     * Whether {@code next} may follow {@code previous}: the identity,
+     * content and receipt never change, and the delivery may only advance
+     * from {@code accepted} to {@code consumed} — an acceptance consumed
+     * once can never be restated.
+     */
+    public static boolean isChildAcceptanceSuccessor(JsonNode previous,
+            JsonNode next) {
+        if (!accepts(() -> requireChildAcceptance(previous))
+                || !accepts(() -> requireChildAcceptance(next))) {
+            return false;
+        }
+        for (String key : ACCEPTANCE_FIXED) {
             if (!same(previous.get(key), next.get(key))) {
                 return false;
             }
         }
         if (!isRunSuccessor(previous.get("run"), next.get("run"))
-                || !previous.get("outputRef").isNull()
-                        && next.get("outputRef").isNull()
-                || previous.get("stopRequested").booleanValue()
-                        && !next.get("stopRequested").booleanValue()
-                || !previous.get("startReceiptRef").isNull()
-                        && !same(previous.get("startReceiptRef"),
-                                next.get("startReceiptRef"))) {
+                || !"accepted".equals(text(previous.get("run")
+                        .get("delivery"), "state"))) {
             return false;
         }
-        if (TERMINAL.contains(text(previous.get("run"), "state"))) {
-            return same(previous, next);
-        }
-        return true;
+        return "consumed".equals(text(next.get("run").get("delivery"),
+                "state"))
+                || same(previous.get("run"), next.get("run"));
     }
 
     /**
