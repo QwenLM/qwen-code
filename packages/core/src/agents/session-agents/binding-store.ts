@@ -185,6 +185,9 @@ function isValidEngagement(value: unknown): value is SessionSquadEngagement {
     typeof value['startedByRecordId'] === 'string' &&
     Array.isArray(value['outstandingRunIds']) &&
     value['outstandingRunIds'].every((id) => typeof id === 'string') &&
+    (value['pendingWakeRunIds'] === undefined ||
+      (Array.isArray(value['pendingWakeRunIds']) &&
+        value['pendingWakeRunIds'].every((id) => typeof id === 'string'))) &&
     typeof value['active'] === 'boolean'
   );
 }
@@ -260,8 +263,12 @@ export function trimTerminalRuns(
   runs: readonly SessionAgentRun[],
   max = MAX_TERMINAL_SESSION_AGENT_RUNS,
 ): SessionAgentRun[] {
-  const terminal = runs.filter((run) =>
-    isTerminalSessionAgentRunStatus(run.status),
+  // A terminal run whose reply never reached the transcript is still owed
+  // (a retry, a pending record, a squad leader waiting on it), so it is
+  // never trimmed; only settled history is.
+  const terminal = runs.filter(
+    (run) =>
+      isTerminalSessionAgentRunStatus(run.status) && run.recorded !== false,
   );
   if (terminal.length <= max) return [...runs];
   const keep = new Set(
@@ -271,7 +278,10 @@ export function trimTerminalRuns(
       .map((run) => run.id),
   );
   return runs.filter(
-    (run) => !isTerminalSessionAgentRunStatus(run.status) || keep.has(run.id),
+    (run) =>
+      !isTerminalSessionAgentRunStatus(run.status) ||
+      run.recorded === false ||
+      keep.has(run.id),
   );
 }
 

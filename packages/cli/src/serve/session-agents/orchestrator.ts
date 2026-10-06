@@ -148,6 +148,27 @@ export const LOCAL_SESSION_AGENT_RUNTIME_ID = 'local';
 export const SESSION_AGENT_STALL_TIMEOUT_MS = 15 * 60_000;
 export const SESSION_AGENT_STALLED_ERROR = 'agent_run_stalled';
 export const SESSION_AGENT_RESTARTED_ERROR = 'daemon restarted';
+/** Why an orchestrator is stopped (see {@link SessionAgentOrchestrator.dispose}). */
+export type SessionAgentStopReason =
+  /** The daemon is stopping (or restarting). */
+  | 'shutdown'
+  /** The workspace's runtime was replaced by a new bridge. */
+  | 'runtime_replaced'
+  /** The workspace was closed or removed from the daemon. */
+  | 'workspace_closed'
+  | 'workspace_untrusted'
+  /** `experimental.agentCollaboration` was turned off for the workspace. */
+  | 'collaboration_disabled';
+/** The error a local run stopped mid-turn by dispose ends with, per reason. */
+export const SESSION_AGENT_STOPPED_ERRORS: Readonly<
+  Record<SessionAgentStopReason, string>
+> = {
+  shutdown: SESSION_AGENT_RESTARTED_ERROR,
+  runtime_replaced: 'stopped: the workspace runtime was restarted',
+  workspace_closed: 'stopped: the workspace was closed',
+  workspace_untrusted: 'stopped: the workspace is no longer trusted',
+  collaboration_disabled: 'stopped: agent collaboration was turned off',
+};
 export const SESSION_AGENT_OFFLINE_ERROR = 'runtime went offline';
 /** A run finished before a restart, its reply never in the transcript. */
 export const SESSION_AGENT_REPLY_NOT_RECORDED_ERROR =
@@ -174,7 +195,7 @@ export const RECORD_WATCH_MAX_MS = PENDING_POST_TTL_MS;
  * that finished with it pending. Its writer died with the previous daemon, so
  * this only catches a record that landed before the run's state was saved.
  */
-const RECORD_RECOVERY_WATCH_MAX_MS = 30_000;
+export const RECORD_RECOVERY_WATCH_MAX_MS = 30_000;
 /** Terminal runs the snapshot still reports (record pending, or retryable). */
 const MAX_SETTLED_RUNS = 200;
 /** How long a Host is told "cancelled" for a run stopped while it ran it. */
@@ -322,7 +343,7 @@ interface LiveRun {
   frame: SessionAgentRunFrame;
   steps: Map<string, SessionAgentStep>;
   controller?: AbortController;
-  /** `shutdown`: the daemon is stopping (see dispose). */
+  /** `shutdown`: the orchestrator is stopping (see dispose). */
   abortReason?: 'cancelled' | 'stalled' | 'shutdown';
   pendingPermissions: Map<string, PendingPermission>;
   voterContexts: Map<string, BridgeClientRequestContext>;
@@ -690,6 +711,8 @@ export class SessionAgentOrchestrator {
   private readonly recovered: Promise<void>;
   private sweepTimer: ReturnType<typeof setInterval> | undefined;
   private stopped = false;
+  /** What a local run dispose stops ends with (see dispose's reason). */
+  private stoppedError = SESSION_AGENT_RESTARTED_ERROR;
 
   constructor(options: SessionAgentOrchestratorOptions) {
     this.workspaceCwd = options.workspaceCwd;
@@ -933,6 +956,9 @@ export class SessionAgentOrchestrator {
    * (404 `run_not_found`), not retryable (409 `run_not_retryable`),
    * already retried (409 `run_already_retried`), or its agent can no longer
    * take work (409 `agent_unavailable`).
+   * TODO(multi-agent): retrying a squad member whose record is still pending
+   * drops the leader wake it owed and does not mark the new run outstanding,
+   * so that engagement ends early; carry both over to the new run.
    */
   async retry(
     sessionId: string,
@@ -1202,18 +1228,20 @@ export class SessionAgentOrchestrator {
 
   /**
    * Stops this daemon's executing local runs and the timers. A stopped run
-   * ends `failed` with "daemon restarted", writes no record (the bridge is
-   * going away with the daemon) and is saved `recorded: false`, so the next
-   * orchestrator for this workspace offers it for retry; queued local runs
-   * stay queued on disk and are offered the same way (see adopt). Remote
-   * runs are left on disk as they are (queued, or executing under their
-   * lease with the last accepted sequence), so the next orchestrator (after
-   * a restart, or a replaced bridge) re-adopts them and their Host carries
-   * on. Idempotent.
+   * ends `failed` with the error for `reason` ("daemon restarted" for a
+   * shutdown; see {@link SESSION_AGENT_STOPPED_ERRORS}), writes no record
+   * (the bridge is going away, or the workspace is off limits) and is saved
+   * `recorded: false`, so the next orchestrator for this workspace offers it
+   * for retry; queued local runs stay queued on disk and are offered the
+   * same way (see adopt). Remote runs are left on disk as they are (queued,
+   * or executing under their lease with the last accepted sequence), so the
+   * next orchestrator (after a restart, or a replaced bridge) re-adopts them
+   * and their Host carries on. Idempotent: a later call's reason is ignored.
    */
-  async dispose(): Promise<void> {
+  async dispose(reason: SessionAgentStopReason = 'shutdown'): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    this.stoppedError = SESSION_AGENT_STOPPED_ERRORS[reason];
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     for (const settled of this.settled.values()) {
       if (settled.timer) clearTimeout(settled.timer);
@@ -1684,6 +1712,7 @@ export class SessionAgentOrchestrator {
         },
       });
     }
+    this.restorePendingWakes(state, roster);
     // Member runs that died with the previous daemon wake no leader.
     if (this.settleEngagements(state)) changed = true;
     if (changed) void this.persist(state).catch(() => {});
@@ -1709,10 +1738,11 @@ export class SessionAgentOrchestrator {
       delete run.recorded;
       return true;
     }
-    // A run a restart failed, or one that went offline, never wrote a
-    // record: there is nothing to look for.
+    // A run a restart (or any dispose) failed, or one that went offline,
+    // never wrote a record: there is nothing to look for.
     const wroteRecord =
-      run.status !== 'offline' && run.error !== SESSION_AGENT_RESTARTED_ERROR;
+      run.status !== 'offline' &&
+      !Object.values(SESSION_AGENT_STOPPED_ERRORS).includes(run.error ?? '');
     this.addSettled(run.id, {
       sessionId: file.sessionId,
       frame: {
@@ -1733,6 +1763,53 @@ export class SessionAgentOrchestrator {
     });
     if (wroteRecord) this.watchRecord(run.id);
     return false;
+  }
+
+  /**
+   * Member replies that owed their squad leader a wake when the previous
+   * daemon stopped (`pendingWakeRunIds`, saved by settleEngagements). Each
+   * one's run is watched for its record again (see adoptUnrecorded), which
+   * wakes the leader with the record once it is found in the transcript, or
+   * with the reply carried as a post once the watcher gives up (see
+   * watchRecord). An entry whose run is gone, let go (cancelled, retried) or
+   * not watched, or whose leader is unavailable, wakes no one; the
+   * engagement then ends as usual. Needs the roster (startup recovery).
+   */
+  private restorePendingWakes(
+    state: SessionState,
+    roster: readonly WorkspaceAgent[] | undefined,
+  ): void {
+    if (!roster) return;
+    for (const [squadId, engagement] of Object.entries(
+      state.file.squads ?? {},
+    )) {
+      if (!engagement.active || !engagement.pendingWakeRunIds) continue;
+      const leader = roster.find(
+        (agent) => agent.id === engagement.leaderAgentId,
+      );
+      if (!leader || !isAgentAddressable(leader)) {
+        writeStderrLine(
+          `qwen serve: squad ${squadId} in session ${state.sessionId} lost its leader across a restart; its pending wake was dropped.`,
+        );
+        continue;
+      }
+      for (const runId of engagement.pendingWakeRunIds) {
+        const settled = this.settled.get(runId);
+        const run = state.file.runs.find((candidate) => candidate.id === runId);
+        if (!run || !settled?.recovered) continue;
+        if (settled.sessionId !== state.sessionId) continue;
+        const wakes = (settled.wakes ??= []);
+        if (wakes.some((wake) => wake.squadId === squadId)) continue;
+        wakes.push({
+          squadId,
+          leader,
+          chainDepth: nextChainDepth({
+            kind: 'agent',
+            chainDepth: run.chainDepth,
+          }),
+        });
+      }
+    }
   }
 
   private async recoverOnStartup(): Promise<void> {
@@ -2047,7 +2124,7 @@ export class SessionAgentOrchestrator {
       outcome = {
         ...outcome,
         status: 'failed',
-        error: SESSION_AGENT_RESTARTED_ERROR,
+        error: this.stoppedError,
       };
     }
     await live.sendChain;
@@ -2968,15 +3045,18 @@ export class SessionAgentOrchestrator {
       }
       if (this.now() - startedAt >= maxMs) {
         // Given up: the leaders it owed a wake still get the reply, and why
-        // it is not recorded, so they can decide.
+        // it is not recorded, so they can decide. A run adopted after a
+        // restart has no request: its reply text died with that daemon.
         const wakes = settled.wakes;
-        if (wakes && request?.kind === 'agent_message') {
+        if (wakes) {
           delete settled.wakes;
+          const reply =
+            request?.kind === 'agent_message' ? request.payload : undefined;
           const trigger = this.addUnrecordedReply(
             sessionId,
             runId,
-            request.payload.author,
-            request.payload.displayText,
+            reply?.author ?? settled.frame.author,
+            reply?.displayText ?? '',
             settled.frame.error,
           );
           this.wakeLeaders(sessionId, wakes, trigger);
@@ -3198,13 +3278,33 @@ export class SessionAgentOrchestrator {
    * Ends every engagement of this session with nothing outstanding and no
    * leader run queued or executing for it. Outstanding ids of runs that are
    * no longer live (ended without a wake: a restart, a cancel) are dropped
-   * first. Returns whether anything changed.
+   * first. Also saves which member replies still owe each leader a wake
+   * (`pendingWakeRunIds`, from {@link SettledRun.wakes}), so a restart
+   * restores them (see restorePendingWakes). Returns whether anything changed.
    */
   private settleEngagements(state: SessionState): boolean {
     let changed = false;
     for (const [squadId, engagement] of Object.entries(
       state.file.squads ?? {},
     )) {
+      const owed: string[] = [];
+      for (const [runId, settled] of this.settled) {
+        if (
+          settled.sessionId === state.sessionId &&
+          settled.wakes?.some((wake) => wake.squadId === squadId) === true
+        ) {
+          owed.push(runId);
+        }
+      }
+      const saved = engagement.pendingWakeRunIds ?? [];
+      if (
+        saved.length !== owed.length ||
+        saved.some((runId, index) => runId !== owed[index])
+      ) {
+        if (owed.length > 0) engagement.pendingWakeRunIds = owed;
+        else delete engagement.pendingWakeRunIds;
+        changed = true;
+      }
       if (!engagement.active) continue;
       const outstanding = engagement.outstandingRunIds.filter(
         (runId) => this.live.get(runId)?.sessionId === state.sessionId,
@@ -3222,12 +3322,7 @@ export class SessionAgentOrchestrator {
       );
       if (leading) continue;
       // A member reply still being recorded will wake the leader.
-      const owed = [...this.settled.values()].some(
-        (settled) =>
-          settled.sessionId === state.sessionId &&
-          settled.wakes?.some((wake) => wake.squadId === squadId) === true,
-      );
-      if (owed) continue;
+      if (owed.length > 0) continue;
       engagement.active = false;
       changed = true;
     }
@@ -3321,7 +3416,7 @@ export function ensureSessionAgentOrchestrator(
 ): SessionAgentOrchestrator {
   const existing = orchestrators.get(options.workspaceCwd);
   if (existing && existing.bridge === options.bridge) return existing;
-  if (existing) void existing.dispose();
+  if (existing) void existing.dispose('runtime_replaced');
   const created = new SessionAgentOrchestrator(options);
   orchestrators.set(options.workspaceCwd, created);
   return created;
@@ -3329,14 +3424,19 @@ export function ensureSessionAgentOrchestrator(
 
 export async function disposeSessionAgentOrchestrator(
   workspaceCwd: string,
+  reason: SessionAgentStopReason = 'shutdown',
 ): Promise<void> {
   const existing = orchestrators.get(workspaceCwd);
   if (!existing) return;
   orchestrators.delete(workspaceCwd);
-  await existing.dispose();
+  await existing.dispose(reason);
 }
 
-export async function disposeAllSessionAgentOrchestrators(): Promise<void> {
+export async function disposeAllSessionAgentOrchestrators(
+  reason: SessionAgentStopReason = 'shutdown',
+): Promise<void> {
   const all = [...orchestrators.keys()];
-  await Promise.all(all.map((cwd) => disposeSessionAgentOrchestrator(cwd)));
+  await Promise.all(
+    all.map((cwd) => disposeSessionAgentOrchestrator(cwd, reason)),
+  );
 }

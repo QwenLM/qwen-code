@@ -93,6 +93,7 @@ describe('session agents binding store', () => {
           leaderAgentId: 'ag_1',
           startedByRecordId: 'r1',
           outstandingRunIds: ['sr_2'],
+          pendingWakeRunIds: ['sr_3'],
           active: true,
         },
       };
@@ -103,6 +104,7 @@ describe('session agents binding store', () => {
       leaderAgentId: 'ag_1',
       startedByRecordId: 'r1',
       outstandingRunIds: ['sr_2'],
+      pendingWakeRunIds: ['sr_3'],
       active: true,
     });
     // A malformed engagement refuses the write rather than wedging reads.
@@ -111,6 +113,11 @@ describe('session agents binding store', () => {
         file.squads = {
           sq_1: { leaderAgentId: 'ag_1' } as never,
         };
+      }),
+    ).rejects.toThrow(/Malformed/);
+    await expect(
+      updateSessionAgents(projectRoot, SESSION, (file) => {
+        file.squads!['sq_1']!.pendingWakeRunIds = [3] as never;
       }),
     ).rejects.toThrow(/Malformed/);
   });
@@ -156,6 +163,19 @@ describe('session agents binding store', () => {
     expect(trimmed[0]?.id).toBe('live');
     expect(trimmed.some((r) => r.id === 't0')).toBe(false);
     expect(trimmed.some((r) => r.id === `t${terminal.length - 1}`)).toBe(true);
+  });
+
+  it('never trims a terminal run whose reply was not recorded', () => {
+    const terminal = Array.from(
+      { length: MAX_TERMINAL_SESSION_AGENT_RUNS + 5 },
+      (_, index) => run(`t${index}`, 'completed', { endedAt: index + 10 }),
+    );
+    const owed = run('owed', 'failed', { endedAt: 0, recorded: false });
+    const trimmed = trimTerminalRuns([owed, ...terminal]);
+    expect(trimmed.some((r) => r.id === 'owed')).toBe(true);
+    expect(trimmed.filter((r) => r.recorded !== false)).toHaveLength(
+      MAX_TERMINAL_SESSION_AGENT_RUNS,
+    );
   });
 
   it('authorizes a planned native session only while a local run executes', async () => {

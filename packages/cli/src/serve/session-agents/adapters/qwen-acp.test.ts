@@ -45,12 +45,16 @@ function eventFeed() {
 
 /**
  * A bridge whose turn keeps "thinking": `sendPrompt` never settles on its
- * own (it settles only when the turn ends) and the turn stays `running`
- * until the test ends it.
+ * own (it settles only when the turn ends; set `promptSettles` for a turn
+ * that ends) and the turn stays `running` until the test ends it.
  */
 function thinkingBridge() {
   const feed = eventFeed();
-  const turn: { promptId?: string; state: 'running' | 'cancelled' } = {
+  const turn: {
+    promptId?: string;
+    state: 'running' | 'completed' | 'cancelled';
+    promptSettles?: boolean;
+  } = {
     state: 'running',
   };
   const bridge = {
@@ -74,7 +78,9 @@ function thinkingBridge() {
         context: { promptId?: string } | undefined,
       ) => {
         turn.promptId = context?.promptId;
-        return new Promise<never>(() => {});
+        return turn.promptSettles
+          ? Promise.resolve()
+          : new Promise<void>(() => {});
       },
     ),
     cancelSession: vi.fn(async () => {}),
@@ -179,6 +185,40 @@ describe('createQwenAcpAdapter', () => {
     });
     // The pending `sendPrompt` never settled: the adapter stopped waiting.
     expect(bridge.cancelSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops its stop listener from the run signal when the turn completes', async () => {
+    const { bridge, turn } = thinkingBridge();
+    turn.state = 'completed';
+    turn.promptSettles = true;
+    const adapter = createQwenAcpAdapter({
+      bridge: bridge as unknown as QwenAcpAdapterBridge,
+      workspaceCwd: WS,
+      agentId: AGENT_ID,
+      idleCloseMs: 60_000,
+      sessionExists: async () => true,
+    });
+    const controller = new AbortController();
+    const added = vi.spyOn(controller.signal, 'addEventListener');
+    const removed = vi.spyOn(controller.signal, 'removeEventListener');
+    await expect(
+      adapter.runTurn({
+        prompt: 'quick one',
+        nativeSessionId: SESSION_ID,
+        cwd: WS,
+        signal: controller.signal,
+        onEvent: () => {},
+        awaitPermission: () => new Promise<string>(() => {}),
+      }),
+    ).resolves.toMatchObject({ status: 'completed' });
+    const listeners = added.mock.calls
+      .filter(([type]) => type === 'abort')
+      .map(([, listener]) => listener);
+    expect(listeners).toHaveLength(1);
+    expect(removed).toHaveBeenCalledWith('abort', listeners[0]);
+    // Stopping the (reused) signal later reaches no ended turn.
+    controller.abort();
+    expect(bridge.cancelSession).not.toHaveBeenCalled();
   });
 
   it('reports cancelled when the turn does not settle in time after a stop', async () => {

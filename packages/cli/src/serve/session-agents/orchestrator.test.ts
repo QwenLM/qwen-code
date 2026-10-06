@@ -27,10 +27,12 @@ import type { AgentAdapterContext } from './adapters/index.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import { SessionAgentEventHub } from './events.js';
 import {
+  RECORD_RECOVERY_WATCH_MAX_MS,
   RECORD_WATCH_MAX_MS,
   SESSION_AGENT_OFFLINE_ERROR,
   SESSION_AGENT_REPLY_NOT_RECORDED_ERROR,
   SESSION_AGENT_RESTARTED_ERROR,
+  SESSION_AGENT_STOPPED_ERRORS,
   SessionAgentError,
   SessionAgentOrchestrator,
   type SessionAgentBridge,
@@ -1083,6 +1085,39 @@ describe('SessionAgentOrchestrator', () => {
     });
   });
 
+  it('fails a run stopped because collaboration was turned off with that reason', async () => {
+    const first = harness();
+    const { runs } = await first.orchestrator.mention(SESSION, {
+      text: '@alice write it',
+      clientMessageId: 'm1',
+    });
+    const runId = runs[0]!.runId;
+    await vi.waitFor(() => expect(first.turns).toHaveLength(1));
+    await first.orchestrator.dispose('collaboration_disabled');
+    const stopped = SESSION_AGENT_STOPPED_ERRORS.collaboration_disabled;
+    expect(stopped).toBe('stopped: agent collaboration was turned off');
+    await vi.waitFor(async () =>
+      expect(
+        (await fileFor()).runs.find((run) => run.id === runId),
+      ).toMatchObject({ status: 'failed', error: stopped, recorded: false }),
+    );
+    expect(first.lastFrame(runId)).toMatchObject({
+      status: 'failed',
+      error: stopped,
+      retryable: true,
+    });
+
+    // Turned back on: offered for retry with the same reason, and not
+    // looked for in the transcript (nothing was written).
+    const loadRecords = vi.fn(async () => []);
+    const second = harness({ extra: { loadRecords } });
+    expect(await second.orchestrator.snapshot(SESSION)).toMatchObject([
+      { runId, status: 'failed', error: stopped, retryable: true },
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(loadRecords).not.toHaveBeenCalled();
+  });
+
   it('resets the read cursor when a resume was rejected', async () => {
     const { orchestrator, turns } = harness();
     await orchestrator.mention(SESSION, {
@@ -1693,5 +1728,122 @@ describe('SessionAgentOrchestrator squads', () => {
       triggerRecordIds: [`pending:unrecorded:${aliceRunId}`],
     });
     expect(h.messageOf('ag_alice')).toBeUndefined();
+  });
+
+  /**
+   * A member reply whose record write keeps failing, so its leader's wake is
+   * pending when the daemon stops. Returns the first daemon (disposed), the
+   * member's run id and the reply's record request.
+   */
+  async function stopWithMemberReplyPending() {
+    const first = squadHarness();
+    await first.orchestrator.mention(SESSION, {
+      text: '@crew go',
+      clientMessageId: 'm1',
+    });
+    await vi.waitFor(() => expect(first.turnOf('ag_lead')).toBeDefined());
+    first.turnOf('ag_lead')!.finish({ outputText: '@alice fix it' });
+    await vi.waitFor(() => expect(first.turnOf('ag_alice')).toBeDefined());
+    const write = first.bridge.appendExternalRecord.getMockImplementation()!;
+    first.bridge.appendExternalRecord.mockImplementation(
+      async (sessionId, request) => {
+        if (
+          request.kind === 'agent_message' &&
+          request.payload.author.agentId === 'ag_alice'
+        ) {
+          throw new Error('disk full');
+        }
+        return write(sessionId, request);
+      },
+    );
+    first.turnOf('ag_alice')!.finish({ outputText: 'Fixed in auth.ts.' });
+    const aliceRunId = first.frames.find(
+      (frame) => frame.author.agentId === 'ag_alice',
+    )!.runId;
+    await vi.waitFor(async () =>
+      expect(await first.engagement()).toMatchObject({
+        active: true,
+        pendingWakeRunIds: [aliceRunId],
+      }),
+    );
+    await first.orchestrator.dispose();
+    const reply = first.bridge.appendExternalRecord.mock.calls
+      .map(([, request]) => request)
+      .find(
+        (request) =>
+          request.kind === 'agent_message' &&
+          request.payload.author.agentId === 'ag_alice',
+      )!;
+    return { first, aliceRunId, reply };
+  }
+
+  it('wakes the leader after a restart once a pending member record is found', async () => {
+    const { first, aliceRunId, reply } = await stopWithMemberReplyPending();
+    const second = squadHarness();
+    // The record turned up in the transcript after all.
+    second.bridge.records.push(...first.bridge.records, {
+      uuid: 'rec-alice',
+      type: 'user',
+      subtype: 'agent_message',
+      systemPayload: reply.payload,
+    });
+
+    await vi.waitFor(() => expect(second.turnOf('ag_lead')).toBeDefined());
+    expect(second.turnOf('ag_lead')!.input.prompt).toContain(
+      'Fixed in auth.ts.',
+    );
+    await vi.waitFor(() =>
+      expect(second.lastFrame(aliceRunId)).toMatchObject({
+        recorded: true,
+        recordId: 'rec-alice',
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // Woken once.
+    expect(
+      second.turns.filter((turn) => turn.context.agentId === 'ag_lead'),
+    ).toHaveLength(1);
+    const file = await fileFor();
+    const leaderRuns = file.runs.filter((run) => run.agentId === 'ag_lead');
+    expect(leaderRuns).toHaveLength(2);
+    expect(leaderRuns[1]).toMatchObject({
+      squadId: 'sq_1',
+      triggerRecordIds: ['rec-alice'],
+    });
+    expect(file.squads?.['sq_1']).not.toHaveProperty('pendingWakeRunIds');
+  });
+
+  it('wakes the leader after a restart with the unrecorded reply when its record never turns up', async () => {
+    const { first, aliceRunId } = await stopWithMemberReplyPending();
+    let clock = Date.now();
+    const second = squadHarness({ extra: { now: () => clock } });
+    second.bridge.records.push(...first.bridge.records);
+    expect(await second.orchestrator.snapshot(SESSION)).toContainEqual(
+      expect.objectContaining({ runId: aliceRunId, retryable: true }),
+    );
+    // Still looking for the record: the engagement stays open.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(second.turnOf('ag_lead')).toBeUndefined();
+    expect((await second.engagement())?.active).toBe(true);
+
+    clock += RECORD_RECOVERY_WATCH_MAX_MS;
+    // The watcher backs off; its next check may be a while.
+    await vi.waitFor(() => expect(second.turnOf('ag_lead')).toBeDefined(), {
+      timeout: 3_000,
+    });
+    const wake = second.turnOf('ag_lead')!.input.prompt;
+    expect(wake).toContain('not in the conversation record');
+    expect(wake).toContain('disk full');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(
+      second.turns.filter((turn) => turn.context.agentId === 'ag_lead'),
+    ).toHaveLength(1);
+    const file = await fileFor();
+    expect(
+      file.runs.filter((run) =>
+        run.triggerRecordIds.includes(`pending:unrecorded:${aliceRunId}`),
+      ),
+    ).toMatchObject([{ agentId: 'ag_lead', squadId: 'sq_1' }]);
+    expect(file.squads?.['sq_1']).not.toHaveProperty('pendingWakeRunIds');
   });
 });

@@ -69,6 +69,12 @@ export type A2AFailure =
 export const A2A_REMOTE_AGENT_UNSUPPORTED =
   'Remote agents cannot take A2A tasks in this build.';
 
+/**
+ * Leads a remote agent's skill description on the caller's card (see
+ * {@link a2aAgentCardForCaller}): a task sent to it answers `unsupported`.
+ */
+export const A2A_REMOTE_AGENT_CARD_NOTE = `Unavailable via A2A in this build: ${A2A_REMOTE_AGENT_UNSUPPORTED}`;
+
 export type A2AResult<T> =
   | { ok: true; value: T }
   | ({ ok: false } & A2AFailure);
@@ -382,6 +388,14 @@ export interface A2AAgentCard {
  * does not learn from the card that other agents exist. The unauthenticated
  * card at `.well-known/agent-card.json` is a different, deliberately emptier
  * document — it exists for discovery, not for enumeration.
+ *
+ * A granted remote (managed-host) agent stays on the card, its description
+ * led by {@link A2A_REMOTE_AGENT_CARD_NOTE}, rather than being left out: the
+ * transport answers an empty skill list as `refused` (routes/a2a.ts,
+ * `getAuthenticatedExtendedAgentCard`), so omitting it would make a granted
+ * caller look unauthorised. Like `a2aSendMessage`, which checks the grant
+ * before locality, only an authorised caller learns where the agent runs,
+ * and `refused` stays distinct from `unsupported`.
  */
 export async function a2aAgentCardForCaller(
   projectRoot: string,
@@ -393,10 +407,13 @@ export async function a2aAgentCardForCaller(
   for (const agentId of agentIds) {
     const auth = await authorize(projectRoot, caller, agentId);
     if (!auth.ok) continue;
+    const description = auth.agent.description ?? '';
     skills.push({
       id: auth.agent.id,
       name: auth.agent.name,
-      description: auth.agent.description ?? '',
+      description: isAgentLocal(auth.agent)
+        ? description
+        : [A2A_REMOTE_AGENT_CARD_NOTE, description].filter(Boolean).join(' '),
     });
   }
   return {

@@ -12,7 +12,10 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { SessionAgentError } from '../session-agents/orchestrator.js';
+import {
+  disposeSessionAgentOrchestrator,
+  SessionAgentError,
+} from '../session-agents/orchestrator.js';
 import {
   registerSessionAgentRoutes,
   registerSessionAgentSendRoute,
@@ -264,5 +267,50 @@ describe('session agent routes', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ text: 'hi' });
     expect(none.status).toBe(401);
+  });
+
+  it('tells the orchestrator why it is torn down', () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      let enabled = true;
+      const runtime = {
+        workspaceId: 'ws',
+        workspaceCwd: '/work/ws',
+        trusted: true,
+        bridge: {},
+      };
+      const app = express();
+      registerSessionAgentRoutes(app, {
+        workspaceRegistry: {
+          list: () => [runtime as unknown as WorkspaceRuntime],
+        } as unknown as WorkspaceRegistry,
+        mutate: () => (_req, _res, next) => next(),
+        isAgentCollaborationEnabledFor: () => enabled,
+      });
+      apps.push(app);
+      // Brought up at registration.
+      expect(ensureOrchestrator).toHaveBeenCalledTimes(1);
+
+      enabled = false;
+      vi.advanceTimersByTime(5_000);
+      expect(disposeSessionAgentOrchestrator).toHaveBeenCalledTimes(1);
+      expect(disposeSessionAgentOrchestrator).toHaveBeenCalledWith(
+        '/work/ws',
+        'collaboration_disabled',
+      );
+
+      enabled = true;
+      vi.advanceTimersByTime(5_000);
+      expect(ensureOrchestrator).toHaveBeenCalledTimes(2);
+      runtime.trusted = false;
+      vi.advanceTimersByTime(5_000);
+      expect(disposeSessionAgentOrchestrator).toHaveBeenCalledTimes(2);
+      expect(disposeSessionAgentOrchestrator).toHaveBeenLastCalledWith(
+        '/work/ws',
+        'workspace_untrusted',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

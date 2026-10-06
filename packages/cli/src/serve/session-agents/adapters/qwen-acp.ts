@@ -492,6 +492,8 @@ export function createQwenAcpAdapter(
       };
 
       let result: AgentAdapterTurnResult;
+      // Removed when the turn ends: the run's signal outlives it.
+      let onStop: (() => void) | undefined;
       try {
         if (input.signal.aborted) {
           result = await cancel();
@@ -500,9 +502,8 @@ export function createQwenAcpAdapter(
           // the stop signal (it forwards the cancel to the child) and stop
           // waiting on it as soon as the run is stopped.
           const stopped = new Promise<'stopped'>((resolve) => {
-            input.signal.addEventListener('abort', () => resolve('stopped'), {
-              once: true,
-            });
+            onStop = () => resolve('stopped');
+            input.signal.addEventListener('abort', onStop, { once: true });
           });
           const sent = bridge.sendPrompt(
             sessionId,
@@ -583,6 +584,7 @@ export function createQwenAcpAdapter(
               nativeSessionId: sessionId,
             };
       } finally {
+        if (onStop) input.signal.removeEventListener('abort', onStop);
         streamController.abort();
         await follow;
         scheduleIdleClose(sessionId);

@@ -243,7 +243,9 @@ export interface SessionAgentRunFrame {
   recordId?: string;
   /**
    * A finished run with no record in the transcript that can run again:
-   * interrupted by a daemon restart (`failed`, error "daemon restarted"),
+   * interrupted by a daemon restart (`failed`, error "daemon restarted") or
+   * another stop of the daemon's agents (error "stopped: …", e.g. agent
+   * collaboration turned off),
    * stopped because its runtime went `offline`, or finished before a restart
    * with its record never written. Offer "Retry"
    * (`POST .../runs/:runId/retry`) and "Dismiss"
@@ -368,6 +370,13 @@ export interface SessionSquadEngagement {
   startedByRecordId: string;
   /** Member runs the leader delegated and has not yet been woken for. */
   outstandingRunIds: string[];
+  /**
+   * Member runs that finished while their reply's record was still pending:
+   * each owes the leader a wake once the record lands (or the reply is given
+   * up on). Persisted so a restarted daemon still wakes the leader. Absent
+   * when none.
+   */
+  pendingWakeRunIds?: string[];
   active: boolean;
 }
 

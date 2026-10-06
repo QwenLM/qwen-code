@@ -11,7 +11,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../../config/storage.js';
 import { issueA2AGrant } from './a2a-grants.js';
 import {
+  A2A_REMOTE_AGENT_CARD_NOTE,
   A2A_REMOTE_AGENT_UNSUPPORTED,
+  a2aAgentCardForCaller,
   a2aCancelTask,
   a2aGetTask,
   a2aListTasks,
@@ -122,6 +124,50 @@ describe('A2A tasks', () => {
         },
       ),
     ).resolves.toEqual({ ok: false, kind: 'refused' });
+  });
+
+  it('marks a granted remote agent on the card instead of leaving it out', async () => {
+    await updateWorkspaceAgents(PROJECT_ROOT, () => [
+      { id: 'ag_lead', name: 'lead', createdAt: 1, description: 'Leads.' },
+      {
+        id: 'ag_far',
+        name: 'far',
+        createdAt: 1,
+        description: 'Runs elsewhere.',
+        execution: { mode: 'managed-host', hostIds: ['ho_1'] },
+      },
+    ]);
+    const local = await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: 'ag_lead',
+    });
+    const remote = await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_2',
+      agentId: 'ag_far',
+    });
+    const cardFor = (callerId: string, secret: string, agentId: string) =>
+      a2aAgentCardForCaller(
+        PROJECT_ROOT,
+        { callerId, secret },
+        [agentId],
+        'http://localhost',
+      );
+
+    expect((await cardFor('share_1', local.secret, 'ag_lead')).skills).toEqual([
+      { id: 'ag_lead', name: 'lead', description: 'Leads.' },
+    ]);
+    // Still listed (an empty card reads as `refused`), but marked: a task
+    // sent to it answers `unsupported`.
+    expect((await cardFor('share_2', remote.secret, 'ag_far')).skills).toEqual([
+      {
+        id: 'ag_far',
+        name: 'far',
+        description: `${A2A_REMOTE_AGENT_CARD_NOTE} Runs elsewhere.`,
+      },
+    ]);
+    expect(A2A_REMOTE_AGENT_CARD_NOTE).toContain(A2A_REMOTE_AGENT_UNSUPPORTED);
+    // A caller without a valid grant learns nothing about it.
+    expect((await cardFor('share_2', 'wrong', 'ag_far')).skills).toEqual([]);
   });
 
   it('answers a malformed task id as not found', async () => {

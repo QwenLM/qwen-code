@@ -41,6 +41,7 @@ import {
   getSessionAgentOrchestrator,
   SessionAgentError,
   type SessionAgentOrchestrator,
+  type SessionAgentStopReason,
 } from '../session-agents/orchestrator.js';
 import { getSessionAgentEventHub } from '../session-agents/events.js';
 import { detectFromLoopback } from '../server/request-helpers.js';
@@ -259,21 +260,29 @@ export function registerSessionAgentRoutes(
       const runtime = runtimes.find(
         (candidate) => candidate.workspaceCwd === workspaceCwd,
       );
-      let gone = true;
+      // Why the orchestrator stops: the error its interrupted runs show.
+      let reason: SessionAgentStopReason | undefined;
       try {
-        gone =
-          !runtime ||
-          !runtime.trusted ||
-          runtime.generationGuard?.closed === true ||
+        if (!runtime || runtime.generationGuard?.closed === true) {
+          reason = 'workspace_closed';
+        } else if (!runtime.trusted) {
+          reason = 'workspace_untrusted';
+        } else if (
           runtime.bridge !== owner.bridge ||
-          runtime.generationGuard !== owner.generationGuard ||
-          !deps.isAgentCollaborationEnabledFor(workspaceCwd);
+          runtime.generationGuard !== owner.generationGuard
+        ) {
+          reason = 'runtime_replaced';
+        } else if (!deps.isAgentCollaborationEnabledFor(workspaceCwd)) {
+          reason = 'collaboration_disabled';
+        }
       } catch {
-        gone = true;
+        reason = 'shutdown';
       }
-      if (!gone) continue;
+      if (!reason) continue;
       owners.delete(workspaceCwd);
-      void disposeSessionAgentOrchestrator(workspaceCwd).catch(() => {});
+      void disposeSessionAgentOrchestrator(workspaceCwd, reason).catch(
+        () => {},
+      );
     }
   };
   const teardownTimer = setInterval(teardownCheck, TEARDOWN_CHECK_MS);
