@@ -183,8 +183,8 @@ class WorkspaceSessionCloseTest {
     }
 
     private void grant(String tenant, String actor) {
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                + " VALUES (?, 'ws', ?, TRUE, TRUE)", tenant, actor.getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES (?, 'ws', ?, 'OPERATOR')", tenant, actor.getBytes(StandardCharsets.UTF_8));
     }
 
     private AuthenticatedTenantActor actor(String tenant, String id) {

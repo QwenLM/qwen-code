@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -85,7 +86,7 @@ public class WorkspaceExecutionStore {
                 + " r.workspace_generation, r.storage_id, r.state,"
                 + " c.tenant_id AS command_tenant, c.session_id AS command_session,"
                 + " a.tenant_id AS access_tenant, a.workspace_id AS access_workspace,"
-                + " a.can_read, a.can_create FROM managed_agent_session s"
+                + " a.role FROM managed_agent_session s"
                 + " JOIN managed_workspace_registry r ON r.tenant_id = s.tenant_id"
                 + " AND r.workspace_id = s.workspace_id"
                 + " JOIN managed_workspace_create_command c ON c.tenant_id = s.tenant_id"
@@ -113,7 +114,8 @@ public class WorkspaceExecutionStore {
                         && binding.getWorkspaceGeneration() == row.getLong("workspace_generation")
                         && binding.getStorageId().equals(row.getString("storage_id"))
                         && "ACTIVE".equals(row.getString("state"))
-                        && row.getBoolean("can_read") && row.getBoolean("can_create")
+                        && WorkspaceAccess.valueOf(row.getString("role"))
+                                .atLeast(WorkspaceAccess.OPERATOR)
                         && WorkspaceExecutionProfile.CONFIG_REF.equals(
                                 row.getString("workspace_config_ref"))
                         && WorkspaceExecutionProfile.POLICY_REF.equals(
