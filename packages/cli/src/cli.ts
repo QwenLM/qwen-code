@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
+import { FatalError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
   DEFAULT_COMMAND,
   DEFAULT_COMMAND_DESC,
@@ -490,20 +491,28 @@ async function parseYargsCommand(
   parser: Argv,
   argv: readonly string[],
 ): Promise<void> {
-  await new Promise<void>((resolve) => {
-    parser.parse(
-      argv,
-      (error: Error | undefined, _argv: ArgumentsCamelCase, output: string) => {
-        if (output) {
-          writeStdoutLine(output);
-        }
-        if (error) {
-          writeStderrLine(error.message);
-          process.exitCode = 1;
-        }
-        resolve();
-      },
-    );
+  await new Promise<void>((resolve, reject) => {
+    void Promise.resolve(
+      parser.parse(
+        argv,
+        (
+          error: Error | undefined,
+          _argv: ArgumentsCamelCase,
+          output: string,
+        ) => {
+          if (error instanceof FatalError) {
+            reject(error);
+            return;
+          }
+          if (output) writeStdoutLine(output);
+          if (error) {
+            writeStderrLine(error.message);
+            process.exitCode = 1;
+          }
+          resolve();
+        },
+      ),
+    ).catch(reject);
   });
 }
 
@@ -566,7 +575,9 @@ export async function runCliEntry(
     await runMcpFastPath(argv);
     return;
   } else if (route === 'managed-runtime-worker') {
-    if (argv.length !== 1) {
+    const containerBoot =
+      argv.length === 3 && argv[1] === '--container-boot' ? argv[2] : undefined;
+    if (argv.length !== 1 && !containerBoot) {
       writeStderrLine('Managed Runtime worker arguments are invalid.');
       process.exitCode = 1;
       return;
@@ -574,7 +585,7 @@ export async function runCliEntry(
     const { runManagedRuntimeAttestationWorker } = await import(
       './serve/managed-runtime-attestation-worker.js'
     );
-    await runManagedRuntimeAttestationWorker();
+    await runManagedRuntimeAttestationWorker(containerBoot);
     return;
   } else if (route === 'help') {
     await printTopLevelHelp();

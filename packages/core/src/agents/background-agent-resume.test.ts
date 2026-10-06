@@ -612,6 +612,16 @@ describe('BackgroundAgentResumeService', () => {
     return metaPath;
   }
 
+  it('explains how to discover the roster after recovery', () => {
+    const service = new BackgroundAgentResumeService({} as Config);
+    expect(service.buildRecoveredBackgroundAgentsModelNotice(1)).toContain(
+      'In Direct mode: If the list_agents tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
+    );
+    expect(service.buildRecoveredBackgroundAgentsNotice(1)).not.toContain(
+      'tool_search',
+    );
+  });
+
   it('restores interrupted and completed background agents without notifying again', async () => {
     const sessionId = 'session-1';
     const runningAgentId = 'agent-running';
@@ -1284,7 +1294,7 @@ describe('BackgroundAgentResumeService', () => {
         getTerminateMode: () => AgentTerminateMode.GOAL,
         getFinalText: () => 'done',
       };
-      const { service, subagentManager, stubToolRegistry } = createService({
+      const { service, subagentManager } = createService({
         toolMode,
         // The session this resume runs in does have the Skill tool; the rows
         // below are about `subagentWillHaveSkillTool`, not about #12838's
@@ -1303,7 +1313,6 @@ describe('BackgroundAgentResumeService', () => {
           isSkillActive: vi.fn().mockReturnValue(true),
         },
       });
-      stubToolRegistry.getAllToolNames.mockReturnValue([ToolNames.SKILL]);
       subagentManager.loadSubagent.mockResolvedValue({
         name: 'researcher',
         color: 'cyan',

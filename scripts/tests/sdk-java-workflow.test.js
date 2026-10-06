@@ -89,13 +89,31 @@ describe('SDK Java self-hosted workflow guards', () => {
 
 // #12940: the duplicate-version guard is the fast lane for a collision two
 // green PRs can only produce in the merge result, so it runs on every
-// trigger — no self-hosted routing, no Java, no database.
+// trigger — no job-level condition, no Java, no database. #13245 moved its
+// trusted runs onto the ECS pool (a seconds-long scan sat 26 minutes in the
+// hosted queue); untrusted fork PRs stay hosted.
 describe('SDK Java Flyway migration version guard', () => {
   it('runs the uniqueness check as an unconditional job', () => {
     const block = job('flyway-migrations');
-    expect(block).toContain("runs-on: 'ubuntu-latest'");
+    const parsed = parse(workflow).jobs['flyway-migrations'];
+    expect(parsed.if).toBeUndefined();
+    for (const fragment of [
+      "github.event_name != ''pull_request''",
+      'github.event.pull_request.head.repo.full_name == github.repository',
+      "vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true''",
+      'fromJSON(\'\'["self-hosted", "linux", "x64", "ecs-qwen"]\'\')',
+      "fromJSON(''[\"ubuntu-latest\"]'')",
+    ]) {
+      expect(block).toContain(fragment);
+    }
+    // The merge result is the point: keep the default merge-ref checkout on
+    // the pool too, never the refs/pull/N/head the build lanes use.
     expect(block).toContain('actions/checkout@');
-    expect(block).not.toContain('if:');
+    expect(block).not.toContain('refs/pull/');
+    const steps = parsed.steps.map((s) => s.name);
+    expect(steps.indexOf('Restore workspace ownership')).toBeLessThan(
+      steps.indexOf('Checkout'),
+    );
     expect(block).toContain(
       "run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'",
     );

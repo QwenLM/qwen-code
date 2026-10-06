@@ -35,6 +35,7 @@ export interface JoinToken {
   token: string;
   workspaceId: string;
   expiresAt: number;
+  replacementHostId?: string;
 }
 
 export interface ConnectExistingInput {
@@ -44,6 +45,25 @@ export interface ConnectExistingInput {
   serverUrl: string;
   provider: 'qwen';
   allowHttp: boolean;
+}
+
+export function findReplacementRuntime(
+  runtimes: readonly RuntimeSummary[],
+  knownIds: ReadonlySet<string>,
+  supersededHostId: string,
+  replacementHostId?: string,
+): RuntimeSummary | undefined {
+  if (runtimes.some((runtime) => runtime.id === supersededHostId)) {
+    return undefined;
+  }
+  return runtimes.find(
+    (runtime) =>
+      runtime.kind === 'external' &&
+      runtime.status === 'online' &&
+      (replacementHostId
+        ? runtime.id === replacementHostId
+        : !knownIds.has(runtime.id)),
+  );
 }
 
 function onlineIds(runtimes: readonly RuntimeSummary[]): Set<string> {
@@ -126,15 +146,17 @@ export function AddRuntimeDialog({
   onCreateJoinToken,
   onConnectExisting,
   onCreateAgentOn,
+  replacementTarget,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** The coordinator address this page talks to; the link's default. */
   serverUrl: string;
   runtimes: readonly RuntimeSummary[];
-  onCreateJoinToken: () => Promise<JoinToken>;
+  onCreateJoinToken: (supersedesHostId?: string) => Promise<JoinToken>;
   onConnectExisting?: (input: ConnectExistingInput) => Promise<boolean>;
   onCreateAgentOn?: (runtimeId: string) => void;
+  replacementTarget?: RuntimeSummary;
 }) {
   const { t } = useI18n();
   const [method, setMethod] = useState<'command' | 'existing'>('command');
@@ -150,19 +172,25 @@ export function AddRuntimeDialog({
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const replacementHostId = replacementTarget?.id;
 
-  const connected = useMemo(
-    () =>
-      watch
-        ? runtimes.find(
-            (runtime) =>
-              runtime.kind === 'external' &&
-              runtime.status === 'online' &&
-              !watch.known.has(runtime.id),
-          )
-        : undefined,
-    [watch, runtimes],
-  );
+  const connected = useMemo(() => {
+    if (!watch) return undefined;
+    if (replacementHostId) {
+      return findReplacementRuntime(
+        runtimes,
+        watch.known,
+        replacementHostId,
+        join?.replacementHostId,
+      );
+    }
+    return runtimes.find(
+      (runtime) =>
+        runtime.kind === 'external' &&
+        runtime.status === 'online' &&
+        !watch.known.has(runtime.id),
+    );
+  }, [replacementHostId, runtimes, watch, join?.replacementHostId]);
   const waiting = open && watch !== undefined && !connected;
   useEffect(() => {
     if (!waiting) return;
@@ -184,10 +212,12 @@ export function AddRuntimeDialog({
     setError(undefined);
     try {
       if (!safeHost(address)) throw new Error(t('collab.runtime.badAddress'));
-      setJoin(await onCreateJoinToken());
+      setJoin(await onCreateJoinToken(replacementHostId));
       setWatch({
         at: Date.now(),
-        known: onlineIds(runtimes),
+        known: replacementHostId
+          ? new Set(runtimes.map((runtime) => runtime.id))
+          : onlineIds(runtimes),
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -239,11 +269,36 @@ export function AddRuntimeDialog({
           truncate inside it instead of widening the dialog past the screen. */}
       <DialogContent className="grid-cols-[minmax(0,1fr)] sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>{t('collab.runtime.addTitle')}</DialogTitle>
+          <DialogTitle>
+            {replacementTarget
+              ? t('collab.runtime.replaceTitle', {
+                  name: replacementTarget.label,
+                })
+              : t('collab.runtime.addTitle')}
+          </DialogTitle>
           <DialogDescription>
-            {t('collab.runtime.addDescription')}
+            {replacementTarget
+              ? t('collab.runtime.replaceDescription', {
+                  name: replacementTarget.label,
+                })
+              : t('collab.runtime.addDescription')}
           </DialogDescription>
         </DialogHeader>
+
+        {replacementTarget ? (
+          <p className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-muted-foreground">
+            {t('collab.runtime.replaceEffects')}
+          </p>
+        ) : null}
+
+        {!connected && replacementTarget && join?.replacementHostId ? (
+          <p role="status" className="text-sm text-muted-foreground">
+            {t('collab.runtime.replaceRecovery', {
+              name: replacementTarget.label,
+              id: replacementTarget.id,
+            })}
+          </p>
+        ) : null}
 
         {connected ? (
           <div className="flex flex-col gap-3">
@@ -254,7 +309,14 @@ export function AddRuntimeDialog({
               />
               <div className="min-w-0">
                 <p className="font-medium">
-                  {t('collab.runtime.connected', { name: connected.label })}
+                  {replacementTarget
+                    ? t('collab.runtime.replaced', {
+                        oldName: replacementTarget.label,
+                        name: connected.label,
+                      })
+                    : t('collab.runtime.connected', {
+                        name: connected.label,
+                      })}
                 </p>
                 <p className="text-xs text-muted-foreground">
                   {t('collab.runtime.offers', {
@@ -264,34 +326,41 @@ export function AddRuntimeDialog({
                     ).join(', '),
                   })}
                 </p>
+                {replacementTarget ? (
+                  <p className="text-xs text-muted-foreground">
+                    {t('collab.runtime.replaceCompleted')}
+                  </p>
+                ) : null}
               </div>
             </div>
           </div>
         ) : (
           <>
-            <div
-              role="tablist"
-              className="flex gap-4 border-b border-border text-sm"
-            >
-              {(['command', 'existing'] as const).map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  role="tab"
-                  aria-selected={method === value}
-                  onClick={() => setMethod(value)}
-                  className={`-mb-px border-b-2 pb-2 ${
-                    method === value
-                      ? 'border-foreground font-medium'
-                      : 'border-transparent text-muted-foreground'
-                  }`}
-                >
-                  {value === 'command'
-                    ? t('collab.runtime.methodCommand')
-                    : t('collab.runtime.methodExisting')}
-                </button>
-              ))}
-            </div>
+            {replacementTarget ? null : (
+              <div
+                role="tablist"
+                className="flex gap-4 border-b border-border text-sm"
+              >
+                {(['command', 'existing'] as const).map((value) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="tab"
+                    aria-selected={method === value}
+                    onClick={() => setMethod(value)}
+                    className={`-mb-px border-b-2 pb-2 ${
+                      method === value
+                        ? 'border-foreground font-medium'
+                        : 'border-transparent text-muted-foreground'
+                    }`}
+                  >
+                    {value === 'command'
+                      ? t('collab.runtime.methodCommand')
+                      : t('collab.runtime.methodExisting')}
+                  </button>
+                ))}
+              </div>
+            )}
 
             <label className="flex flex-col gap-1.5 text-sm">
               <span className="font-medium">{t('collab.runtime.address')}</span>
@@ -307,7 +376,7 @@ export function AddRuntimeDialog({
               </span>
             </label>
 
-            {method === 'command' ? (
+            {replacementTarget || method === 'command' ? (
               live && commands ? (
                 <div className="flex flex-col gap-3 text-sm">
                   <p className="font-medium">{t('collab.runtime.runThis')}</p>
@@ -405,14 +474,18 @@ export function AddRuntimeDialog({
                 </Button>
               )}
             </>
-          ) : method === 'command' ? (
+          ) : replacementTarget || method === 'command' ? (
             live ? (
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 {t('collab.runtime.closeKeepLink')}
               </Button>
             ) : (
               <Button disabled={busy} onClick={() => void generate()}>
-                {t('collab.runtime.generate')}
+                {t(
+                  replacementTarget && join
+                    ? 'collab.runtime.refreshReplacement'
+                    : 'collab.runtime.generate',
+                )}
               </Button>
             )
           ) : (
