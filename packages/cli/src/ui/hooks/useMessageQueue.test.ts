@@ -1650,5 +1650,45 @@ describe('useMessageQueue', () => {
       // The typed text follows its envelope, never ahead of it.
       expect(submission).toMatchObject({ kind: 'user' });
     });
+
+    it('carries the displayed marker through restore and a later drain', () => {
+      // The mid-turn hook's retry dedup rests on this link: a restore that
+      // marked an entry must hand the marker back on the next drain. It
+      // lives in `drainPeerEntries`' return mapping — delete the `displayed`
+      // spread there and a retry re-renders the notification every time
+      // while the model still receives one message.
+      const { result } = renderHook(() => useMessageQueue());
+      const delivery = {
+        msgId: 'm1',
+        from: '/tmp/peer.sock',
+        toSessionId: 's1',
+        priority: 'now' as const,
+      };
+      act(() => {
+        result.current.addPeerMessage(
+          '<envelope one>',
+          'Session A: one',
+          delivery,
+        );
+      });
+      let batch: ReturnType<typeof result.current.drainPeerEntries> = [];
+      act(() => {
+        batch = result.current.drainPeerEntries(1);
+      });
+      expect(batch).toHaveLength(1);
+      const restored = batch.map((entry) => ({ ...entry, displayed: true }));
+      act(() => {
+        result.current.restorePeerEntries(restored);
+      });
+      let again: ReturnType<typeof result.current.drainPeerEntries> = [];
+      act(() => {
+        again = result.current.drainPeerEntries(1);
+      });
+      expect(again).toHaveLength(1);
+      // A fresh projection object, not the restored one: the marker must
+      // ride the returned field, never object identity.
+      expect(again[0]).not.toBe(restored[0]);
+      expect(again[0]!.displayed).toBe(true);
+    });
   });
 });
