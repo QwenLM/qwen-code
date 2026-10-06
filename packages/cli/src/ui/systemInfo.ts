@@ -175,7 +175,7 @@ export async function getSystemInfo(
   const nodeVersion = process.version;
   const executionSandbox = formatExecutionSandbox(context.services.config);
   const npmVersion = executionSandbox
-    ? 'unavailable in tool sandbox'
+    ? 'not probed (tool execution sandbox active)'
     : await getNpmVersion();
   const sandboxEnv = executionSandbox ?? getSandboxEnv();
   const modelVersion = context.services.config?.getModel() || 'Unknown';
