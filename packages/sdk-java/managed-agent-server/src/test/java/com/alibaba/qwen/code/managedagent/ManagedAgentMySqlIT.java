@@ -827,13 +827,18 @@ class ManagedAgentMySqlIT {
                                     chain.get(1).required("occurredAt")
                                             .longValue())));
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
-            while (jdbc.queryForObject("SELECT COUNT(*) FROM"
-                    + " performance_schema.data_lock_waits w JOIN"
-                    + " performance_schema.data_locks l ON"
-                    + " l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID"
-                    + " WHERE l.OBJECT_SCHEMA = DATABASE() AND"
-                    + " l.OBJECT_NAME = 'qwen_managed_session_extension_record'",
-                    Integer.class) == 0) {
+            // Proof that the record commit is actually blocked behind the
+            // held row: the blocked statement is the only running statement
+            // on this table (the schema belongs to this test), and it ages.
+            // Lock-introspection tables are not portable here — MariaDB
+            // keeps information_schema.innodb_lock_waits empty in this
+            // exact condition while SHOW ENGINE INNODB STATUS shows the
+            // wait — so the poll reads the process list instead.
+            String blocked = "SELECT COUNT(*) FROM"
+                    + " information_schema.PROCESSLIST WHERE DB = DATABASE()"
+                    + " AND COMMAND = 'Query' AND TIME >= 1 AND INFO LIKE"
+                    + " 'UPDATE qwen_managed_session_extension_record%'";
+            while (jdbc.queryForObject(blocked, Integer.class) == 0) {
                 assertThat(commit).as("the record commit must wait on the"
                         + " held row, not finish").isNotDone();
                 assertThat(System.nanoTime()).isLessThan(deadline);
