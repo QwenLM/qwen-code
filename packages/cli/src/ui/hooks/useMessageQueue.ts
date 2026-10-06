@@ -525,9 +525,21 @@ export function useMessageQueue(): UseMessageQueueReturn {
           ? GOAL_COMMAND_RE.test(message.text)
           : !isSlashCommand(message.text)) &&
         (includeDeferred || !message.deferUntilIdle);
-      const drained = current.filter(shouldDrain);
+      // Same barrier as `popNextSubmission`'s idle path: text queued behind
+      // a waiting envelope never overtakes it into a submission, and the
+      // envelope's raw text never enters this raw-string channel. Goal
+      // commands keep their barrier-free priority, as they do there.
+      const firstPeerIndex = current.findIndex(({ peer }) => Boolean(peer));
+      const scan =
+        goalTurnActive || firstPeerIndex === -1
+          ? current
+          : current.slice(0, firstPeerIndex);
+      const drained = scan.filter(shouldDrain);
       if (drained.length === 0) return [];
-      const rest = current.filter((message) => !shouldDrain(message));
+      // Identity-based, not predicate-based: drainable entries left behind
+      // the barrier by `scan` must stay in the queue.
+      const drainedEntries = new Set(drained);
+      const rest = current.filter((message) => !drainedEntries.has(message));
       queueRef.current = rest;
       setQueuedMessages(rest);
       return drained.map(({ text }) => text);

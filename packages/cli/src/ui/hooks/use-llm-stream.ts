@@ -6050,8 +6050,13 @@ export const useLlmStream = (
                 settleBoundary(true);
               },
               restore: () => {
-                drainedSteer?.restore();
+                // Order matters: both restores prepend to the shared queue and
+                // the last one run owns the head. Steer text was queued before
+                // the envelope it post-dates, so peers settle first and steer
+                // second; reversed, a requeued envelope pins ahead of user
+                // input queued before it for the rest of the session.
                 settleBoundary(false);
+                drainedSteer?.restore();
               },
             }
           : undefined;
@@ -6062,8 +6067,8 @@ export const useLlmStream = (
       // sends an unpaired call -- the same pairing the cancellation check
       // above owes its own batch.
       if (continuationWasCancelled()) {
-        drainedSteer?.restore();
         settleBoundary(false);
+        drainedSteer?.restore();
         if (toolGoalBinding) {
           if (llmClient) {
             llmClient.addHistory({
@@ -6081,8 +6086,8 @@ export const useLlmStream = (
         return;
       }
       if (toolGoalBinding?.controller.signal.aborted) {
-        drainedSteer?.restore();
         settleBoundary(false);
+        drainedSteer?.restore();
         if (llmClient) {
           llmClient.addHistory({
             role: 'user',

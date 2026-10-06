@@ -147,6 +147,19 @@ export class PeerMidTurnBudget {
   }
 
   /**
+   * Read-only `tryConsume`: whether a drain could pay for one envelope right
+   * now. Callers use it to skip a pop they already know will be restored; it
+   * prunes nothing — the next real consume still does that.
+   */
+  hasAllowance(now: number, capacity: number): boolean {
+    if (capacity <= 0) return false;
+    return (
+      this.stamps.filter((stamp) => now - stamp < PEER_MID_TURN_WINDOW_MS)
+        .length < capacity
+    );
+  }
+
+  /**
    * Gives back allowance for envelopes whose submission did not deliver them.
    *
    * A restored batch is delivered later by the idle drain, so it never spent a

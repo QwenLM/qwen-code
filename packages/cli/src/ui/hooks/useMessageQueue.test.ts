@@ -1618,13 +1618,19 @@ describe('useMessageQueue', () => {
 
       // The raw-text steer channel may take typed input, but it must not take
       // the restored envelope: it carries neither attribution nor delivery pin,
-      // and peer-authored text must never reach user preprocessing.
+      // and peer-authored text must never reach user preprocessing. And with
+      // the envelope queued at the head, the barrier `popNextSubmission`
+      // enforces here holds there too: nothing behind it overtakes it into a
+      // submission, so the model reads the envelope before the typed text.
       let drained: string[] = [];
       act(() => {
         drained = result.current.drainQueue();
       });
-      expect(drained).toEqual(['typed text']);
-      expect(result.current.messageQueue).toEqual(['<envelope one>']);
+      expect(drained).toEqual([]);
+      expect(result.current.messageQueue).toEqual([
+        '<envelope one>',
+        'typed text',
+      ]);
 
       let submission: ReturnType<typeof result.current.popNextSubmission> =
         null;
@@ -1638,6 +1644,11 @@ describe('useMessageQueue', () => {
         displayed: true,
         delivery,
       });
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+      // The typed text follows its envelope, never ahead of it.
+      expect(submission).toMatchObject({ kind: 'user' });
     });
   });
 });

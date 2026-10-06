@@ -9396,6 +9396,9 @@ describe('usePeerMidTurnDrain', () => {
         sessionId: session.current,
         drainPeerEntries,
         restorePeerEntries,
+        // Same role it has in the live container: whether anything waits
+        // behind a spent window.
+        getQueuedPeerCount: () => queue.length,
         addHistoryItem,
       }),
     );
@@ -9551,14 +9554,20 @@ describe('usePeerMidTurnDrain', () => {
     const first = envelope('first', 'frame-1');
     const second = envelope('second', 'frame-2');
     const third = envelope('third', 'frame-3');
-    const { drain, view, queue, restorePeerEntries, addHistoryItem } =
-      renderPeerDrain({
-        peerMessaging: {
-          drainQueuedFrame: vi.fn(() => true),
-        } as unknown as PeerMessaging,
-        capacity: 1,
-        queue: [first, second],
-      });
+    const {
+      drain,
+      view,
+      queue,
+      drainPeerEntries,
+      restorePeerEntries,
+      addHistoryItem,
+    } = renderPeerDrain({
+      peerMessaging: {
+        drainQueuedFrame: vi.fn(() => true),
+      } as unknown as PeerMessaging,
+      capacity: 1,
+      queue: [first, second],
+    });
 
     const batch = drain();
     expect(batch?.entries).toEqual([
@@ -9583,24 +9592,27 @@ describe('usePeerMidTurnDrain', () => {
     expect(written[1]!.display).toBeUndefined();
     expect(noticeTexts(addHistoryItem)).toHaveLength(1);
 
-    // Same window, across a re-render: the throttle timestamp must live in a
-    // ref, so a further saturation earns no second line and a flood cannot
-    // grow the history once per envelope.
+    // Same window, across a re-render: the spent allowance is peeked BEFORE
+    // the pop, so a further boundary neither pops, burns the stale-pin check
+    // nor restores — a queued envelope simply stays queued — and the throttle
+    // timestamp in the ref earns no second line against a flood.
     view.rerender();
     queue.push(second);
     expect(drain()).toBeNull();
-    expect(restorePeerEntries).toHaveBeenNthCalledWith(2, [second]);
+    expect(drainPeerEntries).toHaveBeenCalledTimes(1);
+    expect(restorePeerEntries).toHaveBeenCalledTimes(1);
+    expect(queue).toEqual([second]);
     expect(noticeTexts(addHistoryItem)).toHaveLength(1);
 
     // Next window: the allowance is free again, and the notice is available
     // again — without this the assertions above would also pass for a notice
     // that is simply never repeated.
     vi.setSystemTime(NOW + WINDOW_MS);
-    queue.push(second, third);
+    queue.push(third);
     expect(drain()?.entries).toEqual([
       { modelText: second.modelText, displayText: second.displayText },
     ]);
-    expect(restorePeerEntries).toHaveBeenNthCalledWith(3, [third]);
+    expect(restorePeerEntries).toHaveBeenNthCalledWith(2, [third]);
     expect(noticeTexts(addHistoryItem)).toHaveLength(2);
   });
 
@@ -9658,6 +9670,7 @@ describe('usePeerMidTurnDrain', () => {
       view,
       queue,
       setSessionId,
+      drainPeerEntries,
       restorePeerEntries,
       addHistoryItem,
     } = renderPeerDrain({
@@ -9670,19 +9683,22 @@ describe('usePeerMidTurnDrain', () => {
 
     expect(drain()?.entries).toHaveLength(1);
 
-    // Control, same clock and same session: the window is spent, so neither a
-    // re-render nor another boundary frees it.
+    // Control, same clock and same session: the window is spent, so the
+    // boundary peeks the allowance, finds it gone, and short-circuits before
+    // the pop — neither a re-render nor another boundary frees it, and the
+    // queued envelope stays put (never popped, never restored).
     queue.push(second);
     expect(drain()).toBeNull();
-    expect(restorePeerEntries).toHaveBeenLastCalledWith([second]);
+    expect(drainPeerEntries).toHaveBeenCalledTimes(1);
+    expect(restorePeerEntries).not.toHaveBeenCalled();
     view.rerender();
-    queue.push(second);
     expect(drain()).toBeNull();
+    expect(drainPeerEntries).toHaveBeenCalledTimes(1);
 
     // The next session starts clean: the same envelope the previous session
-    // was throttled on now reaches the turn.
+    // was throttled on now reaches the turn, because the window and the
+    // notice throttle were dropped with the old session id.
     setSessionId('session-b');
-    queue.push(second);
     expect(drain()?.entries).toEqual([
       { modelText: second.modelText, displayText: second.displayText },
     ]);
@@ -9691,8 +9707,32 @@ describe('usePeerMidTurnDrain', () => {
     // is the throttle timestamp being dropped too.
     queue.push(third);
     expect(drain()).toBeNull();
-    expect(restorePeerEntries).toHaveBeenLastCalledWith([third]);
+    expect(restorePeerEntries).not.toHaveBeenCalled();
     expect(noticeTexts(addHistoryItem)).toHaveLength(2);
+  });
+
+  it('writes no pause notice for a spent window with nothing queued', () => {
+    // The boundary calls the drain on every tool round regardless of queue
+    // state; a spent window earns a line only while an envelope actually
+    // waits behind it. Without the pending-peer gate this drain would print
+    // a throttling notice that throttles nothing.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const first = envelope('first', 'frame-1');
+    const { drain, queue, drainPeerEntries, addHistoryItem } = renderPeerDrain({
+      peerMessaging: {
+        drainQueuedFrame: vi.fn(() => true),
+      } as unknown as PeerMessaging,
+      capacity: 1,
+      queue: [first],
+    });
+
+    expect(drain()?.entries).toHaveLength(1);
+    // Window spent, queue empty: the next boundary's drain must stay silent.
+    expect(queue).toEqual([]);
+    expect(drain()).toBeNull();
+    expect(drainPeerEntries).toHaveBeenCalledTimes(1);
+    expect(noticeTexts(addHistoryItem)).toHaveLength(0);
   });
 
   it('is inert when the window allowance is zero', () => {

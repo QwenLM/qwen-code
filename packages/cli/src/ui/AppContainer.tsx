@@ -662,6 +662,7 @@ export function usePeerMidTurnDrain({
   sessionId,
   drainPeerEntries,
   restorePeerEntries,
+  getQueuedPeerCount,
   addHistoryItem,
 }: {
   peerMessaging: PeerMessaging | null;
@@ -670,6 +671,7 @@ export function usePeerMidTurnDrain({
   sessionId: string;
   drainPeerEntries: (limit: number) => QueuedPeerSteer[];
   restorePeerEntries: (entries: QueuedPeerSteer[]) => void;
+  getQueuedPeerCount: () => number;
   addHistoryItem: (item: HistoryItemWithoutId, timestamp: number) => number;
 }): ((limit: number) => PeerMidTurnBatch | null) | null {
   // Survives renders so the window keeps counting across them; created lazily
@@ -697,6 +699,35 @@ export function usePeerMidTurnDrain({
       budgetRef.current = new PeerMidTurnBudget();
     }
     const budget = budgetRef.current;
+    // Once per window: silent throttling is the symptom this feature exists
+    // to fix, and a per-envelope notice would let a flood write history. No
+    // sender is named — the count is this session's total.
+    const writePauseNotice = (noticeAt: number) => {
+      if (noticeAt - noticeAtRef.current >= PEER_MID_TURN_WINDOW_MS) {
+        noticeAtRef.current = noticeAt;
+        // Deliberately not peer-styled: this is the session talking about
+        // itself, not an incoming envelope.
+        addHistoryItem(
+          {
+            type: MessageType.NOTIFICATION,
+            text: `Peer mid-turn delivery is paused for this window (${capacity} allowed); peer messages still arrive when the turn ends.`,
+          },
+          noticeAt,
+        );
+      }
+    };
+    // Read-only peek before the pop: once the window's allowance is spent,
+    // every boundary would otherwise run a full pop → stale-pin → restore
+    // round trip for an envelope this drain cannot pay for. The notice the
+    // deferred path would have written is still owed here — but only when an
+    // envelope is actually waiting: the boundary calls this drain every tool
+    // round, and a spent window with nothing queued throttles no one.
+    if (!budget.hasAllowance(Date.now(), capacity)) {
+      if (getQueuedPeerCount() > 0) {
+        writePauseNotice(Date.now());
+      }
+      return null;
+    }
     const taken: QueuedPeerSteer[] = [];
     // Anything the window's allowance could not pay for goes back to the queue
     // rather than being dropped mid-drain: the idle drain is the guaranteed
@@ -733,22 +764,7 @@ export function usePeerMidTurnDrain({
       debugLogger.debug(
         `peer mid-turn budget spent (${capacity} per window); deferring ${deferred.length} envelope(s) to the idle drain`,
       );
-      // Once per window: silent throttling is the symptom this feature exists
-      // to fix, and a per-envelope notice would let a flood write history. No
-      // sender is named — the count is this session's total.
-      const noticeAt = Date.now();
-      if (noticeAt - noticeAtRef.current >= PEER_MID_TURN_WINDOW_MS) {
-        noticeAtRef.current = noticeAt;
-        // Deliberately not peer-styled: this is the session talking about
-        // itself, not an incoming envelope.
-        addHistoryItem(
-          {
-            type: MessageType.NOTIFICATION,
-            text: `Peer mid-turn delivery is paused for this window (${capacity} allowed); peer messages still arrive when the turn ends.`,
-          },
-          noticeAt,
-        );
-      }
+      writePauseNotice(Date.now());
     }
     if (taken.length === 0) return null;
     let settled = false;
@@ -2892,6 +2908,7 @@ export const AppContainer = (props: AppContainerProps) => {
     sessionId: config.getSessionId(),
     drainPeerEntries,
     restorePeerEntries,
+    getQueuedPeerCount,
     addHistoryItem,
   });
 

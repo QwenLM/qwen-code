@@ -388,6 +388,8 @@ describe('useLlmStream', () => {
     goalQueueRef?: Parameters<typeof useLlmStream>[24],
     modelSwitchedFromQuotaError = false,
     midTurnPeerDrainRef?: Parameters<typeof useLlmStream>[25],
+    midTurnDrainRef?: Parameters<typeof useLlmStream>[19],
+    midTurnRestoreRef?: Parameters<typeof useLlmStream>[23],
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -464,11 +466,11 @@ describe('useLlmStream', () => {
           () => {},
           80,
           24,
-          undefined, // midTurnDrainRef
+          midTurnDrainRef,
           logger,
           availableTerminalHeightRef,
           undefined, // terminalWidthRef
-          undefined, // midTurnRestoreRef
+          midTurnRestoreRef,
           goalQueueRef,
           midTurnPeerDrainRef,
         );
@@ -7382,6 +7384,155 @@ describe('useLlmStream', () => {
     // let `/resume` believe it landed.
     await waitFor(() => expect(restore).toHaveBeenCalledTimes(1));
     expect(recordNotification).not.toHaveBeenCalled();
+  });
+
+  it('requeues a failed both-channel boundary with the envelope behind the steer text', async () => {
+    // Both restores prepend to the shared queue, so the batch restored LAST
+    // owns the head. The steer text was queued before the envelope that
+    // post-dates it, so the peer batch must go back first; reversed, the
+    // envelope pins ahead of earlier user input for the rest of the session.
+    const envelope =
+      '<cross_session_message from="/tmp/peer.sock" name="a">re-check the lease</cross_session_message>';
+    const projection = 'Session a: re-check the lease';
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordNotification: vi.fn(),
+    });
+    // The round's only send fails terminally before any content: nothing is
+    // accepted, so the settlement restores both batches.
+    mockSendMessageStream.mockImplementationOnce(() =>
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.Error,
+          value: { error: { message: 'model overloaded' } },
+        };
+        yield {
+          type: ServerLlmEventType.Finished,
+          value: { reason: 'STOP', usageMetadata: undefined },
+        };
+      })(),
+    );
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-peer-steer-restore',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+
+    const restoreOrder: string[] = [];
+    const peerRestore = vi.fn(() => {
+      restoreOrder.push('peer');
+    });
+    let steerQueued = ['steer behind the envelope'];
+    const midTurnDrainRef = {
+      current: vi.fn<() => string[]>(() => {
+        const drained = steerQueued;
+        steerQueued = [];
+        return drained;
+      }),
+    };
+    const midTurnRestoreRef = {
+      current: vi.fn(() => {
+        restoreOrder.push('steer');
+      }),
+    };
+    const peerDrain = vi
+      .fn<
+        () => {
+          entries: Array<{ modelText: string; displayText: string }>;
+          restore: () => void;
+        } | null
+      >()
+      .mockReturnValueOnce({
+        entries: [{ modelText: envelope, displayText: projection }],
+        restore: peerRestore,
+      })
+      .mockReturnValue(null);
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+        undefined,
+        undefined,
+        undefined,
+        midTurnRestoreRef,
+        undefined,
+        { current: peerDrain },
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(1));
+    // Both channels rode the one submission: tool responses, then the steer
+    // parts, then the peer envelope.
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      [
+        ...toolCallResponseParts,
+        { text: 'steer behind the envelope' },
+        { text: envelope },
+      ],
+      expect.any(AbortSignal),
+      'prompt-id-peer-steer-restore',
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
+    );
+    await waitFor(() => expect(peerRestore).toHaveBeenCalledTimes(1));
+    expect(restoreOrder).toEqual(['peer', 'steer']);
   });
 
   it('never consults the peer drain when no mid-turn peer delivery is wired', async () => {
