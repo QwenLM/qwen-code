@@ -871,7 +871,7 @@ class OperationRetryTerminalStateTest {
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-action", OperationKind.ACTION_RESPONSE, "digest",
                 "RUNNING", "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner",
-                3, 10, null, 10);
+                3, 10, null, null, null, null, 10);
         JsonNode body = actionBody();
         when(sessions.claimOperation(eq("tenant"), eq("session"),
                 eq("op-action"), anyString(), any(Duration.class)))
