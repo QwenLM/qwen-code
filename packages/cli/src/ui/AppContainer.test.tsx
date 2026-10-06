@@ -580,6 +580,8 @@ describe('AppContainer State Management', () => {
       popNextSubmission: vi.fn().mockReturnValue(null),
       restoreMessages: vi.fn(),
       restorePeerMessage: vi.fn(),
+      drainPeerEntries: vi.fn().mockReturnValue([]),
+      restorePeerEntries: vi.fn(),
       drainQueue: vi.fn().mockReturnValue([]),
     });
     mockedUseAutoAcceptIndicator.mockReturnValue(false);
@@ -8784,6 +8786,52 @@ describe('AppContainer State Management', () => {
       });
       expect(drain).toBeNull();
       expect(drainPeerEntries).not.toHaveBeenCalled();
+    });
+
+    it('drains through the shared default queue mock at a tool-round boundary', () => {
+      // The mid-turn route must be reachable with the harness's *default*
+      // queue mock, not only with per-test queue overrides: a default that
+      // omitted the peer-drain members hands the hook undefined inputs, and
+      // the first enabled boundary throws a TypeError from inside the drain
+      // closure instead of failing a readable assertion.
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={
+            {
+              ...mockSettings,
+              merged: {
+                ...mockSettings.merged,
+                agents: {
+                  ...mockSettings.merged.agents,
+                  crossSessionMessaging: true,
+                  crossSessionMidTurn: true,
+                  crossSessionMidTurnBudget: 3,
+                },
+              },
+            } as unknown as LoadedSettings
+          }
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const applied = mockedUseMessageQueue.mock.results.at(-1)!
+        .value as unknown as Record<string, Mock>;
+      expect(typeof applied['drainPeerEntries']).toBe('function');
+      const ref = mockedUseLlmStream.mock.calls.at(-1)?.[
+        MID_TURN_PEER_DRAIN_ARG_INDEX
+      ] as { current: ((limit: number) => unknown) | null } | undefined;
+      expect(
+        ref,
+        `midTurnPeerDrainRef was not captured at arg index ${MID_TURN_PEER_DRAIN_ARG_INDEX} — useLlmStream signature may have changed`,
+      ).toBeDefined();
+      // Quiescent: the default mock's drain hands back an empty batch, so the
+      // boundary finds nothing to deliver but must still have consulted it.
+      expect(ref!.current?.(1)).toBeNull();
+      expect(applied['drainPeerEntries']).toHaveBeenCalledWith(1);
+      expect(applied['restorePeerEntries']).not.toHaveBeenCalled();
     });
 
     it('normalises the budget at the call site so a nonsense value is the default, not unlimited', () => {
