@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close; cwd operations remain gated. The per-caller workspaceTurns capability on this surface advertises the same rule. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
+        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). The per-caller workspaceTurns capability on this surface advertises the same rule. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
         post: operations["webShellCreateSession"];
         delete?: never;
         options?: never;
@@ -127,6 +127,23 @@ export interface paths {
         put?: never;
         /** @description Same authorization, paging, explicit default and pre-Session capability discovery as listWorkspaces, with camelCase fields. Listing errors must not cause silent fallback to a default directory. */
         post: operations["webShellQueryWorkspaces"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/sessions/cwd/change": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description W2, implemented: the camelCase twin of the public changeSessionCwd with the matched refusal order: 400 invalid_request for a missing or malformed field; 401 actor_required without a trusted actor; 400 invalid_idempotency_key for a malformed idempotencyKey — with two documented divergences: a key over 128 characters is refused during request validation with 400 invalid_request before the service's check, and a blank idempotencyKey is refused there too, while the public header answers 400 invalid_idempotency_key for both shapes; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expectedContextRevision below 1; 404 session_not_found for an unknown Session id; 400 unsupported_feature for an unbound Session; 404 session_not_found for an unreadable Session and 403 session_operation_forbidden when a readable actor is not the creator; 409 idempotency_conflict when one key carries different content; 409 workspace_unavailable when execution is disabled; 404 session_not_found for a deleted Session — a completed change under the same key still replays instead; then 409 session_state_conflict, 409 workspace_unavailable from moved Registry facts, 409 context_revision_conflict and 409 session_context_busy exactly like the public surface. Poll the operation or await session.context.changed; do not treat 202 as activation. */
+        post: operations["webShellChangeCwd"];
         delete?: never;
         options?: never;
         head?: never;
@@ -637,6 +654,8 @@ export interface components {
          * @example services/api
          */
         WorkspaceRelativePath: string;
+        /** @enum {string} */
+        CwdOperationStatus: "pending" | "installing" | "completed" | "failed";
         WebShellWorkspaceSelection: {
             workspaceId: string;
             /** @default . */
@@ -679,11 +698,36 @@ export interface components {
                 canCreateSession?: true;
             }) | null;
         };
+        WebShellChangeCwdRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            idempotencyKey: string;
+            cwdRelative: components["schemas"]["WorkspaceRelativePath"];
+            /** Format: int64 */
+            expectedContextRevision: number;
+            requestId?: string | null;
+        };
         WebShellOperationRequest: {
             /** Format: uuid */
             sessionId: string;
             operationId: string;
         };
+        /** @description A completed operation returns the committed target revision. A replay returns the same operation identity and latest durable status, with replayed=true; polling itself is not replay. */
+        WebShellCwdOperation: {
+            operationId: string;
+            /** Format: uuid */
+            sessionId: string;
+            /** @constant */
+            type: "cwd_change";
+            status: components["schemas"]["CwdOperationStatus"];
+            /** Format: int64 */
+            expectedContextRevision: number;
+            targetCwdRelative: components["schemas"]["WorkspaceRelativePath"];
+            /** Format: int64 */
+            resultContextRevision?: number | null;
+            failureCode?: string | null;
+            replayed: boolean;
+        } & (unknown & unknown);
         WebShellAction: components["schemas"]["WebShellPermissionAction"] | components["schemas"]["WebShellQuestionAction"];
         WebShellActionResolution: {
             actionId: string;
@@ -803,7 +847,7 @@ export interface components {
             policyRevision: string;
             answers: components["schemas"]["WebShellQuestionAnswer"][];
         };
-        WebShellOperation: components["schemas"]["WebShellCommandOperation"];
+        WebShellOperation: components["schemas"]["WebShellCwdOperation"] | components["schemas"]["WebShellCommandOperation"];
         WebShellActionQueryRequest: {
             /** Format: uuid */
             sessionId: string;
@@ -1339,6 +1383,36 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellChangeCwd: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellChangeCwdRequest"];
+            };
+        };
+        responses: {
+            /** @description Durable cwd operation; acceptance does not mean the new cwd is active. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellCwdOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
         };
     };
