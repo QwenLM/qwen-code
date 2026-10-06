@@ -1763,14 +1763,22 @@ export class ExtensionManager {
     }
 
     const extensions: Extension[] = [];
-    for (const subdir of subdirs) {
-      const extensionDir = path.join(extensionsDir, subdir);
-      const extension = await this.loadExtension(
-        { extensionDir, workspaceDir },
-        options,
+    const batchSize = 4;
+    for (let offset = 0; offset < subdirs.length; offset += batchSize) {
+      // Drain in-flight loads before a failure can release the store read lock.
+      const results = await Promise.allSettled(
+        subdirs
+          .slice(offset, offset + batchSize)
+          .map((subdir) =>
+            this.loadExtension(
+              { extensionDir: path.join(extensionsDir, subdir), workspaceDir },
+              options,
+            ),
+          ),
       );
-      if (extension != null) {
-        extensions.push(extension);
+      for (const result of results) {
+        if (result.status === 'rejected') throw result.reason;
+        if (result.value != null) extensions.push(result.value);
       }
     }
     return extensions;
