@@ -258,6 +258,37 @@
                 </plugins>
             </build>
         </profile>
+        <profile>
+            <!-- A -Dgroups= caller narrows every surefire execution too:
+                 the groups user property beats even combine.self="override",
+                 so a tag-only run (mvn -Dgroups=daemon-integration test)
+                 selects no witness class here and failIfNoTests aborts the
+                 build. A profile holds a single activation property, so the
+                 !groups half of the lane's condition is this second profile:
+                 while a groups filter is in play it unbinds the lane's
+                 execution. Declared after the lane so its merge wins. -->
+            <id>pinning-witness-lane-stand-down</id>
+            <activation>
+                <property>
+                    <name>groups</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <version>${maven-surefire-plugin.version}</version>
+                        <executions>
+                            <execution>
+                                <id>pinning-witnesses-pinned-scheduler</id>
+                                <phase>none</phase>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
     </profiles>
 
     <organization>
