@@ -5,9 +5,16 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { promises as fs, readFileSync } from 'node:fs';
+import fs, { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
@@ -1462,15 +1469,15 @@ describe('readWorkspaceContext', () => {
     // Two Sessions share one mount. Session 1's AGENTS.md is a symlink to
     // Session 2's: its realpath stays inside the mount root, so a boundary at
     // the mount would admit the sibling's text into Session 1's instruction.
-    const mount = await fs.mkdtemp(path.join(os.tmpdir(), 'ctx-mount-'));
+    const mount = await mkdtemp(path.join(os.tmpdir(), 'ctx-mount-'));
     try {
       const session1 = path.join(mount, 'session-1');
       const session2 = path.join(mount, 'session-2');
-      await fs.mkdir(session1);
-      await fs.mkdir(session2);
-      await fs.writeFile(path.join(session2, 'AGENTS.md'), 'sibling text');
-      await fs.writeFile(path.join(session1, 'QWEN.md'), 'own text');
-      await fs.symlink(
+      await mkdir(session1);
+      await mkdir(session2);
+      await writeFile(path.join(session2, 'AGENTS.md'), 'sibling text');
+      await writeFile(path.join(session1, 'QWEN.md'), 'own text');
+      await symlink(
         path.join(session2, 'AGENTS.md'),
         path.join(session1, 'AGENTS.md'),
       );
@@ -1491,7 +1498,75 @@ describe('readWorkspaceContext', () => {
         false,
       );
     } finally {
-      await fs.rm(mount, { recursive: true, force: true });
+      await rm(mount, { recursive: true, force: true });
     }
+  });
+});
+
+describe('ManagedToolExecutor acknowledgement', () => {
+  const roots = new Set<string>();
+  afterEach(() => {
+    for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
+    roots.clear();
+  });
+
+  function workspace(): string {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mtr-executor-'));
+    roots.add(root);
+    fs.writeFileSync(path.join(root, 'a.txt'), 'contents');
+    return root;
+  }
+
+  const sessionReference = {
+    sessionId: 'session-a',
+    promptId: 'prompt-1',
+    callId: 'call-1',
+    argsDigest: createHash('sha256').update('args').digest('hex'),
+  };
+
+  it('lets a session close after its settled call is acknowledged', async () => {
+    const executor = ManagedToolExecutor.forWorkspace(
+      workspace(),
+      'runtime-01',
+    );
+    const result = await executor.execute(sessionReference, 'read_file', {
+      file_path: 'a.txt',
+    });
+    expect(result.executionStatus).toBe('success');
+
+    expect(executor.acknowledge(sessionReference)?.state).toBe('acknowledged');
+    // The acknowledged entry no longer holds the session's work open.
+    expect(executor.hasActiveSession('session-a')).toBe(false);
+    expect(() => executor.closeSessionAdmission('session-a')).not.toThrow();
+  });
+
+  it('reports a drained worker quiescent once its settled call is acknowledged', async () => {
+    const executor = ManagedToolExecutor.forWorkspace(
+      workspace(),
+      'runtime-01',
+    );
+    const result = await executor.execute(sessionReference, 'read_file', {
+      file_path: 'a.txt',
+    });
+    expect(result.executionStatus).toBe('success');
+    executor.sealAdmission(retirementId);
+
+    expect(executor.acknowledge(sessionReference)?.state).toBe('acknowledged');
+    expect(executor.getDrainObservation(retirementId)).toEqual({
+      state: 'DRAINING',
+      workState: 'QUIESCENT',
+      pendingStarts: 0,
+      pendingInvocations: 0,
+      blockers: [],
+    });
+  });
+
+  it('answers unknown for a reference the Runtime never saw', () => {
+    const executor = ManagedToolExecutor.forWorkspace(
+      workspace(),
+      'runtime-01',
+    );
+    expect(executor.acknowledge(sessionReference)).toBeNull();
+    expect(executor.status(sessionReference)).toBeNull();
   });
 });

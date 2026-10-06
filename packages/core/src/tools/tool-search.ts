@@ -130,7 +130,7 @@ interface ScoredTool {
   score: number;
 }
 
-function isDeferredToolBridgeAvailable(registry: ToolRegistry): boolean {
+export function isDeferredToolBridgeAvailable(registry: ToolRegistry): boolean {
   return Boolean(
     registry.getTool(ToolNames.TOOL_SEARCH) &&
       registry.getTool(ToolNames.TOOL_CALL),
@@ -325,6 +325,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     return registry.getAllTools().filter(
       (t) =>
         registry.isDeferredAndHidden(t.name) &&
+        registry.isToolDeclared(t.name) &&
         (!bindings || bindings.has(t.name)) &&
         // Context-gated: the leader's discovery stays unrestricted (the
         // predicate itself is ungated so prepareTools can fail closed).
