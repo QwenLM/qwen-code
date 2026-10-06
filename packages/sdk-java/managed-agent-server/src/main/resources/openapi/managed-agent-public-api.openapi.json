@@ -2784,12 +2784,30 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "200": {
-            "description": "Planned name only: channel connections and routes; chat input still uses the Session event API. Stage H5 defines the response."
+            "description": "Channel connections of the tenant with their route bindings, newest first (created_at descending, then id descending), so a connection that changes state does not move between pages. Each entry's routes list its newest 100 route bindings, oldest first; a binding rotated past the bound stays persisted but is no longer discoverable from the connection. A route binding names the authenticated channel instance, account generation, platform event and semantic revision it committed; two platform events with identical text stay two bindings. Ordinary chat still uses the Session prompt and event APIs. 400 invalid_cursor on a malformed cursor, 400 invalid_limit when limit is outside 1 to 100.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicChannelList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/ListLimit"
+          }
+        ]
       }
     },
     "/v1/agent-channels/{channelId}/deliveries": {
@@ -2811,7 +2829,17 @@
         "x-qwen-implementation-status": "planned",
         "responses": {
           "200": {
-            "description": "Planned name only: outbound deliveries of a channel with per-segment receipts. Stage H5 defines the response."
+            "description": "Outbound deliveries of the channel, newest first (created_at descending, then id descending), so a delivery whose state changes does not move between pages. Each delivery carries its stable segment identity and ordinal: a streaming card or segmented reply keeps one segmentId per card, only segments proven unsent are sent again, and an explicit resend creates a new deliveryId for its segment rather than rewriting an existing delivery. unknown means the connection dropped after sending without a provider query or idempotency key, so the platform may hold the segment; the user is warned about possible duplication before resending. 404 channel_not_found when the channel is absent or outside the caller's scope. 400 invalid_cursor on a malformed cursor, 400 invalid_limit when limit is outside 1 to 100.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicChannelDeliveryList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -2819,7 +2847,15 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           }
-        }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/ListLimit"
+          }
+        ]
       }
     },
     "/v1/agent-automations": {
@@ -3330,6 +3366,56 @@
           }
         },
         "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the creator with current read access (404 unreadable, 403 readable non-creator). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made."
+      }
+    },
+    "/v1/agent-channels/{channelId}/deliveries/{deliveryId}": {
+      "parameters": [
+        {
+          "name": "channelId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        {
+          "name": "deliveryId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      ],
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "getAgentChannelDelivery",
+        "x-qwen-implementation-status": "planned",
+        "responses": {
+          "200": {
+            "description": "One delivery of the channel, including provider_receipt once the provider returned one. The model turn's completion and the external delivery stay separate views: a delivered segment does not say the user saw it. 404 delivery_not_found covers deliveries outside the caller's scope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicChannelDelivery"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
       }
     }
   },
@@ -8605,6 +8691,336 @@
           }
         },
         "description": "Optional preview for requested native read_file, write_file, edit or run_shell_command approvals. Missing or invalid input, and internal MCP inputs, omit the preview. No general secret redaction is performed; visibility follows Session read permissions. Deploy the version 2 Java reader before a Harness producer starts writing version 2 options."
+      },
+      "ChannelConnectionState": {
+        "type": "string",
+        "enum": ["connected", "disconnected"],
+        "x-qwen-implementation-status": "planned"
+      },
+      "ChannelRouteState": {
+        "type": "string",
+        "enum": ["staged", "admitted"],
+        "x-qwen-implementation-status": "planned"
+      },
+      "ChannelDeliveryState": {
+        "type": "string",
+        "enum": [
+          "planned",
+          "sending",
+          "partial",
+          "delivered",
+          "unknown",
+          "rejected",
+          "cancelled"
+        ],
+        "x-qwen-implementation-status": "planned"
+      },
+      "PublicChannelRoute": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "platform_event_id",
+          "account_generation",
+          "semantic_revision",
+          "sender_id",
+          "session_id",
+          "state",
+          "staged_attachment_refs",
+          "created_at"
+        ],
+        "properties": {
+          "platform_event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Identity the platform gave the inbound event. The binding commits it together with the channel instance, the account generation and the semantic revision, so two distinct platform events stay two bindings even when their text is identical."
+          },
+          "account_generation": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Account generation of the connection when the binding committed; re-authenticating the channel account invalidates bindings of older generations."
+          },
+          "semantic_revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Semantic revision of the platform event the binding committed; an edited platform message binds a new revision instead of rewriting an existing binding."
+          },
+          "sender_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Authenticated sender identity the route was bound from; sender display names and chat titles grant no routing authority."
+          },
+          "chat_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Authenticated chat identity the route was bound from, when the platform has one."
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Authenticated thread identity the route was bound from, when the platform has one."
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Reply target Session the binding committed; a later UI Session selection never overwrites it."
+          },
+          "state": {
+            "$ref": "#/components/schemas/ChannelRouteState"
+          },
+          "input_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "The input the Session admitted from this binding; present exactly while state is admitted."
+          },
+          "staged_attachment_refs": {
+            "type": "array",
+            "maxItems": 100,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Artifacts that received this binding's attachments before input admission. While admission is unknown the staged bytes stay readable through these references and the original input id stays queryable."
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
+          }
+        },
+        "x-qwen-implementation-status": "planned",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "admitted"
+                }
+              },
+              "required": ["state"]
+            },
+            "then": {
+              "required": ["input_id"]
+            },
+            "else": {
+              "not": {
+                "required": ["input_id"]
+              }
+            }
+          }
+        ]
+      },
+      "PublicChannel": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "object",
+          "platform",
+          "account_generation",
+          "state",
+          "routes",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "object": {
+            "const": "agent.channel"
+          },
+          "platform": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Platform this channel instance connects."
+          },
+          "account_generation": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Current account generation of the connection; re-authenticating the channel account increments it."
+          },
+          "state": {
+            "$ref": "#/components/schemas/ChannelConnectionState"
+          },
+          "routes": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/PublicChannelRoute"
+            },
+            "description": "The newest 100 route bindings of this connection, oldest first."
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
+          }
+        },
+        "x-qwen-implementation-status": "planned"
+      },
+      "PublicChannelList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["object", "data", "has_more"],
+        "properties": {
+          "object": {
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/PublicChannel"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": ["string", "null"],
+            "maxLength": 512
+          }
+        },
+        "x-qwen-implementation-status": "planned",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "has_more": {
+                  "const": true
+                }
+              },
+              "required": ["has_more"]
+            },
+            "then": {
+              "required": ["next_cursor"],
+              "properties": {
+                "next_cursor": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        ]
+      },
+      "PublicChannelDelivery": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "object",
+          "channel_id",
+          "segment_id",
+          "ordinal",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "object": {
+            "const": "agent.channel.delivery"
+          },
+          "channel_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "segment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Stable identity of the card or reply segment this delivery carries; only segments proven unsent are sent again, and an explicit resend keeps this identity under a new deliveryId."
+          },
+          "ordinal": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Position of the segment inside its segmentId sequence."
+          },
+          "state": {
+            "$ref": "#/components/schemas/ChannelDeliveryState"
+          },
+          "provider_receipt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Opaque receipt the provider returned for this delivery; absent while the provider returned none, including a delivery reconciled out of unknown."
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
+          }
+        },
+        "x-qwen-implementation-status": "planned"
+      },
+      "PublicChannelDeliveryList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["object", "data", "has_more"],
+        "properties": {
+          "object": {
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/PublicChannelDelivery"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": ["string", "null"],
+            "maxLength": 512
+          }
+        },
+        "x-qwen-implementation-status": "planned",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "has_more": {
+                  "const": true
+                }
+              },
+              "required": ["has_more"]
+            },
+            "then": {
+              "required": ["next_cursor"],
+              "properties": {
+                "next_cursor": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        ]
       }
     }
   }
