@@ -4335,7 +4335,9 @@ describe('Settings Loading and Merging', () => {
         workspacePayload[section][key] =
           key === 'allowedInsecureVoiceBaseUrls'
             ? ['http://voice.example/v1']
-            : true;
+            : key === 'agentMaxTurns' || key === 'agentTimeoutMinutes'
+              ? 0 // numeric budgets; 0 disables the limit, the value being guarded against
+              : true;
       }
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
@@ -4412,6 +4414,60 @@ describe('Settings Loading and Merging', () => {
       expect(warnings.some((w) => w.includes('goals.modelProposed'))).toBe(
         true,
       );
+    });
+  });
+
+  describe('memory agent budget scope handling', () => {
+    it('is listed as workspace-restricted', () => {
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
+        'memory.agentMaxTurns',
+      );
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
+        'memory.agentTimeoutMinutes',
+      );
+    });
+
+    it('honors the budgets from user scope, including 0 (limit disabled)', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              memory: { agentMaxTurns: 0, agentTimeoutMinutes: 0 },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.memory?.agentMaxTurns).toBe(0);
+      expect(settings.merged.memory?.agentTimeoutMinutes).toBe(0);
+    });
+
+    it('strips a workspace 0 and warns, per key', () => {
+      // `0` disables the turn and wall-clock budgets of the auto-approved,
+      // cross-project memory agents, so a cloned repository must not set it.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              memory: { agentMaxTurns: 0, agentTimeoutMinutes: 0 },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.memory?.agentMaxTurns).toBeUndefined();
+      expect(settings.merged.memory?.agentTimeoutMinutes).toBeUndefined();
+      const warnings = getSettingsWarnings(settings);
+      expect(warnings.some((w) => w.includes('memory.agentMaxTurns'))).toBe(
+        true,
+      );
+      expect(
+        warnings.some((w) => w.includes('memory.agentTimeoutMinutes')),
+      ).toBe(true);
     });
   });
 
