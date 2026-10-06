@@ -81,6 +81,8 @@ describe('Managed Session store shared contract', () => {
       'writerToken',
     ]);
     expect(Object.keys(fixture.limits).sort()).toEqual([
+      'maxCommitMarkerBytes',
+      'maxEventBytes',
       'maxInlineResourceBytes',
       'maxJsonDepth',
       'maxResourcesPerTransaction',

@@ -8,9 +8,11 @@ import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -826,36 +828,52 @@ public final class ManagedExtensionRecords {
         }
     }
 
+    /** A lazily-built refusal message, for the per-event-line hot path. */
+    private static void require(boolean condition, Supplier<String> message) {
+        if (!condition) {
+            throw new InvalidRecordException(message.get() + ".");
+        }
+    }
+
     static void closed(JsonNode node, Set<String> keys,
             String label) {
-        require(node != null && node.isObject() && node.size() == keys.size(),
-                label + " must be an object with exactly " + keys);
-        node.fieldNames().forEachRemaining(name -> require(keys.contains(name),
-                label + " must be an object with exactly " + keys));
+        boolean exact = node != null && node.isObject()
+                && node.size() == keys.size();
+        if (exact) {
+            for (Iterator<String> names = node.fieldNames();
+                    names.hasNext();) {
+                if (!keys.contains(names.next())) {
+                    exact = false;
+                    break;
+                }
+            }
+        }
+        require(exact, () -> label + " must be an object with exactly "
+                + keys);
     }
 
     static String id(JsonNode node, String label) {
         require(node != null && node.isTextual() && !node.textValue()
-                .isEmpty(), label + " must be a non-empty string");
+                .isEmpty(), () -> label + " must be a non-empty string");
         String value = node.textValue();
         for (int index = 0; index < value.length(); index++) {
             char character = value.charAt(index);
             require(character > 0x1f && (character < 0x7f || character > 0x9f),
-                    label + " must not contain control characters");
+                    () -> label + " must not contain control characters");
             if (Character.isHighSurrogate(character)) {
                 index++;
                 require(index < value.length()
                         && Character.isLowSurrogate(value.charAt(index)),
-                        label + " must be well-formed text");
+                        () -> label + " must be well-formed text");
             } else {
                 require(!Character.isLowSurrogate(character),
-                        label + " must be well-formed text");
+                        () -> label + " must be well-formed text");
             }
         }
         require(value.getBytes(StandardCharsets.UTF_8).length <= MAX_ID_BYTES,
-                label + " exceeds " + MAX_ID_BYTES + " UTF-8 bytes");
+                () -> label + " exceeds " + MAX_ID_BYTES + " UTF-8 bytes");
         require(Normalizer.isNormalized(value, Normalizer.Form.NFC),
-                label + " must use NFC normalization");
+                () -> label + " must use NFC normalization");
         return value;
     }
 
@@ -911,14 +929,15 @@ public final class ManagedExtensionRecords {
                 && value.compareTo(BigDecimal.valueOf(min)) >= 0
                 && value.compareTo(BigDecimal.valueOf(Math.min(max,
                         MAX_COUNT))) <= 0,
-                label + " must be an integer from " + min + " to " + max);
+                () -> label + " must be an integer from " + min + " to "
+                        + max);
         return value.longValueExact();
     }
 
     private static void digest(JsonNode node, String label) {
         require(node != null && node.isTextual()
                 && DIGEST.matcher(node.textValue()).matches(),
-                label + " must be a lowercase SHA-256 hex digest");
+                () -> label + " must be a lowercase SHA-256 hex digest");
     }
 
     private static void generation(JsonNode node, String label) {
@@ -926,7 +945,8 @@ public final class ManagedExtensionRecords {
                 && GENERATION.matcher(node.textValue()).matches()
                 && new BigInteger(node.textValue()).compareTo(MAX_GENERATION)
                         <= 0,
-                label + " must be canonical decimal text from 1 to 2^63-1");
+                () -> label + " must be canonical decimal text from 1 to"
+                        + " 2^63-1");
     }
 
     static void durableRef(JsonNode node, String label) {
@@ -944,7 +964,7 @@ public final class ManagedExtensionRecords {
             String label) {
         require(node != null && node.isTextual()
                 && allowed.contains(node.textValue()),
-                label + " must be one of " + allowed);
+                () -> label + " must be one of " + allowed);
         return node.textValue();
     }
 

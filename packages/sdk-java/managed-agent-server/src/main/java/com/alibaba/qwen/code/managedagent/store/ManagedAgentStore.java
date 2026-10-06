@@ -2118,40 +2118,6 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
-    @Transactional
-    public void appendLiveSessionTaskEvent(String tenantId, String sessionId,
-            String taskId, String state, long revision, String sourceKey) {
-        // A locking read sees the latest committed status, where a plain one
-        // could still see the snapshot taken before a deletion committed.
-        Optional<SessionRecord> session = jdbc.query("SELECT * FROM"
-                        + " managed_agent_session WHERE tenant_id = ?"
-                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513)) AND"
-                        + " session_id = ? FOR UPDATE",
-                sessionMapper, tenantId, tenantId, sessionId).stream()
-                .findFirst();
-        if (session.isEmpty() || "DELETING".equals(session.get().status())
-                || "DELETED".equals(session.get().status())) {
-            return;
-        }
-        // A plain read: every writer of this outbox runs inside the Session
-        // store's commit, which locks the journal head before its first
-        // plain read, so this snapshot already sees every committed row. A
-        // locking read here would next-key-lock the gap an empty outbox
-        // range shares with other Sessions and deadlock their first
-        // announcements.
-        Long current = jdbc.queryForObject("SELECT MAX(sequence_id) FROM"
-                        + " managed_agent_task_event WHERE tenant_id = ?"
-                        + " AND session_id = ?",
-                Long.class, tenantId, sessionId);
-        jdbc.update("INSERT INTO managed_agent_task_event"
-                        + " (tenant_id, session_id, sequence_id, task_id,"
-                        + " task_state, revision, source_key, created_at)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                tenantId, sessionId, (current == null ? 0 : current) + 1,
-                taskId, state, revision, sourceKey, clock.millis());
-    }
-
     public SessionRecord requireSession(String tenantId, String sessionId) {
         return findSession(tenantId, sessionId).orElseThrow(() ->
                 new ApiException(HttpStatus.NOT_FOUND, "session_not_found",

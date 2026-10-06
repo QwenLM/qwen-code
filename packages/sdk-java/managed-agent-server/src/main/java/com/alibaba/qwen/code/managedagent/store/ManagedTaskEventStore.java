@@ -10,6 +10,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Optional;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -166,11 +167,26 @@ public class ManagedTaskEventStore {
 
     /**
      * Journals a task view change, from the record revision that commits it.
-     * A revision that changes nothing observable produces no event.
+     * A revision that changes nothing observable produces no event, and so
+     * does a Session whose deletion has begun: the skip never refuses, so a
+     * race with the lifecycle never rolls back the record commit this
+     * event rides.
      */
     public void appendStateChange(String tenantId, String sessionId,
             String taskId, String state, String runtimeState,
             long occurredAt) {
+        // A locking read sees the latest committed status, where a plain
+        // one could still see the snapshot taken before a deletion
+        // committed.
+        Optional<String> status = jdbc.query("SELECT status FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND session_id = ? FOR UPDATE",
+                (result, row) -> result.getString(1), tenantId,
+                sessionId).stream().findFirst();
+        if (status.isEmpty() || "DELETING".equals(status.get())
+                || "DELETED".equals(status.get())) {
+            return;
+        }
         long sequence = advance(tenantId, sessionId, taskId);
         jdbc.update("INSERT INTO qwen_managed_session_task_journal"
                         + " (session_scope_key, tenant_id, session_id,"

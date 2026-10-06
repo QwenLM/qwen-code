@@ -38,7 +38,8 @@ class ManagedSessionStoreContractFixtureTest {
                 fieldNames(headers).keySet());
         assertEquals(Set.of("maxInlineResourceBytes",
                 "maxResourcesPerTransaction", "maxTransactionBytes",
-                "maxTransactionEvents", "maxJsonDepth",
+                "maxTransactionEvents", "maxJsonDepth", "maxEventBytes",
+                "maxCommitMarkerBytes",
                 "minimumWriterTokenLength", "maximumWriterTokenLength",
                 "minimumLeaseDurationMs", "maximumLeaseDurationMs"),
                 fieldNames(limits).keySet());

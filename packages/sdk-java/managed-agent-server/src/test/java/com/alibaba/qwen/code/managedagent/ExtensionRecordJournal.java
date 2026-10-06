@@ -203,8 +203,9 @@ final class ExtensionRecordJournal {
                 .put("version", 1).put("operationId", commandId)
                 .set("recordRef", recordRef);
         editEvent.accept(event);
-        String records = editRecords.apply(line("managed_session_event_v1",
-                event) + line("managed_session_commit_v1",
+        String records = editRecords.apply(line(sessionId,
+                "managed_session_event_v1", event) + line(sessionId,
+                        "managed_session_commit_v1",
                         JSON.createObjectNode().put("commandId", commandId)));
         String transactionId = "transaction-" + operation + "-" + commandId;
         List<CommitResource> closure = new ArrayList<>(resources);
@@ -245,7 +246,9 @@ final class ExtensionRecordJournal {
         }
     }
 
-    private String line(String subtype, JsonNode body) {
+    /** One record line in the envelope the authority writes; shared by
+     * every test that composes a line, so helpers cannot drift apart. */
+    static String line(String sessionId, String subtype, JsonNode body) {
         ObjectNode record = JSON.createObjectNode()
                 .put("uuid", UUID.randomUUID().toString())
                 .putNull("parentUuid")

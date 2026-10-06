@@ -5,7 +5,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
@@ -21,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Commit
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
+import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
@@ -32,8 +32,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Proxy;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -654,7 +652,7 @@ class ManagedAgentMySqlIT {
                     revision.required("occurredAt").longValue()));
         }
         ManagedExtensionRecordStore records =
-                new ManagedExtensionRecordStore(jdbc, null);
+                new ManagedExtensionRecordStore(jdbc);
         TaskProjection before = records.listTasks(tenant, session, null,
                 null, 10).tasks().get(0).projection();
 
@@ -748,32 +746,28 @@ class ManagedAgentMySqlIT {
         // snapshot; REPEATABLE READ hides it from a plain read. Completion
         // waits for the private writer, so it runs after this commit.
         AtomicReference<OperationRecord> deletion = new AtomicReference<>();
-        AgentStateStore racing = (AgentStateStore) Proxy.newProxyInstance(
-                AgentStateStore.class.getClassLoader(),
-                new Class<?>[] {AgentStateStore.class},
-                (proxy, method, arguments) -> {
-                    if ("appendLiveSessionTaskEvent".equals(
-                            method.getName())) {
-                        CompletableFuture.runAsync(() -> {
-                            String operation = inTransaction(transactions,
-                                    () -> agents.beginOperation(tenant,
-                                            session, OperationKind.DELETE,
-                                            "sha256:" + "c".repeat(64),
-                                            "delete", "digest-delete"))
-                                    .operation().operationId();
-                            deletion.set(inTransaction(transactions,
-                                    () -> agents.claimOperation(tenant,
-                                            session, operation, "worker",
-                                            Duration.ofMinutes(1)))
-                                    .orElseThrow());
-                        }).join();
-                    }
-                    try {
-                        return method.invoke(agents, arguments);
-                    } catch (InvocationTargetException error) {
-                        throw error.getCause();
-                    }
-                });
+        ManagedTaskEventStore racing = new ManagedTaskEventStore(jdbc) {
+            @Override
+            public void appendStateChange(String tenantId, String sessionId,
+                    String taskId, String state, String runtimeState,
+                    long occurredAt) {
+                CompletableFuture.runAsync(() -> {
+                    String operation = inTransaction(transactions,
+                            () -> agents.beginOperation(tenant, session,
+                                    OperationKind.DELETE,
+                                    "sha256:" + "c".repeat(64),
+                                    "delete", "digest-delete"))
+                            .operation().operationId();
+                    deletion.set(inTransaction(transactions,
+                            () -> agents.claimOperation(tenant, session,
+                                    operation, "worker",
+                                    Duration.ofMinutes(1)))
+                            .orElseThrow());
+                }).join();
+                super.appendStateChange(tenantId, sessionId, taskId, state,
+                        runtimeState, occurredAt);
+            }
+        };
         ManagedSessionStore store = new ManagedSessionStore(jdbc,
                 new ManagedExtensionRecordStore(jdbc, racing));
         ExtensionRecordJournal journal = inTransaction(transactions,
@@ -823,10 +817,10 @@ class ManagedAgentMySqlIT {
                 String.class, tenant, session);
         assertThat(events).endsWith("session.deleted")
                 .doesNotContain("task.updated");
-        // The announcement's locking read sees the deletion that committed
-        // after this transaction's snapshot, so the outbox stays empty.
-        assertThat(count(jdbc, "managed_agent_task_event", tenant, session))
-                .isZero();
+        // The journal's locking read sees the deletion that committed
+        // after this transaction's snapshot, so the journal stays empty.
+        assertThat(count(jdbc, "qwen_managed_session_task_journal",
+                tenant, session)).isZero();
     }
 
     @Test
