@@ -32,9 +32,15 @@ Managed Agent 提案把产品级持久资源交给 Java 控制面：定义修订
 路由、outbox、租约代际、配额与公共投影。目前整条提交后分发路径都是单进程的：
 Java 侧 after-commit 扇出是进程内的 `SessionEventHub`，TypeScript 侧的 Session 激活
 是进程内的 `EmbeddedHarnessScheduler`（基于文件 activation 租约）。两者都无法通知另一台
-Java 节点。因此多节点控制面部署无法唤醒或物化一台记录提交在另一台机器上的
-Session：路由到节点 A 的后台 Shell 任务的后续轮次对节点 B 不可见，节点 A 提交时
-节点 B 上的物化 worker 也无从得知。
+Java 节点。
+
+Java 节点之间的共享 SQL 物化**今天就有**——`MessageMaterializer` 以定时 SQL 扫描
+（默认 100 ms）读取其 Session head 与 `findMaterializationTargets`，因此节点 B 的物化
+worker 会在一个轮询周期内物化节点 A 的提交；这条反证足以推翻「跨节点物化不可能」。
+**仍缺的**是不依赖 SQL 轮询的已提交事实分发：路由到节点 A 的后台 Shell 后续轮次，
+节点 B 的 Harness 只能等本机 materializer 轮到时才听到——既不随提交被唤醒，
+也拿不到 journal 记录的交付消息；现有以扫描下限为天花板的形态是延迟与负载的天花板，
+而不是分布式 transport。
 
 权威设计已经命名了这个缺失的元素，其架构流程（原文照录）：
 
@@ -122,13 +128,19 @@ at-least-once 传输不可能损坏 Session——它至多浪费延迟。若所�
 
 证据见附录 A；以下每个路径均在 `5ddfacc9d4` 上实际阅读过。
 
-- **Java after-commit 接缝——存在。** `CommittedEventPublisher`
+- **Java after-commit 接缝——存在，但它只覆盖一半的通道。** `CommittedEventPublisher`
   （单方法 `publish(List<EventRecord>)`）被注入 `ManagedAgentStore`，并从 Spring
   `TransactionSynchronization.afterCommit()` 钩子中调用
   （`ManagedAgentStore.java` 第 2403–2411 行）。其唯一实现是
   `SessionEventHub`：进程内按 Session 的有界缓冲（容量 512，溢出标记后订阅者重读
-  store），服务 Java SSE 路径。`EventTransport` 生产者适配器可以挂在该接缝上，
-  而不改变提交路径行为。
+  store），服务 Java SSE 路径。**但该接缝挂在公共 `managed_agent_event`
+  事件流上。** 权威 Session journal——`domain.committed`、`wake.requested`、
+  工具回执以及 EventTransport 必须携带的提交标记——由 `ManagedSessionStore.commit`
+  随私有 journal（`qwen_managed_session_journal_tx`）提交，是另一条代码路径、
+  另一类事件。`EventTransport` 生产者适配器因此需要 **两条腿，不是一条**:
+  公共事件流的 after-commit hub 扇出，加权威 Session commit 事务内的
+  journal 事实发布点（同事务提交、after-commit drain)——MQ2 阶段并线第二个,
+  且绝不把第一个牵强为已覆盖它。
 - **专用传输抽象——代码中不存在。** 代码搜索 `EventTransport`/`eventTransport`/
   `RocketMQ` 在设计文档之外零匹配。没有传输配置属性、没有面向 broker 的 outbox
   drain 循环、没有跨节点唤醒消费者。这个名字只存在于 2026-09-20 的存储与事件设计

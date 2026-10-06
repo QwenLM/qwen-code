@@ -41,11 +41,19 @@ outbox, lease generations, quotas, and public projections. Today the whole
 post-commit distribution path is single-process: on the Java side the
 after-commit fan-out is the in-process `SessionEventHub`, and on the TypeScript
 side session activation is the in-process `EmbeddedHarnessScheduler` over
-file-backed activation leases. Neither can notify another Java node. A
-multi-node control-plane deployment therefore cannot wake or materialize a
-Session whose records were committed on a different machine: a follow-up turn
-of a background Shell task routed to node A is invisible to node B, and a
-materialization worker on node B learns nothing when node A commits.
+file-backed activation leases. Neither can notify another Java node.
+
+Shared-SQL materialization between Java nodes is **covered today** —
+`MessageMaterializer` polls its Session head on a scheduled SQL scan
+(default 100 ms) and reads `findMaterializationTargets`, so a worker on node
+B materializes what node A committed inside one poll interval; that counter
+evidence invalidates any claim that cross-node materialization is impossible.
+What is **still absent** is the distribution of committed facts WITHOUT the
+SQL scan poll: for a background Shell follow-up routed to node A, node B's
+Harness hears only when its own materializer happens to poll, neither
+woken on commit nor told of deliveries the journal records —
+and the existing scan-bounded path is a ceiling on latency and load, not a
+distributed transport.
 
 The canonical design already names the missing element. Its architecture flow
 reads (verbatim):
@@ -156,15 +164,24 @@ verify.
 
 Evidence is in Appendix A; every path below was read on `5ddfacc9d4`.
 
-- **Java after-commit seam — EXISTS.** `CommittedEventPublisher`
-  (one method, `publish(List<EventRecord>)`) is injected into
-  `ManagedAgentStore` and invoked from a Spring
+- **Java after-commit seam — EXISTS, and it is only half of the lane.**
+  `CommittedEventPublisher` (one method, `publish(List<EventRecord>)`) is
+  injected into `ManagedAgentStore` and invoked from a Spring
   `TransactionSynchronization.afterCommit()` hook
   (`ManagedAgentStore.java` lines 2403–2411). Its only implementation is
   `SessionEventHub`, an in-process per-Session bounded buffer
   (capacity 512, overflow flagged so subscribers re-read the store) feeding
-  the Java SSE path. An `EventTransport` producer adapter can hang on this
-  seam without changing commit-path behavior.
+  the Java SSE path. **But this seam sits on the public `managed_agent_event`
+  stream.** The authoritative Session journal — `domain.committed`,
+  `wake.requested`, tool receipts and the commit markers an EventTransport
+  must carry — is committed by `ManagedSessionStore.commit` against the
+  private journal (`qwen_managed_session_journal_tx`), a different code path
+  and a different family of events. An `EventTransport` producer adapter
+  therefore needs TWO wires, not one: the after-commit hub fan-out for the
+  public event stream, and a publication point on the authoritative Session
+  commit transaction for journal facts (same-transaction commit, after-commit
+  drain) — the MQ2 phase wires the second and never relabels the first as
+  covering it.
 - **Dedicated transport abstraction — DOES NOT EXIST IN CODE.** A code search
   for `EventTransport`/`eventTransport`/`RocketMQ` returns zero matches
   outside design documents. There is no transport configuration property, no
