@@ -21,7 +21,10 @@ import {
   enrollAgentHost,
   heartbeatAgentHost,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
-import { AGENT_HOST_CREDENTIAL_REJECTED } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
+import {
+  AGENT_HOST_CREDENTIAL_REJECTED,
+  AGENT_HOST_REPLACEMENT_REQUIRED,
+} from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { requireTrustedWorkspaceRuntime } from '../workspace-route-runtime.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
@@ -396,7 +399,14 @@ export function registerAgentHostTransportRoutes(
           return;
         }
         res.json({ host });
-      } catch {
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === AGENT_HOST_REPLACEMENT_REQUIRED
+        ) {
+          res.status(409).json({ error: AGENT_HOST_REPLACEMENT_REQUIRED });
+          return;
+        }
         res.status(400).json({ error: 'Agent Host heartbeat refused.' });
       }
     },

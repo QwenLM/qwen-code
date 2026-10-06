@@ -428,6 +428,7 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
+                "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + decoy,
                 "--qwen.managed-agent.runtime-broker.state-directory=" + temporary.resolve("broker"),
                 "--qwen.managed-agent.runtime-broker.credential-key-id=g0-fixture",
@@ -436,7 +437,7 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.cli-entry=" + cli));
         if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode=default");
-        if (durableClose) arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=true");
+        arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + durableClose);
         for (int i = 0; i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
             arguments.add(prefix + "tenant-id=" + tenant);

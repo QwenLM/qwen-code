@@ -9,6 +9,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import lockfile from 'proper-lockfile';
 import { extractErrorMessage } from '@qwen-code/acp-bridge/bridge';
 import type {
   HostRunAssignment,
@@ -31,6 +32,7 @@ import {
 } from '../runtime/agent-session-source.js';
 import {
   AGENT_HOST_CREDENTIAL_REJECTED,
+  AGENT_HOST_REPLACEMENT_REQUIRED,
   AGENT_PROGRAM_LABELS,
   type AgentProgram,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
@@ -116,14 +118,86 @@ async function readCredential(
 async function writeCredential(
   filePath: string,
   credential: AgentHostCredential,
+  expected: AgentHostCredential | undefined,
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const lock = await lockCredential(filePath);
   const temporary = `${filePath}.${randomUUID()}.tmp`;
-  await fs.writeFile(temporary, `${JSON.stringify(credential, null, 2)}\n`, {
-    mode: 0o600,
-    flag: 'wx',
+  let completed = false;
+  try {
+    const current = await readCredential(filePath);
+    lock.assertHeld();
+    if (
+      current &&
+      (current.hostId !== expected?.hostId ||
+        current.secret !== expected?.secret) &&
+      (current.hostId !== credential.hostId ||
+        current.secret !== credential.secret)
+    ) {
+      throw new Error(
+        'Saved Agent Host credential changed. Retry with the latest credential.',
+      );
+    }
+    await fs.writeFile(temporary, `${JSON.stringify(credential, null, 2)}\n`, {
+      mode: 0o600,
+      flag: 'wx',
+    });
+    lock.assertHeld();
+    await fs.rename(temporary, filePath);
+    lock.assertHeld();
+    completed = true;
+  } finally {
+    const cleanup = fs.rm(temporary, { force: true }).finally(lock.release);
+    if (completed) {
+      await cleanup;
+    } else {
+      await cleanup.catch((error) =>
+        writeStderrLine(
+          `Agent Host credential cleanup failed: ${extractErrorMessage(error)}`,
+        ),
+      );
+    }
+  }
+}
+
+async function lockCredential(filePath: string) {
+  let compromised: Error | undefined;
+  const release = await lockfile.lock(filePath, {
+    realpath: false,
+    retries: { retries: 10, minTimeout: 5, maxTimeout: 100 },
+    onCompromised: (error) => {
+      compromised = error;
+      writeStderrLine(
+        `Agent Host credential lock compromised: ${error.message}`,
+      );
+    },
   });
-  await fs.rename(temporary, filePath);
+  return {
+    assertHeld: () => {
+      if (compromised) throw compromised;
+    },
+    release: () => (compromised ? Promise.resolve() : release()),
+  };
+}
+
+async function removeRevokedCredential(
+  filePath: string,
+  expected: AgentHostCredential,
+): Promise<void> {
+  const lock = await lockCredential(filePath);
+  try {
+    const current = await readCredential(filePath);
+    lock.assertHeld();
+    if (
+      current?.hostId === expected.hostId &&
+      current.secret === expected.secret
+    ) {
+      await fs.rm(filePath, { force: true });
+      lock.assertHeld();
+    }
+  } finally {
+    await lock.release();
+  }
 }
 
 async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
@@ -678,12 +752,21 @@ async function connectAgentHost(
       'WARNING: Agent Host HTTP demo mode sends credentials, task content and results without encryption. Use only on a trusted network.',
     );
   }
-  const filePath = credentialPath(
+  const legacyFilePath = credentialPath(
     serverUrl,
     options.workspaceId,
     options.workspaceCwd,
   );
-  let credential = await readCredential(filePath);
+  // Old clients delete their legacy file on revocation without checking its
+  // identity. Keep updated credentials outside that deletion path.
+  const filePath = legacyFilePath.replace(/\.json$/, '.v2.json');
+  const savedCurrentCredential = await readCredential(filePath);
+  let credential =
+    savedCurrentCredential ?? (await readCredential(legacyFilePath));
+  const discardRevokedCredential = async (expected: AgentHostCredential) => {
+    await removeRevokedCredential(filePath, expected);
+    await removeRevokedCredential(legacyFilePath, expected);
+  };
   assertOpen();
   const sendHeartbeat = async (
     target: AgentHostCredential,
@@ -711,16 +794,23 @@ async function connectAgentHost(
     try {
       await sendHeartbeat(savedCredential, options.enrollmentToken);
     } catch (error) {
-      if ((error as { status?: number }).status !== 401) throw error;
-      try {
-        await sendHeartbeat(savedCredential);
-        throw new Error('Invalid or expired Agent Host enrollment token.');
-      } catch (credentialError) {
-        if (!isRevocation(credentialError)) {
-          throw credentialError;
-        }
-        await fs.rm(filePath, { force: true });
+      if (
+        (error as { status?: number }).status === 409 &&
+        (error as Error).message === AGENT_HOST_REPLACEMENT_REQUIRED
+      ) {
         credential = undefined;
+      } else {
+        if ((error as { status?: number }).status !== 401) throw error;
+        try {
+          await sendHeartbeat(savedCredential);
+          throw new Error('Invalid or expired Agent Host enrollment token.');
+        } catch (credentialError) {
+          if (!isRevocation(credentialError)) {
+            throw credentialError;
+          }
+          await discardRevokedCredential(savedCredential);
+          credential = undefined;
+        }
       }
     }
     assertOpen();
@@ -754,7 +844,9 @@ async function connectAgentHost(
       hostId: enrolled.host.id,
       secret: enrolled.secret,
     };
-    await writeCredential(filePath, credential);
+    await writeCredential(filePath, credential, savedCurrentCredential);
+  } else if (!savedCurrentCredential) {
+    await writeCredential(filePath, credential, undefined);
   }
   const activeCredential = credential;
 
@@ -776,7 +868,7 @@ async function connectAgentHost(
       // is still starting (or when collaboration is off), and deleting the
       // credential then strands the Host until someone re-joins it by hand.
       if (isRevocation(error)) {
-        await fs.rm(filePath, { force: true }).catch(() => undefined);
+        await discardRevokedCredential(activeCredential).catch(() => undefined);
         stop.abort(error);
       }
       if (options.generationGuard?.closed) {
@@ -850,7 +942,9 @@ async function connectAgentHost(
           );
         } catch (error) {
           if (isRevocation(error)) {
-            await fs.rm(filePath, { force: true }).catch(() => undefined);
+            await discardRevokedCredential(activeCredential).catch(
+              () => undefined,
+            );
             stop.abort(error);
             return;
           }

@@ -23,7 +23,6 @@ const mocks = vi.hoisted(() => ({
     submitPrompt: vi.fn(),
     cancel: vi.fn(),
   },
-  features: ['managed_sessions', 'managed_session_cancel'],
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
@@ -131,12 +130,6 @@ describe('ManagedSessionsPage', () => {
       ...mocks.client,
     };
     sessionStorage.clear();
-    mocks.features = ['managed_sessions', 'managed_session_cancel'];
-    mocks.useWorkspace.mockImplementation(() => ({
-      client: mocks.client,
-      baseUrl: 'http://managed-test',
-      capabilities: { features: mocks.features },
-    }));
     mocks.client.listSessions.mockResolvedValue({
       sessions: [summary()],
     });
@@ -772,7 +765,6 @@ describe('ManagedSessionsPage', () => {
   });
 
   it('uses an explicit Java provider without daemon Managed capabilities', async () => {
-    mocks.features = [];
     const listSessions = vi.fn().mockResolvedValue({
       sessions: [summary('java-session')],
     });
@@ -1076,9 +1068,10 @@ describe('ManagedSessionsPage', () => {
     expect(container.querySelector('textarea')?.disabled).toBe(false);
   });
 
-  it('does not fetch Managed endpoints when the feature is unavailable', async () => {
+  it('renders the unavailable fallback and no fetching when no provider is supplied', async () => {
     await render('s1', 'en', null);
     expect(container.textContent).toContain('unavailable');
+    expect(mocks.useWorkspace).not.toHaveBeenCalled();
     expect(mocks.client.getSession).not.toHaveBeenCalled();
     expect(mocks.client.listSessions).not.toHaveBeenCalled();
   });
@@ -1282,7 +1275,62 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.getTranscript).toHaveBeenCalledTimes(3);
   });
 
-  it('deduplicates replay and replaces a gapped stream with a durable snapshot', async () => {
+  it('merges a gapped stream with a durable snapshot and keeps paged history', async () => {
+    vi.useFakeTimers();
+    let deliverGap!: () => void;
+    const gapGate = new Promise<void>((resolve) => {
+      deliverGap = resolve;
+    });
+    mocks.client.getTranscript
+      .mockResolvedValueOnce({
+        events: [event(3, 'Recent')],
+        olderCursor: '3',
+        lastEventId: 3,
+      })
+      .mockResolvedValueOnce({
+        events: [
+          {
+            ...event(1, ''),
+            type: 'accepted',
+            data: { prompt: [{ type: 'text', text: 'Original question' }] },
+          },
+          event(2, 'Earlier '),
+        ],
+        olderCursor: '1',
+        lastEventId: 3,
+      })
+      // The gap resync's snapshot window sits right above the paged page,
+      // and older events still exist below it.
+      .mockResolvedValue({
+        events: [event(3, 'Recent'), event(4, ' New')],
+        olderCursor: '3',
+        lastEventId: 4,
+      });
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await gapGate;
+      yield { ...event(3, ''), type: 'stream_gap' };
+    });
+    await render('s1');
+    await click('Older history');
+    expect(container.textContent).toContain('Original question');
+    await act(async () => {
+      deliverGap();
+      await vi.advanceTimersByTimeAsync(1);
+      await flush();
+    });
+    // The paged page survives the gap resync; wholesale replacement would
+    // drop it.
+    expect(container.textContent).toContain('Original question');
+    expect(container.textContent).toContain('Earlier');
+    expect(container.textContent).toContain('Recent New');
+    expect(
+      [...document.body.querySelectorAll('button')].some(
+        (n) => n.textContent === 'Older history',
+      ),
+    ).toBe(true);
+  });
+
+  it('deduplicates replay and merges a gapped stream with a durable snapshot', async () => {
     vi.useFakeTimers();
     mocks.client.getTranscript
       .mockResolvedValueOnce({ events: [event(1, 'First')], lastEventId: 1 })
@@ -1300,9 +1348,13 @@ describe('ManagedSessionsPage', () => {
       await vi.advanceTimersByTimeAsync(1);
       await flush();
     });
-    expect(
-      container.querySelector('[data-testid="messages"]')?.textContent,
-    ).toContain('First second restored');
+    const rendered =
+      container.querySelector('[data-testid="messages"]')?.textContent ?? '';
+    expect(rendered).toContain('First second restored');
+    // Count/sensitive: an append-instead-of-replace snapshot yields
+    // `First secondFirst second restored` and still satisfies a plain
+    // toContain — so does a replayed prefix with the gap guard removed.
+    expect(rendered.split('First second').length - 1).toBe(1);
     expect(container.textContent).not.toContain('FirstFirst');
     expect(mocks.client.getTranscript).toHaveBeenCalledTimes(2);
     for (const [, options] of mocks.client.getTranscript.mock.calls) {

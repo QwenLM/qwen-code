@@ -226,6 +226,51 @@ describe('managed session authority', () => {
     expect(bodies[3]['previousCommitDigest']).toBeNull();
   });
 
+  it('refuses a shared-reference expansion before any byte is written', async () => {
+    const fixture = await createFixture();
+    const opened = await openAuthority(fixture);
+    await opened.authority.submitInput(inputCommand(fixture), inputRequest);
+
+    let shared: Record<string, unknown> = { leaf: 1 };
+    for (let level = 0; level < 28; level++) {
+      shared = { a: shared, b: shared };
+    }
+    const before = (await fs.readFile(fixture.transcriptPath, 'utf8')).length;
+    // 29 distinct objects holding ~2^28 paths: the expansion has to be
+    // refused during validation, or commit() stringifies every path and
+    // the rejection surfaces as tens of seconds of blocked event loop
+    // plus an untyped RangeError instead.
+    await expect(
+      opened.authority.appendExecution(
+        inputCommand(fixture, {
+          operation: 'appendExecution',
+          commandId: 'cmd-cancel-shared-dag',
+        }),
+        [
+          {
+            v: MANAGED_SESSION_FORMAT_VERSION,
+            sequence: 3,
+            eventId: 'evt-cancel-shared-dag',
+            sessionKey: sessionKeyFor(fixture),
+            kind: 'cancel.requested',
+            occurredAt: 1,
+            payload: {
+              requestId: 'req-1',
+              target: shared,
+              reason: 'test',
+              requestedBy: 'user',
+            },
+          },
+        ],
+        { class: 'trusted_entry' },
+      ),
+    ).rejects.toThrow(ManagedSessionRecordError);
+    expect((await fs.readFile(fixture.transcriptPath, 'utf8')).length).toBe(
+      before,
+    );
+    await opened.release();
+  });
+
   it('reads the committed prefix back from a cold reopen', async () => {
     const fixture = await createFixture();
     const first = await openAuthority(fixture);

@@ -38,6 +38,8 @@ const report = {
   operations: [] as string[],
   signalEvidence: [] as unknown[],
   restoreTransactions: [] as Transaction[],
+  staleWriterConflicts: 0,
+  fencedWriterRenewals: 0,
   target: undefined as Transaction | undefined,
 };
 const proof = path.join(config.directory, 'proof.txt');
@@ -49,6 +51,9 @@ let restoring = false;
 let injected = false;
 let serviceKilled = false;
 let proxyFailure: unknown;
+const sealedWriters = new Set<string>();
+// Writer identities (bootIds) of Harness processes this driver has SIGKILLed.
+const killedWriters = new Set<string>();
 
 function events(transaction: Transaction) {
   return Buffer.from(transaction.recordBytesBase64, 'base64')
@@ -73,12 +78,14 @@ async function control(operation: string) {
 async function killHarness() {
   assert(cli.child?.pid);
   const pid = cli.child.pid;
+  killedWriters.add(cli.bootId);
   const exited = once(cli.child, 'exit');
   assert(cli.child.kill('SIGKILL'));
   const [code, signal] = await exited;
   assert.equal(code, null);
   assert.equal(signal, 'SIGKILL');
   report.signalEvidence.push({ process: 'harness', pid, signal });
+  killedWriters.add(cli.bootId);
 }
 
 async function enteredTool() {
@@ -153,8 +160,47 @@ const proxy = createServer(async (req, res) => {
       ?.includes('application/json')
       ? JSON.parse(bytes.toString())
       : undefined;
+    const writerGrant = `${fields.writerId}:${fields.writerGeneration}`;
+    if (
+      store &&
+      url.pathname.endsWith('/writers:seal') &&
+      upstream.status === 200
+    )
+      sealedWriters.add(writerGrant);
     if (!serviceKilled) {
-      if (upstream.status === 409) {
+      if (
+        upstream.status === 409 &&
+        store &&
+        url.pathname.endsWith('/writers:renew') &&
+        (sealedWriters.has(writerGrant) ||
+          (killedWriters.has(fields.writerId) &&
+            fields.writerId !== cli.bootId))
+      ) {
+        // A renewal already in flight may reach the Store after its writer
+        // sealed, or after the driver SIGKILLed the harness holding it. The
+        // current boot's grant is never tolerated: catching that conflict is
+        // the whole reason the fence exists.
+        assert.equal(
+          json.error.code,
+          'managed_session_writer_conflict',
+          `${url}: ${bytes}`,
+        );
+        report.fencedWriterRenewals++;
+      } else if (
+        upstream.status === 409 &&
+        store &&
+        killedWriters.has(fields.writerId)
+      ) {
+        // A write the killed Harness sent before SIGKILL can be answered only
+        // after the cold load's acquire bumped the writer generation; the
+        // writer fence rejecting it is the designed outcome, not a failure.
+        assert.equal(
+          json?.error?.code,
+          'managed_session_writer_conflict',
+          `${url}: ${bytes}`,
+        );
+        report.staleWriterConflicts++;
+      } else if (upstream.status === 409) {
         assert(
           injected &&
             !store &&

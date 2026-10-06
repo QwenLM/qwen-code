@@ -51,6 +51,14 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.runtime.addTitle': 'Add a runtime',
   'collab.runtime.addDescription':
     'Let another computer run Qwen Code agents for this workspace.',
+  'collab.runtime.replaceTitle': (v) => `Replace ${v?.name}`,
+  'collab.runtime.replaceDescription': (v) =>
+    `Replace ${v?.name} with a new host using a one-time join command.`,
+  'collab.runtime.replaceEffects':
+    'After the new host registers, the old credentials are revoked and agent bindings move to the new host. Running or cancelling tasks on the old host fail; results already being finalized are preserved.',
+  'collab.runtime.replaceRecovery': (v) =>
+    `Resuming replacement of ${v?.name} (${v?.id}). Link expiry does not cancel the pending replacement or undo migrated bindings. If the command expires, create a fresh command here and run it on the replacement machine.`,
+  'collab.runtime.refreshReplacement': 'Refresh replacement command',
   'collab.runtime.methodCommand': 'Run one command there',
   'collab.runtime.methodExisting': 'I have its address and token',
   'collab.runtime.address':
@@ -74,6 +82,9 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
     `${v?.seconds ?? 0}s so far. This updates by itself when it connects.`,
   'collab.runtime.closeKeepLink': 'Close (the link keeps working)',
   'collab.runtime.connected': (v) => `${v?.name} is connected`,
+  'collab.runtime.replaced': (v) => `${v?.oldName} was replaced by ${v?.name}`,
+  'collab.runtime.replaceCompleted':
+    'The old credentials were revoked and agent bindings were migrated. Old active runs were settled; results already being finalized were preserved.',
   'collab.runtime.offers': (v) => `Offers ${v?.programs}`,
   'collab.runtime.done': 'Done',
   'collab.runtime.createAgentOn': (v) => `Create an agent on ${v?.name}`,
@@ -385,6 +396,7 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.runtime.hostSession': (v) => `Host session: ${v?.id}`,
   'collab.runtime.sessions': (v) => `Sessions: ${v?.count}`,
   'collab.runtime.lastSeen': (v) => `Last heartbeat: ${v?.time}`,
+  'collab.runtime.replace': 'Replace Host',
   'collab.runtime.remove': 'Remove',
   'collab.runtime.removeConfirm': (v) =>
     `Remove “${v?.name}”? Agents assigned only to it will move to this computer, and its active runs will stop.`,
@@ -427,6 +439,14 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.runtime.addTitle': '添加 Runtime',
   'collab.runtime.addDescription':
     '让另一台电脑为这个工作区运行 Qwen Code Agent。',
+  'collab.runtime.replaceTitle': (v) => `替换 ${v?.name}`,
+  'collab.runtime.replaceDescription': (v) =>
+    `使用一次性加入命令，用新主机替换 ${v?.name}。`,
+  'collab.runtime.replaceEffects':
+    '新主机注册后，旧凭据被撤销，Agent 绑定迁移到新主机。旧主机上正在运行或取消的任务会失败；已进入完成结算的结果会保留。',
+  'collab.runtime.replaceRecovery': (v) =>
+    `正在恢复对 ${v?.name}（${v?.id}）的替换。链接过期不会取消待完成的替换，也不会回滚已迁移的绑定。命令过期后，在这里生成新命令，再到替换主机上运行。`,
+  'collab.runtime.refreshReplacement': '刷新替换命令',
   'collab.runtime.methodCommand': '在那台电脑上运行一行命令',
   'collab.runtime.methodExisting': '我已有地址和令牌',
   'collab.runtime.address': '这台电脑的地址（从那台电脑看过来）',
@@ -447,6 +467,9 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
     `已等待 ${v?.seconds ?? 0} 秒。连上后这里会自动更新。`,
   'collab.runtime.closeKeepLink': '关闭（链接仍然有效）',
   'collab.runtime.connected': (v) => `${v?.name} 已连接`,
+  'collab.runtime.replaced': (v) => `${v?.oldName} 已由 ${v?.name} 替换`,
+  'collab.runtime.replaceCompleted':
+    '旧主机凭据已撤销，Agent 绑定已迁移。旧的活动任务已结算，已进入完成结算的结果已保留。',
   'collab.runtime.offers': (v) => `提供 ${v?.programs}`,
   'collab.runtime.done': '完成',
   'collab.runtime.createAgentOn': (v) => `在 ${v?.name} 上新建 Agent`,
@@ -731,6 +754,7 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.runtime.hostSession': (v) => `宿主会话：${v?.id}`,
   'collab.runtime.sessions': (v) => `会话数：${v?.count}`,
   'collab.runtime.lastSeen': (v) => `最近心跳：${v?.time}`,
+  'collab.runtime.replace': '替换主机',
   'collab.runtime.remove': '移除',
   'collab.runtime.removeConfirm': (v) =>
     `确定移除“${v?.name}”吗？只绑定到它的 Agent 会切回这台电脑，正在执行的任务会停止。`,

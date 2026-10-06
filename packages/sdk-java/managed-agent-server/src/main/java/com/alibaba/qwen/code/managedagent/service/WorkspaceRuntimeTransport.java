@@ -2,12 +2,14 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
 import com.alibaba.qwen.code.runtimebroker.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.ManagedShellProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
@@ -179,6 +181,35 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         return delegate.acknowledgeV3(lease, session, reference, receipt);
     }
 
+    @Override
+    public CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
+            Map<String, Object> expectedCaptureIdentity) {
+        if (!managed(session)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Context context = context(lease, session, false, true);
+        var runtime = context.runtime();
+        if (!"kubernetes-workspace".equals(runtime.getRequest().getProvisionerKind())
+                || runtime.getState() != RuntimeBindingRecord.State.DRAINING || !runtime.isDrainRequested()
+                || runtime.getProvisionSeed() == null || runtime.getAttestationGeneration() <= 0
+                || context.session().getState() != RuntimeSessionRecord.State.READY
+                || !context.session().getSession().getScope().equals(session.getScope())
+                || !Long.toString(runtime.getGeneration()).equals(expectedCaptureIdentity.get("bindingGeneration"))) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        try {
+            @SuppressWarnings("unchecked")
+            var storage = (Map<String, Object>) boot.get("storage");
+            var originalBoot = ManagedCsiProtocol.boot(runtime.getRequest(), runtime.getProvisionSeed(), storage);
+            ManagedCsiProtocol.validateAcknowledgementRequest(request, originalBoot, expectedPod);
+            ManagedCsiProtocol.validateAcknowledgementIdentity(lease, session, boot, request, expectedCaptureIdentity);
+        } catch (RuntimeException failure) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        return delegate.acknowledgeCsi(lease, session, boot, expectedPod, request, expectedCaptureIdentity);
+    }
+
     private void requireOwnedWorkspace(RuntimeLease lease, RuntimeSession session) {
         if (!managed(session)) {
             throw WorkspaceExecutionStore.unavailable();
@@ -278,16 +309,20 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> operation) {
-        if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)) {
+        if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)
+                || ManagedShellProtocol.isOperation(operation)) {
             if (!managed(session)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             if (ManagedHookProtocol.isOperation(operation)) {
                 ManagedHookProtocol.validateSession(session, operation);
+            } else if (ManagedShellProtocol.isOperation(operation)) {
+                ManagedShellProtocol.validateSession(session, operation);
             } else {
                 ManagedMcpProtocol.validateSession(session, operation);
             }
-            boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation);
+            boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation)
+                    || ManagedShellProtocol.isRecovery(operation);
             Context context = context(lease, session, !recovery);
             if (context.runtime().getState() != RuntimeBindingRecord.State.READY
                     && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {
@@ -333,6 +368,10 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize) {
+        return context(lease, session, authorize, false);
+    }
+
+    private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize, boolean originalCsi) {
         ContextBinding binding;
         if (authorize) {
             var resolved = resolver.resolve(session.getHarnessSessionId());
@@ -350,7 +389,9 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 || !session.getTurnKind().equals(record.getSession().getTurnKind())
                 || record.getRuntimeGeneration() != runtime.getGeneration()
                 || !runtime.getRequest().getScope().equals(session.getScope())
-                || !session.getHarnessSessionId().equals(runtime.getRequest().getIsolationKey())
+                || (originalCsi
+                        ? !"workspace".equals(session.getScope().getIsolationClass()) || runtime.getRequest().getIsolationKey() != null
+                        : !session.getHarnessSessionId().equals(runtime.getRequest().getIsolationKey()))
                 || !binding.getStorageId().equals(runtime.getRequest().getStorageId())
                 || !binding.getTenantId().equals(session.getScope().getTenantId())
                 || !binding.getWorkspaceId().equals(session.getScope().getWorkspaceId())

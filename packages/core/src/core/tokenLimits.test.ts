@@ -565,15 +565,65 @@ describe('clampOutputTokensToWindow', () => {
     expect(clamped).toBe(window - prompt - outputClampMargin(window));
   });
 
-  it('floors at MIN_CLAMPED_OUTPUT_TOKENS when no room is left', () => {
-    // Prompt at/above the window: never send max_tokens ≤ 0; compaction /
-    // hard-rescue owns this regime.
-    expect(clampOutputTokensToWindow(32_000, 40_000, 39_000)).toBe(
+  it('floors at MIN_CLAMPED_OUTPUT_TOKENS when the window can hold it', () => {
+    // 40K window, 30K prompt: room = 40K − 30K − 10K = 0, so the floor binds —
+    // and 30K + 4K still fits, which is the only case where it may.
+    expect(clampOutputTokensToWindow(32_000, 40_000, 30_000)).toBe(
       MIN_CLAMPED_OUTPUT_TOKENS,
     );
-    expect(clampOutputTokensToWindow(32_000, 40_000, 60_000)).toBe(
-      MIN_CLAMPED_OUTPUT_TOKENS,
-    );
+  });
+
+  it('caps the floor by the room the window has left (issue #13252)', () => {
+    // 8192 window, 5000 prompt: the 10K margin floor pushes room to −6808, so
+    // an uncapped 4K floor returned 4000 and 5000 + 4000 = 9000 > 8192 — the
+    // exact invariant this function promises. Capping the floor by
+    // `window − prompt` keeps the request inside the window. 3192 is also what
+    // the side-query path already asserts for this same input (#13244, 'keeps
+    // prompt + max_tokens inside a window smaller than the output floor').
+    expect(clampOutputTokensToWindow(32_000, 8_192, 5_000)).toBe(3_192);
+    expect(
+      5_000 + clampOutputTokensToWindow(32_000, 8_192, 5_000),
+    ).toBeLessThanOrEqual(8_192);
+  });
+
+  it('keeps prompt + max_tokens within the window across small windows', () => {
+    // Below ≈26.7K the 10K margin floor plus the 4K output floor exceed the
+    // window, so this is the whole reachable region — including the un-gated
+    // (4192, 6963] band on an 8192 window that #13252 reports.
+    for (const window of [8_192, 16_384, 26_000, 32_768]) {
+      for (let prompt = 1; prompt < window; prompt += 997) {
+        const maxTokens = clampOutputTokensToWindow(64_000, window, prompt);
+        expect(prompt + maxTokens).toBeLessThanOrEqual(window);
+        expect(maxTokens).toBeGreaterThanOrEqual(1);
+      }
+    }
+  });
+
+  it('is unchanged wherever room already reaches the floor', () => {
+    // Regression guard: capping the floor must not move a single window that
+    // had room for it. Each expectation is the pre-cap formula.
+    const cases: Array<[ceiling: number, window: number, prompt: number]> = [
+      [32_000, 200_000, 50_000],
+      [32_000, 200_000, 170_000],
+      [64_000, 131_072, 71_349],
+      [64_000, 1_000_000, 500_000],
+      [8_000, 40_000, 10_000],
+    ];
+    for (const [ceiling, window, prompt] of cases) {
+      const room = window - prompt - outputClampMargin(window);
+      expect(room).toBeGreaterThanOrEqual(MIN_CLAMPED_OUTPUT_TOKENS);
+      expect(clampOutputTokensToWindow(ceiling, window, prompt)).toBe(
+        Math.min(ceiling, room),
+      );
+    }
+  });
+
+  it('never sends max_tokens below 1 when the prompt fills the window', () => {
+    // Prompt at/above the window: no valid max_tokens exists, so return the
+    // smallest provider-valid value instead of ≤ 0 — compaction / hard-rescue
+    // owns this regime. Same shape as computeCompactionOutputBudget.
+    expect(clampOutputTokensToWindow(32_000, 40_000, 39_000)).toBe(1_000);
+    expect(clampOutputTokensToWindow(32_000, 40_000, 60_000)).toBe(1);
   });
 
   it('scales the margin at 5% for huge windows', () => {
@@ -593,8 +643,12 @@ describe('clampOutputTokensToWindow', () => {
     // QWEN_CODE_MAX_OUTPUT_TOKENS=2000 on a capacity-constrained backend:
     // the floor applies to the ROOM, not to the user's explicit ceiling.
     expect(clampOutputTokensToWindow(2_000, 200_000, 50_000)).toBe(2_000);
-    // Even with no room left, a tiny explicit ceiling is preserved.
-    expect(clampOutputTokensToWindow(2_000, 40_000, 39_000)).toBe(2_000);
+    // Even with no room left, a ceiling below the (capped) floor is preserved:
+    // 40_000 − 39_000 leaves 1_000, and 500 < 1_000 still wins.
+    expect(clampOutputTokensToWindow(500, 40_000, 39_000)).toBe(500);
+    // The ceiling remains an upper bound on a tight window, and a larger one
+    // does not lift the result past the capped floor.
+    expect(clampOutputTokensToWindow(32_000, 40_000, 39_000)).toBe(1_000);
   });
 
   it('keeps OUTPUT_TOKEN_CEILING aligned with the escalation target', () => {
