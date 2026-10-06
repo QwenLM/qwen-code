@@ -1099,7 +1099,11 @@ function sweepStaleRuntimeLedgers(
           lastNamed = alive;
           return 'unproven';
         }
-        return sawRetired ? 'terminal' : 'proven';
+        // A file vanishing without ever being judged proves nothing —
+        // never readable and deleted from outside the sweep, there is no
+        // provable stop behind it. Its single-ledger sibling holds the
+        // same fact terminal.
+        return sawRetired || lastNamed.length === 0 ? 'terminal' : 'proven';
       },
       () => {
         armedStaleSweeps.delete(ledgerDir);

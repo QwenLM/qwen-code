@@ -1831,8 +1831,15 @@ describe.skipIf(process.platform === 'win32')(
       expect(() => process.kill(pid!, 0)).toThrow();
     });
 
-    it('reports and retries an unprovable startup sweep until the truth heals', async () => {
-      {
+    it(
+      'holds the quarantine when a never-readable ledger is deleted from outside the sweep',
+      // The reaper's ticks are seconds apart.
+      { timeout: 30_000 },
+      async () => {
+        // A never-judged file that vanishes from outside proves nothing —
+        // the single-ledger sibling holds the same fact terminal: no lift,
+        // however many retries pass. The lift lives with the next test:
+        // a proof the sweep itself made.
         const sweeperConfig = new Config({
           sessionId: '11111111-2222-3333-4444-555555555555',
           targetDir: root,
@@ -1858,7 +1865,7 @@ describe.skipIf(process.platform === 'win32')(
         await mkdir(ledgerDir, { recursive: true });
         // A FRESH unreadable ledger: old enough to judge, too young to
         // retire, so the sweep fails the same way on every retry until an
-        // operator — here the test — removes the blocker.
+        // outside actor — here the test — removes the blocker.
         const ghost = path.join(ledgerDir, 'ghost.json');
         await writeFile(ghost, '{not a ledger', 'utf8');
 
@@ -1873,20 +1880,12 @@ describe.skipIf(process.platform === 'win32')(
         expect(clearSpy).not.toHaveBeenCalled();
 
         await rm(ghost);
-        // The reaper's first retry lands no earlier than its 1 s interval —
-        // past the waitFor default deadline — so this wait gets the
-        // 15-second precedent.
-        await vi.waitFor(
-          () => {
-            expect(clearSpy).toHaveBeenCalled();
-          },
-          { timeout: 15_000 },
-        );
-        // The reaper reports proven once and stops.
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        expect(clearSpy).toHaveBeenCalledTimes(1);
-      }
-    });
+        // Several retry intervals pass: the terminal fact means no lift.
+        await new Promise((resolve) => setTimeout(resolve, 3_500));
+        expect(clearSpy).not.toHaveBeenCalled();
+        expect(reportSpy).toHaveBeenCalledTimes(1);
+      },
+    );
 
     it(
       'lifts the quarantine when the retry sweep itself proves the ledger clean',

@@ -1181,7 +1181,12 @@ real-process verification before M6.
   stays blocked. The quarantine lives in the Managed child: how the Bridge
   and the daemon learn it is M6's contract, with the engine's registration.
   A group no one can ever kill, one running as another user, keeps the
-  engine quarantined and the ledger on disk: an operator sees it.
+  engine quarantined and the ledger on disk: an operator sees it. So does
+  a ledger that vanished without ever being judged: never readable, set
+  aside unreadable, or deleted from outside the sweep. Its disappearance
+  proves nothing, so the quarantine stands on the same terminal rule as
+  its single-ledger sibling, until the groups it still names provably
+  die (or an operator clears the debris by hand).
 
 M5a had no ledger, and its settled cancel was the worker's word that the
 call ended: a Shell member that ignored SIGTERM survived its leader's exit,
