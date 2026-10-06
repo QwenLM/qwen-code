@@ -31,6 +31,7 @@ import {
   realpathDeepestExisting,
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
+import { ManagedChildRunSupervisor } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
 import { RemoteShellResultPublisher } from './remote-shell-result-publication.js';
 import type { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
@@ -62,6 +63,18 @@ import {
   MANAGED_MCP_WORKER_ROUTE,
   registerManagedMcpRoutes,
 } from './managed-mcp-routes.js';
+import { ManagedBackgroundShellRegistry } from './managed-background-shell-registry.js';
+import { ManagedShellRuntime } from './managed-shell-runtime.js';
+import {
+  MANAGED_SHELL_WORKER_ROUTE,
+  registerManagedShellRoutes,
+} from './managed-shell-routes.js';
+import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
+import { ManagedMonitorRuntime } from './managed-monitor-runtime.js';
+import {
+  MANAGED_MONITOR_WORKER_ROUTE,
+  registerManagedMonitorRoutes,
+} from './managed-monitor-routes.js';
 
 /**
  * The routes of a worker booted with v2. Attestation v2 is not among them,
@@ -72,6 +85,8 @@ export const MANAGED_CONTEXT_WORKER_ROUTES = Object.freeze([
   WORKSPACE_ACTIVATION_ROUTE,
   MANAGED_MCP_WORKER_ROUTE,
   MANAGED_HOOK_WORKER_ROUTE,
+  MANAGED_SHELL_WORKER_ROUTE,
+  MANAGED_MONITOR_WORKER_ROUTE,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   ...OWNED_MANAGED_RUNTIME_ROUTES.filter((route) => route.key !== 'attest'),
 ]);
@@ -200,6 +215,60 @@ function isHostAbsolute(mountRoot: string): boolean {
 }
 
 /**
+ * Picks the capture funnel of one prepare by the capture's own identity. A
+ * background Shell or Monitor capture belongs to the record funnel of its
+ * Session; a foreground result belongs to its own publication grant, and
+ * the same Session owning both at once is a legal, ordinary topology — a
+ * Session-level mixed-mode check can never tell the two apart.
+ */
+export function selectShellCapturePublisher(
+  remotePublishers: ManagedShellPublisherRegistry,
+  remotePublisher: RemoteShellResultPublisher,
+): ManagedShellCapturePublisher {
+  return {
+    // The retirement gate reads this flag — the selector owns both funnels'
+    // installed state, exactly like the inline composite it replaced.
+    get hasInstalledPublication() {
+      return (
+        remotePublishers.hasInstalledPublication ||
+        remotePublisher.hasInstalledPublication
+      );
+    },
+    async prepare(request) {
+      if (request.capture.background === true) {
+        // The detached handle carries no result manifest, so an
+        // unregistered Session funnel is the one place the record could
+        // never settle — admission refuses it instead of silently parking
+        // the capture on the publication.
+        if (!remotePublishers.hasSession(request.reference.sessionId))
+          throw new Error(
+            'Background captures require their Session publisher.',
+          );
+        return {
+          ...(await remotePublishers.prepare(request)),
+          publisher: remotePublishers,
+        };
+      }
+      if (remotePublisher.hasExecution(request.capture.executionCallId)) {
+        // The foreground result's own funnel; the Session's background
+        // lane registered beside it is not a conflict.
+        return {
+          ...(await remotePublisher.prepare(request)),
+          publisher: remotePublisher,
+        };
+      }
+      const selected = remotePublishers.hasSession(request.reference.sessionId)
+        ? remotePublishers
+        : remotePublisher;
+      return {
+        ...(await selected.prepare(request)),
+        publisher: selected,
+      };
+    },
+  };
+}
+
+/**
  * Mounts attestation v3, context installation and the Tool v2 routes for a
  * boot v2 document. A tool call runs only for a Session with an installed
  * context, in its effective directory, verified again for every call.
@@ -224,29 +293,7 @@ export function registerManagedContextRoutes(
   const publisher: ManagedShellCapturePublisher | undefined =
     capturePublisher ??
     (remotePublishers && remotePublisher
-      ? {
-          get hasInstalledPublication() {
-            return (
-              remotePublishers.hasInstalledPublication ||
-              remotePublisher.hasInstalledPublication
-            );
-          },
-          async prepare(request) {
-            const local = remotePublishers.hasSession(
-              request.reference.sessionId,
-            );
-            const remote = remotePublisher.hasExecution(
-              request.capture.executionCallId,
-            );
-            if (local && remote)
-              throw new Error('Shell publication modes conflict.');
-            const selected = local ? remotePublishers : remotePublisher;
-            return {
-              ...(await selected.prepare(request)),
-              publisher: selected,
-            };
-          },
-        }
+      ? selectShellCapturePublisher(remotePublishers, remotePublisher)
       : (remotePublishers ?? remotePublisher));
   remotePublisher?.registerInstallRoute(app, boot, admissionOpen);
   const [attestRoute, contextRoute] = MANAGED_CONTEXT_ROUTES;
@@ -322,6 +369,17 @@ export function registerManagedContextRoutes(
     loadManagedHookManifest(process.env['QWEN_MANAGED_HOOK_CONFIG']),
   );
   registerManagedHookRoutes(app, boot, hooks);
+  // H3 background Shells share the delegation the Hook commands already use;
+  // unset or empty both mean no delegation, and the executor keeps its
+  // committed refusal then.
+  const cgroupRoot = process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'];
+  const backgroundSupervisor = cgroupRoot
+    ? ManagedChildRunSupervisor.create({ cgroupRoot })
+    : undefined;
+  const backgroundRegistry = new ManagedBackgroundShellRegistry();
+  // One monitor registry shared by executor and maintenance routes: a
+  // private second instance could only ever answer unknown.
+  const monitorRegistry = new ManagedMonitorRegistry();
   const executor: ManagedToolExecutor = new ManagedToolExecutor(
     async (reference) => {
       const isActive = () =>
@@ -394,6 +452,19 @@ export function registerManagedContextRoutes(
       }
       return false;
     },
+    backgroundSupervisor,
+    backgroundRegistry,
+    monitorRegistry,
+  );
+  registerManagedShellRoutes(
+    app,
+    boot,
+    new ManagedShellRuntime(backgroundRegistry),
+  );
+  registerManagedMonitorRoutes(
+    app,
+    boot,
+    new ManagedMonitorRuntime(monitorRegistry),
   );
   registerManagedRuntimeProviderRoute(
     app,
