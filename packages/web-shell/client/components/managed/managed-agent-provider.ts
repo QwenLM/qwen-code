@@ -184,7 +184,16 @@ export interface ManagedAgentProvider {
   ): Promise<void>;
   subscribeEvents(
     sessionId: string,
-    options: ManagedAgentRequestOptions & { lastEventId?: number },
+    options: ManagedAgentRequestOptions & {
+      lastEventId?: number;
+      /**
+       * Called once the stream connection has been (re-)established. An
+       * established stream can stay silent indefinitely — heartbeats are
+       * not events — so this is the only liveness signal that does not
+       * depend on stream activity.
+       */
+      onEstablished?(): void;
+    },
   ): AsyncIterable<ManagedAgentSessionEvent>;
 }
 
