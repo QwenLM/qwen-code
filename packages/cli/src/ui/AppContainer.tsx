@@ -703,6 +703,13 @@ export function usePeerMidTurnDrain({
     // to fix, and a per-envelope notice would let a flood write history. No
     // sender is named — the count is this session's total.
     const writePauseNotice = (noticeAt: number) => {
+      // A stepped-back host clock re-arms the throttle rather than silencing
+      // it: a stamp from the future would keep the delta below the window
+      // indefinitely, and the throttled user loses exactly the line that
+      // tells them they are being throttled.
+      if (noticeAt < noticeAtRef.current) {
+        noticeAtRef.current = 0;
+      }
       if (noticeAt - noticeAtRef.current >= PEER_MID_TURN_WINDOW_MS) {
         noticeAtRef.current = noticeAt;
         // Deliberately not peer-styled: this is the session talking about

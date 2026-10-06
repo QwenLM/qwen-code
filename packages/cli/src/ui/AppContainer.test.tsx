@@ -2393,6 +2393,11 @@ describe('AppContainer State Management', () => {
         expect.objectContaining({
           type: MessageType.NOTIFICATION,
           text: displayText,
+          // The idle drain is the path every peer message takes in a default
+          // install (mid-turn is off by default), and without this marker
+          // the envelope renders with the plain info bullet instead of the
+          // peer glyph `PeerMessage` exists for.
+          display: { peer: true },
         }),
         expect.any(Number),
       );
@@ -8744,26 +8749,29 @@ describe('AppContainer State Management', () => {
       });
       const peer = makePeerMessaging();
       peerMessagingHolder.current = peer.value;
-      render(
+      const settings = {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          agents: {
+            ...mockSettings.merged.agents,
+            crossSessionMessaging: true,
+            ...agents,
+          },
+        },
+      } as unknown as LoadedSettings;
+      // A fresh element per pass: rerendering the identical element object
+      // lets React bail out, and the session-swap pin needs the render body
+      // — and so the hook — to actually run again.
+      const element = () => (
         <AppContainer
           config={mockConfig}
-          settings={
-            {
-              ...mockSettings,
-              merged: {
-                ...mockSettings.merged,
-                agents: {
-                  ...mockSettings.merged.agents,
-                  crossSessionMessaging: true,
-                  ...agents,
-                },
-              },
-            } as unknown as LoadedSettings
-          }
+          settings={settings}
           version="1.0.0"
           initializationResult={mockInitResult}
-        />,
+        />
       );
+      const view = render(element());
       const ref = mockedUseLlmStream.mock.calls.at(-1)?.[
         MID_TURN_PEER_DRAIN_ARG_INDEX
       ] as { current: ((limit: number) => unknown) | null } | undefined;
@@ -8773,6 +8781,8 @@ describe('AppContainer State Management', () => {
       ).toBeDefined();
       return {
         drain: ref!.current,
+        ref: ref!,
+        rerender: () => view.rerender(element()),
         drainPeerEntries,
         restorePeerEntries,
       };
@@ -8850,6 +8860,47 @@ describe('AppContainer State Management', () => {
       expect(batch?.entries).toHaveLength(PEER_MID_TURN_BUDGET_DEFAULT);
       // What the allowance could not pay for goes back to the queue.
       expect(restorePeerEntries).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-scopes the mid-turn window to the live session id at the call site', () => {
+      // The hook's own session-reset case injects its id directly; only the
+      // call site can pin that it feeds `config.getSessionId()` live. `/clear`
+      // swaps the id on the same mounted Config, and if the hook were handed
+      // a constant the new session would inherit the previous one's spent
+      // window — its envelopes falling back to the idle drain silently, the
+      // exact symptom the hook-level regression pin says it prevents.
+      let sessionId = 'session-a';
+      vi.spyOn(mockConfig, 'getSessionId').mockImplementation(() => sessionId);
+      const { drain, ref, rerender, drainPeerEntries, restorePeerEntries } =
+        renderMidTurnCallSite({
+          crossSessionMidTurn: true,
+          crossSessionMidTurnBudget: 1,
+        });
+
+      const first = drain?.(1) as {
+        entries: unknown[];
+        restore: () => void;
+      } | null;
+      expect(first?.entries).toHaveLength(1);
+      // Same session, same window: the single allowance is spent, so the
+      // peek short-circuits the boundary before the pop.
+      expect(drain?.(1)).toBeNull();
+      expect(drainPeerEntries).toHaveBeenCalledTimes(1);
+      expect(restorePeerEntries).not.toHaveBeenCalled();
+
+      // What `/clear` does to a mounted container: the id changes in place.
+      sessionId = 'session-b';
+      rerender();
+
+      // The new session starts clean: the envelope the previous session was
+      // throttled on now reaches the turn, because the call site re-read
+      // getSessionId() and the hook dropped the spent window with it.
+      const second = ref.current?.(1) as { entries: unknown[] } | null;
+      expect(second).not.toBeNull();
+      expect(second?.entries).toHaveLength(1);
+      expect(drainPeerEntries).toHaveBeenCalledTimes(2);
+      expect(drainPeerEntries).toHaveBeenLastCalledWith(1);
+      expect(restorePeerEntries).not.toHaveBeenCalled();
     });
 
     it('refuses peer frames once the pending backlog reaches the cap', () => {
@@ -9380,8 +9431,13 @@ describe('usePeerMidTurnDrain', () => {
     sessionId?: string;
     queue?: QueuedPeerSteer[];
   }) => {
+    // Fresh copies per drain, like the real `drainPeerEntries`: production
+    // pops the queue entries and hands the hook a projection object, so the
+    // hook reads and writes `displayed` only on what it was given, never on
+    // the object still in the queue. Handing live references back would let
+    // the retry dedup pass on object identity instead of the marker field.
     const drainPeerEntries = vi.fn((limit: number) =>
-      queue.splice(0, Math.max(limit, 0)),
+      queue.splice(0, Math.max(limit, 0)).map((entry) => ({ ...entry })),
     );
     const restorePeerEntries = vi.fn();
     const addHistoryItem = vi.fn();
@@ -9483,13 +9539,18 @@ describe('usePeerMidTurnDrain', () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     const first = envelope('first', 'frame-1');
-    const { drain, queue, restorePeerEntries, addHistoryItem } =
-      renderPeerDrain({
-        peerMessaging: {
-          drainQueuedFrame: vi.fn(() => true),
-        } as unknown as PeerMessaging,
-        queue: [first],
-      });
+    const {
+      drain,
+      queue,
+      drainPeerEntries,
+      restorePeerEntries,
+      addHistoryItem,
+    } = renderPeerDrain({
+      peerMessaging: {
+        drainQueuedFrame: vi.fn(() => true),
+      } as unknown as PeerMessaging,
+      queue: [first],
+    });
 
     const batch = drain();
     expect(batch?.entries).toEqual([
@@ -9507,12 +9568,26 @@ describe('usePeerMidTurnDrain', () => {
       NOW,
     );
     expect(restorePeerEntries).not.toHaveBeenCalled();
-    expect(first.displayed).toBe(true);
+    // The caller's `limit` reaches the popper verbatim — dropping it would
+    // silently pull every queued envelope into one boundary submission.
+    expect(drainPeerEntries).toHaveBeenCalledWith(10);
+    // The marker lands on the entry the drain was handed, not on the object
+    // the queue still holds: dedup can therefore only run off the field.
+    const drained = drainPeerEntries.mock.results[0]!
+      .value as QueuedPeerSteer[];
+    expect(drained[0]!.displayed).toBe(true);
+    expect(first.displayed).toBeUndefined();
 
-    // A retry after a failed admission requeues the same entry; it must not
+    // A retry after a failed admission requeues the entry; it must not
     // stack a second identical line while the model still gets one message.
-    queue.push(first);
+    // The requeued entry comes back as a *different* object carrying the
+    // marker, the way the real restore→drain round trip hands it over.
+    queue.push(drained[0]!);
     expect(drain()?.entries).toHaveLength(1);
+    const redrained = drainPeerEntries.mock.results[1]!
+      .value as QueuedPeerSteer[];
+    expect(redrained[0]).not.toBe(drained[0]);
+    expect(redrained[0]!.displayed).toBe(true);
     expect(addHistoryItem).toHaveBeenCalledTimes(1);
   });
 
@@ -9521,31 +9596,52 @@ describe('usePeerMidTurnDrain', () => {
     vi.setSystemTime(NOW);
     const stale = envelope('stale', 'frame-stale');
     const fresh = envelope('fresh', 'frame-fresh');
+    const newer = envelope('newer', 'frame-newer');
     const drainQueuedFrame = vi.fn((delivery?: PeerQueuedDelivery) =>
       delivery?.msgId === 'frame-stale' ? false : true,
     );
-    const { drain, queue, restorePeerEntries, addHistoryItem } =
-      renderPeerDrain({
-        peerMessaging: { drainQueuedFrame } as unknown as PeerMessaging,
-        capacity: 1,
-        queue: [stale],
-      });
+    const {
+      drain,
+      queue,
+      drainPeerEntries,
+      restorePeerEntries,
+      addHistoryItem,
+    } = renderPeerDrain({
+      peerMessaging: { drainQueuedFrame } as unknown as PeerMessaging,
+      capacity: 1,
+      // The stale pin and a deliverable envelope in the SAME drain, at a
+      // limit above the production 1: the scan must consume the stale
+      // entry (the gate already sent its `misaddressed` receipt) and keep
+      // going, so the live envelope still reaches this very batch rather
+      // than waiting for a boundary that may never come.
+      queue: [stale, fresh],
+    });
 
-    // drainQueuedFrame returning false means the gate already sent the
-    // `misaddressed` receipt: the envelope is consumed, not deferred.
-    expect(drain()).toBeNull();
-    expect(drainQueuedFrame).toHaveBeenCalledWith(stale.delivery);
-    expect(restorePeerEntries).not.toHaveBeenCalled();
-    expect(addHistoryItem).not.toHaveBeenCalled();
-
-    // Consuming it cost no allowance, so the next envelope still fits the
-    // one-per-window budget.
-    queue.push(fresh);
     const batch = drain();
+    // The live envelope is in the same batch the stale pin interrupted.
     expect(batch?.entries).toEqual([
       { modelText: fresh.modelText, displayText: fresh.displayText },
     ]);
+    // Both envelopes were consulted — the scan went on past the stale one —
+    // and the stale one was consumed, not deferred: nothing is restored.
+    expect(drainQueuedFrame).toHaveBeenNthCalledWith(1, stale.delivery);
+    expect(drainQueuedFrame).toHaveBeenNthCalledWith(2, fresh.delivery);
     expect(restorePeerEntries).not.toHaveBeenCalled();
+    expect(queue).toEqual([]);
+    // The stale pin earned no attribution line of its own.
+    const written = writtenItems(addHistoryItem);
+    expect(written).toHaveLength(1);
+    expect(written[0]!.text).toBe(fresh.displayText);
+
+    // Consuming the stale pin cost no allowance: capacity is 1 and the one
+    // slot went to the live envelope, so the next envelope in this window is
+    // refused by the budget peek — deferred to the idle drain, never lost to
+    // a spent stale frame.
+    queue.push(newer);
+    expect(drain()).toBeNull();
+    expect(drainPeerEntries).toHaveBeenCalledTimes(1);
+    expect(restorePeerEntries).not.toHaveBeenCalled();
+    expect(queue).toEqual([newer]);
   });
 
   it('defers envelopes the window cannot pay for and notices once per window', () => {
@@ -9595,9 +9691,10 @@ describe('usePeerMidTurnDrain', () => {
     // Same window, across a re-render: the spent allowance is peeked BEFORE
     // the pop, so a further boundary neither pops, burns the stale-pin check
     // nor restores — a queued envelope simply stays queued — and the throttle
-    // timestamp in the ref earns no second line against a flood.
+    // timestamp in the ref earns no second line against a flood. The requeue
+    // hands back what the restore received, the way the real queue does.
     view.rerender();
-    queue.push(second);
+    queue.push(...(restorePeerEntries.mock.calls[0]![0] as QueuedPeerSteer[]));
     expect(drain()).toBeNull();
     expect(drainPeerEntries).toHaveBeenCalledTimes(1);
     expect(restorePeerEntries).toHaveBeenCalledTimes(1);
@@ -9614,20 +9711,171 @@ describe('usePeerMidTurnDrain', () => {
     ]);
     expect(restorePeerEntries).toHaveBeenNthCalledWith(2, [third]);
     expect(noticeTexts(addHistoryItem)).toHaveLength(2);
+
+    // The half the deferral-time assertion cannot pin: the envelope the
+    // budget deferred once still earns its attribution line when a later
+    // window delivers it. Stamping `displayed` at deferral would ship green
+    // otherwise, and the user would watch the model act on a message that
+    // was never shown.
+    expect(addHistoryItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.NOTIFICATION,
+        text: second.displayText,
+        display: { peer: true },
+      }),
+      NOW + WINDOW_MS,
+    );
+    // And exactly once — the `displayed` marker exists to stop a retry
+    // stacking a second copy of this line.
+    expect(
+      writtenItems(addHistoryItem).filter(
+        (item) => item.text === second.displayText,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('takes only one envelope per boundary at the production limit', () => {
+    // `drainPeers(1)` is the only production caller (the tool-round boundary
+    // in use-llm-stream), running against a default capacity of 3 — the one
+    // shape where the caller's limit, not the budget, is what bounds a batch.
+    // Forwarding `limit` to the popper must survive, or a single boundary
+    // would pull every queued envelope the window can pay for into one
+    // submission: three steers in one batch, one settlement, one debt record.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const first = envelope('first', 'frame-1');
+    const second = envelope('second', 'frame-2');
+    const third = envelope('third', 'frame-3');
+    const { drain, queue, drainPeerEntries, restorePeerEntries } =
+      renderPeerDrain({
+        peerMessaging: {
+          drainQueuedFrame: vi.fn(() => true),
+        } as unknown as PeerMessaging,
+        capacity: 3,
+        queue: [first, second, third],
+      });
+
+    // Allowance remains for all three, yet this boundary takes exactly one.
+    expect(drain(1)?.entries).toEqual([
+      { modelText: first.modelText, displayText: first.displayText },
+    ]);
+    expect(drainPeerEntries).toHaveBeenCalledWith(1);
+    expect(queue).toEqual([second, third]);
+    expect(restorePeerEntries).not.toHaveBeenCalled();
+
+    // One envelope per boundary while the allowance lasts.
+    expect(drain(1)?.entries).toEqual([
+      { modelText: second.modelText, displayText: second.displayText },
+    ]);
+    expect(drain(1)?.entries).toEqual([
+      { modelText: third.modelText, displayText: third.displayText },
+    ]);
+    expect(drainPeerEntries).toHaveBeenCalledTimes(3);
+    expect(restorePeerEntries).not.toHaveBeenCalled();
+
+    // Window full and queue empty: the boundary peeks, pays nothing, and
+    // stays silent — no pop, no restore, no pause line.
+    expect(drain(1)).toBeNull();
+    expect(drainPeerEntries).toHaveBeenCalledTimes(3);
+  });
+
+  it('reopens the notice throttle only once the window has fully rolled', () => {
+    // The throttle compares wall-clock deltas with `>=`. The millisecond
+    // before the boundary is still silence (this case), and the post-roll
+    // deferral in the 'notices once per window' case pins the boundary
+    // itself — together they bracket the comparison on the side real clocks
+    // travel. A backward step is a budget-internal concern, not something
+    // this hook decides.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const first = envelope('first', 'frame-1');
+    const second = envelope('second', 'frame-2');
+    const { drain, queue, drainPeerEntries, addHistoryItem } = renderPeerDrain({
+      peerMessaging: {
+        drainQueuedFrame: vi.fn(() => true),
+      } as unknown as PeerMessaging,
+      capacity: 1,
+      queue: [first, second],
+    });
+
+    // Saturate the window: one delivery, one notice at NOW.
+    expect(drain()?.entries).toHaveLength(1);
+    expect(drainPeerEntries).toHaveBeenCalledTimes(1);
+    expect(noticeTexts(addHistoryItem)).toHaveLength(1);
+
+    // One millisecond short of the roll-off: still no allowance, so the peek
+    // short-circuits before the pop, the queued envelope is neither consulted
+    // by the stale-pin check nor restored, and the delta — however close to
+    // the boundary — does not re-arm the throttle.
+    queue.push(second);
+    vi.setSystemTime(NOW + WINDOW_MS - 1);
+    expect(drain()).toBeNull();
+    expect(drainPeerEntries).toHaveBeenCalledTimes(1);
+    expect(queue).toEqual([second]);
+    expect(noticeTexts(addHistoryItem)).toHaveLength(1);
+  });
+
+  it('survives a host clock step back: pays and re-notices', () => {
+    // The other direction of both wall-clock comparisons: a stepped-back
+    // clock leaves stamps in the future. Kept alive, the budget pins itself
+    // shut and the notice throttle can never re-arm — together a
+    // permanently silent throttle, the exact symptom the notice exists to
+    // prevent.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const first = envelope('first', 'frame-1');
+    const second = envelope('second', 'frame-2');
+    const third = envelope('third', 'frame-3');
+    const fourth = envelope('fourth', 'frame-4');
+    const { drain, queue, drainPeerEntries, addHistoryItem } = renderPeerDrain({
+      peerMessaging: {
+        drainQueuedFrame: vi.fn(() => true),
+      } as unknown as PeerMessaging,
+      capacity: 1,
+      queue: [first, second],
+    });
+    // Saturate the window: one delivery, one notice, throttle armed at NOW.
+    expect(drain()?.entries).toHaveLength(1);
+    expect(noticeTexts(addHistoryItem)).toHaveLength(1);
+
+    // Step the host clock back a whole window.
+    vi.setSystemTime(NOW - WINDOW_MS);
+
+    // The budget pays: a stamp from the future is broken time, not a
+    // recent delivery.
+    queue.push(third);
+    expect(drain()?.entries).toEqual([
+      { modelText: third.modelText, displayText: third.displayText },
+    ]);
+    expect(drainPeerEntries).toHaveBeenCalledTimes(2);
+
+    // And the notice re-arms: without the reset the future stamp keeps the
+    // delta negative and the throttled user never hears again. The envelope
+    // itself still waits (peek, no pop), never lost to the mispriced window.
+    queue.push(fourth);
+    expect(drain()).toBeNull();
+    expect(drainPeerEntries).toHaveBeenCalledTimes(2);
+    expect(queue).toEqual([fourth]);
+    expect(noticeTexts(addHistoryItem)).toHaveLength(2);
   });
 
   it('restore() requeues the batch, refunds the allowance and runs once', () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     const first = envelope('first', 'frame-1');
-    const { drain, queue, restorePeerEntries, addHistoryItem } =
-      renderPeerDrain({
-        peerMessaging: {
-          drainQueuedFrame: vi.fn(() => true),
-        } as unknown as PeerMessaging,
-        capacity: 1,
-        queue: [first],
-      });
+    const {
+      drain,
+      queue,
+      drainPeerEntries,
+      restorePeerEntries,
+      addHistoryItem,
+    } = renderPeerDrain({
+      peerMessaging: {
+        drainQueuedFrame: vi.fn(() => true),
+      } as unknown as PeerMessaging,
+      capacity: 1,
+      queue: [first],
+    });
 
     const batch = drain();
     expect(batch?.entries).toHaveLength(1);
@@ -9635,7 +9883,17 @@ describe('usePeerMidTurnDrain', () => {
 
     batch?.restore();
     expect(restorePeerEntries).toHaveBeenCalledTimes(1);
-    expect(restorePeerEntries).toHaveBeenCalledWith([first]);
+    // What goes back is the entry the drain held, marker included — the real
+    // restore copies it verbatim onto the new queue entry, and the idle
+    // fallback later reads it to avoid double-projecting.
+    expect(restorePeerEntries).toHaveBeenCalledWith([
+      expect.objectContaining({
+        modelText: first.modelText,
+        displayText: first.displayText,
+        delivery: first.delivery,
+        displayed: true,
+      }),
+    ]);
 
     // Idempotent: a second call (a cancel racing an admission failure) must
     // not requeue the envelope twice.
@@ -9644,13 +9902,18 @@ describe('usePeerMidTurnDrain', () => {
 
     // The refund is what makes the retry reachable: nothing reached the model,
     // so the window's single allowance is free again. Without it this drain
-    // defers and returns null.
-    queue.push(first);
+    // defers and returns null. The requeued copy comes back through a fresh
+    // drain object, so the single projection rides on the marker, not on
+    // object identity.
+    queue.push(...(restorePeerEntries.mock.calls[0]![0] as QueuedPeerSteer[]));
     const again = drain();
     expect(again?.entries).toEqual([
       { modelText: first.modelText, displayText: first.displayText },
     ]);
     expect(restorePeerEntries).toHaveBeenCalledTimes(1);
+    const redrained = drainPeerEntries.mock.results[1]!
+      .value as QueuedPeerSteer[];
+    expect(redrained[0]!.displayed).toBe(true);
     // Still one projection — the requeued entry keeps its `displayed` marker.
     expect(addHistoryItem).toHaveBeenCalledTimes(1);
   });

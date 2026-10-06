@@ -135,12 +135,21 @@ export function peerMidTurnBudgetOf(value: unknown): number {
 export class PeerMidTurnBudget {
   private stamps: number[] = [];
 
+  /**
+   * A stamp counts only inside the window and not from the future: a host
+   * clock step back would otherwise keep every stamp alive forever, pinning
+   * the window shut on an idle queue — the silent throttle the pause notice
+   * exists to prevent. Both comparisons share this predicate.
+   */
+  private isLive(stamp: number, now: number): boolean {
+    const age = now - stamp;
+    return age >= 0 && age < PEER_MID_TURN_WINDOW_MS;
+  }
+
   /** True when one more envelope may join the turn in flight. */
   tryConsume(now: number, capacity: number): boolean {
     if (capacity <= 0) return false;
-    this.stamps = this.stamps.filter(
-      (stamp) => now - stamp < PEER_MID_TURN_WINDOW_MS,
-    );
+    this.stamps = this.stamps.filter((stamp) => this.isLive(stamp, now));
     if (this.stamps.length >= capacity) return false;
     this.stamps.push(now);
     return true;
@@ -154,8 +163,7 @@ export class PeerMidTurnBudget {
   hasAllowance(now: number, capacity: number): boolean {
     if (capacity <= 0) return false;
     return (
-      this.stamps.filter((stamp) => now - stamp < PEER_MID_TURN_WINDOW_MS)
-        .length < capacity
+      this.stamps.filter((stamp) => this.isLive(stamp, now)).length < capacity
     );
   }
 
