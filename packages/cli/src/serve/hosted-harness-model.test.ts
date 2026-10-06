@@ -54,12 +54,19 @@ function config(
     .mockResolvedValue(undefined);
   const refreshAuth = vi.fn(async () => undefined);
   const requests: Part[][] = [];
+  const sendOptions: unknown[] = [];
   const getHistory = vi.fn<() => Content[]>(() => [
     { role: 'model', parts: [{ text: 'answer' }] },
   ]);
   const budget = new TurnBudget();
-  const sendMessageStream = vi.fn(async function* (request: Part[]) {
+  const sendMessageStream = vi.fn(async function* (
+    request: Part[],
+    _signal?: unknown,
+    _promptId?: unknown,
+    options?: unknown,
+  ) {
     requests.push(request);
+    sendOptions.push(options);
     for (const event of events) yield event;
   });
   state.config = {
@@ -91,6 +98,7 @@ function config(
     refreshAuth,
     sendMessageStream,
     requests,
+    sendOptions,
     budget,
     getHistory,
   };
@@ -441,7 +449,10 @@ describe('Hosted Harness model boundary', () => {
     vi.mocked(hooks.session.ensureReady).mockImplementation(async () => {
       ready = true;
     });
-    const textDeltas = { delta: vi.fn(), published: vi.fn(() => false) };
+    const textDeltas = {
+      delta: vi.fn(),
+      retract: vi.fn(async () => undefined),
+    };
     hooks.fire.mockImplementation(async (event) =>
       event === HookEventName.MessageDisplay
         ? { suppressOutput: true }
@@ -490,7 +501,10 @@ describe('Hosted Harness model boundary', () => {
         ? { decision: 'block', reason: 'Continue' }
         : undefined,
     );
-    const textDeltas = { delta: vi.fn(), published: vi.fn(() => false) };
+    const textDeltas = {
+      delta: vi.fn(),
+      retract: vi.fn(async () => undefined),
+    };
     await expect(
       runHostedHarnessTextTurn({ ...input, hooks: hooks.session, textDeltas }),
     ).resolves.toMatchObject({ text: 'accepted answer' });
@@ -504,7 +518,10 @@ describe('Hosted Harness model boundary', () => {
       { type: LlmEventType.Finished },
     ]);
     const hooks = hostedHooks([HookEventName.Notification]);
-    const textDeltas = { delta: vi.fn(), published: vi.fn(() => false) };
+    const textDeltas = {
+      delta: vi.fn(),
+      retract: vi.fn(async () => undefined),
+    };
     await runHostedHarnessTextTurn({
       ...input,
       hooks: hooks.session,
@@ -1016,9 +1033,9 @@ describe('Hosted Harness resume and retraction', () => {
     expect(toolTurn.execute).not.toHaveBeenCalled();
   });
 
-  it('fails the turn rather than retracting a published model attempt', async () => {
-    config([
-      { type: LlmEventType.Content, value: 'leaked prefix' },
+  it('retracts a published model attempt before the replay resumes', async () => {
+    const model = config([
+      { type: LlmEventType.Content, value: 'orphaned prefix' },
       { type: LlmEventType.Retry, isContinuation: false },
       { type: LlmEventType.Content, value: 'second attempt' },
       { type: LlmEventType.Finished },
@@ -1026,16 +1043,29 @@ describe('Hosted Harness resume and retraction', () => {
     const textDeltas = {
       delta: vi.fn(async () => undefined),
       messageComplete: vi.fn(async () => undefined),
-      published: () => true,
+      retract: vi.fn(async () => undefined),
     };
     await expect(
       runHostedHarnessTextTurn({ ...input, textDeltas }),
-    ).rejects.toThrow('cannot retract a published model attempt');
+    ).resolves.toMatchObject({ text: 'second attempt' });
+    expect(textDeltas.retract).toHaveBeenCalledOnce();
+    // The replay's text is published under the fresh identity only after the
+    // retraction, so the orphaned prefix never glues into it (#13319).
+    expect(textDeltas.retract.mock.invocationCallOrder[0]).toBeLessThan(
+      textDeltas.delta.mock.invocationCallOrder[1],
+    );
+    // The send opts out of continuation recovery: a post-delivery cut must
+    // replay the original request, or the retry has nothing clean to publish
+    // over the retracted prefix. Deleting this option silently regresses to
+    // the glued transcript (#13319).
+    expect(model.sendOptions[0]).toMatchObject({
+      retractDeliveredOutputOnRetry: true,
+    });
   });
 
-  it('fails the turn rather than retracting a published model fallback', async () => {
+  it('retracts a published model fallback before the fallback resumes', async () => {
     config([
-      { type: LlmEventType.Content, value: 'leaked prefix' },
+      { type: LlmEventType.Content, value: 'orphaned prefix' },
       { type: LlmEventType.ModelFallback },
       { type: LlmEventType.Content, value: 'second attempt' },
       { type: LlmEventType.Finished },
@@ -1043,11 +1073,30 @@ describe('Hosted Harness resume and retraction', () => {
     const textDeltas = {
       delta: vi.fn(async () => undefined),
       messageComplete: vi.fn(async () => undefined),
-      published: () => true,
+      retract: vi.fn(async () => undefined),
     };
     await expect(
       runHostedHarnessTextTurn({ ...input, textDeltas }),
-    ).rejects.toThrow('cannot retract a published model attempt');
+    ).resolves.toMatchObject({ text: 'second attempt' });
+    expect(textDeltas.retract).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the text buffer across a continuation retry', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'published prefix' },
+      { type: LlmEventType.Retry, isContinuation: true },
+      { type: LlmEventType.Content, value: ' continued' },
+      { type: LlmEventType.Finished },
+    ]);
+    const textDeltas = {
+      delta: vi.fn(async () => undefined),
+      messageComplete: vi.fn(async () => undefined),
+      retract: vi.fn(async () => undefined),
+    };
+    await expect(
+      runHostedHarnessTextTurn({ ...input, textDeltas }),
+    ).resolves.toMatchObject({ text: 'published prefix continued' });
+    expect(textDeltas.retract).not.toHaveBeenCalled();
   });
 
   it('still discards an unpublished abandoned attempt', async () => {
@@ -1060,11 +1109,14 @@ describe('Hosted Harness resume and retraction', () => {
     const textDeltas = {
       delta: vi.fn(async () => undefined),
       messageComplete: vi.fn(async () => undefined),
-      published: () => false,
+      retract: vi.fn(async () => undefined),
     };
     await expect(
       runHostedHarnessTextTurn({ ...input, textDeltas }),
     ).resolves.toMatchObject({ text: 'final answer' });
+    // retract() is a no-op when nothing is published, but the stream owns
+    // that decision: the turn still defers to it.
+    expect(textDeltas.retract).toHaveBeenCalledOnce();
   });
 
   it('commits every Content chunk through the delta stream as it arrives', async () => {
@@ -1073,15 +1125,10 @@ describe('Hosted Harness resume and retraction', () => {
       { type: LlmEventType.Content, value: ' and two' },
       { type: LlmEventType.Finished },
     ]);
-    // Track the durable-prefix contract the way the real stream does: a
-    // chunk is published the moment delta() commits it.
-    let prefix = '';
     const textDeltas = {
-      delta: vi.fn(async (text: string) => {
-        prefix += text;
-      }),
+      delta: vi.fn(async (_text: string) => undefined),
       messageComplete: vi.fn(async () => undefined),
-      published: () => prefix.length > 0,
+      retract: vi.fn(async () => undefined),
     };
     await expect(
       runHostedHarnessTextTurn({ ...input, textDeltas }),

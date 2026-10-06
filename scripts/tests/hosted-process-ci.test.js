@@ -229,4 +229,22 @@ describe('Hosted real-process gates', () => {
     expect(upload.if).toBe('always()');
     expect(upload.with.path).toContain('failsafe-reports');
   });
+
+  it('keeps the Hosted verify step ceiling above its failsafe fork timeout', () => {
+    const run = java.jobs['hosted-harness-mysql'].steps.find(
+      (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
+    );
+    const forkSeconds = Number(
+      read('packages/sdk-java/managed-agent-server/pom.xml')
+        .split('<id>hosted-harness-mysql</id>')[1]
+        .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
+    );
+    // A step killed before its fork leaves no per-test failure lines, so the
+    // main-CI failure analyzer can only file an undiagnosable per-commit
+    // issue (#13503). The ceiling must cover the fork plus the wrapped
+    // compile/surefire/spotbugs/checkstyle work.
+    expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
+      forkSeconds + 300,
+    );
+  });
 });

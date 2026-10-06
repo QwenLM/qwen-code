@@ -17,6 +17,7 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 
@@ -31,6 +32,15 @@ class ManagedSessionStoreContractFixtureTest {
         JsonNode limits = contract.required("limits");
 
         assertEquals(1, contract.required("contractVersion").intValue());
+        // Every header and limit is read: a key nobody asserts cannot hide.
+        assertEquals(Set.of("tenant", "writerToken"),
+                fieldNames(headers).keySet());
+        assertEquals(Set.of("maxInlineResourceBytes",
+                "maxResourcesPerTransaction", "maxTransactionBytes",
+                "maxTransactionEvents", "maxJsonDepth",
+                "minimumWriterTokenLength", "maximumWriterTokenLength",
+                "minimumLeaseDurationMs", "maximumLeaseDurationMs"),
+                fieldNames(limits).keySet());
         assertEquals(TenantContextFilter.HEADER,
                 headers.required("tenant").textValue());
         assertEquals(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
@@ -70,6 +80,32 @@ class ManagedSessionStoreContractFixtureTest {
         }
 
         JsonNode transaction = contract.required("genesisTransaction");
+        JsonNode request = transaction.required("expectedRequest");
+        // Internal coherence of the published shape, not only of the digest:
+        // an edit regenerating one field must not keep the fixture green
+        // while its request summary disagrees with its records.
+        assertEquals(request.required("recordCount").intValue(),
+                transaction.required("records").size());
+        String sessionId = contract.required("sessionKey")
+                .required("sessionId").textValue();
+        for (JsonNode record : transaction.required("records")) {
+            assertEquals(sessionId, record.required("sessionId").textValue());
+        }
+        long firstSequence = request.required("firstSequence").longValue();
+        long lastSequence = request.required("lastSequence").longValue();
+        long eventCount = request.required("eventCount").longValue();
+        assertEquals("session.create",
+                request.required("operation").textValue());
+        assertEquals(0L, eventCount);
+        assertEquals(0L, firstSequence);
+        assertEquals(0L, lastSequence);
+        assertEquals(2, request.required("recordCount").intValue());
+        assertTrue(request.path("eventsDigest").isMissingNode()
+                || request.required("eventsDigest").isNull());
+        assertTrue(request.path("previousCommitDigest").isMissingNode()
+                || request.required("previousCommitDigest").isNull());
+        assertTrue(request.path("commitDigest").isMissingNode()
+                || request.required("commitDigest").isNull());
         StringBuilder jsonl = new StringBuilder();
         for (JsonNode record : transaction.required("records")) {
             jsonl.append(JSON.writeValueAsString(record)).append('\n');
@@ -106,6 +142,9 @@ class ManagedSessionStoreContractFixtureTest {
         expected.put("resourceNotFound", new ExpectedError(
                 HttpStatus.NOT_FOUND.value(),
                 ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND));
+        expected.put("writerCredentialInvalid", new ExpectedError(
+                HttpStatus.FORBIDDEN.value(),
+                ManagedSessionStoreModels.ERROR_WRITER_CREDENTIAL_INVALID));
         expected.put("ossDisabled", new ExpectedError(
                 HttpStatus.NOT_IMPLEMENTED.value(),
                 ManagedSessionStoreModels.ERROR_OSS_DISABLED));

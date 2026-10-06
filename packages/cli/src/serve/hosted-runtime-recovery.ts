@@ -20,6 +20,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
+import { truncateHostedGlobResponse } from './hosted-workspace-tool-turn.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   HostedWorkspaceBroker,
@@ -298,6 +299,13 @@ export async function recoverHostedRuntimeTurn(input: {
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
   passive: boolean;
+  /** Set when the calling Session already holds the Runtime lease from an
+   * earlier recovery of the same parked Turn (a re-answered load whose first
+   * reply was lost): a failed re-acquire then says nothing about the held
+   * lease, so the failure exits below must not release it — a release
+   * persists RELEASED and wedges every later redrive on
+   * runtime_session_not_acquirable. */
+  leaseAlreadyHeld?: boolean;
 }): Promise<HostedRecoveryTurn | undefined> {
   const { session, promptId, passive } = input;
   const authorization = await session.authority.harnessRunAuthorization();
@@ -402,7 +410,7 @@ export async function recoverHostedRuntimeTurn(input: {
             stored.payloadJson,
             new AbortController().signal,
           );
-          const parts = toolResultParts(item, result);
+          let parts = toolResultParts(item, result);
           let outcome = outcomeBytes(item, parts);
           let record: ChatRecord = {
             uuid: randomUUID(),
@@ -415,12 +423,24 @@ export async function recoverHostedRuntimeTurn(input: {
             daemonPromptId: promptId,
             message: { role: 'user', parts },
           };
-          if (
-            outcome.byteLength >
-              HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
-            Buffer.byteLength(JSON.stringify(record)) >
-              HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
-          ) {
+          const fits = (candidate: Part[]) =>
+            outcomeBytes(item, candidate).byteLength <=
+              HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes &&
+            Buffer.byteLength(
+              JSON.stringify({
+                ...record,
+                message: { role: 'user', parts: candidate },
+              }),
+            ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+          if (item.toolName === 'glob' && !fits(parts)) {
+            const truncated = truncateHostedGlobResponse(parts, fits);
+            if (truncated) {
+              parts = truncated;
+              outcome = outcomeBytes(item, parts);
+              record = { ...record, message: { role: 'user', parts } };
+            }
+          }
+          if (!fits(parts)) {
             // Mirror the live turn's durable ceiling: keep the settled outcome
             // but omit an oversized body rather than replaying the execution.
             const omitted = convertToFunctionErrorResponse(
@@ -460,13 +480,16 @@ export async function recoverHostedRuntimeTurn(input: {
         }
       } catch (cause) {
         // The caller only learns about the lease from a returned report, so
-        // every failure exit here must give it back first.
-        await broker.release().catch((releaseCause) => {
-          writeStderrLineSafe(
-            `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
-          );
-        });
-        acquiredRuntime = false;
+        // every failure exit here must give it back first — unless the
+        // Session already held it before this call (see leaseAlreadyHeld).
+        if (!input.leaseAlreadyHeld) {
+          await broker.release().catch((releaseCause) => {
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
+            );
+          });
+          acquiredRuntime = false;
+        }
         if (cause instanceof RecoveryDeclined) return undefined;
         throw cause;
       }
@@ -480,12 +503,15 @@ export async function recoverHostedRuntimeTurn(input: {
       acquiredRuntime = true;
     } catch (cause) {
       // A lost acquire reply leaves the lease uncertain: hand back whatever
-      // may exist rather than stranding it.
-      await broker.release().catch((releaseCause) => {
-        writeStderrLineSafe(
-          `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
-        );
-      });
+      // may exist rather than stranding it — unless the Session already holds
+      // the lease (leaseAlreadyHeld), where nothing is uncertain and the
+      // release would only persist RELEASED against every later redrive.
+      if (!input.leaseAlreadyHeld)
+        await broker.release().catch((releaseCause) => {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
+          );
+        });
       throw cause;
     }
   }
@@ -495,8 +521,10 @@ export async function recoverHostedRuntimeTurn(input: {
   } catch (cause) {
     // A failed continuation hands the lease back — but a passive load must
     // not (see the adoption comment above): its retried takeover re-acquires
-    // the READY identity idempotently, while a release would wedge it.
-    if (acquiredRuntime && !passive) {
+    // the READY identity idempotently, while a release would wedge it. A
+    // lease the Session already held before this call stays held for the
+    // same reason (leaseAlreadyHeld).
+    if (acquiredRuntime && !passive && !input.leaseAlreadyHeld) {
       await broker.release().catch((releaseCause) => {
         writeStderrLineSafe(
           `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
@@ -509,7 +537,7 @@ export async function recoverHostedRuntimeTurn(input: {
   if (finalAuthorization.status !== 'runnable') {
     // Same split as the catch above: only the continuation path hands its
     // lease back here; a passive load leaves the adoption owed.
-    if (acquiredRuntime && !passive) {
+    if (acquiredRuntime && !passive && !input.leaseAlreadyHeld) {
       await broker.release().catch((releaseCause) => {
         writeStderrLineSafe(
           `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,

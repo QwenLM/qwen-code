@@ -45,6 +45,42 @@ public final class InMemoryRuntimeBindingRepository
     }
 
     @Override
+    public synchronized RuntimeSessionRecord beginSessionRelease(
+            RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+            RuntimeSessionRecord expected) {
+        if (!(sessions instanceof InMemoryRuntimeSessionRepository memorySessions)
+                || !(executions instanceof InMemoryToolExecutionRepository)) {
+            throw new IllegalArgumentException("Release requires matching in-memory repositories");
+        }
+        synchronized (memorySessions) {
+            RuntimeSessionRecord current = sessions.findById(
+                    expected.getSession().getScope(),
+                    expected.getRuntimeSessionId());
+            if (current == null || !current.sameIdentity(expected)
+                    || current.getVersion() != expected.getVersion()) {
+                return null;
+            }
+            if (current.getState() == RuntimeSessionRecord.State.RELEASING
+                    || current.getState() == RuntimeSessionRecord.State.RELEASED) {
+                return current;
+            }
+            if (current.getState() != RuntimeSessionRecord.State.READY
+                    && current.getState() != RuntimeSessionRecord.State.ACQUIRING) {
+                throw new RuntimeBrokerException(409, "runtime_session_not_ready",
+                        "Runtime Session is not ready for release", false);
+            }
+            if (executions.hasActiveByRuntimeSession(current.getBindingId(),
+                    current.getRuntimeGeneration(),
+                    current.getRuntimeSessionId())) {
+                throw new RuntimeBrokerException(409, "runtime_session_busy",
+                        "Runtime Session has an active operation", false);
+            }
+            return sessions.compareAndSet(current, current.withState(
+                    RuntimeSessionRecord.State.RELEASING, clock.instant()));
+        }
+    }
+
+    @Override
     public synchronized RuntimeBindingRecord recoverLost(
             RuntimeSessionRepository sessions, ToolExecutionRepository executions,
             RuntimeBindingRecord expected) {
@@ -68,6 +104,10 @@ public final class InMemoryRuntimeBindingRepository
             return null;
         }
         if (current.getLossEvidence() == null) {
+            return current;
+        }
+        if ("kubernetes-workspace".equals(current.getRequest().getProvisionerKind())
+                && current.isDrainRequested()) {
             return current;
         }
         if (!(sessions instanceof InMemoryRuntimeSessionRepository memorySessions)
@@ -163,6 +203,32 @@ public final class InMemoryRuntimeBindingRepository
                 && harnessSessionId.equals(record.getRequest().getIsolationKey())
                 && (afterBindingId == null || record.getBindingId().compareTo(afterBindingId) > 0))
                 .sorted(java.util.Comparator.comparing(RuntimeBindingRecord::getBindingId)).limit(limit).toList();
+    }
+
+    @Override
+    public synchronized ToolExecutionRecord authorizeDispatch(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, ToolExecutionRecord expected,
+            String owner, long dispatchGeneration) {
+        if (expected == null || expected.getState() != ToolExecutionRecord.State.DISPATCHING
+                || expected.isCancelRequested()) {
+            throw new IllegalArgumentException("Dispatch admission requires an uncancelled claim");
+        }
+        var binding = findById(expected.getBindingId());
+        RuntimeAdmission.requireReady(binding, expected.getRuntimeGeneration());
+        synchronized (sessions) {
+            RuntimeAdmission.requireSession(sessions.findById(
+                    binding.getRequest().getScope(), expected.getRuntimeSessionId()), expected);
+            if (sessions instanceof InMemoryRuntimeSessionRepository
+                    && executions instanceof InMemoryToolExecutionRepository memoryExecutions) {
+                return memoryExecutions.authorizeDispatch(expected, owner, dispatchGeneration, binding.getVersion());
+            }
+            if ("kubernetes-workspace".equals(binding.getRequest().getProvisionerKind())) {
+                throw new RuntimeBrokerException(501, "runtime_dispatch_admission_unavailable",
+                        "CSI dispatch authorization requires native repositories", false);
+            }
+            return executions.compareAndSet(expected,
+                    expected.withState(ToolExecutionRecord.State.EXECUTING, false), owner, dispatchGeneration);
+        }
     }
 
     @Override

@@ -28,6 +28,12 @@ import {
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
 import { createManagedEngineChannelFactory } from './managed-engine-channel-factory.js';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { localManagedSessionKey } from '@qwen-code/qwen-code-core/utils/sessionStorageUtils.js';
+import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import type { HarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
 // Real `qwen --acp` children and their Runtime workers, run from source
 // through tsx; workspace packages resolve to their sources too.
@@ -294,6 +300,41 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     }
   }
 
+  /** The durable outcome behind the newest tool.receipt on these log lines. */
+  async function readLatestOutcome(
+    lines: Array<{
+      managedSession?: {
+        kind?: string;
+        payload?: { toolOutcomeRef?: ManagedSessionDurableRef };
+      };
+    }>,
+    sessionId: string,
+  ): Promise<{ executionStatus: string }> {
+    const sessionKey = localManagedSessionKey(workspace, sessionId);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: path.join(root, 'runtime'),
+      sessionKey,
+    });
+    const refs = lines
+      .filter((line) => line.managedSession?.kind === 'tool.receipt')
+      .map((line) => line.managedSession!.payload!.toolOutcomeRef!);
+    const envelope = JSON.parse(
+      (await resources.read(refs[refs.length - 1]! as never)).toString(),
+    ) as { result?: { executionStatus?: string } };
+    return { executionStatus: envelope.result?.executionStatus ?? 'unknown' };
+  }
+
+  /** The session's Managed Session log, as the child left it. */
+  async function readManagedLog(sessionId: string): Promise<string> {
+    const transcript = new SessionService(workspace, {
+      runtimeBaseDir: path.join(root, 'runtime'),
+    }).getSessionTranscriptPath(sessionId);
+    return waitFor(async () => {
+      const text = await readFile(transcript, 'utf8').catch(() => undefined);
+      return text !== undefined && text.length > 0 ? text : undefined;
+    });
+  }
+
   /** A shell command that records the worker's pid, command and parent. */
   function recordWorker(file: string, then = ''): Record<string, unknown> {
     return {
@@ -381,6 +422,57 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     // Closing the session stops its worker before the session ends.
     await bridge!.closeSession(sessionId);
     expect(isAlive(worker.pid)).toBe(false);
+
+    // Every call's evidence is durable: admitted before dispatch, settled as
+    // it ended, and the batch closed behind it before the model continued.
+    const log = await readManagedLog(sessionId);
+    const count = (needle: string) => log.split(needle).length - 1;
+    expect(count('"tool.intent"')).toBe(4);
+    expect(count('"tool.receipt"')).toBe(4);
+    expect(count('"durable_wait"')).toBeGreaterThanOrEqual(1);
+    expect(count('"turn_complete"')).toBeGreaterThanOrEqual(1);
+
+    // The batch closed behind the results: a consumed turn_settled
+    // checkpoint names every call settled with its outcome.
+    const checkpointRefs = log
+      .split('\n')
+      .filter(Boolean)
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            managedSession?: { kind?: string; payload?: { stateRef?: never } };
+          },
+      )
+      .filter((line) => line.managedSession?.kind === 'checkpoint.committed')
+      .map((line) => line.managedSession!.payload!.stateRef!);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: path.join(root, 'runtime'),
+      sessionKey: localManagedSessionKey(workspace, sessionId),
+    });
+    const checkpoints: HarnessCheckpointV1[] = [];
+    for (const ref of checkpointRefs) {
+      // parse, not JSON.parse: the decoded body must satisfy the schema, so
+      // a renamed or dropped field fails here rather than passing vacuously.
+      checkpoints.push(parseHarnessCheckpointV1(await resources.read(ref)));
+    }
+    const closed = checkpoints
+      .reverse()
+      .find(
+        (checkpoint) =>
+          checkpoint.continuation.phase === 'turn_settled' &&
+          Array.isArray(checkpoint.tools?.items),
+      );
+    const closedItems = closed?.tools?.items;
+    expect(closedItems).toBeDefined();
+    expect(closedItems!.length).toBe(4);
+    expect(
+      closedItems!.every(
+        (item) =>
+          item.state === 'settled' &&
+          item.consumed === true &&
+          item.outcomeRef !== null,
+      ),
+    ).toBe(true);
   }, 120_000);
 
   it('starts no worker for a session that calls no tool', async () => {
@@ -431,6 +523,27 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     // The worker settled the call only after the command stopped.
     expect(isAlive(sleepPid)).toBe(false);
     expect(isAlive(worker.pid)).toBe(true);
+    // The cancellation settled as a receipt too, and its outcome says how
+    // the call ended — read from the outcome itself, not a substring.
+    const cancelledLog = await readManagedLog(sessionId);
+    expect(cancelledLog).toContain('"tool.intent"');
+    expect(cancelledLog).toContain('"tool.receipt"');
+    const outcome = await readLatestOutcome(
+      cancelledLog
+        .split('\n')
+        .filter(Boolean)
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              managedSession?: {
+                kind?: string;
+                payload?: { toolOutcomeRef?: ManagedSessionDurableRef };
+              };
+            },
+        ),
+      sessionId,
+    );
+    expect(outcome.executionStatus).toBe('cancelled');
 
     // The same worker serves the session's next call.
     const nextOut = path.join(workspace, 'next.txt');
@@ -518,5 +631,12 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     turns.push({ text: 'SHOULD_NOT_RUN' });
     await expect(prompt(sessionId)).rejects.toMatchObject(unknownOutcome);
     expect(modelRequests).toHaveLength(requestsBefore);
+
+    // The durable form of the block: admitted before dispatch, never settled,
+    // and the log answers nothing for it.
+    const blockedLog = await readManagedLog(sessionId);
+    expect(blockedLog).toContain('"tool.intent"');
+    expect(blockedLog).not.toContain('"tool.receipt"');
+    expect(blockedLog).toContain('"durable_wait"');
   }, 120_000);
 });
