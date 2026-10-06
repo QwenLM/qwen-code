@@ -200,16 +200,18 @@ class EmbeddedRuntimeBrokerTest {
                 .hasMessageContaining("closed");
     }
 
-    @Test
-    void unboundLifecycleClosedSessionsAreFencedByTheDurableRow()
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"CLOSING",
+            "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED"})
+    void unboundLifecycleClosedSessionsAreFencedByTheDurableRow(String status)
             throws Exception {
         ManagedAgentStore store = mock(ManagedAgentStore.class);
-        // No in-process drain entry: the resolver must reject archived and
-        // deleted rows durably, so the retired set no longer grows on the
-        // delete path and the fence survives restarts.
+        // No in-process drain entry: the resolver must reject every
+        // closed-or-closing row durably, so the retired set no longer grows
+        // on the lifecycle path and the fence survives restarts.
         when(store.findSessionById(SESSION_ID)).thenReturn(
                 Optional.of(new SessionRecord("tenant-a", SESSION_ID,
-                        "qwen-code", null, "ARCHIVED", null, null, 0, 0, 1,
+                        "qwen-code", null, status, null, null, 0, 0, 1,
                         1, null, 0)));
         try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
             assertThatThrownBy(() -> broker.warm(SESSION_ID)
@@ -223,6 +225,60 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
+    void drainDuringSettleStillFencesTheWarm() throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        // deliver() settles before completing the operation, so drain() reads
+        // the row while it is still CLOSING and must not count on the
+        // in-process set: the durable fence has to refuse the warm.
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, "CLOSING", null, null, 0, 0, 1,
+                        1, null, 0)));
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            broker.drain(SESSION_ID).toCompletableFuture().join();
+            assertThatThrownBy(() -> broker.warm(SESSION_ID)
+                    .toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo("runtime_broker_session_closed"));
+        }
+    }
+
+    @Test
+    void drainRetiresASessionWhoseRowIsGone() throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        // A vanished row is the one state the durable fence cannot cover;
+        // the in-process entry keeps the closed refusal instead of the
+        // not-owned one.
+        when(store.findSessionById(SESSION_ID)).thenReturn(Optional.empty());
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            broker.drain(SESSION_ID).toCompletableFuture().join();
+            assertThatThrownBy(() -> broker.warm(SESSION_ID)
+                    .toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo("runtime_broker_session_closed"));
+        }
+    }
+
+    @Test
+    void drainLeavesAnActiveSessionWarmable() throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, "ACTIVE", null, null, 0, 0, 1,
+                        1, null, 0)));
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            broker.drain(SESSION_ID).toCompletableFuture().join();
+            broker.warm(SESSION_ID).toCompletableFuture().join();
+        }
+    }
+
+    @Test
     void drainStillRetiresAClosedSessionInProcess() throws Exception {
         ManagedAgentStore store = mock(ManagedAgentStore.class);
         when(store.findSessionById(SESSION_ID)).thenReturn(
@@ -230,8 +286,8 @@ class EmbeddedRuntimeBrokerTest {
                         "qwen-code", null, "CLOSED", null, null, 0, 0, 1,
                         1, null, 0)));
         try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
-            // CLOSED has no durable fence: only the in-process retirement
-            // blocks a re-warm.
+            // The durable row fences CLOSED, so drain() adds no in-process
+            // entry for it; the re-warm still refuses.
             broker.drain(SESSION_ID).toCompletableFuture().join();
             assertThatThrownBy(() -> broker.warm(SESSION_ID)
                     .toCompletableFuture().join())

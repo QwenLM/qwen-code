@@ -318,8 +318,10 @@ public class ManagedAgentService {
                             status == null ? HttpStatus.CONFLICT : status,
                             refusal.getCode(), refusal.getMessage());
                 }
-                // Chain the root cause: a plain 503 leaves on-call unable to
-                // tell a network fault from a daemon bug.
+                // Chain and log the root cause: a plain 503 leaves on-call
+                // unable to tell a network fault from a daemon bug.
+                LOG.warn("Hosted Harness rename failed tenant={} session={}",
+                        tenantId, sessionId, error);
                 throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE,
                         "hosted_harness_unavailable",
                         "The Hosted Harness could not persist the Session title.",

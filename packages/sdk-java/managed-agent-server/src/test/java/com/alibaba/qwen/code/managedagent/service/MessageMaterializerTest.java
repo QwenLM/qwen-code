@@ -41,6 +41,35 @@ class MessageMaterializerTest {
     }
 
     @Test
+    void atTheCapRetriesOnceEveryMaxStreakPasses() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        when(store.findMaterializationTargets(32))
+                .thenReturn(List.of(POISON));
+        when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
+                .thenThrow(new IllegalStateException("gap"));
+        MessageMaterializer materializer = new MessageMaterializer(store);
+
+        // Attempts land on streaks 0, 1, 2, 4, 8, 16 and 32; the streak
+        // reaches the 64 cap after 64 passes.
+        for (int pass = 0; pass < 64; pass++) {
+            materializer.materialize();
+        }
+        verify(store, times(7)).materializeNextBatch("tenant", "poison",
+                200);
+
+        // At the cap the gate retries once every MAX_BACKOFF_STREAK passes
+        // instead of attempting and warning on every pass.
+        for (int pass = 0; pass < 64; pass++) {
+            materializer.materialize();
+        }
+        verify(store, times(8)).materializeNextBatch("tenant", "poison",
+                200);
+        materializer.materialize();
+        verify(store, times(9)).materializeNextBatch("tenant", "poison",
+                200);
+    }
+
+    @Test
     void clearsTheStreakAfterASuccess() {
         AgentStateStore store = mock(AgentStateStore.class);
         when(store.findMaterializationTargets(32))

@@ -52,6 +52,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeRecoveryCoordinator recovery;
     private final AgentStateStore store;
     private final Set<String> retired = ConcurrentHashMap.newKeySet();
+    private static final Set<String> LIFECYCLE_FENCED = Set.of("CLOSING",
+            "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED");
 
     public EmbeddedRuntimeBroker(AgentStateStore store,
             ManagedAgentProperties properties,
@@ -128,11 +130,10 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                                 "Hosted Workspace execution is not available.",
                                 false));
             }
-            // The durable row is the fence for archived/deleted Sessions:
-            // unlike the in-process retired set it survives restarts and
-            // never accumulates in memory.
-            if ("ARCHIVED".equals(session.status())
-                    || "DELETED".equals(session.status())) {
+            // The durable row is the fence for closing/closed, archived and
+            // deleted Sessions: unlike the in-process retired set it survives
+            // restarts and never accumulates in memory.
+            if (LIFECYCLE_FENCED.contains(session.status())) {
                 return CompletableFuture.failedFuture(
                         new RuntimeBrokerException(409,
                                 "runtime_broker_session_closed",
@@ -222,11 +223,10 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
      */
     @Override
     public CompletionStage<Void> drain(String sessionId) {
-        // Retire only the states the durable row cannot fence: the resolver
-        // already rejects ARCHIVED/DELETED, so keeping entries for those
-        // would grow this set for the life of the process.
-        SessionRecord row = store.findSessionById(sessionId).orElse(null);
-        if (row == null || "CLOSED".equals(row.status())) {
+        // drain() runs while the row still reads CLOSING/DELETING; the
+        // resolver fences every lifecycle status durably, so only a vanished
+        // row needs the in-process entry.
+        if (store.findSessionById(sessionId).isEmpty()) {
             retired.add(sessionId);
         }
         return CompletableFuture.completedFuture(null);

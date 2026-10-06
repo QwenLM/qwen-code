@@ -87,11 +87,12 @@ public class HarnessEventProjector {
         if (callId == null) {
             callId = string(update.get("callId"));
         }
-        // Tag both branches: a harness callId of the literal form "source:<n>"
-        // must not collide with the no-id fallback identity.
+        // The callId branch is EventIdentity's version-1 rule, which the
+        // published tool result also derives; only the no-id fallback moves to
+        // a separator that no "turnId:callId" can spell.
         String identity = callId == null
-                ? turnId + ":source:" + sourceId
-                : turnId + ":call:" + callId;
+                ? turnId + "#source:" + sourceId
+                : turnId + ":" + callId;
         safe.put("itemId", "item_tool_" + UUID.nameUUIDFromBytes(
                 identity.getBytes(StandardCharsets.UTF_8)));
         return Map.copyOf(safe);
