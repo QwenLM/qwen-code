@@ -383,11 +383,19 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
 
     // Scan the full resulting content, not just new_string, so a secret split
     // across multiple edits (each fragment alone undetectable) is still caught.
+    // Only the bytes that reach disk need scanning: for an existing file that is
+    // `contentForWrite`, and `newContent` is the LF-normalized view of those same
+    // bytes, so a scan of both would run the same content through the detector
+    // twice. A brand-new file writes `newContent` directly, which is why it is
+    // the one named in the first position below.
     if (!error) {
       const projectRoot = this.config.getProjectRoot();
-      const teamMemoryError =
-        checkTeamMemorySecrets(params.file_path, newContent, projectRoot) ??
-        checkTeamMemorySecrets(params.file_path, contentForWrite, projectRoot);
+      const bytesToWrite = isNewFile ? newContent : contentForWrite;
+      const teamMemoryError = checkTeamMemorySecrets(
+        params.file_path,
+        bytesToWrite,
+        projectRoot,
+      );
       if (teamMemoryError) {
         // If the secret is already in the on-disk file, this edit can't clear it
         // — tell the user to remove the committed secret, not just retry.

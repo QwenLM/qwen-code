@@ -629,9 +629,10 @@ function normalizedToRawOffsets(
  * A whole-file span keeps the previous writer's file-wide CRLF
  * conversion because there are no outside bytes to preserve. Uniformly
  * terminated files remain byte-identical to the previous path, with one
- * exception: where the matched span is not followed by a line break, a
+ * exception: where the matched span is followed by a CRLF or by nothing, a
  * `newString` ending in a bare `\r` loses that `\r` here, and the previous path
- * kept it as a stray character mid-line.
+ * kept it as a stray character mid-line. A tail opening with a bare `\n` is not
+ * that case: there the caller's `\r` completes the pair and is kept.
  *
  * Two paths, and which one runs is decided by whether the file contains a CRLF
  * at all. A file with none takes the plain literal replace, so the replacement's
@@ -723,16 +724,24 @@ export function applyReplacementPreservingLineEndings(
           preceding.at(rawStart) ??
           (fileEnding ??= firstLineEnding(rawContent)));
     const insertedEnding = ending;
+    // A `\r` the caller wrote at the very end of `new_string` is absorbed into
+    // the break that follows the span, which is what the previous write path did
+    // and what keeps a CRLF tail from doubling. The one shape where that is not
+    // right is a tail opening with a *bare* `\n`: the caller's `\r` and that `\n`
+    // are a pair they asked for, so absorbing it rewrites the content -- `y` ->
+    // `y\r` against a tail of `\nz` has to come back as `y\r\nz`, not `y\nz`.
+    const tailOpensWithBareLf =
+      rawContent.startsWith('\n', rawEnd) &&
+      !rawContent.startsWith('\r\n', rawEnd);
     const inserted = newString
       .split(/\r\n|\n/)
       .map((text, index, segments) => {
         // The split consumes each complete CRLF break, so a trailing `\r` in
-        // an intermediate segment is user content. Only the final segment
-        // keeps the existing CR absorption: it avoids duplicating the CR before
-        // an untouched tail break and, as documented above, still drops it when
-        // no break follows the span.
+        // an intermediate segment is user content and is always kept.
         const body =
-          index === segments.length - 1 && text.endsWith('\r')
+          index === segments.length - 1 &&
+          !tailOpensWithBareLf &&
+          text.endsWith('\r')
             ? text.slice(0, -1)
             : text;
         return index === 0 ? body : `${insertedEnding}${body}`;

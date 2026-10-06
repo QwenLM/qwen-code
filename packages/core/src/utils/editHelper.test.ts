@@ -614,6 +614,18 @@ describe('applyReplacementPreservingLineEndings', () => {
       }
     });
 
+    it('keeps a trailing CR when the untouched tail opens with a bare LF', () => {
+      // The one shape where absorbing the CR changes what the caller wrote.
+      // The tail's `\n` is a bare LF, so the caller's `\r` is not a duplicate
+      // of a CRLF already in the file -- it is half of the CRLF the caller is
+      // asking for, and dropping it turns their `\r\n` into a bare `\n`.
+      expect(splice('x\r\ny\nz', 'y', 'y\r')).toBe('x\r\ny\r\nz');
+      // A CRLF tail is the doubling case, so it keeps absorbing.
+      expect(splice('x\r\ny\r\nz', 'y', 'y\r')).toBe('x\r\ny\r\nz');
+      // And the control: a NUL-free ASCII replacement is untouched either way.
+      expect(splice('x\r\ny\nz', 'y', 'Y')).toBe('x\r\nY\nz');
+    });
+
     it('drops a trailing CR even when no break follows the span', () => {
       // The one case where this differs from `main`, and where `main` was
       // itself leaving a lone CR in the middle of a line: it merged the `\r`
