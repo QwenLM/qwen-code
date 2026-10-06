@@ -1807,7 +1807,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     const parentConfiguredToolAllowlist =
       getCurrentAgentConfiguredToolAllowlist();
     const keepOffParentBlocklist = (toolName: string): boolean =>
-      !matchesAgentToolBlocklist(parentDisallowedTools, toolName);
+      !matchesAgentToolBlocklist(
+        parentDisallowedTools,
+        toolName,
+        agentConfig.getToolRegistry().getPermissionAliases?.(toolName),
+        agentConfig.getToolRegistry().getMcpToolIdentity?.(toolName),
+      );
     const defaultExecutionToolNames = buildInheritedForkExecutionToolNames(
       parentToolNames,
       agentConfig.getToolRegistry().getAllToolNames(),
