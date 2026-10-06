@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Storage } from '../config/storage.js';
 import {
@@ -1402,3 +1403,50 @@ async function runtimeCommit(
     ),
   };
 }
+
+describe('ensureCheckpoint', () => {
+  it('starts an empty log at before_model, and calls it idempotently', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    try {
+      const harness = createManagedHarnessHandle(session);
+      const checkpoint = await harness.ensureCheckpoint();
+      expect(checkpoint.continuation.phase).toBe('before_model');
+      const again = await harness.ensureCheckpoint();
+      expect(again.identity.checkpointId).toBe(
+        checkpoint.identity.checkpointId,
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('answers blocked with the authorization\u0027s own message on a checkpoint it cannot parse', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    try {
+      const garbage = Buffer.from('{"v":2,"opaque":true}', 'utf8');
+      await session.authority.commitCheckpoint(
+        {
+          operation: 'commitCheckpoint',
+          commandId: 'opaque-checkpoint-1',
+          sessionKey: session.authority.sessionHeader.sessionKey,
+          contentDigest: createHash('sha256').update(garbage).digest('hex'),
+        },
+        { state: garbage, boundary: null },
+        { class: 'harness', activation: session.activation },
+      );
+      const harness = createManagedHarnessHandle(session);
+      const failure = harness.ensureCheckpoint();
+      await expect(failure).rejects.toBeInstanceOf(ManagedHarnessBlockedError);
+      // The parser diagnostic is kept, not rewritten to a bare reason.
+      const cause = await failure.catch((error: unknown) => error);
+      expect(cause).toBeInstanceOf(ManagedHarnessBlockedError);
+      expect((cause as ManagedHarnessBlockedError).message).not.toContain(
+        'missing_checkpoint',
+      );
+    } finally {
+      await session.close();
+    }
+  });
+});

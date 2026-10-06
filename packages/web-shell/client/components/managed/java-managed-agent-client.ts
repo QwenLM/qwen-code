@@ -362,6 +362,7 @@ export class JavaManagedAgentClient {
   async *streamEvents(
     request: Schemas['WebShellStreamRequest'],
     signal?: AbortSignal,
+    onOpen?: () => void,
   ): AsyncGenerator<JavaAgentEvent | JavaAgentResyncRequired> {
     const response = await this.request(
       '/events/stream',
@@ -376,6 +377,10 @@ export class JavaManagedAgentClient {
         'Managed Agent event stream is unavailable',
       );
     }
+    // The response headers are back and the body is attached: the stream
+    // is established even when it then idles on heartbeats, which never
+    // decode into events.
+    onOpen?.();
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';

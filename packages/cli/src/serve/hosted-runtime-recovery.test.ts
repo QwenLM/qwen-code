@@ -21,6 +21,7 @@ import {
   recoverHostedRuntimeTurn,
 } from './hosted-runtime-recovery.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
@@ -39,7 +40,11 @@ describe('recoverHostedRuntimeTurn', () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  async function open(workerId: string, create: boolean) {
+  async function open(
+    workerId: string,
+    create: boolean,
+    toolProfile = 'hosted-workspace-files/1',
+  ) {
     const sessionKey = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -57,7 +62,7 @@ describe('recoverHostedRuntimeTurn', () => {
               JSON.stringify({
                 engine: 'managed',
                 sessionId: SESSION_ID,
-                toolProfile: 'hosted-workspace-files/1',
+                toolProfile,
               }),
             ),
           ),
@@ -96,7 +101,13 @@ describe('recoverHostedRuntimeTurn', () => {
     extraExecutionId?: string,
     runtimeSessionId = PROMPT_ID,
   ): Promise<ManagedSession> {
-    const session = await open('boot-1', true);
+    const session = await open(
+      'boot-1',
+      true,
+      toolName === 'glob'
+        ? 'hosted-workspace-files/2'
+        : 'hosted-workspace-files/1',
+    );
     const harness = createManagedHarnessHandle(session);
     const authority = session.authority;
     const contentRef = await session.resources.publish(
@@ -142,7 +153,10 @@ describe('recoverHostedRuntimeTurn', () => {
           runtimeSessionId,
           payloadJson: JSON.stringify({
             toolName,
-            input: { file_path: `${ordinal}.txt`, content: 'x' },
+            input:
+              toolName === 'glob'
+                ? { pattern: '**/*.ts' }
+                : { file_path: `${ordinal}.txt`, content: 'x' },
           }),
         }),
       );
@@ -637,35 +651,78 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it('omits an oversized settled output instead of failing the load', async () => {
-    await parkAtAwaitRuntime();
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
-      executionStatus: 'success',
-      responseParts: [{ text: 'x'.repeat(2 * 1024 * 1024) }],
-    } as never);
-    const replacement = await open('boot-2', false);
-    try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: false,
-      });
-      expect(recovered).toBeDefined();
-      expect(recovered!.report.phase).toBe('results_ready');
-      const projected = await replacement.sink.project();
-      const result = projected.find(
-        (entry) =>
-          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+  it.each(['write_file', 'read_file', 'glob'])(
+    'bounds an oversized recovered %s output without replaying it again',
+    async (toolName) => {
+      await parkAtAwaitRuntime(toolName);
+      const paths = Array.from(
+        { length: 100 },
+        (_, index) => 'nested/'.repeat(120) + `file-${index}.ts`,
       );
-      expect(JSON.stringify(result)).toContain('outputOmitted');
-    } finally {
-      await replacement.close();
-    }
-  });
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+      const execute = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'execute')
+        .mockResolvedValue({
+          executionStatus: 'success',
+          responseParts: [{ text: paths.join('\n') }],
+        } as never);
+      const replacement = await open('boot-2', false);
+      try {
+        const recovered = await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        });
+        expect(recovered?.report.phase).toBe('results_ready');
+        expect(execute).toHaveBeenCalledTimes(1);
+        const projected = await replacement.sink.project();
+        const result = projected.find(
+          (entry) =>
+            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+        );
+        const limit =
+          HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+        expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(
+          limit,
+        );
+        const response =
+          result?.message?.parts?.[0]?.functionResponse?.response;
+        expect(response?.['executionStatus']).toBe('success');
+        const authorization =
+          await replacement.authority.harnessRunAuthorization();
+        expect(authorization.status).toBe('runnable');
+        if (authorization.status !== 'runnable')
+          throw new Error('not runnable');
+        const outcomeRef = authorization.checkpoint.tools?.items[0]?.outcomeRef;
+        expect(outcomeRef).toBeDefined();
+        const outcome = await replacement.resources.read(outcomeRef!);
+        expect(outcome.byteLength).toBeLessThanOrEqual(limit);
+        expect(
+          JSON.parse(outcome.toString('utf8')).functionResponse.response,
+        ).toEqual(response);
+        if (toolName === 'glob') {
+          expect(response?.['outputTruncated']).toBe(true);
+          expect(response?.['outputOmitted']).toBeUndefined();
+          expect(response?.['output']).toContain(paths[0]);
+          expect(response?.['output']).not.toContain(paths.at(-1));
+          expect(response?.['output']).toContain('Narrow the pattern or path.');
+        } else {
+          expect(response?.['outputOmitted']).toBe(true);
+          expect(response?.['outputTruncated']).toBeUndefined();
+          expect(JSON.stringify(response)).not.toContain(
+            'Narrow the pattern or path.',
+          );
+          if (toolName === 'read_file')
+            expect(JSON.stringify(response)).toContain('offset/limit');
+        }
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
 
   it.each([false, true])(
     'refuses cancellation when an execution outcome is unknown (afterCancel=%s)',

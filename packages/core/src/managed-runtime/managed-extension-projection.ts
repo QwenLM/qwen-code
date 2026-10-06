@@ -35,6 +35,11 @@ import {
   parseHookRegistration,
   parseHookExecution,
 } from './managed-hook-record.js';
+import {
+  isChildRunStart,
+  isChildRunSuccessor,
+  parseChildRun,
+} from './managed-child-run-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -143,6 +148,15 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isStart: isMonitorRunStart,
     isSuccessor: isMonitorRunSuccessor,
   }),
+  child_run: Object.freeze({
+    taskKind: 'background_shell',
+    parse: (value: unknown) => {
+      const record = parseChildRun(value);
+      return { record, recordId: record.shellId, run: record.run };
+    },
+    isStart: isChildRunStart,
+    isSuccessor: isChildRunSuccessor,
+  }),
 });
 
 // An envelope domain's commits predates any body a later slice could
@@ -225,13 +239,18 @@ function taskState(run: ExtensionRun): ManagedTaskState {
   }
 }
 
-function runtimeState(run: ExtensionRun): ManagedTaskRuntimeState | null {
+function runtimeState(
+  run: ExtensionRun,
+  stopRequested: boolean,
+): ManagedTaskRuntimeState | null {
   if (isTerminalRunState(run.state) || run.execution === null) return null;
   if (run.runtime === null) return 'unbound';
-  if (run.execution === 'running_attached') return 'ready';
+  if (run.execution === 'running_attached') {
+    return stopRequested ? 'draining' : 'ready';
+  }
   if (run.reason === 'runtime_lost') return 'lost';
   if (run.execution === 'intent' || run.execution === 'dispatch_started') {
-    return 'provisioning';
+    return stopRequested ? 'draining' : 'provisioning';
   }
   return null;
 }
@@ -241,12 +260,17 @@ function runtimeState(run: ExtensionRun): ManagedTaskRuntimeState | null {
  * view before it (null for the first revision), the revision's run and the
  * time its `domain.committed` event occurred. The times come from the
  * journal, so a rebuild yields the same view; a writer's clock may run
- * behind the one before it, so a time never precedes an earlier one.
+ * behind the one before it, so a time never precedes an earlier one. A
+ * stop-requested record whose run is attached (`running_attached`) or
+ * still provisioning (`intent`/`dispatch_started`) projects its Runtime as
+ * `draining`; a lost, terminal or unbound row keeps its own Runtime state
+ * (H3's `child_run`; every earlier record passes false).
  */
 export function projectManagedTask(
   previous: ManagedTaskProjection | null,
   run: ExtensionRun,
   occurredAt: number,
+  stopRequested = false,
 ): ManagedTaskProjection {
   const createdAt = previous?.createdAt ?? occurredAt;
   const startedAt =
@@ -259,7 +283,7 @@ export function projectManagedTask(
       : null);
   return Object.freeze({
     state: taskState(run),
-    runtimeState: runtimeState(run),
+    runtimeState: runtimeState(run, stopRequested),
     definitionRevision: run.definition?.definitionRevision ?? null,
     createdAt,
     startedAt,
