@@ -338,6 +338,36 @@ class ManagedExtensionRecordStoreTest {
                         "agent-1", "child_run",
                         childAgent("admitted", "intent", null, inputResource),
                         List.of(), 1_000)));
+        // So do the result and receipt its settling revision names.
+        String unheldResult = UUID.randomUUID().toString();
+        ExtensionRecordJournal resultJournal = journal(unheldResult);
+        commitDomain(resultJournal, "agent-1", "child_run",
+                childAgent("admitted", "intent", null, inputResource),
+                List.of(inputResource));
+        ObjectNode dispatching = childAgent("running", "dispatch_started",
+                "binding-1", inputResource);
+        dispatching.withObject("/run").put("dispatchId", "dispatch-1");
+        commitDomain(resultJournal, "agent-2", "child_run", dispatching,
+                List.of());
+        ObjectNode attached = childAgent("running", "running_attached",
+                "binding-1", inputResource);
+        attached.withObject("/run").put("dispatchId", "dispatch-1");
+        attached.put("childSessionId", "session-child");
+        commitDomain(resultJournal, "agent-3", "child_run", attached,
+                List.of());
+        ObjectNode settled = childAgent("settled", "settled", "binding-1",
+                inputResource);
+        settled.withObject("/run").put("dispatchId", "dispatch-1");
+        settled.put("childSessionId", "session-child");
+        settled.put("stopReason", "completed");
+        settled.set("resultRef", hookRef(resultResource));
+        settled.set("terminalReceiptRef", hookRef(receiptResource));
+        assertRefused("a settled child agent citing a result the Session"
+                        + " does not hold", unheldResult,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> resultJournal.commit(resultJournal.requestDomain(
+                        "agent-4", "child_run", settled,
+                        List.of(receiptResource), 4_000)));
     }
 
     /** Commits a sent-completion child agent through its settled result. */

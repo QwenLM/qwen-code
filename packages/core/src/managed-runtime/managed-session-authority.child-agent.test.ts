@@ -775,6 +775,30 @@ describe('managed session authority child_agent records', () => {
     });
   });
 
+  it('closes a settling revision over its result and receipt', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const unheld = { ...refs.result, resourceId: 'result-never-published' };
+    await withAuthority(harness, async (authority) => {
+      const chain = life({ ...refs, result: unheld });
+      for (const [index, record] of chain.slice(0, 3).entries()) {
+        await authority.commitExtensionRecord(
+          command(`run-1:${index + 1}`),
+          { domain: 'child_run', record },
+          TRUSTED,
+        );
+      }
+      await expect(
+        authority.commitExtensionRecord(
+          command('run-1:4'),
+          { domain: 'child_run', record: chain[3] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow('resource result-never-published is not present');
+      expect(await publishedBodies(harness, 'child_run')).toBe(3);
+    });
+  });
+
   it('replays a repeated acceptance command with the original receipt', async () => {
     const harness = await createHarness();
     const refs = await publishRefs(harness);
