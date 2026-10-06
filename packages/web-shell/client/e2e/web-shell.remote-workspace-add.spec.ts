@@ -135,6 +135,10 @@ function addWorkspaceDialog(page: Page) {
 async function openFolderBrowser(page: Page): Promise<void> {
   await page
     .getByRole('button', { name: 'Add workspace', exact: true })
+    .locator('../..')
+    .hover();
+  await page
+    .getByRole('button', { name: 'Add workspace', exact: true })
     .click();
   await expect(addWorkspaceDialog(page)).toBeVisible();
 }
@@ -201,6 +205,7 @@ test('Settings adds a verified computer and returns to Connections @smoke', asyn
   );
 
   const sourceUrl = await gotoSourceShell(page);
+  await page.getByRole('button', { name: 'More', exact: true }).click();
   await page
     .getByRole('button', { name: 'Settings', exact: true })
     .first()
@@ -452,6 +457,10 @@ test('with no connected computer the folder browser opens directly @smoke', asyn
   page.on('load', () => loads.push(page.url()));
 
   await gotoSourceShell(page);
+  await page
+    .getByRole('button', { name: 'Add workspace', exact: true })
+    .locator('../..')
+    .hover();
   await page
     .getByRole('button', { name: 'Add workspace', exact: true })
     .click();

@@ -79,17 +79,25 @@ public class ManagedExtensionRecordStore {
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
     private final JdbcTemplate jdbc;
     private final AgentStateStore sessions;
+    private final ManagedTaskEventStore taskEvents;
 
     @Autowired
     public ManagedExtensionRecordStore(JdbcTemplate jdbc,
-            AgentStateStore sessions) {
+            AgentStateStore sessions, ManagedTaskEventStore taskEvents) {
         this.jdbc = jdbc;
         this.sessions = sessions;
+        this.taskEvents = taskEvents;
     }
 
     /** A store beside no public Session table, which announces nothing. */
     ManagedExtensionRecordStore(JdbcTemplate jdbc) {
         this(jdbc, null);
+    }
+
+    /** A store that journals its own task events beside the table. */
+    public ManagedExtensionRecordStore(JdbcTemplate jdbc,
+            AgentStateStore sessions) {
+        this(jdbc, sessions, new ManagedTaskEventStore(jdbc));
     }
 
     public record TaskRow(String taskId, String kind,
@@ -136,11 +144,16 @@ public class ManagedExtensionRecordStore {
     /** Reads only a committed resource in this Session's scope. */
     public JsonNode readRecordResource(String tenantId, String sessionId,
             JsonNode ref) {
+        return readBody(readCommittedResource(tenantId, sessionId, ref));
+    }
+
+    public StoredResource readCommittedResource(String tenantId, String sessionId,
+            JsonNode ref) {
         ManagedExtensionRecords.durableRef(ref, "recordResource");
         StoredResource resource = readResource(tenantId, sessionId,
                 ref.get("resourceId").textValue());
         requireReference(resource, ref);
-        return readBody(resource);
+        return resource;
     }
 
     private StoredResource readResource(String tenantId, String sessionId,
@@ -393,6 +406,23 @@ public class ManagedExtensionRecordStore {
                 }
             }
         }
+        if (domain.equals("child_run")) {
+            for (String field : List.of("commandRef", "startReceiptRef", "outputRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
+        if (domain.equals("monitor_run")) {
+            for (String field : List.of("commandRef", "startReceiptRef", "outputRef",
+                    "lastObservationRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
         if (domain.equals("hook_execution")) {
             StoredResource plan = resources.apply(record.get("planRef").get("resourceId").textValue());
             if (plan.kind().equals("managed-hook-plan")) {
@@ -527,7 +557,8 @@ public class ManagedExtensionRecordStore {
         JsonNode run = record.get("run");
         TaskProjection projection = ManagedExtensionProjection.project(
                 previous == null ? null : previous.projection(), run,
-                occurredAt);
+                occurredAt,
+                record.path("stopRequested").asBoolean(false));
         JsonNode delivery = run.get("delivery");
         String deliveryTarget = delivery.isNull() ? null
                 : delivery.get("target").textValue();
@@ -583,9 +614,26 @@ public class ManagedExtensionRecordStore {
         }
         if (body.taskKind() != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
-            announce(tenantId, sessionId,
-                    ManagedExtensionProjection.taskId(recordKey),
-                    projection.state(), revision);
+            String taskId = ManagedExtensionProjection.taskId(recordKey);
+            announce(tenantId, sessionId, taskId, projection.state(),
+                    revision);
+            try {
+                taskEvents.appendStateChange(tenantId, sessionId, taskId,
+                        projection.state(), projection.runtimeState(),
+                        occurredAt);
+            } catch (ApiException refused) {
+                // The record row above is the authoritative state and it is
+                // already written; the event journal is a derived, bounded
+                // feed. A journal that refuses past its backlog bound — or
+                // whose retention floor is pinned behind unarchived output —
+                // degrades the feed, never the record commit, or one task's
+                // output backlog would wedge every later revision of it.
+                LOG.warn("Managed Stage H task event was refused by the journal"
+                                + " tenant={} session={} task={} revision={}"
+                                + " code={}",
+                        tenantId, sessionId, taskId, revision,
+                        refused.getCode());
+            }
         }
     }
 

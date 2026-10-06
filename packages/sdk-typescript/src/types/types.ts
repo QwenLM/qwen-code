@@ -437,7 +437,7 @@ export interface QueryOptions {
    * warns and falls back to direct tools without it), exec retains callable
    * nested bindings; their schemas are included in exec when either bridge
    * tool is unavailable. CodeModeOnly discovers deferred schemas through top-level tool_search and invokes them through exec. It skips deferred preload and startup catalogs; tools.eager reduces the initial exec description. When search is unavailable in the current scope, exec includes all allowed signatures. In Hybrid mode, AgentCore excludes tools still hidden by tools.eager
-   * from nested bindings. Agent allowlists that do not grant `exec` narrow nested bindings.
+   * from nested bindings. In both code modes, agent allowlists that do not grant `exec` narrow nested bindings.
    * Inheriting or explicitly granting `exec` keeps all otherwise admitted
    * ordinary code-mode-callable bindings. An execution allowlist that
    * mentions any MCP tool additionally restricts MCP bindings to matching
@@ -519,7 +519,7 @@ export interface QueryOptions {
    *   description. When search is unavailable in the current scope, exec
    *   includes all allowed signatures.
    *   In Hybrid mode, AgentCore excludes tools still hidden by tools.eager
-   *   from nested bindings. Agent allowlists that do not grant `exec` narrow nested bindings.
+   *   from nested bindings. In both code modes, agent allowlists that do not grant `exec` narrow nested bindings.
    *   Inheriting or explicitly granting `exec` keeps all otherwise admitted
    *   ordinary code-mode-callable bindings. An execution allowlist that
    *   mentions any MCP tool additionally restricts MCP bindings to matching

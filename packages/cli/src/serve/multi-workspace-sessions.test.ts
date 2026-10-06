@@ -40,6 +40,7 @@ import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { ServeOptions } from './types.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
 import {
+  createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from './workspace-registry.js';
@@ -1040,6 +1041,7 @@ function makeRuntime(input: {
 }): WorkspaceRuntime {
   return {
     ...input,
+    generationGuard: createWorkspaceGenerationGuard(),
     sessionRuntimeBaseDir:
       input.sessionRuntimeBaseDir ?? Storage.getRuntimeBaseDir(),
     env: { mode: 'parent-process', overlayKeys: [] },
@@ -3167,6 +3169,175 @@ describe('multi-workspace session dispatch', () => {
         workspaceCwd: SECONDARY_CWD,
       }),
     );
+  });
+
+  it.each([false, true])(
+    'creates a secondary side task with an active parent: %s',
+    async (hasActivePrompt) => {
+      const sessionId = '22222222-2222-4222-a222-222222222222';
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondarySummaries: [
+          makeSummary(sessionId, SECONDARY_CWD, { hasActivePrompt }),
+        ],
+      });
+      const create = vi.spyOn(secondaryBridge, 'createSideTaskSession');
+      const primaryCreate = vi.spyOn(primaryBridge, 'createSideTaskSession');
+
+      const response = await request(app)
+        .post(`/session/${sessionId}/side-task`)
+        .set('Host', host())
+        .set('X-Qwen-Client-Id', 'client-secondary')
+        .send({ name: 'Secondary research' });
+
+      expect(response.status).toBe(201);
+      expect(response.body).toMatchObject({
+        workspaceCwd: SECONDARY_CWD,
+        parentSessionId: sessionId,
+        sessionId: `${sessionId}-side-task`,
+      });
+      expect(create).toHaveBeenCalledExactlyOnceWith(
+        sessionId,
+        { name: 'Secondary research' },
+        { clientId: 'client-secondary' },
+      );
+      expect(primaryCreate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['unknown', 'untrusted', 'ambiguous', 'draining', 'closed'] as const)(
+    'rejects side-task creation for %s owners without primary fallback',
+    async (state) => {
+      const sessionId =
+        state === 'unknown'
+          ? 'missing'
+          : '22222222-2222-4222-a222-222222222222';
+      const { app, registry, primaryBridge, secondaryBridge } = makeHarness({
+        secondaryTrusted: state !== 'untrusted',
+        ...(state === 'ambiguous'
+          ? { primarySummaries: [makeSummary(sessionId, PRIMARY_CWD)] }
+          : {}),
+      });
+      const generation =
+        registry.getEntryByWorkspaceId('secondary-id')!.current!;
+      if (state === 'draining') registry.beginDrain(generation.runtime);
+      if (state === 'closed') generation.guard.close();
+
+      const response = await request(app)
+        .post(`/session/${sessionId}/side-task`)
+        .set('Host', host())
+        .send({ name: 'Must not be created' });
+
+      const expected = {
+        unknown: [404, 'session_not_found'],
+        untrusted: [403, 'untrusted_workspace'],
+        ambiguous: [500, 'ambiguous_session_owner'],
+        draining: [404, 'session_not_found'],
+        closed: [503, 'workspace_runtime_unavailable'],
+      }[state];
+      expect([response.status, response.body.code]).toEqual(expected);
+      expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+      expect(secondaryBridge.primaryOnlyMutationCalls).toEqual([]);
+    },
+  );
+
+  it('cleans up a secondary side task in its owner when creation outlives the generation', async () => {
+    const { app, registry, primaryBridge, secondaryBridge } = makeHarness();
+    const generation = registry.getEntryByWorkspaceId('secondary-id')!.current!;
+    const create = secondaryBridge.createSideTaskSession.bind(secondaryBridge);
+    vi.spyOn(secondaryBridge, 'createSideTaskSession').mockImplementation(
+      async (...args) => {
+        const result = await create(...args);
+        generation.guard.close();
+        return result;
+      },
+    );
+    const removedFrom: string[] = [];
+    const remove = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async function (this: SessionService) {
+        removedFrom.push(this.getProjectRoot());
+        return true;
+      });
+    try {
+      const response = await request(app)
+        .post('/session/22222222-2222-4222-a222-222222222222/side-task')
+        .set('Host', host())
+        .send({ name: 'Interrupted creation' });
+
+      expect(response.status).toBe(503);
+      expect(response.body.code).toBe('workspace_runtime_unavailable');
+      expect(secondaryBridge.killCalls).toEqual([
+        '22222222-2222-4222-a222-222222222222-side-task',
+      ]);
+      expect(remove).toHaveBeenCalledExactlyOnceWith(
+        '22222222-2222-4222-a222-222222222222-side-task',
+      );
+      expect(removedFrom).toEqual([SECONDARY_CWD]);
+      expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+      expect(primaryBridge.killCalls).toEqual([]);
+    } finally {
+      remove.mockRestore();
+    }
+  });
+
+  it('lists and restores persisted secondary side tasks in their workspace', async () => {
+    const parentId = '22222222-2222-4222-a222-222222222222';
+    const sideTaskId = '33333333-3333-4333-a333-333333333333';
+    for (const [sessionId, cwd, sourceId] of [
+      [sideTaskId, SECONDARY_CWD, parentId],
+      ['44444444-4444-4444-a444-444444444444', SECONDARY_CWD, 'other-parent'],
+      ['55555555-5555-4555-a555-555555555555', PRIMARY_CWD, parentId],
+    ]) {
+      await writeStoredSession({
+        sessionId,
+        cwd,
+        sourceType: 'side_task',
+        sourceId,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'Persisted side question',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+    }
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+    const listed = await request(app)
+      .get(`/workspace/${encodeURIComponent(SECONDARY_CWD)}/sessions`)
+      .query({
+        sourceType: 'side_task',
+        sourceId: parentId,
+        archiveState: 'active',
+      })
+      .set('Host', host());
+
+    expect(listed.status).toBe(200);
+    expect(listed.body.sessions).toEqual([
+      expect.objectContaining({
+        sessionId: sideTaskId,
+        workspaceCwd: SECONDARY_CWD,
+        sourceType: 'side_task',
+        sourceId: parentId,
+      }),
+    ]);
+
+    const restored = await request(app)
+      .post(`/session/${sideTaskId}/load`)
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD, clientId: 'side-task-restored' });
+
+    expect(restored.status).toBe(200);
+    expect(secondaryBridge.restoreCalls).toEqual([
+      {
+        action: 'load',
+        req: expect.objectContaining({
+          sessionId: sideTaskId,
+          workspaceCwd: SECONDARY_CWD,
+          sourceType: 'side_task',
+          sourceId: parentId,
+        }),
+      },
+    ]);
+    expect(primaryBridge.restoreCalls).toEqual([]);
+    expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+    expect(secondaryBridge.primaryOnlyMutationCalls).toEqual([]);
   });
 
   it.each([

@@ -32,6 +32,24 @@ import {
 
 describe('SettingsSchema', () => {
   describe('getSettingsSchema', () => {
+    it('distinguishes hybrid eager exclusions from allowlist narrowing in both code modes', () => {
+      const tools = getSettingsSchema().tools.properties;
+      const descriptions = [
+        tools.mode.description,
+        tools.eager.description,
+        tools.toolSearch.properties.threshold.description,
+      ];
+
+      for (const description of descriptions) {
+        expect(description).toContain(
+          'In Hybrid mode, AgentCore excludes tools still hidden by tools.eager from nested bindings.',
+        );
+        expect(description).toContain(
+          'In both code modes, agent allowlists that do not grant exec narrow nested bindings.',
+        );
+      }
+    });
+
     it('should describe prompt hooks supported by the runtime', () => {
       const hookProperties =
         getSettingsSchema().hooks.properties.PreToolUse.items.properties?.[
