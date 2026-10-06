@@ -24,6 +24,31 @@ trap 'exit 1' INT TERM
 sandbox_revision="$(git rev-parse HEAD)"
 sandbox_image="$(node -p "require('./packages/cli/package.json').config.sandboxImageUri")-release-${sandbox_revision}"
 
+# The job-start disk floor gate predates this build: run 37374675168 passed
+# it and the runner still died on ENOSPC 24 minutes into this step (#13479).
+# Gate the build's own filesystem — the docker data root — at a build-sized
+# floor, so a saturated host fails fast with a legible error and a re-run
+# lands on an instance with headroom instead of the runner worker crashing
+# mid-build. 8 GiB covers a cold builder stage (monorepo install + bundle
+# layers) plus the final image with margin. Self-hosted only, like every
+# other check-disk-floor.sh call site: an ephemeral hosted runner starts
+# with an order of magnitude more free disk than this floor.
+check_docker_data_root_floor() {
+  if [ "$RUNNER_ENVIRONMENT" != 'self-hosted' ]; then
+    return 0
+  fi
+  if [ ! -f .github/scripts/check-disk-floor.sh ]; then
+    echo "::warning::docker data root floor gate skipped: .github/scripts/check-disk-floor.sh not present at this ref on ${RUNNER_NAME:-this runner}"
+    return 0
+  fi
+  docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+  if [ -z "$docker_root" ] || [ ! -d "$docker_root" ]; then
+    echo "::warning::docker data root floor gate skipped: docker data root '${docker_root:-<unreadable>}' is not a readable directory on ${RUNNER_NAME:-this runner}"
+    return 0
+  fi
+  DISK_FLOOR_MIN_FREE_KB="${DISK_FLOOR_MIN_FREE_KB:-8388608}" bash .github/scripts/check-disk-floor.sh "$docker_root"
+}
+
 if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
   mkdir -p "${HOME}/.cache/qwen-code-ci"
   # Same protocol as e2e.yml: the host daemon lock is held shared for the whole
@@ -52,24 +77,20 @@ if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
     fi
   fi
   docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
+  # The labelled prune cannot reach untagged images, and this lane passes
+  # --no-prune to the build: an image that went dangling after the daily
+  # 02:30 UTC sweep would otherwise never be reclaimed.
+  docker image prune --force --filter 'until=24h' || echo "::warning::dangling image cleanup failed on ${RUNNER_NAME:-this runner}"
   # Image pruning does not reclaim BuildKit's intermediate install/build
   # layers. The daily host sweep (ecs-runner/qwen-docker-cleanup) bounds them
   # at 30 GB, but this lane builds at the end of the pool's day, hours after
-  # that sweep.
-  docker builder prune --all --force --filter 'until=24h' || echo "::warning::docker build cache cleanup failed on ${RUNNER_NAME:-this runner}"
-  # The job-start disk floor gate predates this build: run 37374675168 passed
-  # it and the runner still died on ENOSPC 24 minutes into this step (#13479).
-  # Gate the build's own filesystem — the docker data root — at a build-sized
-  # floor, so a saturated host fails fast with a legible error and a re-run
-  # lands on an instance with headroom instead of the runner worker crashing
-  # mid-build. 8 GiB covers a cold builder stage (monorepo install + bundle
-  # layers) plus the final image with margin.
-  if [ -f .github/scripts/check-disk-floor.sh ]; then
-    docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
-    if [ -n "$docker_root" ] && [ -d "$docker_root" ]; then
-      DISK_FLOOR_MIN_FREE_KB="${DISK_FLOOR_MIN_FREE_KB:-8388608}" bash .github/scripts/check-disk-floor.sh "$docker_root"
-    fi
-  fi
+  # that sweep. Bound the prune so a slow daemon GC cannot hold the host
+  # build mutex past the E2E lane's 30-minute lock wait. No --keep-storage
+  # here: it is a reserve, not a quota, so on a host with less cache than the
+  # reserve — exactly the hosts this line exists for — it would reclaim
+  # nothing.
+  timeout 20m docker builder prune --all --force --filter 'until=24h' || echo "::warning::docker build cache cleanup failed on ${RUNNER_NAME:-this runner}"
+  check_docker_data_root_floor
   # See e2e.yml: closing the lock descriptors in the child keeps a descendant
   # that outlives this job from holding the lock.
   npm run build:sandbox -- -s --no-prune -i "$sandbox_image" 7>&- 8>&- 9>&-
@@ -77,6 +98,10 @@ if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
     flock --unlock 7
     exec 7>&-
   fi
+  # Run 37374675168 actually died in the vitest phase, ~15 minutes after the
+  # build finished: re-gate now that the build's peak and the image it leaves
+  # behind have landed on this filesystem.
+  check_docker_data_root_floor
 fi
 sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
 export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
