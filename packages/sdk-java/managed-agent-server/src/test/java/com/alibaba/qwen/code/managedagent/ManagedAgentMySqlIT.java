@@ -7,8 +7,10 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskRow;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
@@ -69,55 +71,91 @@ class ManagedAgentMySqlIT {
     @Order(1)
     void upgradesAndExercisesStoresOnMySql() throws IOException {
         DriverManagerDataSource dataSource = dataSource();
+        BackfillWitnesses witnesses = BackfillWitnesses.forApplied(
+                BackfillWitnesses.appliedVersions(dataSource));
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration")
                 .target(MigrationVersion.fromVersion("1")).load().migrate();
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        // A rerun sees every prior run's rows. The legacy seeds are
+        // namespaced per run so the second pass of this method does not
+        // collide with the first.
+        String runId = UUID.randomUUID().toString().substring(0, 8);
+        String upgradeTenant = "mysql-upgrade-" + runId;
+        String upgradeSession = "session_upgrade_" + runId;
+        String lifecycleTenant = "mysql-lifecycle-" + runId;
+        String hooksTenant = "mysql-hooks-" + runId;
+        String hooksSession = "session_hooks_" + runId;
         jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
                         + " session_id, agent_id, status, created_at,"
                         + " updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                "mysql-upgrade", "session_upgrade", "qwen-code", "IDLE",
+                upgradeTenant, upgradeSession, "qwen-code", "IDLE",
                 1L, 1L);
         jdbc.update("INSERT INTO managed_agent_command (tenant_id, operation,"
                 + " idempotency_key, request_digest, session_id, created_at)"
-                + " VALUES ('mysql-upgrade', 'CREATE_SESSION', 'legacy-key',"
-                + " 'legacy-digest', 'session_upgrade', 1)");
-        LegacyEvents.insert(jdbc, "mysql-upgrade", "session_upgrade");
+                + " VALUES (?, 'CREATE_SESSION', 'legacy-key',"
+                + " 'legacy-digest', ?, 1)", upgradeTenant, upgradeSession);
+        LegacyEvents.insert(jdbc, upgradeTenant, upgradeSession);
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration")
                 .target(MigrationVersion.fromVersion("15")).load().migrate();
         LegacyLifecycleCommands.Sessions lifecycle =
-                LegacyLifecycleCommands.insert(jdbc, "mysql-lifecycle");
+                LegacyLifecycleCommands.insert(jdbc, lifecycleTenant);
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration")
                 .target(MigrationVersion.fromVersion("27")).load().migrate();
-        LegacyHookRecords.insert(jdbc, "mysql-hooks", "session_hooks");
+        LegacyHookRecords.insert(jdbc, hooksTenant, hooksSession);
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
-        LegacyEvents.assertBackfilled(jdbc, "mysql-upgrade",
-                "session_upgrade");
-        LegacyLifecycleCommands.assertMigrated(jdbc, "mysql-lifecycle",
-                lifecycle);
-        LegacyHookRecords.assertBackfilled(jdbc, "mysql-hooks", "session_hooks");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " managed_agent_consumer_progress WHERE tenant_id = ?"
-                        + " AND session_id = ? AND consumer_name = ?",
-                Integer.class, "mysql-upgrade", "session_upgrade",
-                "message_projection")).isEqualTo(1);
+        // The gates come from what this run found already applied, never
+        // from the migrated rows: gating on V15's item_id backfill would
+        // let a V15 regression silently switch off its own witnesses. A
+        // rerun still exercises the store through the idempotency conflict
+        // re-seeded below and the fresh-projection exercises;
+        // agent_revision there reads V13's column DEFAULT.
+        if (witnesses.eventIdentity()) {
+            LegacyEvents.assertBackfilled(jdbc, upgradeTenant, upgradeSession);
+        }
+        if (witnesses.pendingOperations()) {
+            LegacyLifecycleCommands.assertMigrated(jdbc, lifecycleTenant,
+                    lifecycle);
+        }
+        if (witnesses.hookAdmissions()) {
+            LegacyHookRecords.assertBackfilled(jdbc, hooksTenant,
+                    hooksSession);
+        }
+        if (witnesses.consumerProgress()) {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                            + " managed_agent_consumer_progress WHERE tenant_id = ?"
+                            + " AND session_id = ? AND consumer_name = ?",
+                    Integer.class, upgradeTenant, upgradeSession,
+                    "message_projection")).isEqualTo(1);
+        }
         assertThat(jdbc.queryForObject("SELECT agent_revision FROM"
                         + " managed_agent_session WHERE session_id = ?",
-                String.class, "session_upgrade")).isEqualTo("1");
+                String.class, upgradeSession)).isEqualTo("1");
         ManagedAgentStore store = new ManagedAgentStore(
                 jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {
                 }, new com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry(jdbc),
                 new ManagedAgentProperties());
+        // The V9 scope backfill marked the legacy creation key
+        // workspace-unbound when it ran; when V9 was already applied this
+        // run's seed missed it, so the conflict source is re-seeded
+        // explicitly and the probe does not depend on the migration order.
+        if (witnesses.reseedCreationScope()) {
+            jdbc.update("INSERT INTO managed_session_create_scope (tenant_id,"
+                            + " idempotency_key, workspace_bound) VALUES (?, ?,"
+                            + " FALSE) ON DUPLICATE KEY UPDATE workspace_bound"
+                            + " = workspace_bound", upgradeTenant,
+                    "legacy-key");
+        }
         assertThatThrownBy(() -> store.insertWorkspaceSessionCommand(
-                "mysql-upgrade", "actor", "legacy-key", "bound-digest",
+                upgradeTenant, "actor", "legacy-key", "bound-digest",
                 "qwen-code", null, null, List.of(), null,
                 new com.alibaba.qwen.code.managedagent.api.WorkspaceSelection("ws-a", ".")))
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
-        String tenant = "mysql-projection";
+        String tenant = "mysql-projection-" + runId;
         List<Map<String, Object>> input = List.of(Map.of(
                 "type", "text", "text", "hello"));
         Admission admission = store.insertSessionCommand(tenant,
@@ -179,9 +217,9 @@ class ManagedAgentMySqlIT {
                 new DataSourceTransactionManager(dataSource));
         ManagedSessionStore firstInstance = new ManagedSessionStore(jdbc);
         ManagedSessionStore secondInstance = new ManagedSessionStore(jdbc);
-        String storeTenant = "mysql-private-store";
-        String sessionId = "mysql-private-session";
-        String workspaceId = "mysql-private-workspace";
+        String storeTenant = "mysql-private-store-" + runId;
+        String sessionId = "mysql-private-session-" + runId;
+        String workspaceId = "mysql-private-workspace-" + runId;
         String tokenA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         String tokenB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         WriterGrant firstGrant = inTransaction(transactions,
@@ -230,7 +268,8 @@ class ManagedAgentMySqlIT {
                         sessionId, "mysql-resource", tokenA)).bytes())
                 .isEqualTo(resourceBytes);
         assertThatThrownBy(() -> inTransaction(transactions,
-                () -> secondInstance.restore("MYSQL-PRIVATE-STORE",
+                () -> secondInstance.restore(
+                        storeTenant.toUpperCase(java.util.Locale.ROOT),
                         workspaceId, sessionId, tokenA)))
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode()).isEqualTo(
@@ -324,13 +363,9 @@ class ManagedAgentMySqlIT {
         assertThat(now).isNotNull();
         assertThat(grant.leaseUntil() - now)
                 .isBetween(700L, 1_000L);
-        Long persistedLeaseMicros = jdbc.queryForObject(
-                "SELECT TIMESTAMPDIFF(MICROSECOND, CURRENT_TIMESTAMP(6),"
-                        + " writer_lease_until) FROM"
-                        + " qwen_managed_session_journal_head WHERE tenant_id"
-                        + " = ? AND session_id = ?",
-                Long.class, tenant, session);
-        assertThat(persistedLeaseMicros).isPositive();
+        // The sub-second precision is pinned by assertLeaseDeadline's exact
+        // stored-vs-app deadline equality; a bare isPositive cannot detect
+        // fraction truncation.
         assertLeaseDeadline(jdbc, tenant, session, grant);
 
         WriterGrant reacquired = inTransaction(transactions,
@@ -423,25 +458,31 @@ class ManagedAgentMySqlIT {
         DriverManagerDataSource dataSource = dataSource();
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        // Per-run tenant ids keep reruns on a shared database isolated with
+        // no cleanup; the pair differs only by case, the property under
+        // test (tenant_id is utf8mb4_bin).
+        String lowerTenant = "case-" + UUID.randomUUID().toString()
+                .substring(0, 8);
+        String upperTenant = lowerTenant.toUpperCase(java.util.Locale.ROOT);
         ManagedAgentStore store = new ManagedAgentStore(
-                new JdbcTemplate(dataSource), new ObjectMapper(),
-                Clock.systemUTC(), ignored -> {
+                jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {
                 }, new com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry(
-                        new JdbcTemplate(dataSource)),
+                        jdbc),
                 new ManagedAgentProperties());
-        Admission lower = store.insertSessionCommand("case-tenant",
+        Admission lower = store.insertSessionCommand(lowerTenant,
                 "CREATE_SESSION", "case-key", "case-digest", "qwen-code", null,
                 null, List.of(), null);
-        Admission upper = store.insertSessionCommand("CASE-TENANT",
+        Admission upper = store.insertSessionCommand(upperTenant,
                 "CREATE_SESSION", "case-key", "case-digest", "qwen-code", null,
                 null, List.of(), null);
 
         assertThat(upper.sessionId()).isNotEqualTo(lower.sessionId());
-        assertThat(store.findSession("CASE-TENANT", lower.sessionId()))
+        assertThat(store.findSession(upperTenant, lower.sessionId()))
                 .isEmpty();
-        assertThat(store.findSession("case-tenant", upper.sessionId()))
+        assertThat(store.findSession(lowerTenant, upper.sessionId()))
                 .isEmpty();
-        assertThat(store.listSessions("CASE-TENANT", null, null, null, 10)
+        assertThat(store.listSessions(upperTenant, null, null, null, 10)
                 .sessions()).extracting(session -> session.sessionId())
                 .containsExactly(upper.sessionId());
     }
@@ -678,13 +719,23 @@ class ManagedAgentMySqlIT {
                 Integer.class, tenant, session, refusedResource)).isZero();
         assertThat(count(jdbc, "qwen_managed_session_resource_ref", tenant,
                 session)).isEqualTo(references);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " qwen_managed_session_journal_tx WHERE"
-                        + " tenant_id = ? AND session_id = ? AND"
-                        + " command_id = 'refused'", Integer.class, tenant,
-                session)).isZero();
-        assertThat(records.listTasks(tenant, session, null, null, 10).tasks()
-                .get(0).projection()).isEqualTo(before);
+        // No command row survives the refusal: the same operation and
+        // command id commit a new body as new, not as a replay of the
+        // refused call; the rollback of its resource rows is pinned by the
+        // counts above.
+        JsonNode retry = ((ObjectNode) chain.get(0).required("monitorRun")
+                .deepCopy()).put("monitorId", "monitor-retry");
+        CommitReceipt resent = inTransaction(transactions,
+                () -> journal.commitMonitor("refused", retry, 99_000));
+        assertThat(resent.replayed()).isFalse();
+        String retryTask = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(session, "monitor_run",
+                        "monitor-retry"));
+        List<TaskRow> tasks = records.listTasks(tenant, session, null, null,
+                10).tasks();
+        assertThat(tasks).hasSize(2);
+        assertThat(tasks.get(0).taskId()).isEqualTo(retryTask);
+        assertThat(records.findTask(tenant, session, retryTask)).isPresent();
 
         // A first revision checks its opening command through an index, not
         // by reading every record of its Session. The plan is asked of a
@@ -706,9 +757,8 @@ class ManagedAgentMySqlIT {
                         .toList());
         jdbc.queryForList("ANALYZE TABLE"
                 + " qwen_managed_session_extension_record");
-        assertThat(jdbc.queryForList("EXPLAIN SELECT COUNT(*) FROM"
-                        + " qwen_managed_session_extension_record WHERE"
-                        + " session_scope_key = ? AND operation_hash = ?",
+        assertThat(jdbc.queryForList("EXPLAIN "
+                        + ManagedExtensionRecordStore.OPENING_COMMAND_QUERY,
                 scopeKey, sha256("command-7")))
                 .extracting(row -> row.get("key"))
                 .containsExactly("idx_managed_session_extension_operation");
