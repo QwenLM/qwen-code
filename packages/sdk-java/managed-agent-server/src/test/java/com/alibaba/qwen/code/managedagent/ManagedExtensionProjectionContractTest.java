@@ -182,7 +182,9 @@ class ManagedExtensionProjectionContractTest {
                     ManagedExtensionProjection.executionOf(
                             ToolExecutionRecord.State.valueOf(
                                     text(fixture, "state")),
-                            status.isNull() ? null : status.textValue()),
+                            status.isNull() ? null : status.textValue(),
+                            fixture.required("dispatchGeneration")
+                                    .longValue()),
                     id(fixture));
         }
         Set<String> covered = new HashSet<>();

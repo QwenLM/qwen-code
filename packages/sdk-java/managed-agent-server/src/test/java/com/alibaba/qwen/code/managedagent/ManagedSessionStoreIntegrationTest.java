@@ -348,8 +348,10 @@ class ManagedSessionStoreIntegrationTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("managed_session_writer_conflict"));
 
-        String turnBytes = "{\"subtype\":\"managed_session_event_v1\"}\n"
-                + "{\"subtype\":\"managed_session_commit_v1\"}\n";
+        // The event and its bytes live in TurnEventLines, which the reader
+        // replay replays too, so this happy path stays authority-valid.
+        String turnBytes = TurnEventLines.turnBytes(TENANT, WORKSPACE,
+                SESSION);
         ObjectNode turn = transactionRequest(turnBytes, WRITER_A, 1);
         byte[] checkpointBytes = "checkpoint-state"
                 .getBytes(StandardCharsets.UTF_8);
@@ -443,7 +445,12 @@ class ManagedSessionStoreIntegrationTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("managed_session_not_found"));
 
-        ObjectNode oversized = transactionRequest(turnBytes, WRITER_B, 2)
+        // Its own bytes hold the event at sequence 2, so only the oversized
+        // resource can refuse this commit.
+        String oversizedBytes = turnBytes.replace("\"sequence\":1,",
+                "\"sequence\":2,").replace("turn-1:accepted",
+                        "turn-2:accepted");
+        ObjectNode oversized = transactionRequest(oversizedBytes, WRITER_B, 2)
                 .put("transactionId", "transaction-oversized")
                 .put("commandId", "command-oversized")
                 .put("expectedJournalRevision", 2)
@@ -554,6 +561,125 @@ class ManagedSessionStoreIntegrationTest {
                 .andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.error.code")
                         .value("managed_session_journal_corrupt"));
+    }
+
+    @Test
+    void holdsRestorePagesInsideThePerPageByteBudget() throws Exception {
+        String session = "budget-" + UUID.randomUUID();
+        String base = "/internal/managed-session-store/v1/sessions/"
+                + session;
+        String token = "d".repeat(32);
+        mvc.perform(post(base + "/writers:acquire")
+                        .header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
+                                token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(writerRequest(WRITER_A).toString()))
+                .andExpect(status().isOk());
+
+        // One tiny genesis plus twelve dense transactions whose record
+        // lines each hold ~1 MiB of padding (under both the per-line and
+        // container caps): the budget must cut the page before bytes show
+        // past 8 MiB, whatever the count limit allows.
+        java.util.function.BiConsumer<String, Integer> commit =
+                (padChar, revision) -> {
+                    try {
+                        String records;
+                        ObjectNode request;
+                        if (revision == 1) {
+                            // Genesis stays canonical: exactly two small
+                            // records (session.create requires recordCount 2).
+                            records =
+                                    "{\"subtype\":\"session_execution_engine\"}\n"
+                                            + "{\"subtype\":\"managed_session_header_v1\"}\n";
+                            request = genesisRequest(records, new byte[1024]);
+                        } else {
+                            // ~0.9 MiB raw bytes per transaction held in a
+                            // single padded line (a record line itself is
+                            // capped at 1 MiB server-side; recordCount must
+                            // stay 2 = 1 event + 1 commit).
+                            records = "{\"subtype\":\"event_v1\"}\n"
+                                    + "{\"subtype\":\"commit_v1\",\"pad\":\""
+                                    + padChar.repeat(1_000_000) + "\"}\n";
+                            request = transactionRequest(records, WRITER_A, 1)
+                                    .put("expectedJournalRevision",
+                                            revision - 1)
+                                    .put("expectedCommittedSequence",
+                                            Math.max(0, revision - 2))
+                                    .put("firstSequence",
+                                            Math.max(1, revision - 1))
+                                    .put("lastSequence",
+                                            Math.max(1, revision - 1))
+                                    .put("transactionId",
+                                            "transaction-blob-" + revision)
+                                    .put("commandId",
+                                            "command-blob-" + revision);
+                            if (revision >= 3) {
+                                request.put("previousCommitDigest",
+                                        "c".repeat(64));
+                            }
+                        }
+                        var result = mvc.perform(post(base + "/transactions:commit")
+                                        .header(TenantContextFilter.HEADER,
+                                                TENANT)
+                                        .header(ManagedSessionStoreModels
+                                                        .WRITER_TOKEN_HEADER,
+                                                token)
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content(request.toString()))
+                                .andReturn();
+                        if (result.getResponse().getStatus() != 200) {
+                            String body = result.getResponse()
+                                    .getContentAsString();
+                            throw new IllegalStateException(
+                                    "commit at revision " + revision + " -> "
+                                            + result.getResponse().getStatus()
+                                            + " " + body.substring(0,
+                                                    Math.min(240,
+                                                            body.length())));
+                        }
+                    } catch (IllegalStateException error) {
+                        throw error;
+                    } catch (Exception error) {
+                        throw new IllegalStateException(
+                                "commit at revision " + revision, error);
+                    }
+                };
+        // The genesis is tiny; twelve dense transactions carry the
+        // cumulative bytes past 8 MiB.
+        for (int revision = 1; revision <= 12; revision++) {
+            commit.accept(String.valueOf((char) ('a' + revision - 1)), revision);
+        }
+
+        // The byte budget cuts the page even under a generous count limit;
+        // the follow-up page reaches the remaining rows.
+        mvc.perform(get(base + "/transactions")
+                        .header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
+                                token)
+                        .param("workspaceId", WORKSPACE)
+                        .param("limit", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.transactions.length()").value(9))
+                .andExpect(jsonPath("$.transactions[0].journalRevision")
+                        .value(1))
+                .andExpect(jsonPath("$.transactions[8].journalRevision")
+                        .value(9))
+                .andExpect(jsonPath("$.hasMore").value(true));
+        mvc.perform(get(base + "/transactions")
+                        .header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER,
+                                token)
+                        .param("workspaceId", WORKSPACE)
+                        .param("afterRevision", "9")
+                        .param("limit", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.transactions.length()").value(3))
+                .andExpect(jsonPath("$.transactions[0].journalRevision")
+                        .value(10))
+                .andExpect(jsonPath("$.transactions[2].journalRevision")
+                        .value(12))
+                .andExpect(jsonPath("$.hasMore").value(false));
     }
 
     private ObjectNode writerRequest(String writerId) {
