@@ -65,9 +65,12 @@ export interface ManagedEventEnvelopePayloadRef {
 /**
  * One committed event as distributed to other nodes. `sessionId`,
  * `tenantId` and `workspaceId` flatten the row's `sessionKey`; `sequence`,
- * `eventId`, `kind` and `occurredAt` are taken from the row unchanged —
- * `occurredAt` is the authority-clock UTC Unix millisecond stamped at
- * commit, the only clock the commit path records.
+ * `eventId`, `kind` and `occurredAt` are taken from the row unchanged.
+ * `occurredAt` is the UTC Unix millisecond at which the event's own writer
+ * recorded it — the recorder-side timestamp committed with the event, so
+ * it precedes commit by however long the call took in flight. It is not a
+ * commit order; ordering per Session rides `(tenantId, sessionId,
+ * sequence)`.
  */
 export interface ManagedEventEnvelope {
   readonly v: 1;
@@ -81,8 +84,12 @@ export interface ManagedEventEnvelope {
   readonly payloadRef: ManagedEventEnvelopePayloadRef;
 }
 
-/** The receiver-side idempotence key: the per-key ordering coordinate. */
+/** The receiver-side idempotence key: the per-key ordering coordinate.
+ * Sessions are tenant-scoped (one `qwen_managed_session_journal_head` row per
+ * tenant and session), so a key is only identity-ending within its tenant —
+ * the same session id under another tenant is another Session. */
 export interface ManagedEventEnvelopeKey {
+  readonly tenantId: string;
   readonly sessionId: string;
   readonly sequence: number;
 }
@@ -212,11 +219,13 @@ export function managedEventEnvelopeFrom(
   });
 }
 
-/** The idempotence key of a parsed envelope: `(sessionId, sequence)`. */
+/** The idempotence key of a parsed envelope: `(tenantId, sessionId,
+ * sequence)`. */
 export function managedEventEnvelopeKey(
   envelope: ManagedEventEnvelope,
 ): ManagedEventEnvelopeKey {
   return Object.freeze({
+    tenantId: envelope.tenantId,
     sessionId: envelope.sessionId,
     sequence: envelope.sequence,
   });
@@ -226,9 +235,9 @@ export function managedEventEnvelopeKey(
  * Redelivery-safe comparison: two parses announce the same committed event
  * when their keys are exactly equal. A broker may redeliver a fact any
  * number of times, and the committed row it identifies cannot change, so
- * equality compares the key and nothing else — differing surroundings with
- * an equal key still name the one fact, and anything unparseable announces
- * nothing.
+ * equality compares the key (tenant included) and nothing
+ * else — differing surroundings with an equal key still name the one fact,
+ * and anything unparseable announces nothing.
  */
 export function isManagedEventEnvelopeRedelivered(
   delivered: unknown,
@@ -247,6 +256,7 @@ export function isManagedEventEnvelopeRedelivered(
   return (
     left !== null &&
     right !== null &&
+    left.tenantId === right.tenantId &&
     left.sessionId === right.sessionId &&
     left.sequence === right.sequence
   );

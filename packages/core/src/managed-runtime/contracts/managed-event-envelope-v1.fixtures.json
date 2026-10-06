@@ -1131,7 +1131,7 @@
     },
     {
       "id": "different-tenant-same-key",
-      "same": true,
+      "same": false,
       "first": {
         "v": 1,
         "sessionId": "session-1",
