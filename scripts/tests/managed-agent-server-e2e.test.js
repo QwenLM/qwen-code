@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   createSourceFile,
+  isArrayLiteralExpression,
   isCallExpression,
   isFunctionDeclaration,
   isVariableStatement,
@@ -86,14 +87,27 @@ describe('managed-agent-server e2e runner', () => {
     );
     const calls = [];
     const visit = (node) => {
-      if (
-        isCallExpression(node) &&
-        node.expression.getText(ast) === 'spawnSync' &&
-        node.arguments.length > 0
-      ) {
-        const binary = node.arguments[0].getText(ast);
-        if (['mysql', 'mysqladmin', 'mysqld'].includes(binary)) {
-          calls.push({ binary, text: node.getText(ast) });
+      if (isCallExpression(node) && node.arguments.length > 0) {
+        // The long-lived mysqld server launches through start(), which
+        // spawns internally: scanning spawnSync alone inventories 3 of the
+        // 4 MySQL process launches.
+        const callee = node.expression.getText(ast);
+        if (
+          callee === 'spawnSync' ||
+          callee === 'spawn' ||
+          callee === 'start'
+        ) {
+          const binary = node.arguments[0].getText(ast);
+          if (['mysql', 'mysqladmin', 'mysqld'].includes(binary)) {
+            const args = node.arguments[1];
+            const firstArg =
+              args !== undefined &&
+              isArrayLiteralExpression(args) &&
+              args.elements.length > 0
+                ? args.elements[0].getText(ast)
+                : undefined;
+            calls.push({ binary, text: node.getText(ast), firstArg });
+          }
         }
       }
       node.forEachChild(visit);
@@ -444,6 +458,9 @@ describe('managed-agent-server e2e runner', () => {
     // client round trip; the floor keeps the last probe possible.
     expect(() => runMysql(3306, 'SELECT 1', 3)).toThrow(/ETIMEDOUT/);
     expect(spawns[1][2].timeout).toBeGreaterThanOrEqual(2_000);
+    // The default-timeout call pins the opposite direction: a budget above
+    // the floor reaches spawnSync unchanged.
+    expect(spawns[0][2].timeout).toBe(10_000);
   });
 
   // --no-defaults does not disable $HOME/.mylogin.cnf, so a developer's
@@ -460,11 +477,17 @@ describe('managed-agent-server e2e runner', () => {
     // added. The mysqld server launches deliberately keep the real HOME, so
     // the isolated override is required on the mysql/mysqladmin clients.
     const calls = mysqlCalls(source);
-    expect(calls.length).toBeGreaterThan(0);
+    // The exact inventory, not a lower bound: a scan that silently stops
+    // seeing a call site — or a fifth launch added without the protections —
+    // must fail here, not pass against a collapsed population.
+    expect(calls).toHaveLength(4);
     for (const call of calls) {
-      expect(call.text, `${call.binary} must pass --no-defaults`).toContain(
-        "'--no-defaults'",
-      );
+      // MySQL honors --no-defaults only as the first option, so pin the
+      // position: containment would survive the flag moving off index 0.
+      expect(
+        call.firstArg,
+        `${call.binary} must pass --no-defaults first`,
+      ).toBe("'--no-defaults'");
       if (call.binary === 'mysqld') continue;
       expect(
         call.text,
@@ -607,67 +630,77 @@ describe('managed-agent-server e2e runner', () => {
   // count both left them green. Run the stage's own shell text against
   // fixture target/ populations so the guard's behaviour is pinned, not its
   // spelling.
-  it('fails the image build loudly when the jar selection is ambiguous', () => {
-    const probe = spawnSync('sh', ['-c', 'true']);
-    if (probe.status !== 0) return; // no sh on this host: skip rather than fail
-    const dockerfile = read(
-      'packages/sdk-java/managed-agent-server/Dockerfile',
-    );
-    const stage = dockerfile.match(
-      /cd packages\/sdk-java\/managed-agent-server\/target \\[\s\S]*?&& cp "\$main" \/tmp\/qwen-managed-agent-server\.jar/,
-    );
-    expect(
-      stage,
-      'the jar-selection RUN stage must be extractable from the Dockerfile',
-    ).not.toBeNull();
-    const script = stage[0]
-      .split('\n')
-      .filter((line) => !line.trimStart().startsWith('#'))
-      .map((line) => line.trimEnd().replace(/\\$/, ''))
-      .join(' ');
-    const populations = [
-      { jars: [], status: 1, found: 0 },
-      { jars: ['qwen-managed-agent-server-1.0.jar'], status: 0 },
-      {
-        jars: [
-          'qwen-managed-agent-server-1.0.jar',
-          'qwen-managed-agent-server-1.0-workspace-bundle.jar',
-          'qwen-managed-agent-server-1.0-operator-recovery.jar',
-        ],
-        status: 0,
-      },
-      {
-        jars: [
-          'qwen-managed-agent-server-1.0.jar',
-          'qwen-managed-agent-server-2.0.jar',
-        ],
-        status: 1,
-        found: 2,
-      },
-    ];
-    for (const { jars, status, found } of populations) {
-      const dir = mkdtempSync(join(tmpdir(), 'jar-guard-'));
-      try {
-        for (const jar of jars) writeFileSync(join(dir, jar), '');
-        const fixture = script
-          .replace(
-            'cd packages/sdk-java/managed-agent-server/target',
-            `cd '${dir.replaceAll('\\', '/')}'`,
-          )
-          .replace(
-            '/tmp/qwen-managed-agent-server.jar',
-            `'${join(dir, 'published.jar').replaceAll('\\', '/')}'`,
-          );
-        const run = spawnSync('sh', ['-c', fixture], { encoding: 'utf8' });
-        expect(run.status, `${jars.length} jars: ${run.stderr}`).toBe(status);
-        if (found !== undefined) {
-          expect(run.stderr).toContain(
-            `expected exactly one unclassified server jar, found ${found}`,
-          );
+  // The fixture ends in `cp`, and a Git-Bash-only Windows PATH resolves
+  // sh.exe without the coreutils: probe the capability the fixture consumes
+  // and skip visibly — an in-body return would record the case as passed for
+  // a guard that never ran.
+  const hasShAndCp =
+    spawnSync('sh', ['-c', 'command -v cp >/dev/null 2>&1'], {
+      stdio: 'ignore',
+    }).status === 0;
+
+  it.skipIf(!hasShAndCp)(
+    'fails the image build loudly when the jar selection is ambiguous',
+    () => {
+      const dockerfile = read(
+        'packages/sdk-java/managed-agent-server/Dockerfile',
+      );
+      const stage = dockerfile.match(
+        /cd packages\/sdk-java\/managed-agent-server\/target \\[\s\S]*?&& cp "\$main" \/tmp\/qwen-managed-agent-server\.jar/,
+      );
+      expect(
+        stage,
+        'the jar-selection RUN stage must be extractable from the Dockerfile',
+      ).not.toBeNull();
+      const script = stage[0]
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('#'))
+        .map((line) => line.trimEnd().replace(/\\$/, ''))
+        .join(' ');
+      const populations = [
+        { jars: [], status: 1, found: 0 },
+        { jars: ['qwen-managed-agent-server-1.0.jar'], status: 0 },
+        {
+          jars: [
+            'qwen-managed-agent-server-1.0.jar',
+            'qwen-managed-agent-server-1.0-workspace-bundle.jar',
+            'qwen-managed-agent-server-1.0-operator-recovery.jar',
+          ],
+          status: 0,
+        },
+        {
+          jars: [
+            'qwen-managed-agent-server-1.0.jar',
+            'qwen-managed-agent-server-2.0.jar',
+          ],
+          status: 1,
+          found: 2,
+        },
+      ];
+      for (const { jars, status, found } of populations) {
+        const dir = mkdtempSync(join(tmpdir(), 'jar-guard-'));
+        try {
+          for (const jar of jars) writeFileSync(join(dir, jar), '');
+          const fixture = script
+            .replace(
+              'cd packages/sdk-java/managed-agent-server/target',
+              `cd '${dir.replaceAll('\\', '/')}'`,
+            )
+            .replace(
+              '/tmp/qwen-managed-agent-server.jar',
+              `'${join(dir, 'published.jar').replaceAll('\\', '/')}'`,
+            );
+          const run = spawnSync('sh', ['-c', fixture], { encoding: 'utf8' });
+          expect(run.status, `${jars.length} jars: ${run.stderr}`).toBe(status);
+          if (found !== undefined) {
+            expect(run.stderr).toContain(
+              `expected exactly one unclassified server jar, found ${found}`,
+            );
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
         }
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
       }
-    }
-  });
+    },
+  );
 });
