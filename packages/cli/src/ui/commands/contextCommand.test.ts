@@ -1646,7 +1646,8 @@ describe('collectContextData (contextCommand)', () => {
       getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi
         .fn()
-        .mockReturnValue('# auto memory\nMEMORY_INDEX_MARKER'),
+        .mockReturnValue('# auto memory\nStable policy'),
+      getAutoMemoryContext: vi.fn().mockReturnValue('MEMORY_INDEX_MARKER'),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
