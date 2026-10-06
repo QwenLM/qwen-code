@@ -46,6 +46,8 @@ interface Revision {
 interface FixtureSuite {
   readonly contractVersion: 1;
   readonly recordBodies: Record<string, string | null>;
+  /** The bodies H4/H6 added to the projection contract after version 1. */
+  readonly additionalRecordBodies: Record<string, string | null>;
   readonly taskStates: readonly string[];
   readonly pendingDeliveryStates: readonly string[];
   readonly runtimeStates: readonly string[];
@@ -108,7 +110,10 @@ describe('managed-extension-projection/1 fixtures', () => {
           ([domain, body]) => [domain, body?.taskKind],
         ),
       ),
-    ).toEqual(fixtures.recordBodies);
+    ).toEqual({
+      ...fixtures.recordBodies,
+      ...fixtures.additionalRecordBodies,
+    });
     expect([...MANAGED_TASK_STATES]).toEqual(fixtures.taskStates);
     expect([...MANAGED_TASK_RUNTIME_STATES].sort()).toEqual(
       fixtures.runtimeStates,

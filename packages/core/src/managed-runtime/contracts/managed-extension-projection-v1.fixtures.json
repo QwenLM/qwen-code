@@ -8,6 +8,10 @@
     "hook_execution": null,
     "child_run": "background_shell"
   },
+  "additionalRecordBodies": {
+    "schedule": null,
+    "automation_run": "automation_run"
+  },
   "taskStates": [
     "pending",
     "running",

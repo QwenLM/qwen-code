@@ -52,7 +52,17 @@ public final class ManagedExtensionProjection {
                     ManagedExtensionRecords::requireChildRun,
                     body -> body.get("shellId").textValue(),
                     ManagedExtensionRecords::isChildRunStart,
-                    ManagedExtensionRecords::isChildRunSuccessor));
+                    ManagedExtensionRecords::isChildRunSuccessor),
+            "schedule", new Body(null,
+                    ManagedExtensionRecords::requireScheduleRecord,
+                    body -> body.get("scheduleId").textValue(),
+                    ManagedExtensionRecords::isScheduleStart,
+                    ManagedExtensionRecords::isScheduleSuccessor),
+            "automation_run", new Body("automation_run",
+                    ManagedExtensionRecords::requireAutomationRunRecord,
+                    body -> body.get("automationRunId").textValue(),
+                    ManagedExtensionRecords::isAutomationRunStart,
+                    ManagedExtensionRecords::isAutomationRunSuccessor));
     public static final List<String> TASK_STATES = List.of("pending",
             "running", "waiting", "completed", "failed", "cancelled",
             "degraded", "recovery_blocked");

@@ -2,8 +2,14 @@
 
 [English](2026-10-04-managed-automation.md) | [简体中文](2026-10-04-managed-automation.zh-CN.md)
 
-Status: proposed design; nothing in this document is implemented, and no domain
-it names is enabled for submission. This is the design for slice H6 of
+Status: proposed design; its H6a record contract is now implemented as
+[Record bodies](#record-bodies-h6a-contract) spells out — the two bodies,
+their validators, occurrence identity and transition witnesses, the shared
+fixtures TypeScript and Java replay, the `MANAGED_EXTENSION_RECORD_BODIES`
+entries and the Java mirrors. No domain it names is enabled for submission:
+`schedule` and `automation_run` stay out of `MANAGED_SESSION_ENABLED_DOMAINS`,
+and `commitExtensionRecord` still refuses them. H6b and H6c remain proposed.
+This is the design for slice H6 of
 [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the
 Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380).
 It builds on the task contract of H0a
@@ -43,10 +49,11 @@ The facts below are from `main` at `5ddfacc9d4`.
 - **Domain index.** `schedule` and `automation_run` are registered in the
   closed v1 domain index of
   `packages/core/src/managed-runtime/managed-session-records.ts`.
-  Registration is not enablement: neither has a record body in
+  Registration is not enablement: neither is in
+  `MANAGED_SESSION_ENABLED_DOMAINS`, and `commitExtensionRecord` refuses
+  them. Since the H6a contract landed, both have record bodies in
   `MANAGED_EXTENSION_RECORD_BODIES` (`managed-extension-projection.ts`),
-  neither is in `MANAGED_SESSION_ENABLED_DOMAINS`, and
-  `commitExtensionRecord` refuses them.
+  each committed as `managed-automation-record/1`.
 - **Task projection.** The task kind `automation_run` is declared
   (`MANAGED_TASK_KINDS`) and frozen in the public `TaskKind` enum, and the
   H0b run block carries the run, execution and delivery lines an
@@ -197,36 +204,55 @@ The facts below are from `main` at `5ddfacc9d4`.
    in the same bounded-aggregation spirit that reference section 14, item
    8 states for high-frequency Monitor output.
 
-## Record bodies (H6a contract direction)
+## Record bodies (H6a contract)
 
 Both bodies embed the H0b run block unchanged. The closed field sets,
-validators and transition rules are pinned by the H6a change in the shared
-schema and fixture files that TypeScript and Java both replay. This section
-fixes the direction, not the byte-level schema.
+validators and transition rules below are the shipped H6a contract, pinned
+by `managed-automation-record-v1.fixtures.json`, which TypeScript and Java
+both replay — including the timezone anchors every host tz database must
+know. Where the direction above named more (the delivery-policy snapshot
+shape, the concurrency and budget policy fields), version 1 deliberately
+carries less: the delivery policy's shape lands with its H5/H6 producers,
+and `allow` overlaps are already bounded by the shared `count_limit`
+quota. This section is the byte-level truth.
 
-- `managed-schedule` (chain identity `scheduleId`): the tenant/workspace
-  scope, the definition revision and digest, cron and timezone, prompt
-  resource reference, `sessionMode` (`persistent` | `per_run`) with its
-  frozen target, delivery policy, overlap policy, catch-up policy,
-  concurrency and budget policy, and an enabled/disabled flag. Definition
-  revisions are append-only; a first revision opens with
-  `overlap: "skip"` and `catch_up: "none"` as the contract defaults.
-- `managed-automation_run` (chain identity `runId`): the `scheduleId` and
-  pinned definition revision, the `occurrenceKey` and its trigger kind
-  (`timer` | `manual` | `webhook`), the slot for timer triggers, the
-  frozen target (bound Session reference or child Session intent), the
-  delivery policy snapshot, and the H0b run block with task kind
-  `automation_run`. Its execution line tracks the target dispatch; its
-  delivery line (target `channel`, when the policy delivers) tracks the
-  H5 delivery.
-- Fixed-across-revisions fields follow H0b's rule: the occurrence identity,
-  definition pin and frozen target never change once the chain exists.
+- `managed-schedule` version 1 (chain identity `scheduleId`): the
+  `ownerScopeId`, `goal` (bounded text), a five-field `cron` of minute,
+  hour, day-of-month, month and day-of-week digit/range atoms, an IANA
+  `timezone` name (host-validated in the fixture anchors), the definition
+  `definitionRevision` and `definitionDigest`, the `promptRef` resource
+  reference, `sessionMode` (`persistent` | `per_run`) with
+  `targetSessionId` set exactly for `persistent`, the `overlap` policy
+  (`skip` | `queue_one` | `allow`), the `catchUp` policy (`none` |
+  `latest` | `bounded`) with `catchUpLimit` of at least 1 set exactly for
+  `bounded`, and an `enabled` flag. Definition revisions are append-only:
+  every successor revision carries `definitionRevision + 1`, and the run
+  block is a purely logical lifecycle (no execution, delivery, dispatch or
+  definition pin).
+- `managed-automation_run` version 1 (chain identity `automationRunId`):
+  the `scheduleId` and pinned `definitionRevision`, the closed
+  `occurrenceKey` union — `schedule:<slot>` (the slot a canonical UTC
+  instant to the second, so DST folds and gaps have exactly one reading;
+  open question 1 answered) or `manual:<commandId>`, with
+  `webhook:<eventId>` registered and refused until the webhook ingress
+  slice lands — `sessionMode` and the frozen `targetSessionId`, and the
+  H0b run block with task kind `automation_run`. Its run names its durable
+  `dispatchId` from the first revision and no `executionCallId` or
+  definition pin; its execution line tracks the target dispatch; its
+  delivery line (target `channel`, when the policy delivers) may move past
+  `planned` only once the run ended, so a delivered-or-not run never
+  re-runs the model.
+- Fixed-across-revisions fields follow H0b's rule: the schedule's identity
+  (`kind`, `scheduleId`, `ownerScopeId`) and, for the run, everything but
+  the run block itself — the occurrence identity, the pinned definition
+  revision and the frozen target never change once the chain exists, so
+  only the run moves.
 
 ## Slice plan
 
 | Slice | Scope                                                                                                                                                                                                                                                                 | Exit gates                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| H6a   | Record contract: both bodies, validators, occurrence-identity canonicalization (including DST witnesses), added to the shared schema and `managed-extension-record-v1` fixtures; `MANAGED_EXTENSION_RECORD_BODIES` entries; Java replay.                              | TypeScript and Java produce and refuse identical chains from the fixtures, including the DST cases. Both domains stay absent from `MANAGED_SESSION_ENABLED_DOMAINS`; `commitExtensionRecord` still refuses them. The Java store ships the bodies before any writer can commit (H0c open question 7). No production caller constructs either body.                                                                                           |
+| H6a   | Record contract: both bodies, validators, occurrence-identity canonicalization (canonical UTC slot, timezone anchors), in the shared `managed-automation-record-v1` fixtures; `MANAGED_EXTENSION_RECORD_BODIES` entries; Java replay. Landed.                         | TypeScript and Java produce and refuse identical chains from the fixtures (met). Both domains stay absent from `MANAGED_SESSION_ENABLED_DOMAINS`; `commitExtensionRecord` still refuses them (met). The Java store ships the bodies before any writer can commit (met — H0c open question 7). No production caller constructs either body (met).                                                                                            |
 | H6b   | Definition CRUD under the planned public routes (moved to `partial`), manual run via command ID, the scanner with workspace lease/fencing and single-claim, the run ledger with skip/queue records, and overlap/catch-up enforcement. Domains enabled for submission. | Two scanner instances claim exactly one run per occurrence (reference section 14, item 6): the loser reads the committed run. A missed window under `none` is recorded and never fires; under `latest` at most one catch-up fires; under `bounded: N` at most N. A manual run replays its `Idempotency-Key`. Definitions and runs page separately; every mutation answers `202 + operationId`.                                              |
 | H6c   | Execution targets and delivery: `persistent` input admission with wake, `per_run` child Sessions through H4, delivery-policy projection onto H5 `channel_delivery` entries.                                                                                           | A `persistent` run's input commits with its wake in one transaction and a scanner crash between claim and admission reconciles by `runId`. A `per_run` dispatch whose answer is unknown never produces a second child for the same `occurrenceKey`. A settled run creates exactly its committed deliveries; a Channel send failure, `partial` or `unknown` reconciles without touching the run's model work (reference section 14, item 6). |
 
@@ -268,9 +294,10 @@ IDs; Goal/Live/channel-loop migration onto the ledger; new budget kinds.
 
 ## Open questions
 
-1. **Slot representation.** The H6a contract pins the canonical slot form
-   (an instant plus the definition's timezone, or the local wall time);
-   the fixtures make the choice observable.
+1. **Slot representation.** Answered by the shipped H6a contract: the
+   slot is the canonical UTC instant to the second
+   (`schedule:<instant>`), so DST folds and gaps have exactly one reading
+   and the definition's timezone stays a property of the definition.
 2. **Catch-up window bound.** Whether `bounded: N` also needs a maximum
    age, or the definition's enablement window bounds it, is an H6b
    decision.

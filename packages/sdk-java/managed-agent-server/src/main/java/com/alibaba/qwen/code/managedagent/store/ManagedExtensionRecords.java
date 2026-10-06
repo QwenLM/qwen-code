@@ -44,6 +44,7 @@ public final class ManagedExtensionRecords {
             "lifecycle.changed", "domain.committed", "message.delta",
             "message.retracted");
     public static final int MAX_ID_BYTES = 512;
+    public static final int MAX_TEXT_BYTES = 4096;
     public static final int MAX_GRANT_PHASES = 16;
     public static final int MAX_PHASE_LENGTH = 64;
     public static final int MAX_MONITOR_EVENTS = 10_000;
@@ -160,6 +161,19 @@ public final class ManagedExtensionRecords {
             "ownerScopeId", "commandRef");
     private static final List<String> RUN_IDENTITIES = List.of("definition",
             "executionCallId", "effectId", "dispatchId", "deliveryId");
+    private static final Set<String> SCHEDULE_KEYS = Set.of("kind",
+            "scheduleId", "ownerScopeId", "goal", "cron", "timezone",
+            "definitionRevision", "definitionDigest", "promptRef",
+            "sessionMode", "targetSessionId", "overlap", "catchUp",
+            "catchUpLimit", "enabled", "run");
+    private static final List<String> SCHEDULE_FIXED = List.of("kind",
+            "scheduleId", "ownerScopeId");
+    private static final Set<String> AUTOMATION_RUN_KEYS = Set.of("kind",
+            "automationRunId", "scheduleId", "definitionRevision",
+            "occurrenceKey", "sessionMode", "targetSessionId", "run");
+    private static final List<String> AUTOMATION_RUN_FIXED = List.of("kind",
+            "automationRunId", "scheduleId", "definitionRevision",
+            "occurrenceKey", "sessionMode", "targetSessionId");
 
     private ManagedExtensionRecords() {
     }
@@ -170,9 +184,24 @@ public final class ManagedExtensionRecords {
                     List.of("start_failed", "process_failed",
                             "quota_exceeded"),
                     "cancelled", List.of("stop_requested"));
+    /** The overlap policies a Schedule picks exactly one of (H6 decision 4). */
+    public static final List<String> SCHEDULE_OVERLAP_POLICIES = List.of(
+            "skip", "queue_one", "allow");
+    /** The catch-up policies; unbounded catch-up has no name here. */
+    public static final List<String> SCHEDULE_CATCH_UP_POLICIES = List.of(
+            "none", "latest", "bounded");
+    /** The two target modes, frozen into each run's intent (H6 decision 6). */
+    public static final List<String> SCHEDULE_SESSION_MODES = List.of(
+            "persistent", "per_run");
 
     private static final Pattern EXIT_SIGNAL = Pattern.compile(
             "[A-Z][A-Z0-9]{0,15}");
+    private static final Pattern CRON_FIELD = Pattern.compile(
+            "[0-9*,/\\-]{1,64}");
+    private static final Pattern TIMEZONE = Pattern.compile(
+            "[A-Za-z][A-Za-z0-9_+\\-]{0,63}(/[A-Za-z0-9_+\\-]{1,64}){0,2}");
+    private static final Pattern SLOT = Pattern.compile(
+            "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z");
 
     /** A record that breaks the contract. */
     public static final class InvalidRecordException
@@ -802,6 +831,222 @@ public final class ManagedExtensionRecords {
     }
 
     /**
+     * A purely logical lifecycle: no execution, delivery or physical
+     * identity — the shape a Schedule definition's run keeps.
+     */
+    private static JsonNode logicalRun(JsonNode run, String label) {
+        requireRun(run);
+        require(run.get("executionCallId").isNull()
+                && run.get("effectId").isNull()
+                && run.get("dispatchId").isNull()
+                && run.get("deliveryId").isNull()
+                && run.get("definition").isNull()
+                && run.get("execution").isNull()
+                && run.get("runtime").isNull()
+                && run.get("delivery").isNull(),
+                label + " run must stay a purely logical lifecycle");
+        return run;
+    }
+
+    private static void requireTargetSession(String sessionMode,
+            JsonNode targetSessionId, String label) {
+        require("persistent".equals(sessionMode) == !targetSessionId.isNull(),
+                label + " targetSessionId is frozen exactly for the "
+                        + "persistent target mode");
+    }
+
+    /**
+     * Checks the body of a managed-schedule schema version 1 record: a
+     * Schedule definition, the append-only revision chain the scanner's
+     * occurrences pin (H6 decision 1).
+     */
+    public static void requireScheduleRecord(JsonNode schedule) {
+        closed(schedule, SCHEDULE_KEYS, "schedule");
+        require("schedule".equals(schedule.get("kind").textValue()),
+                "schedule.kind must be 'schedule' in schema version 1");
+        logicalRun(schedule.get("run"), "schedule");
+        String sessionMode = oneOf(schedule.get("sessionMode"),
+                SCHEDULE_SESSION_MODES, "schedule.sessionMode");
+        JsonNode targetSessionId = schedule.get("targetSessionId");
+        if (!targetSessionId.isNull()) {
+            id(targetSessionId, "schedule.targetSessionId");
+        }
+        requireTargetSession(sessionMode, targetSessionId, "schedule");
+        String catchUp = oneOf(schedule.get("catchUp"),
+                SCHEDULE_CATCH_UP_POLICIES, "schedule.catchUp");
+        JsonNode catchUpLimit = schedule.get("catchUpLimit");
+        require("bounded".equals(catchUp) == !catchUpLimit.isNull(),
+                "schedule.catchUpLimit is set exactly for bounded catch-up");
+        if (!catchUpLimit.isNull()) {
+            count(catchUpLimit, 1, MAX_COUNT, "schedule.catchUpLimit");
+        }
+        id(schedule.get("scheduleId"), "schedule.scheduleId");
+        id(schedule.get("ownerScopeId"), "schedule.ownerScopeId");
+        boundedText(schedule.get("goal"), "schedule.goal");
+        String cron = boundedText(schedule.get("cron"), "schedule.cron");
+        String[] fields = cron.split(" ", -1);
+        require(fields.length == 5
+                && cron.equals(String.join(" ", fields))
+                && List.of(fields).stream().allMatch(field -> CRON_FIELD
+                        .matcher(field).matches()),
+                "schedule.cron must be five fields of minutes, hours, days, "
+                        + "months and weekdays");
+        require(TIMEZONE.matcher(boundedText(schedule.get("timezone"),
+                "schedule.timezone")).matches(),
+                "schedule.timezone must be an IANA timezone name");
+        count(schedule.get("definitionRevision"), 1, MAX_COUNT,
+                "schedule.definitionRevision");
+        digest(schedule.get("definitionDigest"), "schedule.definitionDigest");
+        durableRef(schedule.get("promptRef"), "schedule.promptRef");
+        oneOf(schedule.get("overlap"), SCHEDULE_OVERLAP_POLICIES,
+                "schedule.overlap");
+        require(schedule.get("enabled").isBoolean(),
+                "schedule.enabled must be boolean");
+    }
+
+    /**
+     * Whether {@code schedule} may be the first revision of a Schedule:
+     * its purely logical run opens.
+     */
+    public static boolean isScheduleStart(JsonNode schedule) {
+        return accepts(() -> requireScheduleRecord(schedule))
+                && isRunStart(schedule.get("run"));
+    }
+
+    /**
+     * Whether {@code next} may follow {@code previous} as a later revision
+     * of one Schedule: its identity is fixed, its run moves forward, its
+     * definition revision advances by exactly one with each new record
+     * revision — append-only, as the AgentDefinition contract is — and
+     * once the run is terminal the definition is frozen for good.
+     */
+    public static boolean isScheduleSuccessor(JsonNode previous,
+            JsonNode next) {
+        if (!accepts(() -> requireScheduleRecord(previous))
+                || !accepts(() -> requireScheduleRecord(next))) {
+            return false;
+        }
+        for (String key : SCHEDULE_FIXED) {
+            if (!same(previous.get(key), next.get(key))) {
+                return false;
+            }
+        }
+        if (!isRunSuccessor(previous.get("run"), next.get("run"))
+                || next.get("definitionRevision").asLong()
+                        != previous.get("definitionRevision").asLong() + 1) {
+            return false;
+        }
+        if (TERMINAL.contains(text(previous.get("run"), "state"))) {
+            return same(without(previous, "run"), without(next, "run"));
+        }
+        return true;
+    }
+
+    private static String occurrenceKey(JsonNode key) {
+        String value = boundedText(key, "automationRun.occurrenceKey");
+        int separator = value.indexOf(':');
+        String kind = separator < 0 ? "" : value.substring(0, separator);
+        String valuePart = separator < 0 ? "" : value.substring(separator + 1);
+        if ("schedule".equals(kind)) {
+            require(SLOT.matcher(valuePart).matches()
+                    && isCanonicalInstant(valuePart),
+                    "automationRun.occurrenceKey slot must be a canonical UTC"
+                            + " instant to the second");
+            return value;
+        }
+        if ("manual".equals(kind)) {
+            id(com.fasterxml.jackson.databind.node.TextNode
+                    .valueOf(valuePart),
+                    "automationRun.occurrenceKey commandId");
+            return value;
+        }
+        require(!"webhook".equals(kind),
+                "automationRun webhook occurrences are reserved until their "
+                        + "slice lands");
+        require(false, "automationRun.occurrenceKey must be schedule:<slot>"
+                + " or manual:<commandId>");
+        return value;
+    }
+
+    /**
+     * Checks the body of a managed-automation_run schema version 1 record:
+     * one occurrence, claimed under one durable dispatch (H6 decisions 2
+     * and 6).
+     */
+    public static void requireAutomationRunRecord(JsonNode automation) {
+        closed(automation, AUTOMATION_RUN_KEYS, "automationRun");
+        require("automation_run".equals(automation.get("kind").textValue()),
+                "automationRun.kind must be 'automation_run' in schema "
+                        + "version 1");
+        JsonNode run = automation.get("run");
+        requireRun(run);
+        // One occurrence, claimed under one durable dispatch: the scanner
+        // is no tool call of this Session, the run names its effect only
+        // when the dispatch has one, and it never carries its own
+        // definition pin — the definition it fired with freezes on the body.
+        require(run.get("executionCallId").isNull()
+                && !run.get("dispatchId").isNull()
+                && run.get("definition").isNull(),
+                "automationRun.run must name its dispatch, no call and no "
+                        + "definition");
+        // The delivery of a settled run reconciles on Channel rules, but
+        // the run's model work is never retried for it (decision 7): a
+        // delivery line beyond its plan exists only after the run ended.
+        JsonNode delivery = run.get("delivery");
+        require(delivery.isNull()
+                || "planned".equals(delivery.get("state").textValue())
+                || TERMINAL.contains(text(run, "state")),
+                "automationRun delivery moves past its plan only once the "
+                        + "run ended");
+        String sessionMode = oneOf(automation.get("sessionMode"),
+                SCHEDULE_SESSION_MODES, "automationRun.sessionMode");
+        JsonNode targetSessionId = automation.get("targetSessionId");
+        if (!targetSessionId.isNull()) {
+            id(targetSessionId, "automationRun.targetSessionId");
+        }
+        requireTargetSession(sessionMode, targetSessionId, "automationRun");
+        id(automation.get("automationRunId"), "automationRun.automationRunId");
+        id(automation.get("scheduleId"), "automationRun.scheduleId");
+        count(automation.get("definitionRevision"), 1, MAX_COUNT,
+                "automationRun.definitionRevision");
+        occurrenceKey(automation.get("occurrenceKey"));
+    }
+
+    /** Whether {@code automation} may open an AutomationRun: its run opens. */
+    public static boolean isAutomationRunStart(JsonNode automation) {
+        return accepts(() -> requireAutomationRunRecord(automation))
+                && isRunStart(automation.get("run"));
+    }
+
+    /**
+     * Whether {@code next} may follow {@code previous} as a later revision
+     * of one AutomationRun: the occurrence identity, the pinned definition
+     * revision and the frozen target never change, so only its run moves,
+     * under the shared block's rules.
+     */
+    public static boolean isAutomationRunSuccessor(JsonNode previous,
+            JsonNode next) {
+        if (!accepts(() -> requireAutomationRunRecord(previous))
+                || !accepts(() -> requireAutomationRunRecord(next))) {
+            return false;
+        }
+        for (String key : AUTOMATION_RUN_FIXED) {
+            if (!same(previous.get(key), next.get(key))) {
+                return false;
+            }
+        }
+        return isRunSuccessor(previous.get("run"), next.get("run"));
+    }
+
+    private static boolean isCanonicalInstant(String value) {
+        try {
+            return java.time.Instant.parse(value).toString().equals(value);
+        } catch (java.time.format.DateTimeParseException error) {
+            return false;
+        }
+    }
+
+    /**
      * Equality that compares numbers by value, so a record built in Java,
      * where 4 may be a long, matches the same record parsed from JSON.
      */
@@ -874,6 +1119,27 @@ public final class ManagedExtensionRecords {
                 () -> label + " exceeds " + MAX_ID_BYTES + " UTF-8 bytes");
         require(Normalizer.isNormalized(value, Normalizer.Form.NFC),
                 () -> label + " must use NFC normalization");
+        return value;
+    }
+
+    /**
+     * A bounded free-text field, the same rule boundedString applies in
+     * packages/core: a non-empty string of at most MAX_TEXT_BYTES UTF-8
+     * bytes with no control content (an ANSI escape holds one).
+     */
+    static String boundedText(JsonNode node, String label) {
+        require(node != null && node.isTextual() && !node.textValue()
+                .isEmpty(), label + " must be a non-empty string");
+        String value = node.textValue();
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            require(character > 0x1f
+                    && (character < 0x7f || character > 0x9f),
+                    label + " must not contain control characters");
+        }
+        require(value.getBytes(StandardCharsets.UTF_8).length
+                <= MAX_TEXT_BYTES,
+                label + " exceeds " + MAX_TEXT_BYTES + " UTF-8 bytes");
         return value;
     }
 
