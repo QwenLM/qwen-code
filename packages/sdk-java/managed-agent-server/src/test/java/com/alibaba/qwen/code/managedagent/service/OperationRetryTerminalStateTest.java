@@ -1122,7 +1122,7 @@ class OperationRetryTerminalStateTest {
         return new OperationRecord("tenant", "session", "op-close",
                 OperationKind.CLOSE, "digest", "RUNNING", "JAVA_DURABLE",
                 "LEASED", "ACTIVE", null, "owner", 1, attemptCount, null,
-                budgetExemptAttempt);
+                null, null, null, budgetExemptAttempt);
     }
 
     private static OperationRecord actionOperation(int attemptCount) {

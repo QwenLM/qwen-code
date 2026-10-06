@@ -4,10 +4,13 @@ import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore.CwdChangeOutcome;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Set;
@@ -20,26 +23,44 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * Delivers admitted close and delete operations. An operation admitted on an
- * active Session closes it in the Hosted Harness and waits until no Harness
- * holds the Session's journal writer; every operation then drains the
- * Session's Runtime binding and completes. A failed attempt is retried with
- * the dispatch backoff; once the retry budget is spent the operation reaches
- * a terminal failure that keeps the failure code and leaves the Session in
- * its pending status, rather than retrying forever or certifying a settle
- * that never happened. The budget counts only attempts that could have made
- * progress; two conditions keep waiting instead, and their attempts stay
- * budget-exempt: a live journal writer (the close can still succeed once it
- * stops; past the budget the wait is published as recovery_blocked with the
- * session_close_writer_live code), and a generation error from Java's stale
- * view of a restarted Harness (the close can still succeed once this replica
- * refreshes).
+ * Delivers admitted close, delete and cwd-change operations. An
+ * operation admitted on an active Session closes it in the Hosted
+ * Harness and waits until no Harness holds the Session's journal
+ * writer; a close or delete then drains the Session's Runtime
+ * binding and completes. A failed attempt is retried with the
+ * dispatch backoff; once the retry budget is spent the operation
+ * reaches a terminal failure that keeps the failure code and leaves
+ * the Session in its pending status, rather than retrying forever
+ * or certifying a settle that never happened. The budget counts
+ * only attempts that could have made progress; two conditions keep
+ * waiting instead, and their attempts stay budget-exempt: a live
+ * journal writer (the close can still succeed once it stops; past
+ * the budget the wait is published as recovery_blocked with the
+ * session_close_writer_live code), and a generation error from
+ * Java's stale view of a restarted Harness (the close can still
+ * succeed once this replica refreshes). A cwd change is settled
+ * without Harness or worker involvement — a read-only mount probe
+ * and one revision-CAS commit. A structural probe refusal or a
+ * moved fact is a terminal failure that is never retried; a
+ * momentary probe failure retries through the same dispatch
+ * backoff, bounded at {@link #CWD_CHANGE_ATTEMPT_BUDGET} attempts —
+ * a fault that outlives the budget settles with the typed terminal
+ * failure instead of wedging the Session behind the admission
+ * barriers forever, and a refusal that exhausts it leaves the
+ * Session unchanged and executable.
  */
 @Component
 public class SessionLifecycleCoordinator {
     private static final Logger LOG = LoggerFactory.getLogger(
             SessionLifecycleCoordinator.class);
     private static final int SCAN_LIMIT = 50;
+    // A transient cwd-probe refusal re-arms through the capped dispatch
+    // backoff, but only this many times: a fault lasting past the budget
+    // (a retired NFS/FUSE export, a re-pointed mount) is permanent for the
+    // caller, and only database surgery could free a Session the scan kept
+    // re-arming. Greater than one by contract — the first retry's success
+    // is the documented transient case.
+    private static final int CWD_CHANGE_ATTEMPT_BUDGET = 8;
     private final AgentStateStore store;
     private final ManagedSessionStore sessionStore;
     private final HarnessConnector harness;
@@ -129,6 +150,10 @@ public class SessionLifecycleCoordinator {
         }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
         Boolean harnessConfirmed = null;
         try {
+            if (claimed.kind() == OperationKind.CWD_CHANGE) {
+                settleCwdChange(claimed);
+                return;
+            }
             harnessConfirmed = settle(claimed);
             if (!valid.get()) {
                 return;
@@ -167,7 +192,13 @@ public class SessionLifecycleCoordinator {
             // and a generation error from Java's stale view of a restarted
             // Harness (the close can still succeed once this replica
             // refreshes). Both reschedule through the budget-exempt baseline.
-            boolean writerLive = writerStillLive(claimed);
+            // A cwd change never reaches settle(): the close-specific
+            // waits (live writer, stale boot) and the terminal budget arm
+            // are not its semantics — its rethrown probe refusal takes the
+            // plain reschedule below, bounded by CWD_CHANGE_ATTEMPT_BUDGET
+            // inside settleCwdChange.
+            boolean cwdChange = claimed.kind() == OperationKind.CWD_CHANGE;
+            boolean writerLive = !cwdChange && writerStillLive(claimed);
             boolean staleBoot =
                     cause instanceof HostedHarnessGenerationException;
             // The budget bounds every settle outcome that could have made
@@ -177,7 +208,7 @@ public class SessionLifecycleCoordinator {
             // the settle did happen then, and a terminal
             // session_lifecycle_delivery_failed would certify the opposite;
             // the completion write is simply retried (settle is idempotent).
-            if (harnessConfirmed == null
+            if (!cwdChange && harnessConfirmed == null
                     && claimed.attemptCount() - claimed.budgetExemptAttempt()
                             >= maxOperationRetries
                     && valid.get() && !writerLive && !staleBoot) {
@@ -279,7 +310,8 @@ public class SessionLifecycleCoordinator {
                             + " failure={} {}",
                     tenantId, sessionId, operationId,
                     claimed.attemptCount() + 1, delay,
-                    error.getClass().getSimpleName(), error.getMessage());
+                    error.getClass().getSimpleName(), error.getMessage(),
+                    error);
         } finally {
             renewal.cancel(false);
         }
@@ -314,6 +346,75 @@ public class SessionLifecycleCoordinator {
         return operation.kind() == OperationKind.DELETE
                 && ("CLOSED".equals(operation.sessionStatusBefore())
                         || "ARCHIVED".equals(operation.sessionStatusBefore()));
+    }
+
+    // A cwd change settles without Harness or worker involvement: the probe
+    // is read-only, and the commit transaction re-checks every fact it
+    // depends on, so a reclaim can rerun this branch idempotently.
+    private void settleCwdChange(OperationRecord operation) {
+        String tenantId = operation.tenantId();
+        String sessionId = operation.sessionId();
+        String operationId = operation.operationId();
+        var session = store.requireSession(tenantId, sessionId);
+        try {
+            if (session.workspace() == null) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            runtimeWarmer.verifyWorkspaceCwdTarget(session.workspace(),
+                    operation.targetCwdRelative());
+        } catch (RuntimeBrokerException error) {
+            // A transient probe failure is not the verdict the terminal
+            // refusal promises: hand it to the delivery machine's retry
+            // (capped in delay, bounded in count) instead of writing a
+            // permanent failure — until the budget runs out, at which point
+            // the typed terminal failure is exactly its verdict.
+            if (error.isRetryable()) {
+                if (operation.attemptCount() + 1
+                        >= CWD_CHANGE_ATTEMPT_BUDGET) {
+                    if (store.failCwdChangeOperation(tenantId, sessionId,
+                            operationId, owner, operation.claimGeneration(),
+                            error.getCode())) {
+                        LOG.info("Managed Session cwd change failed after"
+                                        + " the probe budget tenant={}"
+                                        + " session={} operation={} code={}",
+                                tenantId, sessionId, operationId,
+                                error.getCode(), error);
+                    }
+                    return;
+                }
+                LOG.info("Managed Session cwd change probe deferred"
+                                + " tenant={} session={} operation={}"
+                                + " code={} {}", tenantId, sessionId,
+                        operationId, error.getCode(),
+                        error.getMessage(), error);
+                throw error;
+            }
+            if (store.failCwdChangeOperation(tenantId, sessionId, operationId,
+                    owner, operation.claimGeneration(), error.getCode())) {
+                LOG.info("Managed Session cwd change refused tenant={}"
+                                + " session={} operation={} code={}"
+                                + " failure={} {}", tenantId, sessionId,
+                        operationId, error.getCode(),
+                        error.getClass().getSimpleName(), error.getMessage());
+            } else {
+                LOG.warn("Managed Session cwd change refusal lost its lease"
+                                + " tenant={} session={} operation={} code={}",
+                        tenantId, sessionId, operationId, error.getCode());
+            }
+            return;
+        }
+        CwdChangeOutcome outcome = store.completeCwdChangeOperation(
+                tenantId, sessionId, operationId, owner,
+                operation.claimGeneration());
+        if (outcome == null) {
+            LOG.warn("Managed Session operation was claimed by another"
+                            + " worker tenant={} session={} operation={}",
+                    tenantId, sessionId, operationId);
+        } else if (!outcome.completed()) {
+            LOG.info("Managed Session cwd change failed tenant={}"
+                            + " session={} operation={} failure={}",
+                    tenantId, sessionId, operationId, outcome.failureCode());
+        }
     }
 
     // Returns whether the Harness that held the Session acknowledged closing
