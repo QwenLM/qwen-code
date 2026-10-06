@@ -1088,7 +1088,10 @@ function sweepStaleRuntimeLedgers(
           // the readdir and the judgement; the next tick judges it.
           return 'unproven';
         }
-        if (!needsLiveness) return sawRetired ? 'terminal' : 'proven';
+        // A retirement never reaches this line: the retired ledger was
+        // renamed away, so its armed path always fails existsSync above
+        // and the end answers through the liveness check below.
+        if (!needsLiveness) return 'proven';
         const alive = lastNamed.filter(
           (pgid) => processGroupLiveness(pgid) !== 'gone',
         );
