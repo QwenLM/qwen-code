@@ -432,7 +432,7 @@ export async function recoverHostedRuntimeTurn(input: {
         `Checkpoint read was blocked (${authorization.reason})`,
     );
   }
-  const checkpoint = authorization.checkpoint;
+  let checkpoint = authorization.checkpoint;
   if (checkpoint.identity.turnId !== promptId) {
     if (passive)
       throw new Error(
@@ -444,15 +444,55 @@ export async function recoverHostedRuntimeTurn(input: {
     checkpoint.continuation.phase !== 'await_runtime' &&
     checkpoint.continuation.phase !== 'results_ready'
   ) {
-    // A requested approval is a wait the USER owns, not a verdict: even a
-    // drive takeover must not end the Turn — the answer is still
-    // deliverable through the plain attach, so answer inapplicable on
-    // both shapes and let the approval timeout bound the wait.
+    // The stale checkpoint copy is not the authority on an approval
+    // wait: when the owner died, the durable action record is. A still
+    // requested record is a wait the USER owns — never a verdict — so
+    // answer inapplicable and let the resolution write durably (D3).
+    // Anything else means the wait ended already: with no takeover
+    // signal the dead wait may only converge transiently (the route's
+    // refusal), for CANCELLING its settle was written before this call —
+    // and a drive takeover for a DECIDED wait resolves it through the
+    // wait's own gate so the continuation below runs on facts, not on
+    // the copy the dead owner left behind (P1-2).
     if (
       checkpoint.approval !== null &&
       checkpoint.approval.state === 'requested'
-    )
-      return inapplicable();
+    ) {
+      const actionState = session.authority.action(
+        checkpoint.approval.requestId,
+      )?.state;
+      if (actionState === undefined || actionState === 'requested')
+        return inapplicable();
+      // The wait the USER owns ended: a decided wait advances through
+      // its own gate when the boundary exists (the continuation below
+      // runs on the fresh check); an undecided one is transient (its
+      // terminal honest answer is the route's refusal, not my mint).
+      if (actionState === 'decided') {
+        // A drive takeover advances the wait through its own gate (it's
+        // the only rider who may add a checkpoint here: a cancellation
+        // never crosses it — an earlier version leaked one passively and
+        // the journal's verify path had to eat a foreign wait).
+        if (!passive) {
+          const resolved = await createManagedHarnessHandle(session)
+            .resolveDurableWait()
+            .catch(() => null);
+          if (resolved === null)
+            throw new Error(
+              'Parked approval decided but its durable wait could not be advanced',
+            );
+          const after = await session.authority.harnessRunAuthorization();
+          if (after.status !== 'runnable')
+            throw new Error(
+              'Parked approval resolved to an unrunnable continuation',
+            );
+          checkpoint = after.checkpoint;
+        }
+      } else {
+        throw new Error(
+          `Parked approval ended without a decision (${actionState})`,
+        );
+      }
+    }
     // Settled in the checkpoint while the journal never landed the settle:
     // it completed and must never be recorded as a failure — answering
     // inapplicable hands the load route the one case it DOES project

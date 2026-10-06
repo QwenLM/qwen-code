@@ -682,6 +682,148 @@ describe('recoverHostedRuntimeTurn', () => {
     },
   );
 
+  it.each([undefined, 'requested'])(
+    'answers inapplicable only while the durable action record charts requested (state=%s)',
+    async (durableState) => {
+      // The approval branch reads the DURABLE action record, not the
+      // stale checkpoint copy (P1-2): while the record stays requested,
+      // the wait the user owns is unanswered.
+      await parkAtAwaitRuntime();
+      const replacement = await open('boot-2', false);
+      vi.spyOn(
+        replacement.authority,
+        'harnessRunAuthorization',
+      ).mockResolvedValue({
+        status: 'runnable',
+        checkpoint: {
+          identity: {
+            turnId: PROMPT_ID,
+            promptId: PROMPT_ID,
+            checkpointId: 'checkpoint-await-action',
+          },
+          attempt: {},
+          continuation: { phase: 'await_action' },
+          approval: { state: 'requested', requestId: 'request-1' },
+          output: {},
+          followUp: {},
+          runtime: {},
+          tools: { items: [] },
+        },
+      } as never);
+      vi.spyOn(replacement.authority, 'action').mockReturnValue(
+        (durableState === undefined
+          ? undefined
+          : { state: durableState }) as never,
+      );
+      try {
+        const outcome = await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        });
+        expect(outcome.kind).toBe('inapplicable');
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
+
+  it.each(['expired', 'cancelled'])(
+    'throws for a durable wait that ended without a decision (state=%s)',
+    async (durableState) => {
+      await parkAtAwaitRuntime();
+      const replacement = await open('boot-2', false);
+      vi.spyOn(
+        replacement.authority,
+        'harnessRunAuthorization',
+      ).mockResolvedValue({
+        status: 'runnable',
+        checkpoint: {
+          identity: {
+            turnId: PROMPT_ID,
+            promptId: PROMPT_ID,
+            checkpointId: 'checkpoint-await-action',
+          },
+          attempt: {},
+          continuation: { phase: 'await_action' },
+          approval: { state: 'requested', requestId: 'request-1' },
+          output: {},
+          followUp: {},
+          runtime: {},
+          tools: { items: [] },
+        },
+      } as never);
+      vi.spyOn(replacement.authority, 'action').mockReturnValue({
+        state: durableState,
+      } as never);
+      try {
+        await expect(
+          recoverHostedRuntimeTurn({
+            session: replacement,
+            sessionId: SESSION_ID,
+            cwd: root,
+            promptId: PROMPT_ID,
+            brokerOptions,
+            passive: true,
+          }),
+        ).rejects.toThrow('ended without a decision');
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
+
+  it('declines a decided wait whose checkpoint the drive cannot resume', async () => {
+    // With the durable action decided, the approval wait is over — the
+    // drive load winds past inapplicable into the continuation whose own
+    // checkpoint cannot drive (P1-2); its honest answer is the typed
+    // checkpoint_blocked decline, never a lie-attach.
+    await parkAtAwaitRuntime();
+    const replacement = await open('boot-2', false);
+    vi.spyOn(
+      replacement.authority,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'runnable',
+      checkpoint: {
+        identity: {
+          turnId: PROMPT_ID,
+          promptId: PROMPT_ID,
+          checkpointId: 'checkpoint-await-action',
+        },
+        attempt: {},
+        continuation: { phase: 'await_action' },
+        approval: { state: 'requested', requestId: 'request-1' },
+        output: {},
+        followUp: {},
+        runtime: {},
+        tools: { items: [] },
+      },
+    } as never);
+    vi.spyOn(replacement.authority, 'action').mockReturnValue({
+      state: 'decided',
+    } as never);
+    try {
+      const outcome = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: false,
+      });
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'checkpoint_blocked',
+      });
+    } finally {
+      await replacement.close();
+    }
+  });
+
   it('stays retriable for a model-round wait on a cancellation load', async () => {
     // R11 narrowing: a plain attach on this shape stands a Session no
     // settlement route can pay — no live waiter, no projection. The

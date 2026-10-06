@@ -237,11 +237,22 @@ boot 条目、再在活 boot 下放入携快照的 attachment，而下一次派�
 只有**显式的取消**才有资格写它。`LoadHarnessSession` 因此增加布尔
 `cancellationTakeover`（只由 `recoverManagedRuntime` 的取消臂设
 置；普通 passive 重附着共享 passive 线型却绝不能代它铸任何记录）。
-带旗信号时，接管分支的无工具臂自己把停靠写进 journal
-（`turn_result`/`cancelled`，该记录随即带来 `turn.settled` 事件）；
-不带时，该臂保持基线：取消侧可重试 409、drive 侧类型化 `model_start`
-decline。这次写入之所以安全，正是同一次 load 自带的 writer fence：
-它证明生产代再也写不了一字（Arm B 2026-10-06）。
+带旗信号时，load 自己把停靠写进 journal——经过一道把**工具配置**
+与 **Turn 未付的 Runtime 工作**分开判读的分离面（无 checkpoint、
+bootstrap checkpoint 指名为空、工具项全部结算并被消费、或 durable
+审批记录已经结束的——无论用户选了哪一边的结束态，只有带旗信号才
+结算）。不带旗信号时该臂保持基线：取消侧可重试 409、drive 侧类型化
+`model_start` decline；有未付 Runtime 工作时，内核报告的
+recovery-cancel 才是忠实的结算。这次写入之所以安全，正是同一次
+load 自带的 writer fence：它证明生产代再也写不了一字（P1-1）。
+
+审批的陈旧 checkpoint 副本在现实中更不是权威：恢复内核越过
+`authority.action(requestId)` 读取 durable 记录。记录仍 requested
+时，takeover 继续 inapplicable plain attach（resolve 路由付得起这次
+等待）；记录已结束时，内核绝不把这份结束态塞回可恢复的
+continuation——expired/cancelled 保持瞬态（路由的可重试 409），
+而 decided 的等待只在 **drive** load 下经 durability-wait 自身的
+闸门推进，取消侧 load 绝不越过它（P1-2）。
 
 抛出的错误保持瞬时，与今天完全一致。load 路由对 decline 回答新的
 409 code `hosted_turn_recovery_declined` 并带 `reason` 字段；在接管

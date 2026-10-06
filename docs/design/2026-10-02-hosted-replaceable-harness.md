@@ -278,12 +278,26 @@ an EXPLICIT cancellation may write it. `LoadHarnessSession` therefore
 carries the boolean `cancellationTakeover` (set ONLY by
 `recoverManagedRuntime`'s cancellation arm; a plain passive re-attach
 shares the passive wire shape and must never mint anything). With the
-signal present, the no-tool arm of the takeover branch settles the park
-into the journal itself (`turn_result`/`cancelled`, which lands the
-`turn.settled` event); without it, the branch keeps the baseline retriable
-refusal for cancels and the typed `model_start` decline for drives. The
-writer fence on the very load is what makes the settle safe: it proves
-the producing generation can never write again (Arm B 2026-10-06).
+signal present, the load settles the park into the journal itself, through
+a separation that splits tool CONFIGURATION from the Turn's unpaid
+Runtime work (checkpointless, a bootstrap checkpoint naming no Turn,
+every tool item settled and consumed, or an approval whose durable
+record already ended — an ended approval settleable only with the
+signal, regardless of the user's side). Without the signal the branch
+keeps the baseline retriable refusal for cancels and the typed
+`model_start` decline for drives; with work unpaid the recovery-cancel
+of the kernel's report stays the faithful settlement. The writer fence
+on the very load proves the producing generation can never write again
+(P1-1).
+
+The stale checkpoint copy of an approval is not the authority posthumously
+either: the recovery kernel cross-reads `authority.action(requestId)`.
+While the record stays requested the takeover keeps its inapplicable
+plain attach (the resolve route pays that wait); when the record says
+the wait ended, the kernel never slips it back into a resumable
+continuation — expired or cancelled stays transient (the route refusal),
+while a decided wait is advanced through its own durable gate ONLY on a
+drive load — a cancellation-only load never crosses it (P1-2).
 
 Thrown errors stay transient, exactly as today. The load route answers
 declines with new 409 code `hosted_turn_recovery_declined` plus a `reason`

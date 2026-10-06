@@ -560,6 +560,47 @@ async function settleCancelledHarnessTurn(
   );
 }
 
+// True when a cancellation takeover may settle this park without ever
+// consulting the kernel — the ownerless Turn carries NO unsettled Runtime
+// work it could still owe: no checkpoint yet, a bootstrap checkpoint that
+// still names no Turn, every tool item settled and consumed, or an
+// approval whose durable record already says the wait ended (P1-1/2).
+// A Turn with executions in flight answers false: its faithful cancel
+// settlement is the recovery-cancel of the kernel's report, not here.
+async function parkNeedsNoRuntimeSettlement(
+  session: HostedSession,
+  managed: ManagedSession,
+  promptId: string,
+): Promise<boolean> {
+  const authorization = await managed.authority.harnessRunAuthorization();
+  if (authorization.status === 'initial') return true;
+  if (authorization.status !== 'runnable') return false;
+  const checkpoint = authorization.checkpoint;
+  if (
+    checkpoint.identity.turnId !== promptId &&
+    checkpoint.identity.turnId !== null
+  )
+    return false;
+  if (
+    !(checkpoint.tools?.items ?? []).every(
+      (item) => item.state === 'settled' && item.consumed,
+    )
+  )
+    return false;
+  if (checkpoint.approval !== null) {
+    // The stale checkpoint copy says requested; the record decides. A
+    // live wait stays out of the separation (the resolve route keeps
+    // paying it); any resolved wait only has a cancelled-wait answer on a
+    // CANCELLING takeover, decisions included.
+    const actionState = session.managed.authority.action(
+      checkpoint.approval.requestId,
+    )?.state;
+    if (actionState === undefined || actionState === 'requested') return false;
+    return true;
+  }
+  return true;
+}
+
 export async function settleCancelledHookTurn(
   session: HostedSession,
 ): Promise<void> {
@@ -2313,40 +2354,45 @@ export function registerHostedHarnessSessionRoutes(
         // baseline retriable refusal, and the cancel path re-issues when
         // the tools to settle exist. Attaching one here would stand up a
         // Session whose parked Turn no route may resolve (R5-2' round).
+        // The cancellation separation (P1-1) splits "the Session is
+        // configured for tools" from "the Turn owes unsettled Runtime
+        // work": wherever NO unpaid Runtime work exists — checkpointless,
+        // bootstrap, fully consumed, or an approval whose record says the
+        // wait ended — the cancelled terminal can only be this journal,
+        // so this load writes it itself; wherever Runtime work is in
+        // flight, the recovery-cancel below is its faithful settlement,
+        // and both must not be claimed by the same park.
+        let cancellationSettled = false;
+        if (
+          body?.['cancellationTakeover'] === true &&
+          (await parkNeedsNoRuntimeSettlement(session, managed, unsettled))
+        ) {
+          try {
+            await settleCancelledHarnessTurn(
+              managed,
+              session,
+              sessionId,
+              unsettled,
+            );
+            writeStderrLineSafe(
+              `qwen serve: Hosted Session ${sessionId} settles the cancelled park on load: prompt=${unsettled}`,
+            );
+            // The journal owes nothing more: the cancelled record is
+            // the plain attach's whole answer, replayed home from the
+            // kept watermark.
+            inapplicableAnswer = true;
+            cancellationSettled = true;
+          } catch (cause) {
+            writeStderrLineSafe(
+              `qwen serve: Hosted Session ${sessionId} load refused (takeover_unavailable): profile=${toolProfile ?? 'none'} broker=${brokerOptions ? 'ready' : 'none'} settle=${String(cause)}`,
+            );
+            await managed.close();
+            error(res, 409, 'hosted_turn_recovery_required');
+            return;
+          }
+        }
         if (toolProfile === undefined || !brokerOptions) {
-          // An explicit cancellation taking over is the one caller that
-          // CAN be paid here: the cancelled terminal of the provably
-          // ownerless park lives nowhere else, so this load writes it
-          // itself (the writer fence on this very load proves the
-          // producing generation is dead), then continues as the plain
-          // attach the replay answers with. Without that signal the arm
-          // keeps its baseline answers — re-issue on cancel, model_start
-          // on drive — because nothing may mint a canned CANCELLED record
-          // for a wait whose owner could still exist (Arm B, R-round 6).
-          if (body?.['cancellationTakeover'] === true) {
-            try {
-              await settleCancelledHarnessTurn(
-                managed,
-                session,
-                sessionId,
-                unsettled,
-              );
-              writeStderrLineSafe(
-                `qwen serve: Hosted Session ${sessionId} settles the cancelled park on load: prompt=${unsettled}`,
-              );
-              // The journal owes nothing more: the cancelled record is
-              // the plain attach's whole answer, replayed home from the
-              // kept watermark.
-              inapplicableAnswer = true;
-            } catch (cause) {
-              writeStderrLineSafe(
-                `qwen serve: Hosted Session ${sessionId} load refused (takeover_unavailable): profile=${toolProfile ?? 'none'} broker=${brokerOptions ? 'ready' : 'none'} settle=${String(cause)}`,
-              );
-              await managed.close();
-              error(res, 409, 'hosted_turn_recovery_required');
-              return;
-            }
-          } else {
+          if (!cancellationSettled) {
             writeStderrLineSafe(
               `qwen serve: Hosted Session ${sessionId} load refused (takeover_unavailable): profile=${toolProfile ?? 'none'} broker=${brokerOptions ? 'ready' : 'none'}`,
             );
@@ -2356,7 +2402,7 @@ export function registerHostedHarnessSessionRoutes(
             else recoveryDeclined(res, 'model_start');
             return;
           }
-        } else {
+        } else if (!cancellationSettled) {
           try {
             const outcome = await recoverHostedRuntimeTurn({
               session: managed,
