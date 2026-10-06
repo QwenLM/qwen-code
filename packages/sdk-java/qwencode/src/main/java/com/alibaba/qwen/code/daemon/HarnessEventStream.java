@@ -62,8 +62,13 @@ public final class HarnessEventStream implements AutoCloseable {
             }
             // The idle budget measures peer silence while a consumer is
             // parked here; time between next() calls is not charged.
-            consumerWaiting.set(true);
+            // Stamp before publishing the waiting flag: the watchdog reads
+            // the flag first, so a tick landing between the two writes
+            // then either skips (flag not yet set) or sees this fresh
+            // stamp — never one stale by the whole pause since the
+            // previous next().
             lastActivity.set(System.nanoTime());
+            consumerWaiting.set(true);
             try {
                 SseReader.Frame frame = reader.next();
                 if (frame == null) {

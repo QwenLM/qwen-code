@@ -6183,6 +6183,22 @@ describe('Hosted Harness no-tool session', () => {
       clearSpy.mockRestore();
       abort.abort();
       listener.closeAllConnections();
+      // Settle the turn this test started before tearing down: while
+      // session.active is set the DELETE below answers 409
+      // hosted_turn_active and cannot close the session, so a late
+      // resource write from the still-draining turn would race
+      // afterEach's recursive rm of the scratch tree. The poll runs only
+      // after end() is restored — while the spy swallows it, a status
+      // response could never complete.
+      const settleDeadline = Date.now() + 10_000;
+      for (;;) {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        if (status.body.hasActivePrompt === false) break;
+        if (Date.now() > settleDeadline) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
       await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
         'X-Qwen-Client-Id',
         clientId,

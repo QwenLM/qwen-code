@@ -253,6 +253,10 @@ public final class HostedHarnessClient implements AutoCloseable {
                     "Hosted Harness session already has a running turn");
         }
         boolean ownsActivePrompt = existing == null;
+        // Every settle flip below must write the entry the map holds: on a
+        // same-identity retry that is the earlier registration, not this
+        // call's candidate.
+        ActivePrompt registered = ownsActivePrompt ? candidate : existing;
         HttpResponse<HttpSupport.Body> raw;
         try {
             raw = send(sessionPath(session.getHarnessSessionId()) + "/prompt",
@@ -263,17 +267,24 @@ public final class HostedHarnessClient implements AutoCloseable {
             // a same-identity retry keeps the original entry instead.
             if (ownsActivePrompt) {
                 activePrompts.remove(session.getHarnessSessionId(),
-                        candidate);
+                        registered);
             }
             throw e;
         } catch (IOException | InterruptedException e) {
-            candidate.admissionSettled = true;
+            registered.admissionSettled = true;
             restoreInterrupt(e);
             throw new PromptAdmissionUnknownException(e);
+        } catch (RuntimeException | Error e) {
+            // An unchecked escape (for example an OutOfMemoryError while
+            // encoding the body) can never be matched by a terminal event,
+            // so the registered marker settles here: a later status read
+            // is the only recovery path that can clear it.
+            registered.admissionSettled = true;
+            throw e;
         }
         // The send attempt concluded, so a status answer received from here
         // on no longer predates this submission's admission window.
-        candidate.admissionSettled = true;
+        registered.admissionSettled = true;
         try {
             validateGeneration(raw.headers(), raw.statusCode());
         } catch (DaemonProtocolException e) {
@@ -627,22 +638,28 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     public void detachSession(HarnessSessionRef session) {
         HarnessSessionRef ref = requireSessionRef(session);
-        HttpSupport.Response response = sendMutation(
-                sessionPath(ref.getHarnessSessionId()) + "/detach",
-                Collections.emptyMap(), ref.getHarnessClientId(),
-                "POST /session/:id/detach");
-        // sendMutation has already classified every ambiguous status, so
-        // anything here is definitive; on an outcome-unknown surface the
-        // local attachment must survive, or the lease it keeps alive can
-        // be reclaimed while the server is still deciding the turn.
+        // sendMutation sits inside the try so the definitive arm below
+        // also intercepts the DaemonHttpException sendMutation itself
+        // raises for an unfenced definitive answer, matching the private
+        // closeSession. Everything sendMutation lets through is
+        // definitive; on an outcome-unknown surface the attachment stays:
+        // it is the client's only liveness probe for this ref and its
+        // record that the ref is still attached, while the server may
+        // still be deciding the mutation.
         try {
+            HttpSupport.Response response = sendMutation(
+                    sessionPath(ref.getHarnessSessionId()) + "/detach",
+                    Collections.emptyMap(), ref.getHarnessClientId(),
+                    "POST /session/:id/detach");
             if (response.getStatusCode() != 404) {
                 requireMutationStatus(response, 204,
                         "POST /session/:id/detach");
             }
             removeAttachment(ref);
-        } catch (DaemonHttpException e) {
-            // A definitive refusal retires the attachment as well.
+        } catch (DaemonHttpException | HostedHarnessGenerationException e) {
+            // A definitive refusal retires the attachment; a proven
+            // generation change means every local record for that peer is
+            // dead. An outcome-unknown surface keeps it.
             removeAttachment(ref);
             throw e;
         }
@@ -681,11 +698,17 @@ public final class HostedHarnessClient implements AutoCloseable {
             closeSession(ref.getHarnessSessionId(), ref.getHarnessClientId());
             removeAttachment(ref);
             activePrompts.remove(ref.getHarnessSessionId());
-        } catch (DaemonHttpException e) {
+        } catch (DaemonHttpException | HostedHarnessGenerationException e) {
             // A definitive refusal still retires the local state; an
-            // outcome-unknown surface keeps it, same rule as detach.
+            // outcome-unknown surface keeps it, same rule as detach. The
+            // ledger is the one exception: a refusal proving the turn is
+            // still live (hosted_turn_active) must keep the admission
+            // record, or the local one-turn veto fails open against a
+            // running turn.
             removeAttachment(ref);
-            activePrompts.remove(ref.getHarnessSessionId());
+            if (!provesLiveTurn(e)) {
+                activePrompts.remove(ref.getHarnessSessionId());
+            }
             throw e;
         }
     }
@@ -697,18 +720,25 @@ public final class HostedHarnessClient implements AutoCloseable {
         try {
             closeSession(sessionId, null);
             discardLocalSessionState(sessionId);
-        } catch (DaemonHttpException e) {
-            discardLocalSessionState(sessionId);
+        } catch (DaemonHttpException | HostedHarnessGenerationException e) {
+            discardLocalSessionState(sessionId, provesLiveTurn(e));
             throw e;
         }
     }
 
     private void discardLocalSessionState(String sessionId) {
+        discardLocalSessionState(sessionId, false);
+    }
+
+    private void discardLocalSessionState(String sessionId,
+            boolean keepLedger) {
         AttachmentState state = attachments.remove(sessionId);
         if (state != null) {
             state.cancel();
         }
-        activePrompts.remove(sessionId);
+        if (!keepLedger) {
+            activePrompts.remove(sessionId);
+        }
     }
 
     private void closeSession(String sessionId, String clientId) {
@@ -1120,6 +1150,14 @@ public final class HostedHarnessClient implements AutoCloseable {
         return code != null && REFUSAL_CODE_PATTERN.matcher(code).matches()
                 ? code
                 : null;
+    }
+
+    // A refusal whose code proves the session's turn is still running
+    // server-side: the admission ledger must then survive a failed close.
+    private static boolean provesLiveTurn(DaemonException e) {
+        return e instanceof DaemonHttpException
+                && "hosted_turn_active".equals(refusalCode(
+                        ((DaemonHttpException) e).getResponseBody()));
     }
 
     // A load that fails with a refusal code on the wire is fail-closed, not
