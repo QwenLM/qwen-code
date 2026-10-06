@@ -156,14 +156,20 @@ describe('Hosted real-process gates', () => {
     expect(run.run).toContain('clean verify checkstyle:check');
     expect(run.run).not.toContain('skip');
     // 20 min: the measurement basis lives in the hosted-harness-mysql job
-    // comment (issue #13471). Pin the job's whole ceiling enumeration so a
-    // bump to any of the other five cannot leave that comment's sum stale.
+    // comment (issue #13471). A bump to any of the six ceilings fails here
+    // and prompts updating that comment's sum, which nothing cross-checks
+    // against this array.
     expect(run['timeout-minutes']).toBe(20);
-    expect(
-      job.steps
-        .map((step) => step['timeout-minutes'])
-        .filter((minutes) => minutes !== undefined),
-    ).toEqual([20, 10, 10, 10, 10, 12]);
+    const ceilings = job.steps
+      .map((step) => step['timeout-minutes'])
+      .filter((minutes) => minutes !== undefined);
+    expect(ceilings).toEqual([20, 10, 10, 10, 10, 12]);
+    // The comment's "the job cap binds first" rests on two operands; pin the
+    // cap too, and the sum's direction against it.
+    expect(job['timeout-minutes']).toBe(60);
+    expect(ceilings.reduce((a, b) => a + b, 0)).toBeGreaterThan(
+      job['timeout-minutes'],
+    );
     expect(run['continue-on-error']).toBeUndefined();
     const pom = read('packages/sdk-java/managed-agent-server/pom.xml').replace(
       /<!--[\s\S]*?-->/g,
@@ -186,7 +192,12 @@ describe('Hosted real-process gates', () => {
     // The step ceiling must outlive the profile's own fork timeout, or
     // GitHub cancels the step before failsafe kills a hung fork and writes
     // its diagnostic (issue #13471): the old 12-minute ceiling sat below the
-    // 900 s fork timeout, leaving it dead config.
+    // 900 s fork timeout, leaving it dead config. This guard covers the
+    // hosted profile only; the job's two other timed Maven steps violate the
+    // same invariant on pre-existing values -- fault-gates (600 s ceiling
+    // against a 600 s surefire fork timeout) and o4-mysql-gates (720 s
+    // against a 600 s failsafe fork timeout after a ~210 s pre-fork phase)
+    // -- and re-timing them is deferred to a follow-up.
     const forkSeconds = Number(
       hosted
         .split('</profile>')[0]
