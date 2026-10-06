@@ -5,6 +5,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -229,13 +230,18 @@ export async function syncTeamMemory(
         if (mode === '000000') {
           record(filePath, null);
         } else if ((mode === '100644' || mode === '100755') && blob) {
+          const leaf = await fs.lstat(filePath).catch(() => undefined);
+          if (!leaf?.isFile()) {
+            record(filePath, undefined);
+            continue;
+          }
           const content = await tryGit(
             gitRoot,
             ['cat-file', '--filters', `--path=${entries[i + 1]!}`, blob],
             'SIGKILL',
             Infinity,
           );
-          if (content !== null) record(filePath, content);
+          record(filePath, content ?? undefined);
         }
       }
       return pulled;

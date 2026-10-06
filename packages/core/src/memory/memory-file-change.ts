@@ -65,7 +65,8 @@ interface MemoryChangedRegistration {
 
 const listeners = new Set<MemoryChangedRegistration>();
 interface ReportedMemoryContent {
-  content: string | null;
+  // null is a reported deletion; undefined is an import we cannot compare.
+  content: string | null | undefined;
   sequence: number;
 }
 
@@ -270,7 +271,7 @@ let teamMemorySyncSequence = 0;
 export async function withTeamMemorySync<T>(
   projectRoot: string,
   sync: (
-    record: (filePath: string, content: string | null) => void,
+    record: (filePath: string, content: string | null | undefined) => void,
   ) => Promise<T>,
 ): Promise<T> {
   let finish!: () => void;
@@ -490,6 +491,14 @@ export async function notifyMemoryFileChange(
     const invisible = new Set<string>();
     for (const change of changes) {
       for (const candidate of change.paths) {
+        const imported = window?.outside.get(candidate);
+        if (imported && imported.content === undefined) {
+          // Unknown imported bytes cannot support a closing diff. Deliver the
+          // explicit write and prevent an older sync from replacing its marker.
+          imported.sequence = ++reportSequence;
+          invisible.add(candidate);
+          continue;
+        }
         if (!(await isTreeVisible(rootForScope(change.scope), candidate))) {
           invisible.add(candidate);
         }
@@ -821,11 +830,13 @@ async function runMemoryChangeWindow<T>(
             : before.documents.get(filePath)?.content;
         // A report newer than the read owns the change; comparing it with
         // stale snapshot bytes would invert a create into a delete or vice versa.
-        const reportedAfterRead = (filePath: string) =>
+        const cannotCompare = (filePath: string) =>
+          (outside.has(filePath) &&
+            outside.get(filePath)!.content === undefined) ||
           (outside.get(filePath)?.sequence ?? 0) >
-          (after.documents.get(filePath)?.sequence ?? after.sequence);
+            (after.documents.get(filePath)?.sequence ?? after.sequence);
         for (const [filePath, { content }] of after.documents) {
-          if (reportedAfterRead(filePath)) continue;
+          if (cannotCompare(filePath)) continue;
           const reported = baseline(filePath);
           if (reported === undefined) {
             // Unknown-before is not absent-before: a document the opening
@@ -843,7 +854,7 @@ async function runMemoryChangeWindow<T>(
           ...before.unreadable,
           ...outside.keys(),
         ])) {
-          if (reportedAfterRead(filePath)) continue;
+          if (cannotCompare(filePath)) continue;
           // Present-or-unknown is not a delete: a path that was only
           // unreadable in the after snapshot must not be reported gone.
           if (after.documents.has(filePath) || after.unreadable.has(filePath)) {

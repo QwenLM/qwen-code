@@ -374,7 +374,6 @@ export async function runManagedAutoMemoryDream(
         await rebuildManagedAutoMemoryIndex(
           projectRoot,
           config.getMemoryHookDeliveryId?.(),
-          abortSignal,
         );
       }
       return { agentResult, hasChanges };

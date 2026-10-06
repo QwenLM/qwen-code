@@ -2772,6 +2772,51 @@ describe('memory notification snapshot boundaries', () => {
       }),
     ]);
   });
+  it.each(['create', 'update', 'delete'] as const)(
+    'delivers explicit %s after an unknown import without a delayed sync duplicating it',
+    async (operation) => {
+      const file = path.join(getTeamAutoMemoryRoot(workspace), 'shared.md');
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      if (operation !== 'create') await fs.writeFile(file, 'original');
+      const notices: MemoryChangedNotice[] = [];
+      const owner = listen(notices);
+      await withCoalescedMemoryChanges(workspace, owner, async () => {
+        await withTeamMemorySync(workspace, async (record) => {
+          record(file, undefined);
+        });
+        const entered = deferred();
+        const release = deferred();
+        const sync = withTeamMemorySync(workspace, async (record) => {
+          entered.resolve();
+          await release.promise;
+          record(file, 'remote content');
+        });
+        try {
+          await entered.promise;
+          if (operation === 'delete') await fs.rm(file);
+          else await fs.writeFile(file, 'local content');
+          await notifyMemoryFileChange(file, workspace, operation, owner);
+          expect(notices).toEqual([
+            expect.objectContaining({
+              scope: 'team',
+              operation,
+              relativePaths: ['shared.md'],
+            }),
+          ]);
+        } finally {
+          release.resolve();
+          await sync;
+        }
+      });
+      expect(notices).toEqual([
+        expect.objectContaining({
+          scope: 'team',
+          operation,
+          relativePaths: ['shared.md'],
+        }),
+      ]);
+    },
+  );
   it('rereads a snapshot crossed by sync and preserves the subsequent local write', async () => {
     const file = path.join(getTeamAutoMemoryRoot(workspace), 'shared.md');
     await fs.mkdir(path.dirname(file), { recursive: true });

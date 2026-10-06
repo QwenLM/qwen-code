@@ -238,6 +238,107 @@ describe('syncTeamMemory', () => {
     30_000,
   );
 
+  it('does not report a pulled document excluded by sparse checkout as deleted', async () => {
+    const { bare, repo } = freshRemoteAndClone('alice');
+    vi.stubEnv(
+      'QWEN_CODE_MEMORY_BASE_DIR',
+      path.join(path.dirname(repo), 'private-memory'),
+    );
+    git(repo, 'sparse-checkout', 'set', 'docs');
+    const bob = makeWorkingClone(bare, 'bob');
+    cleanup.push(path.dirname(bob));
+    writeTeamMemory(bob, 'reference/remote.md', 'collaborator fact');
+    git(bob, 'add', '--', '.qwen/team-memory');
+    git(bob, 'commit', '-m', 'collaborator fact');
+    git(bob, 'push');
+    const seen: MemoryChangedNotice[] = [];
+    const registration = registerMemoryChangedListener(repo, (notice) => {
+      seen.push(notice);
+    });
+    try {
+      await withCoalescedMemoryChanges(repo, registration.id, async () => {
+        expect(
+          (await syncTeamMemory(repo, { message: 'refresh' })).pulled,
+        ).toBe(true);
+      });
+      expect(
+        git(
+          repo,
+          'ls-tree',
+          '-r',
+          '--name-only',
+          'HEAD',
+          '--',
+          '.qwen/team-memory',
+        ),
+      ).toContain('reference/remote.md');
+      expect(
+        fs.existsSync(
+          path.join(getTeamAutoMemoryRoot(repo), 'reference/remote.md'),
+        ),
+      ).toBe(false);
+      expect(seen).toEqual([]);
+    } finally {
+      registration();
+    }
+  }, 30_000);
+
+  it.skipIf(process.platform === 'win32')(
+    'does not attribute a pulled document whose Git content read fails',
+    async () => {
+      const { bare, repo } = freshRemoteAndClone('alice');
+      vi.stubEnv(
+        'QWEN_CODE_MEMORY_BASE_DIR',
+        path.join(path.dirname(repo), 'private-memory'),
+      );
+      const bob = makeWorkingClone(bare, 'bob');
+      cleanup.push(path.dirname(bob));
+      writeTeamMemory(bob, 'reference/remote.md', 'collaborator fact');
+      git(bob, 'add', '--', '.qwen/team-memory');
+      git(bob, 'commit', '-m', 'collaborator fact');
+      git(bob, 'push');
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-git-fault-'));
+      cleanup.push(bin);
+      fs.writeFileSync(
+        path.join(bin, 'git'),
+        `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = "cat-file" ]; then exit 70; fi\ndone\nexec '${realGit.replaceAll("'", "'\\''")}' "$@"\n`,
+        { mode: 0o755 },
+      );
+      vi.stubEnv('PATH', bin + path.delimiter + process.env['PATH']);
+      const seen: MemoryChangedNotice[] = [];
+      const registration = registerMemoryChangedListener(repo, (notice) => {
+        seen.push(notice);
+      });
+      try {
+        await withCoalescedMemoryChanges(repo, registration.id, async () => {
+          expect(
+            (await syncTeamMemory(repo, { message: 'refresh' })).pulled,
+          ).toBe(true);
+          writeTeamMemory(repo, 'feedback/local.md', 'local shell write');
+        });
+        expect(
+          fs.readFileSync(
+            path.join(getTeamAutoMemoryRoot(repo), 'reference/remote.md'),
+            'utf8',
+          ),
+        ).toContain('collaborator fact');
+        expect(seen).toEqual([
+          expect.objectContaining({
+            scope: 'team',
+            operation: 'create',
+            relativePaths: ['feedback/local.md'],
+          }),
+        ]);
+      } finally {
+        registration();
+      }
+    },
+    30_000,
+  );
+
   it('reconciles a second writer instead of diverging (commit lands on top)', async () => {
     const { bare, repo } = freshRemoteAndClone('alice');
     // Bob advances the remote with his own team memory file.

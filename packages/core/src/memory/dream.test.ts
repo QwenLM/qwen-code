@@ -62,6 +62,92 @@ describe('managed auto-memory dream', () => {
     );
   });
 
+  it('finishes index repair if cancelled after the repair starts without recording completion metadata', async () => {
+    vi.stubEnv(
+      'QWEN_CODE_MEMORY_BASE_DIR',
+      path.join(tempDir, 'isolated-memory'),
+    );
+    await ensureAutoMemoryScaffold(projectRoot);
+    const indexPath = getAutoMemoryIndexPath(projectRoot);
+    await fs.writeFile(indexPath, 'stale index');
+    const metadataBefore = await fs.readFile(
+      getAutoMemoryMetadataPath(projectRoot),
+      'utf8',
+    );
+    const topic = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'project',
+      'durable.md',
+    );
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockImplementation(
+      async () => {
+        await fs.mkdir(path.dirname(topic), { recursive: true });
+        await fs.writeFile(
+          topic,
+          '---\ntype: project\nname: Durable\ndescription: Persisted fact\ncategory: project_introduction\nkeywords:\n  - durable fact\n  - project details\nusage_scenarios:\n  - Project work\n---\nCommitted consolidation.\n',
+        );
+        return {
+          status: 'completed',
+          finalText: 'done',
+          filesTouched: [topic],
+        };
+      },
+    );
+    const owner = vi.fn();
+    const sibling = vi.fn();
+    const unregisterOwner = registerMemoryChangedListener(projectRoot, owner);
+    const unregisterSibling = registerMemoryChangedListener(
+      projectRoot,
+      sibling,
+    );
+    const controller = new AbortController();
+    let deliveryReads = 0;
+    mockConfig.getMemoryHookDeliveryId = () => {
+      // The second read occurs after the cancellation guard, at index repair.
+      if (++deliveryReads === 2) controller.abort();
+      return unregisterOwner.id;
+    };
+    try {
+      await runManagedAutoMemoryDream(
+        projectRoot,
+        new Date(),
+        mockConfig,
+        controller.signal,
+        { recordMetadata: true },
+      );
+      expect(controller.signal.aborted).toBe(true);
+      expect(await fs.readFile(indexPath, 'utf8')).toContain(
+        'project/durable.md',
+      );
+      expect(
+        await fs.readFile(getAutoMemoryMetadataPath(projectRoot), 'utf8'),
+      ).toBe(metadataBefore);
+      expect(owner).toHaveBeenCalledTimes(2);
+      expect(owner).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          scope: 'project',
+          operation: 'update',
+          relativePaths: ['MEMORY.md'],
+        }),
+        undefined,
+      );
+      expect(owner).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          scope: 'project',
+          operation: 'create',
+          relativePaths: ['project/durable.md'],
+        }),
+        undefined,
+      );
+      expect(sibling).not.toHaveBeenCalled();
+    } finally {
+      unregisterOwner();
+      unregisterSibling();
+    }
+  });
+
   it('reports file changes and keyword backfills from filesystem snapshots', async () => {
     const memoryRoot = getAutoMemoryRoot(projectRoot);
     const userFile = path.join(memoryRoot, 'user', 'prefs.md');
