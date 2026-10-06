@@ -5601,6 +5601,9 @@ export class Session implements SessionContext {
         this.config.getGoalProposalHostSupported() &&
         this.config.setGoalProposalTurnKey(undefined)
       ) {
+        this.config
+          .getToolRegistry()
+          .unrevealDeferredTool(ToolNames.PROPOSE_GOAL);
         try {
           await this.config.getLlmClient().setTools();
         } catch (error) {
@@ -6081,6 +6084,12 @@ export class Session implements SessionContext {
             responseCapture.goalProposalTurn?.turnKey,
           )
         ) {
+          // propose_goal is natively deferred: the key arms only inside a
+          // prompt, so without the reveal it would be filtered out of every
+          // announcement and never be discoverable in ACP/daemon sessions.
+          this.config
+            .getToolRegistry()
+            .revealDeferredTool(ToolNames.PROPOSE_GOAL);
           await this.config.getLlmClient().setTools();
         }
         const daemonPromptId = getInvocationContext()?.promptId;
@@ -9226,11 +9235,17 @@ export class Session implements SessionContext {
     // returned (#10953): real work advanced while the parent earned a
     // single tool turn, so the turn budget cannot come due on its own.
     // Force the reminder exactly where the progress information arrives.
-    const carriesAgentToolResult = toolRun.parts.some(
-      (part) =>
-        canonicalToolName(part.functionResponse?.name ?? '') ===
-        ToolNames.AGENT,
-    );
+    const carriesAgentToolResult =
+      toolRun.parts.some(
+        (part) =>
+          canonicalToolName(part.functionResponse?.name ?? '') ===
+          ToolNames.AGENT,
+      ) ||
+      toolRun.repeatedToolFailureBatch?.observations.some(
+        (observation) =>
+          canonicalToolName(observation.policyToolName ?? '') ===
+            ToolNames.AGENT && observation.executionStatus !== 'not_started',
+      );
     const activeTodoReminder = carriesAgentToolResult
       ? this.config.takeActiveTodoReminder(promptId, true)
       : this.config.takeActiveTodoReminder(promptId);
@@ -12650,6 +12665,7 @@ export class Session implements SessionContext {
         const goalProvenance = ambientGoalToolResultProvenance(
           record.toolName,
           record.toolArgs,
+          finalized[index].responseParts,
         );
         this.config.getChatRecordingService()?.recordToolResult(
           finalized[index].responseParts,
@@ -12946,7 +12962,26 @@ export class Session implements SessionContext {
       // Canonical names match core's isToolCallConcurrencySafe predicate,
       // where `task` is a live alias of the agent tool; concurrent batches
       // are therefore agent-only.
-      const isAgent = canonicalToolName(fc.name ?? '') === ToolNames.AGENT;
+      let executionToolName = canonicalToolName(fc.name ?? '');
+      // Skip the awaited bridge resolution once the turn is cancelled: the
+      // execution path bails on the same signal before resolving, so work
+      // spent here would be discarded anyway.
+      if (executionToolName === ToolNames.TOOL_CALL && !abortSignal.aborted) {
+        const pm = this.config.getPermissionManager?.();
+        const bridgeEnabled =
+          !pm ||
+          (await pm.isToolEnabled(ToolNames.TOOL_CALL).catch(() => false));
+        if (bridgeEnabled) {
+          const resolution = await resolveDeferredToolCall(
+            this.config.getToolRegistry(),
+            fc.args ?? {},
+            { maxSubagentDepth: this.config.getMaxSubagentDepth() },
+          );
+          if ('tool' in resolution)
+            executionToolName = canonicalToolName(resolution.tool.name);
+        }
+      }
+      const isAgent = executionToolName === ToolNames.AGENT;
       const last = batches[batches.length - 1];
       if (isAgent && last?.kind === 'execute' && last.concurrent) {
         last.calls.push(fc);
@@ -13553,11 +13588,13 @@ export class Session implements SessionContext {
     ) => {
       const durationMs = Date.now() - startTime;
       const modelFacingError =
-        status === 'cancelled' && modelFacingToolName === ToolNames.TOOL_CALL
+        status === 'cancelled' &&
+        modelFacingToolName === ToolNames.TOOL_CALL &&
+        executionStatus === 'not_started'
           ? `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}${error.message}`
           : status === 'error' &&
               modelFacingToolName === ToolNames.TOOL_CALL &&
-              toolName === ToolNames.TOOL_CALL &&
+              executionStatus === 'not_started' &&
               !error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX)
             ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${error.message}`
             : error.message;
