@@ -24,6 +24,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTaskEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicWorkspace;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionCapabilities;
@@ -48,6 +49,8 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellStreamRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSubmitRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEvent;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEventQueryRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskGetRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskQueryRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
@@ -59,6 +62,7 @@ import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -155,7 +159,8 @@ class ManagedAgentApiContractTest {
                             List.of("SessionCapabilities")),
                     entry(PublicList.class, List.of("PublicSessionList",
                             "PublicEventList", "PublicTaskList",
-                            "PublicTurnList", "PublicArtifactList")),
+                            "PublicTaskEventList", "PublicTurnList",
+                            "PublicArtifactList")),
                     entry(PublicEvent.class, List.of("PublicEvent")),
                     entry(SessionResyncRequired.class,
                             List.of("SessionResyncRequired")),
@@ -190,13 +195,19 @@ class ManagedAgentApiContractTest {
                     entry(WebShellSessionCapabilities.class,
                             List.of("WebShellSessionCapabilities")),
                     entry(WebShellPage.class, List.of("WebShellSessionPage",
-                            "WebShellTaskPage", "WebShellActionPage", "WebShellArtifactPage")),
+                            "WebShellTaskPage", "WebShellTaskEventPage",
+                            "WebShellActionPage", "WebShellArtifactPage")),
                     entry(PublicTask.class, List.of("PublicTask")),
                     entry(WebShellTask.class, List.of("WebShellTask")),
+                    entry(PublicTaskEvent.class, List.of("PublicTaskEvent")),
+                    entry(WebShellTaskEvent.class,
+                            List.of("WebShellTaskEvent")),
                     entry(WebShellTaskQueryRequest.class,
                             List.of("WebShellTaskQueryRequest")),
                     entry(WebShellTaskGetRequest.class,
                             List.of("WebShellTaskGetRequest")),
+                    entry(WebShellTaskEventQueryRequest.class,
+                            List.of("WebShellTaskEventQueryRequest")),
                     entry(WebShellEvent.class, List.of("WebShellEvent")),
                     entry(WebShellResyncRequired.class,
                             List.of("WebShellResyncRequired")),
@@ -225,6 +236,9 @@ class ManagedAgentApiContractTest {
 
     @Autowired
     private ManagedSessionStore sessionStore;
+
+    @Autowired
+    private ManagedTaskEventStore taskEvents;
 
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
@@ -1187,6 +1201,90 @@ class ManagedAgentApiContractTest {
                         .principal(actor(otherTenant)),
                 "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
                         .formatted(sessionId, taskId));
+
+        String eventsPath = "/v1/agents/sessions/" + sessionId + "/tasks/"
+                + taskId + "/events";
+        JsonNode events = json(exchange(drift, "listSessionTaskEvents", 200,
+                get(eventsPath).header(TENANT, tenant), null));
+        assertThat(events.get("data")).hasSize(1);
+        assertThat(events.at("/data/0/type").asText())
+                .isEqualTo("state_changed");
+        assertThat(events.at("/data/0/state").asText()).isEqualTo("pending");
+        assertThat(events.get("has_more").asBoolean()).isFalse();
+        assertThat(events.get("next_cursor").isTextual()).isTrue();
+        JsonNode taskView = json(exchange(drift, "getSessionTask", 200,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        taskId).header(TENANT, tenant), null));
+        assertThat(taskView.get("output_cursor").isTextual()).isTrue();
+        exchange(drift, "listSessionTaskEvents", 400,
+                get(eventsPath).param("after", "bad").header(TENANT, tenant),
+                null);
+        String otherTask = rest.at("/data/0/id").asText();
+        exchange(drift, "listSessionTaskEvents", 400,
+                get("/v1/agents/sessions/{id}/tasks/{task}/events", sessionId,
+                        otherTask)
+                        .param("after", events.at("/data/0/cursor").asText())
+                        .header(TENANT, tenant),
+                null);
+        exchange(drift, "listSessionTaskEvents", 400,
+                get(eventsPath).param("limit", "0").header(TENANT, tenant),
+                null);
+        exchange(drift, "listSessionTaskEvents", 404,
+                get(eventsPath).header(TENANT, otherTenant), null);
+        exchange(drift, "listSessionTaskEvents", 403,
+                get(eventsPath).header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                null);
+        exchange(drift, "listSessionTaskEvents", 404,
+                get("/v1/agents/sessions/{id}/tasks/{task}/events", sessionId,
+                        "task_missing").header(TENANT, tenant),
+                null);
+        taskEvents.expireThrough(tenant, sessionId, taskId, 1);
+        exchange(drift, "listSessionTaskEvents", 409,
+                get(eventsPath)
+                        .param("after", ManagedTaskEventStore
+                                .encodeCursor(taskId, 0))
+                        .header(TENANT, tenant),
+                null);
+        exchange(drift, "listSessionTaskEvents", 200,
+                get(eventsPath)
+                        .param("after", ManagedTaskEventStore
+                                .encodeCursor(taskId, 1))
+                        .header(TENANT, tenant),
+                null);
+
+        JsonNode webShellEvents = json(exchange(drift,
+                "queryWebShellTaskEvents", 200,
+                post(WEB_SHELL + "/tasks/events/query").header(TENANT,
+                        tenant),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
+                        .formatted(sessionId, taskId)));
+        assertThat(webShellEvents.get("data")).isEmpty();
+        assertThat(webShellEvents.get("nextCursor").isTextual()).isTrue();
+        exchange(drift, "queryWebShellTaskEvents", 400,
+                post(WEB_SHELL + "/tasks/events/query").header(TENANT,
+                        tenant),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\",\"after\":\"bad\"}"
+                        .formatted(sessionId, taskId));
+        exchange(drift, "queryWebShellTaskEvents", 400,
+                post(WEB_SHELL + "/tasks/events/query").header(TENANT,
+                        tenant),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\",\"limit\":0}"
+                        .formatted(sessionId, taskId));
+        exchange(drift, "queryWebShellTaskEvents", 404,
+                post(WEB_SHELL + "/tasks/events/query").header(TENANT,
+                        otherTenant),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
+                        .formatted(sessionId, taskId));
+        exchange(drift, "queryWebShellTaskEvents", 403,
+                post(WEB_SHELL + "/tasks/events/query").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
+                        .formatted(sessionId, taskId));
+        exchange(drift, "queryWebShellTaskEvents", 400,
+                post(WEB_SHELL + "/tasks/events/query").header(TENANT,
+                        tenant),
+                "{\"sessionId\":\"%s\"}".formatted(sessionId));
 
         // The served task bodies say exactly what the shared fixture views
         // say, down to the settled task's start and settle times.
