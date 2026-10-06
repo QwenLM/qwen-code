@@ -423,7 +423,6 @@ function mediaBlockParseError(
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
-  'POST /session/:id/side-task',
   'POST /session/:id/fork',
 ] as const;
 type PrimaryOnlyLiveSessionRoute =
@@ -1896,6 +1895,19 @@ export function registerSessionRoutes(
     });
   };
 
+  const sendStandaloneActionUnsupported = (
+    res: Response,
+    route: string,
+    sessionId: string,
+  ): void => {
+    res.status(400).json({
+      error: 'This action is not supported in a standalone session.',
+      code: 'unsupported_action',
+      sessionId,
+      route,
+    });
+  };
+
   const isStandaloneOwner = (
     runtime: WorkspaceRuntime,
     sessionId: string,
@@ -1950,6 +1962,7 @@ export function registerSessionRoutes(
       options: {
         cwdBound?: 'always' | 'rewind-files' | 'sync-output-language';
         promptAdmission?: boolean;
+        rejectStandalone?: boolean;
       } = {},
     ): RequestHandler =>
     async (req, res) => {
@@ -1959,6 +1972,10 @@ export function registerSessionRoutes(
         const owner = await resolveOwnerSessionRuntime(sessionId, res, route);
         if (!owner) return;
         const { runtime, standalone } = owner;
+        if (options.rejectStandalone && standalone) {
+          sendStandaloneActionUnsupported(res, route, sessionId);
+          return;
+        }
         const cwdBound =
           options.cwdBound === 'always' ||
           (options.cwdBound === 'rewind-files' &&
@@ -2853,12 +2870,7 @@ export function registerSessionRoutes(
         if (!owner) return;
         const { runtime, standalone } = owner;
         if (options.rejectStandalone && standalone) {
-          res.status(400).json({
-            error: 'This action is not supported in a standalone session.',
-            code: 'unsupported_action',
-            sessionId,
-            route,
-          });
+          sendStandaloneActionUnsupported(res, route, sessionId);
           return;
         }
         if (
@@ -5997,7 +6009,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/side-task',
     mutate(),
-    withRestrictedMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/side-task',
       async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
