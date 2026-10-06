@@ -100,8 +100,10 @@ export interface SessionAgentRunFrame {
   recorded?: boolean;
   recordId?: string;
   /**
-   * A run a daemon restart interrupted: offer Retry
-   * (`POST …/runs/:runId/retry`) and Dismiss (`POST …/runs/:runId/cancel`).
+   * A finished run with no record that can run again (interrupted by a
+   * daemon restart, its runtime went offline, or its record was lost in a
+   * restart): offer Retry (`POST …/runs/:runId/retry`) and Dismiss
+   * (`POST …/runs/:runId/cancel`).
    */
   retryable?: boolean;
   /** Set on the final frame of a retried run: the run that replaces it. */

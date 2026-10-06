@@ -929,6 +929,48 @@ describe('AssistantMessage squad replies', () => {
     expect(line?.childElementCount).toBe(0);
   });
 
+  it('renders a leader reply of only invisible characters as no_action', () => {
+    // Recorded before the daemon classified U+200B as no reply.
+    const container = render(
+      <AssistantMessage
+        content={'\u200B'}
+        author={{ name: 'lead' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-7',
+          status: 'completed',
+          totalTokens: 42,
+          author: { agentId: 'ag_lead', name: 'lead', squadName: 'crew' },
+        }}
+        showFooterActions
+      />,
+    );
+    expect(
+      container.querySelector('[data-squad-outcome="no_action"]')?.textContent,
+    ).toBe('lead · crew · no action needed');
+  });
+
+  it('shows no blank bubble for an agent reply of only invisible characters', () => {
+    const container = render(
+      <AssistantMessage
+        content={' \u200B\u2060 '}
+        author={{ name: 'bob' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-8',
+          status: 'completed',
+          author: { agentId: 'ag_bob', name: 'bob' },
+        }}
+        showFooterActions
+      />,
+    );
+    expect(container.textContent).toContain('bob');
+    expect(container.textContent).not.toContain('\u200B');
+    expect(container.querySelector('[data-squad-outcome]')).toBeNull();
+    // No copy footer for a reply with nothing to copy.
+    expect(container.querySelector('button')).toBeNull();
+  });
+
   it('never shows the dictionary key where the collaboration strings are absent', () => {
     // The transcript build stubs the collaboration dictionary; zh-CN here
     // still has it, so check the localized label instead.

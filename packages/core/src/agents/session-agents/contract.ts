@@ -88,6 +88,24 @@ export interface SessionAgentAuthor {
  */
 export type SessionSquadOutcome = 'no_action';
 
+/**
+ * Whitespace plus the invisible characters a model may answer with when it
+ * means "nothing": zero-width space / non-joiner / joiner (U+200B-U+200D),
+ * word joiner (U+2060), zero-width no-break space (U+FEFF) and soft hyphen
+ * (U+00AD). `String.prototype.trim()` keeps all but U+FEFF.
+ */
+const BLANK_AGENT_TEXT = /^[\s\u200B-\u200D\u2060\uFEFF\u00AD]*$/;
+
+/**
+ * True when an agent's text shows nothing: empty, or only whitespace and
+ * invisible characters (see {@link BLANK_AGENT_TEXT}). Such a reply counts as
+ * no reply (a squad leader's `no_action`), never as a blank message.
+ * Mirrored in web-shell (`isBlankAgentText` in agent-message-details.tsx).
+ */
+export function isBlankAgentText(text: string): boolean {
+  return BLANK_AGENT_TEXT.test(text);
+}
+
 /** `systemPayload` of an `agent_message` record. */
 export interface AgentMessageRecordPayload {
   /** Markdown shown in the UI. */
@@ -224,9 +242,12 @@ export interface SessionAgentRunFrame {
   /** uuid of that record, when known. */
   recordId?: string;
   /**
-   * A run interrupted by a daemon restart (`failed`, error "daemon
-   * restarted"): offer "Retry" (`POST .../runs/:runId/retry`) and "Dismiss"
-   * (`POST .../runs/:runId/cancel`).
+   * A finished run with no record in the transcript that can run again:
+   * interrupted by a daemon restart (`failed`, error "daemon restarted"),
+   * stopped because its runtime went `offline`, or finished before a restart
+   * with its record never written. Offer "Retry"
+   * (`POST .../runs/:runId/retry`) and "Dismiss"
+   * (`POST .../runs/:runId/cancel`). Always sent with `recorded: false`.
    */
   retryable?: boolean;
   /** Set on the final frame of a retried run: the run that replaces it. */
@@ -324,6 +345,15 @@ export interface SessionAgentRun {
   retryOf?: string;
   /** Set on a squad leader's run: it runs in squad mode for this squad. */
   squadId?: string;
+  /**
+   * Record state of a terminal run, persisted so a restarted daemon can
+   * offer the run again: `true` once its `agent_message` record is in the
+   * transcript; `false` while no record is there (its write is deferred or
+   * failed, or the run is offered for retry: interrupted by a restart, or
+   * offline); absent when none is expected (cancelled while queued,
+   * dismissed, retried, or a refused write).
+   */
+  recorded?: boolean;
 }
 
 /**

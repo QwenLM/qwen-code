@@ -172,6 +172,8 @@ function isValidRun(value: unknown): value is SessionAgentRun {
     isOptionalFiniteNumber(value['totalTokens']) &&
     isOptionalString(value['retryOf']) &&
     isOptionalString(value['squadId']) &&
+    (value['recorded'] === undefined ||
+      typeof value['recorded'] === 'boolean') &&
     isValidLease(value['lease'])
   );
 }

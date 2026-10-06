@@ -17,6 +17,7 @@ import { parseTitle, ToolApproval } from '../messages/ToolApproval';
 import {
   AgentStepList,
   AgentTokenUsage,
+  isBlankAgentText,
 } from '../messages/agent-message-details';
 import { Button } from '../ui/button';
 import type { PermissionOption, PermissionRequest } from '../../adapters/types';
@@ -211,18 +212,22 @@ export function toApprovalRequest(
   };
 }
 
-/** A failed or offline run the daemon offers to run again. */
+/**
+ * A finished run the daemon offers to run again (`retryable`): failed by a
+ * restart, offline, or one whose record a restart lost. Never a stopped one.
+ */
 export function canRetryRun(run: SessionAgentRunFrame): boolean {
   return (
     run.retryable === true &&
-    (run.status === 'failed' || run.status === 'offline')
+    isTerminalRunStatus(run.status) &&
+    run.status !== 'cancelled'
   );
 }
 
 /**
- * Retry and Dismiss on a run a daemon restart cut short. Such a run writes no
- * record, so its card is the only place to act on it: Retry queues it again
- * as a new run, Dismiss (the cancel route) lets it go.
+ * Retry and Dismiss on a run a daemon restart or a lost runtime cut short.
+ * Such a run has no record, so its card is the only place to act on it:
+ * Retry queues it again as a new run, Dismiss (the cancel route) lets it go.
  */
 function RetryableRunActions({
   runId,
@@ -321,7 +326,7 @@ function LiveRun({
           </Button>
         )}
       </div>
-      {run.outputText && (
+      {run.outputText && !isBlankAgentText(run.outputText) && (
         <div className={assistantStyles.content}>
           <div className={assistantStyles.contentBody}>
             <Markdown

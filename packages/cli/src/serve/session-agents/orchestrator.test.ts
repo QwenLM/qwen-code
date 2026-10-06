@@ -28,6 +28,8 @@ import { SessionNotFoundError } from '../acp-session-bridge.js';
 import { SessionAgentEventHub } from './events.js';
 import {
   RECORD_WATCH_MAX_MS,
+  SESSION_AGENT_OFFLINE_ERROR,
+  SESSION_AGENT_REPLY_NOT_RECORDED_ERROR,
   SESSION_AGENT_RESTARTED_ERROR,
   SessionAgentError,
   SessionAgentOrchestrator,
@@ -383,6 +385,90 @@ describe('SessionAgentOrchestrator', () => {
     ).toThrow(/No pending permission/);
   });
 
+  it('ignores what a stopped run still reports and refuses its late permission request', async () => {
+    const held: {
+      turn?: AgentAdapterTurnInput;
+      finish?: (result: AgentAdapterTurnResult) => void;
+    } = {};
+    const { orchestrator, frames, lastFrame } = harness({
+      extra: {
+        getAdapter: (program) => ({
+          program,
+          // Winds down only when told to, like a native turn after a stop.
+          runTurn: (input) =>
+            new Promise<AgentAdapterTurnResult>((resolve) => {
+              held.turn = input;
+              held.finish = resolve;
+            }),
+        }),
+      },
+    });
+    const { runs } = await orchestrator.mention(SESSION, {
+      text: '@alice think about it',
+      clientMessageId: 'm1',
+    });
+    const runId = runs[0]!.runId;
+    await vi.waitFor(() => expect(held.turn).toBeDefined());
+    const turn = held.turn!;
+    const prompt = (requestId: string): SessionAgentPermissionPrompt => ({
+      requestId,
+      title: 'Run marker',
+      toolName: 'execute',
+      options: [
+        { optionId: 'yes', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'no', name: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    turn.onEvent({ type: 'permission_request', prompt: prompt('p1') });
+    const first = turn.awaitPermission(prompt('p1'));
+    expect((await orchestrator.snapshot(SESSION))[0]).toMatchObject({
+      status: 'awaiting_approval',
+    });
+
+    expect(await orchestrator.cancel(SESSION, runId)).toBe(true);
+    const stoppedAt = frames.length;
+    expect(turn.signal.aborted).toBe(true);
+    await expect(first).rejects.toThrow('cancelled');
+    // The card stops asking at once.
+    let [frame] = await orchestrator.snapshot(SESSION);
+    expect(frame).toMatchObject({ runId, status: 'running' });
+    expect(frame).not.toHaveProperty('permission');
+
+    // The native turn, still winding down, asks again and keeps talking.
+    turn.onEvent({ type: 'permission_request', prompt: prompt('p2') });
+    await expect(turn.awaitPermission(prompt('p2'))).rejects.toThrow(
+      'cancelled',
+    );
+    turn.onEvent({ type: 'text_delta', text: 'still here' });
+    [frame] = await orchestrator.snapshot(SESSION);
+    expect(frame).toMatchObject({ runId, status: 'running' });
+    expect(frame).not.toHaveProperty('permission');
+    expect(frame).not.toHaveProperty('outputText');
+    expect(() =>
+      orchestrator.resolvePermission(SESSION, runId, 'p2', 'yes'),
+    ).toThrow(/No pending permission/);
+
+    held.finish!({ status: 'cancelled', outputText: '' });
+    await vi.waitFor(() =>
+      expect(lastFrame(runId)).toMatchObject({
+        status: 'cancelled',
+        recorded: true,
+      }),
+    );
+    // Nothing after the stop put a permission back or flipped the status.
+    expect(
+      frames
+        .slice(stoppedAt)
+        .some(
+          (published) =>
+            published.runId === runId &&
+            (published.status === 'awaiting_approval' ||
+              published.permission !== undefined),
+        ),
+    ).toBe(false);
+    expect(await orchestrator.snapshot(SESSION)).toEqual([]);
+  });
+
   it('fences remote turns by lease and tells the Host about a cancel', async () => {
     const { orchestrator, turns, lastFrame } = harness({
       roster: [carol],
@@ -547,9 +633,9 @@ describe('SessionAgentOrchestrator', () => {
     expect(second).toMatchObject({ runId, attempt: 2 });
   });
 
-  it('marks a remote run offline when its lease lapses', async () => {
+  it('marks a remote run offline when its lease lapses, and offers it for retry', async () => {
     let now = 1_000;
-    const { orchestrator, lastFrame } = harness({
+    const { orchestrator, bridge, lastFrame } = harness({
       roster: [{ ...carol, agentType: undefined }],
       extra: { now: () => now, leaseMs: 100 },
     });
@@ -557,12 +643,52 @@ describe('SessionAgentOrchestrator', () => {
       text: '@carol hi',
       clientMessageId: 'm1',
     });
-    await orchestrator.pickupForHost('h1', ['claude']);
+    const runId = runs[0]!.runId;
+    const assignment = await orchestrator.pickupForHost('h1', ['claude']);
     now += 101;
     orchestrator.sweep();
     await vi.waitFor(() =>
-      expect(lastFrame(runs[0]!.runId)).toMatchObject({ status: 'offline' }),
+      expect(lastFrame(runId)).toMatchObject({
+        status: 'offline',
+        error: SESSION_AGENT_OFFLINE_ERROR,
+        recorded: false,
+        retryable: true,
+      }),
     );
+    // No record: the card, with Retry and Dismiss, is where it is shown.
+    expect(
+      bridge.records.some((record) => record.subtype === 'agent_message'),
+    ).toBe(false);
+    expect(await orchestrator.snapshot(SESSION)).toMatchObject([
+      { runId, status: 'offline', retryable: true, recorded: false },
+    ]);
+    await vi.waitFor(async () =>
+      expect(
+        (await fileFor()).runs.find((run) => run.id === runId),
+      ).toMatchObject({ status: 'offline', recorded: false }),
+    );
+    // The Host coming back late changes nothing.
+    expect(
+      orchestrator.acceptHostEvents('h1', {
+        sessionId: SESSION,
+        runId,
+        attempt: assignment!.attempt,
+        leaseId: assignment!.leaseId,
+        sequence: 1,
+        events: [{ type: 'text_delta', text: 'late' }],
+      }),
+    ).toEqual({ ok: false, reason: 'unknown_run' });
+
+    const retried = await orchestrator.retry(SESSION, runId);
+    expect(retried).toMatchObject({ agentId: 'ag_carol', status: 'queued' });
+    expect(lastFrame(runId)).toMatchObject({ retriedAsRunId: retried.runId });
+    expect(lastFrame(runId)).not.toHaveProperty('retryable');
+    expect(
+      (await orchestrator.snapshot(SESSION)).map((frame) => frame.runId),
+    ).toEqual([retried.runId]);
+    await expect(
+      orchestrator.pickupForHost('h1', ['claude']),
+    ).resolves.toMatchObject({ runId: retried.runId });
   });
 
   it('enforces maxConcurrentRuns across chat sessions', async () => {
@@ -791,6 +917,169 @@ describe('SessionAgentOrchestrator', () => {
     await expect(orchestrator.retry(SESSION, 'sr_nope')).rejects.toMatchObject({
       status: 404,
       code: 'run_not_found',
+    });
+  });
+
+  it('offers runs whose record a shutdown lost for retry after a restart', async () => {
+    const base = {
+      chainDepth: 0,
+      createdAt: 1,
+      startedAt: 2,
+      endedAt: 3,
+      attempts: 1,
+      recorded: false,
+    };
+    await updateSessionAgents(projectRoot, SESSION, (file) => {
+      file.runs.push(
+        {
+          ...base,
+          // What 6.1 left: the run ended while the bridge was closing.
+          id: 'sr_unrecorded',
+          agentId: 'ag_alice',
+          status: 'failed',
+          triggerRecordIds: ['rec-x'],
+          error:
+            'Could not record the reply: AcpSessionBridge is shutting down',
+        },
+        {
+          ...base,
+          id: 'sr_lost',
+          agentId: 'ag_bob',
+          status: 'completed',
+          triggerRecordIds: ['rec-y'],
+        },
+        {
+          ...base,
+          id: 'sr_landed',
+          agentId: 'ag_bob',
+          status: 'completed',
+          triggerRecordIds: ['rec-z'],
+        },
+        {
+          ...base,
+          id: 'sr_stopped',
+          agentId: 'ag_alice',
+          status: 'cancelled',
+          triggerRecordIds: ['rec-w'],
+        },
+      );
+    });
+    const { orchestrator, bridge, turns, lastFrame } = harness();
+    // This one's record landed before its state was saved.
+    bridge.records.push({
+      uuid: 'rec-landed',
+      type: 'user',
+      subtype: 'agent_message',
+      systemPayload: { runId: 'sr_landed' },
+    });
+
+    const snapshot = await orchestrator.snapshot(SESSION);
+    expect(
+      snapshot.find((frame) => frame.runId === 'sr_unrecorded'),
+    ).toMatchObject({
+      status: 'failed',
+      error: expect.stringContaining('shutting down'),
+      recorded: false,
+      retryable: true,
+      author: { agentId: 'ag_alice', name: 'alice' },
+    });
+    expect(snapshot.find((frame) => frame.runId === 'sr_lost')).toMatchObject({
+      status: 'completed',
+      error: SESSION_AGENT_REPLY_NOT_RECORDED_ERROR,
+      recorded: false,
+      retryable: true,
+    });
+    // A stopped run is let go.
+    expect(snapshot.some((frame) => frame.runId === 'sr_stopped')).toBe(false);
+    // The record watcher found the landed one in the transcript.
+    await vi.waitFor(() =>
+      expect(lastFrame('sr_landed')).toMatchObject({
+        recorded: true,
+        recordId: 'rec-landed',
+      }),
+    );
+    expect(lastFrame('sr_landed')).not.toHaveProperty('retryable');
+    await vi.waitFor(async () => {
+      const runs = (await fileFor()).runs;
+      expect(runs.find((run) => run.id === 'sr_landed')).toMatchObject({
+        recorded: true,
+      });
+      expect(runs.find((run) => run.id === 'sr_stopped')).not.toHaveProperty(
+        'recorded',
+      );
+    });
+
+    // Retry starts a new run for the same trigger.
+    const retried = await orchestrator.retry(SESSION, 'sr_unrecorded');
+    expect(retried).toMatchObject({ agentId: 'ag_alice' });
+    expect(lastFrame('sr_unrecorded')).toMatchObject({
+      retriedAsRunId: retried.runId,
+    });
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    expect(turns[0]!.context.agentId).toBe('ag_alice');
+    // A completed run whose reply was lost can be retried too.
+    const again = await orchestrator.retry(SESSION, 'sr_lost');
+    expect(again).toMatchObject({ agentId: 'ag_bob' });
+    await vi.waitFor(() => expect(turns).toHaveLength(2));
+    await vi.waitFor(async () => {
+      const runs = (await fileFor()).runs;
+      expect(runs.find((run) => run.id === retried.runId)).toMatchObject({
+        retryOf: 'sr_unrecorded',
+        triggerRecordIds: ['rec-x'],
+      });
+      // Retried: a later restart does not offer it again.
+      expect(runs.find((run) => run.id === 'sr_unrecorded')).not.toHaveProperty(
+        'recorded',
+      );
+    });
+  });
+
+  it('fails a run the daemon stops with retryably, for the next daemon to offer', async () => {
+    const first = harness();
+    const { runs } = await first.orchestrator.mention(SESSION, {
+      text: '@alice write it',
+      clientMessageId: 'm1',
+    });
+    const runId = runs[0]!.runId;
+    await vi.waitFor(() => expect(first.turns).toHaveLength(1));
+    const prompt: SessionAgentPermissionPrompt = {
+      requestId: 'p1',
+      title: 'Write a.txt',
+      options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }],
+    };
+    // Waiting on a person when the daemon stops.
+    first.turns[0]!.input.onEvent({ type: 'permission_request', prompt });
+    const answer = first.turns[0]!.input.awaitPermission(prompt);
+    await first.orchestrator.dispose();
+    await expect(answer).rejects.toThrow();
+    await vi.waitFor(async () =>
+      expect(
+        (await fileFor()).runs.find((run) => run.id === runId),
+      ).toMatchObject({
+        status: 'failed',
+        error: SESSION_AGENT_RESTARTED_ERROR,
+        recorded: false,
+      }),
+    );
+    // No record: the bridge goes away with the daemon.
+    expect(
+      first.bridge.records.some((record) => record.subtype === 'agent_message'),
+    ).toBe(false);
+
+    const second = harness();
+    expect(await second.orchestrator.snapshot(SESSION)).toMatchObject([
+      {
+        runId,
+        status: 'failed',
+        error: SESSION_AGENT_RESTARTED_ERROR,
+        recorded: false,
+        retryable: true,
+      },
+    ]);
+    const retried = await second.orchestrator.retry(SESSION, runId);
+    await vi.waitFor(() => expect(second.turns).toHaveLength(1));
+    expect(second.lastFrame(runId)).toMatchObject({
+      retriedAsRunId: retried.runId,
     });
   });
 
@@ -1072,6 +1361,31 @@ describe('SessionAgentOrchestrator squads', () => {
     await vi.waitFor(() => expect(h.messageOf('ag_alice', 1)).toBeDefined());
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(h.turnOf('ag_lead', 2)).toBeUndefined();
+  });
+
+  it('records a leader reply of only invisible characters as no_action', async () => {
+    const h = squadHarness();
+    const { runs } = await h.orchestrator.mention(SESSION, {
+      text: '@crew anything to do?',
+      clientMessageId: 'm1',
+    });
+    await vi.waitFor(() => expect(h.turnOf('ag_lead')).toBeDefined());
+    // What real leaders answered with; `trim()` keeps U+200B.
+    h.turnOf('ag_lead')!.finish({ outputText: '\u200B' });
+    await vi.waitFor(() =>
+      expect(h.messageOf('ag_lead')?.systemPayload).toMatchObject({
+        displayText: '',
+        status: 'completed',
+        squadOutcome: 'no_action',
+      }),
+    );
+    expect(h.lastFrame(runs[0]!.runId)).toMatchObject({
+      status: 'completed',
+      recorded: true,
+    });
+    await vi.waitFor(async () =>
+      expect(await h.engagement()).toMatchObject({ active: false }),
+    );
   });
 
   it('coalesces member replies that land while the leader is busy into one wake', async () => {

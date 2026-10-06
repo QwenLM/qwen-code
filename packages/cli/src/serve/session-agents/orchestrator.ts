@@ -38,6 +38,15 @@
  * under a lease is re-adopted with its lease and last accepted event
  * sequence, so the Host can carry on; every other one is `failed` with
  * "daemon restarted" and offered for {@link SessionAgentOrchestrator.retry}.
+ * A run that finished with its record still pending (`run.recorded: false`;
+ * the record request itself is in memory only) is offered for retry too,
+ * while the transcript is checked for the record in case it landed.
+ *
+ * Stop: a stopped local run ignores what its adapter still reports while the
+ * turn winds down (a late permission request is refused, never shown), and a
+ * remote one is answered `cancelled` from then on. A remote run whose lease
+ * lapses (its Host went away) ends `offline` without a record and is offered
+ * for retry like a restart failure.
  */
 
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -54,6 +63,7 @@ import {
   DEFAULT_AGENT_TOKEN_BUDGET,
   AGENT_MESSAGE_SUBTYPE,
   HOST_PROTOCOL_VERSION,
+  isBlankAgentText,
   type AgentAdapter,
   type AgentAdapterEvent,
   type AgentAdapterTurnInput,
@@ -139,6 +149,9 @@ export const SESSION_AGENT_STALL_TIMEOUT_MS = 15 * 60_000;
 export const SESSION_AGENT_STALLED_ERROR = 'agent_run_stalled';
 export const SESSION_AGENT_RESTARTED_ERROR = 'daemon restarted';
 export const SESSION_AGENT_OFFLINE_ERROR = 'runtime went offline';
+/** A run finished before a restart, its reply never in the transcript. */
+export const SESSION_AGENT_REPLY_NOT_RECORDED_ERROR =
+  'the reply was not recorded before the daemon stopped';
 /** Remote turn lease; a Host renews it while it works. */
 export const HOST_TURN_LEASE_MS = 60_000;
 const SWEEP_INTERVAL_MS = 5_000;
@@ -156,6 +169,12 @@ export const RECORD_WATCH_INITIAL_MS = 1_000;
 const RECORD_WATCH_MAX_INTERVAL_MS = 15_000;
 /** How long a pending record is watched before the watcher gives up. */
 export const RECORD_WATCH_MAX_MS = PENDING_POST_TTL_MS;
+/**
+ * How long a restarted daemon checks the transcript for the record of a run
+ * that finished with it pending. Its writer died with the previous daemon, so
+ * this only catches a record that landed before the run's state was saved.
+ */
+const RECORD_RECOVERY_WATCH_MAX_MS = 30_000;
 /** Terminal runs the snapshot still reports (record pending, or retryable). */
 const MAX_SETTLED_RUNS = 200;
 /** How long a Host is told "cancelled" for a run stopped while it ran it. */
@@ -303,7 +322,8 @@ interface LiveRun {
   frame: SessionAgentRunFrame;
   steps: Map<string, SessionAgentStep>;
   controller?: AbortController;
-  abortReason?: 'cancelled' | 'stalled';
+  /** `shutdown`: the daemon is stopping (see dispose). */
+  abortReason?: 'cancelled' | 'stalled' | 'shutdown';
   pendingPermissions: Map<string, PendingPermission>;
   voterContexts: Map<string, BridgeClientRequestContext>;
   /** Newest chat record the run's prompt included (the next read cursor). */
@@ -338,6 +358,11 @@ interface SettledRun {
   frame: SessionAgentRunFrame;
   /** The record request being re-sent; absent for a retryable run. */
   request?: RecordRequest;
+  /**
+   * Adopted after a restart with its record pending: the request is gone,
+   * so the watcher only looks for the record in the transcript.
+   */
+  recovered?: true;
   /** `error` to show once the record lands (a write error is cleared). */
   recordedError?: string;
   /**
@@ -883,6 +908,13 @@ export class SessionAgentOrchestrator {
         return false;
       }
       this.dropSettled(runId, {});
+      // Dismissed: a later restart must not offer it again.
+      const state = await this.session(sessionId);
+      const run = state.file.runs.find((candidate) => candidate.id === runId);
+      if (run?.recorded === false) {
+        delete run.recorded;
+        await this.persist(state).catch(() => {});
+      }
       return true;
     }
     const state = await this.session(sessionId);
@@ -892,11 +924,13 @@ export class SessionAgentOrchestrator {
 
   /**
    * Runs a `failed` or `offline` run again (typically one a daemon restart
-   * interrupted): queues a NEW run with the same triggers and chain depth,
-   * `retryOf: runId`, and, when the old run is still in the snapshot
-   * (retryable, or its record pending), publishes its final frame with
-   * `retriedAsRunId`; a run whose record already landed gets no frame. Refuses (SessionAgentError) when the run is unknown
-   * (404 `run_not_found`), not failed/offline (409 `run_not_retryable`),
+   * interrupted), or any run the snapshot offers as `retryable` (one whose
+   * record a restart lost): queues a NEW run with the same triggers and
+   * chain depth, `retryOf: runId`, and, when the old run is still in the
+   * snapshot (retryable, or its record pending), publishes its final frame
+   * with `retriedAsRunId`; a run whose record already landed gets no frame.
+   * Refuses (SessionAgentError) when the run is unknown
+   * (404 `run_not_found`), not retryable (409 `run_not_retryable`),
    * already retried (409 `run_already_retried`), or its agent can no longer
    * take work (409 `agent_unavailable`).
    */
@@ -917,7 +951,11 @@ export class SessionAgentOrchestrator {
     if (!run) {
       throw new SessionAgentError(404, 'run_not_found', 'No such run.');
     }
-    if (run.status !== 'failed' && run.status !== 'offline') {
+    if (
+      run.status !== 'failed' &&
+      run.status !== 'offline' &&
+      this.settled.get(runId)?.frame.retryable !== true
+    ) {
       throw new SessionAgentError(
         409,
         'run_not_retryable',
@@ -956,6 +994,7 @@ export class SessionAgentOrchestrator {
       );
     }
     retried.retryOf ??= runId;
+    if (run.recorded === false) delete run.recorded;
     this.dropSettled(runId, { retriedAsRunId: retried.id });
     await this.persist(state).catch(() => {});
     this.pumpAgent(agent.id);
@@ -1089,7 +1128,7 @@ export class SessionAgentOrchestrator {
     }
     if (
       typeof text !== 'string' ||
-      text.trim().length === 0 ||
+      isBlankAgentText(text) ||
       text.length > MAX_MENTION_TEXT_CHARS
     ) {
       throw new SessionAgentError(400, 'invalid_text', 'text is required.');
@@ -1099,6 +1138,7 @@ export class SessionAgentOrchestrator {
         candidate.sessionId === sessionId &&
         candidate.run.agentId === agentId &&
         !candidate.remote &&
+        !candidate.abortReason &&
         isExecutingRun(candidate.run),
     );
     if (!live) {
@@ -1161,11 +1201,15 @@ export class SessionAgentOrchestrator {
   }
 
   /**
-   * Stops this daemon's local runs (queued and executing) and the timers.
-   * Remote runs are left on disk as they are (queued, or executing under
-   * their lease with the last accepted sequence), so the next orchestrator
-   * for this workspace (after a restart, or a replaced bridge) re-adopts
-   * them and their Host carries on. Idempotent.
+   * Stops this daemon's executing local runs and the timers. A stopped run
+   * ends `failed` with "daemon restarted", writes no record (the bridge is
+   * going away with the daemon) and is saved `recorded: false`, so the next
+   * orchestrator for this workspace offers it for retry; queued local runs
+   * stay queued on disk and are offered the same way (see adopt). Remote
+   * runs are left on disk as they are (queued, or executing under their
+   * lease with the last accepted sequence), so the next orchestrator (after
+   * a restart, or a replaced bridge) re-adopts them and their Host carries
+   * on. Idempotent.
    */
   async dispose(): Promise<void> {
     if (this.stopped) return;
@@ -1174,18 +1218,21 @@ export class SessionAgentOrchestrator {
     for (const settled of this.settled.values()) {
       if (settled.timer) clearTimeout(settled.timer);
     }
-    const local = [...this.live.values()].filter(
-      (live) =>
-        !live.remote &&
-        live.author.runtimeId === LOCAL_SESSION_AGENT_RUNTIME_ID,
-    );
-    // Queued first, so finishing an executing run cannot start one of them.
-    local.sort(
-      (a, b) => Number(isExecutingRun(a.run)) - Number(isExecutingRun(b.run)),
-    );
-    for (const live of local) {
-      const state = this.states.get(live.sessionId);
-      if (state) await this.cancelLive(state, live).catch(() => {});
+    // `stopped` already keeps queued runs from starting.
+    for (const live of this.live.values()) {
+      if (
+        live.remote ||
+        live.author.runtimeId !== LOCAL_SESSION_AGENT_RUNTIME_ID ||
+        !isExecutingRun(live.run)
+      ) {
+        continue;
+      }
+      live.abortReason = 'shutdown';
+      for (const pending of live.pendingPermissions.values()) {
+        pending.reject(new Error('daemon stopping'));
+      }
+      live.pendingPermissions.clear();
+      live.controller?.abort();
     }
     for (const state of this.dirty) await this.persist(state).catch(() => {});
     this.dirty.clear();
@@ -1567,6 +1614,18 @@ export class SessionAgentOrchestrator {
     this.states.set(file.sessionId, state);
     const now = this.now();
     let changed = false;
+    const authorOf = (run: SessionAgentRun): SessionAgentAuthor => {
+      const agent = roster?.find((candidate) => candidate.id === run.agentId);
+      return agent
+        ? authorFor(
+            agent,
+            agent.execution?.mode === 'managed-host'
+              ? undefined
+              : LOCAL_SESSION_AGENT_RUNTIME_ID,
+            programForAgent(agent),
+          )
+        : { agentId: run.agentId, name: run.agentId };
+    };
     for (const run of file.runs) {
       if (isTerminalSessionAgentRunStatus(run.status)) {
         // A run cancelled while a Host ran it keeps its lease (finishRun).
@@ -1576,6 +1635,11 @@ export class SessionAgentOrchestrator {
           now - (run.endedAt ?? run.createdAt) <= CANCELLED_LEASE_TTL_MS
         ) {
           this.rememberCancelledLease(file.sessionId, run);
+        }
+        if (run.recorded === false && !this.settled.has(run.id)) {
+          if (this.adoptUnrecorded(file, run, authorOf(run), now)) {
+            changed = true;
+          }
         }
         continue;
       }
@@ -1601,22 +1665,17 @@ export class SessionAgentOrchestrator {
       run.status = 'failed';
       run.error = SESSION_AGENT_RESTARTED_ERROR;
       run.endedAt = now;
+      // No record: a further restart still offers it (see adoptUnrecorded).
+      run.recorded = false;
       delete run.lease;
       changed = true;
-      const author: SessionAgentAuthor = agent
-        ? authorFor(
-            agent,
-            remoteAgent ? undefined : LOCAL_SESSION_AGENT_RUNTIME_ID,
-            programForAgent(agent),
-          )
-        : { agentId: run.agentId, name: run.agentId };
       this.addSettled(run.id, {
         sessionId: file.sessionId,
         frame: {
           type: 'run',
           sessionId: file.sessionId,
           runId: run.id,
-          author,
+          author: authorOf(run),
           status: 'failed',
           error: SESSION_AGENT_RESTARTED_ERROR,
           activityAt: now,
@@ -1629,6 +1688,51 @@ export class SessionAgentOrchestrator {
     if (this.settleEngagements(state)) changed = true;
     if (changed) void this.persist(state).catch(() => {});
     return state;
+  }
+
+  /**
+   * A run a previous daemon finished whose record is not known to have
+   * landed (`recorded: false`): offered for retry (`retryable`), while the
+   * transcript is checked for the record. A cancelled or already retried
+   * one is let go. Returns whether `run` changed.
+   */
+  private adoptUnrecorded(
+    file: SessionAgentsFile,
+    run: SessionAgentRun,
+    author: SessionAgentAuthor,
+    now: number,
+  ): boolean {
+    if (
+      run.status === 'cancelled' ||
+      file.runs.some((candidate) => candidate.retryOf === run.id)
+    ) {
+      delete run.recorded;
+      return true;
+    }
+    // A run a restart failed, or one that went offline, never wrote a
+    // record: there is nothing to look for.
+    const wroteRecord =
+      run.status !== 'offline' && run.error !== SESSION_AGENT_RESTARTED_ERROR;
+    this.addSettled(run.id, {
+      sessionId: file.sessionId,
+      frame: {
+        type: 'run',
+        sessionId: file.sessionId,
+        runId: run.id,
+        author,
+        status: run.status,
+        error: run.error ?? SESSION_AGENT_REPLY_NOT_RECORDED_ERROR,
+        ...(run.totalTokens !== undefined
+          ? { totalTokens: run.totalTokens }
+          : {}),
+        activityAt: run.endedAt ?? now,
+        recorded: false,
+        retryable: true,
+      },
+      ...(wroteRecord ? { recovered: true as const } : {}),
+    });
+    if (wroteRecord) this.watchRecord(run.id);
+    return false;
   }
 
   private async recoverOnStartup(): Promise<void> {
@@ -1645,13 +1749,15 @@ export class SessionAgentOrchestrator {
         );
         continue;
       }
-      // Nothing to adopt: no live run, and no remote run cancelled while
-      // its Host ran it (whose Host must still be told).
+      // Nothing to adopt: no live run, no remote run cancelled while its
+      // Host ran it (whose Host must still be told), and no finished run
+      // whose record is pending (offered for retry).
       if (
         file.runs.every(
           (run) =>
             isTerminalSessionAgentRunStatus(run.status) &&
-            !(run.status === 'cancelled' && run.lease),
+            !(run.status === 'cancelled' && run.lease) &&
+            run.recorded !== false,
         )
       ) {
         continue;
@@ -1937,6 +2043,12 @@ export class SessionAgentOrchestrator {
     } else if (live.abortReason === 'cancelled') {
       outcome = { ...outcome, status: 'cancelled' };
       delete outcome.error;
+    } else if (live.abortReason === 'shutdown') {
+      outcome = {
+        ...outcome,
+        status: 'failed',
+        error: SESSION_AGENT_RESTARTED_ERROR,
+      };
     }
     await live.sendChain;
     await this.finishRun(state, live, outcome);
@@ -1961,6 +2073,17 @@ export class SessionAgentOrchestrator {
     event: AgentAdapterEvent,
   ): void {
     if (isTerminalSessionAgentRunStatus(live.run.status)) return;
+    // Stopping: the turn is winding down. Nothing it still reports may
+    // revive the run; a late permission request is refused by the adapter
+    // (`awaitPermission` rejects) and never shown. Only its token count and
+    // native session id are kept.
+    if (
+      live.abortReason &&
+      event.type !== 'usage' &&
+      event.type !== 'native_session'
+    ) {
+      return;
+    }
     const frame = live.frame;
     frame.activityAt = this.now();
     switch (event.type) {
@@ -2044,7 +2167,7 @@ export class SessionAgentOrchestrator {
     live: LiveRun,
     text: string,
   ): Promise<void> {
-    if (text.trim().length === 0) return;
+    if (isBlankAgentText(text)) return;
     const roster = await this.readAgents(this.workspaceCwd);
     const targets = resolveMentionTargetsWithSquads(
       text,
@@ -2201,6 +2324,12 @@ export class SessionAgentOrchestrator {
       pending.reject(new Error('cancelled'));
     }
     live.pendingPermissions.clear();
+    // The card stops asking at once; the run ends when its turn winds down.
+    if (live.frame.permission || run.status === 'awaiting_approval') {
+      delete live.frame.permission;
+      run.status = 'running';
+      this.publish(live);
+    }
     live.controller?.abort();
   }
 
@@ -2225,11 +2354,19 @@ export class SessionAgentOrchestrator {
     }
     live.pendingPermissions.clear();
 
-    const displayText = outcome.outputText.trim()
+    const replyText = !isBlankAgentText(outcome.outputText)
       ? outcome.outputText
       : outcome.status === 'completed'
         ? ''
         : (live.frame.outputText ?? '');
+    // Only whitespace or invisible characters (a leader's U+200B) is no
+    // reply: a squad leader's `no_action`, never a blank message.
+    const displayText = isBlankAgentText(replyText) ? '' : replyText;
+    // A remote run whose Host went away, or a local one the daemon stopped
+    // with: no record yet. It is offered for retry like a run a restart cut
+    // short; dismissing it lets it go.
+    const retryable =
+      outcome.status === 'offline' || live.abortReason === 'shutdown';
     const nativeSessionId = outcome.nativeSessionId ?? live.nativeSessionId;
     const totalTokens = outcome.totalTokens ?? live.totalTokens;
 
@@ -2368,34 +2505,36 @@ export class SessionAgentOrchestrator {
       payload,
     };
     let watch = false;
-    try {
-      const written = await this.appendRecord(state.sessionId, request);
-      recordId = triggerIdFor(written, recordKey);
-      if (written.deferred || !written.recordId) {
-        watch = true;
-        if (displayText.trim()) {
-          this.addPendingPost({
-            sessionId: state.sessionId,
-            id: recordId,
-            kind: 'agent_message',
-            speaker: `${live.author.name} (agent)`,
-            text: displayText,
-            authorAgentId: run.agentId,
-            runId: run.id,
-            createdAt: this.now(),
-          });
+    if (!retryable) {
+      try {
+        const written = await this.appendRecord(state.sessionId, request);
+        recordId = triggerIdFor(written, recordKey);
+        if (written.deferred || !written.recordId) {
+          watch = true;
+          if (displayText.trim()) {
+            this.addPendingPost({
+              sessionId: state.sessionId,
+              id: recordId,
+              kind: 'agent_message',
+              speaker: `${live.author.name} (agent)`,
+              text: displayText,
+              authorAgentId: run.agentId,
+              runId: run.id,
+              createdAt: this.now(),
+            });
+          }
+        } else {
+          landedRecordId = written.recordId;
         }
-      } else {
-        landedRecordId = written.recordId;
+      } catch (writeError) {
+        const refusal = recordWriteError(writeError);
+        error = `Could not record the reply: ${refusal.message}`;
+        followUps = [];
+        squadFollowUps = [];
+        // A managed session refuses every write; anything else is retried by
+        // the record watcher, which also reports when it lands.
+        watch = refusal.code !== 'managed_session_unsupported';
       }
-    } catch (writeError) {
-      const refusal = recordWriteError(writeError);
-      error = `Could not record the reply: ${refusal.message}`;
-      followUps = [];
-      squadFollowUps = [];
-      // A managed session refuses every write; anything else is retried by
-      // the record watcher, which also reports when it lands.
-      watch = refusal.code !== 'managed_session_unsupported';
     }
     const nextDepth = nextChainDepth({
       kind: 'agent',
@@ -2437,6 +2576,9 @@ export class SessionAgentOrchestrator {
     state.file.bindings[run.agentId] = binding;
     if (error) run.error = error;
     else delete run.error;
+    if (landedRecordId) run.recorded = true;
+    else if (watch || retryable) run.recorded = false;
+    else delete run.recorded;
     if (totalTokens !== undefined) {
       run.totalTokens = totalTokens;
       state.file.chainTokens = (state.file.chainTokens ?? 0) + totalTokens;
@@ -2452,13 +2594,19 @@ export class SessionAgentOrchestrator {
     if (landedRecordId) {
       live.frame.recorded = true;
       live.frame.recordId = landedRecordId;
-    } else if (watch) {
+    } else if (watch || retryable) {
       live.frame.recorded = false;
     }
+    if (retryable) live.frame.retryable = true;
     this.publish(live);
     this.hub.forgetRun(state.sessionId, run.id);
     this.live.delete(run.id);
-    if (watch) {
+    if (retryable) {
+      this.addSettled(run.id, {
+        sessionId: state.sessionId,
+        frame: this.buildFrame(live),
+      });
+    } else if (watch) {
       this.addSettled(run.id, {
         sessionId: state.sessionId,
         frame: this.buildFrame(live),
@@ -2762,35 +2910,42 @@ export class SessionAgentOrchestrator {
    */
   private watchRecord(runId: string): void {
     const settled = this.settled.get(runId);
-    if (!settled?.request) return;
-    const request = settled.request;
+    const request = settled?.request;
+    if (!settled || (!request && !settled.recovered)) return;
     const { sessionId } = settled;
     const startedAt = this.now();
+    const maxMs = request ? RECORD_WATCH_MAX_MS : RECORD_RECOVERY_WATCH_MAX_MS;
     let delayMs = this.recordWatchMs;
     const check = async (): Promise<void> => {
       settled.timer = undefined;
       if (this.stopped || this.settled.get(runId) !== settled) return;
       let recordId: string | undefined;
-      try {
-        const response = await this.bridge.appendExternalRecord(
-          sessionId,
-          request,
+      if (!request) {
+        recordId = await this.findAgentMessageRecord(sessionId, runId).catch(
+          () => undefined,
         );
-        if (!response.deferred && response.recordId) {
-          recordId = response.recordId;
-        }
-      } catch (error) {
-        if (error instanceof SessionNotFoundError) {
-          try {
-            recordId = await this.findAgentMessageRecord(sessionId, runId);
-            if (!recordId) {
-              const response = await this.appendRecord(sessionId, request);
-              if (!response.deferred && response.recordId) {
-                recordId = response.recordId;
+      } else {
+        try {
+          const response = await this.bridge.appendExternalRecord(
+            sessionId,
+            request,
+          );
+          if (!response.deferred && response.recordId) {
+            recordId = response.recordId;
+          }
+        } catch (error) {
+          if (error instanceof SessionNotFoundError) {
+            try {
+              recordId = await this.findAgentMessageRecord(sessionId, runId);
+              if (!recordId) {
+                const response = await this.appendRecord(sessionId, request);
+                if (!response.deferred && response.recordId) {
+                  recordId = response.recordId;
+                }
               }
+            } catch {
+              // Retried on the next check.
             }
-          } catch {
-            // Retried on the next check.
           }
         }
       }
@@ -2802,18 +2957,20 @@ export class SessionAgentOrchestrator {
           recorded: true,
           recordId,
         };
+        delete frame.retryable;
         if (settled.recordedError) frame.error = settled.recordedError;
         else delete frame.error;
         this.hub.publish(frame);
         this.hub.forgetRun(sessionId, runId);
+        this.markRecorded(sessionId, runId);
         if (settled.wakes) this.wakeLeaders(sessionId, settled.wakes, recordId);
         return;
       }
-      if (this.now() - startedAt >= RECORD_WATCH_MAX_MS) {
+      if (this.now() - startedAt >= maxMs) {
         // Given up: the leaders it owed a wake still get the reply, and why
         // it is not recorded, so they can decide.
         const wakes = settled.wakes;
-        if (wakes && request.kind === 'agent_message') {
+        if (wakes && request?.kind === 'agent_message') {
           delete settled.wakes;
           const trigger = this.addUnrecordedReply(
             sessionId,
@@ -2834,6 +2991,15 @@ export class SessionAgentOrchestrator {
       settled.timer.unref?.();
     };
     schedule();
+  }
+
+  /** Persists that run `runId`'s record is in the transcript. */
+  private markRecorded(sessionId: string, runId: string): void {
+    const state = this.states.get(sessionId);
+    const run = state?.file.runs.find((candidate) => candidate.id === runId);
+    if (!state || !run || run.recorded === true) return;
+    run.recorded = true;
+    void this.persist(state).catch(() => {});
   }
 
   /** uuid of run `runId`'s `agent_message` record in the transcript. */

@@ -33,7 +33,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import type { DaemonMessageAuthor } from '../../adapters/messageTypes';
 import { AuthorAvatar } from './AuthorAvatar';
-import { AgentMessageDetails } from './agent-message-details';
+import { AgentMessageDetails, isBlankAgentText } from './agent-message-details';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import flashStyles from '../MessageLocateFlash.module.css';
@@ -83,8 +83,16 @@ export const AssistantMessage = memo(function AssistantMessage({
   const { renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, flashCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
+  // An agent reply of only whitespace or invisible characters (a leader's
+  // U+200B, recorded before the daemon classified it) shows no bubble text;
+  // a squad leader's such reply is its `no_action` line.
+  const blankAgentReply =
+    agentMessage?.kind === 'agent_message' &&
+    !isStreaming &&
+    isBlankAgentText(content);
   const showFooter =
     !!content &&
+    !blankAgentReply &&
     !isStreaming &&
     (showFooterActions || (turnSources?.length ?? 0) > 0) &&
     !documentMode;
@@ -149,7 +157,10 @@ export const AssistantMessage = memo(function AssistantMessage({
       : undefined;
   if (
     agentMessage?.kind === 'agent_message' &&
-    agentMessage.squadOutcome === 'no_action'
+    (agentMessage.squadOutcome === 'no_action' ||
+      (blankAgentReply &&
+        !!squadName &&
+        (agentMessage.status ?? 'completed') === 'completed'))
   ) {
     // A squad leader that decided nothing was needed: one muted line, not a
     // message. The label is in the main dictionary so exported transcripts
@@ -183,7 +194,7 @@ export const AssistantMessage = memo(function AssistantMessage({
           )}
         </div>
       )}
-      {content && (
+      {content && !blankAgentReply && (
         <div
           className={`${styles.content}${
             isLocateFlashing ? ` ${flashStyles.flash}` : ''

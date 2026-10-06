@@ -115,6 +115,20 @@ describe('session agents binding store', () => {
     ).rejects.toThrow(/Malformed/);
   });
 
+  it("round-trips a run's record state and refuses a malformed one", async () => {
+    await updateSessionAgents(projectRoot, SESSION, (file) => {
+      file.runs.push(run('sr_1', 'failed', { recorded: false }));
+    });
+    expect(
+      (await readSessionAgents(projectRoot, SESSION)).runs[0],
+    ).toMatchObject({ id: 'sr_1', recorded: false });
+    await expect(
+      updateSessionAgents(projectRoot, SESSION, (file) => {
+        file.runs[0]!.recorded = 'no' as never;
+      }),
+    ).rejects.toThrow(/Malformed/);
+  });
+
   it('writes the file with mode 0600', async () => {
     if (process.platform === 'win32') return;
     await updateSessionAgents(projectRoot, SESSION, () => {});

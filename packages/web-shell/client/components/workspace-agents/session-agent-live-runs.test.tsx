@@ -174,13 +174,17 @@ describe('approval input preview', () => {
   });
 });
 
-it('offers retry only on a failed or offline run the daemon marked retryable', () => {
+it('offers retry only on a finished run the daemon marked retryable', () => {
   expect(canRetryRun(run({ status: 'failed', retryable: true }))).toBe(true);
   expect(canRetryRun(run({ status: 'offline', retryable: true }))).toBe(true);
+  // Finished before a restart, its record lost.
+  expect(canRetryRun(run({ status: 'completed', retryable: true }))).toBe(true);
   expect(canRetryRun(run({ status: 'failed' }))).toBe(false);
-  expect(canRetryRun(run({ status: 'completed', retryable: true }))).toBe(
+  expect(canRetryRun(run({ status: 'offline' }))).toBe(false);
+  expect(canRetryRun(run({ status: 'cancelled', retryable: true }))).toBe(
     false,
   );
+  expect(canRetryRun(run({ status: 'running', retryable: true }))).toBe(false);
 });
 
 describe('SessionAgentLiveRuns', () => {
@@ -297,6 +301,36 @@ describe('SessionAgentLiveRuns', () => {
     expect(dismiss[0]?.textContent).toBe('Dismiss');
     act(() => (retry[0] as HTMLButtonElement).click());
     expect(onRetry).toHaveBeenCalledWith('r1');
+  });
+
+  it('offers Retry and Dismiss on a retryable offline run', () => {
+    const onRetry = vi.fn().mockResolvedValue(undefined);
+    const { node } = render(
+      [
+        run({
+          status: 'offline',
+          recorded: false,
+          retryable: true,
+          error: 'runtime went offline',
+        }),
+      ],
+      { onRetry },
+    );
+    expect(node.textContent).toContain("reviewer's runtime is offline");
+    expect(
+      node.querySelector('[data-testid="session-agent-retry"]'),
+    ).not.toBeNull();
+    expect(
+      node.querySelector('[data-testid="session-agent-dismiss"]'),
+    ).not.toBeNull();
+  });
+
+  it('shows no reply text for output of only invisible characters', () => {
+    const { node } = render([
+      run({ status: 'running', outputText: '\u200B\u200B' }),
+    ]);
+    expect(node.textContent).not.toContain('\u200B');
+    expect(node.textContent).toContain('reviewer');
   });
 
   it('dismisses a retryable run through the cancel route', async () => {

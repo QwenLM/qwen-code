@@ -29,6 +29,13 @@
  * then resolves the post to the agent's CURRENT live run. The turn input's
  * per-run `sessionSendServer` is not used here.
  *
+ * Stop: `sendPrompt` resolves only when the turn ends, so the run's signal
+ * is handed to it (the bridge then forwards the cancel to the child) and
+ * raced against it. On abort the adapter cancels the session, refuses every
+ * permission request still open or arriving later (an unanswered request
+ * would keep the native turn from winding down), and waits a bounded time
+ * for the turn's terminal before it reports `cancelled`.
+ *
  * Hidden sessions are closed after {@link QWEN_AGENT_SESSION_IDLE_CLOSE_MS}
  * idle so they do not exhaust the bridge's `maxSessions`.
  */
@@ -53,6 +60,8 @@ import { AGENT_SESSION_SOURCE_TYPE } from '../../../runtime/agent-session-source
 /** Idle time after which a hidden agent session is closed. */
 export const QWEN_AGENT_SESSION_IDLE_CLOSE_MS = 10 * 60_000;
 const TURN_POLL_MS = 250;
+/** How long a stopped turn is given to reach its terminal. */
+export const QWEN_AGENT_CANCEL_SETTLE_MS = 5_000;
 const MAX_INPUT_PREVIEW_CHARS = 2_000;
 const MAX_STEP_TITLE_CHARS = 200;
 
@@ -85,6 +94,8 @@ export interface QwenAcpAdapterOptions {
     requestId: string,
   ) => BridgeClientRequestContext | undefined;
   idleCloseMs?: number;
+  /** See {@link QWEN_AGENT_CANCEL_SETTLE_MS}. */
+  cancelSettleMs?: number;
   /** See the file header. Absent means the session gets no `session_send`. */
   sessionSend?: QwenSessionSendBinding;
   /** Test seam. */
@@ -218,6 +229,7 @@ export function createQwenAcpAdapter(
 ): AgentAdapter {
   const { bridge, workspaceCwd, agentId } = options;
   const idleCloseMs = options.idleCloseMs ?? QWEN_AGENT_SESSION_IDLE_CLOSE_MS;
+  const cancelSettleMs = options.cancelSettleMs ?? QWEN_AGENT_CANCEL_SETTLE_MS;
   const sessions = new SessionService(workspaceCwd);
   const sessionExists =
     options.sessionExists ??
@@ -327,6 +339,24 @@ export function createQwenAcpAdapter(
       let segmentText = '';
       const steps = new Map<string, SessionAgentStep>();
 
+      /**
+       * Answers a permission request the run no longer waits on (stopped, or
+       * ended) with ACP's `cancelled` outcome, which the bridge accepts
+       * whatever the permission policy.
+       */
+      const withdrawPermission = (requestId: string) => {
+        try {
+          bridge.respondToSessionPermission(
+            sessionId,
+            requestId,
+            { outcome: { outcome: 'cancelled' } },
+            options.permissionVoteContext?.(requestId),
+          );
+        } catch {
+          // Already resolved, or the session is gone.
+        }
+      };
+
       const follow = (async () => {
         for await (const event of bridge.subscribeEvents(sessionId, {
           signal: streamController.signal,
@@ -337,14 +367,26 @@ export function createQwenAcpAdapter(
               event.data as Parameters<typeof toPermissionPrompt>[0],
             );
             if (!prompt) continue;
+            // The turn is winding down after a stop: refuse it unannounced.
+            if (input.signal.aborted) {
+              withdrawPermission(prompt.requestId);
+              continue;
+            }
             input.onEvent({ type: 'permission_request', prompt });
             void (async () => {
               // Until the bridge accepts a vote: a refused one (policy,
               // unknown option) re-arms `awaitPermission` so the person can
               // answer again instead of the run hanging on a dead prompt.
-              // `awaitPermission` rejects when the run ends, which exits.
+              // `awaitPermission` rejects when the run is stopped or ends:
+              // the request is then refused, so the turn can wind down.
               for (;;) {
-                const optionId = await input.awaitPermission(prompt);
+                let optionId: string;
+                try {
+                  optionId = await input.awaitPermission(prompt);
+                } catch {
+                  withdrawPermission(prompt.requestId);
+                  return;
+                }
                 let accepted = false;
                 try {
                   accepted = bridge.respondToSessionPermission(
@@ -357,7 +399,10 @@ export function createQwenAcpAdapter(
                   accepted = false;
                 }
                 if (accepted) return;
-                if (input.signal.aborted) return;
+                if (input.signal.aborted) {
+                  withdrawPermission(prompt.requestId);
+                  return;
+                }
               }
             })().catch(() => {});
             continue;
@@ -412,8 +457,33 @@ export function createQwenAcpAdapter(
         // getSessionTurnStatus below.
       });
 
+      const isTurnOver = (
+        status: Awaited<
+          ReturnType<QwenAcpAdapterBridge['getSessionTurnStatus']>
+        >,
+      ) =>
+        !status ||
+        status.promptId !== promptId ||
+        status.state === 'completed' ||
+        status.state === 'cancelled' ||
+        status.state === 'error';
+
       const cancel = async (): Promise<AgentAdapterTurnResult> => {
-        await bridge.cancelSession(sessionId).catch(() => {});
+        // Bounded: a child that never acknowledges must not hold the run.
+        const deadline = Date.now() + cancelSettleMs;
+        await Promise.race([
+          bridge.cancelSession(sessionId).catch(() => {}),
+          delay(cancelSettleMs, undefined, { ref: false }),
+        ]);
+        // Wait for the turn's terminal, so nothing it emits on the way down
+        // (a late permission request is refused above) outlives the run.
+        while (Date.now() < deadline) {
+          const status = await bridge
+            .getSessionTurnStatus(sessionId, undefined, promptId)
+            .catch(() => undefined);
+          if (isTurnOver(status)) break;
+          await delay(TURN_POLL_MS);
+        }
         return {
           status: 'cancelled',
           outputText: segmentText.trim() ? segmentText : fullText,
@@ -426,7 +496,15 @@ export function createQwenAcpAdapter(
         if (input.signal.aborted) {
           result = await cancel();
         } else {
-          await bridge.sendPrompt(
+          // The bridge settles `sendPrompt` only when the turn ends: hand it
+          // the stop signal (it forwards the cancel to the child) and stop
+          // waiting on it as soon as the run is stopped.
+          const stopped = new Promise<'stopped'>((resolve) => {
+            input.signal.addEventListener('abort', () => resolve('stopped'), {
+              once: true,
+            });
+          });
+          const sent = bridge.sendPrompt(
             sessionId,
             {
               sessionId,
@@ -444,12 +522,16 @@ export function createQwenAcpAdapter(
                 },
               ],
             } as Parameters<QwenAcpAdapterBridge['sendPrompt']>[1],
-            undefined,
+            input.signal,
             { promptId },
           );
+          const first = await Promise.race([
+            sent.then(() => 'sent' as const),
+            stopped,
+          ]);
           result = await (async (): Promise<AgentAdapterTurnResult> => {
             for (;;) {
-              if (input.signal.aborted) return cancel();
+              if (first === 'stopped' || input.signal.aborted) return cancel();
               const status = await bridge.getSessionTurnStatus(
                 sessionId,
                 undefined,
@@ -491,12 +573,15 @@ export function createQwenAcpAdapter(
           })();
         }
       } catch (error) {
-        result = {
-          status: 'failed',
-          outputText: fullText,
-          error: getErrorMessage(error),
-          nativeSessionId: sessionId,
-        };
+        // A stopped turn's `sendPrompt` rejects (AbortError): still cancel.
+        result = input.signal.aborted
+          ? await cancel()
+          : {
+              status: 'failed',
+              outputText: fullText,
+              error: getErrorMessage(error),
+              nativeSessionId: sessionId,
+            };
       } finally {
         streamController.abort();
         await follow;

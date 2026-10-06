@@ -1,0 +1,209 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it, vi } from 'vitest';
+import type {
+  AgentAdapterEvent,
+  SessionAgentPermissionPrompt,
+} from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
+import { AGENT_SESSION_SOURCE_TYPE } from '../../../runtime/agent-session-source.js';
+import { createQwenAcpAdapter, type QwenAcpAdapterBridge } from './qwen-acp.js';
+
+const WS = '/ws';
+const AGENT_ID = 'ag_alice';
+const SESSION_ID = 'agent-session-1';
+
+/** A session event stream the test feeds by hand. */
+function eventFeed() {
+  const queue: unknown[] = [];
+  let wake: (() => void) | undefined;
+  return {
+    push(event: unknown) {
+      queue.push(event);
+      wake?.();
+    },
+    async *subscribeEvents(_sessionId: string, opts: { signal: AbortSignal }) {
+      while (!opts.signal.aborted) {
+        if (queue.length > 0) {
+          yield queue.shift();
+          continue;
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          opts.signal.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+        wake = undefined;
+      }
+    },
+  };
+}
+
+/**
+ * A bridge whose turn keeps "thinking": `sendPrompt` never settles on its
+ * own (it settles only when the turn ends) and the turn stays `running`
+ * until the test ends it.
+ */
+function thinkingBridge() {
+  const feed = eventFeed();
+  const turn: { promptId?: string; state: 'running' | 'cancelled' } = {
+    state: 'running',
+  };
+  const bridge = {
+    listWorkspaceSessions: vi.fn(() => [
+      {
+        sessionId: SESSION_ID,
+        sourceType: AGENT_SESSION_SOURCE_TYPE,
+        sourceId: AGENT_ID,
+        hasActivePrompt: true,
+      },
+    ]),
+    spawnOrAttach: vi.fn(),
+    resumeSession: vi.fn(),
+    closeSession: vi.fn(async () => {}),
+    subscribeEvents: vi.fn(feed.subscribeEvents),
+    sendPrompt: vi.fn(
+      (
+        _sessionId: string,
+        _req: unknown,
+        _signal: AbortSignal | undefined,
+        context: { promptId?: string } | undefined,
+      ) => {
+        turn.promptId = context?.promptId;
+        return new Promise<never>(() => {});
+      },
+    ),
+    cancelSession: vi.fn(async () => {}),
+    getSessionTurnStatus: vi.fn(async () =>
+      turn.promptId
+        ? { sessionId: SESSION_ID, promptId: turn.promptId, state: turn.state }
+        : undefined,
+    ),
+    respondToSessionPermission: vi.fn(() => true),
+    getSessionStatsStatus: vi.fn(async () => {
+      throw new Error('no stats');
+    }),
+  };
+  const permissionEvent = (requestId: string) => ({
+    type: 'permission_request',
+    promptId: turn.promptId,
+    data: {
+      requestId,
+      toolCall: { title: 'Run marker', kind: 'execute' },
+      options: [
+        { optionId: 'yes', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'no', name: 'Reject', kind: 'reject_once' },
+      ],
+    },
+  });
+  return { bridge, feed, turn, permissionEvent };
+}
+
+describe('createQwenAcpAdapter', () => {
+  it('cancels the native turn when the run is stopped, and refuses its permission requests', async () => {
+    const { bridge, feed, turn, permissionEvent } = thinkingBridge();
+    const adapter = createQwenAcpAdapter({
+      bridge: bridge as unknown as QwenAcpAdapterBridge,
+      workspaceCwd: WS,
+      agentId: AGENT_ID,
+      idleCloseMs: 60_000,
+      sessionExists: async () => true,
+    });
+    const controller = new AbortController();
+    const events: AgentAdapterEvent[] = [];
+    const asked: string[] = [];
+    // Like the orchestrator: an open question is rejected when the run stops.
+    const awaitPermission = (prompt: SessionAgentPermissionPrompt) =>
+      new Promise<string>((_resolve, reject) => {
+        asked.push(prompt.requestId);
+        controller.signal.addEventListener(
+          'abort',
+          () => reject(new Error('cancelled')),
+          { once: true },
+        );
+      });
+    const result = adapter.runTurn({
+      prompt: 'think hard',
+      nativeSessionId: SESSION_ID,
+      cwd: WS,
+      signal: controller.signal,
+      onEvent: (event) => events.push(event),
+      awaitPermission,
+    });
+
+    await vi.waitFor(() => expect(turn.promptId).toBeDefined());
+    // The stop signal reaches the bridge with the prompt.
+    expect(bridge.sendPrompt.mock.calls[0]![2]).toBe(controller.signal);
+    feed.push(permissionEvent('p1'));
+    await vi.waitFor(() => expect(asked).toEqual(['p1']));
+
+    controller.abort();
+    await vi.waitFor(() =>
+      expect(bridge.cancelSession).toHaveBeenCalledWith(SESSION_ID),
+    );
+    // The open question is answered `cancelled`, so the turn can wind down.
+    await vi.waitFor(() =>
+      expect(bridge.respondToSessionPermission).toHaveBeenCalledWith(
+        SESSION_ID,
+        'p1',
+        { outcome: { outcome: 'cancelled' } },
+        undefined,
+      ),
+    );
+
+    // Winding down, the turn asks again: refused, never shown.
+    feed.push(permissionEvent('p2'));
+    await vi.waitFor(() =>
+      expect(bridge.respondToSessionPermission).toHaveBeenCalledWith(
+        SESSION_ID,
+        'p2',
+        { outcome: { outcome: 'cancelled' } },
+        undefined,
+      ),
+    );
+    expect(asked).toEqual(['p1']);
+    expect(
+      events.flatMap((event) =>
+        event.type === 'permission_request' ? [event.prompt.requestId] : [],
+      ),
+    ).toEqual(['p1']);
+
+    turn.state = 'cancelled';
+    await expect(result).resolves.toMatchObject({
+      status: 'cancelled',
+      nativeSessionId: SESSION_ID,
+    });
+    // The pending `sendPrompt` never settled: the adapter stopped waiting.
+    expect(bridge.cancelSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports cancelled when the turn does not settle in time after a stop', async () => {
+    const { bridge, turn } = thinkingBridge();
+    const adapter = createQwenAcpAdapter({
+      bridge: bridge as unknown as QwenAcpAdapterBridge,
+      workspaceCwd: WS,
+      agentId: AGENT_ID,
+      idleCloseMs: 60_000,
+      cancelSettleMs: 300,
+      sessionExists: async () => true,
+    });
+    const controller = new AbortController();
+    const result = adapter.runTurn({
+      prompt: 'think hard',
+      nativeSessionId: SESSION_ID,
+      cwd: WS,
+      signal: controller.signal,
+      onEvent: () => {},
+      awaitPermission: () => new Promise<string>(() => {}),
+    });
+    await vi.waitFor(() => expect(turn.promptId).toBeDefined());
+    controller.abort();
+    // The turn never reaches its terminal; the run still ends.
+    await expect(result).resolves.toMatchObject({ status: 'cancelled' });
+    expect(bridge.cancelSession).toHaveBeenCalledWith(SESSION_ID);
+  });
+});

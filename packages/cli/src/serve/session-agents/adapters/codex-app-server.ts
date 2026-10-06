@@ -18,6 +18,13 @@
  * a user config of `never` cannot skip the question (Multica
  * execenv/codex_sandbox.go explains how `never` bypasses the approver).
  *
+ * Approval contract (product decision, acceptance row 2.5): the thread runs
+ * in codex's `read-only` sandbox. Every file change, and every command that
+ * needs to leave that sandbox (a write, network, an escalation), asks the
+ * person in the session. Read-only commands that the sandbox allows (`ls`,
+ * `cat`, `rg`, ...) run without asking; that is codex's `on-request`
+ * behaviour, not every command asking.
+ *
  * There are no text deltas: each finished `agentMessage` is emitted whole.
  */
 
@@ -866,14 +873,17 @@ export function createCodexAppServerAdapter(
             model: input.model ?? null,
             cwd: input.cwd,
             approvalPolicy: 'on-request',
-            // Pinned to read-only so every write or command the agent wants
-            // must be escalated and therefore asks the person in the session
-            // (plan §8-1). Under `workspace-write`, `on-request` lets writes
+            // Pinned to read-only (plan §8-1; the contract in the file
+            // header): every write, and every command that must leave the
+            // read-only sandbox, is escalated and asks the person in the
+            // session; read-only commands inside the sandbox run without
+            // asking. Under `workspace-write`, `on-request` would let writes
             // inside the workspace through without asking.
-            // TODO(multi-agent): verify against real codex CLI — that
-            // `read-only` + `on-request` turns file changes and commands into
-            // approval requests, and whether a resumed thread keeps this
-            // policy (thread/resume does not resend it).
+            // Observed with codex 0.155.1 (acceptance 2.5): `ls` ran without
+            // a prompt; apply_patch asked, and allow / reject were honoured.
+            // TODO(multi-agent): verify against real codex CLI — whether a
+            // resumed thread keeps this policy (thread/resume does not
+            // resend it).
             sandbox: 'read-only',
             // TODO(multi-agent): verify against real codex CLI — that
             // `developerInstructions` carries the persona and persists with

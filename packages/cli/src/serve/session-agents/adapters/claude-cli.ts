@@ -17,6 +17,13 @@
  * request is relayed to the person through `awaitPermission`.
  * Because Claude does not run with bypass, Multica's root/sudo preflight
  * (`IS_SANDBOX=1`) does not apply.
+ *
+ * Approval contract: `--permission-mode default` asks for every edit and
+ * every Bash command unless the user's own Claude settings
+ * (`permissions.allow` in their settings.json, or the project's) already
+ * allow it; an allowed tool runs without a question in the session, as it
+ * would in their terminal. Read-only tools (Read, Grep, Glob) do not ask by
+ * default.
  */
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
