@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   isToolResultManifestChainLink,
   isToolResultManifestSuccessor,
@@ -475,6 +475,89 @@ describe('LocalShellStreamCapture', () => {
     expect(
       ordinals.reduce((length, entry) => length + entry.byteLength, 0),
     ).toBe(5 * 1024 * 1024);
+  });
+
+  it('flushes a healthy sibling at its own boundary when a revision arrives mid-flush', async () => {
+    // Round-17 P2: stderr's page flush is held mid-publish with its batch
+    // already spliced and its counters already advanced; a queue of
+    // further stderr bytes parks behind it; then stdout's own revision
+    // builds the manifest. The manifest's per-stream flush must run on
+    // stderr's own boundary chain — freezing the live digest/byte length
+    // against pages the held flush has not committed yet throws the
+    // manifest validator, latches storage_failed through no storage
+    // failure, and silently drops the queued tail.
+    const r = await rig({ segmentsPerPage: 1 });
+    await r.captured.open();
+    r.captured.setStarted(1);
+    const mib = (fill: number) => Buffer.alloc(1024 * 1024, fill);
+    r.holdFirstStderrPage();
+    const held = r.captured.write('stderr', mib(2));
+    await r.firstStderrPageSeen;
+    const queued = r.captured.write('stderr', mib(3));
+    const sibling = r.captured.write('stdout', mib(1));
+    // The sibling reaches its manifest build right after its own page
+    // lands; from there the cross-stream consult is pure microtasks, so
+    // one turn is every world it can take: the boundary chain parks it
+    // behind the held flush, while without it the empty-pending branch
+    // freezes live counters, the manifest validator throws and the
+    // capture latches storage_failed through no storage failure.
+    await vi.waitFor(() => {
+      expect(
+        r.pages.filter(
+          (page) =>
+            (JSON.parse(page.toString()) as { streamId: string }).streamId ===
+            'stdout',
+        ),
+      ).toHaveLength(1);
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    r.releaseFirstStderrPage();
+    await Promise.all([held, queued, sibling]);
+    // No latch and no drop: the sibling's revision froze stderr at its
+    // own completed boundary, and the queued segment got its own page.
+    expect(r.captured.brokenReason).toBeNull();
+    await r.captured.finish('stdout', true);
+    await r.captured.finish('stderr', true);
+    const final = await r.captured.finalize('success', [], undefined, {
+      exitCode: 0,
+      signalName: null,
+    });
+    expect(final.capture).toMatchObject({
+      captureStatus: 'complete',
+      captureReason: null,
+    });
+    const digest = (fill: number) =>
+      createHash('sha256').update(mib(fill)).digest('hex');
+    const stderrSegments = r.pages
+      .map(
+        (page) =>
+          JSON.parse(page.toString()) as {
+            streamId: string;
+            segments: Array<{ digest: string }>;
+          },
+      )
+      .filter((page) => page.streamId === 'stderr')
+      .flatMap((page) => page.segments.map((segment) => segment.digest));
+    expect(stderrSegments).toEqual([digest(2), digest(3)]);
+    expect(
+      r.segments.reduce(
+        (length, segment) => length + segment.bytes.byteLength,
+        0,
+      ),
+    ).toBe(3 * 1024 * 1024);
+    const settled = r.manifests.at(-1)!;
+    const stderr = (settled['contents'] as Array<Record<string, unknown>>).find(
+      (each) => each['streamId'] === 'stderr',
+    )!;
+    expect(stderr['byteLength']).toBe(2 * 1024 * 1024);
+    for (let index = 1; index < r.manifests.length; index++) {
+      expect(
+        isToolResultManifestSuccessor(
+          r.manifests[index - 1],
+          r.manifests[index],
+        ),
+      ).toBe(true);
+    }
   });
 
   it('succeeds the pending chain after a late storage failure', async () => {
