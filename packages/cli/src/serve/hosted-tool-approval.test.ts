@@ -43,17 +43,27 @@ describe('Hosted tool approval settings', () => {
   });
 
   it('asks before the tools each mode does not pre-approve', () => {
-    const asked = (mode: 'yolo' | 'default' | 'auto-edit') =>
-      ['read_file', 'write_file', 'edit', 'run_shell_command'].filter((tool) =>
-        hostedApprovalAsks({ mode, timeoutMs: 1_000 }, tool),
+    const asked = (mode: 'yolo' | 'default' | 'auto-edit', search = false) =>
+      ['read_file', 'write_file', 'edit', 'run_shell_command', 'glob'].filter(
+        (tool) => hostedApprovalAsks({ mode, timeoutMs: 1_000 }, tool, search),
       );
     expect(asked('yolo')).toEqual([]);
+    // `glob` is asked outside the `/2` search profiles, including for an
+    // MCP-declared tool of that name; only a search profile pre-approves it.
     expect(asked('default')).toEqual([
       'write_file',
       'edit',
       'run_shell_command',
+      'glob',
     ]);
-    expect(asked('auto-edit')).toEqual(['run_shell_command']);
+    expect(asked('default', true)).toEqual([
+      'write_file',
+      'edit',
+      'run_shell_command',
+    ]);
+    expect(asked('auto-edit')).toEqual(['run_shell_command', 'glob']);
+    expect(asked('auto-edit', true)).toEqual(['run_shell_command']);
+    expect(asked('yolo', true)).toEqual([]);
     for (const mode of ['default', 'auto-edit'] as const)
       expect(hostedApprovalAsks({ mode, timeoutMs: 1_000 }, 'new_tool')).toBe(
         true,

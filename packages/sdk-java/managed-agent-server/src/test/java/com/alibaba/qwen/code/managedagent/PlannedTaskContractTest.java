@@ -297,6 +297,13 @@ class PlannedTaskContractTest {
                     .as("%s declares the tenant filter refusal", operationId)
                     .isEqualTo("/components/responses/Forbidden");
         }
+        // H3 serves the events routes: no schema-level flip may demote them.
+        for (String operationId : List.of("listSessionTaskEvents",
+                "queryWebShellTaskEvents")) {
+            assertThat(CONTRACT.operation(operationId).status())
+                    .as("%s is served, not planned", operationId)
+                    .isNotEqualTo("planned");
+        }
     }
 
     @Test

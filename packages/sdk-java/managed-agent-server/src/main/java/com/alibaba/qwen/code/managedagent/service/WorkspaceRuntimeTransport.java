@@ -20,10 +20,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
-import java.nio.file.Path;
 import java.util.Map;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -62,7 +58,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         }
         Context context = context(lease, session, true);
         // Reject a missing directory before a new claim can strand storage ownership.
-        requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
+        WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
         ownership.claim(context.binding(), context.session());
         // Failure retains ownership: a missing response cannot prove the worker did nothing.
         try {
@@ -401,19 +397,6 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             throw WorkspaceExecutionStore.unavailable();
         }
         return new Context(binding, record, runtime);
-    }
-
-    private static void requireDirectory(String root, String cwdRelative) {
-        try {
-            Path base = Path.of(root);
-            Path directory = base.resolve(cwdRelative).normalize();
-            if (!directory.startsWith(base) || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
-                    || !directory.toRealPath().equals(directory)) {
-                throw WorkspaceExecutionStore.unavailable();
-            }
-        } catch (IOException error) {
-            throw WorkspaceExecutionStore.unavailable();
-        }
     }
 
     private static boolean managed(RuntimeSession session) {
