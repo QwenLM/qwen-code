@@ -39,6 +39,90 @@ function toolGroup(turnId: string, callId: string): Message {
 }
 
 describe('Managed approval presentation', () => {
+  it('uses the exact Action preview without parsing a truncated JSON prefix', () => {
+    const text = ' {"toolName":"write_file","input":{"content":"<b>😀';
+    const request = toManagedPermissionRequest(
+      { ...action, inputPreview: { text, truncated: true, byteLength: 9000 } },
+      [],
+    );
+    expect(request.content).toEqual([{ type: 'text', text }]);
+    expect(request.contentIsInput).toBe(true);
+    expect(request).not.toHaveProperty('rawInput');
+  });
+
+  it('renders the preview without invisible format characters', () => {
+    // U+202E RIGHT-TO-LEFT OVERRIDE would otherwise reach the card verbatim
+    // and reorder the command the approver reads.
+    const request = toManagedPermissionRequest(
+      {
+        ...action,
+        inputPreview: {
+          text: '{"command":"ls\u202egpj"}',
+          truncated: false,
+          byteLength: 21,
+        },
+      },
+      [],
+    );
+    expect(request.content).toEqual([
+      { type: 'text', text: '{"command":"ls\\u202egpj"}' },
+    ]);
+  });
+
+  it('prefers matched transcript arguments over the Action preview', () => {
+    const request = toManagedPermissionRequest(
+      {
+        ...action,
+        inputPreview: { text: 'fallback', truncated: false, byteLength: 8 },
+      },
+      [toolGroup('turn-2', 'call-1')],
+    );
+    expect(request.rawInput).toEqual({
+      file_path: 'notes.md',
+      content: 'turn-2',
+    });
+    expect(request.content).not.toEqual([{ type: 'text', text: 'fallback' }]);
+  });
+
+  it('keeps previews separate for different calls to the same tool', () => {
+    // Two rows for one tool with no Harness input, so the matching rule has to
+    // pick the row and the Action preview still supplies the rendered text.
+    const messages = managedEventsToMessages(
+      ['call-0', 'call-1'].map((toolCallId, index) => ({
+        id: 20 + index,
+        at: 20 + index,
+        type: 'tool_started' as const,
+        sessionId: 's1',
+        turnId: 'turn-2',
+        data: { itemId: `item_${index}`, toolCallId, toolName: 'write_file' },
+      })),
+      '[truncated]',
+    );
+    const requests = ['first', 'second'].map((text, index) =>
+      toManagedPermissionRequest(
+        {
+          ...action,
+          actionId: `approval-${index}`,
+          functionCallId: `call-${index}`,
+          inputPreview: { text, truncated: false, byteLength: text.length },
+        },
+        messages,
+      ),
+    );
+    expect(
+      requests.map(({ toolCallId, content }) => ({ toolCallId, content })),
+    ).toEqual([
+      {
+        toolCallId: 'turn-2:item_0',
+        content: [{ type: 'text', text: 'first' }],
+      },
+      {
+        toolCallId: 'turn-2:item_1',
+        content: [{ type: 'text', text: 'second' }],
+      },
+    ]);
+  });
+
   it('attaches the approval to its tool call in the Action Turn', () => {
     const messages = [
       toolGroup('turn-1', 'call-1'),
@@ -139,5 +223,36 @@ describe('Managed approval presentation', () => {
     expect(toManagedPermissionRequest(action, messages).title).toBe(
       'Write notes.md',
     );
+  });
+
+  it('ignores a call with the same ID in a later Turn', () => {
+    // Call IDs restart per Turn, so the later Turn's call must not win.
+    const messages = [
+      toolGroup('turn-2', 'call-1'),
+      toolGroup('turn-3', 'call-1'),
+    ];
+    expect(findManagedApprovalTool(messages, action)?.callId).toBe(
+      'turn-2:call-1',
+    );
+    const itemRows = managedEventsToMessages(
+      ['turn-2', 'turn-3'].map((turnId, index) => ({
+        id: 10 + index,
+        at: 10 + index,
+        type: 'tool_started' as const,
+        sessionId: 's1',
+        turnId,
+        data: {
+          itemId: `item_tool_${turnId}`,
+          toolCallId: 'call-1',
+          toolName: 'write_file',
+          input: { file_path: 'notes.md', content: turnId },
+        },
+      })),
+      '[truncated]',
+    );
+    expect(toManagedPermissionRequest(action, itemRows).rawInput).toEqual({
+      file_path: 'notes.md',
+      content: 'turn-2',
+    });
   });
 });

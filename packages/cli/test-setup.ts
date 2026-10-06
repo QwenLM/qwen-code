@@ -33,6 +33,13 @@ process.env['QWEN_CODE_MODELS_DEV'] = 'off';
 delete process.env['QWEN_REVIEW_SANDBOX'];
 delete process.env['SANDBOX_SET_UID_GID'];
 
+// QWEN_RUNTIME_DIR is the OPERATOR's runtime root, and it outranks
+// Storage.setRuntimeBaseDir (config/storage.ts:169). Exported on a developer
+// run, any test relying on that static override alone reads and writes the
+// ambient runtime root instead of its own temp dir. Deleting rather than
+// pinning: tests that want the variable set it in-body.
+delete process.env['QWEN_RUNTIME_DIR'];
+
 // Registration capacity is an OPERATOR daemon setting, and `createServeApp` /
 // `runQwenServe` read it straight from the ambient environment when no explicit
 // option or `daemonEnv` is supplied. A maintainer who exports the documented

@@ -7600,6 +7600,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           name: 'unsafe',
         }),
       ).rejects.toThrow('unavailable for SSH workspaces');
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSideTask, {
+          sessionId,
+          name: 'Side task',
+        }),
+      ).rejects.toMatchObject({
+        message: 'This operation is unavailable for SSH workspaces.',
+        errorKind: 'unsupported_operation',
+      });
       expect(relocateWorkingDirectory).not.toHaveBeenCalled();
       Object.assign(mockConfig, {
         getExecutionEnvironment: vi.fn().mockReturnValue({}),
