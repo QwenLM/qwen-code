@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.ManagedShellProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
@@ -19,10 +20,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
-import java.nio.file.Path;
 import java.util.Map;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -61,7 +58,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         }
         Context context = context(lease, session, true);
         // Reject a missing directory before a new claim can strand storage ownership.
-        requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
+        WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
         ownership.claim(context.binding(), context.session());
         // Failure retains ownership: a missing response cannot prove the worker did nothing.
         try {
@@ -308,16 +305,20 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> operation) {
-        if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)) {
+        if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)
+                || ManagedShellProtocol.isOperation(operation)) {
             if (!managed(session)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             if (ManagedHookProtocol.isOperation(operation)) {
                 ManagedHookProtocol.validateSession(session, operation);
+            } else if (ManagedShellProtocol.isOperation(operation)) {
+                ManagedShellProtocol.validateSession(session, operation);
             } else {
                 ManagedMcpProtocol.validateSession(session, operation);
             }
-            boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation);
+            boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation)
+                    || ManagedShellProtocol.isRecovery(operation);
             Context context = context(lease, session, !recovery);
             if (context.runtime().getState() != RuntimeBindingRecord.State.READY
                     && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {
@@ -396,19 +397,6 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             throw WorkspaceExecutionStore.unavailable();
         }
         return new Context(binding, record, runtime);
-    }
-
-    private static void requireDirectory(String root, String cwdRelative) {
-        try {
-            Path base = Path.of(root);
-            Path directory = base.resolve(cwdRelative).normalize();
-            if (!directory.startsWith(base) || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
-                    || !directory.toRealPath().equals(directory)) {
-                throw WorkspaceExecutionStore.unavailable();
-            }
-        } catch (IOException error) {
-            throw WorkspaceExecutionStore.unavailable();
-        }
     }
 
     private static boolean managed(RuntimeSession session) {
