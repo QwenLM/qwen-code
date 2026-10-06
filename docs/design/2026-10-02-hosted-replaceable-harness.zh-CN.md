@@ -254,6 +254,24 @@ continuation——expired/cancelled 保持瞬态（路由的可重试 409），
 而 decided 的等待只在 **drive** load 下经 durability-wait 自身的
 闸门推进，取消侧 load 绝不越过它（P1-2）。
 
+第九轮在真实栈上实测了这套分离，并收紧了其中两处读法（R9）：
+
+- 「欠着未付的 Runtime 工作」只看工作本身，不看 checkpoint 写的是
+  不是这一轮。checkpoint 写的是更早一轮、且那一轮的工具项全部
+  settled 并被消费时，对一个从没走到工具调用的被取消轮次没有任何
+  欠账——「第 1 轮已完成」正是这个形状。无工具 Session 按定义也
+  不可能欠 Runtime 工作，所以它的取消臂无条件结算：若用
+  授权状态去卡它（blocked 的恢复基座恰是有历史无工具 Session 的
+  常态），第一轮之后每一轮取消都会重新卡死。
+- plain cancel 的 coded 拒绝不是要重试的判决，而是要升级的信号：
+  存活的 plain-attach 协调上 `harness.cancel` 回答 409
+  `hosted_turn_recovery_required` 时，coordinator 就沿同一挂接
+  发出取消接管 load（`recoverManagedCancellation`）。线上
+  connector 的健康挂接捷径绝不能吞掉这次调用，否则 load 根本
+  出不了进程；load 若报告一个恢复的 Runtime 驻留，就经其
+  checkpoint 入场把它取消，纯结算的驻留不需要入场——两种情况
+  都由协调已经在跑的那条流落定结算（R9-P1-2）。
+
 抛出的错误保持瞬时，与今天完全一致。load 路由对 decline 回答新的
 409 code `hosted_turn_recovery_declined` 并带 `reason` 字段；在接管
 分支内部，`hosted_turn_recovery_required` 此后只为瞬态发出（路由上

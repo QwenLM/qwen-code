@@ -565,22 +565,20 @@ async function settleCancelledHarnessTurn(
 // work it could still owe: no checkpoint yet, a bootstrap checkpoint that
 // still names no Turn, every tool item settled and consumed, or an
 // approval whose durable record already says the wait ended (P1-1/2).
-// A Turn with executions in flight answers false: its faithful cancel
-// settlement is the recovery-cancel of the kernel's report, not here.
+// "Owed work" is read off the work itself, not off whether the checkpoint
+// names this Turn: a checkpoint naming an EARLIER Turn whose tools all
+// settled and were consumed owes nothing to a cancelled Turn that never
+// reached a tool call (R9). A Turn with executions in flight answers
+// false: its faithful cancel settlement is the recovery-cancel of the
+// kernel's report, not here.
 async function parkNeedsNoRuntimeSettlement(
   session: HostedSession,
   managed: ManagedSession,
-  promptId: string,
 ): Promise<boolean> {
   const authorization = await managed.authority.harnessRunAuthorization();
   if (authorization.status === 'initial') return true;
   if (authorization.status !== 'runnable') return false;
   const checkpoint = authorization.checkpoint;
-  if (
-    checkpoint.identity.turnId !== promptId &&
-    checkpoint.identity.turnId !== null
-  )
-    return false;
   if (
     !(checkpoint.tools?.items ?? []).every(
       (item) => item.state === 'settled' && item.consumed,
@@ -2357,11 +2355,17 @@ export function registerHostedHarnessSessionRoutes(
         // wait ended — the cancelled terminal can only be this journal,
         // so this load writes it itself; wherever Runtime work is in
         // flight, the recovery-cancel below is its faithful settlement,
-        // and both must not be claimed by the same park.
+        // and both must not be claimed by the same park. A no-tool
+        // Session cannot owe Runtime work by definition, so its arm
+        // settles unconditionally — the gate's checkpoint questions mean
+        // nothing there, and gating on them re-wedged every cancelled
+        // Turn after the first (R9).
         let cancellationSettled = false;
         if (
           body?.['cancellationTakeover'] === true &&
-          (await parkNeedsNoRuntimeSettlement(session, managed, unsettled))
+          (toolProfile === undefined ||
+            !brokerOptions ||
+            (await parkNeedsNoRuntimeSettlement(session, managed)))
         ) {
           try {
             await settleCancelledHarnessTurn(

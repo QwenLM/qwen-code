@@ -9457,6 +9457,93 @@ describe('Hosted Harness Runtime turn takeover', () => {
     },
   );
 
+  it.each([null, FILE_PROFILE])(
+    'settles the cancellation takeover of a park that is not the first Turn (profile=%s)',
+    async (toolProfile) => {
+      // R9: Turn 1 completed first, so the sabotaged Turn 2 parks with
+      // history behind it — a no-tool Session's restore basis is blocked
+      // (history without a checkpoint) and a tool Session's checkpoint
+      // names Turn 1, whose tools all settled and were consumed. Neither
+      // shape owes Runtime work for a Turn that never reached a tool call;
+      // the cancellation takeover settles them exactly like the
+      // first-Turn park above.
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        ...(toolProfile === null ? {} : { toolProfile }),
+      });
+      expect(created.status).toBe(200);
+      const clientId = created.body.clientId as string;
+      const first = [{ type: 'text', text: 'first turn completes' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt: first,
+          promptId: randomUUID(),
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(first)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      const originalWrite = ManagedSessionRecordSink.prototype.write;
+      const write = vi
+        .spyOn(ManagedSessionRecordSink.prototype, 'write')
+        .mockImplementation(async function (
+          this: ManagedSessionRecordSink,
+          record,
+        ) {
+          if (record.subtype === 'turn_result')
+            throw new Error('settlement unavailable');
+          return originalWrite.call(this, record);
+        });
+      const prompt = [{ type: 'text', text: 'hello' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(true);
+        },
+        { timeout: 10_000 },
+      );
+      write.mockRestore();
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+      const log = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => {});
+      const taken = await replacementHeaders(
+        supertest(replacementApp()).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: storeFor(BOOT_ID_2),
+        passiveManagedRuntimeRecovery: true,
+        cancellationTakeover: true,
+      });
+      expect(taken.status).toBe(200);
+      expect(taken.body.recoveryRequired).toBeUndefined();
+      expect(
+        log.mock.calls
+          .map(([line]) => line)
+          .some((line) => line.includes('settles the cancelled park on load')),
+      ).toBe(true);
+    },
+  );
+
   it.each(['cancelled', 'decided'])(
     'settles a cancellation takeover whose durable approval already ended (state=%s)',
     async (durableState) => {

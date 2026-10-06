@@ -873,7 +873,36 @@ public class HarnessCoordinator {
             // needed for new work and could replace the running attachment.
             if (session.harnessBootId() != null && store.bindHarness(tenantId,
                     sessionId, turnId, owner, session.harnessBootId())) {
-                harness.cancel(session.tenantId(), session.sessionId());
+                try {
+                    harness.cancel(session.tenantId(), session.sessionId());
+                } catch (DaemonHttpException error) {
+                    if (error.getStatusCode() != 409
+                            || !"hosted_turn_recovery_required"
+                                    .equals(error.getErrorCode())) {
+                        throw error;
+                    }
+                    // The plain cancel route aborts only a live, in-memory
+                    // Turn: a parked Turn its dead generation owned answers
+                    // the coded refusal, and re-issuing that same cancel
+                    // settles nothing (the round-9 wedge). The cancellation
+                    // takeover load is the only route that pays it, so it
+                    // goes out inline over THIS attachment — the stream the
+                    // coordination already runs then lands the settle.
+                    Attachment takeover = harness.recoverManagedCancellation(
+                            tenantId, sessionId);
+                    HarnessRuntimeRecovery recovery =
+                            takeover.runtimeRecovery();
+                    if (recovery != null) {
+                        if (!recovery.isCancellationReady()) {
+                            throw new IllegalStateException("Hosted Harness"
+                                    + " reported a cancellation recovery"
+                                    + " that is not ready");
+                        }
+                        harness.cancelManagedRuntime(tenantId, sessionId,
+                                turn.promptId(), recovery.getCheckpointId(),
+                                recovery.getActivationId());
+                    }
+                }
             }
         } catch (RuntimeException error) {
             LOG.warn("Managed Turn cancellation awaits lease renewal tenant={}"

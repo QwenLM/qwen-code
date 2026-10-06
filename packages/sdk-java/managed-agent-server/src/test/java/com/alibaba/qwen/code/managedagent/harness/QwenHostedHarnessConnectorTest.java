@@ -249,6 +249,38 @@ class QwenHostedHarnessConnectorTest {
                 .doesNotContainKey("passiveManagedRuntimeRecovery");
     }
 
+    @Test
+    void recoverManagedCancellationLoadsEvenOverAHealthyAttachment() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        connector.recoverManagedCancellation("tenant-a", SESSION_ID);
+        // The Session that sits on THIS Harness's plain attachment answered
+        // the coded refusal to a plain cancel: only a cancellation
+        // takeover load pays that park, so it goes out even though the
+        // attachment is cached — and again on every re-entry, since a
+        // swallowed retry is the round-9 wedge all over.
+        connector.recoverManagedCancellation("tenant-a", SESSION_ID);
+
+        ArgumentCaptor<LoadHarnessSession> loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client, org.mockito.Mockito.times(2))
+                .loadSession(loads.capture());
+        for (LoadHarnessSession load : loads.getAllValues()) {
+            assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load, "toJson"))
+                    .containsEntry("cancellationTakeover", true)
+                    .containsEntry("passiveManagedRuntimeRecovery", true)
+                    .doesNotContainKey("driveRuntimeRecovery");
+        }
+    }
+
     @ParameterizedTest
     @org.junit.jupiter.params.provider.NullSource
     @ValueSource(strings = {"hosted-workspace-files/1"})

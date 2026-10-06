@@ -762,6 +762,144 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyLong());
     }
 
+    // The admitted-coordination sibling of the arm above: the Turn sits on
+    // a live plain attach (an approval died with the old generation), so
+    // the plain cancel is the coded refusal — and retrying that same
+    // cancel forever settles nothing (the round-9 wedge). The coordinator
+    // must send the cancellation takeover load over the same attachment;
+    // a plain-settled park (no Runtime recovery to report) needs no
+    // admission, and the already-running stream lands the settle.
+    @Test
+    void cancelRefusedOnAdmittedTurnDrivesTheTakeoverLoad() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord cancelling = turn("tenant", "session", "turn", "prompt",
+                "epoch-new", 4, "CANCELLING");
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(cancelling));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-new", null, 0, 0, 1, 1, null, 1));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-new"))).thenReturn(true);
+        DaemonHttpException refused = mock(DaemonHttpException.class);
+        when(refused.getStatusCode()).thenReturn(409);
+        when(refused.getErrorCode())
+                .thenReturn("hosted_turn_recovery_required");
+        doThrow(refused).when(harness).cancel("tenant", "session");
+        when(harness.recoverManagedCancellation("tenant", "session"))
+                .thenReturn(new Attachment("boot-new", null, 5L,
+                        "epoch-new"));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        // Exactly one plain cancel attempt, then the takeover load — never
+        // the same no-op cancel again, and nothing is failed.
+        verify(harness, times(1)).cancel("tenant", "session");
+        verify(harness).recoverManagedCancellation("tenant", "session");
+        verify(harness, never()).cancelManagedRuntime(anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    // Same refusal, but the takeover load reports a recovered Runtime
+    // park: the cancellation admission for its checkpoint goes out over
+    // the same attachment too.
+    @Test
+    void cancelRefusedOnAdmittedTurnAdmitsTheRecoveredCancel() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord cancelling = turn("tenant", "session", "turn", "prompt",
+                "epoch-new", 4, "CANCELLING");
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(cancelling));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-new", null, 0, 0, 1, 1, null, 1));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-new"))).thenReturn(true);
+        DaemonHttpException refused = mock(DaemonHttpException.class);
+        when(refused.getStatusCode()).thenReturn(409);
+        when(refused.getErrorCode())
+                .thenReturn("hosted_turn_recovery_required");
+        doThrow(refused).when(harness).cancel("tenant", "session");
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(recovery.isCancellationReady()).thenReturn(true);
+        when(recovery.getCheckpointId()).thenReturn("checkpoint-1");
+        when(recovery.getActivationId()).thenReturn("activation-1");
+        when(harness.recoverManagedCancellation("tenant", "session"))
+                .thenReturn(new Attachment("boot-new", recovery, 5L,
+                        "epoch-new"));
+        when(harness.cancelManagedRuntime("tenant", "session", "prompt",
+                "checkpoint-1", "activation-1"))
+                .thenReturn(new Admission(5, "epoch-new"));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(harness, times(1)).cancel("tenant", "session");
+        verify(harness).recoverManagedCancellation("tenant", "session");
+        verify(harness).cancelManagedRuntime("tenant", "session", "prompt",
+                "checkpoint-1", "activation-1");
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    // Only the coded park refusal earns the takeover load: any other
+    // cancel failure stays on the lease-renewal retry, so a transient
+    // daemon answer never mints one.
+    @Test
+    void cancelRefusedWithAnyOtherAnswerAwaitsLeaseRenewal() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord cancelling = turn("tenant", "session", "turn", "prompt",
+                "epoch-new", 4, "CANCELLING");
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(cancelling));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-new", null, 0, 0, 1, 1, null, 1));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-new"))).thenReturn(true);
+        DaemonHttpException refused = mock(DaemonHttpException.class);
+        when(refused.getStatusCode()).thenReturn(409);
+        when(refused.getErrorCode())
+                .thenReturn("hosted_prompt_recovery_required");
+        doThrow(refused).when(harness).cancel("tenant", "session");
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(harness, times(1)).cancel("tenant", "session");
+        verify(harness, never()).recoverManagedCancellation(anyString(),
+                anyString());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
     // A lost G1 admission whose 202 never landed leaves the mark without an
     // epoch; the adopted generation's resubmit meets the coded 409. The
     // code proves the daemon durably holds THIS prompt unsettled, so the

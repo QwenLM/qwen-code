@@ -522,7 +522,51 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
     }
 
-    private Attachment doRecoverManagedRuntime(String tenantId,
+    @Override
+    public Attachment recoverManagedCancellation(String tenantId,
+            String sessionId) {
+        try {
+            return doRecoverManagedCancellation(tenantId, sessionId);
+        } catch (DaemonHttpException error) {
+            // The same takeover-refusal mapping as recoverManagedRuntime.
+            if (error.getStatusCode() == 409
+                    && HostedHarnessRecoveryDeclinedException.CODE.equals(
+                            error.getErrorCode())) {
+                throw new HostedHarnessRecoveryDeclinedException(
+                        error.getBodyField("reason"));
+            }
+            throw error;
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private Attachment doRecoverManagedCancellation(String tenantId,
+            String sessionId) {
+        SessionRecord session = requireRecoverableSession(tenantId, sessionId,
+                true);
+        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        // A Session THIS Harness already serves can still park a dead
+        // generation's Turn: the plain cancel route settles nothing there
+        // and answered the coded refusal, so the cancellation load always
+        // goes out — the redispatch path's healthy-attachment shortcut
+        // would swallow it. The fresh ref replaces the cached entry.
+        HarnessSessionRef attached = load(session, true, false, true);
+        attachments.put(key, attached);
+        if (attached.getRuntimeRecovery() != null) {
+            pendingRecovery.add(key);
+        } else {
+            pendingRecovery.remove(key);
+        }
+        return new Attachment(attached.getHarnessBootId(),
+                pendingRecovery.contains(key) ? attached.getRuntimeRecovery()
+                        : null,
+                attached.getHarnessLastEventId(),
+                attached.getHarnessEventEpoch());
+    }
+
+    private SessionRecord requireRecoverableSession(String tenantId,
             String sessionId, boolean cancellation) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         if (session.workspace() != null) {
@@ -539,6 +583,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 workspaceExecution.authorize(session);
             }
         }
+        return session;
+    }
+
+    private Attachment doRecoverManagedRuntime(String tenantId,
+            String sessionId, boolean cancellation) {
+        SessionRecord session = requireRecoverableSession(tenantId, sessionId,
+                cancellation);
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
         HarnessSessionRef cached = attachments.get(key);
         if (cached == null) {

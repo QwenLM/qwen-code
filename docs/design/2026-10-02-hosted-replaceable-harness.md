@@ -299,6 +299,29 @@ continuation — expired or cancelled stays transient (the route refusal),
 while a decided wait is advanced through its own durable gate ONLY on a
 drive load — a cancellation-only load never crosses it (P1-2).
 
+Round 9 measured the separation on the real stack and tightened two of
+its readings (R9):
+
+- "Unpaid Runtime work" is read off the work itself, never off whether
+  the checkpoint names this Turn. A checkpoint naming an EARLIER Turn
+  whose tool items all settled and were consumed owes nothing to a
+  cancelled Turn that never reached a tool call — Turn 1 completing is
+  exactly that shape. A no-tool Session cannot owe Runtime work by
+  definition either, so its cancellation arm settles unconditionally:
+  gating it on the authorization state (a blocked restore basis is the
+  NORMAL state of a no-tool Session with history) re-wedged every
+  cancelled Turn after the first there.
+- The plain-cancel coded refusal is not a verdict to retry, it is the
+  signal to escalate: when `harness.cancel` answers 409
+  `hosted_turn_recovery_required` on a live plain-attach coordination,
+  the coordinator sends the cancellation takeover load over that same
+  attachment (`recoverManagedCancellation`). On the wire the connector's
+  healthy-attachment shortcut must NOT absorb that call, or the load
+  never leaves the process; a recovered Runtime park it reports is
+  cancelled through its checkpoint admission, a plain-settled park needs
+  none, and the stream the coordination already runs lands the settle
+  either way (R9-P1-2).
+
 Thrown errors stay transient, exactly as today. The load route answers
 declines with new 409 code `hosted_turn_recovery_declined` plus a `reason`
 field; inside the takeover branch, `hosted_turn_recovery_required` is
