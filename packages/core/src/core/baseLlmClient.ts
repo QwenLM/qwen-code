@@ -103,12 +103,26 @@ function estimateSystemInstructionTokens(
 }
 
 /**
+ * Estimate the tokens a `tools` payload occupies on the wire. `generateJson`
+ * sends the `respond_in_schema` declaration whose `parameters` is the
+ * caller's whole schema — an arbitrarily large object — so a room term that
+ * prices only `contents` and `systemInstruction` exact-fits the window and
+ * leaves zero slack for the declaration riding along on the same request,
+ * which is the unretried 400 the budget exists to prevent (#13208). The wire
+ * form of a declaration is JSON whichever provider format it is translated
+ * to, so charge its serialized size at the same ratio as the other terms.
+ */
+function estimateToolTokens(tools: Tool[] | undefined): number {
+  if (!tools || tools.length === 0) return 0;
+  return Math.ceil(JSON.stringify(tools).length / CHARS_PER_TOKEN);
+}
+
+/**
  * Give a request an output budget that fits the window it is actually going
  * to, so `prompt + max_tokens <= window` holds (#13208) for the prompt terms
- * this layer can measure: `contents` and `systemInstruction`. A `generateJson`
- * tool declaration is not counted — the flat estimation margin that would
- * cover it was declined on #13208 — so in JSON mode the invariant holds for
- * the measured terms only.
+ * this layer can measure: `contents`, `systemInstruction`, and `tools` — in
+ * JSON mode the `respond_in_schema` declaration carries the caller's whole
+ * schema and is priced by the caller passing it through.
  *
  * Side queries reach the provider through `generateJson`/`generateText` and
  * never enter `llm-chat.ts`, so the main turn's `clampOutputTokensToWindow`
@@ -188,6 +202,7 @@ function budgetOutputTokensForWindow(
   contentGeneratorConfig: ContentGeneratorConfig | undefined,
   resolvedContextWindowSize: number | undefined,
   imageTokenEstimate: number,
+  tools?: Tool[],
 ): GenerateContentConfig {
   if (requestConfig.maxOutputTokens !== undefined) return requestConfig;
 
@@ -229,7 +244,8 @@ function budgetOutputTokensForWindow(
     // low here over-states the room, which is the 400 this budget exists to
     // prevent.
     estimateContentTokens(contents, imageTokenEstimate) -
-    estimateSystemInstructionTokens(requestConfig.systemInstruction);
+    estimateSystemInstructionTokens(requestConfig.systemInstruction) -
+    estimateToolTokens(tools);
 
   // A window the measured prompt all but fills is not this layer's to paper
   // over: `max_tokens: 12` would send a request that can only answer with a
@@ -518,6 +534,7 @@ export class BaseLlmClient {
       resolvedContextWindowSize,
       resolveSlimmingConfig(this.config.getChatCompression?.())
         .imageTokenEstimate,
+      tools,
     );
 
     try {

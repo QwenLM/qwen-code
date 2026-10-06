@@ -27,6 +27,7 @@ import { reportError } from '../utils/errorReporting.js';
 import { retryWithBackoff } from '../utils/retry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
+import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
   content,
   fnCall,
@@ -1200,6 +1201,19 @@ describe('BaseLlmClient', () => {
           | undefined
       )?.config?.thinkingConfig;
 
+    // Estimate of the `tools` payload on the wire the last request actually
+    // carried, priced the way the budget prices it: the declaration is read
+    // back off the mock rather than rebuilt so the assertion measures the
+    // production shape, not a copy that could drift from it.
+    const sentToolsTokens = (generator = mockGenerateContent) => {
+      const tools = (
+        generator.mock.calls.at(-1)?.[0] as
+          | { config?: { tools?: unknown } }
+          | undefined
+      )?.config?.tools;
+      return Math.ceil(JSON.stringify(tools).length / CHARS_PER_TOKEN);
+    };
+
     const askText = (
       model: string,
       tokens: number,
@@ -1288,7 +1302,52 @@ describe('BaseLlmClient', () => {
         promptId: 'p',
       });
 
-      expect(sentBudget()).toBe(31_072);
+      // The room is priced against the `respond_in_schema` declaration too,
+      // so the emitted cap sits below the plain `window − prompt` by the
+      // schema's wire size; prompt + cap + schema still fit the window.
+      const budget = sentBudget();
+      const schemaTokens = sentToolsTokens();
+      expect(schemaTokens).toBeGreaterThan(0);
+      expect(budget).toBe(31_072 - schemaTokens);
+      expect(100_000 + (budget ?? 0) + schemaTokens).toBeLessThanOrEqual(
+        131_072,
+      );
+    });
+
+    it('leaves room for a large respond_in_schema schema against the window', async () => {
+      // The failure this case pins: a room term pricing only the prompt
+      // emits `window − prompt` (31_072) and the wire then adds the
+      // declaration on top, so a ~10_000-token schema on top of a
+      // 100_000-token prompt sends ~141_072 against a 131_072 window and
+      // comes back an unretried 400 — exactly the regression the budget
+      // exists to prevent.
+      const schema = {
+        type: 'object',
+        properties: Object.fromEntries(
+          Array.from({ length: 1_000 }, (_, i) => [
+            `field_${i}`,
+            { type: 'string', description: `column ${i} of the record` },
+          ]),
+        ),
+      } as const;
+      useWindow('qwen3-coder-plus', 131_072);
+      answerWithJson({});
+
+      await client.generateJson({
+        contents: promptOfTokens(100_000),
+        schema,
+        model: 'qwen3-coder-plus',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+      });
+
+      const budget = sentBudget();
+      const schemaTokens = sentToolsTokens();
+      expect(schemaTokens).toBeGreaterThan(10_000);
+      expect(budget).toBe(31_072 - schemaTokens);
+      expect(100_000 + (budget ?? 0) + schemaTokens).toBeLessThanOrEqual(
+        131_072,
+      );
     });
 
     it('budgets the streaming request too', async () => {
