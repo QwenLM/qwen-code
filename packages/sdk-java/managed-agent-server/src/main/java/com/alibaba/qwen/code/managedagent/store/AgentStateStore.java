@@ -27,11 +27,24 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 public interface AgentStateStore {
-    Admission insertSessionCommand(String tenantId, String operation,
+    // The annotation must sit on the default itself: the delegating body runs
+    // on the target instance, so without it the self-call bypasses the proxy.
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertSessionCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
             String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        return insertSessionCommand(tenantId, null, operation,
+                idempotencyKey, requestDigest, agentId, requestedRevision,
+                title, input, payloadDigest);
+    }
+
+    Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest);
 
     Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
@@ -96,6 +109,10 @@ public interface AgentStateStore {
 
     boolean hasCompletedWorkspaceClose(String tenantId, String sessionId);
 
+    /** The given Sessions with a completed workspace close, in one read. */
+    Set<String> completedWorkspaceCloses(String tenantId,
+            List<String> sessionIds);
+
     SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
             String actorId, String scopedKey, String requestDigest);
 
@@ -107,6 +124,47 @@ public interface AgentStateStore {
     default void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, String failureCode, long availableAt) {
         throw new UnsupportedOperationException("Lifecycle reconciliation is unavailable");
+    }
+
+    /**
+     * Admits a controlled same-Workspace cwd change (W2) on a bound Session,
+     * or returns the operation the same actor already admitted under the
+     * key. The target directory is already normalized and the request digest
+     * already covers it; admission checks the creation actor, the current
+     * grant, the Registry facts, the expected context revision and the busy
+     * barriers in the pinned order of the W2 design.
+     */
+    OperationAdmission beginCwdChangeOperation(String tenantId,
+            String sessionId, String actorId, String actorDigest,
+            String idempotencyKey, String requestDigest,
+            String targetCwdRelative, long expectedContextRevision);
+
+    /**
+     * Settles a claimed cwd change in one transaction: re-verifies the
+     * Session facts, updates the binding directory and context revision,
+     * marks the operation completed or failed, and appends
+     * {@code session.context.changed} on success.
+     *
+     * @return the outcome; a contested claim returns {@code null}
+     */
+    CwdChangeOutcome completeCwdChangeOperation(String tenantId,
+            String sessionId, String operationId, String owner,
+            long claimGeneration);
+
+    /**
+     * Marks a claimed cwd change terminally failed with its public failure
+     * code.
+     *
+     * @return false when the claim is no longer current — the write was
+     *         skipped and the caller must not report a terminal refusal
+     */
+    boolean failCwdChangeOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            String failureCode);
+
+    /** The result of a settled cwd change. */
+    record CwdChangeOutcome(boolean completed, String failureCode,
+            Long resultContextRevision) {
     }
 
     Optional<OperationRecord> findOperation(String tenantId,
@@ -146,9 +204,20 @@ public interface AgentStateStore {
     Optional<TurnRecord> findTurn(String tenantId, String sessionId,
             String turnId);
 
-    Optional<TurnRecord> findActiveTurn(String tenantId, String sessionId);
+    /** The active Turn of each given Session, in one round trip. */
+    Map<String, TurnSummary> findActiveTurns(String tenantId,
+            List<String> sessionIds);
 
-    Optional<TurnRecord> findLatestTurn(String tenantId, String sessionId);
+    /** The latest Turn of each given Session, in one round trip. */
+    Map<String, TurnSummary> findLatestTurns(String tenantId,
+            List<String> sessionIds);
+
+    /**
+     * The latest environment event of each Session's latest Turn, in one
+     * round trip.
+     */
+    Map<String, EventRecord> findLatestEnvironmentEvents(String tenantId,
+            Map<String, TurnSummary> latestTurns);
 
     /**
      * A page of a Session's Turns, newest first: by creation time, then by
@@ -164,9 +233,6 @@ public interface AgentStateStore {
     List<EventRecord> findEvents(String tenantId, String sessionId,
             long afterSequence, int limit);
 
-    Optional<EventRecord> findLatestEnvironmentEvent(String tenantId,
-            String sessionId);
-
     List<EventRecord> findControlEvents(String tenantId, String sessionId,
             long throughSequence);
 
@@ -176,7 +242,9 @@ public interface AgentStateStore {
     Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);
 
-    long findSnapshotCoveredSequence(String tenantId, String sessionId);
+    /** The snapshot's covered sequence of each given Session, in one read. */
+    Map<String, Long> findSnapshotCoveredSequences(String tenantId,
+            List<String> sessionIds);
 
     ReplayWindow findReplayWindow(String tenantId, String sessionId);
 

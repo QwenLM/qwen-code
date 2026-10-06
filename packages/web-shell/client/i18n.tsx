@@ -124,6 +124,8 @@ const EN: Messages = {
   'managed.cancel': 'Cancel turn',
   'managed.uncertain':
     'The request outcome is unconfirmed. Retry to check or complete the same submission.',
+  'managed.discard': 'Discard this request',
+  'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
   'managed.approval.failed':
@@ -1809,6 +1811,13 @@ const EN: Messages = {
       ? `File not found in the workspace · ${v.path}`
       : 'File not found in the workspace',
   'sidebar.label': 'Workspace sidebar',
+  'sidebar.home': 'Home',
+  'sidebar.channelSettings': 'Settings',
+  'sidebar.liveSettings': 'Settings',
+  'sidebar.liveSettingsUnavailable':
+    'Live settings are not available on this server.',
+  'sidebar.more': 'More',
+  'sidebar.navigation': 'Main navigation',
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
   'sidebar.newTask': 'New task',
@@ -3918,6 +3927,7 @@ const EN: Messages = {
   'channels.workspace.label': 'Workspace',
   'channels.workspace.primary': 'Primary',
   'channels.loading': 'Loading channels',
+  'channels.configuredCount': (v) => plural(v?.count, 'configured channel'),
   'channels.configured': 'Configured channels',
   'channels.configured.description':
     'Manage the bots that receive and deliver messages for this workspace.',
@@ -4343,6 +4353,8 @@ const ZH: Messages = {
   'managed.retry': '重试同一请求',
   'managed.cancel': '取消本轮',
   'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
+  'managed.discard': '丢弃本次请求',
+  'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
   'managed.approval.failed':
@@ -5993,6 +6005,12 @@ const ZH: Messages = {
   'turnOutputs.artifactUnavailable': (v) =>
     v?.path ? `工作区中未找到该文件 · ${v.path}` : '工作区中未找到该文件',
   'sidebar.label': '工作区侧边栏',
+  'sidebar.home': '首页',
+  'sidebar.channelSettings': '设置',
+  'sidebar.liveSettings': '设置',
+  'sidebar.liveSettingsUnavailable': '当前服务未提供 Live 设置。',
+  'sidebar.more': '更多',
+  'sidebar.navigation': '主导航',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
   'sidebar.newTask': '新建任务',
@@ -7934,6 +7952,7 @@ const ZH: Messages = {
   'channels.workspace.label': '工作区',
   'channels.workspace.primary': '主工作区',
   'channels.loading': '正在加载频道',
+  'channels.configuredCount': (v) => `已配置 ${v?.count ?? 0} 个频道`,
   'channels.configured': '已配置频道',
   'channels.configured.description': '管理当前工作区中负责收发消息的机器人。',
   'channels.availablePlatforms': '可连接平台',

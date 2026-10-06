@@ -13,6 +13,20 @@ import {
 } from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import {
+  checkHostedGlobPattern,
+  HOSTED_GLOB_TOO_COMPLEX,
+} from './hosted-glob-pattern.js';
+import {
+  HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE,
+  HOSTED_WORKSPACE_FILE_PROFILE_V2,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceShellProfile,
+  isHostedWorkspaceSearchProfile,
+  type HostedWorkspaceToolProfile,
+} from './hosted-workspace-profiles.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -33,6 +47,7 @@ import {
   type ToolResultEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
+  assertManagedSessionDomainEnabled,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
   type ManagedSessionDurableRef,
@@ -60,6 +75,10 @@ import type {
   HostedHookSession,
   HostedPromptHookRunner,
 } from './hosted-hook-session.js';
+import type { HostedChildRunSession } from './hosted-child-run-session.js';
+import type { HostedMonitorSession } from './hosted-monitor-session.js';
+import { HostedMonitorLoop } from './hosted-monitor-loop.js';
+import { HostedMonitorRemoteExecutor } from './hosted-monitor-remote-executor.js';
 import {
   HookEventName,
   PreToolUseHookOutput,
@@ -81,8 +100,17 @@ import {
   type HostedApprovalWaiters,
 } from './hosted-tool-approval.js';
 
-export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
-export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
+export {
+  HOSTED_WORKSPACE_FILE_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE,
+  HOSTED_WORKSPACE_FILE_PROFILE_V2,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V2,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceShellProfile,
+  isHostedWorkspaceSearchProfile,
+  type HostedWorkspaceToolProfile,
+};
+
 const ACQUIRE_BUSY_POLL_MS = 250;
 export function isRetryableWorkspaceAcquisition(
   cause: unknown,
@@ -100,13 +128,22 @@ function isBusyWorkspaceAcquisition(cause: unknown): boolean {
     isRetryableWorkspaceAcquisition(cause) && cause.code === 'workspace_busy'
   );
 }
-export type HostedWorkspaceToolProfile =
-  | typeof HOSTED_WORKSPACE_FILE_PROFILE
-  | typeof HOSTED_WORKSPACE_SHELL_PROFILE;
 
 export interface HostedShellTurnOptions {
   resources: DurableToolResultResourceStore;
   assertWritable(): Promise<void>;
+  // The Session-scoped publisher instance: one server owns every Shell
+  // capture of the Session across turns, so background traffic keeps its
+  // endpoint after the registering turn ends (H3 fifth slice drains it at
+  // the Session's ordered close).
+  publisher?: HostedShellPublisher;
+  // The Session-scoped observation loops of running Monitor watches,
+  // keyed by their execution identity; they outlive their starting turns
+  // exactly like the publisher.
+  monitorLoops?: Map<string, HostedMonitorLoop>;
+  // The embedded wake scheduler's tip: a notification input committed
+  // under its observation revision asks the pump to deliver it.
+  monitorWakeKick?: () => void;
 }
 
 function shellHistoryId(executionCallId: string): string {
@@ -118,6 +155,28 @@ function shellHistoryId(executionCallId: string): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.subarray(0, 16).toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+// H3: background admissions exist only while the child_run domain is
+// enabled for commits; otherwise the turn keeps its foreground refusals.
+function childRunAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionDomainEnabled('child_run');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// H3: Monitor admissions exist only while the monitor_run domain is
+// enabled for commits; otherwise the turn keeps its monitor refusals.
+function monitorRunAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionDomainEnabled('monitor_run');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface HostedApprovalTurnOptions {
@@ -201,8 +260,50 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'monitor',
+    description:
+      'Watch a shell command in the saved Workspace working directory and receive its stdout lines as observations while it runs. Observations aggregate by one-second-or-longer debounce windows, so `max_events` counts windows, not lines; `idle_timeout_ms` bounds the silent stretch between windows ending the watch. The watch is admitted only on Sessions whose Monitor path is enabled.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string' },
+        idle_timeout_ms: { type: 'integer', minimum: 1, maximum: 600000 },
+        max_events: { type: 'integer', minimum: 1, maximum: 10000 },
+        description: { type: 'string' },
+      },
+      required: ['command'],
+      additionalProperties: false,
+    },
+  },
 ];
 
+const HOSTED_GLOB_TOOL: FunctionDeclaration = {
+  name: 'glob',
+  description:
+    'Find files by name pattern in the remote Workspace, for example "**/*.ts". Returns paths relative to the saved Session working directory, sorted by modification time (newest first).',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      pattern: { type: 'string' },
+      path: {
+        type: 'string',
+        description:
+          'Directory to search, relative to the saved Session working directory. Omit to search the whole working directory.',
+      },
+    },
+    required: ['pattern'],
+    additionalProperties: false,
+  },
+};
+export const HOSTED_WORKSPACE_FILE_TOOLS_V2: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_FILE_TOOLS,
+  HOSTED_GLOB_TOOL,
+];
+export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_SHELL_TOOLS,
+  HOSTED_GLOB_TOOL,
+];
 function physicalToolStatus(
   response: Record<string, unknown> | undefined,
 ): 'success' | 'error' | 'cancelled' {
@@ -242,6 +343,8 @@ export class HostedWorkspaceToolTurn {
   private unanswered = false;
   private promptHookRunner?: HostedPromptHookRunner;
   private readonly hookPermission = new Map<string, 'allow' | 'deny'>();
+  private readonly childRuns?: HostedChildRunSession;
+  private readonly monitors?: HostedMonitorSession;
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -265,8 +368,14 @@ export class HostedWorkspaceToolTurn {
     shell?: HostedShellTurnOptions,
     private readonly approval?: HostedApprovalTurnOptions,
     private readonly mcp?: HostedMcpSession,
+    private readonly profile?: string,
     private readonly hooks?: HostedHookSession,
+    childRuns?: HostedChildRunSession,
+    monitors?: HostedMonitorSession,
+    private readonly backgroundLane?: HostedShellTurnOptions,
   ) {
+    this.childRuns = childRuns;
+    this.monitors = monitors;
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
         ? publicationOrShell
@@ -288,13 +397,23 @@ export class HostedWorkspaceToolTurn {
     void this.warmed.catch(() => undefined);
   }
 
+  /** Whether this Session runs one of the `/2` search profiles. */
+  private get searchProfile(): boolean {
+    return isHostedWorkspaceSearchProfile(this.profile);
+  }
+
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
+    const search = isHostedWorkspaceSearchProfile(this.profile);
     this.advertised = [
       ...(this.publication || this.shell
-        ? HOSTED_WORKSPACE_SHELL_TOOLS
-        : HOSTED_WORKSPACE_FILE_TOOLS
+        ? search
+          ? HOSTED_WORKSPACE_SHELL_TOOLS_V2
+          : HOSTED_WORKSPACE_SHELL_TOOLS
+        : search
+          ? HOSTED_WORKSPACE_FILE_TOOLS_V2
+          : HOSTED_WORKSPACE_FILE_TOOLS
       ).map((tool) =>
         ['write_file', 'edit'].includes(tool.name ?? '')
           ? {
@@ -717,8 +836,12 @@ export class HostedWorkspaceToolTurn {
     if (this.hooks && this.approval) {
       calls = await Promise.all(
         calls.map(async (call) => {
-          if (!hostedApprovalAsks(this.approval!.settings, call.name))
-            return call;
+          const asks = hostedApprovalAsks(
+            this.approval!.settings,
+            call.name,
+            this.searchProfile,
+          );
+          if (!asks) return call;
           const output = await this.hooks!.fire(
             HookEventName.PermissionRequest,
             `${this.promptId}:${call.callId}`,
@@ -775,6 +898,8 @@ export class HostedWorkspaceToolTurn {
         ids.add(call.callId);
         let validationError: string | undefined;
         let input: Record<string, unknown>;
+        let backgroundAdmitted = false;
+        let monitorAdmitted = false;
         if (mcpInput) {
           input = { ...mcpInput.input };
         } else if (isShell) {
@@ -785,17 +910,36 @@ export class HostedWorkspaceToolTurn {
                 key,
               ),
           );
-          if (typeof args['command'] !== 'string' || !args['command'].trim()) {
-            validationError = 'Hosted Shell requires a nonempty command.';
-          } else if (unsupportedKey !== undefined) {
-            validationError = `Hosted Shell received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
-          } else if (
+          // H3: a background request is admitted exactly when this Session
+          // owns its child_run orchestrator and the domain is enabled — the
+          // deliberate refusals below keep their texts otherwise.
+          const backgroundRequested =
+            args['is_background'] === true ||
+            (typeof args['is_background'] === 'string' &&
+              args['is_background'].toLowerCase() === 'true');
+          const backgroundIllFormed =
+            !backgroundRequested &&
             args['is_background'] !== undefined &&
             args['is_background'] !== false &&
             !(
               typeof args['is_background'] === 'string' &&
               args['is_background'].toLowerCase() === 'false'
-            )
+            );
+          backgroundAdmitted =
+            backgroundRequested &&
+            // The admitted family runs v3 only: a shell-mode turn has no
+            // publication to drive it, so admitting there would only re-
+            // send the request into the background-refusing v2 path.
+            this.publication !== undefined &&
+            this.childRuns !== undefined &&
+            childRunAdmissionsEnabled();
+          if (typeof args['command'] !== 'string' || !args['command'].trim()) {
+            validationError = 'Hosted Shell requires a nonempty command.';
+          } else if (unsupportedKey !== undefined) {
+            validationError = `Hosted Shell received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
+          } else if (
+            backgroundIllFormed ||
+            (backgroundRequested && !backgroundAdmitted)
           ) {
             validationError =
               'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
@@ -813,12 +957,114 @@ export class HostedWorkspaceToolTurn {
             validationError =
               'Hosted Shell timeout must be an integer from 1 to 600000 ms.';
           }
-          if (this.publication && args['is_background'] !== undefined) {
+          if (
+            !backgroundAdmitted &&
+            this.publication &&
+            args['is_background'] !== undefined
+          ) {
             validationError = 'Hosted Shell requires one foreground command.';
           }
-          input = this.publication
-            ? { ...args }
-            : { ...args, is_background: false };
+          input = backgroundAdmitted
+            ? { ...args, is_background: true }
+            : this.publication
+              ? { ...args }
+              : { ...args, is_background: false };
+        } else if (call.name === 'glob') {
+          input = { ...call.args };
+          const globError =
+            'Hosted glob requires a nonempty pattern, and its optional path must be relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct the arguments and retry.';
+          const requestedPattern = call.args['pattern'];
+          const directory = call.args['path'];
+          // A pattern is a second search root: refuse the absolute/`..` and
+          // oversized shapes here, pre-acquisition, with the identical check
+          // the worker applies after dispatch — a refusal before acquisition
+          // stays model-correctable and costs no durable Runtime work
+          // (#13030). Validate the value that gets dispatched, never the raw
+          // one: glob treats an untrimmed pattern as a literal, so it matches
+          // nothing and the false negative is persisted.
+          const pattern =
+            typeof requestedPattern === 'string' ? requestedPattern.trim() : '';
+          const check = pattern ? checkHostedGlobPattern(pattern) : 'escapes';
+          if (check === 'too-complex') {
+            validationError = HOSTED_GLOB_TOO_COMPLEX;
+          } else if (check === 'escapes') {
+            validationError = globError;
+          } else {
+            input['pattern'] = pattern;
+          }
+          if (!validationError && directory !== undefined) {
+            if (
+              directory === null ||
+              (typeof directory === 'string' && directory.trim() === '')
+            ) {
+              // A blank or `null` path is the omitted case: the declaration
+              // marks it optional, and the executor maps a missing key to the
+              // Session root — refusing it as traversal would also poison every
+              // valid sibling call in the batch.
+              delete input['path'];
+            } else if (typeof directory !== 'string') {
+              validationError = globError;
+            } else {
+              try {
+                input['path'] = normalizeWorkspaceRelativePath(
+                  directory.trim(),
+                );
+              } catch (cause) {
+                if (!(cause instanceof InvalidWorkspaceRelativePathError))
+                  throw cause;
+                validationError = globError;
+              }
+            }
+          }
+        } else if (call.name === 'monitor') {
+          const args = call.args;
+          const unsupportedKey = Object.keys(args).find(
+            (key) =>
+              ![
+                'command',
+                'idle_timeout_ms',
+                'max_events',
+                'description',
+              ].includes(key),
+          );
+          // H3: a Monitor request is admitted exactly when this Session
+          // owns its monitor_run orchestrator and the detached family has
+          // its v3 flow — publication — without it the request refuses at
+          // admission rather than travelling v2 and never landing.
+          monitorAdmitted =
+            this.monitors !== undefined &&
+            this.publication !== undefined &&
+            monitorRunAdmissionsEnabled();
+          if (typeof args['command'] !== 'string' || !args['command'].trim()) {
+            validationError = 'Hosted Monitor requires a nonempty command.';
+          } else if (unsupportedKey !== undefined) {
+            validationError = `Hosted Monitor received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
+          } else if (!monitorAdmitted) {
+            validationError =
+              'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.';
+          } else if (
+            args['description'] !== undefined &&
+            typeof args['description'] !== 'string'
+          ) {
+            validationError = 'Hosted Monitor description must be a string.';
+          } else if (
+            args['idle_timeout_ms'] !== undefined &&
+            (!Number.isSafeInteger(args['idle_timeout_ms']) ||
+              (args['idle_timeout_ms'] as number) < 1 ||
+              (args['idle_timeout_ms'] as number) > 600000)
+          ) {
+            validationError =
+              'Hosted Monitor idle_timeout_ms must be an integer from 1 to 600000 ms.';
+          } else if (
+            args['max_events'] !== undefined &&
+            (!Number.isSafeInteger(args['max_events']) ||
+              (args['max_events'] as number) < 1 ||
+              (args['max_events'] as number) > 10000)
+          ) {
+            validationError =
+              'Hosted Monitor max_events must be an integer from 1 to 10000.';
+          }
+          input = { ...args, is_monitor: true };
         } else {
           const file = call.args['file_path'];
           input = { ...call.args };
@@ -848,8 +1094,14 @@ export class HostedWorkspaceToolTurn {
           mcp: mcpInput !== undefined,
           ...encoded,
           argsDigest: `sha256:${managedToolDigest(input)}`,
-          publicationId: isShell && this.publication ? randomUUID() : null,
+          publicationId:
+            (isShell || (call.name === 'monitor' && monitorAdmitted)) &&
+            this.publication
+              ? randomUUID()
+              : null,
           runtimeCallId,
+          background: mcpInput === undefined && backgroundAdmitted,
+          monitoring: mcpInput === undefined && monitorAdmitted,
         };
       });
     };
@@ -933,15 +1185,38 @@ export class HostedWorkspaceToolTurn {
       this.uncertain = true;
       if (
         this.shell &&
-        requests.some((request) => request.isShell) &&
+        requests.some((request) => request.isShell || request.monitoring) &&
         !this.publisher
       ) {
-        this.publisher = new HostedShellPublisher(
+        this.publisher = this.shell!.publisher ??= new HostedShellPublisher(
           this.session,
           this.shell!.resources,
           this.shell!.assertWritable,
-          this.promptId,
+          this.childRuns,
+          this.monitors,
+          () => this.shell!.monitorWakeKick?.(),
         );
+        this.bindingGeneration = await this.broker.registerPublisher(
+          await this.publisher.start(),
+        );
+      } else if (
+        this.publication &&
+        this.backgroundLane &&
+        requests.some((request) => request.background || request.monitoring) &&
+        !this.publisher
+      ) {
+        // Publication mode: the record funnel of the detached family is
+        // this Session's, exactly like without capture bytes — without it
+        // a background exit's settle and tail could never reach the record.
+        this.publisher = this.backgroundLane.publisher ??=
+          new HostedShellPublisher(
+            this.session,
+            this.backgroundLane.resources,
+            this.backgroundLane.assertWritable,
+            this.childRuns,
+            this.monitors,
+            () => this.backgroundLane!.monitorWakeKick?.(),
+          );
         this.bindingGeneration = await this.broker.registerPublisher(
           await this.publisher.start(),
         );
@@ -994,7 +1269,11 @@ export class HostedWorkspaceToolTurn {
             inputRefs.delete(index);
             if (
               this.approval &&
-              hostedApprovalAsks(this.approval.settings, request.call.name)
+              hostedApprovalAsks(
+                this.approval.settings,
+                request.call.name,
+                this.searchProfile,
+              )
             )
               askAgain.add(index);
           }
@@ -1135,7 +1414,7 @@ export class HostedWorkspaceToolTurn {
         let executionCallId: string;
         try {
           prepared =
-            request.isShell && this.publication
+            (request.isShell || request.monitoring) && this.publication
               ? await this.broker.prepareV3(
                   request.runtimeCallId,
                   request.argsDigest,
@@ -1225,6 +1504,35 @@ export class HostedWorkspaceToolTurn {
             modelCallId: request.call.callId,
             captureId: randomUUID(),
           });
+          // H3: the record intent precedes every physical side effect.
+          if (request.background) {
+            await this.childRuns!.admit({
+              shellId: executionCallId,
+              ownerScopeId: authority.sessionHeader.sessionKey.sessionId,
+              executionCallId,
+              args: request.input,
+            });
+          }
+          if (request.monitoring) {
+            await this.monitors!.admit({
+              monitorId: executionCallId,
+              ownerScopeId: authority.sessionHeader.sessionKey.sessionId,
+              executionCallId,
+              args: request.input,
+              maxEvents: Math.min(
+                Math.max((request.input['max_events'] as number) ?? 1_000, 1),
+                10_000,
+              ),
+              idleTimeoutMs: Math.min(
+                Math.max(
+                  (request.input['idle_timeout_ms'] as number) ?? 300_000,
+                  1,
+                ),
+                600_000,
+              ),
+              debounceMs: 1_000,
+            });
+          }
         }
         bindings.push({
           functionCallId: request.call.callId,
@@ -1249,7 +1557,16 @@ export class HostedWorkspaceToolTurn {
           attemptId: messageId,
           routeRef,
         });
-        if (request.isShell && this.publisher) {
+        if (
+          (request.isShell || request.monitoring) &&
+          this.publisher &&
+          // A refused request never funnels its identity: what admissions
+          // failed to admit must not be registered either.
+          request.validationError === undefined &&
+          // A publication lane serves only the detached family: foreground
+          // Shell captures stay on the Runtime's publication there.
+          (this.shell !== undefined || request.background || request.monitoring)
+        ) {
           this.publisher!.register(
             {
               reference: {
@@ -1265,9 +1582,14 @@ export class HostedWorkspaceToolTurn {
                 executionCallId,
                 bindingGeneration: this.bindingGeneration!,
                 capturePolicy: 'complete_required',
+                ...(request.background ? { background: true } : {}),
+                ...(request.monitoring
+                  ? { background: true, monitoring: true }
+                  : {}),
               },
             },
             request.call.callId,
+            this.promptId,
           );
         }
       }
@@ -1276,6 +1598,21 @@ export class HostedWorkspaceToolTurn {
           turnId: this.promptId,
           promptId: this.promptId,
         });
+      // H3: dispatch is durable the moment the checkpoint commits.
+      for (const [index, request] of requests.entries()) {
+        if (!request.background && !request.monitoring) continue;
+        const executionCallId = reserved.get(index)!;
+        const saved = shellBindings.get(executionCallId);
+        if (!saved) continue;
+        const runtime = {
+          runtimeBindingId: saved.runtimeBindingId,
+          generation: saved.bindingGeneration,
+        };
+        if (request.background)
+          await this.childRuns!.dispatchStarted(executionCallId, runtime);
+        if (request.monitoring)
+          await this.monitors!.dispatchStarted(executionCallId, runtime);
+      }
       if (shellBindings.size > 0) {
         const owner = await this.publication!.owner.owner();
         const authority = this.session.authority;
@@ -1389,7 +1726,7 @@ export class HostedWorkspaceToolTurn {
           continue;
         }
         const executionCallId = reserved.get(index)!;
-        if (request.isShell && this.publication) {
+        if ((request.isShell || request.monitoring) && this.publication) {
           const saved = shellBindings.get(executionCallId);
           if (!saved) throw new Error('Original Shell publication is missing.');
           await renewGrants!();
@@ -1423,16 +1760,38 @@ export class HostedWorkspaceToolTurn {
               throw new Error('Finished publication binding changed.');
             result = parseToolResultEnvelope(finished['result']);
           }
-          responses.push(
-            ...(await this.acceptShell(
-              request.call,
-              executionCallId,
-              saved.publicationId,
-              saved.publicationToken,
-              result,
-              model,
-            )),
-          );
+          if (request.monitoring) {
+            responses.push(
+              ...(await this.acceptMonitor(
+                request,
+                executionCallId,
+                saved,
+                result,
+                model,
+              )),
+            );
+          } else if (request.background) {
+            responses.push(
+              ...(await this.acceptBackgroundShell(
+                request,
+                executionCallId,
+                saved,
+                result,
+                model,
+              )),
+            );
+          } else {
+            responses.push(
+              ...(await this.acceptShell(
+                request.call,
+                executionCallId,
+                saved.publicationId,
+                saved.publicationToken,
+                result,
+                model,
+              )),
+            );
+          }
           shellBindings.delete(executionCallId);
           continue;
         }
@@ -1508,6 +1867,28 @@ export class HostedWorkspaceToolTurn {
             HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
           !this.messageFitsInline('tool_result', converted, model)
         ) {
+          // A glob result is a path list: keep the prefix that fits rather
+          // than omitting the whole result, so the model can narrow and retry.
+          if (request.call.name === 'glob') {
+            const fits = (candidate: Part[]) =>
+              Buffer.byteLength(
+                JSON.stringify({ executionCallId, ...candidate[0] }),
+              ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes &&
+              this.messageFitsInline('tool_result', candidate, model);
+            const truncated = truncateHostedGlobResponse(converted, fits);
+            if (truncated) {
+              converted = truncated;
+              outcome = Buffer.from(
+                JSON.stringify({ executionCallId, ...converted[0] }),
+              );
+            }
+          }
+        }
+        if (
+          outcome.byteLength >
+            HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
+          !this.messageFitsInline('tool_result', converted, model)
+        ) {
           if (receipt)
             throw new Error(
               'Admitted Shell result exceeds the inline Session Store limit.',
@@ -1571,6 +1952,7 @@ export class HostedWorkspaceToolTurn {
       for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
         if (!saved) continue;
+        let proven = false;
         try {
           const owner = this.publication!.owner;
           const closed = await owner.request(
@@ -1590,12 +1972,46 @@ export class HostedWorkspaceToolTurn {
             (closed as Record<string, unknown>)['state'] !== 'NOT_STARTED'
           )
             throw new Error('Original execution was not proven unstarted.');
+          proven = true;
         } catch (closeCause) {
           writeStderrLineSafe(
             'qwen serve: Tool publication close was not confirmed: ' +
               String(closeCause),
           );
         }
+        if (!proven) continue;
+        // The grant owner proved this start never happened, yet the run
+        // record admitted for the same execution was already committed
+        // dispatch_started — and nothing beyond this catch can ever settle
+        // it again. Settle it under the same proof so the projection stops
+        // reporting a run that never started.
+        const request = requests.find(
+          (_, index) => reserved.get(index) === executionCallId,
+        );
+        if (request?.background)
+          await this.childRuns
+            ?.settleFailed(executionCallId, {
+              stopReason: 'start_failed',
+              started: false,
+            })
+            .catch((settleCause: unknown) =>
+              writeStderrLineSafe(
+                'qwen serve: Unstarted child run record was not settled: ' +
+                  String(settleCause),
+              ),
+            );
+        if (request?.monitoring)
+          await this.monitors
+            ?.settleFailed(executionCallId, {
+              stopReason: 'start_failed',
+              started: false,
+            })
+            .catch((settleCause: unknown) =>
+              writeStderrLineSafe(
+                'qwen serve: Unstarted monitor run record was not settled: ' +
+                  String(settleCause),
+              ),
+            );
       }
       throw new HostedToolRecoveryRequiredError(cause);
     } finally {
@@ -1627,6 +2043,485 @@ export class HostedWorkspaceToolTurn {
       inputBytes,
       digest: `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`,
     };
+  }
+
+  /**
+   * H3 Monitor watch settlement, the mirror of acceptBackgroundShell: an
+   * unstarted refuse settles start_failed on the record; a settled
+   * detached handle lands blocked with no second journal receipt, and the
+   * watch's physical start attaches through the same idempotent rule —
+   * a journaled receipt verdict first, attach only when this identity
+   * still lacks its start receipt.
+   */
+  private async acceptMonitor(
+    request: {
+      call: ToolCallRequestInfo;
+      input: Record<string, unknown>;
+    },
+    executionCallId: string,
+    saved: {
+      publicationId: string;
+      publicationToken: string;
+      runtimeBindingId: string;
+      bindingGeneration: string;
+      runtimeCallId: string;
+    },
+    result: ToolResultEnvelope,
+    model: string,
+  ): Promise<Part[]> {
+    if (result.executionStatus === 'not_started' && result.capture === null) {
+      // Prove before settle: the owner's close gate is the authority on
+      // "this start never happened". Settling the record first and then
+      // seeing the proof refused would freeze a run that actually started
+      // into a line no later fact may ever touch.
+      const parts = await this.acceptShell(
+        request.call,
+        executionCallId,
+        saved.publicationId,
+        saved.publicationToken,
+        result,
+        model,
+      );
+      await this.monitors!.settleFailed(executionCallId, {
+        stopReason: 'start_failed',
+        started: false,
+      });
+      return parts;
+    }
+    if (
+      result.executionStatus !== 'success' ||
+      result.capture?.captureStatus !== 'detached'
+    ) {
+      throw new Error(
+        `Monitor watch settled with an unexpected result shape (${result.executionStatus}).`,
+      );
+    }
+    const authority = this.session.authority;
+    let receipt = authority
+      .eventsInSequenceRange(1, authority.committedSequence)
+      .find(
+        (event) =>
+          event.kind === 'tool.receipt' &&
+          event.payload['executionCallId'] === executionCallId,
+      );
+    if (receipt === undefined) {
+      const existing = this.monitors!.record(executionCallId);
+      if (existing === undefined || existing.startReceiptRef === null) {
+        await this.monitors!.attach(
+          executionCallId,
+          {
+            runtimeBindingId: saved.runtimeBindingId,
+            generation: saved.bindingGeneration,
+          },
+          {
+            executionCallId,
+            runtimeCallId: saved.runtimeCallId,
+            unitName: `qwen-mon-${saved.runtimeCallId.replace(/[^a-zA-Z0-9._-]/g, '-')}`,
+            bindingGeneration: saved.bindingGeneration,
+            occurredAt: Date.now(),
+          },
+        );
+      }
+      // A watch that ended before this attach left its finalize refused:
+      // with the start receipt now committed, its own settle — tail
+      // observation included — completes without any client retry.
+      await this.publisher?.settleAttached(executionCallId);
+    }
+    // The observation lifecycle lives exactly once per owning process,
+    // keyed on the live record rather than on this call's freshness: a
+    // fresh accept starts it, and a replay after a restart — whose
+    // journal already carries the receipt — must resume it, or the
+    // watch's lines, terminal conditions and settle never arrive.
+    if (this.monitors!.record(executionCallId)?.stopReason === null) {
+      await this.resumeMonitorWatch(executionCallId);
+    }
+    let ref: ManagedSessionDurableRef;
+    let converted: Part[];
+    let messageId: string;
+    let timestamp: string;
+    if (receipt) {
+      ref = assertManagedSessionDurableRef(
+        receipt.payload['toolOutcomeRef'],
+        'original tool outcome',
+      );
+      const savedResult = JSON.parse(
+        (await this.session.resources.read(ref)).toString('utf8'),
+      ) as Record<string, unknown>;
+      const history = savedResult['history'] as
+        | Record<string, unknown>
+        | undefined;
+      if (
+        savedResult['schemaVersion'] !== 1 ||
+        savedResult['decision'] !== 'blocked' ||
+        !isDeepStrictEqual(savedResult['envelope'], result) ||
+        savedResult['manifestRef'] !== null ||
+        receipt.payload['resultRef'] !== null ||
+        (receipt.payload['resources'] !== undefined &&
+          !isDeepStrictEqual(receipt.payload['resources'], [])) ||
+        receipt.payload['historyRevision'] !== receipt.sequence ||
+        typeof history?.['messageId'] !== 'string' ||
+        typeof history['timestamp'] !== 'string' ||
+        typeof history['model'] !== 'string' ||
+        !Array.isArray(history['parts'])
+      )
+        throw new Error('Original Monitor watch receipt conflicts.');
+      converted = history['parts'] as Part[];
+      messageId = history['messageId'] as string;
+      timestamp = history['timestamp'] as string;
+      model = history['model'] as string;
+    } else {
+      converted = convertToFunctionResponse(
+        request.call.name,
+        request.call.callId,
+        result.responseParts as Part[],
+      );
+      const response = converted[0]?.functionResponse;
+      if (!response || converted.length !== 1)
+        throw new Error('Monitor watch result cannot be recorded.');
+      response.response = {
+        ...response.response,
+        executionStatus: 'success',
+      };
+      if (!this.messageFitsInline('tool_result', converted, model))
+        throw new Error('Monitor watch result cannot be recorded.');
+      const originalIntent = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .find(
+          (event) =>
+            event.kind === 'tool.intent' &&
+            event.payload['executionCallId'] === executionCallId,
+        );
+      if (!originalIntent)
+        throw new Error('Original Monitor watch intent is missing.');
+      messageId = shellHistoryId(executionCallId);
+      timestamp = new Date(originalIntent.occurredAt).toISOString();
+      const outcome = Buffer.from(
+        JSON.stringify({
+          schemaVersion: 1,
+          decision: 'blocked',
+          envelope: result,
+          manifestRef: null,
+          history: { messageId, timestamp, model, parts: converted },
+        }),
+      );
+      if (
+        outcome.byteLength >
+        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+      )
+        throw new Error('Monitor watch outcome exceeds its limit.');
+      ref = await this.session.resources.publish(
+        'managed-tool-outcome',
+        outcome,
+      );
+      await authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: executionCallId,
+          sessionKey: authority.sessionHeader.sessionKey,
+          contentDigest: ref.digest,
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: `tool-receipt:${executionCallId}`,
+          sessionKey: authority.sessionHeader.sessionKey,
+          kind: 'tool.receipt',
+          occurredAt: Date.now(),
+          payload: {
+            executionCallId,
+            toolOutcomeRef: ref,
+            resultRef: null,
+            resources: [],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      receipt = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .find(
+          (event) =>
+            event.kind === 'tool.receipt' &&
+            event.payload['executionCallId'] === executionCallId,
+        );
+    }
+    if (!receipt)
+      throw new Error('Original Monitor watch receipt disappeared.');
+    await this.commit('tool_result', converted, model, {
+      uuid: messageId,
+      timestamp,
+    });
+    await this.harness.resolveAwaitRuntime(executionCallId, ref);
+    try {
+      await this.broker.acknowledgeV3(executionCallId, {
+        executionCallId,
+        manifest: null,
+        deliveryStatus: 'blocked',
+        historyRevision: null,
+      });
+    } catch (cause) {
+      throw new Error(
+        `Monitor watch acknowledgement failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+    return converted;
+  }
+
+  /**
+   * Starts the observation loop for a watch fresh out of its v3 start,
+   * once per Session lifetime: the loop resumes an already-attached
+   * record and is fed lines through the Session publisher's fan-out.
+   */
+  private async resumeMonitorWatch(executionCallId: string): Promise<void> {
+    // The lane is Shell-mode or the publication lane, whichever this turn
+    // owns — the detached family's loops park on it either way.
+    const lane = this.shell ?? this.backgroundLane;
+    if (!lane || !this.publisher || !this.monitors) return;
+    const loops = (lane.monitorLoops ??= new Map());
+    if (loops.has(executionCallId)) return;
+    const record = this.monitors.record(executionCallId);
+    if (!record) return;
+    const argsBody = JSON.parse(
+      (await this.session.resources.read(record.commandRef)).toString('utf8'),
+    ) as Record<string, unknown>;
+    const executor = new HostedMonitorRemoteExecutor(this.publisher);
+    const loop = new HostedMonitorLoop(
+      this.monitors,
+      executionCallId,
+      executor,
+      undefined,
+      () => lane.monitorWakeKick?.(),
+    );
+    // Register the loop only after its start went through: a failed resume
+    // leaves no dead entry to short-circuit every later one (the fan-out
+    // rides the remote executor, not this map, so line order is unaffected).
+    await loop.resumeAttached({
+      ownerScopeId: this.session.authority.sessionHeader.sessionKey.sessionId,
+      executionCallId,
+      args: argsBody,
+      maxEvents: record.maxEvents,
+      idleTimeoutMs: record.idleTimeoutMs,
+      debounceMs: record.debounceMs,
+      runtime: record.run.runtime!,
+    });
+    loops.set(executionCallId, loop);
+  }
+
+  /**
+   * H3 background Shell settlement. A proven unstarted refuse rides the
+   * unstarted family as-is (settled as start_failed on the record); a
+   * settled detached handle lands as the third durable receipt family —
+   * blocked delivery, null resultRef, resolve — with the physical start
+   * attached to the record from the same facts before history is written.
+   */
+  private async acceptBackgroundShell(
+    request: {
+      call: ToolCallRequestInfo;
+      input: Record<string, unknown>;
+    },
+    executionCallId: string,
+    saved: {
+      publicationId: string;
+      publicationToken: string;
+      runtimeBindingId: string;
+      bindingGeneration: string;
+      runtimeCallId: string;
+    },
+    result: ToolResultEnvelope,
+    model: string,
+  ): Promise<Part[]> {
+    if (result.executionStatus === 'not_started' && result.capture === null) {
+      // Prove before settle: the owner's close gate is the authority on
+      // "this start never happened". Settling the record first and then
+      // seeing the proof refused would freeze a run that actually started
+      // into a line no later fact may ever touch.
+      const parts = await this.acceptShell(
+        request.call,
+        executionCallId,
+        saved.publicationId,
+        saved.publicationToken,
+        result,
+        model,
+      );
+      await this.childRuns!.settleFailed(executionCallId, {
+        stopReason: 'start_failed',
+        started: false,
+      });
+      return parts;
+    }
+    if (
+      result.executionStatus !== 'success' ||
+      result.capture?.captureStatus !== 'detached'
+    ) {
+      throw new Error(
+        `Background Shell settled with an unexpected result shape (${result.executionStatus}).`,
+      );
+    }
+    const authority = this.session.authority;
+    let receipt = authority
+      .eventsInSequenceRange(1, authority.committedSequence)
+      .find(
+        (event) =>
+          event.kind === 'tool.receipt' &&
+          event.payload['executionCallId'] === executionCallId,
+      );
+    if (receipt === undefined) {
+      // Attach the physical start to the record before history is written —
+      // replay-tolerant: a retry after a crash between attach and journal
+      // finds its own start receipt on this identity and must not mint a
+      // rerun; any mismatched receipt stays the funnel's rerun refusal.
+      const existing = this.childRuns!.record(executionCallId);
+      if (existing === undefined || existing.startReceiptRef === null) {
+        await this.childRuns!.attach(
+          executionCallId,
+          {
+            runtimeBindingId: saved.runtimeBindingId,
+            generation: saved.bindingGeneration,
+          },
+          {
+            executionCallId,
+            runtimeCallId: saved.runtimeCallId,
+            unitName: `qwen-bg-${saved.runtimeCallId.replace(/[^a-zA-Z0-9._-]/g, '-')}`,
+            bindingGeneration: saved.bindingGeneration,
+            occurredAt: Date.now(),
+          },
+        );
+      }
+      // A Shell that ended before this attach left its finalize refused:
+      // with the start receipt now committed, the settle completes here.
+      await this.publisher?.settleAttached(executionCallId);
+    }
+    let ref: ManagedSessionDurableRef;
+    let converted: Part[];
+    let messageId: string;
+    let timestamp: string;
+    if (receipt) {
+      ref = assertManagedSessionDurableRef(
+        receipt.payload['toolOutcomeRef'],
+        'original tool outcome',
+      );
+      const savedResult = JSON.parse(
+        (await this.session.resources.read(ref)).toString('utf8'),
+      ) as Record<string, unknown>;
+      const history = savedResult['history'] as
+        | Record<string, unknown>
+        | undefined;
+      if (
+        savedResult['schemaVersion'] !== 1 ||
+        savedResult['decision'] !== 'blocked' ||
+        !isDeepStrictEqual(savedResult['envelope'], result) ||
+        savedResult['manifestRef'] !== null ||
+        receipt.payload['resultRef'] !== null ||
+        (receipt.payload['resources'] !== undefined &&
+          !isDeepStrictEqual(receipt.payload['resources'], [])) ||
+        receipt.payload['historyRevision'] !== receipt.sequence ||
+        typeof history?.['messageId'] !== 'string' ||
+        typeof history['timestamp'] !== 'string' ||
+        typeof history['model'] !== 'string' ||
+        !Array.isArray(history['parts'])
+      )
+        throw new Error('Original background Shell receipt conflicts.');
+      converted = history['parts'] as Part[];
+      messageId = history['messageId'] as string;
+      timestamp = history['timestamp'] as string;
+      model = history['model'] as string;
+    } else {
+      converted = convertToFunctionResponse(
+        request.call.name,
+        request.call.callId,
+        result.responseParts as Part[],
+      );
+      const response = converted[0]?.functionResponse;
+      if (!response || converted.length !== 1)
+        throw new Error('Background Shell result cannot be recorded.');
+      response.response = {
+        ...response.response,
+        executionStatus: 'success',
+      };
+      if (!this.messageFitsInline('tool_result', converted, model))
+        throw new Error('Background Shell result cannot be recorded.');
+      const originalIntent = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .find(
+          (event) =>
+            event.kind === 'tool.intent' &&
+            event.payload['executionCallId'] === executionCallId,
+        );
+      if (!originalIntent)
+        throw new Error('Original background Shell intent is missing.');
+      messageId = shellHistoryId(executionCallId);
+      timestamp = new Date(originalIntent.occurredAt).toISOString();
+      const outcome = Buffer.from(
+        JSON.stringify({
+          schemaVersion: 1,
+          decision: 'blocked',
+          envelope: result,
+          manifestRef: null,
+          history: { messageId, timestamp, model, parts: converted },
+        }),
+      );
+      if (
+        outcome.byteLength >
+        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+      )
+        throw new Error('Background Shell outcome exceeds its limit.');
+      ref = await this.session.resources.publish(
+        'managed-tool-outcome',
+        outcome,
+      );
+      await authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: executionCallId,
+          sessionKey: authority.sessionHeader.sessionKey,
+          contentDigest: ref.digest,
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: `tool-receipt:${executionCallId}`,
+          sessionKey: authority.sessionHeader.sessionKey,
+          kind: 'tool.receipt',
+          occurredAt: Date.now(),
+          payload: {
+            executionCallId,
+            toolOutcomeRef: ref,
+            resultRef: null,
+            resources: [],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      receipt = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .find(
+          (event) =>
+            event.kind === 'tool.receipt' &&
+            event.payload['executionCallId'] === executionCallId,
+        );
+    }
+    if (!receipt)
+      throw new Error('Original background Shell receipt disappeared.');
+    await this.commit('tool_result', converted, model, {
+      uuid: messageId,
+      timestamp,
+    });
+    await this.harness.resolveAwaitRuntime(executionCallId, ref);
+    try {
+      await this.broker.acknowledgeV3(executionCallId, {
+        executionCallId,
+        manifest: null,
+        deliveryStatus: 'blocked',
+        historyRevision: null,
+      });
+    } catch (cause) {
+      writeStderrLineSafe(
+        'qwen serve: Background Shell v3 ACK can be retried after its Session receipt: ' +
+          String(cause),
+      );
+    }
+    return converted;
   }
 
   private async acceptShell(
@@ -1995,12 +2890,13 @@ export class HostedWorkspaceToolTurn {
     );
     const approval = this.approval;
     if (!approval) return refusals;
+    const searchProfile = this.searchProfile;
     let asked = false;
     for (const [index, request] of requests.entries()) {
       if (
         refusals[index] ||
         this.hookPermission.get(request.call.callId) === 'allow' ||
-        !hostedApprovalAsks(approval.settings, request.call.name)
+        !hostedApprovalAsks(approval.settings, request.call.name, searchProfile)
       )
         continue;
       asked = true;
@@ -2117,7 +3013,48 @@ export class HostedWorkspaceToolTurn {
     }
   }
 
-  async close(): Promise<void> {
-    await this.publisher?.close();
+  // The publisher lives on the Session across turns, so a turn's close
+  // deliberately does not touch it: the Session's ordered close (H3's
+  // fifth slice) drains the stores, and background traffic keeps its
+  // endpoint until then.
+  async close(): Promise<void> {}
+}
+
+const HOSTED_GLOB_TRUNCATION_HINT =
+  '\n---\n[Result truncated to fit the durable Session limit. Narrow the pattern or path.]';
+
+/**
+ * Keeps the longest whole-line prefix of a glob result that fits, followed by
+ * a narrowing hint. Returns undefined when the response has no text output to
+ * truncate or even the empty list does not fit.
+ */
+export function truncateHostedGlobResponse(
+  parts: Part[],
+  fits: (candidate: Part[]) => boolean,
+): Part[] | undefined {
+  const functionResponse = parts[0]?.functionResponse;
+  const response = functionResponse?.response as
+    | Record<string, unknown>
+    | undefined;
+  const output = response?.['output'];
+  if (!functionResponse || !response || typeof output !== 'string')
+    return undefined;
+  const lines = output.split('\n');
+  while (lines.length > 0) {
+    const candidate: Part[] = [
+      {
+        functionResponse: {
+          ...functionResponse,
+          response: {
+            ...response,
+            output: lines.join('\n') + HOSTED_GLOB_TRUNCATION_HINT,
+            outputTruncated: true,
+          },
+        },
+      },
+    ];
+    if (fits(candidate)) return candidate;
+    lines.pop();
   }
+  return undefined;
 }

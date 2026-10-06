@@ -23,6 +23,81 @@ describe('collectSessionData', () => {
     }),
   } as unknown as Config;
 
+  it('keeps nested writes out of direct-call file statistics', async () => {
+    const base = {
+      sessionId: 'session-1',
+      timestamp: '2026-08-16T00:00:00.000Z',
+      cwd: '/workspace',
+      version: 'test',
+    };
+    const records: ChatRecord[] = [
+      {
+        ...base,
+        uuid: 'calls',
+        parentUuid: null,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'direct',
+                name: 'write_file',
+                args: { file_path: '/workspace/direct.txt' },
+              },
+            },
+          ],
+        },
+      },
+      ...['nested-1', 'nested-2', 'direct'].map(
+        (id, index): ChatRecord => ({
+          ...base,
+          uuid: id,
+          parentUuid: index === 0 ? 'calls' : `nested-${index}`,
+          type: 'tool_result',
+          ...(id !== 'direct'
+            ? { subtype: 'code_mode_tool_result' as const }
+            : {}),
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id,
+                  name: 'write_file',
+                  response: { output: 'written' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: id,
+            resultDisplay: {
+              fileName: `${id}.txt`,
+              fileDiff: '@@ -0,0 +1,2 @@\n+one\n+two',
+              originalContent: null,
+              newContent: 'one\ntwo',
+            },
+          },
+        }),
+      ),
+    ];
+    const data = await collectSessionData(
+      {
+        sessionId: base.sessionId,
+        startTime: base.timestamp,
+        messages: records,
+      },
+      config,
+    );
+    expect(data.metadata).toMatchObject({
+      filesWritten: 1,
+      linesAdded: 2,
+      linesRemoved: 0,
+      uniqueFiles: ['/workspace/direct.txt'],
+    });
+  });
+
   it('keeps oversized canonical tool results lossless in offline export', async () => {
     const source = `head-${'x'.repeat(499_999)}-tail`;
     const records: ChatRecord[] = [
