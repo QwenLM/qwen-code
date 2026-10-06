@@ -189,6 +189,7 @@ import {
   SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   activeWorkCloseRetryDelayMs,
+  getPromptCancelAbortReason,
   isValidTrustedModelPrompt,
   sessionCloseDrainBudgetMs,
 } from './bridgeTypes.js';
@@ -11834,7 +11835,13 @@ export function createSessionControlPlane(
               entry.activePromptId === runningPrompt.promptId
                 ? forwardRunningPromptCancel(entry, runningPrompt, notif)
                 : Promise.resolve();
-            runningPrompt.abortController.abort(USER_CANCEL_ABORT_REASON);
+            // The abort reason, not `notif`, is what `onAbort` translates back
+            // into forwarded cancel metadata, so a cancel that lands before
+            // dispatch (gate false, no direct forward) must still carry the
+            // caller-declared provenance instead of being re-labelled 'user'.
+            runningPrompt.abortController.abort(
+              getPromptCancelAbortReason(notif._meta),
+            );
             await forwarding;
             return;
           }

@@ -148,6 +148,7 @@ import {
   MID_TURN_QUEUE_DRAIN_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
+  PROMPT_CANCEL_REASON_META_KEY,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   ACTIVE_WORK_CLOSE_RETRY_BASE_MS,
@@ -23111,6 +23112,67 @@ describe('createAcpSessionBridge', () => {
         ).resolves.toBeUndefined();
         expect(handles[0]?.agent.cancelCalls).toHaveLength(1);
 
+        await bridge.shutdown();
+      }
+    });
+
+    it('keeps a caller-declared interruption when the cancel lands before dispatch', async () => {
+      const prompt = deferred<PromptResponse>();
+      const handle = makeChannel({ promptImpl: () => prompt.promise });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const resolveSpy = vi.spyOn(
+        SessionAttachmentStore.prototype,
+        'resolveContent',
+      );
+      const gate =
+        deferred<
+          Awaited<ReturnType<SessionAttachmentStore['resolveContent']>>
+        >();
+      resolveSpy.mockReturnValueOnce(gate.promise);
+      try {
+        const running = bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'work' }],
+          },
+          undefined,
+          { promptId: 'infra-1' },
+        );
+        void running.catch(() => {});
+        // Parked in attachment resolution, so `dispatched` is still unset and
+        // the direct-forward gate is false: only the abort-driven forward can
+        // carry the reason to the child.
+        await vi.waitFor(() =>
+          expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1),
+        );
+        await bridge.cancelSession(session.sessionId, {
+          sessionId: session.sessionId,
+          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+        });
+        gate.resolve([{ type: 'text', text: 'work' }]);
+        // Re-labelling an infrastructure interrupt as an explicit user
+        // cancellation makes the child stamp `cancelledAt`, which durably
+        // excludes the turn from recovery.
+        await vi.waitFor(() =>
+          expect(
+            handle.agent.extMethodCalls.filter(
+              ({ method }) => method === PROMPT_CANCEL_METHOD,
+            ),
+          ).toEqual([
+            {
+              method: PROMPT_CANCEL_METHOD,
+              params: {
+                sessionId: session.sessionId,
+                _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+              },
+            },
+          ]),
+        );
+      } finally {
+        resolveSpy.mockRestore();
+        prompt.resolve({ stopReason: 'cancelled' });
         await bridge.shutdown();
       }
     });
