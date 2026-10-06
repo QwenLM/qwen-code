@@ -55,14 +55,19 @@ Q4 的答案：一张授权表，按 `(tenant_id, workspace_id, actor_id)` 键 �
 ```sql
 ALTER TABLE managed_workspace_access
     ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'READER';
+-- 没有 can_read 的行今天不授予任何东西；保留它会经回填拿到 READER
+-- （若是 can_create 行则拿到 OPERATOR）。
+DELETE FROM managed_workspace_access WHERE can_read = FALSE;
 UPDATE managed_workspace_access
     SET role = CASE WHEN can_create THEN 'OPERATOR' ELSE 'READER' END;
+ALTER TABLE managed_workspace_access DROP COLUMN can_read;
+ALTER TABLE managed_workspace_access DROP COLUMN can_create;
 ALTER TABLE managed_workspace_access
-    DROP COLUMN can_read, DROP COLUMN can_create,
-    ADD CHECK (role IN ('READER','OPERATOR','OWNER'));
+    ADD CONSTRAINT managed_workspace_access_role
+    CHECK (role IN ('READER', 'OPERATOR', 'OWNER'));
 ```
 
-`role` 是唯一存储词表；不双写。`WorkspaceAccess` 枚举变为 `NONE / READER / OPERATOR / OWNER`（READ→READER、CREATE→OPERATOR）；`OWNER` 蕴含 `OPERATOR` 蕴含 `READER`。每个 store 读取点（`canRead`、`findReadable`、`listReadable`、`canCreateSession`、`resolveForCreation`、`authorizePassiveAttachment`、SSE 读授权复查、list 路由的 SQL 过滤）保持当前判定不变，布尔由 `role` 重新推导 —— 这是一次行为不可见的内部改动，由现有测试套件钉住。`NONE` 不可存储（CHECK 排除它）；它保留为「无行」的领域值。
+复合语句按仓内迁移先例（V7、V12、V24、V40）拆成每动作一条；先删除无可读行再回填，才使这次改动对每一个可达授权行都只是改名。`role` 是唯一存储词表；不双写。`WorkspaceAccess` 枚举变为 `NONE / READER / OPERATOR / OWNER`（READ→READER、CREATE→OPERATOR）；`OWNER` 蕴含 `OPERATOR` 蕴含 `READER`。每个 store 读取点（`canRead`、`findReadable`、`listReadable`、`canCreateSession`、`resolveForCreation`、`authorizePassiveAttachment`、SSE 读授权复查、list 路由的 SQL 过滤）保持当前判定不变，布尔由 `role` 重新推导 —— 这是一次行为不可见的内部改动，由现有测试套件钉住。`NONE` 不可存储（CHECK 排除它）；它保留为「无行」的领域值。
 
 授权置备保持带外，与今天两个布尔的置备方式一致：fixture/部署 SQL 写行；本切片不出现 HTTP 授权管理路由（第 7 节）。
 

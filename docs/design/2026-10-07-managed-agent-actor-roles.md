@@ -106,14 +106,23 @@ Concretely, migration V48 replaces the two booleans with one column:
 ```sql
 ALTER TABLE managed_workspace_access
     ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'READER';
+-- A row without can_read grants nothing today; keeping it would gain
+-- READER (or OPERATOR, for a can_create row) through the backfill.
+DELETE FROM managed_workspace_access WHERE can_read = FALSE;
 UPDATE managed_workspace_access
     SET role = CASE WHEN can_create THEN 'OPERATOR' ELSE 'READER' END;
+ALTER TABLE managed_workspace_access DROP COLUMN can_read;
+ALTER TABLE managed_workspace_access DROP COLUMN can_create;
 ALTER TABLE managed_workspace_access
-    DROP COLUMN can_read, DROP COLUMN can_create,
-    ADD CHECK (role IN ('READER','OPERATOR','OWNER'));
+    ADD CONSTRAINT managed_workspace_access_role
+    CHECK (role IN ('READER', 'OPERATOR', 'OWNER'));
 ```
 
-`role` is the single stored vocabulary; no dual-write. The `WorkspaceAccess`
+The compound shapes are split into per-action statements, matching the
+in-repo migration precedent (V7, V12, V24, V40); dropping unreadable rows
+before the backfill is what makes the change purely a relabelling for every
+reachable grant row. `role` is the single stored vocabulary; no
+dual-write. The `WorkspaceAccess`
 enum becomes `NONE / READER / OPERATOR / OWNER` (READ→READER,
 CREATE→OPERATOR); `OWNER` implies `OPERATOR` implies `READER`. Every store
 reader (`canRead`, `findReadable`, `listReadable`, `canCreateSession`,
