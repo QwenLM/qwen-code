@@ -18150,27 +18150,179 @@ describe('App session callbacks', () => {
         expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
       });
 
-      it('keeps holding prompts for a moment when the rewind fails for an unknown reason', async () => {
-        mockSessionActions.rewindSession.mockRejectedValue(
-          new Error('Rewind session timed out'),
+      describe('when the rewind fails for an unknown reason', () => {
+        // The daemon's listing before and after it applied the rewind.
+        const listedBefore = { snapshots: [snapshot(0), snapshot(1)] };
+        const listedAfter = { snapshots: [snapshot(0)] };
+
+        const failRewind = async () => {
+          mockSessionActions.rewindSession.mockRejectedValue(
+            new TypeError('fetch failed'),
+          );
+          const rendered = renderApp({ language: 'en' });
+          await flush();
+          await submitAndCancel();
+          await settleTurn();
+          await vi.waitFor(() =>
+            expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+          );
+          await flush();
+          return rendered;
+        };
+
+        it('holds prompts until the event arrives when the daemon no longer lists the turn', async () => {
+          mockSessionActions.getRewindSnapshots
+            .mockResolvedValueOnce(listedBefore)
+            .mockResolvedValue(listedAfter);
+          vi.useFakeTimers({ toFake: ['Date'] });
+          try {
+            const { rerender } = await failRewind();
+            await vi.waitFor(() =>
+              expect(
+                mockSessionActions.getRewindSnapshots,
+              ).toHaveBeenCalledTimes(2),
+            );
+            await flush();
+
+            // The daemon did rewind; no amount of waiting makes the correction
+            // safe to send before its event has dropped the turn.
+            expect(testState.queuedPromptWriteBlocked).toBe(true);
+            vi.setSystemTime(Date.now() + 2_100);
+            await corrected();
+            expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+            expect(testState.queuedPromptWriteBlocked).toBe(true);
+            expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+              2,
+            );
+
+            testState.blocks = testState.blocks.slice(0, 2);
+            rerender({ language: 'en' });
+            await flush();
+            expect(testState.queuedPromptWriteBlocked).toBe(false);
+            await corrected();
+            expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('releases prompts once the daemon has twice listed the turn as still there', async () => {
+          mockSessionActions.getRewindSnapshots.mockResolvedValue(listedBefore);
+          await failRewind();
+
+          // One reading can predate a rewind still queued at the daemon.
+          await vi.waitFor(() =>
+            expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+              2,
+            ),
+          );
+          await flush();
+          expect(testState.queuedPromptWriteBlocked).toBe(true);
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+
+          await act(async () => {
+            await vi.waitFor(
+              () =>
+                expect(
+                  mockSessionActions.getRewindSnapshots,
+                ).toHaveBeenCalledTimes(3),
+              { timeout: 2_000 },
+            );
+            await flush();
+          });
+          expect(testState.queuedPromptWriteBlocked).toBe(false);
+          expect(testState.prompt).toBe('oops typo');
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+          expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+            3,
+          );
+        });
+
+        it('keeps asking while the daemon cannot be reached', async () => {
+          mockSessionActions.getRewindSnapshots
+            .mockResolvedValueOnce(listedBefore)
+            .mockRejectedValueOnce(new TypeError('fetch failed'))
+            .mockResolvedValue(listedAfter);
+          const { rerender } = await failRewind();
+
+          await vi.waitFor(
+            () =>
+              expect(
+                mockSessionActions.getRewindSnapshots,
+              ).toHaveBeenCalledTimes(3),
+            { timeout: 2_000 },
+          );
+          await flush();
+          expect(testState.queuedPromptWriteBlocked).toBe(true);
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+
+          testState.blocks = testState.blocks.slice(0, 2);
+          rerender({ language: 'en' });
+          await flush();
+          expect(testState.queuedPromptWriteBlocked).toBe(false);
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+        });
+
+        it('stops asking once the transcript shows the rewind', async () => {
+          let answerSnapshots: () => void = () => {};
+          mockSessionActions.getRewindSnapshots
+            .mockResolvedValueOnce(listedBefore)
+            .mockImplementation(
+              () =>
+                new Promise((resolve) => {
+                  answerSnapshots = () => resolve(listedBefore);
+                }),
+            );
+          const { rerender } = await failRewind();
+          await vi.waitFor(() =>
+            expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+              2,
+            ),
+          );
+
+          // The event lands while the daemon is still being asked.
+          testState.blocks = testState.blocks.slice(0, 2);
+          rerender({ language: 'en' });
+          await flush();
+          expect(testState.queuedPromptWriteBlocked).toBe(false);
+          await act(async () => {
+            answerSnapshots();
+          });
+          await flush();
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+          // Long enough for a recheck to have been due.
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+            2,
+          );
+        });
+      });
+
+      it('releases prompts when the snapshots cannot be read', async () => {
+        mockSessionActions.getRewindSnapshots.mockRejectedValue(
+          new TypeError('fetch failed'),
         );
-        const { rerender } = renderApp({ language: 'en' });
+        renderApp({ language: 'en' });
         await flush();
         await submitAndCancel();
         await settleTurn();
         await vi.waitFor(() =>
-          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+          expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce(),
         );
         await flush();
 
-        // The daemon may still have rewound; its event gets a moment to land.
-        expect(testState.queuedPromptWriteBlocked).toBe(true);
-        testState.blocks = testState.blocks.slice(0, 2);
-        rerender({ language: 'en' });
-        await flush();
+        // No rewind was issued, so none can land.
+        expect(testState.prompt).toBe('oops typo');
+        expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
         expect(testState.queuedPromptWriteBlocked).toBe(false);
         await corrected();
         expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+        expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce();
       });
 
       it('releases prompts when no rewind is issued', async () => {

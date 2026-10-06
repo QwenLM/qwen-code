@@ -960,6 +960,52 @@ function waitForRewindApplied(
   });
 }
 
+/** Pause before asking the daemon again whether a rewind landed. */
+const REWIND_OUTCOME_RECHECK_MS = 500;
+/** Longest pause between attempts to reach the daemon about it. */
+const REWIND_OUTCOME_RETRY_MAX_MS = 2_000;
+
+/**
+ * Whether a rewind the tab stopped waiting for missed the daemon. The daemon
+ * cannot take back a rewind it has dispatched, so only it can tell: it lists
+ * a turn's snapshot while the turn is in history and never reuses a snapshot
+ * id. The target still listed on two readings — the first can be served from
+ * the same read of the agent's pipe as a stalled rewind, before that rewind
+ * truncates — means no rewind happened. Keeps asking while the daemon cannot
+ * be reached. Resolves `false` once the daemon shows the rewind landed (the
+ * transcript then lifts the hold) or `stillHeld` says the hold is gone.
+ */
+async function rewindMissed(
+  target: string,
+  listSnapshots: () => Promise<{
+    snapshots: ReadonlyArray<{ promptId: string }>;
+  }>,
+  stillHeld: () => boolean,
+): Promise<boolean> {
+  let listedBefore = false;
+  let failures = 0;
+  for (;;) {
+    if (!stillHeld()) return false;
+    let listed: boolean | undefined;
+    try {
+      const { snapshots } = await listSnapshots();
+      listed = snapshots.some((entry) => entry.promptId === target);
+    } catch {
+      failures += 1;
+    }
+    if (listed === false) return false;
+    if (listed && listedBefore) return true;
+    listedBefore = listed === true;
+    const pause = listed
+      ? REWIND_OUTCOME_RECHECK_MS
+      : Math.min(
+          REWIND_OUTCOME_RETRY_MAX_MS,
+          REWIND_OUTCOME_RECHECK_MS * 2 ** (failures - 1),
+        );
+    await new Promise<void>((resolve) => window.setTimeout(resolve, pause));
+  }
+}
+
 function matchesUserMessageIdentity(
   block: DaemonTranscriptBlock | undefined,
   identity: TranscriptUserMessageIdentity | undefined,
@@ -3682,6 +3728,7 @@ export function App({
     sessionKey: string | undefined;
     turnIndex: number;
     owner: DaemonSessionOwnerSnapshot;
+    /** Runs once the hold lifts with the session still current. */
     recover?: () => void;
   } | null>(null);
   const rewindSyncBlocked = Boolean(
@@ -17881,21 +17928,33 @@ export function App({
       if (!historyComplete) return;
       // Hold prompts from here until the rewind has shown up in the
       // transcript or is known not to happen.
-      const pending = { sessionKey: logicalSessionKey, turnIndex, owner };
+      let lifted = false;
+      const pending = {
+        sessionKey: logicalSessionKey,
+        turnIndex,
+        owner,
+        recover: () => {
+          lifted = true;
+        },
+      };
       setPendingRewind(pending);
-      const release = () =>
+      const release = () => {
+        lifted = true;
         setPendingRewind((current) => (current === pending ? null : current));
+      };
+      const listSnapshots = () =>
+        sessionActions.getRewindSnapshots({ silent: true });
       let rewound = false;
+      let target: string | undefined;
       try {
-        const { snapshots } = await sessionActions.getRewindSnapshots({
-          silent: true,
-        });
+        const { snapshots } = await listSnapshots();
         // Only ever rewind the daemon's newest turn: a prompt cancelled before
         // it reached the model has no snapshot of its own, and the newest one
         // then belongs to the turn before it.
         const newest = snapshots[snapshots.length - 1];
         if (!newest || newest.turnIndex !== bareTurnIndex()) return;
-        await sessionActions.rewindSession(newest.promptId, {
+        target = newest.promptId;
+        await sessionActions.rewindSession(target, {
           rewindFiles: false,
           silent: true,
         });
@@ -17904,14 +17963,17 @@ export function App({
       } catch (error) {
         // Nobody asked for a rewind, so a failed one is not worth a toast:
         // the prompt is back in the composer and simply stays in history. A
-        // daemon refusal (an SSH workspace, say) did not rewind; any other
-        // failure may still land, so give its event a moment to arrive.
-        if (!(error instanceof DaemonHttpError)) {
-          await waitForRewindApplied(
-            () => store.getSnapshot().blocks,
-            turnIndex,
-            isCurrent,
-          );
+        // daemon refusal (an SSH workspace, say) did not rewind. Any other
+        // failure of an issued rewind leaves it open whether the daemon
+        // applied it, and a wait proves nothing: prompts stay held until
+        // the daemon says the turn is still there or the transcript shows
+        // it gone.
+        if (target !== undefined && !(error instanceof DaemonHttpError)) {
+          rewound = !(await rewindMissed(
+            target,
+            listSnapshots,
+            () => isCurrent() && !lifted,
+          ));
         }
       } finally {
         if (!rewound) release();
