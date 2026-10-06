@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTaskEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionEventRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.UpdateSessionRequest;
@@ -235,6 +236,15 @@ public class PublicAgentController {
             @PathVariable String sessionId, @PathVariable String taskId) {
         return tasks.getPublicTask(tenant.tenantId(), tenant.actorId(),
                 sessionId, taskId);
+    }
+
+    @GetMapping("/{sessionId}/tasks/{taskId}/events")
+    public PublicList<PublicTaskEvent> taskEvents(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String taskId,
+            @RequestParam(required = false) String after,
+            @RequestParam(defaultValue = "20") int limit) {
+        return tasks.listPublicTaskEvents(tenant.tenantId(), tenant.actorId(),
+                sessionId, taskId, after, limit);
     }
 
     private static long parseSequence(String header, long fallback) {
