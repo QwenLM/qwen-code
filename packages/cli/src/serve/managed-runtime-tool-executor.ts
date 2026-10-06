@@ -1735,9 +1735,18 @@ export class ManagedToolExecutor {
         );
         // Validation unescapes file_path. Check and record the path this
         // invocation consumes without applying that normalization twice.
-        fileInvocation = sessionIdContext.run(sessionId, () =>
-          tool.build(params),
-        );
+        // Validation mutates `params` before it can fail, and the tool's own
+        // text quotes the resolved host path — so a build failure is held
+        // until the boundary below has answered: an out-of-boundary target
+        // must get the sanitized refusal, not the tool's diagnosis of it.
+        let buildError: unknown;
+        try {
+          fileInvocation = sessionIdContext.run(sessionId, () =>
+            tool.build(params),
+          );
+        } catch (error) {
+          buildError = error;
+        }
         // The glob admission makes an in-context symlink enumerable, so the
         // lexical resolve is no longer sufficient: realpath the result and
         // refuse anything that lands outside the boundary. A create's leaf
@@ -1786,6 +1795,7 @@ export class ManagedToolExecutor {
             `Path '${entry.input!['file_path'] as string}' is not within the Session working directory.`,
           );
         }
+        if (buildError !== undefined) throw buildError;
       }
       if (entry.toolName === GlobTool.Name) {
         // Glob's own validation admits external paths, so the executor pins
@@ -1796,8 +1806,6 @@ export class ManagedToolExecutor {
           throw new ManagedToolUnavailableError(
             'Managed context directory is unavailable.',
           );
-        const requested =
-          typeof params['path'] === 'string' ? params['path'].trim() : '';
         // `pattern` is a second search root, and glob searches every brace
         // alternative: the same check as the harness refuses absolute/`..`
         // shapes and patterns too large to search before anything expands
@@ -1811,21 +1819,49 @@ export class ManagedToolExecutor {
             'Glob pattern must stay within the Session working directory.',
           );
         }
+        // Validation unescapes `path`, and `unescapePath` is not idempotent
+        // for a real name that contains a backslash — so build first and
+        // certify the spelling the walk consumes, exactly as the file arm
+        // above does. Re-normalizing here instead would judge one string and
+        // search another. A build failure is held for the same reason the
+        // file arm holds one.
+        let globBuildError: unknown;
+        try {
+          fileInvocation = sessionIdContext.run(sessionId, () =>
+            tool.build(params),
+          );
+        } catch (error) {
+          globBuildError = error;
+        }
+        const requested =
+          typeof params['path'] === 'string' ? params['path'].trim() : '';
         const resolved =
           requested === '' || requested === '.'
             ? root
             : path.resolve(root, requested);
         // Containment compares realpaths: a lexical compare cannot see a
         // symlink inside the Session context that leaves it.
-        const relative = path.relative(
-          await realpathDeepestExisting(root),
-          await realpathDeepestExisting(resolved),
-        );
-        if (escapesSession(relative)) {
+        const realRoot = await realpathDeepestExisting(root);
+        const realResolved = await realpathDeepestExisting(resolved);
+        // The ownership arm belongs on the input as well as the output. A
+        // Session bound at the mount root holds the whole mount as its
+        // containment root, so the escape test alone admits a search over a
+        // sibling's private estate and answers, per pattern, whether that
+        // sibling holds a match — while the same caller's `read_file` of the
+        // path is refused.
+        if (
+          escapesSession(path.relative(realRoot, realResolved)) ||
+          (await this.ownsAnotherSessionDir?.(
+            tools.sessionId,
+            realResolved,
+            realRoot,
+          ))
+        ) {
           throw new Error(
             `Path '${requested}' is not within the Session working directory.`,
           );
         }
+        if (globBuildError !== undefined) throw globBuildError;
         params['path'] = resolved;
       }
       if (

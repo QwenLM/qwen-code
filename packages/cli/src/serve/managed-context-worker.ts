@@ -431,24 +431,35 @@ export function registerManagedContextRoutes(
       // only when that directory is private: a Session bound at the mount
       // root (`'.'`, a Workspace selection without `cwd_relative`) delimits
       // no private area, so its targets stay subject to sibling ownership.
-      if (
+      const ownEstate =
         contains(ownDirectory, realPath) &&
-        (root === undefined || ownDirectory !== root)
-      ) {
-        return false;
-      }
+        (root === undefined || ownDirectory !== root);
       for (const [otherId, binding] of installations.bindings()) {
         if (otherId === sessionId) continue;
         const directory = await siblingDirectory(mount, binding.cwdRelative);
         // A binding that cannot be located at all cannot prove the outside
-        // target is shared.
-        if (directory === undefined) return true;
+        // target is shared — and it cannot veto the caller's own estate
+        // either, which is the caller's business by the test above.
+        if (directory === undefined) {
+          if (ownEstate) continue;
+          return true;
+        }
         // Only a binding AT the mount root exempts: the shared Workspace
         // itself owns nothing. One bound at a non-root ancestor of the
         // caller still owns its whole subtree, including what spills past
         // the caller's directory.
         if (root !== undefined && directory === root) continue;
-        if (contains(directory, realPath)) return true;
+        if (!contains(directory, realPath)) continue;
+        // Ownership runs in both directions. Inside the caller's own estate
+        // only a Session installed strictly below it owns the target: one at
+        // the same directory shares it, and one above it leaves it intact, or
+        // the caller could not read its own files.
+        if (
+          !ownEstate ||
+          (directory !== ownDirectory && contains(ownDirectory, directory))
+        ) {
+          return true;
+        }
       }
       return false;
     },
