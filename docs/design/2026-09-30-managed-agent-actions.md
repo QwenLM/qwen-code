@@ -84,6 +84,9 @@ pinned mode as `approvalMode`; a Harness from before D6a omits it.
 | `default`   | `read_file`                          | `write_file`, `edit` and `run_shell_command` |
 | `auto-edit` | `read_file`, `write_file` and `edit` | `run_shell_command`                          |
 
+The `/2` search profiles additionally pre-approve `glob` under `default` and
+`auto-edit`; see [the search profile](2026-10-01-hosted-workspace-search-profile.md).
+
 Each mode lists what it pre-approves, so a tool added to a profile later is
 asked about until someone lists it. The file profile that Java selects today,
 `hosted-workspace-files/1`, has no shell tool, so `auto-edit` asks nothing
