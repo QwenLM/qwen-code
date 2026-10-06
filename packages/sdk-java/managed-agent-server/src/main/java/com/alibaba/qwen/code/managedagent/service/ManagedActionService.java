@@ -7,12 +7,17 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCommandOperation
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore.Action;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
@@ -22,11 +27,18 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 @Service
 public class ManagedActionService {
+    private static final Logger LOG =
+            LoggerFactory.getLogger(ManagedActionService.class);
+    private static final int INPUT_PREVIEW_BYTES = 8192;
+    private static final Set<String> PREVIEW_TOOLS =
+            Set.of("read_file", "write_file", "edit", "run_shell_command");
     private final ManagedAgentService sessions;
     private final ManagedActionStore actions;
+    private final ManagedExtensionRecordStore resources;
     private final ActionResponseCoordinator coordinator;
     private final RequestDigests digests;
     private final Clock clock;
@@ -35,12 +47,14 @@ public class ManagedActionService {
     public ManagedActionService(
             ManagedAgentService sessions,
             ManagedActionStore actions,
+            ManagedExtensionRecordStore resources,
             ActionResponseCoordinator coordinator,
             RequestDigests digests,
             Clock clock,
             ObjectMapper json) {
         this.sessions = sessions;
         this.actions = actions;
+        this.resources = resources;
         this.coordinator = coordinator;
         this.digests = digests;
         this.clock = clock;
@@ -236,11 +250,75 @@ public class ManagedActionService {
         actions.publicTurnId(tenant, session, options.path("turnId").asText())
                 .ifPresent(turn -> result.put(web ? "turnId" : "turn_id", turn));
         result.set("options", options.path("options"));
+        JsonNode preview = inputPreview(tenant, session, action, web);
+        if (preview != null) {
+            result.set(web ? "inputPreview" : "input_preview", preview);
+        }
         if (action.decisionReceiptId() != null) {
             result.put(
                     web ? "decisionReceiptId" : "decision_receipt_id", action.decisionReceiptId());
         }
         return result;
+    }
+
+    private JsonNode inputPreview(String tenant, String session, Action action, boolean web) {
+        JsonNode options = action.options();
+        String tool = options.path("toolName").asText();
+        if (!"requested".equals(action.state())
+                || options.path("v").asLong() != 2
+                || !PREVIEW_TOOLS.contains(tool)) {
+            return null;
+        }
+        try {
+            JsonNode ref = options.path("inputRef");
+            if (!"managed-tool-input".equals(ref.path("kind").asText())
+                    || ref.path("schemaVersion").asLong() != 1
+                    || ref.path("byteLength").asLong() < 1
+                    || ref.path("byteLength").asLong()
+                            > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES) {
+                return null;
+            }
+            var resource = resources.readCommittedResource(tenant, session, ref);
+            JsonNode wrapper = ToolPublicationContract.readJson(resource.bytes());
+            if (wrapper == null || !wrapper.isObject()
+                    || wrapper.size() != 3
+                    || !session.equals(wrapper.path("harnessSessionId").asText())
+                    || !wrapper.path("runtimeSessionId").isTextual()
+                    || wrapper.path("runtimeSessionId").asText().isBlank()
+                    || !wrapper.path("payloadJson").isTextual()) {
+                return null;
+            }
+            String text = wrapper.path("payloadJson").asText();
+            JsonNode payload = ManagedExtensionRecordStore.parse(text);
+            if (payload == null
+                    || payload.size() != 2
+                    || !tool.equals(payload.path("toolName").asText())
+                    || !payload.path("input").isObject()) {
+                return null;
+            }
+            byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+            if (!text.equals(new String(bytes, StandardCharsets.UTF_8))) {
+                return null;
+            }
+            int end = Math.min(INPUT_PREVIEW_BYTES, bytes.length);
+            while (end < bytes.length && (bytes[end] & 0xc0) == 0x80) {
+                end--;
+            }
+            return json.createObjectNode()
+                    .put("text", new String(bytes, 0, end, StandardCharsets.UTF_8))
+                    .put("truncated", end < bytes.length)
+                    .put(web ? "byteLength" : "byte_length", bytes.length);
+        } catch (ApiException | IllegalArgumentException error) {
+            // Stored-input integrity failure, not the normal version 1 path.
+            // The preview is still omitted; the reason must remain greppable
+            // and must never carry payload or preview text.
+            LOG.warn(
+                    "Omitting Managed Action {} input preview, stored input rejected: {}: {}",
+                    action.id(),
+                    error.getClass().getSimpleName(),
+                    error.getMessage());
+            return null;
+        }
     }
 
     private static String lower(String value) {

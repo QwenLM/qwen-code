@@ -128,10 +128,63 @@ final class ExtensionRecordJournal {
                 event -> { }, records -> records, 0, domain, resources);
     }
 
+    /**
+     * An ordinary body-less domain commit, open to the same edits as a
+     * Stage H one, as a writer that does not follow the contract would.
+     */
+    CommitTransactionRequest requestOrdinary(String commandId, String domain,
+            JsonNode body, Consumer<ObjectNode> editEvent,
+            UnaryOperator<String> editRecords, int extraEvents) {
+        return request("commitDomainRecord", commandId, bytes(body), 1_000,
+                editEvent, editRecords, extraEvents, domain, List.of());
+    }
+
     private CommitTransactionRequest request(String operation, String commandId,
             byte[] body, long occurredAt, Consumer<ObjectNode> editEvent,
             UnaryOperator<String> editRecords, int extraEvents, String domain,
             List<CommitResource> resources) {
+        if ("monitor_run".equals(domain) && resources.isEmpty()) {
+            try {
+                JsonNode maybeMonitor;
+                try (var parser = JSON.getFactory().createParser(body)) {
+                    maybeMonitor = parser.readValueAsTree();
+                    if (parser.nextToken() != null) {
+                        maybeMonitor = null;
+                    }
+                }
+                if (maybeMonitor != null && maybeMonitor.isObject()) {
+                    ObjectNode rewritten = maybeMonitor.deepCopy();
+                    List<CommitResource> gathered = new ArrayList<>();
+                    for (String field : List.of("commandRef", "startReceiptRef",
+                            "outputRef", "lastObservationRef")) {
+                        JsonNode ref = rewritten.get(field);
+                        if (ref != null && ref.isObject() && !ref.isNull()) {
+                            byte[] placeholder = new byte[(int) ref.required("byteLength").longValue()];
+                            String digest = sha256(placeholder);
+                            rewritten.putObject(field)
+                                    .put("resourceId", ref.required("resourceId").textValue())
+                                    .put("kind", ref.required("kind").textValue())
+                                    .put("schemaVersion", ref.required("schemaVersion").intValue())
+                                    .put("byteLength", placeholder.length)
+                                    .put("digest", digest);
+                            gathered.add(new CommitResource(
+                                    ref.required("resourceId").textValue(),
+                                    ref.required("kind").textValue(),
+                                    ref.required("schemaVersion").intValue(),
+                                    placeholder.length, digest,
+                                    Base64.getEncoder().encodeToString(placeholder)));
+                        }
+                    }
+                    if (!gathered.isEmpty()) {
+                        return request(operation, commandId, bytes(rewritten),
+                                occurredAt, editEvent, editRecords, extraEvents,
+                                domain, gathered);
+                    }
+                }
+            } catch (Exception notAMonitor) {
+                // Not a JSON monitor body: the generic request path handles it.
+            }
+        }
         String resourceId = resourceId(body);
         ObjectNode recordRef = JSON.createObjectNode()
                 .put("resourceId", resourceId)
@@ -150,8 +203,9 @@ final class ExtensionRecordJournal {
                 .put("version", 1).put("operationId", commandId)
                 .set("recordRef", recordRef);
         editEvent.accept(event);
-        String records = editRecords.apply(line("managed_session_event_v1",
-                event) + line("managed_session_commit_v1",
+        String records = editRecords.apply(line(sessionId,
+                "managed_session_event_v1", event) + line(sessionId,
+                        "managed_session_commit_v1",
                         JSON.createObjectNode().put("commandId", commandId)));
         String transactionId = "transaction-" + operation + "-" + commandId;
         List<CommitResource> closure = new ArrayList<>(resources);
@@ -192,7 +246,9 @@ final class ExtensionRecordJournal {
         }
     }
 
-    private String line(String subtype, JsonNode body) {
+    /** One record line in the envelope the authority writes; shared by
+     * every test that composes a line, so helpers cannot drift apart. */
+    static String line(String sessionId, String subtype, JsonNode body) {
         ObjectNode record = JSON.createObjectNode()
                 .put("uuid", UUID.randomUUID().toString())
                 .putNull("parentUuid")

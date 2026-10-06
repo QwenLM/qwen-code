@@ -33,6 +33,7 @@ class ManagedExtensionProjectionContractTest {
     @Test
     void pinsTheBodiesStatesAndOutbox() throws IOException {
         JsonNode fixtures = fixtures();
+        assertEquals(1, fixtures.required("contractVersion").intValue());
         Map<String, String> bodies = new TreeMap<>();
         ManagedExtensionProjection.RECORD_BODIES.forEach(
                 (domain, body) -> bodies.put(domain, body.taskKind()));
@@ -40,6 +41,16 @@ class ManagedExtensionProjectionContractTest {
                 TreeMap.class), bodies);
         assertEquals(JSON.convertValue(fixtures.required("taskStates"),
                 List.class), ManagedExtensionProjection.TASK_STATES);
+        List<String> runtimeStates = new ArrayList<>(
+                ManagedExtensionProjection.RUNTIME_STATES);
+        runtimeStates.sort(null);
+        assertEquals(JSON.convertValue(fixtures.required("runtimeStates"),
+                List.class), runtimeStates);
+        List<String> taskKinds = new ArrayList<>(
+                ManagedExtensionProjection.TASK_KINDS);
+        taskKinds.sort(null);
+        assertEquals(JSON.convertValue(fixtures.required("taskKinds"),
+                List.class), taskKinds);
         Set<String> pending = new TreeSet<>();
         ManagedExtensionRecords.DELIVERY_TARGETS.forEach((target, states) -> {
             for (String state : states) {
@@ -103,12 +114,39 @@ class ManagedExtensionProjectionContractTest {
             ManagedExtensionRecords.requireRun(run);
             assertEquals(view(fixture.required("view")),
                     ManagedExtensionProjection.project(null, run,
-                            fixture.required("occurredAt").longValue()),
+                            fixture.required("occurredAt").longValue(),
+                            fixture.path("stopRequested").asBoolean(false)),
                     id(fixture));
             assertEquals(fixture.required("deliveryPending").booleanValue(),
                     ManagedExtensionProjection.isDeliveryPending(run),
                     id(fixture));
         }
+    }
+
+    @Test
+    void settlesEveryRunStateWhoseLineEnds() throws IOException {
+        // The projection's terminal set is the run line's own: a state with
+        // no successors must stamp settledAt and no runtime state. The
+        // execution proven to have ended carries the state, so only the
+        // terminality of the line itself can force the runtime out —
+        // without it the assertion short-circuits on execution == null.
+        ManagedExtensionRecords.TRANSITIONS.get("run").forEach((state,
+                successors) -> {
+            if (!successors.isEmpty()) {
+                return;
+            }
+            JsonNode run = JSON.createObjectNode().put("state", state)
+                    .putNull("reason").putNull("definition")
+                    .put("executionCallId", "call-1").putNull("effectId")
+                    .putNull("dispatchId").putNull("deliveryId")
+                    .put("execution", "settled").putNull("runtime")
+                    .putNull("delivery");
+            ManagedExtensionRecords.requireRun(run);
+            TaskProjection view = ManagedExtensionProjection.project(null,
+                    run, 1_000);
+            assertTrue(view.settledAt() != null, state);
+            assertTrue(view.runtimeState() == null, state);
+        });
     }
 
     @Test
@@ -123,7 +161,8 @@ class ManagedExtensionProjectionContractTest {
                         : ManagedExtensionRecords.isRunSuccessor(previousRun,
                                 run), id(fixture));
                 previous = ManagedExtensionProjection.project(previous, run,
-                        revision.required("occurredAt").longValue());
+                        revision.required("occurredAt").longValue(),
+                        revision.path("stopRequested").asBoolean(false));
                 assertEquals(view(revision.required("view")), previous,
                         id(fixture));
                 assertEquals(revision.required("deliveryPending")
@@ -143,7 +182,9 @@ class ManagedExtensionProjectionContractTest {
                     ManagedExtensionProjection.executionOf(
                             ToolExecutionRecord.State.valueOf(
                                     text(fixture, "state")),
-                            status.isNull() ? null : status.textValue()),
+                            status.isNull() ? null : status.textValue(),
+                            fixture.required("dispatchGeneration")
+                                    .longValue()),
                     id(fixture));
         }
         Set<String> covered = new HashSet<>();
@@ -157,22 +198,41 @@ class ManagedExtensionProjectionContractTest {
 
     @Test
     void usesEachCaseIdOnceInEachList() throws IOException {
-        int lists = 0;
+        // The name set pins the lists the fixture must carry: no replayed
+        // list may vanish, go empty or arrive unannounced.
+        List<String> names = new ArrayList<>();
         for (Map.Entry<String, JsonNode> field : fixtures().properties()) {
             if (!field.getKey().endsWith("Cases")) {
                 continue;
             }
+            names.add(field.getKey());
+            assertTrue(field.getValue().size() > 0,
+                    () -> field.getKey() + " replays an empty list");
             Set<String> ids = new HashSet<>();
             for (JsonNode fixture : field.getValue()) {
                 assertTrue(ids.add(id(fixture)), () -> "duplicate "
                         + field.getKey() + " id: " + id(fixture));
             }
-            lists++;
         }
-        assertEquals(9, lists);
+        names.sort(null);
+        assertEquals(List.of("brokerExecutionCases", "historyCases",
+                "monitorChainCases", "monitorChainRejectCases",
+                "monitorRunStartCases", "runStartCases", "taskIdCases",
+                "viewCases"), names);
     }
 
+    /** The six components the projection record carries, sorted. */
+    static final List<String> PROJECTION_FIELDS = List.of("createdAt",
+            "definitionRevision", "runtimeState", "settledAt", "startedAt",
+            "state");
+
     static TaskProjection view(JsonNode view) {
+        List<String> keys = new ArrayList<>();
+        view.fieldNames().forEachRemaining(keys::add);
+        keys.sort(null);
+        // The same six components the record carries, so a seventh fixture
+        // field cannot pass unread.
+        assertEquals(PROJECTION_FIELDS, keys);
         return new TaskProjection(text(view, "state"),
                 text(view, "runtimeState"),
                 view.required("definitionRevision").isNull() ? null

@@ -540,6 +540,8 @@ describe('useLlmStream', () => {
       [
         'Continue working on the active Goal.',
         'Use get_goal for the authoritative objective, the budget figures, and any verifier feedback.',
+        'In Direct mode: If the get_goal or update_goal tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
+        'In Code Mode, discover missing Goal tools with tool_search and invoke them through exec using the returned JavaScript name.',
         "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
         'If completion depends on content delivered in this turn, deliver only that content in this turn, before update_goal.',
         'This is a synthetic continuation turn. It contains no new real user input and cannot satisfy an objective condition that requires the user to send, confirm, choose, approve, or provide something.',
