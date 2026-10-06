@@ -2678,7 +2678,7 @@ export function createDaemonSessionActions({
       yield* session.generateContent(prompt, opts);
     },
 
-    async getRewindSnapshots(): Promise<{
+    async getRewindSnapshots(opts?: { silent?: boolean }): Promise<{
       snapshots: DaemonRewindSnapshotInfo[];
     }> {
       const session = requireSessionForAction(
@@ -2693,6 +2693,7 @@ export function createDaemonSessionActions({
           'Load rewind snapshots timed out',
         );
       } catch (error) {
+        if (opts?.silent) throw error;
         throw dispatchActionError(
           addNotice,
           'Load rewind snapshots failed',
@@ -2704,7 +2705,7 @@ export function createDaemonSessionActions({
 
     async rewindSession(
       promptId: string,
-      opts?: { rewindFiles?: boolean },
+      opts?: { rewindFiles?: boolean; silent?: boolean },
     ): Promise<DaemonRewindResult> {
       const session = requireSessionForAction(
         addNotice,
@@ -2718,6 +2719,7 @@ export function createDaemonSessionActions({
           'Rewind session timed out',
         );
       } catch (error) {
+        if (opts?.silent) throw error;
         throw dispatchActionError(
           addNotice,
           'Rewind session failed',

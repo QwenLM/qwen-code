@@ -16759,6 +16759,55 @@ describe('DaemonSessionProvider', () => {
     },
   );
 
+  it('refreshes recovery after a rewind drops the interrupted turn', async () => {
+    const rewind = createDeferred<void>();
+    const initial = {
+      v: 1 as const,
+      sessionId: 'session-1',
+      workspaceCwd: '/mock-workspace',
+      state: {},
+      recovery: { kind: 'interrupted_prompt' as const, canContinue: true },
+    };
+    const clean = { kind: 'clean' as const, canContinue: false };
+    const context = vi
+      .fn()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValue({ ...initial, recovery: clean });
+    const session = createMockSession({
+      context,
+      lastEventId: 10,
+      async *events(opts) {
+        await rewind.promise;
+        yield {
+          v: 1,
+          id: 11,
+          type: 'session_rewound',
+          data: {
+            sessionId: 'session-1',
+            promptId: 'session-1########2',
+            targetTurnIndex: 1,
+          },
+        };
+        yield* createIdleEvents()(opts);
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect(connection?.context?.recovery).toEqual(initial.recovery);
+    expect(context).toHaveBeenCalledOnce();
+    await act(async () => {
+      rewind.resolve();
+      await flushPromises();
+    });
+    expect(context).toHaveBeenCalledTimes(2);
+    expect(connection?.context?.recovery).toEqual(clean);
+  });
+
   it.each(['stream_end', 'transport_error'] as const)(
     'ignores recovery reads from a previous subscription after %s',
     async (ending) => {

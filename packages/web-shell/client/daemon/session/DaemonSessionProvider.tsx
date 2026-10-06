@@ -3642,6 +3642,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 if (
                   event.type === 'turn_complete' ||
                   event.type === 'turn_error' ||
+                  // A rewind can drop the interrupted turn itself.
+                  event.type === 'session_rewound' ||
                   uiEvents.some((item) => item.type === 'prompt.cancelled')
                 ) {
                   const generation = advanceSessionRecoveryGeneration(

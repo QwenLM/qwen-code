@@ -92,6 +92,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 
 import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
+import { cancelledTurnProducedNothing } from './utils/cancelledTurn';
 import { keepWorkspaceSplitSessionIds } from './utils/standalone-session-routing';
 import { setBoundedMapEntry } from './utils/bounded-map';
 import { type SessionGitIntent } from './components/GitModePopover';
@@ -752,6 +753,14 @@ interface FailedPrompt {
 
 interface TranscriptUserMessageIdentity {
   block: DaemonTranscriptBlock;
+}
+
+interface InFlightPrompt {
+  block: DaemonTranscriptBlock;
+  text: string;
+  images?: PromptImage[];
+  files?: PromptFile[];
+  inputAnnotations?: DaemonInputAnnotation[];
 }
 
 interface TranscriptTurnErrorIdentity {
@@ -8116,6 +8125,9 @@ export function App({
   const lastSubmittedSourceVersionRef = useRef(
     composerSourceVersionRef.current,
   );
+  // The composer prompt this client still has in flight. Cancelling it before
+  // the turn produced anything hands it back instead of leaving it in history.
+  const inFlightPromptRef = useRef<InFlightPrompt | null>(null);
   const retryableTurnErrorIdRef = useRef<string | null>(null);
   const lastTurnErrorIdRef = useRef<string | null>(null);
   const retryableTurnErrorIdentityRef = useRef<
@@ -11149,6 +11161,32 @@ export function App({
       }
       let admissionStarted = false;
       let admitted = false;
+      const previousUserMessage = getLatestUserBlock(
+        store.getSnapshot().blocks,
+      );
+      let inFlightPrompt: InFlightPrompt | undefined;
+      // A text prompt gets its transcript block as it is sent, one with
+      // attachments only once it is admitted, so both points try.
+      const trackInFlightPrompt = () => {
+        if (
+          inFlightPrompt ||
+          opts?.retry ||
+          opts?.optimisticUserMessage === false ||
+          isSlashPreparedSubmit
+        ) {
+          return;
+        }
+        const block = getLatestUserBlock(store.getSnapshot().blocks);
+        if (!block || block === previousUserMessage) return;
+        inFlightPrompt = {
+          block,
+          text: preparedPrompt,
+          images,
+          files,
+          inputAnnotations: preparedInputAnnotations,
+        };
+        inFlightPromptRef.current = inFlightPrompt;
+      };
       const promptOptions: SendPromptOptionsWithRetry = {
         ...(opts?.submittedPrompt !== undefined
           ? { submittedPrompt: opts.submittedPrompt }
@@ -11175,6 +11213,7 @@ export function App({
               sessionIdAfterEnsure,
             );
           }
+          trackInFlightPrompt();
           opts?.onAdmitted?.();
         },
       };
@@ -11191,15 +11230,13 @@ export function App({
           queued: false,
         });
       }
-      const previousUserMessage = opts?.onOptimisticUserMessage
-        ? getLatestUserBlock(store.getSnapshot().blocks)
-        : undefined;
       const resultPromise = (
         sessionActions.sendPrompt as (
           promptText: string,
           options?: SendPromptOptionsWithRetry,
         ) => ReturnType<typeof sessionActions.sendPrompt>
       )(preparedPrompt, promptOptions);
+      trackInFlightPrompt();
       if (
         sessionIdAfterEnsure &&
         opts?.optimisticUserMessage !== false &&
@@ -11230,6 +11267,10 @@ export function App({
           sessionCatalogController.promptAdmissionUncertain(promptWorkspaceCwd);
         }
         throw error;
+      } finally {
+        if (inFlightPrompt && inFlightPromptRef.current === inFlightPrompt) {
+          inFlightPromptRef.current = null;
+        }
       }
     },
     [
@@ -17748,6 +17789,71 @@ export function App({
     [sessionActions],
   );
 
+  const takeBackCancelledPrompt = useCallback(
+    async (
+      cancelled: InFlightPrompt,
+      sessionId: string | undefined,
+      owner: DaemonSessionOwnerSnapshot,
+      historyComplete: boolean,
+    ) => {
+      // The turn index of the cancelled prompt while it is still the newest
+      // turn and nothing but thoughts and notices came after it.
+      const bareTurnIndex = () => {
+        if (
+          !appMountedRef.current ||
+          !owner.isCurrent() ||
+          connectionRef.current.sessionId !== sessionId
+        ) {
+          return undefined;
+        }
+        const blocks = store.getSnapshot().blocks;
+        const prompt = getLatestUserBlock(blocks);
+        return prompt &&
+          matchesUserMessageIdentity(
+            prompt,
+            { block: cancelled.block },
+            true,
+          ) &&
+          cancelledTurnProducedNothing(blocks.slice(blocks.indexOf(prompt) + 1))
+          ? countUserTurns(blocks) - 1
+          : undefined;
+      };
+      const editor = editorRef.current;
+      if (bareTurnIndex() === undefined || !editor || editor.hasInput()) return;
+      editor.setText(cancelled.text);
+      if (cancelled.images?.length) editor.restoreImages(cancelled.images);
+      if (cancelled.files?.length) editor.restoreFiles(cancelled.files);
+      if (cancelled.inputAnnotations?.length) {
+        editor.restoreInputAnnotations?.(cancelled.inputAnnotations);
+      }
+      // A partial transcript cannot tell which turn the prompt was, so the
+      // prompt goes back to the composer but stays in history.
+      if (!historyComplete) return;
+      try {
+        const { snapshots } = await sessionActions.getRewindSnapshots({
+          silent: true,
+        });
+        // Only ever rewind the daemon's newest turn: a prompt cancelled before
+        // it reached the model has no snapshot of its own, and the newest one
+        // then belongs to the turn before it.
+        const newest = snapshots[snapshots.length - 1];
+        if (newest && newest.turnIndex === bareTurnIndex()) {
+          await sessionActions.rewindSession(newest.promptId, {
+            rewindFiles: false,
+            silent: true,
+          });
+        }
+      } catch {
+        // Nobody asked for a rewind, so a failed one is not worth a toast:
+        // the prompt is back in the composer and simply stays in history.
+      }
+    },
+    [sessionActions, store],
+  );
+
+  const transcriptHistoryComplete =
+    !transcriptHistory.hasMore && !transcriptHistory.capacityReached;
+  const hasQueuedPrompts = queuedPrompts.length > 0;
   const handleCancel = useCallback(() => {
     const owner = sessionOwnerGuard.capture();
     const dropped = queuedShellCommandsRef.current.length;
@@ -17758,11 +17864,36 @@ export function App({
     if (dropped > 0) {
       pushToast('warning', t('queue.shellDropped', { count: dropped }));
     }
-    sessionActions.cancel().catch((error: unknown) => {
-      if (!owner.isCurrent()) return;
-      reportError(error, 'Failed to cancel request');
-    });
-  }, [sessionActions, reportError, pushToast, sessionOwnerGuard, t]);
+    // Read before cancelling: the abort settles the send, which clears the ref.
+    // Queued prompts mean the user has moved on, so the turn is just stopped.
+    const cancelled = hasQueuedPrompts ? null : inFlightPromptRef.current;
+    const sessionId = connectionRef.current.sessionId;
+    sessionActions.cancel().then(
+      () => {
+        if (cancelled) {
+          void takeBackCancelledPrompt(
+            cancelled,
+            sessionId,
+            owner,
+            transcriptHistoryComplete,
+          );
+        }
+      },
+      (error: unknown) => {
+        if (!owner.isCurrent()) return;
+        reportError(error, 'Failed to cancel request');
+      },
+    );
+  }, [
+    sessionActions,
+    reportError,
+    pushToast,
+    sessionOwnerGuard,
+    t,
+    takeBackCancelledPrompt,
+    transcriptHistoryComplete,
+    hasQueuedPrompts,
+  ]);
 
   const handleFocusTaskPill = useCallback((): boolean => {
     if (interactionBlocked) return false;

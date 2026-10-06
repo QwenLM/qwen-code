@@ -611,10 +611,19 @@ export interface DaemonSessionActions {
     prompt: string,
     opts?: { signal?: AbortSignal },
   ): AsyncGenerator<DaemonSessionGenerationEvent>;
-  getRewindSnapshots(): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
+  getRewindSnapshots(opts?: {
+    /** Rethrow failures raw instead of recording a notice; for best-effort
+     * callers that fall back on their own. */
+    silent?: boolean;
+  }): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
   rewindSession(
     promptId: string,
-    opts?: { rewindFiles?: boolean },
+    opts?: {
+      rewindFiles?: boolean;
+      /** Rethrow failures raw instead of recording a notice; for best-effort
+       * callers that fall back on their own. */
+      silent?: boolean;
+    },
   ): Promise<DaemonRewindResult>;
   btwSession(
     question: string,
