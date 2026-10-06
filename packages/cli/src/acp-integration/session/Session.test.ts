@@ -4029,7 +4029,7 @@ describe('Session', () => {
         ]);
         if (outcome === 'validation_error') {
           expect(error).toBe(
-            `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}Deferred tool "agent" (called through tool_call) rejected the arguments: invalid delegation arguments. Pass arguments matching the schema returned by tool_search for "agent".`,
+            `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}Deferred tool "${core.ToolNames.AGENT}" (called through tool_call) rejected the arguments: invalid delegation arguments. Pass arguments matching the schema returned by tool_search for "${core.ToolNames.AGENT}".`,
           );
         } else if (outcome === 'pre_execution_cancelled') {
           expect(
