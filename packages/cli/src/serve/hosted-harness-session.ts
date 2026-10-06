@@ -37,10 +37,14 @@ import {
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import {
+  isToolResultManifestChainLink,
   MANAGED_TOOL_RESULT_LIMITS,
   parseToolResultEnvelope,
   parseToolResultManifestBytes,
+  type ToolResultManifest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   ResourceToolResultSegmentStore,
   type DurableToolResultResourceStore,
@@ -874,15 +878,10 @@ async function verifyWorkspaceRestore(
       if (envelope.capture?.captureStatus !== 'complete') incomplete = true;
     }
   }
-  for (const ref of manifests.values()) {
-    const manifest = parseToolResultManifestBytes(await toolResults.read(ref));
-    if (session.publication) {
-      if (!publicationManifests.has(ref.resourceId))
-        throw new Error('Hosted publication has no verified receipt.');
-      continue;
-    }
-    if (manifest.captureStatus !== 'complete')
-      throw new Error('Hosted tool result capture is incomplete.');
+  const verifyContents = async (
+    ref: ManagedSessionDurableRef,
+    manifest: ToolResultManifest,
+  ): Promise<void> => {
     for (const content of manifest.contents) {
       if ('ref' in content.body) {
         const bytes = await toolResults.read(content.body.ref);
@@ -914,6 +913,88 @@ async function verifyWorkspaceRestore(
           throw new Error('Hosted tool result content is incomplete.');
       }
     }
+  };
+  // A detached background Shell or Monitor owns its own manifest lineage:
+  // every record revision carried the then-current output manifest into
+  // the verified population, so the history's pending revisions descend
+  // here too. Their discipline is the record's own chain — a pending
+  // revision mid-history is the ledger doing its job, not corruption, and
+  // a detached capture never had a foreground receipt to expect.
+  const detached = new Map<string, ManagedSessionDurableRef | null>();
+  for (const event of events) {
+    if (event.kind !== 'domain.committed') continue;
+    const domain = event.payload['domain'];
+    if (domain !== 'child_run' && domain !== 'monitor_run') continue;
+    const recordRef = assertManagedSessionDurableRef(
+      event.payload['recordRef'],
+      'domain record',
+    );
+    const record =
+      domain === 'child_run'
+        ? parseChildRun(
+            JSON.parse((await resources.read(recordRef)).toString('utf8')),
+          )
+        : parseMonitorRun(
+            JSON.parse((await resources.read(recordRef)).toString('utf8')),
+          );
+    if (record.run.executionCallId !== null)
+      detached.set(record.run.executionCallId, record.outputRef);
+  }
+  const lineages = new Map<
+    string,
+    Array<{ ref: ManagedSessionDurableRef; manifest: ToolResultManifest }>
+  >();
+  for (const ref of manifests.values()) {
+    const manifest = parseToolResultManifestBytes(await toolResults.read(ref));
+    if (detached.get(manifest.executionCallId) !== undefined) {
+      let members = lineages.get(manifest.executionCallId);
+      if (members === undefined) {
+        members = [];
+        lineages.set(manifest.executionCallId, members);
+      }
+      members.push({ ref, manifest });
+      continue;
+    }
+    if (session.publication) {
+      if (!publicationManifests.has(ref.resourceId))
+        throw new Error('Hosted publication has no verified receipt.');
+      continue;
+    }
+    if (manifest.captureStatus !== 'complete')
+      throw new Error('Hosted tool result capture is incomplete.');
+    await verifyContents(ref, manifest);
+  }
+  for (const [executionCallId, members] of lineages) {
+    members.sort(
+      (left, right) => left.manifest.revision - right.manifest.revision,
+    );
+    for (let index = 1; index < members.length; index++)
+      if (
+        !isToolResultManifestChainLink(
+          members[index - 1]!.manifest,
+          members[index]!.manifest,
+        )
+      )
+        throw new Error(
+          `Detached capture lineage of ${executionCallId} broke.`,
+        );
+    const outputRef = detached.get(executionCallId);
+    const terminal = members.at(-1)!;
+    if (outputRef === null) {
+      if (
+        members.some((member) => member.manifest.executionStatus !== 'unknown')
+      )
+        throw new Error(
+          `Detached capture lineage of ${executionCallId} settled no record named.`,
+        );
+      continue;
+    }
+    if (!isDeepStrictEqual(outputRef, terminal.ref))
+      throw new Error(
+        `Detached capture lineage of ${executionCallId} does not end at the record output.`,
+      );
+    if (terminal.manifest.captureStatus === 'complete')
+      await verifyContents(terminal.ref, terminal.manifest);
   }
   await sink.project(throughSequence);
   return incomplete;
