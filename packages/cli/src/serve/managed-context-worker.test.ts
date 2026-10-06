@@ -1172,7 +1172,6 @@ describe('Managed context tool gate', () => {
     expect(plain.result.executionStatus).toBe('success');
     expect(JSON.stringify(plain)).toContain('in-bounds-rules');
   });
-
   it('allows a pattern segment that merely starts with `..`', async () => {
     // The containment guard matches `..` by segment equality, so `a/..b/*.ts`
     // is legitimate; nothing else pinned that before a hardening edit could
@@ -1593,15 +1592,51 @@ describe('Managed context tool gate', () => {
     expect(escaped.result.executionStatus).toBe('error');
     expect(JSON.stringify(escaped)).not.toContain('host text');
 
-    // Elsewhere in the mount is outside the Session too: the boundary is the
-    // Session directory, not "any directory no installed Session claims".
+    // The in-mount escape valve survives: a linked dependency's real
+    // location is still readable by absolute path.
     fs.mkdirSync(path.join(root, 'packages/ui/src'), { recursive: true });
     fs.writeFileSync(path.join(root, 'packages/ui/src/index.ts'), 'ui-source');
     const shared = await execute('call-4', 'read_file', {
       file_path: realDirectory(root, 'packages/ui/src/index.ts'),
     });
-    expect(shared.result.executionStatus).toBe('error');
-    expect(JSON.stringify(shared)).not.toContain('ui-source');
+    expect(shared.result.executionStatus).toBe('success');
+    expect(JSON.stringify(shared)).toContain('ui-source');
+  });
+
+  it('answers an out-of-boundary file_path with the refusal, not the tool diagnosis', async () => {
+    // `write_file` rejects a directory at build time and its own message
+    // quotes the resolved host path. The boundary must be decided first, or
+    // the model and the durable v3 record learn the mount root and a sibling
+    // Session's real directory name.
+    const root = workspace(['services/api', 'services/web']);
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install);
+    await post(origin, ACTIVATION, workspaceActivation(install));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-2', 'services/web'),
+    );
+
+    const answer = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-1', 'call-1', ''),
+        toolName: 'write_file',
+        input: { file_path: '../web', content: 'pwned' },
+      })
+    ).json();
+
+    expect(answer.result.executionStatus).toBe('error');
+    expect(answer.result.error.message).toBe(
+      "Path '../web' is not within the Session working directory.",
+    );
+    expect(JSON.stringify(answer)).not.toContain(realDirectory(root, '.'));
+    expect(JSON.stringify(answer)).not.toContain('is a directory, not a file');
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -1687,13 +1722,28 @@ describe('Managed context tool gate', () => {
     },
   );
 
-  it.each(['missing', 'linked'])(
-    'refuses directory-external file access with a %s sibling binding',
+  it.each(['missing', 'linked', 'dangling'])(
+    'contains a %s sibling without refusing shared dependencies',
     async (state) => {
-      const root = workspace(['services/api/src', 'services/web']);
+      const root = workspace([
+        'services/api/src',
+        'services/web',
+        'packages/ui/src',
+      ]);
       fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
       fs.writeFileSync(path.join(root, 'services/web/notes.txt'), 'peer-data');
+      fs.writeFileSync(
+        path.join(root, 'packages/ui/src/index.ts'),
+        'ui-source',
+      );
       fs.symlinkSync('../web', path.join(root, 'services/api/peek'));
+      fs.mkdirSync(path.join(root, 'services/api/node_modules/@acme'), {
+        recursive: true,
+      });
+      symlinkDirectory(
+        path.join(root, 'packages/ui'),
+        path.join(root, 'services/api/node_modules/@acme/ui'),
+      );
       const origin = await startWorker({
         ...BOOT,
         mountRoot: root,
@@ -1715,15 +1765,19 @@ describe('Managed context tool gate', () => {
           path.join(root, 'services/retired-web'),
         );
         fs.symlinkSync('retired-web', path.join(root, 'services/web'));
+        if (state === 'dangling')
+          fs.rmSync(path.join(root, 'services/retired-web'), {
+            recursive: true,
+          });
       }
       const answer = await (
         await post(origin, EXECUTE, {
           ...shell('session-1', 'call-1', ''),
-          toolName: state === 'missing' ? 'write_file' : 'read_file',
+          toolName: state === 'linked' ? 'read_file' : 'write_file',
           input:
-            state === 'missing'
-              ? { file_path: '../web/new.txt', content: 'dummy' }
-              : { file_path: 'peek/notes.txt' },
+            state === 'linked'
+              ? { file_path: 'peek/notes.txt' }
+              : { file_path: 'peek/new.txt', content: 'dummy' },
         })
       ).json();
       expect(answer.result.executionStatus).toBe('error');
@@ -1733,6 +1787,10 @@ describe('Managed context tool gate', () => {
       );
       if (state === 'missing')
         expect(fs.existsSync(path.join(root, 'services/web'))).toBe(false);
+      if (state === 'dangling')
+        expect(fs.existsSync(path.join(root, 'services/retired-web'))).toBe(
+          false,
+        );
       const own = await (
         await post(origin, EXECUTE, {
           ...shell('session-1', 'call-2', ''),
@@ -1742,10 +1800,79 @@ describe('Managed context tool gate', () => {
       ).json();
       expect(own.result.executionStatus).toBe('success');
       expect(JSON.stringify(own)).toContain('mine');
+      const linkedDep = await (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', 'call-3', ''),
+          toolName: 'read_file',
+          input: { file_path: 'node_modules/@acme/ui/src/index.ts' },
+        })
+      ).json();
+      expect(linkedDep.result.executionStatus).toBe('success');
+      expect(JSON.stringify(linkedDep)).toContain('ui-source');
     },
   );
 
+  it('reads through a symlink to a shared directory that is no Session', async () => {
+    // The Session boundary protects sibling SESSIONS. A linked dependency
+    // inside the same mount (`node_modules/@acme/ui -> ../../packages/ui`)
+    // is no Session: refusing it narrows every /1 workspace that reads
+    // through linked dependencies — the pre-containment behavior.
+    const root = workspace([
+      'services/api/src',
+      'services/web',
+      'packages/ui/src',
+    ]);
+    fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
+    fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+    fs.writeFileSync(path.join(root, 'packages/ui/src/index.ts'), 'ui-source');
+    fs.symlinkSync(
+      path.join('..', 'web'),
+      path.join(root, 'services/api/peek'),
+    );
+    fs.mkdirSync(path.join(root, 'services/api/node_modules/@acme'), {
+      recursive: true,
+    });
+    fs.symlinkSync(
+      path.join('..', '..', '..', '..', 'packages', 'ui'),
+      path.join(root, 'services/api/node_modules/@acme/ui'),
+    );
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install1 = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install1);
+    await post(origin, ACTIVATION, workspaceActivation(install1));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-2', 'services/web'),
+    );
+    const read = async (callId: string, filePath: string) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', callId, ''),
+          toolName: 'read_file',
+          input: { file_path: filePath },
+        })
+      ).json();
+
+    // The shared dependency reads through; the sibling Session still does
+    // not — both halves of the boundary in one fixture.
+    const linkedDep = await read(
+      'call-1',
+      'node_modules/@acme/ui/src/index.ts',
+    );
+    expect(linkedDep.result.executionStatus).toBe('success');
+    expect(JSON.stringify(linkedDep)).toContain('ui-source');
+    const sibling = await read('call-2', 'peek/secret.txt');
+    expect(sibling.result.executionStatus).toBe('error');
+    expect(JSON.stringify(sibling)).not.toContain('sibling');
+  });
+
   /**
+   * The linked-dependency fixture both sibling-boundary cases below share:
    * `session-1` in `services/api`, a dependency symlinked in from
    * `packages/ui`, and `peek` pointing at the sibling `services/web`.
    */
@@ -1757,7 +1884,7 @@ describe('Managed context tool gate', () => {
     ]);
     fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
     fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
-    fs.writeFileSync(path.join(root, 'services/secret.txt'), 'ancestor');
+
     fs.writeFileSync(path.join(root, 'packages/ui/src/index.ts'), 'ui-source');
     fs.symlinkSync(
       path.join('..', 'web'),
@@ -1773,17 +1900,349 @@ describe('Managed context tool gate', () => {
     return root;
   }
 
-  // The file-tool boundary is the Session directory itself, as glob's walk
-  // is: whether another path is a sibling Session's or shared cannot be
-  // known from this process, which learns Sessions only as they install.
+  it('reads a linked dependency while a Session is bound at the Workspace root', async () => {
+    // A selection without `cwd_relative` binds at `'.'`, so the Workspace
+    // root itself can be an installed Session. That Session delimits no
+    // private area — every path in the mount is inside it — so it must not
+    // turn into a veto over the caller's own linked dependencies.
+    const root = linkedDependencyWorkspace();
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install);
+    await post(origin, ACTIVATION, workspaceActivation(install));
+    await post(origin, CONTEXT, workspaceInstallation('session-root', '.'));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-2', 'services/web'),
+    );
+    const read = async (callId: string, filePath: string) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', callId, ''),
+          toolName: 'read_file',
+          input: { file_path: filePath },
+        })
+      ).json();
+
+    const linkedDep = await read(
+      'call-1',
+      'node_modules/@acme/ui/src/index.ts',
+    );
+    expect(linkedDep.result.executionStatus).toBe('success');
+    expect(JSON.stringify(linkedDep)).toContain('ui-source');
+    const sibling = await read('call-2', 'peek/secret.txt');
+    expect(sibling.result.executionStatus).toBe('error');
+    expect(JSON.stringify(sibling)).not.toContain('sibling');
+  });
+
+  it('keeps a non-root ancestor sibling owning its whole subtree', async () => {
+    // The exemption covers only a binding AT the mount root: a Session
+    // installed at `services` owns `services/**`, so a caller nested under
+    // it cannot read or write outside its own directory within that tree.
+    const root = workspace(['services/api/src', 'services/web']);
+    fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
+    fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install);
+    await post(origin, ACTIVATION, workspaceActivation(install));
+    await post(origin, CONTEXT, workspaceInstallation('session-a', 'services'));
+    const call = async (callId: string, toolName: string, input: unknown) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', callId, ''),
+          toolName,
+          input,
+        })
+      ).json();
+
+    const read = await call('call-1', 'read_file', {
+      file_path: '../web/secret.txt',
+    });
+    expect(read.result.executionStatus).toBe('error');
+    expect(JSON.stringify(read)).toContain(
+      "Path '../web/secret.txt' is not within the Session working directory.",
+    );
+    expect(JSON.stringify(read)).not.toContain('sibling');
+    const write = await call('call-2', 'write_file', {
+      file_path: '../web/pwned.txt',
+      content: 'pwned',
+    });
+    expect(write.result.executionStatus).toBe('error');
+    expect(JSON.stringify(write)).toContain(
+      "Path '../web/pwned.txt' is not within the Session working directory.",
+    );
+    expect(fs.existsSync(path.join(root, 'services/web/pwned.txt'))).toBe(
+      false,
+    );
+    const own = await call('call-3', 'read_file', {
+      file_path: 'src/index.ts',
+    });
+    expect(own.result.executionStatus).toBe('success');
+    expect(JSON.stringify(own)).toContain('mine');
+  });
+
+  it('judges every target of a Workspace-root Session against sibling estates', async () => {
+    // A binding at `'.'` holds no private directory: its glob must not
+    // enumerate a sibling's files, and its reads, writes and edits spelled
+    // inside the mount still settle as the boundary refusal. Shared
+    // locations no sibling owns remain available to it.
+    const root = linkedDependencyWorkspace();
+    fs.writeFileSync(path.join(root, 'services/api/probe.txt'), 'api-secret');
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const rootInstall = workspaceInstallation('session-root', '.');
+    await post(origin, CONTEXT, rootInstall);
+    await post(origin, ACTIVATION, workspaceActivation(rootInstall));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-1', 'services/api'),
+    );
+    const exec = async (callId: string, toolName: string, input: unknown) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-root', callId, ''),
+          toolName,
+          input,
+        })
+      ).json();
+
+    const found = await exec('call-1', 'glob', { pattern: '**/probe.txt' });
+    expect(found.result.executionStatus).toBe('error');
+    expect(JSON.stringify(found)).not.toContain('services/api/probe.txt');
+    expect(JSON.stringify(found)).not.toContain('api-secret');
+    const read = await exec('call-2', 'read_file', {
+      file_path: 'services/api/probe.txt',
+    });
+    expect(read.result.executionStatus).toBe('error');
+    expect(JSON.stringify(read)).toContain(
+      "Path 'services/api/probe.txt' is not within the Session working directory.",
+    );
+    expect(JSON.stringify(read)).not.toContain('api-secret');
+    const write = await exec('call-3', 'write_file', {
+      file_path: 'services/api/pwned.txt',
+      content: 'pwned',
+    });
+    expect(write.result.executionStatus).toBe('error');
+    expect(fs.existsSync(path.join(root, 'services/api/pwned.txt'))).toBe(
+      false,
+    );
+    const shared = await exec('call-4', 'read_file', {
+      file_path: 'services/web/secret.txt',
+    });
+    expect(shared.result.executionStatus).toBe('success');
+    expect(JSON.stringify(shared)).toContain('sibling');
+  });
+
+  it('refuses a root-bound Session a glob aimed at a sibling estate, matched or not', async () => {
+    // A Session bound at `'.'` holds the whole mount as its containment root,
+    // so the escape test prunes nothing: without the ownership arm on glob's
+    // *input* the walk stats the sibling's files, and the caller learns per
+    // pattern whether that sibling holds a match — an empty answer certifying
+    // a directory its own boundary excludes.
+    const root = workspace(['services/api/src', 'shared']);
+    fs.writeFileSync(
+      path.join(root, 'services/api/src/index.ts'),
+      'api-secret',
+    );
+    fs.writeFileSync(path.join(root, 'shared/note.txt'), 'shared text');
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const rootInstall = workspaceInstallation('session-root', '.');
+    await post(origin, CONTEXT, rootInstall);
+    await post(origin, ACTIVATION, workspaceActivation(rootInstall));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-1', 'services/api'),
+    );
+    const search = async (
+      callId: string,
+      pattern: string,
+      searchPath: string,
+    ) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-root', callId, ''),
+          toolName: 'glob',
+          input: { pattern, path: searchPath },
+        })
+      ).json();
+
+    const matched = await search('call-1', '**/*.ts', 'services/api');
+    expect(matched.result.executionStatus).toBe('error');
+    expect(matched.result.error.message).toBe(
+      "Path 'services/api' is not within the Session working directory.",
+    );
+    expect(JSON.stringify(matched)).not.toContain('api-secret');
+
+    const unmatched = await search('call-2', '**/*.md', 'services/api');
+    expect(unmatched.result.executionStatus).toBe('error');
+    expect(unmatched.result.error.message).toBe(matched.result.error.message);
+    expect(JSON.stringify(unmatched)).not.toContain('api-secret');
+
+    // Control: a shared directory no Session owns stays searchable.
+    const unowned = await search('call-3', '**/*.txt', 'shared');
+    expect(unowned.result.executionStatus).not.toBe('error');
+    expect(JSON.stringify(unowned)).toContain('note.txt');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'certifies the glob path spelling the walk consumes, escaped or not',
+    async () => {
+      // `unescapePath` is not idempotent for a real name containing a
+      // backslash, so the arm must build first and judge the value glob
+      // actually searches. Judging the producer's raw spelling instead admits
+      // `shared\ notes` while refusing `shared notes` — one real target, two
+      // answers, and the admitted search root realpaths into the sibling.
+      const root = workspace(['services/api', 'services/web']);
+      fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+      fs.symlinkSync('../web', path.join(root, 'services/api/shared notes'));
+      const origin = await startWorker({
+        ...BOOT,
+        mountRoot: root,
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+      });
+      const install = workspaceInstallation('session-1', 'services/api');
+      await post(origin, CONTEXT, install);
+      await post(origin, ACTIVATION, workspaceActivation(install));
+      await post(
+        origin,
+        CONTEXT,
+        workspaceInstallation('session-2', 'services/web'),
+      );
+      const search = async (callId: string, searchPath: string) =>
+        (
+          await post(origin, EXECUTE, {
+            ...shell('session-1', callId, ''),
+            toolName: 'glob',
+            input: { pattern: '*', path: searchPath },
+          })
+        ).json();
+
+      const unescaped = await search('call-1', 'shared notes');
+      const escaped = await search('call-2', String.raw`shared\ notes`);
+
+      expect(unescaped.result.executionStatus).toBe('error');
+      expect(escaped.result.executionStatus).toBe('error');
+      expect(escaped.result.error.message).toBe(unescaped.result.error.message);
+      expect(escaped.result.error.message).toBe(
+        "Path 'shared notes' is not within the Session working directory.",
+      );
+      expect(JSON.stringify(escaped)).not.toContain('sibling');
+      expect(JSON.stringify(escaped)).not.toContain(
+        realDirectory(root, 'services/web'),
+      );
+    },
+  );
+
+  it('refuses an ancestor Session the nested Session estate, in both directions', async () => {
+    // Ownership is not one-directional. A Session bound above another cannot
+    // read, write or glob the nested Session's private estate; the nested
+    // Session keeps its own files, and both keep the shared directory that no
+    // Session owns.
+    const root = workspace(['services/api/src', 'shared']);
+    fs.writeFileSync(
+      path.join(root, 'services/api/src/index.ts'),
+      'nested-private-content',
+    );
+    fs.writeFileSync(path.join(root, 'shared/note.txt'), 'shared text');
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const installA = workspaceInstallation('session-a', 'services');
+    await post(origin, CONTEXT, installA);
+    await post(origin, ACTIVATION, workspaceActivation(installA));
+    const installB = workspaceInstallation('session-b', 'services/api');
+    await post(origin, CONTEXT, installB);
+    await post(origin, ACTIVATION, workspaceActivation(installB));
+    const call = async (
+      sessionId: string,
+      callId: string,
+      toolName: string,
+      input: unknown,
+    ) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell(sessionId, callId, ''),
+          toolName,
+          input,
+        })
+      ).json();
+
+    const read = await call('session-a', 'call-1', 'read_file', {
+      file_path: 'api/src/index.ts',
+    });
+    expect(read.result.executionStatus).toBe('error');
+    expect(read.result.error.message).toBe(
+      "Path 'api/src/index.ts' is not within the Session working directory.",
+    );
+    expect(JSON.stringify(read)).not.toContain('nested-private-content');
+
+    const write = await call('session-a', 'call-2', 'write_file', {
+      file_path: 'api/src/pwned.txt',
+      content: 'pwned',
+    });
+    expect(write.result.executionStatus).toBe('error');
+    expect(fs.existsSync(path.join(root, 'services/api/src/pwned.txt'))).toBe(
+      false,
+    );
+
+    const search = await call('session-a', 'call-3', 'glob', {
+      pattern: '**/*.ts',
+    });
+    expect(search.result.executionStatus).toBe('error');
+    expect(JSON.stringify(search)).not.toContain('nested-private-content');
+
+    // Controls.
+    const own = await call('session-b', 'call-4', 'read_file', {
+      file_path: 'src/index.ts',
+    });
+    expect(own.result.executionStatus).toBe('success');
+    expect(JSON.stringify(own)).toContain('nested-private-content');
+    const sharedA = await call('session-a', 'call-5', 'read_file', {
+      file_path: '../shared/note.txt',
+    });
+    expect(sharedA.result.executionStatus).toBe('success');
+    expect(JSON.stringify(sharedA)).toContain('shared text');
+    const sharedB = await call('session-b', 'call-6', 'read_file', {
+      file_path: '../../shared/note.txt',
+    });
+    expect(sharedB.result.executionStatus).toBe('success');
+    expect(JSON.stringify(sharedB)).toContain('shared text');
+  });
+
   it.each([
-    ['no sibling installed', []],
-    ['the sibling installed', [['session-2', 'services/web']]],
-    ['a sibling at an ancestor', [['session-up', 'services']]],
-    ['a Session at the Workspace root', [['session-root', '.']]],
-  ] as const)(
-    'confines file tools to the Session directory with %s',
-    async (_name, siblings) => {
+    'removed',
+    'replaced by a file',
+    'replaced by a symlink loop',
+    'redirected to a shared directory',
+  ])(
+    'keeps stale sibling ownership scoped when its directory is %s',
+    async (state) => {
+      // `mount.resolve` answers undefined for a sibling whose directory was
+      // removed or stopped being a directory — reachable from inside that
+      // sibling's own boundary by its own admitted `run_shell_command`. The
+      // installation set is add-only, so judging the whole scan by that one
+      // binding would veto every Session's linked dependencies permanently.
       const root = linkedDependencyWorkspace();
       const origin = await startWorker({
         ...BOOT,
@@ -1793,56 +2252,47 @@ describe('Managed context tool gate', () => {
       const install = workspaceInstallation('session-1', 'services/api');
       await post(origin, CONTEXT, install);
       await post(origin, ACTIVATION, workspaceActivation(install));
-      for (const [sessionId, cwdRelative] of siblings)
-        await post(
-          origin,
-          CONTEXT,
-          workspaceInstallation(sessionId, cwdRelative),
-        );
-      const call = async (
-        callId: string,
-        toolName: string,
-        input: Record<string, unknown>,
-      ) =>
+      await post(
+        origin,
+        CONTEXT,
+        workspaceInstallation('session-2', 'services/web'),
+      );
+      const read = async (callId: string, filePath: string) =>
         (
           await post(origin, EXECUTE, {
             ...shell('session-1', callId, ''),
-            toolName,
-            input,
+            toolName: 'read_file',
+            input: { file_path: filePath },
           })
         ).json();
 
-      for (const [index, filePath] of [
-        'peek/secret.txt',
-        '../secret.txt',
-        path.join(root, 'services/secret.txt'),
-        'node_modules/@acme/ui/src/index.ts',
-      ].entries()) {
-        const answer = await call(`read-${index}`, 'read_file', {
-          file_path: filePath,
-        });
-        expect(answer.result.executionStatus).toBe('error');
-        expect(answer.result.error.message).toBe(
-          `Path '${filePath}' is not within the Session working directory.`,
+      const before = await read('call-1', 'node_modules/@acme/ui/src/index.ts');
+      expect(before.result.executionStatus).toBe('success');
+
+      const stale = path.join(root, 'services/web');
+      fs.rmSync(stale, { recursive: true });
+      if (state === 'replaced by a file')
+        fs.writeFileSync(stale, 'not a directory');
+      if (state === 'replaced by a symlink loop')
+        fs.symlinkSync(
+          stale,
+          stale,
+          process.platform === 'win32' ? 'junction' : 'dir',
         );
-        const text = JSON.stringify(answer);
-        expect(text).not.toContain('sibling');
-        expect(text).not.toContain('ancestor');
-        expect(text).not.toContain('ui-source');
+      if (state === 'redirected to a shared directory')
+        symlinkDirectory(path.join(root, 'packages/ui'), stale);
+
+      const after = await read('call-2', 'node_modules/@acme/ui/src/index.ts');
+      if (state === 'redirected to a shared directory') {
+        expect(after.result.executionStatus).toBe('error');
+        expect(JSON.stringify(after)).not.toContain('ui-source');
+      } else {
+        expect(after.result.executionStatus).toBe('success');
+        expect(JSON.stringify(after)).toContain('ui-source');
       }
-      // A write through the link would plant a file inside the sibling's
-      // directory — one its own Workspace context read then promotes.
-      const planted = await call('write', 'write_file', {
-        file_path: 'peek/AGENTS.md',
-        content: 'planted',
-      });
-      expect(planted.result.executionStatus).toBe('error');
-      expect(fs.existsSync(path.join(root, 'services/web/AGENTS.md'))).toBe(
-        false,
-      );
-      const own = await call('own', 'read_file', {
-        file_path: 'src/index.ts',
-      });
+      const sibling = await read('call-3', 'peek/secret.txt');
+      expect(sibling.result.executionStatus).toBe('error');
+      const own = await read('call-4', 'src/index.ts');
       expect(own.result.executionStatus).toBe('success');
       expect(JSON.stringify(own)).toContain('mine');
     },

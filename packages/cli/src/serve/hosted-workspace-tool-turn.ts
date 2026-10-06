@@ -314,7 +314,6 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
   ...HOSTED_WORKSPACE_SHELL_TOOLS,
   HOSTED_GLOB_TOOL,
 ];
-
 function physicalToolStatus(
   response: Record<string, unknown> | undefined,
 ): 'success' | 'error' | 'cancelled' {

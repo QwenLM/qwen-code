@@ -31,6 +31,14 @@ export interface ToolInvocation<
   readonly permissionAliases?: readonly string[];
 
   /**
+   * Producer-carried MCP identity (server name + tool name on that server),
+   * set by MCP tool invocations. Permission matchers read the server
+   * boundary from here instead of re-deriving it from a flattened
+   * `mcp__<server>__<tool>` spelling, which cannot tell `foo` from `foo_`.
+   */
+  readonly mcpIdentity?: { serverName: string; serverToolName: string };
+
+  /**
    * Gets a pre-execution description of the tool operation.
    *
    * @returns A markdown string describing what the tool will do.

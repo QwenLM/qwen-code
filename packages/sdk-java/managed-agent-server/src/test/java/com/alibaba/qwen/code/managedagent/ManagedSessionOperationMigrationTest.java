@@ -86,12 +86,12 @@ class ManagedSessionOperationMigrationTest {
                             sessions.archiving()).status())
                             && "DELETED".equals(store.requireSession(TENANT,
                                     sessions.deleting()).status()));
-            assertThat(lifecycle.getPublic(TENANT, null,
-                    sessions.archiving(), archive.id()).admissionStage())
-                    .isEqualTo("harness_confirmed");
-            assertThat(lifecycle.getPublic(TENANT, null,
-                    sessions.deleting(), operations.get(1)).admissionStage())
-                    .isEqualTo("java_durable");
+            assertThat(((PublicCommandOperation) lifecycle.getPublicOperation(
+                    TENANT, null, sessions.archiving(), archive.id()))
+                    .admissionStage()).isEqualTo("harness_confirmed");
+            assertThat(((PublicCommandOperation) lifecycle.getPublicOperation(
+                    TENANT, null, sessions.deleting(), operations.get(1)))
+                    .admissionStage()).isEqualTo("java_durable");
             // The archive was admitted on an active Session, so it closes it
             // as archive did before; the delete of an archived one does not.
             assertThat(harness.closeCount()).isEqualTo(1);

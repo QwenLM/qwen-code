@@ -596,6 +596,22 @@ export class ManagedToolExecutor {
     private readonly capturePublisher?: ManagedShellCapturePublisher,
     private readonly mcp?: ManagedMcpRuntime,
     private readonly hooks?: ManagedHookRuntime,
+    /**
+     * True when a realpath lands inside ANOTHER installed Session's
+     * directory. The file-tool boundary is the Session directory for that
+     * case (a sibling Session's files are never this Session's business);
+     * anywhere else inside the mount — a linked dependency's real location
+     * — keeps the pre-containment behavior of reading through the symlink.
+     * `ownDirectory` is the caller's canonical Session directory: a sibling
+     * bound exactly at the mount root delimits no private area and never
+     * vets, while a caller bound there holds none either, so its targets —
+     * however spelled — are judged against every non-root sibling.
+     */
+    private readonly ownsAnotherSessionDir?: (
+      sessionId: string,
+      realPath: string,
+      ownDirectory: string,
+    ) => Promise<boolean>,
     private readonly backgroundSupervisor?: ManagedChildRunSupervisor,
     backgroundRegistry?: ManagedBackgroundShellRegistry,
     monitorRegistry?: ManagedMonitorRegistry,
@@ -1789,28 +1805,67 @@ export class ManagedToolExecutor {
         );
         // Validation unescapes file_path. Check and record the path this
         // invocation consumes without applying that normalization twice.
-        fileInvocation = sessionIdContext.run(sessionId, () =>
-          tool.build(params),
-        );
+        // Validation mutates `params` before it can fail, and the tool's own
+        // text quotes the resolved host path — so a build failure is held
+        // until the boundary below has answered: an out-of-boundary target
+        // must get the sanitized refusal, not the tool's diagnosis of it.
+        let buildError: unknown;
+        try {
+          fileInvocation = sessionIdContext.run(sessionId, () =>
+            tool.build(params),
+          );
+        } catch (error) {
+          buildError = error;
+        }
         // The glob admission makes an in-context symlink enumerable, so the
         // lexical resolve is no longer sufficient: realpath the result and
-        // refuse anything that lands outside the Session directory. The
-        // boundary is structural, like glob's `containmentRoot`: telling a
-        // shared directory from a sibling Session's would need the set of
-        // Sessions on the mount, which this process only learns as they
-        // install and forgets on restart. A create's leaf does not exist
-        // yet, so resolve the deepest ancestor that does — a genuinely
-        // absent path stays lexical and keeps the tool's own not-found
-        // answer rather than a traversal accusation.
+        // refuse anything that lands outside the boundary. A create's leaf
+        // does not exist yet, so resolve the deepest ancestor that does —
+        // a genuinely absent path stays lexical and keeps the tool's own
+        // not-found answer rather than a traversal accusation.
         const realTarget = await realpathDeepestExisting(
           params['file_path'] as string,
         );
         const realDirectory = await realpathDeepestExisting(directory);
-        if (escapesSession(path.relative(realDirectory, realTarget))) {
+        const relative = path.relative(realDirectory, realTarget);
+        let outOfBoundary = false;
+        if (
+          relative === '..' ||
+          relative.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(relative)
+        ) {
+          // The boundary is the Session directory only when the target lands
+          // in ANOTHER installed Session's directory; anywhere else inside
+          // the mount — a linked dependency's real location — stays
+          // reachable, the behavior /1 Sessions had before containment.
+          const workspaceRoot = tools.workspaceRoot;
+          outOfBoundary =
+            workspaceRoot === undefined ||
+            escapesSession(
+              path.relative(
+                await realpathDeepestExisting(workspaceRoot),
+                realTarget,
+              ),
+            );
+        }
+        outOfBoundary ||= Boolean(
+          await this.ownsAnotherSessionDir?.(
+            tools.sessionId,
+            realTarget,
+            realDirectory,
+          ),
+        );
+        if (outOfBoundary) {
+          // A non-escaping target is judged too: a Session bound at the
+          // mount root holds no private directory, so even a target spelled
+          // inside it can belong to a sibling. The callback answers false
+          // for any other caller's own-directory target before consulting a
+          // single binding.
           throw new Error(
             `Path '${entry.input!['file_path'] as string}' is not within the Session working directory.`,
           );
         }
+        if (buildError !== undefined) throw buildError;
       }
       if (entry.toolName === GlobTool.Name) {
         // Glob's own validation admits external paths, so the executor pins
@@ -1821,8 +1876,6 @@ export class ManagedToolExecutor {
           throw new ManagedToolUnavailableError(
             'Managed context directory is unavailable.',
           );
-        const requested =
-          typeof params['path'] === 'string' ? params['path'].trim() : '';
         // `pattern` is a second search root, and glob searches every brace
         // alternative: the same check as the harness refuses absolute/`..`
         // shapes and patterns too large to search before anything expands
@@ -1836,21 +1889,49 @@ export class ManagedToolExecutor {
             'Glob pattern must stay within the Session working directory.',
           );
         }
+        // Validation unescapes `path`, and `unescapePath` is not idempotent
+        // for a real name that contains a backslash — so build first and
+        // certify the spelling the walk consumes, exactly as the file arm
+        // above does. Re-normalizing here instead would judge one string and
+        // search another. A build failure is held for the same reason the
+        // file arm holds one.
+        let globBuildError: unknown;
+        try {
+          fileInvocation = sessionIdContext.run(sessionId, () =>
+            tool.build(params),
+          );
+        } catch (error) {
+          globBuildError = error;
+        }
+        const requested =
+          typeof params['path'] === 'string' ? params['path'].trim() : '';
         const resolved =
           requested === '' || requested === '.'
             ? root
             : path.resolve(root, requested);
         // Containment compares realpaths: a lexical compare cannot see a
         // symlink inside the Session context that leaves it.
-        const relative = path.relative(
-          await realpathDeepestExisting(root),
-          await realpathDeepestExisting(resolved),
-        );
-        if (escapesSession(relative)) {
+        const realRoot = await realpathDeepestExisting(root);
+        const realResolved = await realpathDeepestExisting(resolved);
+        // The ownership arm belongs on the input as well as the output. A
+        // Session bound at the mount root holds the whole mount as its
+        // containment root, so the escape test alone admits a search over a
+        // sibling's private estate and answers, per pattern, whether that
+        // sibling holds a match — while the same caller's `read_file` of the
+        // path is refused.
+        if (
+          escapesSession(path.relative(realRoot, realResolved)) ||
+          (await this.ownsAnotherSessionDir?.(
+            tools.sessionId,
+            realResolved,
+            realRoot,
+          ))
+        ) {
           throw new Error(
             `Path '${requested}' is not within the Session working directory.`,
           );
         }
+        if (globBuildError !== undefined) throw globBuildError;
         params['path'] = resolved;
       }
       if (
@@ -1936,14 +2017,22 @@ export class ManagedToolExecutor {
           const realRoot = await realpathDeepestExisting(root);
           for (const hit of resultPaths) {
             if (typeof hit !== 'string') continue;
-            const relative = path.relative(
-              realRoot,
-              path.join(
-                await realpathDeepestExisting(path.dirname(hit)),
-                path.basename(hit),
-              ),
+            const effective = path.join(
+              await realpathDeepestExisting(path.dirname(hit)),
+              path.basename(hit),
             );
-            if (escapesSession(relative)) {
+            const relative = path.relative(realRoot, effective);
+            if (
+              escapesSession(relative) ||
+              (await this.ownsAnotherSessionDir?.(
+                tools.sessionId,
+                effective,
+                realRoot,
+              ))
+            ) {
+              // The sibling-ownership arm carries the same message: it names
+              // no hit, and a root-bound caller's effective boundary excludes
+              // sibling estates even though they sit inside its own root.
               throw new Error(
                 'Glob results must stay within the Session working directory.',
               );
@@ -2295,7 +2384,9 @@ function escapesSession(relative: string): boolean {
  * its own not-found answer rather than being accused as traversal; any
  * non-ENOENT failure to resolve is not something containment may assume away.
  */
-async function realpathDeepestExisting(candidate: string): Promise<string> {
+export async function realpathDeepestExisting(
+  candidate: string,
+): Promise<string> {
   let resolved = candidate;
   const tail: string[] = [];
   try {

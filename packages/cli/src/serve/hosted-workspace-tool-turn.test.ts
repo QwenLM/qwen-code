@@ -1118,7 +1118,6 @@ it('dispatches an ordinary brace pattern unchanged', async () => {
   await turn.consumeResults();
   await turn.finish();
 });
-
 it('treats a blank glob path as omitted and still dispatches', async () => {
   // The declaration marks `path` optional; an explicit blank must not read
   // as a traversal refusal (which would also poison every valid sibling
@@ -1414,7 +1413,6 @@ it('never blocks a turn when the Workspace context read fails', async () => {
   await turn.consumeResults();
   await turn.finish();
 });
-
 it.each([
   ['file-first', false],
   ['file-last-with-shell', true],
@@ -4865,6 +4863,7 @@ function monitorTurnRig(
     { owner, captureBytes: 1024 * 1024 },
     opts.lane !== undefined ? undefined : options,
     undefined,
+
     {
       childRuns: {
         admit: async () => {},
@@ -5170,6 +5169,7 @@ describe('hosted Monitor admission arm', () => {
       } as never,
       undefined,
       undefined,
+
       {
         childRuns: {
           admit: async () => undefined,

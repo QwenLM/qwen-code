@@ -2,12 +2,16 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCommandOperation;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCommandOperation;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCwdOperation;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceException;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath;
 import java.util.Locale;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
@@ -70,17 +74,120 @@ public class SessionLifecycleService {
                 admission.replayed());
     }
 
-    // Reading an operation is not a replay.
-    public PublicCommandOperation getPublic(String tenantId, String actorId,
+    // The read-back shape is chosen by kind: a cwd change answers with its
+    // own contract, every other kind with the command operation.
+    public Object getPublicOperation(String tenantId, String actorId,
             String sessionId, String operationId) {
-        return publicOperation(operation(tenantId, actorId, sessionId,
-                operationId), false);
+        OperationRecord operation = operation(tenantId, actorId, sessionId,
+                operationId);
+        return operation.kind() == OperationKind.CWD_CHANGE
+                ? publicCwdOperation(operation, false)
+                : publicOperation(operation, false);
     }
 
-    public WebShellCommandOperation getWebShell(String tenantId,
-            String actorId, String sessionId, String operationId) {
-        return webShellOperation(operation(tenantId, actorId, sessionId,
-                operationId), false);
+    public Object getWebShellOperation(String tenantId, String actorId,
+            String sessionId, String operationId) {
+        OperationRecord operation = operation(tenantId, actorId, sessionId,
+                operationId);
+        return operation.kind() == OperationKind.CWD_CHANGE
+                ? webShellCwdOperation(operation, false)
+                : webShellOperation(operation, false);
+    }
+
+    public PublicCwdOperation admitPublicCwdChange(String tenantId,
+            String actorId, String sessionId, String idempotencyKey,
+            String cwdRelative, Long expectedContextRevision) {
+        OperationAdmission admission = admitCwdChange(tenantId, actorId,
+                sessionId, idempotencyKey, cwdRelative,
+                expectedContextRevision);
+        return publicCwdOperation(admission.operation(),
+                admission.replayed());
+    }
+
+    public WebShellCwdOperation admitWebShellCwdChange(String tenantId,
+            String actorId, String sessionId, String idempotencyKey,
+            String cwdRelative, Long expectedContextRevision) {
+        OperationAdmission admission = admitCwdChange(tenantId, actorId,
+                sessionId, idempotencyKey, cwdRelative,
+                expectedContextRevision);
+        return webShellCwdOperation(admission.operation(),
+                admission.replayed());
+    }
+
+    private OperationAdmission admitCwdChange(String tenantId, String actorId,
+            String sessionId, String idempotencyKey, String cwdRelative,
+            Long expectedContextRevision) {
+        // Actor before key, on the service itself: the published refusal
+        // order must not rest on argument-evaluation order at the routes.
+        if (actorId == null || actorId.isEmpty()) {
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "actor_required",
+                    "A trusted actor is required.");
+        }
+        ManagedAgentService.validateIdempotencyKey(idempotencyKey);
+        if (cwdRelative == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_request",
+                    "cwd_relative is required.");
+        }
+        String normalized;
+        try {
+            normalized = WorkspaceRelativePath.normalize(cwdRelative);
+        } catch (WorkspaceException error) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_cwd",
+                    "The working directory is invalid.");
+        }
+        if (expectedContextRevision == null || expectedContextRevision < 1) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_request",
+                    "expected_context_revision must be at least 1.");
+        }
+        String requestDigest = digests.digest(Map.of("sessionId", sessionId,
+                "operation", "CWD_CHANGE", "cwdRelative", normalized,
+                "expectedContextRevision",
+                Long.toString(expectedContextRevision)));
+        OperationAdmission admission = store.beginCwdChangeOperation(
+                tenantId, sessionId, actorId, actorDigest(actorId),
+                idempotencyKey, requestDigest, normalized,
+                expectedContextRevision);
+        OperationRecord operation = admission.operation();
+        if ("PENDING".equals(operation.state())) {
+            coordinator.dispatch(tenantId, sessionId,
+                    operation.operationId());
+        }
+        return admission;
+    }
+
+    public PublicCwdOperation publicCwdOperation(OperationRecord operation,
+            boolean replayed) {
+        return new PublicCwdOperation(operation.operationId(),
+                operation.sessionId(), "cwd_change",
+                cwdStatus(operation.state()),
+                operation.expectedContextRevision(),
+                operation.targetCwdRelative(),
+                operation.resultContextRevision(), operation.failureCode(),
+                replayed);
+    }
+
+    public WebShellCwdOperation webShellCwdOperation(
+            OperationRecord operation, boolean replayed) {
+        return new WebShellCwdOperation(operation.operationId(),
+                operation.sessionId(), "cwd_change",
+                cwdStatus(operation.state()),
+                operation.expectedContextRevision(),
+                operation.targetCwdRelative(),
+                operation.resultContextRevision(), operation.failureCode(),
+                replayed);
+    }
+
+    // The store's RUNNING/FAILED states surface with the W2 contract's
+    // vocabulary; terminal refusal never retries.
+    private static String cwdStatus(String state) {
+        return switch (state) {
+            case "PENDING" -> "pending";
+            case "RUNNING" -> "installing";
+            case "COMPLETED" -> "completed";
+            case "FAILED" -> "failed";
+            default -> throw new IllegalStateException(
+                    "Unknown cwd operation state " + state);
+        };
     }
 
     private OperationAdmission admit(String tenantId, String actorId,

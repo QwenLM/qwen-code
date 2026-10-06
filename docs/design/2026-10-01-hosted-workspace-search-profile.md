@@ -93,19 +93,28 @@ entries are judged by their parent's realpath. Walking through that link is
 pruned, including ordinary workspace-dependency links; a broad search retains
 its in-Session matches.
 
-The file-tool containment is the Session directory itself on every boot,
-as glob's walk is: a `read_file`, `write_file` or `edit` whose realpath
-leaves it is refused, wherever in the mount it lands. Telling a shared
-location from a sibling Session's directory would need the set of Sessions
-on the mount, which a worker only learns as they install and forgets on
-restart, so a registry-based exemption admitted sibling reads and writes
-after a restart, and a write planted in a sibling's directory became that
-Session's Workspace context. Dangling links are checked against their
-intended targets before a write; file history retains its own write
-boundary. Non-ENOENT resolution failures must fail without exposing Node's
-physical-path diagnostics. Reading a linked dependency outside the Session
-(`node_modules/@acme/ui -> ../../packages/ui`) is a follow-up: it needs a
-durable notion of which mount locations are shared.
+The boot-v2 file-tool containment permits shared locations inside the mount
+and excludes directories owned by another Session installed in the same
+worker. A stale sibling whose location cannot be resolved retains its occupied
+path without refusing unrelated shared reads. A resolvable redirect retains
+ownership of its target, including a formerly shared directory; access there is
+refused until the binding is repaired. Own-directory access remains available.
+Ownership is geometric, with one exact exemption: a Session bound at a
+non-root ancestor of the caller owns its whole subtree, including what the
+caller reaches past its own directory, while a binding exactly at the mount
+root (`'.'`, a Workspace selection without `cwd_relative`) delimits no
+private area and never vets another Session's targets. Symmetrically, a
+caller bound at the mount root holds no private directory: its glob hits,
+reads, writes and edits refuse every target a non-root sibling owns,
+however the path is spelled, while shared locations owned by no sibling
+stay reachable. Whether nested or overlapping installations may exist at
+all is install-time policy and out of scope for this slice; the ownership
+above governs whatever the registry accepts. Dangling links are checked against
+their intended targets before a write. That registry check is worker-local, not a confidentiality guarantee
+across separate workers. It preserves `/1` linked-dependency reads; file
+history retains its own write boundary. Boot v1 keeps the stricter Session
+boundary. Non-ENOENT resolution failures of the requested target must fail without exposing Node's
+physical-path diagnostics.
 
 ## Bounds
 
@@ -164,10 +173,17 @@ worker-derived capability advertisement before it can be supported.
 
 **Behavior change for existing Sessions:** the realpath containment that
 glob made necessary applies to `read_file`, `write_file` and `edit` on every
-Hosted profile, `/1` included. The boundary is the Session
-directory itself on every worker: a path that resolves through a symlink
-outside it, a linked dependency
-(`node_modules/@acme/ui -> ../../packages/ui`) included, is refused where it
-previously read through.
+Hosted profile, `/1` included. On a Workspace-capability worker, shared
+locations inside the mount remain reachable when no sibling owns that target.
+Directory-external access is refused when its realpath leaves the mount,
+lands in another installed Session's directory, or the mount root cannot be
+verified. A removed or unresolvable sibling location does not veto unrelated
+shared dependencies. A sibling redirected into a shared directory continues to
+exclude that destination. A linked dependency inside the mount
+(`node_modules/@acme/ui -> ../../packages/ui`) still reads through when it is not
+owned by a sibling. A boot-v1
+worker has no Workspace mount or Session registry, so its boundary is the
+Session directory itself: a path that resolves through a symlink outside it,
+a linked dependency included, is refused where it previously read through.
 
 A lighter dispatch path for read-only, idempotent tools is out of scope.

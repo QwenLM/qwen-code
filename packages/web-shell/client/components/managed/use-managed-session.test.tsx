@@ -2023,6 +2023,106 @@ describe('useManagedSession', () => {
     }
   });
 
+  it('keeps the stall alert when the summary poll succeeds mid-stall', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let streamHangs = false;
+    let blipNextSummary = false;
+    const fetchImpl = vi.fn<typeof fetch>(async (url) => {
+      const path = String(url);
+      if (path.endsWith('/sessions/get')) {
+        if (blipNextSummary) {
+          blipNextSummary = false;
+          return new Response(
+            JSON.stringify({ error: { code: 'boom', message: 'boom-blip' } }),
+            { status: 500, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        return new Response(javaSessionPayload(2), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (path.endsWith('/transcript/query')) {
+        return new Response(
+          JSON.stringify({
+            items: [],
+            events: [
+              JSON.parse(javaDelta(1, 'one')),
+              JSON.parse(javaDelta(2, 'two')),
+            ],
+            coveredSequence: 0,
+            hasMore: false,
+            lastSequence: 2,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (path.endsWith('/events/stream')) {
+        if (streamHangs) {
+          // A resubscribe that never yields again: no further gap can
+          // re-assert the alert from the stream side.
+          return new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+            status: 200,
+          });
+        }
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(corrupt(3) + corrupt(4) + corrupt(5) + corrupt(6)),
+            );
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200 });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      // Three stalls assert the alert.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+      // Freeze the stream mid-stall while the 3s summary poll keeps
+      // succeeding: the poll may only clear errors it raised itself, so
+      // the alert must survive several poll cadences untouched.
+      streamHangs = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+      // The stream is parked for good now, so every summary fetch is the
+      // poll's. A blip occupies the field for one cadence; the next success
+      // may only clear that — the still-current stall alert comes back.
+      blipNextSummary = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('clears a transient recovery error once a resync succeeds', async () => {
     vi.useFakeTimers();
     let snapshotCalls = 0;
@@ -2249,5 +2349,1832 @@ describe('useManagedSession', () => {
     // The single stream request started from the snapshot cursor.
     expect(streamBodies).toHaveLength(1);
     expect(streamBodies[0]?.['afterSequence']).toBe(2);
+  });
+
+  it('clears the stream error on its clean pass even when the poll raised the identical message', async () => {
+    vi.useFakeTimers();
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let subscribeCalls = 0;
+    let getSessionCalls = 0;
+    const provider = {
+      // #1 the initial snapshot, #2 the poll's failure, #3 parks the poll
+      // for good, #4 the stream's clean pass.
+      getSession: vi.fn(async () => {
+        getSessionCalls += 1;
+        if (getSessionCalls === 2) throw new TypeError('Failed to fetch');
+        if (getSessionCalls === 3) await new Promise(() => {});
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi
+        .fn<ManagedAgentProvider['getTranscript']>()
+        .mockResolvedValue({ events: [event(1)], lastEventId: 1 }),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          await firstGate;
+          throw new TypeError('Failed to fetch');
+        }
+        if (subscribeCalls === 2) {
+          await secondGate;
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBeUndefined();
+      // The poll fails first; the stream loop fails with the same message.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('Failed to fetch');
+      await act(async () => {
+        releaseFirst();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBe('Failed to fetch');
+      // The next cadence parks the poll inside getSession (#3) and starts
+      // the stream's clean pass, held on its gate: ownership, not the
+      // identical message text, decides what the pass may clear.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      await act(async () => {
+        releaseSecond();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBeUndefined();
+      expect(latest?.summary).toEqual({ sessionId: 'session-1' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the stream failure beside healthy polls until the stream itself recovers', async () => {
+    vi.useFakeTimers();
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let subscribeCalls = 0;
+    let getSessionCalls = 0;
+    const provider = {
+      // #2 is the poll's failure; every other summary fetch succeeds.
+      getSession: vi.fn(async () => {
+        getSessionCalls += 1;
+        if (getSessionCalls === 2) throw new TypeError('Failed to fetch');
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi
+        .fn<ManagedAgentProvider['getTranscript']>()
+        .mockResolvedValue({ events: [event(1)], lastEventId: 1 }),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          await firstGate;
+          throw new TypeError('Failed to fetch');
+        }
+        if (subscribeCalls === 2) {
+          await secondGate;
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // The poll raises the message first; the stream raises it after, and
+      // the stream owns the banner from that write on.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('Failed to fetch');
+      await act(async () => {
+        releaseFirst();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBe('Failed to fetch');
+      // Repeated poll successes prove only the poll healthy: the stream's
+      // banner stays while the stream is down.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('Failed to fetch');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('Failed to fetch');
+      // The stream's own clean pass ends its condition and clears it.
+      await act(async () => {
+        releaseSecond();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a paging failure when a clean stream pass follows', async () => {
+    let releaseStream!: () => void;
+    const streamGate = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    let subscribeCalls = 0;
+    let cursorGone = true;
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) => {
+          if (request.before === 'cursor-1')
+            return cursorGone
+              ? Promise.reject(new Error('Managed Agent request failed (410)'))
+              : // The retried page is empty and carries no older cursor.
+                Promise.resolve({ events: [], lastEventId: 1 });
+          return Promise.resolve({
+            events: [event(1)],
+            olderCursor: 'cursor-1',
+            lastEventId: 1,
+          });
+        },
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          await streamGate;
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    await vi.waitFor(() => expect(latest?.olderCursor).toBe('cursor-1'));
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    expect(latest?.error).toBe('Managed Agent request failed (410)');
+
+    // A clean stream pass follows: the paging error is not the stream's to
+    // clear, so the dead cursor's banner survives beside healthy data.
+    const getSessionCalls = provider.getSession.mock.calls.length;
+    await act(async () => {
+      releaseStream();
+    });
+    await vi.waitFor(() =>
+      expect(provider.getSession.mock.calls.length).toBe(getSessionCalls + 1),
+    );
+    expect(latest?.error).toBe('Managed Agent request failed (410)');
+    expect(latest?.olderCursor).toBe('cursor-1');
+
+    // A successful retry on the same cursor owns the release: the banner it
+    // raised clears and the exhausted cursor retires the affordance.
+    cursorGone = false;
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    expect(latest?.error).toBeUndefined();
+    expect(latest?.olderCursor).toBeUndefined();
+  });
+
+  it('reveals a still-live paging failure again once a poll blip clears', async () => {
+    vi.useFakeTimers();
+    let blipNextSummary = false;
+    const provider = {
+      getSession: vi.fn(async () => {
+        if (blipNextSummary) {
+          blipNextSummary = false;
+          throw new Error('boom-blip');
+        }
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) =>
+          request.before === 'cursor-1'
+            ? Promise.reject(new Error('Managed Agent request failed (410)'))
+            : Promise.resolve({
+                events: [event(1)],
+                olderCursor: 'cursor-1',
+                lastEventId: 1,
+              }),
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.olderCursor).toBe('cursor-1');
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBe('Managed Agent request failed (410)');
+
+      // The poll's one-cadence blip occupies the field but must not displace
+      // the paging condition: the dead cursor is still dead.
+      blipNextSummary = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('Managed Agent request failed (410)');
+      expect(latest?.olderCursor).toBe('cursor-1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ends a dropped stream’s failure once the reconnect establishes and idles', async () => {
+    vi.useFakeTimers();
+    let subscribeCalls = 0;
+    let cursorGone = true;
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) => {
+          if (request.before === 'cursor-1')
+            return cursorGone
+              ? Promise.reject(new Error('Managed Agent request failed (410)'))
+              : Promise.resolve({ events: [], lastEventId: 1 });
+          return Promise.resolve({
+            events: [event(1)],
+            olderCursor: 'cursor-1',
+            lastEventId: 1,
+          });
+        },
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: {
+          lastEventId?: number;
+          signal?: AbortSignal;
+          onEstablished?: () => void;
+        },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          // The first connection drops before any event.
+          throw new TypeError('Failed to fetch');
+        }
+        // The reconnect establishes, then idles: heartbeats never yield,
+        // so neither an advancing event nor a completed pass can release
+        // the booking.
+        request.onEstablished?.();
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBe('Failed to fetch');
+
+      // The reconnect establishes on the retry cadence: its failure's
+      // condition ends there, even though the stream then stays silent.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.error).toBeUndefined();
+
+      // A later paging failure and its successful retry must not reveal
+      // the dead stream condition.
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBe('Managed Agent request failed (410)');
+      cursorGone = false;
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBeUndefined();
+      expect(latest?.olderCursor).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reveals the stall alert ahead of booked stream and paging conditions', async () => {
+    vi.useFakeTimers();
+    let gapsLeft = 0;
+    let throwNextSubscribe = false;
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) =>
+          request.before === 'cursor-1'
+            ? Promise.reject(new Error('Managed Agent request failed (410)'))
+            : Promise.resolve({
+                events: [event(1)],
+                olderCursor: 'cursor-1',
+                // The resync head never advances: three stalls arm the alert.
+                lastEventId: 1,
+              }),
+      ),
+      async *subscribeEvents(_sessionId: string) {
+        if (throwNextSubscribe) {
+          throwNextSubscribe = false;
+          throw new TypeError('Failed to fetch');
+        }
+        if (gapsLeft > 0) {
+          gapsLeft -= 1;
+          yield { ...event(1), type: 'stream_gap' };
+          return;
+        }
+        // A completed pass: the stream loop runs its clean pass next.
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      gapsLeft = 3;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+
+      // The stream drops: its failure is booked over the armed stall.
+      throwNextSubscribe = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('Failed to fetch');
+
+      // A paging failure is booked as well.
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBe('Managed Agent request failed (410)');
+
+      // The stream's clean pass releases its own booking; the still-armed
+      // stall outranks the paging condition that survives alongside it.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reveals a still-live stream failure ahead of a paging condition', async () => {
+    vi.useFakeTimers();
+    let throwNextSubscribe = true;
+    let blipNextSummary = false;
+    const provider = {
+      getSession: vi.fn(async () => {
+        if (blipNextSummary) {
+          blipNextSummary = false;
+          throw new Error('boom-blip');
+        }
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) =>
+          request.before === 'cursor-1'
+            ? Promise.reject(new Error('Managed Agent request failed (410)'))
+            : Promise.resolve({
+                events: [event(1)],
+                olderCursor: 'cursor-1',
+                lastEventId: 1,
+              }),
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        if (throwNextSubscribe) {
+          throwNextSubscribe = false;
+          throw new TypeError('Failed to fetch');
+        }
+        // The reconnect never establishes: the stream stays down.
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBe('Failed to fetch');
+
+      // A paging failure occupies the field beside the downed stream.
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBe('Managed Agent request failed (410)');
+
+      // A poll blip and its recovery release the poll's own booking: the
+      // stream's still-live condition is revealed ahead of the paging one.
+      blipNextSummary = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('Failed to fetch');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops a booked paging condition when a live event advances the stream', async () => {
+    vi.useFakeTimers();
+    let releaseEvent!: () => void;
+    const eventGate = new Promise<void>((resolve) => {
+      releaseEvent = resolve;
+    });
+    let blipNextSummary = false;
+    const provider = {
+      getSession: vi.fn(async () => {
+        if (blipNextSummary) {
+          blipNextSummary = false;
+          throw new Error('boom-blip');
+        }
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) =>
+          request.before === 'cursor-1'
+            ? Promise.reject(new Error('Managed Agent request failed (410)'))
+            : Promise.resolve({
+                events: [event(1)],
+                olderCursor: 'cursor-1',
+                lastEventId: 1,
+              }),
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        await eventGate;
+        yield event(2);
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.olderCursor).toBe('cursor-1');
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBe('Managed Agent request failed (410)');
+
+      // A live event advances the stream: every booked condition ends.
+      await act(async () => {
+        releaseEvent();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.events.map((item) => item.id)).toEqual([1, 2]);
+      expect(latest?.error).toBeUndefined();
+
+      // A later poll blip and its recovery must not resurrect the dead
+      // cursor's message.
+      blipNextSummary = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops a booked paging condition when a gap resync runs', async () => {
+    vi.useFakeTimers();
+    let releaseGap!: () => void;
+    const gapGate = new Promise<void>((resolve) => {
+      releaseGap = resolve;
+    });
+    let subscribeCalls = 0;
+    let blipNextSummary = false;
+    const provider = {
+      getSession: vi.fn(async () => {
+        if (blipNextSummary) {
+          blipNextSummary = false;
+          throw new Error('boom-blip');
+        }
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) =>
+          request.before === 'cursor-1'
+            ? Promise.reject(new Error('Managed Agent request failed (410)'))
+            : // The resync snapshot never advances the head.
+              Promise.resolve({
+                events: [event(1)],
+                olderCursor: 'cursor-1',
+                lastEventId: 1,
+              }),
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          await gapGate;
+          yield { ...event(1), type: 'stream_gap' };
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.olderCursor).toBe('cursor-1');
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBe('Managed Agent request failed (410)');
+
+      // A non-advancing gap resync replaces the whole window state: every
+      // booked condition ends with it.
+      await act(async () => {
+        releaseGap();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBeUndefined();
+      expect(latest?.olderCursor).toBe('cursor-1');
+
+      blipNextSummary = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops the failed snapshot’s booking when the retry lands', async () => {
+    vi.useFakeTimers();
+    let firstFailed = false;
+    let cursorGone = true;
+    const provider = {
+      getSession: vi.fn(async () => {
+        if (!firstFailed) {
+          firstFailed = true;
+          throw new TypeError('Failed to fetch');
+        }
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) => {
+          if (request.before === 'cursor-1')
+            return cursorGone
+              ? Promise.reject(new Error('Managed Agent request failed (410)'))
+              : Promise.resolve({ events: [], lastEventId: 1 });
+          return Promise.resolve({
+            events: [event(1)],
+            olderCursor: 'cursor-1',
+            lastEventId: 1,
+          });
+        },
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBe('Failed to fetch');
+
+      // The retried snapshot replaces the whole state, including the failed
+      // attempt's booking.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+      expect(latest?.olderCursor).toBe('cursor-1');
+
+      // A paging failure and its successful retry must not reveal the
+      // failed attempt's message.
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBe('Managed Agent request failed (410)');
+      cursorGone = false;
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops a booked stream failure when the run reloads', async () => {
+    vi.useFakeTimers();
+    let failNextSubscribe = true;
+    let getSessionCalls = 0;
+    let releaseSnapshot!: () => void;
+    const snapshotGate = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    const provider = {
+      getSession: vi.fn(async () => {
+        getSessionCalls += 1;
+        // The reloaded run's initial snapshot parks in flight: a completed
+        // snapshot would wipe the carried ledger on its own, so the reset
+        // is only observable while it has not landed.
+        if (getSessionCalls === 2) await snapshotGate;
+        // The fresh run's first poll blips while its snapshot is parked.
+        if (getSessionCalls === 3) throw new Error('boom-blip');
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(() =>
+        Promise.resolve(transcript(1)),
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        if (failNextSubscribe) {
+          failNextSubscribe = false;
+          throw new TypeError('Failed to fetch');
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBe('Failed to fetch');
+
+      await act(async () => {
+        latest!.reload();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      // A blip in the fresh run, then its recovery: the old run's stream
+      // booking must not be revealed alongside either.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+
+      await act(async () => {
+        releaseSnapshot();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the poll’s banner when an unbooked older-page load succeeds', async () => {
+    vi.useFakeTimers();
+    let blipNextSummary = false;
+    const provider = {
+      getSession: vi.fn(async () => {
+        if (blipNextSummary) {
+          blipNextSummary = false;
+          throw new Error('boom-blip');
+        }
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) =>
+          Promise.resolve(
+            request.before === 'cursor-1'
+              ? { events: [], lastEventId: 1 }
+              : {
+                  events: [event(1)],
+                  olderCursor: 'cursor-1',
+                  lastEventId: 1,
+                },
+          ),
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.olderCursor).toBe('cursor-1');
+
+      // The first poll blips: its banner is booked.
+      blipNextSummary = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+
+      // A successful older-page load owns no booking: it must not clear the
+      // poll's.
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBe('boom-blip');
+
+      // The poll's own recovery clears it.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the stall alert across a successful older-page load and a poll blip', async () => {
+    vi.useFakeTimers();
+    let subscribeCalls = 0;
+    let blipNextSummary = false;
+    const provider = {
+      getSession: vi.fn(async () => {
+        if (blipNextSummary) {
+          blipNextSummary = false;
+          throw new Error('boom-blip');
+        }
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) =>
+          Promise.resolve(
+            request.before === 'cursor-0'
+              ? { events: [], lastEventId: 1 }
+              : {
+                  events: [event(1)],
+                  olderCursor: 'cursor-0',
+                  // The resync head never advances: three stalls assert the
+                  // alert.
+                  lastEventId: 1,
+                },
+          ),
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls <= 3) {
+          yield { ...event(1), type: 'stream_gap' };
+          return;
+        }
+        // The stream then hangs: no pass can re-assert the alert.
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+
+      // Paging history is not the stall's owner: a successful older-page
+      // load must not dismiss the still-current alert.
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+
+      // A poll blip occupies the field for one cadence; releasing it
+      // reveals the still-armed alert rather than an empty field.
+      blipNextSummary = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('disarms the stall alert once the stream advances again', async () => {
+    vi.useFakeTimers();
+    let head = 1;
+    let gapsLeft = 0;
+    let throwNextSubscribe = false;
+    let emitEventId: number | undefined;
+    let blipNextSummary = false;
+    const provider = {
+      getSession: vi.fn(async () => {
+        if (blipNextSummary) {
+          blipNextSummary = false;
+          throw new Error('boom-blip');
+        }
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(() =>
+        Promise.resolve(transcript(head)),
+      ),
+      async *subscribeEvents(_sessionId: string) {
+        if (throwNextSubscribe) {
+          throwNextSubscribe = false;
+          throw new TypeError('Failed to fetch');
+        }
+        if (emitEventId !== undefined) {
+          const id = emitEventId;
+          emitEventId = undefined;
+          yield event(id);
+          return;
+        }
+        if (gapsLeft > 0) {
+          gapsLeft -= 1;
+          yield { ...event(1), type: 'stream_gap' };
+          return;
+        }
+        // A completed pass: the stream loop runs its clean pass next.
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      // Three non-advancing resyncs arm the alert.
+      gapsLeft = 3;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+
+      // A stream failure while the stall is armed shows the failure; the
+      // stream's own clean pass must reveal the still-armed alert again.
+      throwNextSubscribe = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('Failed to fetch');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+
+      // An advancing resync ends the stall; a later poll blip must not
+      // resurrect it once the blip clears.
+      head = 2;
+      gapsLeft = 1;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+      blipNextSummary = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+
+      // Re-arm, then advance via a live event: same disarm, same protection.
+      gapsLeft = 3;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+      emitEventId = 3;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+      blipNextSummary = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  function createStallHarness() {
+    let blipNextSummary = false;
+    let gapsLeft = 0;
+    const stallProvider = {
+      getSession: vi.fn(async () => {
+        if (blipNextSummary) {
+          blipNextSummary = false;
+          throw new Error('boom-blip');
+        }
+        return { sessionId: 'session-1' };
+      }),
+      // The head never advances, so every resync counts toward a stall.
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(() =>
+        Promise.resolve(transcript(1)),
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        if (gapsLeft > 0) {
+          gapsLeft -= 1;
+          yield { ...event(1), type: 'stream_gap' };
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    return {
+      provider: stallProvider,
+      armStall: () => {
+        gapsLeft = 3;
+      },
+      blip: () => {
+        blipNextSummary = true;
+      },
+    };
+  }
+
+  it('drops an armed stall when the run reloads', async () => {
+    vi.useFakeTimers();
+    const harness = createStallHarness();
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe({ sessionId }: { sessionId: string }) {
+      latest = useManagedSession(harness.provider, 'client-1', sessionId);
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe sessionId="session-1" />));
+
+    try {
+      harness.armStall();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+
+      await act(async () => {
+        latest!.reload();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBeUndefined();
+
+      // A blip in the fresh run must not resurrect the old run's stall.
+      harness.blip();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops an armed stall when the session changes', async () => {
+    vi.useFakeTimers();
+    const harness = createStallHarness();
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe({ sessionId }: { sessionId: string }) {
+      latest = useManagedSession(harness.provider, 'client-1', sessionId);
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe sessionId="session-1" />));
+
+    try {
+      harness.armStall();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+
+      await act(async () => {
+        root!.render(<Probe sessionId="session-2" />);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBeUndefined();
+
+      harness.blip();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores a superseded run releasing an error it no longer owns', async () => {
+    vi.useFakeTimers();
+    let parkNextSummary = false;
+    let releaseParkedSummary!: () => void;
+    let blipNextSummary = false;
+    const provider = {
+      getSession: vi.fn(async () => {
+        if (parkNextSummary) {
+          parkNextSummary = false;
+          await new Promise<void>((resolve) => {
+            releaseParkedSummary = resolve;
+          });
+        }
+        if (blipNextSummary) {
+          blipNextSummary = false;
+          throw new Error('boom-blip');
+        }
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(() =>
+        Promise.resolve(transcript(1)),
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe({ sessionId }: { sessionId: string }) {
+      latest = useManagedSession(provider, 'client-1', sessionId);
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe sessionId="session-1" />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // The live run's poll parks inside the provider...
+      parkNextSummary = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      // ...and the session switch supersedes the whole run.
+      await act(async () => {
+        root!.render(<Probe sessionId="session-2" />);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // The successor's own poll fails: the field and the ledger entry are
+      // its poll's to release.
+      blipNextSummary = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      // The superseded run's parked poll now resolves late: its release must
+      // not delete the successor's entry.
+      await act(async () => {
+        releaseParkedSummary();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      // The successor's next poll succeeds and clears its own error.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores a superseded run releasing a stream error it no longer owns', async () => {
+    vi.useFakeTimers();
+    let releaseParkedSummary!: () => void;
+    let getSessionCalls = 0;
+    let subscribeCalls = 0;
+    const provider = {
+      getSession: vi.fn(async () => {
+        getSessionCalls += 1;
+        if (getSessionCalls === 2) {
+          // The first run's stream clean pass parks mid-refresh (its
+          // initial snapshot was call #1)...
+          await new Promise<void>((resolve) => {
+            releaseParkedSummary = resolve;
+          });
+        }
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(() =>
+        Promise.resolve(transcript(1)),
+      ),
+      async *subscribeEvents(_sessionId: string) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 2) {
+          // ...while the successor's stream fails for real.
+          throw new Error('live-stream-boom');
+        }
+        // Every other subscribe completes immediately: a clean pass.
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe({ sessionId }: { sessionId: string }) {
+      latest = useManagedSession(provider, 'client-1', sessionId);
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe sessionId="session-1" />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      await act(async () => {
+        root!.render(<Probe sessionId="session-2" />);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBe('live-stream-boom');
+
+      // The superseded run's clean pass now resolves late: its release must
+      // not delete the successor's stream entry.
+      await act(async () => {
+        releaseParkedSummary();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBe('live-stream-boom');
+
+      // The successor's stream recovers and clears its own error.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores a superseded run booking a late stream failure', async () => {
+    vi.useFakeTimers();
+    let releaseStream!: () => void;
+    const streamGate = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    let subscribeCalls = 0;
+    let cursorGone = true;
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) => {
+          if (request.before === 'cursor-1')
+            return cursorGone
+              ? Promise.reject(new Error('Managed Agent request failed (410)'))
+              : Promise.resolve({ events: [], lastEventId: 1 });
+          return Promise.resolve({
+            events: [event(1)],
+            olderCursor: 'cursor-1',
+            lastEventId: 1,
+          });
+        },
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          // The first run's stream fails only after the gate releases.
+          await streamGate;
+          throw new Error('stale-stream-boom');
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe({ sessionId }: { sessionId: string }) {
+      latest = useManagedSession(provider, 'client-1', sessionId);
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe sessionId="session-1" />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.olderCursor).toBe('cursor-1');
+      await act(async () => {
+        root!.render(<Probe sessionId="session-2" />);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.olderCursor).toBe('cursor-1');
+
+      // The superseded run's stream rejects late: its failure must not be
+      // booked into the successor's ledger.
+      await act(async () => {
+        releaseStream();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBeUndefined();
+
+      // A phantom entry would surface the next time any writer releases:
+      // the paging failure then its successful retry is that release.
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBe('Managed Agent request failed (410)');
+      cursorGone = false;
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores a superseded run merging a late stream event', async () => {
+    vi.useFakeTimers();
+    let releaseStale!: () => void;
+    const staleGate = new Promise<void>((resolve) => {
+      releaseStale = resolve;
+    });
+    let subscribeCalls = 0;
+    let cursorGone = true;
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(
+        (_sessionId, request) => {
+          if (request.before === 'cursor-1')
+            return cursorGone
+              ? Promise.reject(new Error('Managed Agent request failed (410)'))
+              : Promise.resolve({ events: [], lastEventId: 1 });
+          return Promise.resolve({
+            events: [event(1)],
+            olderCursor: 'cursor-1',
+            lastEventId: 1,
+          });
+        },
+      ),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          // The first run's stream parks, then delivers one late event.
+          await staleGate;
+          yield event(2);
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe({ sessionId }: { sessionId: string }) {
+      latest = useManagedSession(provider, 'client-1', sessionId);
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe sessionId="session-1" />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.olderCursor).toBe('cursor-1');
+
+      // The session switch supersedes the whole first run mid-stream.
+      await act(async () => {
+        root!.render(<Probe sessionId="session-2" />);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.olderCursor).toBe('cursor-1');
+
+      // The successor books its own paging failure.
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBe('Managed Agent request failed (410)');
+
+      // The superseded run's late event must not merge into the
+      // successor's transcript or touch its ledger.
+      await act(async () => {
+        releaseStale();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.events.map((item) => item.id)).toEqual([1]);
+      expect(latest?.error).toBe('Managed Agent request failed (410)');
+
+      // The successor's paging retry still owns its release.
+      cursorGone = false;
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores a superseded run disarming the live run’s stall', async () => {
+    vi.useFakeTimers();
+    let releaseParkedTranscript!: () => void;
+    let transcriptCalls = 0;
+    let gapsLeft = 1;
+    let blipNextSummary = false;
+    const provider = {
+      getSession: vi.fn(async () => {
+        if (blipNextSummary) {
+          blipNextSummary = false;
+          throw new Error('boom-blip');
+        }
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(() => {
+        transcriptCalls += 1;
+        if (transcriptCalls === 2) {
+          // The first run's gap resync parks mid-snapshot (its initial
+          // snapshot was call #1)...
+          return new Promise<ManagedAgentSessionTranscript>((resolve) => {
+            releaseParkedTranscript = () =>
+              resolve({ events: [event(1), event(2)], lastEventId: 2 });
+          });
+        }
+        // ...while the live run's head never advances, arming the stall.
+        return Promise.resolve(transcript(1));
+      }),
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        if (gapsLeft > 0) {
+          gapsLeft -= 1;
+          yield { ...event(1), type: 'stream_gap' };
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe({ sessionId }: { sessionId: string }) {
+      latest = useManagedSession(provider, 'client-1', sessionId);
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe sessionId="session-1" />));
+
+    try {
+      // Run 1's first resync parks inside its snapshot.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // The successor arms its own stall (armed before the rerender: the
+      // first subscribe fires inside the rerender's own flush).
+      gapsLeft = 3;
+      await act(async () => {
+        root!.render(<Probe sessionId="session-2" />);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(12000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+
+      // ...and its late completion advances: the disarm must not touch the
+      // successor's armed stall.
+      await act(async () => {
+        releaseParkedTranscript();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+
+      blipNextSummary = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toMatch(/not advancing/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the live run’s paging banner when a superseded run’s token refresh resolves late', async () => {
+    vi.useFakeTimers();
+    let releaseParked!: () => void;
+    const parkedGate = new Promise<void>((resolve) => {
+      releaseParked = resolve;
+    });
+    // The host's short-lived-token hook: the first run's stream request
+    // parks mid-refresh (the snapshot's two requests are calls #1 and #2).
+    // The park targets the stream on purpose: a phantom 'stream' booking is
+    // reveal-eligible, so the abort gate below is observable; a phantom
+    // 'poll' booking never is.
+    let getHeadersCalls = 0;
+    const getHeaders = vi.fn(async () => {
+      getHeadersCalls += 1;
+      if (getHeadersCalls === 3) await parkedGate;
+      return {};
+    });
+    let cursorGone = true;
+    const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
+      const path = String(url);
+      if (init?.signal?.aborted) {
+        throw new DOMException('This operation was aborted', 'AbortError');
+      }
+      if (path.endsWith('/sessions/get')) {
+        return new Response(javaSessionPayload(1), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (path.endsWith('/transcript/query')) {
+        const body = JSON.parse(String(init?.body)) as { cursor?: string };
+        if (body.cursor === 'cursor-1') {
+          if (cursorGone) return new Response('gone', { status: 410 });
+          return new Response(
+            JSON.stringify({
+              items: [],
+              events: [],
+              coveredSequence: 1,
+              hasMore: false,
+              lastSequence: 1,
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            items: [],
+            events: [JSON.parse(javaDelta(1, 'one'))],
+            coveredSequence: 1,
+            hasMore: true,
+            lastSequence: 1,
+            olderCursor: 'cursor-1',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (path.endsWith('/events/stream')) {
+        return new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+          status: 200,
+        });
+      }
+      throw new Error('Unexpected request: ' + String(url));
+    });
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      getHeaders,
+    });
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe({ sessionId }: { sessionId: string }) {
+      latest = useManagedSession(provider, 'client-1', sessionId);
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe sessionId="session-1" />));
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.olderCursor).toBe('cursor-1');
+
+      // The first run's stream request is still parked inside the token
+      // refresh when the session switch supersedes the whole run.
+      await act(async () => {
+        root!.render(<Probe sessionId="session-2" />);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.olderCursor).toBe('cursor-1');
+
+      // The successor raises a paging error of its own.
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBe('Managed Agent request failed (410)');
+
+      // The superseded run's request now rejects on its aborted signal: its
+      // failure must not be booked into the successor's ledger.
+      await act(async () => {
+        releaseParked();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // The successor's next poll succeeds — the paging banner survives.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('Managed Agent request failed (410)');
+
+      // The successor's paging retry owns its release: nothing reveals a
+      // phantom stream entry from the superseded run.
+      cursorGone = false;
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBeUndefined();
+      expect(latest?.olderCursor).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears a transient error on the next successful poll', async () => {
+    vi.useFakeTimers();
+    let summaryCalls = 0;
+    const provider = {
+      getSession: vi.fn(async () => {
+        summaryCalls += 1;
+        if (summaryCalls === 2) throw new Error('boom-blip');
+        return { sessionId: 'session-1' };
+      }),
+      getTranscript: vi
+        .fn<ManagedAgentProvider['getTranscript']>()
+        .mockResolvedValue({ events: [event(1)], lastEventId: 1 }),
+      async *subscribeEvents() {
+        await new Promise(() => {});
+        yield* [];
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      // Settle the initial snapshot (call 1) so the blip lands on the first
+      // poll, then step the hard-coded 3s poll cadence.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // Snapshot summary (call 1) is fine, the first poll (call 2) blips.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBe('boom-blip');
+      // The next poll (call 3) succeeds: the fresh summary must not carry a
+      // stale alert beside it.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(latest?.error).toBeUndefined();
+      expect(latest?.summary).toEqual({ sessionId: 'session-1' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
