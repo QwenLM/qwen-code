@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.31). The per-caller workspaceTurns capability on this surface advertises the same rule. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
+        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). The per-caller workspaceTurns capability on this surface advertises the same rule. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
         post: operations["webShellCreateSession"];
         delete?: never;
         options?: never;
@@ -311,6 +311,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["getWebShellTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/tasks/events/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["queryWebShellTaskEvents"];
         delete?: never;
         options?: never;
         head?: never;
@@ -909,6 +925,8 @@ export interface components {
              * @description Unix epoch milliseconds.
              */
             settledAt?: number;
+            /** @description Stable task event cursor after the committed tail at view read time. No event can later appear at or before it. Pass it as after to follow only new events; recovery must instead keep its saved event page cursor so it does not skip intervening output. Normal retention may expire it. */
+            outputCursor?: string;
             /** @description The newest Artifacts that hold durable task output, at most 100, oldest first. Entries must not rotate out until older Artifacts can be enumerated and attributed to the task: an evicted Artifact stays readable by id through the Session artifact routes but is no longer discoverable from the task. */
             artifactRefs: string[];
             actionCapabilities: components["schemas"]["TaskActionCapability"][];
@@ -918,6 +936,31 @@ export interface components {
             hasMore: boolean;
             nextCursor?: string | null;
         } & unknown;
+        /** @description One task event: a logical state change, a bounded output chunk, or an Artifact reference. High-volume output goes to Artifacts or bounded chunks in this paged stream, never one Session event per raw line. The closed schema validates the server's own version; clients ignore unknown optional fields and unknown types and checkpoint their cursors. Strict response validation against an older minor version is not supported. Event identity, position, payload and accepted schema/projection versions are immutable across restart, projection rebuild and archival. */
+        WebShellTaskEvent: {
+            schemaVersion: number;
+            projectionVersion: number;
+            taskId: string;
+            /** Format: uuid */
+            sessionId: string;
+            type: components["schemas"]["TaskEventType"];
+            /** @description Stable opaque position after this event and its identity. Atomically apply the event and save this cursor to avoid duplicate application after a crash. It is never reassigned; normal retention can expire it. */
+            cursor: string;
+            /** Format: int64 */
+            createdAt: number;
+            state?: components["schemas"]["TaskState"];
+            runtimeState?: components["schemas"]["TaskRuntimeState"];
+            text?: string;
+            /** @description True when the chunk was cut to the event limit; its full output is already durably readable and discoverable in the task Artifacts when the event is published. */
+            truncated?: boolean;
+            artifactId?: string;
+        } & (unknown & unknown & unknown);
+        WebShellTaskEventPage: {
+            data: components["schemas"]["WebShellTaskEvent"][];
+            hasMore: boolean;
+            /** @description The last returned event cursor, never passing an event held back by limit. On an empty page, the requested position, or the durable retention floor if after was omitted. Required and never null, including when no events remain. No event may later become visible at or before this position. */
+            nextCursor: string;
+        };
         WebShellTaskQueryRequest: {
             /** Format: uuid */
             sessionId: string;
@@ -930,6 +973,17 @@ export interface components {
             sessionId: string;
             taskId: string;
         };
+        WebShellTaskEventQueryRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            taskId: string;
+            /** @description Opaque task event cursor: an event cursor, a page nextCursor or a task outputCursor. Omit it to read from the durable retention floor. Strictly below the floor is 409 cursor_expired; equality is valid, including with no retained events. */
+            after?: string;
+            /** @default 20 */
+            limit?: number;
+        };
+        /** @description state_changed, output or artifact. The set is open: a later minor version may add types and optional fields. Clients ignore unknown optional fields and unknown types, while still checkpointing event cursors; strict validation against an older minor response schema is not supported. Existing fields forbidden for a known type cannot be repurposed on that type. */
+        TaskEventType: string;
         ToolResultPreview: {
             text: string;
             truncated: boolean;
@@ -1043,6 +1097,15 @@ export interface components {
         };
         /** @description Resource absent or outside the caller tenant scope. */
         NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description Task event cursor is strictly below the task's durable retention floor, which survives an empty retained set; equality is valid. The envelope's replay_floor_sequence and snapshot_through_sequence stay absent because task cursors are opaque. */
+        TaskCursorExpired: {
             headers: {
                 [name: string]: unknown;
             };
@@ -1639,6 +1702,36 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    queryWebShellTaskEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellTaskEventQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized task semantics as the public task events route, including the durable retention floor, committed-prefix publication, Artifact recovery order and client tolerance of unknown optional fields and event types. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellTaskEventPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["TaskCursorExpired"];
             413: components["responses"]["PayloadTooLarge"];
         };
     };
