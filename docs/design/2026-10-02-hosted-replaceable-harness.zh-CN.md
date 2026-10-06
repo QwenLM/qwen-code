@@ -279,6 +279,16 @@ continuation——expired/cancelled 保持瞬态（路由的可重试 409），
   经 `settleCancelledHarnessTurn` 写入已在跑的那条流会读到的
   journal。第十轮真实栈复现——审批 requested 时先 plain attach、
   挂接后写入决定、再带取消旗 load——就是它的见证形状。
+- 因审批等待驻留的取消终态，必须先合拢这道等待再落终态记录
+  （R9-3）：record sink 只在 model-start 一族相位推进下一轮的
+  checkpoint；只写 `turn_result` 会让 checkpoint 死在
+  `await_action`，下一个 prompt 的 harness 以「不是 model-start
+  相位」拒跑——旧轮收得干净，Session 却再也跑不起来。结算现在
+  先经等待自身的 durable 闸门推进已结束的等待
+  （`resolveDurableWait` → `model_output_committed`，属 model-start
+  一族）；决定是用户本人的，没有东西续跑——Turn 之后立即死亡。
+  只有已结束的记录能过这道闸，正是调用方闸门已经做过的那次
+  交叉读。
 
 抛出的错误保持瞬时，与今天完全一致。load 路由对 decline 回答新的
 409 code `hosted_turn_recovery_declined` 并带 `reason` 字段；在接管

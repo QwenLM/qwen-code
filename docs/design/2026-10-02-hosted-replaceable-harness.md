@@ -332,6 +332,17 @@ its readings (R9):
   stream reads. Round 10's real-stack repro — attach plain with the
   approval requested, resolve the decision after the attach, then load
   with the cancel signal — is its witness shape.
+- A cancelled terminal whose park was an approval wait must close the
+  WAIT before the terminal record lands (R9-3): the record sink only
+  advances next-turn checkpoints at a model-start phase, so writing just
+  `turn_result` left the checkpoint at `await_action` and the next
+  prompt's harness refused it as not-a-model-start — the old Turn ended
+  cleanly while the Session could never run again. The settle now first
+  advances the ended wait through its own durable gate
+  (`resolveDurableWait` → `model_output_committed`, a model-start family
+  phase); the decision is the USER's and nothing resumes — the Turn
+  dies immediately after. Only an ENDED record crosses the gate here,
+  exactly the cross-read the caller's gate already made.
 
 Thrown errors stay transient, exactly as today. The load route answers
 declines with new 409 code `hosted_turn_recovery_declined` plus a `reason`

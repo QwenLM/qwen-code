@@ -547,6 +547,32 @@ async function settleCancelledHarnessTurn(
   sessionId: string,
   promptId: string,
 ): Promise<void> {
+  // A cancelled terminal whose park was an approval wait must close the
+  // WAIT first, or the checkpoint dies one phase behind the journal's
+  // terminal: the sink only advances next-turn checkpoints at a
+  // model-start phase, and the next prompt's harness refuses
+  // `await_action is not a model-start phase` (R9-3). The wait's own
+  // gate is the sanctioned advance — the decision is the USER's and
+  // nothing resumes: the Turn dies immediately after. Only an ENDED
+  // record crosses here, exactly the cross-read the caller's gate made;
+  // a still-requested wait never reaches this helper through it.
+  const settleAuthorization = await managed.authority
+    .harnessRunAuthorization()
+    .catch(() => undefined);
+  if (
+    settleAuthorization?.status === 'runnable' &&
+    settleAuthorization.checkpoint.identity.turnId === promptId &&
+    settleAuthorization.checkpoint.continuation.phase === 'await_action'
+  ) {
+    const requestId = settleAuthorization.checkpoint.approval?.requestId;
+    const actionState =
+      requestId === undefined
+        ? undefined
+        : session.managed.authority.action(requestId)?.state;
+    if (actionState !== undefined && actionState !== 'requested') {
+      await createManagedHarnessHandle(managed).resolveDurableWait();
+    }
+  }
   await managed.sink.write(
     record(session, sessionId, 'system', null, {
       subtype: 'turn_result',

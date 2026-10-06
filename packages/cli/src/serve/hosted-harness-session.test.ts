@@ -9599,37 +9599,50 @@ describe('Hosted Harness Runtime turn takeover', () => {
     },
   );
 
-  it.each(['cancelled', 'decided'])(
-    'settles the redriven cancellation takeover whose approval ended since the attach (state=%s)',
-    async (durableState) => {
-      // R9-2 (round-10 probe): the first takeover attaches plain because
-      // the durable record says requested; the decision lands AFTER the
-      // attach through the live resolve route, so the checkpoint copy
-      // stays the stale requested/await_action one. The attached branch
-      // never consulted the cancellation signal, and the passive kernel
-      // threw the park back as an unknown phase — three real redrives
-      // wedged exactly there. The settle pays identically on this branch.
-      await parkToolTurn();
-      vi.spyOn(
-        LocalManagedSessionAuthority.prototype,
-        'harnessRunAuthorization',
-      ).mockResolvedValue({
-        status: 'runnable',
+  // A REAL checkpoint structurally read as an approval wait: the phase and
+  // approval copy are overridden while identity, sequence and the rest of
+  // the underlying authority pass through — so the wait's own durable gate
+  // and the cancelled settle's close hook both drive on a coherent
+  // authority. (A wholesale mock leaves the real latest checkpoint at the
+  // tool round's await_runtime and the resolve hook would never fire.)
+  function mockApprovalWaitAuthorization() {
+    const original =
+      LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
+      const authorization = await original.call(this);
+      if (authorization.status !== 'runnable') return authorization;
+      return {
+        ...authorization,
         checkpoint: {
-          identity: {
-            turnId: PROMPT_ID,
-            promptId: PROMPT_ID,
-            checkpointId: 'checkpoint-await-action',
+          ...authorization.checkpoint,
+          continuation: {
+            ...authorization.checkpoint.continuation,
+            phase: 'await_action',
           },
-          attempt: {},
-          continuation: { phase: 'await_action' },
           approval: { state: 'requested', requestId: 'request-1' },
-          output: {},
-          followUp: {},
-          runtime: {},
           tools: { items: [] },
         },
-      } as never);
+      } as never;
+    });
+  }
+
+  it.each(['allow', 'deny'])(
+    'settles the redriven cancellation takeover whose approval was answered since the attach (answer=%s)',
+    async (optionId) => {
+      // R9-2 + R9-3 (round-10/11 probes): the first takeover attaches
+      // plain because the durable record says requested; the user answers
+      // AFTER the attach through the real resolve route, so the
+      // checkpoint copy stays the stale await_action one. The attached
+      // branch never consulted the cancellation signal, and the passive
+      // kernel threw the park back as an unknown phase. Now the settle
+      // pays identically there, AND the wait closes with it — the SAME
+      // Session's next prompt executes instead of failing its model-start
+      // check on the obsolete phase.
+      await parkToolTurn();
+      mockApprovalWaitAuthorization();
       const action = vi
         .spyOn(LocalManagedSessionAuthority.prototype, 'action')
         .mockReturnValue({ state: 'requested' } as never);
@@ -9638,10 +9651,31 @@ describe('Hosted Harness Runtime turn takeover', () => {
       expect(loaded.body.recoveryRequired).toBeUndefined();
       // The wait the USER owns ends after the attach: the record decides,
       // the copy the dead owner left still says requested.
-      action.mockReturnValue({ state: durableState } as never);
+      action.mockReturnValue({
+        state: optionId === 'allow' ? 'decided' : 'cancelled',
+      } as never);
       const log = vi
         .spyOn(stdio, 'writeStderrLineSafe')
         .mockImplementation(() => {});
+      const commits: string[] = [];
+      const commitOriginal = (
+        LocalManagedSessionAuthority.prototype as unknown as {
+          commitCheckpoint: (
+            this: LocalManagedSessionAuthority,
+            ...args: unknown[]
+          ) => Promise<unknown>;
+        }
+      ).commitCheckpoint;
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'commitCheckpoint' as never,
+      ).mockImplementation(async function (
+        this: LocalManagedSessionAuthority,
+        ...args: unknown[]
+      ) {
+        commits.push(String((args[0] as { commandId?: string }).commandId));
+        return commitOriginal.apply(this, args);
+      });
       const taken = await replacementHeaders(
         supertest(server).post(`/session/${SESSION_ID}/load`),
       ).send({
@@ -9663,6 +9697,18 @@ describe('Hosted Harness Runtime turn takeover', () => {
         supertest(server).post(`/session/${SESSION_ID}/cancel`),
       ).set('X-Qwen-Client-Id', taken.body.clientId as string);
       expect(cancelled.status).toBe(204);
+      // And the cancelled settle closed the WAIT first: ahead of the
+      // terminal record, the durable gate committed its own advance —
+      // `model_output_committed`, a model-start family phase the next
+      // prompt's run check accepts — so the checkpoint never dies one
+      // phase behind the journal's terminal (R9-3, whose obsolete
+      // `await_action` wedged the relief turn before it ever called the
+      // model; the end-to-end relief-turn proof belongs to the
+      // real-stack probe, whose approval-first park has no dangling
+      // tool call to answer).
+      expect(
+        commits.some((id) => id.startsWith('harness:model_output_committed:')),
+      ).toBe(true);
     },
   );
 
