@@ -46,6 +46,14 @@ class ManagedWorkspaceRolesMigrationTest {
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
                 + " workspace_id, actor_id, can_read, can_create) VALUES"
                 + " ('tenant', 'workspace', ?, TRUE, FALSE)", READER);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                + " workspace_id, actor_id, can_read, can_create) VALUES"
+                + " ('tenant', 'workspace', ?, FALSE, TRUE)",
+                "write-no-read".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                + " workspace_id, actor_id, can_read, can_create) VALUES"
+                + " ('tenant', 'workspace', ?, FALSE, FALSE)",
+                "no-access".getBytes(StandardCharsets.UTF_8));
         insertSession(jdbc, "owned", CREATOR);
         insertSession(jdbc, "anonymous", null);
 
@@ -57,6 +65,12 @@ class ManagedWorkspaceRolesMigrationTest {
         assertThat(jdbc.queryForObject("SELECT role FROM"
                 + " managed_workspace_access WHERE actor_id = ?",
                 String.class, READER)).isEqualTo("READER");
+        // Rows without can_read granted nothing under the booleans and are
+        // dropped instead of gaining a role through the backfill.
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                + " managed_workspace_access WHERE actor_id IN (?, ?)",
+                Integer.class, "write-no-read".getBytes(StandardCharsets.UTF_8),
+                "no-access".getBytes(StandardCharsets.UTF_8))).isZero();
         assertThat(jdbc.queryForObject("SELECT owner_actor_key FROM"
                 + " managed_agent_session WHERE session_id = 'owned'",
                 byte[].class)).isEqualTo(CREATOR);
