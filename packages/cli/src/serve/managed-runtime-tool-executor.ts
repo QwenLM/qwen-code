@@ -122,6 +122,7 @@ export type ManagedToolExecutionState =
   | 'executing'
   | 'cancel_requested'
   | 'settled'
+  | 'acknowledged'
   | 'unknown';
 
 export interface ManagedToolResultPayload {
@@ -211,8 +212,13 @@ interface JournalEntry {
   readonly version: 2 | 3;
   readonly reference: ManagedToolReference;
   readonly toolName: string;
-  readonly input: Record<string, unknown>;
-  readonly inputJson: string;
+  /**
+   * Dropped with the result on acknowledgement: the caller that settled the
+   * call durably owns the payload from then on, so the journal keeps only the
+   * fact that proves a repeat is a repeat.
+   */
+  input?: Record<string, unknown>;
+  inputJson?: string;
   state: ManagedToolExecutionState;
   lastSequence: number;
   result?: ManagedToolResultPayload;
@@ -344,6 +350,9 @@ export class ManagedToolExecutor {
       if (entry.toolName === ShellTool.Name)
         blockers.add('shell_lifecycle_unqualified');
       if (entry.state === 'unknown') blockers.add('execution_outcome_unknown');
+      // An acknowledged call is settled and its outcome durably committed by
+      // the caller: it holds neither pending work nor a result to check.
+      else if (entry.state === 'acknowledged') continue;
       else if (entry.state !== 'settled') pendingInvocations++;
       else if (entry.version === 2 && !entry.result)
         blockers.add('execution_result_missing');
@@ -1539,6 +1548,7 @@ export class ManagedToolExecutor {
         (entry) =>
           entry.reference.sessionId === sessionId &&
           entry.state !== 'settled' &&
+          entry.state !== 'acknowledged' &&
           entry.state !== 'unknown',
       )
     );
@@ -1594,6 +1604,38 @@ export class ManagedToolExecutor {
       entry.lastSequence += 1;
       entry.controller.abort();
     }
+    return view(entry);
+  }
+
+  /**
+   * The caller committed the call's outcome in its own durable store: drop
+   * the payload this journal holds for it. Only a settled call may be
+   * forgotten — an in-flight one's payload is not the caller's yet — and an
+   * acknowledged call stays acknowledged. Afterwards `execute` of the same
+   * reference no longer matches the entry, so a repeat is refused as an
+   * identity conflict.
+   */
+  acknowledge(
+    reference: ManagedToolReference,
+  ): ManagedToolInvocationView | null {
+    const entry = this.entries.get(reference.callId);
+    if (entry && entry.version !== 2) {
+      throw new ManagedToolConflictError('Managed Runtime protocol conflicts.');
+    }
+    if (!entry || !sameReference(entry.reference, reference)) {
+      return null;
+    }
+    if (entry.state !== 'settled') {
+      if (entry.state === 'acknowledged') return view(entry);
+      throw new ManagedToolConflictError(
+        'Managed Runtime tool call has not settled.',
+      );
+    }
+    entry.input = undefined;
+    entry.inputJson = undefined;
+    entry.result = undefined;
+    entry.state = 'acknowledged';
+    entry.lastSequence += 1;
     return view(entry);
   }
 
@@ -1669,7 +1711,9 @@ export class ManagedToolExecutor {
     let payload: ManagedToolResultPayload;
     let invocationStarted = false;
     try {
-      const params = structuredClone(entry.input);
+      // Runs start only from a fresh journal entry, which still carries its
+      // input; only an acknowledged entry loses it, and nothing runs that.
+      const params = structuredClone(entry.input!);
       let fileInvocation: AnyToolInvocation | undefined;
       if (
         directory &&
@@ -1739,7 +1783,7 @@ export class ManagedToolExecutor {
           // for any other caller's own-directory target before consulting a
           // single binding.
           throw new Error(
-            `Path '${entry.input['file_path'] as string}' is not within the Session working directory.`,
+            `Path '${entry.input!['file_path'] as string}' is not within the Session working directory.`,
           );
         }
       }
@@ -2160,7 +2204,10 @@ function sameInvocation(
   toolName: string,
   inputJson: string,
 ): boolean {
+  // An acknowledged entry holds no encoded input, so it matches nothing: a
+  // repeat of its reference is a conflict, as the design refuses re-dispatch.
   return (
+    entry.inputJson !== undefined &&
     sameReference(entry.reference, reference) &&
     entry.toolName === toolName &&
     entry.inputJson === inputJson
