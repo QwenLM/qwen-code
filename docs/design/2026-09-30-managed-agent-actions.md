@@ -148,7 +148,7 @@ call ID and the tool name are published as the Action's `optionsRef` resource
 before the request is committed, so Java can project the Action without asking
 the Harness. The authority records only `tool_call` as the source, so the
 function call ID lives in that resource; it names a call that the committed
-assistant message carries. The public Action shows no tool arguments.
+assistant message carries. Version 1 public Actions show no tool arguments. The [Java-first input preview rollout](2026-10-04-hosted-action-input-preview.md) accepts version 2 options with an input reference and exposes a requested native tool's exact input up to 8192 UTF-8 bytes, with truncation and full-length metadata. Deploy that reader before a Harness emits version 2. Native write content is visible within the bound to Session readers; MCP internal grants are not previewed. General redaction remains separate.
 
 The approval timeout is part of the Session definition, set from the create
 request with a default of 10 minutes, from 1 second to 24 hours.
@@ -274,7 +274,7 @@ the Hosted prompt ID when a matching Java Turn exists.
   Sessions default to `yolo`. Owner checks use the existing creator record
   without adding grants or owners. Unknown creators fail closed.
 - `allow` and `deny` are stable option IDs. Actions expose both revisions, the
-  function call ID, tool name and expiry. Arguments come from Items. Only one
+  function call ID, tool name and expiry. Version 1 arguments are not projected to Items; version 2 can supply the bounded Action input preview described above. Only one
   Hosted approval is pending per Turn; list returns requested Actions, newest
   first, without locally expiring them.
 
