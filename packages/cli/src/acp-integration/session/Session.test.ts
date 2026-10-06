@@ -4166,7 +4166,7 @@ describe('Session', () => {
         ]);
         if (outcome === 'validation_error') {
           expect(error).toBe(
-            `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}invalid delegation arguments`,
+            `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}Deferred tool "${core.ToolNames.AGENT}" (called through tool_call) rejected the arguments: invalid delegation arguments. Pass arguments matching the schema returned by tool_search for "${core.ToolNames.AGENT}".`,
           );
         } else if (outcome === 'pre_execution_cancelled') {
           expect(
@@ -19043,6 +19043,9 @@ describe('Session', () => {
       it.each(['success', 'build error', 'execute error'] as const)(
         'routes tool_call through a hidden deferred tool in ACP: %s',
         async (outcome) => {
+          const { DEFERRED_TOOL_CALL_REFUSAL_PREFIX } = await import(
+            '@qwen-code/qwen-code-core/tools/tool-call.js'
+          );
           mockConfig.getApprovalMode = vi
             .fn()
             .mockReturnValue(ApprovalMode.YOLO);
@@ -19156,7 +19159,7 @@ describe('Session', () => {
                 : {
                     error:
                       outcome === 'build error'
-                        ? `Deferred tool "${target.name}" (called through tool_call) rejected the arguments: params must have required property 'title'. Pass arguments matching the schema returned by tool_search for "${target.name}".`
+                        ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}Deferred tool "${target.name}" (called through tool_call) rejected the arguments: params must have required property 'title'. Pass arguments matching the schema returned by tool_search for "${target.name}".`
                         : 'Remote service unavailable',
                   },
           });
