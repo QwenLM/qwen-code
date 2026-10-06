@@ -4560,6 +4560,7 @@ describe('createServeApp', () => {
     it.each([
       '/plugins',
       '/channels',
+      '/live',
       '/scheduled-tasks',
       '/goals',
       '/settings',
@@ -44944,7 +44945,12 @@ describe('Live conversation runtime lifecycle', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send(action.body);
         expect(rejected.status).toBe(400);
-        expect(rejected.body.code).toBe('unsupported_action');
+        expect(rejected.body).toEqual({
+          error: 'This action is not supported in a standalone session.',
+          code: 'unsupported_action',
+          sessionId,
+          route: `POST /session/:id/${action.route}`,
+        });
         expect(action.callCount()).toBe(callsBefore);
       }
 

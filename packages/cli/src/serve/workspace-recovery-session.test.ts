@@ -39,7 +39,11 @@ const KEY = {
 const hash = (bytes: Buffer) =>
   createHash('sha256').update(bytes).digest('hex');
 
-function fixture() {
+function fixture(
+  definition: Record<string, unknown> = {
+    toolProfile: 'hosted-workspace-files/1',
+  },
+) {
   const resources = new Map<string, Buffer>();
   const refs = new Map<string, ManagedSessionDurableRef>();
   const complete = new Set<string>();
@@ -204,7 +208,7 @@ function fixture() {
         definitionRef: resource('managed-definition', {
           engine: 'managed',
           sessionId: SESSION,
-          toolProfile: 'hosted-workspace-files/1',
+          ...definition,
         }),
         rootSnapshotRef: resource('managed-root', { cwd: '/original/cwd' }),
         createdBy: 'hosted-harness',
@@ -630,6 +634,157 @@ async function shellFixture(
   );
   await store.close();
   return { ...f, localSegmentId, emptySealId, manifestRef, seals, binary };
+}
+
+async function detachedShellFixture(options: { partial?: boolean } = {}) {
+  const f = fixture();
+  const partial = options.partial === true;
+  const manifestRef = partial
+    ? f.resource('managed-tool-result-manifest', {
+        toolResult: 'managed-tool-result/1',
+        type: 'manifest',
+        tenantId: 'tenant',
+        sessionId: SESSION,
+        turnId: 'prompt',
+        executionCallId: 'execution',
+        callId: 'call',
+        invocationDigest: 'sha256:' + 'a'.repeat(64),
+        bindingGeneration: '1',
+        captureId: 'capture',
+        revision: 1,
+        executionStatus: 'error',
+        exitCode: null,
+        signal: null,
+        captureScope: 'process_pipes',
+        capturePolicy: 'complete_required',
+        captureStatus: 'partial',
+        captureReason: 'storage_failed',
+        upstreamTruncated: false,
+        contents: [
+          {
+            streamId: 'stdout',
+            role: 'stdout',
+            mimeType: 'application/octet-stream',
+            state: 'incomplete',
+            byteLength: 0,
+            digest: hash(Buffer.alloc(0)),
+            missingRanges: [{ start: 0, end: null }],
+            body: { pages: [] },
+          },
+        ],
+      })
+    : null;
+  const envelope = {
+    executionStatus: partial ? ('error' as const) : ('success' as const),
+    responseParts: [
+      { text: 'Background shell started under unit qwen-bg-call.' },
+    ],
+    capture: partial
+      ? {
+          captureStatus: 'partial' as const,
+          captureReason: 'storage_failed' as const,
+          manifest: manifestRef,
+          previewTruncated: false,
+          deliveryStatus: 'pending' as const,
+        }
+      : {
+          captureStatus: 'detached' as const,
+          captureReason: null,
+          manifest: null,
+          previewTruncated: false,
+          deliveryStatus: 'pending' as const,
+        },
+  };
+  const history = {
+    messageId: '123e4567-e89b-42d3-a456-426614174000',
+    timestamp: '2026-10-01T00:00:00.000Z',
+    model: 'model',
+    parts: [{ text: 'Background shell started under unit qwen-bg-call.' }],
+  };
+  f.append([
+    f.event('input.accepted', {
+      inputId: 'prompt',
+      turnId: 'prompt',
+      source: 'hosted-harness',
+      contentRef: f.resource('managed-input', 'prompt'),
+      admissionRef: f.resource('managed-admission', { promptId: 'prompt' }),
+      deadline: null,
+    }),
+  ]);
+  const initial = createInitialHarnessCheckpoint({
+    sessionKey: KEY,
+    checkpointId: 'initial',
+    coveredSequence: 1,
+    activationId: 'activation',
+    turnId: null,
+    promptId: null,
+    definitionRevision: 'definition',
+    configRevision: 'config',
+    inputDigest: 'a'.repeat(64),
+    previousCheckpointId: null,
+  });
+  const checkpointRef = f.resource('managed-checkpoint', initial);
+  f.append([
+    f.event('checkpoint.committed', {
+      checkpointId: 'initial',
+      coveredSequence: 1,
+      previousCheckpointId: null,
+      stateRef: checkpointRef,
+      boundary: null,
+    }),
+  ]);
+  const outcomeRef = f.resource('managed-tool-outcome', {
+    schemaVersion: 1,
+    decision: 'blocked',
+    envelope,
+    manifestRef,
+    history,
+  });
+  f.append([
+    f.event('tool.receipt', {
+      executionCallId: 'execution',
+      toolOutcomeRef: outcomeRef,
+      resultRef: manifestRef,
+      resources: manifestRef ? [manifestRef] : [],
+      historyRevision: 3,
+    }),
+  ]);
+  const state = createInitialHarnessCheckpoint({
+    sessionKey: KEY,
+    checkpointId: 'final',
+    coveredSequence: 3,
+    activationId: 'activation',
+    turnId: 'prompt',
+    promptId: 'prompt',
+    definitionRevision: 'definition',
+    configRevision: 'config',
+    inputDigest: 'a'.repeat(64),
+    previousCheckpointId: 'initial',
+  });
+  const settled = f.event('turn.settled', {
+    turnId: 'prompt',
+    outcome: 'completed',
+    stopReason: null,
+    resultRef: f.resource(
+      'managed-turn-result',
+      f.record('turn_result', { promptId: 'prompt', state: 'completed' }),
+    ),
+    usageRef: null,
+    pendingOwnersRef: null,
+  });
+  const checkpoint = {
+    ...f.event('checkpoint.committed', {
+      checkpointId: 'final',
+      coveredSequence: 3,
+      previousCheckpointId: 'initial',
+      stateRef: f.resource('managed-checkpoint', state),
+      boundary: 'turn_complete',
+    }),
+    sequence: 5,
+    eventId: 'final-checkpoint',
+  };
+  f.append([settled, checkpoint]);
+  return { ...f, outcomeRef };
 }
 
 function retiredFixture(turnId: string | null = null) {
@@ -1166,6 +1321,30 @@ describe('verifyRecoverySession', () => {
       'original publication receipt conflicts',
     );
   });
+
+  it('replays a detached background start handle like the not-started family', async () => {
+    const f = await detachedShellFixture();
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.io.publicationReceipt).not.toHaveBeenCalled();
+    expect(f.io.publicationObject).not.toHaveBeenCalled();
+    expect(f.complete.size).toBe(f.refs.size);
+  });
+
+  it('keeps refusing a blocked partial or committed-free receipt', async () => {
+    const partial = await detachedShellFixture({ partial: true });
+    await expect(
+      verifyRecoverySession(partial.source, partial.io),
+    ).rejects.toThrow('unsettled or conflicting Shell receipt');
+    const committedFree = await detachedShellFixture();
+    committedFree.resources.delete(
+      (committedFree.outcomeRef as { resourceId: string }).resourceId,
+    );
+    await expect(
+      verifyRecoverySession(committedFree.source, committedFree.io),
+    ).rejects.toThrow();
+  });
   it('uses the actual private workspace key and verifies an initial journal', async () => {
     const f = fixture();
     expect(await verifyRecoverySession(f.source, f.io)).toEqual({
@@ -1173,6 +1352,30 @@ describe('verifyRecoverySession', () => {
     });
     expect(f.complete.size).toBe(f.refs.size);
     expect(f.io.publicationReceipt).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { toolProfile: 'hosted-workspace-files/1' },
+    { toolProfile: 'hosted-workspace-files/2' },
+    { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
+  ])('recovers every saved Workspace profile (%j)', async (definition) => {
+    // One refused profile would abort recovery for the whole Workspace,
+    // so recovery reads the same profile vocabulary creation persists.
+    const f = fixture(definition);
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+  });
+
+  it.each([
+    { toolProfile: 'hosted-workspace-files/3' },
+    { toolProfile: 'hosted-workspace-files/2', captureBytes: 1024 },
+  ])('still refuses an unknown Hosted definition (%j)', async (definition) => {
+    const f = fixture(definition);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      /unsupported Hosted profile|invalid frozen Hosted definition/u,
+    );
   });
 
   it('rejects changed bytes even when the stored transaction metadata was not changed', async () => {
