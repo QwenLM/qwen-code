@@ -33,7 +33,15 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -562,6 +570,216 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @Test
+    void concurrentFirstAttachmentOfOneSessionCreatesItOnce()
+            throws Exception {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        CountDownLatch inCreate = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(client.createSession(any(CreateHarnessSession.class)))
+                .thenAnswer(invocation -> {
+                    inCreate.countDown();
+                    release.await(30, TimeUnit.SECONDS);
+                    HarnessSessionRef created = mock(HarnessSessionRef.class);
+                    when(created.getHarnessBootId()).thenReturn(BOOT_ID);
+                    return created;
+                });
+        QwenHostedHarnessConnector connector = connector(client);
+        List<Throwable> failures =
+                Collections.synchronizedList(new ArrayList<>());
+        Runnable caller = () -> {
+            try {
+                connector.createOrLoad("tenant-a", SESSION_ID, false);
+            } catch (RuntimeException error) {
+                failures.add(error);
+            }
+        };
+
+        Thread first = Thread.ofVirtual().start(caller);
+        assertThat(inCreate.await(30, TimeUnit.SECONDS)).isTrue();
+        Thread second = Thread.ofVirtual().start(caller);
+        // The second caller must be queued on the per-key lock when the
+        // first create returns, or it never exercises the re-read under
+        // the lock and the single-flight half of the connector could
+        // regress without this test noticing. Wait for the observable
+        // queue state: a wall-clock sleep can lose on a loaded runner and
+        // the test would pass without ever exercising the re-read.
+        awaitQueuedOnTheSingleSlot(connector);
+        release.countDown();
+        first.join(30_000);
+        second.join(30_000);
+
+        assertThat(failures).isEmpty();
+        assertThat(first.isAlive()).isFalse();
+        assertThat(second.isAlive()).isFalse();
+        verify(client, times(1)).createSession(any(CreateHarnessSession.class));
+        // Both holders left the contended slot: the reference count must
+        // have drained it.
+        assertThat((Map<?, ?>) ReflectionTestUtils.getField(connector,
+                "attachmentLocks")).isEmpty();
+    }
+
+    @Test
+    void attachmentLocksAreReclaimedOnceAttachmentsSettle() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.createSession(any(CreateHarnessSession.class)))
+                .thenAnswer(invocation -> {
+                    HarnessSessionRef created = mock(HarnessSessionRef.class);
+                    when(created.getHarnessBootId()).thenReturn(BOOT_ID);
+                    return created;
+                });
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession(any(String.class), any(String.class)))
+                .thenAnswer(invocation -> new SessionRecord(
+                        invocation.getArgument(0), invocation.getArgument(1),
+                        "qwen-code", null, "ACTIVE", null, null, 0, 0, 1, 1,
+                        null, 1));
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions,
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        for (int index = 0; index < 8; index++) {
+            String sessionId = "00000000-0000-4000-8000-"
+                    + String.format("%012d", index);
+            connector.createOrLoad("tenant-a", sessionId, false);
+            connector.closeSession("tenant-a", sessionId);
+        }
+
+        assertThat((Map<?, ?>) ReflectionTestUtils.getField(connector,
+                "attachmentLocks")).isEmpty();
+        // close() clears the attachment cache, not the lock map: leave one
+        // Session attached so the clear is what drains the cache.
+        connector.createOrLoad("tenant-a",
+                "00000000-0000-4000-8000-000000000008", false);
+        connector.close();
+        assertThat((Map<?, ?>) ReflectionTestUtils.getField(connector,
+                "attachments")).isEmpty();
+    }
+
+    @Test
+    void failedAttachmentReleasesTheAttachmentLock() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        DaemonHttpException failure = mock(DaemonHttpException.class);
+        when(failure.getStatusCode()).thenReturn(500);
+        when(client.createSession(any(CreateHarnessSession.class)))
+                .thenThrow(failure);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a",
+                SESSION_ID, false))
+                .isSameAs(failure);
+        // The throw escapes the guarded region: the slot's reference count
+        // must still drain, or every failed cold attach leaks an entry for
+        // the life of the process.
+        assertThat((Map<?, ?>) ReflectionTestUtils.getField(connector,
+                "attachmentLocks")).isEmpty();
+    }
+
+    @Test
+    void failedFirstAttachmentKeepsQueuedCallersInASingleFlight()
+            throws Exception {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        DaemonHttpException failure = mock(DaemonHttpException.class);
+        when(failure.getStatusCode()).thenReturn(500);
+        CountDownLatch firstEntered = new CountDownLatch(1);
+        CountDownLatch firstRelease = new CountDownLatch(1);
+        CountDownLatch secondEntered = new CountDownLatch(1);
+        CountDownLatch secondRelease = new CountDownLatch(1);
+        AtomicInteger calls = new AtomicInteger();
+        AtomicInteger inFlight = new AtomicInteger();
+        AtomicInteger maxInFlight = new AtomicInteger();
+        when(client.createSession(any(CreateHarnessSession.class)))
+                .thenAnswer(invocation -> {
+                    int now = inFlight.incrementAndGet();
+                    maxInFlight.accumulateAndGet(now, Math::max);
+                    try {
+                        int call = calls.incrementAndGet();
+                        if (call == 1) {
+                            firstEntered.countDown();
+                            firstRelease.await(30, TimeUnit.SECONDS);
+                            throw failure;
+                        }
+                        if (call == 2) {
+                            secondEntered.countDown();
+                        }
+                        secondRelease.await(30, TimeUnit.SECONDS);
+                        HarnessSessionRef created =
+                                mock(HarnessSessionRef.class);
+                        when(created.getHarnessBootId()).thenReturn(BOOT_ID);
+                        return created;
+                    } finally {
+                        inFlight.decrementAndGet();
+                    }
+                });
+        QwenHostedHarnessConnector connector = connector(client);
+        AtomicReference<Throwable> firstError = new AtomicReference<>();
+        List<Throwable> failures =
+                Collections.synchronizedList(new ArrayList<>());
+        Runnable caller = () -> {
+            try {
+                connector.createOrLoad("tenant-a", SESSION_ID, false);
+            } catch (RuntimeException error) {
+                failures.add(error);
+            }
+        };
+
+        Thread first = Thread.ofVirtual().start(() -> {
+            try {
+                connector.createOrLoad("tenant-a", SESSION_ID, false);
+            } catch (RuntimeException error) {
+                firstError.set(error);
+            }
+        });
+        assertThat(firstEntered.await(30, TimeUnit.SECONDS)).isTrue();
+        Thread second = Thread.ofVirtual().start(caller);
+        ReentrantLock slotLock = awaitQueuedOnTheSingleSlot(connector);
+        firstRelease.countDown();
+        first.join(30_000);
+        assertThat(first.isAlive()).isFalse();
+        assertThat(firstError.get()).isSameAs(failure);
+        assertThat(secondEntered.await(30, TimeUnit.SECONDS)).isTrue();
+        Thread third = Thread.ofVirtual().start(caller);
+        // The third caller must queue behind the second on the same slot:
+        // a release that had dropped the first caller's entry would hand
+        // the third a fresh lock and let its create overlap the second's.
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (!slotLock.hasQueuedThreads() && inFlight.get() < 2
+                && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertThat(slotLock.hasQueuedThreads())
+                .as("third caller must queue on the original slot")
+                .isTrue();
+        secondRelease.countDown();
+        second.join(30_000);
+        third.join(30_000);
+
+        assertThat(failures).isEmpty();
+        assertThat(second.isAlive()).isFalse();
+        assertThat(third.isAlive()).isFalse();
+        assertThat(maxInFlight.get()).isEqualTo(1);
+        verify(client, times(2)).createSession(any(CreateHarnessSession.class));
+        assertThat((Map<?, ?>) ReflectionTestUtils.getField(connector,
+                "attachmentLocks")).isEmpty();
+    }
+
+    @Test
     void attachProvisionsTheBindingCredentialAndTheInsecureOptIn() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities =
@@ -627,6 +845,21 @@ class QwenHostedHarnessConnectorTest {
                 .doesNotContainKey("allowInsecureHttp");
     }
 
+    private static ReentrantLock awaitQueuedOnTheSingleSlot(
+            QwenHostedHarnessConnector connector) throws InterruptedException {
+        Map<?, ?> slots = (Map<?, ?>) ReflectionTestUtils.getField(
+                connector, "attachmentLocks");
+        assertThat(slots).hasSize(1);
+        Object slot = slots.values().iterator().next();
+        ReentrantLock lock = (ReentrantLock) ReflectionTestUtils.getField(
+                slot, "lock");
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (!lock.hasQueuedThreads() && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertThat(lock.hasQueuedThreads()).isTrue();
+        return lock;
+    }
 
     private static QwenHostedHarnessConnector connector(
             HostedHarnessClient client) {

@@ -130,6 +130,10 @@ public class ManagedSessionStore {
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()));
     }
 
+    boolean usesDataSource(javax.sql.DataSource source) {
+        return source != null && jdbc.getDataSource() == source;
+    }
+
     @Autowired(required = false)
     public void setPublicationObjects(ToolPublicationObjectStore publicationObjects) {
         this.publicationObjects = publicationObjects;
