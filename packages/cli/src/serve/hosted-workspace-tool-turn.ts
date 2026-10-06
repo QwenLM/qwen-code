@@ -304,6 +304,21 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
   ...HOSTED_WORKSPACE_SHELL_TOOLS,
   HOSTED_GLOB_TOOL,
 ];
+
+// Native tools whose Action carries the captured input, so the approval card
+// shows the arguments of the call being answered. This is a cross-service
+// contract: it must stay byte-identical to the Java reader's closed
+// `ManagedActionService.PREVIEW_TOOLS`. A name missing here writes a version 1
+// Action with no input reference; a name missing there makes the reader return
+// no preview. Both degrade silently into the card's "Tool arguments are
+// unavailable for this approval." fallback, so a test enumerates the set.
+export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
+  'read_file',
+  'write_file',
+  'edit',
+  'run_shell_command',
+];
+
 function physicalToolStatus(
   response: Record<string, unknown> | undefined,
 ): 'success' | 'error' | 'cancelled' {
@@ -2934,7 +2949,9 @@ export class HostedWorkspaceToolTurn {
     const requestId = `tool_approval_${randomBytes(16).toString('hex')}`;
     const createdAt = Date.now();
     const options: HostedActionOptions = {
-      v: 1,
+      ...(HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
+        ? { v: 2 as const, inputRef }
+        : { v: 1 as const }),
       requestId,
       turnId: this.promptId,
       functionCallId: call.callId,
