@@ -237,6 +237,48 @@ public final class ApiModels {
             @NotBlank @Size(max = 128) String idempotencyKey) {
     }
 
+    public record ChangeCwdRequest(
+            @NotNull @JsonProperty("cwd_relative") String cwdRelative,
+            @NotNull @JsonProperty("expected_context_revision")
+                    Long expectedContextRevision) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicCwdOperation(
+            String id,
+            @JsonProperty("session_id") String sessionId,
+            String type,
+            String status,
+            @JsonProperty("expected_context_revision")
+                    long expectedContextRevision,
+            @JsonProperty("target_cwd_relative") String targetCwdRelative,
+            @JsonProperty("result_context_revision")
+                    Long resultContextRevision,
+            @JsonProperty("failure_code") String failureCode,
+            boolean replayed) {
+    }
+
+    public record WebShellChangeCwdRequest(
+            @Size(max = 128) String requestId,
+            @NotBlank String sessionId,
+            @NotBlank @Size(max = 128) String idempotencyKey,
+            @NotNull String cwdRelative,
+            @NotNull Long expectedContextRevision) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellCwdOperation(
+            String operationId,
+            String sessionId,
+            String type,
+            String status,
+            long expectedContextRevision,
+            String targetCwdRelative,
+            Long resultContextRevision,
+            String failureCode,
+            boolean replayed) {
+    }
+
     public record WebShellOperationRequest(@NotBlank String sessionId,
             @NotBlank @Size(max = 64) String operationId) {
     }
