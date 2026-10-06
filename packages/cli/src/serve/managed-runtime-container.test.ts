@@ -135,6 +135,7 @@ describe('Managed Runtime container entry', () => {
       'install',
     );
     const localPublications = new ManagedShellPublisherRegistry();
+    stubContainerListen();
     const worker = await startManagedRuntimeAttestationWorker(
       boot,
       undefined,
@@ -301,7 +302,7 @@ describe('Managed Runtime container entry', () => {
   });
 
   it('opens the explicit container port with authenticated attestation', async () => {
-    const listen = vi.spyOn(Server.prototype, 'listen');
+    const listen = stubContainerListen();
     const worker = await startManagedRuntimeAttestationWorker(
       boot,
       undefined,
@@ -309,11 +310,12 @@ describe('Managed Runtime container entry', () => {
       true,
     );
     try {
-      expect(listen.mock.results[0]?.value?.address()).toMatchObject({
-        address: '0.0.0.0',
-        port: 43190,
-      });
-      expect(worker.ready.url).toBe('http://127.0.0.1:43190');
+      expect(listen).toHaveBeenCalledWith(43190, '0.0.0.0');
+      const bound: unknown = listen.mock.results[0]?.value?.address();
+      expect(bound).toMatchObject({ address: '127.0.0.1' });
+      expect(worker.ready.url).toBe(
+        `http://127.0.0.1:${(bound as { port: number }).port}`,
+      );
       const url = `${worker.ready.url}/internal/managed-runtime/v2/attest`;
       const body = {
         protocolVersion: 2,
@@ -399,3 +401,16 @@ describe('Managed Runtime container entry', () => {
     ).rejects.toThrow('Managed Runtime worker boot payload is invalid.');
   });
 });
+
+// Container mode binds the fixed port 43190, which lies inside the Linux
+// ephemeral range; under a parallel suite a worker's outbound connection can
+// hold 43190 as its source port and the real bind fails with EADDRINUSE.
+// Bind a real loopback socket instead and assert the requested address.
+function stubContainerListen() {
+  const nativeListen = Server.prototype.listen;
+  return vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+    this: Server,
+  ) {
+    return Reflect.apply(nativeListen, this, [0, '127.0.0.1']);
+  });
+}
