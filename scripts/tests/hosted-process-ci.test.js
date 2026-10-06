@@ -236,9 +236,9 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (12 + 8x10 + 12); the uncapped setup steps need
+    // Step ceilings today (25 + 8x10 + 12); the uncapped setup steps need
     // their own allowance, which is exactly what the job comment claims.
-    expect(summed).toBe(104);
+    expect(summed).toBe(117);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 10);
   });
 
@@ -280,7 +280,7 @@ describe('Hosted real-process gates', () => {
     ],
   ])('pins the %s arm into the Hosted MySQL job', (stepName, script, flags) => {
     const job = java.jobs['hosted-harness-mysql'];
-    expect(job['timeout-minutes']).toBe(120);
+    expect(job['timeout-minutes']).toBe(130);
     const install = job.steps.find(
       (step) => step.name === 'Install MySQL binaries for the failover E2E',
     );
@@ -319,5 +319,23 @@ describe('Hosted real-process gates', () => {
         );
       }
     }
+  });
+
+  it('keeps the Hosted verify step ceiling above its failsafe fork timeout', () => {
+    const run = java.jobs['hosted-harness-mysql'].steps.find(
+      (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
+    );
+    const forkSeconds = Number(
+      read('packages/sdk-java/managed-agent-server/pom.xml')
+        .split('<id>hosted-harness-mysql</id>')[1]
+        .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
+    );
+    // A step killed before its fork leaves no per-test failure lines, so the
+    // main-CI failure analyzer can only file an undiagnosable per-commit
+    // issue (#13503). The ceiling must cover the fork plus the wrapped
+    // compile/surefire/spotbugs/checkstyle work.
+    expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
+      forkSeconds + 300,
+    );
   });
 });

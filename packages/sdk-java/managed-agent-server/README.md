@@ -121,8 +121,9 @@ revalidation window: [English](../../../docs/design/2026-10-02-managed-agent-que
 - MySQL 8
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
-process. It supports durable no-tool Sessions and the opt-in Workspace file
-Turns described in the G0 section below.
+process (the credentialed launch is spelled out in the Full WebShell
+dual-path development entry below). It supports durable no-tool Sessions and
+the opt-in Workspace file Turns described in the G0 section below.
 
 Install the two sibling libraries once when building this module outside a
 Maven reactor:
@@ -242,9 +243,17 @@ Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
 authority and never initializes one. The Java connector attempts strict create for a new binding and loads on
 conflict or uncertain creation outcome. A known existing binding only loads.
-An in-memory Hosted attachment is bound to one normalized Store endpoint,
-tenant, workspace, and Harness writer generation; an attach or cold-load race
-with a different identity fails closed.
+The Java connector caches an attachment per `(tenantId, sessionId)`,
+so one tenant's cached reference is never handed to another by the connector.
+The Harness itself keys its in-memory Session by `sessionId` alone and does
+not compare the presented tenant, Store endpoint or workspace on attach; the
+only attach-time identity fence is the Harness writer generation, so tenant
+isolation on attach is the caller's responsibility in this slice. A presented
+Harness writer generation _is_ checked: an attach whose `writerId` is not this
+process's boot ID fails closed with `409 hosted_harness_generation_mismatch` —
+the restart-generation failure described above. That
+`managed_session_store_conflict` fence is target design for the integration
+slice, not shipped behavior.
 
 Delete writes a public tombstone: get and list stop returning the Session,
 while its operations stay readable. Completed deletion permanently marks an existing
@@ -376,9 +385,46 @@ Turn then fails with `hosted_harness_rejected` in the panel: a Harness
 `400` means the Session Store wiring in `spring.env` did not load
 (`invalid_managed_session_store` — an env file from an older run), while a
 Harness `401` means a launcher restarted without restarting Spring —
-re-source the new `spring.env` and restart Spring. To wire the pieces by
-hand instead, start an ordinary `qwen serve` on port 4170 in addition to the
-private Hosted Harness used by Spring, then run from the repository root:
+re-source the new `spring.env` and restart Spring.
+
+To wire the pieces by hand instead, keep the ordinary daemon on 4170 (the
+vite proxy's default) and start the private Hosted Harness on a distinct
+port. The profile refuses to start without credentials, so the launch
+reuses the same credential pair the Prerequisites section exports for
+Spring — CLI-side the token travels as `QWEN_SERVER_TOKEN` and the
+capability digest as `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` — plus
+`--no-web`, which the profile requires and no environment variable supplies:
+
+```bash
+QWEN_SERVER_TOKEN="$QWEN_MANAGED_AGENT_HARNESS_TOKEN" \
+QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST="$QWEN_MANAGED_AGENT_CAPABILITY_DIGEST" \
+qwen serve --profile hosted-harness --port 4171 --hostname 127.0.0.1 --no-web
+```
+
+— and Spring must point at it with the matching base URL. Spring's HTTP
+Session Store stays off by default, and the Hosted Harness rejects every
+attach without a store descriptor, so Spring also needs the three values
+the one-shot launcher writes into `spring.env` — the connector refuses to
+start when the store is enabled with a blank base URL or workspace ID.
+Export all four together:
+
+```bash
+export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4171'
+export QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'
+export QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL='http://127.0.0.1:8080'
+export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
+```
+
+All four are read once at JVM startup, so if `mvn spring-boot:run` is
+already up on the 4170 value exported in Prerequisites, restart it with the
+overrides in place.
+
+`--port` is a request, not a guarantee: `qwen serve` moves to the next free
+port on a collision, and 4171 is exactly where a daemon displaced from 4170
+lands. Confirm each server's bound port in its startup line before exporting
+the base URL above.
+
+With both up, run from the repository root:
 
 ```bash
 QWEN_DAEMON_URL=http://127.0.0.1:4170 \
