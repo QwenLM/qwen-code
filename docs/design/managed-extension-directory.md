@@ -37,8 +37,7 @@ ExtensionStore. A container sandbox (docker/podman) mounts the resolved root
 read-only at its translated container path, launch spelling, and every alias exposed by a generated read-write ancestor mount, including `/home/node/.qwen`. Settings and runtime state remain writable outside those protected subdirectories. A writable mount sourced from the managed root or one of its descendants, or an incompatible mount at a required read-only destination or anywhere below it, fails sandbox startup; the guard never silently preserves a conflicting writable mount. Readonly subtree overlays must resolve to the corresponding deployed subtree; writable ancestors covered by the managed read-only child remain supported. Advanced operator overrides through `SANDBOX_FLAGS` remain outside this generated-mount guard. The sandbox forwards the flag unchanged —
 raw argv carries user content in value positions, so the flag is never
 rewritten; the child's startup validation applies the same container
-translation to the flag value. The bwrap and seatbelt backends already expose
-the host filesystem for reads. Reject overlaps (including symlink and filesystem case aliases) with writable
+translation to the flag value. macOS Seatbelt (`sandbox-exec`) is unsupported when a managed root is configured, for both built-in and custom profiles. Startup refuses this combination before preparing or launching Seatbelt; use Docker or Podman instead. A path-based write denial alone cannot preserve the deployment boundary when an enclosing directory moves. Seatbelt without managed extensions keeps its existing behavior. Reject overlaps (including symlink and filesystem case aliases) with writable
 extension/state directories to preserve the read-only boundary. Discovery and lookup share the same resolver: validate managed
 names using existing rules, reject duplicate managed names case-insensitively,
 then give managed precedence over user packages and diagnose shadowing. Resolve

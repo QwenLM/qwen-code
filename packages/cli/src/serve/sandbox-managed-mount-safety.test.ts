@@ -13,17 +13,28 @@ import { type Config, FatalSandboxError } from '@qwen-code/qwen-code-core';
 
 const spawnMock = vi.hoisted(() => vi.fn());
 const execSyncMock = vi.hoisted(() => vi.fn());
+const execMock = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
-    default: { ...actual, spawn: spawnMock, execSync: execSyncMock },
+    default: {
+      ...actual,
+      spawn: spawnMock,
+      execSync: execSyncMock,
+      exec: execMock,
+    },
     spawn: spawnMock,
     execSync: execSyncMock,
+    exec: execMock,
   };
 });
 
-import { start_sandbox } from './sandbox.js';
+import {
+  BUILTIN_SEATBELT_PROFILES,
+  resolveSeatbeltProfileFile,
+  start_sandbox,
+} from './sandbox.js';
 
 interface Mount {
   source: string;
@@ -477,5 +488,211 @@ describe.skipIf(process.platform === 'win32')(
       });
       expect(unprotectedAliases(mounts, managed)).toEqual([]);
     });
+  },
+);
+
+describe.skipIf(process.platform === 'win32')(
+  'managed Seatbelt startup boundary',
+  () => {
+    let root: string;
+    let workspace: string;
+    let qwenHome: string;
+    let runtime: string;
+    let cache: string;
+    const customProfile = 'managed-test';
+    const profiles = [...BUILTIN_SEATBELT_PROFILES, customProfile];
+
+    beforeEach(() => {
+      root = fs.realpathSync.native(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-seatbelt-')),
+      );
+      workspace = path.join(root, 'workspace');
+      qwenHome = path.join(root, 'home', '.qwen');
+      runtime = path.join(root, 'runtime');
+      cache = path.join(root, 'cache');
+      for (const directory of [workspace, path.dirname(qwenHome), cache])
+        fs.mkdirSync(directory, { recursive: true });
+      fs.mkdirSync(path.join(root, 'tmp'));
+      vi.spyOn(process, 'cwd').mockReturnValue(workspace);
+      vi.spyOn(os, 'homedir').mockReturnValue(path.dirname(qwenHome));
+      vi.spyOn(os, 'tmpdir').mockReturnValue(path.join(root, 'tmp'));
+      const existsSync = fs.existsSync;
+      vi.spyOn(fs, 'existsSync').mockImplementation((file) =>
+        existsSync(
+          path.isAbsolute(String(file))
+            ? file
+            : path.resolve(workspace, String(file)),
+        ),
+      );
+      vi.stubEnv('QWEN_HOME', qwenHome);
+      vi.stubEnv('QWEN_RUNTIME_DIR', runtime);
+      vi.stubEnv('BUILD_SANDBOX', '');
+      vi.stubEnv('QWEN_SANDBOX_PROXY_COMMAND', '');
+      vi.stubEnv('SEATBELT_PROFILE', 'permissive-open');
+      execSyncMock.mockReset().mockReturnValue(Buffer.from(`${cache}\n`));
+      execMock.mockReset().mockImplementation((_command, callback) => {
+        callback(null, '', '');
+        return new EventEmitter();
+      });
+      spawnMock.mockReset().mockImplementation((command: string) => {
+        const child = Object.assign(new EventEmitter(), {
+          stderr: new EventEmitter(),
+        });
+        if (command !== 'bash') queueMicrotask(() => child.emit('close', 0));
+        return child;
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+
+    async function refuse(managedRoot: string) {
+      const mkdir = vi.spyOn(fs, 'mkdirSync');
+      const realpath = vi.spyOn(fs, 'realpathSync');
+      const exists = vi.mocked(fs.existsSync);
+      exists.mockClear();
+      const pause = vi.spyOn(process.stdin, 'pause');
+      const resume = vi.spyOn(process.stdin, 'resume');
+      const wasPaused = process.stdin.isPaused();
+      const on = vi.spyOn(process, 'on').mockReturnValue(process);
+      const profileBefore = process.env['SEATBELT_PROFILE'];
+      const marker = path.join(workspace, 'ordinary.txt');
+      fs.writeFileSync(marker, 'preserved');
+      const getTargetDir = vi.fn(() => workspace);
+      const getWorkspaceContext = vi.fn(() => ({
+        getDirectories: () => [workspace],
+      }));
+      const config = {
+        getManagedExtensionsDir: () => managedRoot,
+        getTargetDir,
+        getWorkspaceContext,
+      } as unknown as Config;
+
+      const launch = start_sandbox({ command: 'sandbox-exec' }, [], config, [
+        '/bin/true',
+      ]);
+      await expect(launch).rejects.toThrow(FatalSandboxError);
+      await expect(launch).rejects.toThrow(
+        /managed.*sandbox-exec|sandbox-exec.*managed/i,
+      );
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(execMock).not.toHaveBeenCalled();
+      expect(execSyncMock).not.toHaveBeenCalled();
+      expect(mkdir).not.toHaveBeenCalled();
+      expect(realpath).not.toHaveBeenCalled();
+      expect(exists).not.toHaveBeenCalled();
+      expect(getTargetDir).not.toHaveBeenCalled();
+      expect(getWorkspaceContext).not.toHaveBeenCalled();
+      expect(pause).not.toHaveBeenCalled();
+      expect(resume).not.toHaveBeenCalled();
+      expect(process.stdin.isPaused()).toBe(wasPaused);
+      expect(on).not.toHaveBeenCalled();
+      expect(process.env['SEATBELT_PROFILE']).toBe(profileBefore);
+      expect(fs.readFileSync(marker, 'utf8')).toBe('preserved');
+      expect(fs.readdirSync(path.dirname(qwenHome))).toEqual([]);
+      expect(fs.readdirSync(root)).not.toContain('runtime');
+    }
+
+    it.each(profiles)(
+      'refuses configured managed content for %s',
+      async (profile) => {
+        vi.stubEnv('SEATBELT_PROFILE', profile);
+        if (profile === customProfile) {
+          fs.mkdirSync(path.join(workspace, '.qwen'));
+          fs.writeFileSync(
+            path.join(workspace, '.qwen', `sandbox-macos-${customProfile}.sb`),
+            '(version 1)\n(allow default)\n',
+          );
+        }
+        const managed = path.join(workspace, 'managed');
+        fs.mkdirSync(managed);
+        await refuse(managed);
+      },
+    );
+
+    it('refuses a pinned root that became unavailable', async () => {
+      const managed = path.join(root, 'managed');
+      fs.mkdirSync(managed);
+      const pinned = fs.realpathSync.native(managed);
+      fs.rmdirSync(managed);
+      await refuse(pinned);
+    });
+
+    it('refuses a pinned root after its enclosing path is relinked', async () => {
+      const parent = path.join(root, 'deployment');
+      const managed = path.join(parent, 'managed');
+      const replacement = path.join(root, 'replacement');
+      fs.mkdirSync(managed, { recursive: true });
+      fs.mkdirSync(path.join(replacement, 'managed'), { recursive: true });
+      const pinned = fs.realpathSync.native(managed);
+      fs.renameSync(parent, `${parent}-original`);
+      fs.symlinkSync(replacement, parent, 'dir');
+      await refuse(pinned);
+    });
+
+    it.each(['missing', 'malformed'])(
+      'refuses managed content before loading a %s custom profile',
+      async (state) => {
+        vi.stubEnv('SEATBELT_PROFILE', customProfile);
+        if (state === 'malformed') {
+          fs.mkdirSync(path.join(workspace, '.qwen'));
+          fs.writeFileSync(
+            path.join(workspace, '.qwen', `sandbox-macos-${customProfile}.sb`),
+            'invalid profile',
+          );
+        }
+        await refuse(path.join(root, 'managed'));
+      },
+    );
+
+    it('refuses before build, proxy, profile-default and bootstrap setup', async () => {
+      vi.stubEnv('SEATBELT_PROFILE', undefined);
+      vi.stubEnv('BUILD_SANDBOX', '1');
+      vi.stubEnv('QWEN_SANDBOX_PROXY_COMMAND', 'printf proxy-started');
+      await refuse(path.join(root, 'managed'));
+    });
+
+    it('refuses before proxy startup or assigning the default profile', async () => {
+      vi.stubEnv('SEATBELT_PROFILE', undefined);
+      vi.stubEnv('QWEN_SANDBOX_PROXY_COMMAND', 'printf proxy-started');
+      await refuse(path.join(root, 'managed'));
+    });
+
+    it.each(profiles)(
+      'keeps ordinary Seatbelt startup for %s',
+      async (profile) => {
+        vi.stubEnv('SEATBELT_PROFILE', profile);
+        if (profile === customProfile) {
+          fs.mkdirSync(path.join(workspace, '.qwen'));
+          fs.writeFileSync(
+            path.join(workspace, '.qwen', `sandbox-macos-${customProfile}.sb`),
+            '(version 1)\n(allow default)\n',
+          );
+        }
+        const config = {
+          getManagedExtensionsDir: () => undefined,
+          getTargetDir: () => workspace,
+          getWorkspaceContext: () => ({ getDirectories: () => [workspace] }),
+        } as unknown as Config;
+        await expect(
+          start_sandbox({ command: 'sandbox-exec' }, [], config, ['/bin/true']),
+        ).resolves.toBe(0);
+        expect(spawnMock).toHaveBeenCalledOnce();
+        const [command, args] = spawnMock.mock.calls[0];
+        expect(command).toBe('sandbox-exec');
+        expect(args).toContain(`QWEN_DIR=${qwenHome}`);
+        expect(args).toContain(`RUNTIME_DIR=${runtime}`);
+        expect(args).toContain(`TARGET_DIR=${workspace}`);
+        expect(args).toContain(`CACHE_DIR=${cache}`);
+        expect(args[args.indexOf('-f') + 1]).toBe(
+          resolveSeatbeltProfileFile(profile),
+        );
+        expect(fs.statSync(qwenHome).isDirectory()).toBe(true);
+        expect(fs.statSync(runtime).isDirectory()).toBe(true);
+      },
+    );
   },
 );

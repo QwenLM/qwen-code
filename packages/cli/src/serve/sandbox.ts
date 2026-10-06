@@ -238,6 +238,11 @@ export async function start_sandbox(
   if (config.command === 'bwrap')
     throw new FatalSandboxError(BWRAP_MIGRATION_MESSAGE);
   if (config.command === 'sandbox-exec') {
+    if (cliConfig?.getManagedExtensionsDir()) {
+      throw new FatalSandboxError(
+        'Managed extensions cannot be used with macOS Seatbelt (sandbox-exec). Use QWEN_SANDBOX=docker or QWEN_SANDBOX=podman.',
+      );
+    }
     // disallow BUILD_SANDBOX
     if (process.env['BUILD_SANDBOX']) {
       throw new FatalSandboxError(
