@@ -128,11 +128,11 @@ OpenAPI 版本升为 `1.19.0`，排在持久 Session 生命周期（#12881）的
 - 记录正文、任务状态与 outbox 状态，作为常量；
 - 7 个任务 ID 用例；
 - 50 个运行起始用例与 32 个 Monitor 起始用例；
-- 45 个单修订视图与 11 段运行历史，附带各自的 outbox 归属；
+- 46 个单修订视图与 12 段运行历史，附带各自的 outbox 归属；
 - 2 条 Monitor 修订链，两侧分别通过各自的 authority 或存储提交；另有 12 条两侧都必须拒绝的修订链：其中一条复用了已开启另一条记录的命令，另有三条在相同或更旧的代数下、或未经未知结果就重新挂接 Runtime；
-- 10 个 Broker 用例，Broker 台账的每个执行状态各一个，每个都附带 Broker 为它上报的线上状态以及 Harness 据此读出的执行状态；另有 8 个线上状态执行用例。
+- 10 个 Broker 用例，Broker 台账的每个执行状态各一个，每个都附带 Broker 为它上报的线上状态以及 Harness 据此读出的执行状态。
 
-标注由一个依据本文编写、独立于两种语言的 Python 实现给出，它与 H0b 一样保存在仓库之外。`managed-extension-projection.test.ts` 与 `ManagedExtensionProjectionContractTest` 都回放任务 ID、起始、视图与历史用例。Java 映射每个 Broker 用例的状态；TypeScript 映射它的线上状态以及线上状态用例，并检查两种读法只在 `DISPATCHING` 上不同，与决策 10 一致；Broker 的 `ManagedExtensionExecutionContractTest` 则检查 Broker 确实上报这些线上状态。authority 测试套件、`ManagedExtensionRecordStoreTest` 与 `ManagedAgentMySqlIT` 提交修订链。
+标注由一个依据本文编写、独立于两种语言的 Python 实现给出，它与 H0b 一样保存在仓库之外。`managed-extension-projection.test.ts` 与 `ManagedExtensionProjectionContractTest` 都回放任务 ID、起始、视图与历史用例。Java 映射每个 Broker 用例的状态；TypeScript 映射它的线上状态，并检查两种读法只在 `DISPATCHING` 上不同，与决策 10 一致；Broker 的 `ManagedExtensionExecutionContractTest` 则检查 Broker 确实上报这些线上状态。authority 测试套件、`ManagedExtensionRecordStoreTest` 与 `ManagedAgentMySqlIT` 提交修订链。
 
 `managed-extension-journal-v1.fixtures.json` 保存了 TypeScript authority 通过其 HTTP 存储发出的请求，对应一个含两条 Monitor 修订的 Session，其中第二条带有通知输入及其唤醒。写入端的输出一旦变化，HTTP 存储测试就会失败；以 `QWEN_WRITE_GOLDEN=1` 运行时会重写该文件。`ManagedSessionStoreIntegrationTest` 把同样的请求发给 Java 存储，后者必须全部接受并投影出相同的任务。
 
@@ -173,7 +173,7 @@ OpenAPI 版本升为 `1.19.0`，排在持久 Session 生命周期（#12881）的
 4. **逻辑启动与物理启动。** H0b 允许运行在执行已处于 `running_attached` 时仍停在 `admitted`，此时任务显示为 `pending`，Runtime 状态为 `ready`，且没有启动时间。收紧这条规则属于对 H0b 契约的修改。
 5. **重放的 domain 记录。** `commitDomainRecord` 会在发现命令是重放之前就发布新的正文，并返回这个正文的引用，而不是已提交的那个。`commitExtensionRecord` 先检查重放；旧方法留待单独修复。
 6. **通知唤醒。** 提交通知输入的修订也会提交对应的 `wake.requested`，但目前还没有任何消费方。托管 Session 路径在已接受的输入缺少 `turn.settled` 时拒绝重新打开 Session（`hosted_turn_recovery_required`），因此 H3 在开放会发出通知的 domain 之前，必须先运行或结算这类输入。
-7. **后续新增的正文。** Java 存储只物化它认识的正文，其他 domain 的 `domain.committed` 事件则与 H0c 之前一样直接放行。新增正文的切片必须先让服务端上线，再让任何写入者提交该 domain；否则就要在服务端获得该正文时从日志回填这些行。不然，这样的服务端看到某条记录的第一条修订并不是起始修订，会拒绝它，写入者随之停止。H0c 唯一的正文 `monitor_run` 两侧同时具备，且仍未开放。
+7. **后续新增的正文。** Java 存储只物化它认识的正文，其他 domain 的 `domain.committed` 事件则与 H0c 之前一样直接放行。以信封路径提交记录的已开放 domain 列在 `MANAGED_SESSION_ENVELOPE_DOMAINS` 中，而正文绝不注册给它们：正文模块加载时会拒绝这种冲突，重开的 authority 则会跳过它们的注册前信封——任何封闭正文都无法解析的记录——而不是因此拒绝打开。注册下一个正文的切片承担这四项检查：这张清单、这道绊线、这一次跳过，以及跳过所依赖的键不相交性——它识别的三个信封键 `operationId`、`revision` 与 `previousRecordRef` 必须始终落在每一个正文的封闭键集之外，否则重开会跳过该正文自己已提交的修订。正文若是与自身 domain 同时发布的，正如 H1 与 H2 的记录，就无需这些迁移。若要为已经通过 `commitExtensionRecord` 提交的 domain 注册正文，仍然必须先让服务端上线，再让任何写入者提交它，或者从日志回填它的行。H0c 唯一的正文 `monitor_run` 两侧同时具备，且仍未开放。
 
 ## 后续工作
 

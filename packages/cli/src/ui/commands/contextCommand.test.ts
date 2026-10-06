@@ -1097,6 +1097,23 @@ describe('collectContextData (contextCommand)', () => {
       ).toBeGreaterThan(estimateContextTextTokens(JSON.stringify(declared)));
       expect(data.breakdown.messages).toBe(300);
       expect(sumRows(data.breakdown)).toBe(total);
+
+      // `/context detail` lists the MCP tools under the mcp row, so they must
+      // add up to it on both paths.
+      const mcpDetailSum = (
+        item: Awaited<ReturnType<typeof collectContextData>>,
+      ) => item.mcpTools.reduce((sum, tool) => sum + tool.tokens, 0);
+      for (const options of [
+        { total: 0, tools, declared, history },
+        { total: 0, tools, declared: [], history },
+        { total, tools, declared, history },
+      ]) {
+        const detailed = await collectContextData(
+          makeChatConfig(options),
+          true,
+        );
+        expect(mcpDetailSum(detailed)).toBe(detailed.breakdown.mcpTools);
+      }
     });
 
     it('bills a path-activation envelope folded into a tool response as messages (#12235)', async () => {
