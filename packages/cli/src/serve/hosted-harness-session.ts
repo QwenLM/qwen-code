@@ -37,10 +37,14 @@ import {
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import {
+  isToolResultManifestChainLink,
   MANAGED_TOOL_RESULT_LIMITS,
   parseToolResultEnvelope,
   parseToolResultManifestBytes,
+  type ToolResultManifest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   ResourceToolResultSegmentStore,
   type DurableToolResultResourceStore,
@@ -65,6 +69,18 @@ import {
   parseHostedHookPin,
   hostedHookOccurrenceId,
 } from './hosted-hook-session.js';
+import { HostedChildRunSession } from './hosted-child-run-session.js';
+import { HostedMonitorSession } from './hosted-monitor-session.js';
+import {
+  HostedMonitorWakeScheduler,
+  settlePendingMonitorInputs,
+  wakeHasPriorAttempt,
+} from './hosted-monitor-wake.js';
+import {
+  createMonitorWakeRunTurn,
+  monitorWakeNeedsRecovery,
+} from './hosted-monitor-wake-turn.js';
+import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { runHostedHookOperation } from './hosted-hook-model.js';
@@ -165,14 +181,22 @@ interface HostedSession {
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;
   publication?: { owner: HttpToolPublicationOwner; captureBytes: number };
   shell?: HostedShellTurnOptions;
+  // The record funnel of a publication-mode turn's background Shells and
+  // Monitors. Captures of the detached family belong to this Session's
+  // record store, never to the Runtime's publication, so the lane exists
+  // in publication mode exactly like `shell` does without capture bytes.
+  backgroundLane?: HostedShellTurnOptions;
   mcp?: HostedMcpSession;
   hooks?: HostedHookSession;
+  childRuns?: HostedChildRunSession;
+  monitors?: HostedMonitorSession;
   hooksBusy?: boolean;
   mcpBusy?: boolean;
   mcpClosing?: boolean;
   mcpRecovering?: boolean;
   approval?: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
+  monitorWake?: HostedMonitorWakeScheduler;
   /** A recovery load acquired the Runtime Session for this promptId. On
    * the cancellation path, only the terminal success route and session
    * teardown hand it back; retry-inviting refusals deliberately leave it
@@ -286,6 +310,15 @@ function hasAcceptedInput(session: HostedSession, promptId: string): boolean {
     );
 }
 
+// H3: a monitor notification input is never a parked Turn — the wake pump
+// owns its consumption, so reopen and takeover arithmetic skips it exactly
+// like the close path settles it model-free.
+function isMonitorInput(event: ManagedSessionEvent): boolean {
+  return (
+    event.kind === 'input.accepted' && event.payload['source'] === 'monitor'
+  );
+}
+
 function unsettledInputsThrough(
   session: HostedSession,
   throughSequence: number,
@@ -293,7 +326,7 @@ function unsettledInputsThrough(
   const accepted = new Set<string>();
   const authority = session.managed.authority;
   for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
-    if (event.kind === 'input.accepted')
+    if (event.kind === 'input.accepted' && !isMonitorInput(event))
       accepted.add(event.payload['turnId'] as string);
     if (event.kind === 'turn.settled')
       accepted.delete(event.payload['turnId'] as string);
@@ -469,7 +502,9 @@ async function recoverCancelledPreToolHook(
   return true;
 }
 
-async function settleCancelledHookTurn(session: HostedSession): Promise<void> {
+export async function settleCancelledHookTurn(
+  session: HostedSession,
+): Promise<void> {
   if (
     !session.blocked ||
     session.active ||
@@ -487,10 +522,23 @@ async function settleCancelledHookTurn(session: HostedSession): Promise<void> {
       1,
       authority.committedSequence,
     );
+    const projected = await session.managed.sink.project(
+      authority.committedSequence,
+    );
     const pending = new Map<string, number>();
     for (const event of events) {
-      if (event.kind === 'input.accepted')
-        pending.set(event.payload['turnId'] as string, event.sequence);
+      // A monitor notification that never ran is nobody's parked turn —
+      // but once the wake actually began, its turn parks exactly like a
+      // user prompt's, and the cancelled settle owns it the same way.
+      if (event.kind === 'input.accepted') {
+        const turnId = event.payload['turnId'];
+        const queuedOnly =
+          isMonitorInput(event) &&
+          (typeof turnId !== 'string' ||
+            !wakeHasPriorAttempt(projected, turnId));
+        if (!queuedOnly && typeof turnId === 'string')
+          pending.set(turnId, event.sequence);
+      }
       if (event.kind === 'turn.settled')
         pending.delete(event.payload['turnId'] as string);
     }
@@ -764,6 +812,11 @@ async function verifyWorkspaceRestore(
         'hook_registration',
         'hook_execution',
         'file_history',
+        // H3 families: an admitted child_run or monitor_run journal is
+        // exactly what a workspace-profile load must restore, driven by
+        // their own record parsers up front.
+        'child_run',
+        'monitor_run',
       ].includes(event.payload['domain'] as string)
     )
       throw new Error('Hosted recovery domain is unsupported.');
@@ -804,6 +857,9 @@ async function verifyWorkspaceRestore(
         envelope.capture === null
       )
         continue;
+      // A detached start handle has no publication delivery to verify, like
+      // an unstarted one: its durable truth is the child_run record.
+      if (envelope.capture?.captureStatus === 'detached') continue;
       const receipt = object(
         await session.publication.owner.request('/receipts/verify', {
           executionCallId,
@@ -822,15 +878,10 @@ async function verifyWorkspaceRestore(
       if (envelope.capture?.captureStatus !== 'complete') incomplete = true;
     }
   }
-  for (const ref of manifests.values()) {
-    const manifest = parseToolResultManifestBytes(await toolResults.read(ref));
-    if (session.publication) {
-      if (!publicationManifests.has(ref.resourceId))
-        throw new Error('Hosted publication has no verified receipt.');
-      continue;
-    }
-    if (manifest.captureStatus !== 'complete')
-      throw new Error('Hosted tool result capture is incomplete.');
+  const verifyContents = async (
+    ref: ManagedSessionDurableRef,
+    manifest: ToolResultManifest,
+  ): Promise<void> => {
     for (const content of manifest.contents) {
       if ('ref' in content.body) {
         const bytes = await toolResults.read(content.body.ref);
@@ -862,25 +913,114 @@ async function verifyWorkspaceRestore(
           throw new Error('Hosted tool result content is incomplete.');
       }
     }
+  };
+  // A detached background Shell or Monitor owns its own manifest lineage:
+  // every record revision carried the then-current output manifest into
+  // the verified population, so the history's pending revisions descend
+  // here too. Their discipline is the record's own chain — a pending
+  // revision mid-history is the ledger doing its job, not corruption, and
+  // a detached capture never had a foreground receipt to expect.
+  const detached = new Map<string, ManagedSessionDurableRef | null>();
+  for (const event of events) {
+    if (event.kind !== 'domain.committed') continue;
+    const domain = event.payload['domain'];
+    if (domain !== 'child_run' && domain !== 'monitor_run') continue;
+    const recordRef = assertManagedSessionDurableRef(
+      event.payload['recordRef'],
+      'domain record',
+    );
+    const record =
+      domain === 'child_run'
+        ? parseChildRun(
+            JSON.parse((await resources.read(recordRef)).toString('utf8')),
+          )
+        : parseMonitorRun(
+            JSON.parse((await resources.read(recordRef)).toString('utf8')),
+          );
+    if (record.run.executionCallId !== null)
+      detached.set(record.run.executionCallId, record.outputRef);
+  }
+  const lineages = new Map<
+    string,
+    Array<{ ref: ManagedSessionDurableRef; manifest: ToolResultManifest }>
+  >();
+  for (const ref of manifests.values()) {
+    const manifest = parseToolResultManifestBytes(await toolResults.read(ref));
+    if (detached.get(manifest.executionCallId) !== undefined) {
+      let members = lineages.get(manifest.executionCallId);
+      if (members === undefined) {
+        members = [];
+        lineages.set(manifest.executionCallId, members);
+      }
+      members.push({ ref, manifest });
+      continue;
+    }
+    if (session.publication) {
+      if (!publicationManifests.has(ref.resourceId))
+        throw new Error('Hosted publication has no verified receipt.');
+      continue;
+    }
+    if (manifest.captureStatus !== 'complete')
+      throw new Error('Hosted tool result capture is incomplete.');
+    await verifyContents(ref, manifest);
+  }
+  for (const [executionCallId, members] of lineages) {
+    members.sort(
+      (left, right) => left.manifest.revision - right.manifest.revision,
+    );
+    for (let index = 1; index < members.length; index++)
+      if (
+        !isToolResultManifestChainLink(
+          members[index - 1]!.manifest,
+          members[index]!.manifest,
+        )
+      )
+        throw new Error(
+          `Detached capture lineage of ${executionCallId} broke.`,
+        );
+    const outputRef = detached.get(executionCallId);
+    const terminal = members.at(-1)!;
+    if (outputRef === null) {
+      if (
+        members.some((member) => member.manifest.executionStatus !== 'unknown')
+      )
+        throw new Error(
+          `Detached capture lineage of ${executionCallId} settled no record named.`,
+        );
+      continue;
+    }
+    if (!isDeepStrictEqual(outputRef, terminal.ref))
+      throw new Error(
+        `Detached capture lineage of ${executionCallId} does not end at the record output.`,
+      );
+    if (terminal.manifest.captureStatus === 'complete')
+      await verifyContents(terminal.ref, terminal.manifest);
   }
   await sink.project(throughSequence);
   return incomplete;
 }
 
-async function recoverShellReceipts(
-  session: HostedSession,
-  options: HostedWorkspaceBrokerOptions,
-  throughSequence: number,
-): Promise<string | null> {
-  const authority = session.managed.authority;
-  const events = authority.eventsInSequenceRange(1, throughSequence);
+/**
+ * Attributes each durable Shell receipt to the prompt whose turn ran the tool.
+ *
+ * Attribution never follows a monitor notification: a wake may only claim the
+ * session while idle, so a receipt that follows a queued notification still
+ * belongs to the occupied foreground turn. Receipts after every non-monitor
+ * input settled attribute to nothing and stay unrecovered by the caller.
+ */
+export function attributeShellReceipts(
+  events: readonly ManagedSessionEvent[],
+): {
+  promptId: string | null;
+  receipts: Array<{ promptId: string; event: ManagedSessionEvent }>;
+} {
   const pending = new Set<string>();
   const receipts: Array<{ promptId: string; event: ManagedSessionEvent }> = [];
   let currentPrompt: string | null = null;
   for (const event of events) {
     if (event.kind === 'input.accepted') {
       const turnId = event.payload['turnId'];
-      if (typeof turnId === 'string') {
+      if (typeof turnId === 'string' && !isMonitorInput(event)) {
         pending.add(turnId);
         currentPrompt = turnId;
       }
@@ -896,7 +1036,20 @@ async function recoverShellReceipts(
       }
     }
   }
-  const promptId = pending.size === 1 ? [...pending][0] : null;
+  return {
+    promptId: pending.size === 1 ? [...pending][0] : null,
+    receipts,
+  };
+}
+
+async function recoverShellReceipts(
+  session: HostedSession,
+  options: HostedWorkspaceBrokerOptions,
+  throughSequence: number,
+): Promise<string | null> {
+  const authority = session.managed.authority;
+  const events = authority.eventsInSequenceRange(1, throughSequence);
+  const { promptId, receipts } = attributeShellReceipts(events);
   const harness = createManagedHarnessHandle(session.managed);
   const projected = receipts.length
     ? await session.managed.sink.project(throughSequence)
@@ -1237,6 +1390,9 @@ async function executeHostedTurn(
                 },
                 session.mcp,
                 session.hooks,
+                session.childRuns,
+                session.monitors,
+                session.backgroundLane,
               )
             : undefined;
         if (resumeFromToolResults) {
@@ -1663,6 +1819,10 @@ export function registerHostedHarnessSessionRoutes(
                 owner: stores.publication,
                 captureBytes: captureBytes as number,
               },
+              backgroundLane: {
+                resources: stores.toolResultResources,
+                assertWritable: stores.assertWritable,
+              },
             }
           : {}),
         ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
@@ -1700,6 +1860,108 @@ export function registerHostedHarnessSessionRoutes(
           hookCatalog,
           session.mcp?.broker,
         );
+      if (session.toolProfile && brokerOptions)
+        session.childRuns = new HostedChildRunSession(
+          {
+            authority: session.managed.authority,
+            resources: session.managed.resources,
+          },
+          session.managed.authority.sessionHeader.sessionKey,
+        );
+      if (
+        session.toolProfile &&
+        brokerOptions &&
+        (session.shell || session.backgroundLane)
+      )
+        session.monitors = new HostedMonitorSession(
+          {
+            authority: session.managed.authority,
+            resources: session.managed.resources,
+          },
+          session.managed.authority.sessionHeader.sessionKey,
+        );
+      // H3: the embedded wake scheduler of a Monitor-capable Session. A
+      // notification rides its observation revision; the pump delivers it
+      // as an ordinary text turn while the Session idles, queues in the
+      // journal while a turn runs, and leaves the remainder accurately
+      // pending the moment anything is parked or blocked.
+      if (
+        session.monitors &&
+        brokerOptions &&
+        (session.shell || session.backgroundLane)
+      ) {
+        const wakeBusy = () =>
+          session.active !== undefined ||
+          session.mcpBusy === true ||
+          session.mcpRecovering === true ||
+          session.hooksBusy === true ||
+          session.mcpClosing === true;
+        const wakeBlocked = () =>
+          session.blocked ||
+          session.managed.authority.currentActivation?.phase !== 'active' ||
+          (session.mcp?.hasPendingOperations() ?? false) ||
+          (session.hooks?.hasPendingOperations ?? false);
+        session.monitorWake = new HostedMonitorWakeScheduler({
+          next: async () => {
+            // The whole committed prefix, not a bounded page: a notification
+            // input lands late in the log, and a default-sized read would
+            // hide every one of them once the Session passes that page.
+            const authority = session.managed.authority;
+            const first = pendingSessionInputs(
+              authority.eventsInSequenceRange(1, authority.committedSequence),
+            ).find((input) => input.source === 'monitor');
+            if (first === undefined) return undefined;
+            const ref = assertManagedSessionDurableRef(
+              first.contentRef,
+              'monitor wake input',
+            );
+            if (ref.kind !== 'managed-input')
+              throw new Error('Monitor wake input is not an input resource.');
+            const body = object(
+              JSON.parse(
+                (await session.managed.resources.read(ref)).toString('utf8'),
+              ),
+            );
+            if (typeof body?.['text'] !== 'string')
+              throw new Error('Monitor wake input has no text.');
+            return { turnId: first.turnId, text: body['text'] };
+          },
+          state: () =>
+            wakeBlocked() ? 'blocked' : wakeBusy() ? 'busy' : 'idle',
+          runTurn: createMonitorWakeRunTurn({
+            session,
+            sessionId,
+            cwd,
+            executeHostedTurn: (promptId, text, abort) =>
+              executeHostedTurn(
+                session,
+                sessionId,
+                cwd,
+                promptId,
+                text,
+                abort,
+                brokerOptions,
+              ),
+            busy: wakeBusy,
+            needsRecovery: monitorWakeNeedsRecovery,
+            writeStderr: writeStderrLineSafe,
+          }),
+          failed: (cause) => {
+            session.blocked = true;
+            writeStderrLineSafe(
+              'qwen serve: Monitor wake pump of session ' +
+                sessionId +
+                ' failed: ' +
+                String(cause),
+            );
+          },
+        });
+        if (session.shell)
+          session.shell.monitorWakeKick = () => session.monitorWake?.kick();
+        if (session.backgroundLane)
+          session.backgroundLane.monitorWakeKick = () =>
+            session.monitorWake?.kick();
+      }
       if (pinned) session.approval = pinned;
       // A takeover recovers exactly the parked Turn, including the file
       // history it left pending; only refuse a stranger's pending state.
@@ -1845,7 +2107,7 @@ export function registerHostedHarnessSessionRoutes(
           1,
           restore.throughSequence,
         )) {
-          if (event.kind === 'input.accepted')
+          if (event.kind === 'input.accepted' && !isMonitorInput(event))
             pendingInputs.add(event.payload['turnId'] as string);
           if (event.kind === 'turn.settled')
             pendingInputs.delete(event.payload['turnId'] as string);
@@ -2015,6 +2277,7 @@ export function registerHostedHarnessSessionRoutes(
           });
       }
       sessions.set(sessionId, session);
+      session.monitorWake?.kick();
       // The registered Session now carries the owed lease itself; the
       // refusal-time record is discharged.
       refusedAdoptions.delete(sessionId);
@@ -2913,6 +3176,10 @@ export function registerHostedHarnessSessionRoutes(
             waiters: session.waiters,
           },
           session.mcp,
+          undefined,
+          session.childRuns,
+          session.monitors,
+          session.backgroundLane,
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         try {
@@ -3513,6 +3780,9 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 409, 'hosted_turn_active');
     session.mcpBusy = true;
     session.mcpClosing = true;
+    // No wake turn may start once the Session is draining; pending
+    // notifications still settle below before the log closes.
+    session.monitorWake?.close();
     try {
       if (req.method === 'DELETE' && session.hooks) {
         session.hooksBusy = true;
@@ -3538,7 +3808,33 @@ export function registerHostedHarnessSessionRoutes(
       // A lease a recovery load acquired must go back with the Session, or
       // the Workspace stays pinned after every later route is gone.
       await releaseLeaseNow(session);
+      // A registered observation loop outlives its turn: only the Session
+      // close ends it. Stop every live loop here, ahead of the publisher
+      // close and the log close, so its settle write can still reach the
+      // journal. A Session whose own settlement already failed (blocked)
+      // never proved to the Runtime that anything stopped: claiming
+      // `stop_requested` there would display an unconfirmed task as
+      // settled, so the record parks on the runtime_lost line instead —
+      // the loop ends, and the record keeps an honest rebuild path.
+      const stopSettle = session.blocked ? 'runtime_lost' : 'stop_requested';
+      for (const loop of session.shell?.monitorLoops?.values() ?? [])
+        await loop.stop(stopSettle);
+      for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
+        await loop.stop(stopSettle);
+      // The broker release drained the Session's background Shells and
+      // their exits settled through this publisher; it closes last.
+      await session.shell?.publisher?.close();
+      await session.backgroundLane?.publisher?.close();
       await session.mcp?.close();
+      // No monitor notification may park the Session: every pending one
+      // settles cancelled here, model-free, before the log closes.
+      if (session.monitors)
+        await settlePendingMonitorInputs({
+          authority: session.managed.authority,
+          sink: session.managed.sink,
+          sessionId: req.params['id'],
+          cwd: session.cwd,
+        });
       await session.managed.close();
       for (const stop of session.streams) stop();
       sessions.delete(req.params['id']);

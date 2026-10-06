@@ -192,7 +192,9 @@ public class ManagedToolResultProjector {
                 manifest = exact(data, source, publicationId, manifestRef, lease, guard);
                 validateManifest(source, binding, envelope, manifest);
             } else {
-                require("unavailable".equals(capture.path("captureStatus").asText()), "Capture manifest is missing");
+                String status = capture.path("captureStatus").asText();
+                require("unavailable".equals(status) || "detached".equals(status),
+                        "Capture manifest is missing");
             }
         }
         String policyVersion = policy.version();
