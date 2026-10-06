@@ -834,9 +834,10 @@ public class ManagedExtensionRecordStore {
      * inside the record commit's own transaction, so a plain SELECT would
      * read that transaction's own snapshot and silently miss a deletion that
      * committed later (REPEATABLE READ) — the journal must stay empty once a
-     * deletion began. The lock here is the one this transaction already holds
-     * on the Session row, so FOR UPDATE re-acquires it in-place and can never
-     * wait across connections. */
+     * deletion began. Up to this point the commit holds the tenant row and
+     * the journal head, not the Session row, so FOR UPDATE takes the Session
+     * row's lock here for the first time and may wait across connections —
+     * the same shape main's announce() already has. */
     private boolean isBeingDeleted(String tenantId, String sessionId) {
         String status = jdbc.query("SELECT status FROM managed_agent_session"
                         + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
