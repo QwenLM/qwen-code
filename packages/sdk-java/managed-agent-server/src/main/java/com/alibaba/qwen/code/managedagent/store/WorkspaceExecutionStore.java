@@ -50,6 +50,17 @@ public class WorkspaceExecutionStore {
         }
     }
 
+    // The mount guard of an execution authority, without the Session-level
+    // checks; the W2 settlement probe must not fail a Session it only
+    // reads. It uses the guard's probe-only entry: momentary I/O failures
+    // classify retryable-with-cause, structural refusals keep the terminal
+    // verdict, and the shared acquire path (claim/assertHeld) is untouched.
+    public void verifyMountForProbe(ContextBinding binding) {
+        if (storageGuard != null) {
+            storageGuard.verifyProbe(binding);
+        }
+    }
+
     public void authorizePassiveAttachment(SessionRecord session) {
         ContextBinding binding = session.workspace();
         if (binding == null || !"ACTIVE".equals(session.status())
@@ -280,6 +291,17 @@ public class WorkspaceExecutionStore {
     public static RuntimeBrokerException unavailable() {
         return new RuntimeBrokerException(409, "workspace_unavailable",
                 "Workspace execution authority is unavailable.", false);
+    }
+
+    // A probe's momentary I/O failure is not the structural verdict the
+    // terminal refusal promises: it retries through the delivery machine,
+    // keeping the cause for the log. Structural refusals keep
+    // unavailable().
+    public static RuntimeBrokerException unavailableTransient(
+            Throwable cause) {
+        return new RuntimeBrokerException(409, "workspace_unavailable",
+                "Workspace mount cannot be verified right now.", true,
+                cause);
     }
 
     private static RuntimeBrokerException busy() {
