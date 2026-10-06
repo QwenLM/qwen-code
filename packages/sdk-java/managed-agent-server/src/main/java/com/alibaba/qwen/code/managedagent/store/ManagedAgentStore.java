@@ -31,6 +31,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -704,13 +705,16 @@ public class ManagedAgentStore implements AgentStateStore {
                 String.class, arguments.toArray()));
     }
 
+    // The lifecycle owner gate: the Session's recorded owner (with the
+    // pre-V40 creator fallback) holding a current read grant. Unreadable is
+    // invisible; a readable non-owner gets the sibling family's 403.
     private void requireWorkspaceCreator(SessionRecord session, String actorId) {
         if (!workspaces.canRead(session.tenantId(), actorId, session.workspace().getWorkspaceId())) {
             throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
         }
-        if (!workspaces.isSessionCreator(session.tenantId(), session.sessionId(), actorId)) {
+        if (!workspaces.isSessionOwner(session.tenantId(), session.sessionId(), actorId)) {
             throw new ApiException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
-                    "Only the Session creator may manage it.");
+                    "Only the Session owner may manage it.");
         }
     }
 
@@ -1012,13 +1016,22 @@ public class ManagedAgentStore implements AgentStateStore {
                 owner, claimGeneration, now) == 1;
     }
 
-    // Only the creation actor may move the Session's directory, matching
-    // the sibling lifecycle refusals: unreadable 404, a readable actor who
-    // is not the creator 403 session_operation_forbidden. The settlement
-    // still re-verifies the creator's full grant set at commit.
+    // Any actor holding OPERATOR on the Workspace may move the Session's
+    // directory, with the sibling lifecycle refusal shapes: unreadable 404,
+    // a readable actor below OPERATOR 403 session_operation_forbidden. The
+    // settlement still re-verifies the creator's full grant set at commit.
     private void requireCwdChangeActor(SessionRecord session,
             String actorId) {
-        requireWorkspaceCreator(session, actorId);
+        if (!workspaces.canRead(session.tenantId(), actorId,
+                session.workspace().getWorkspaceId())) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
+        }
+        if (!workspaces.accessOf(session.tenantId(), actorId,
+                session.workspace().getWorkspaceId())
+                .atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
+                    "Only a Workspace operator may change the Session directory.");
+        }
     }
 
     private void requireCwdChangeRegistryFacts(SessionRecord session) {

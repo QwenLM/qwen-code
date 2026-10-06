@@ -45,6 +45,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -622,32 +623,41 @@ public class ManagedAgentService {
         Map<String, EventRecord> environmentEvents = store
                 .findLatestEnvironmentEvents(tenantId, latestTurns);
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
-        // The creator-submit capability batches its registry reads like the
-        // close state: one IN query over the submit-shaped Sessions, then
-        // one over the creator-owned ones' workspaces.
+        // The role-submit capability batches its registry read like the
+        // close state: one IN query over the submit-shaped Sessions'
+        // workspaces answers the caller's role for the whole page.
         Set<String> shaped = sessions.stream().filter(this::maySubmitShape)
                 .map(SessionRecord::sessionId)
                 .collect(java.util.stream.Collectors.toSet());
-        Set<String> creatorOwns = shaped.isEmpty() ? Set.of()
-                : workspaces.createdSessions(tenantId, actorId,
-                        List.copyOf(shaped));
-        Set<String> grantWorkspaces = creatorOwns.isEmpty() ? Set.of()
+        Set<String> grantWorkspaces = shaped.isEmpty() ? Set.of()
                 : sessions.stream()
-                        .filter(session -> creatorOwns.contains(
+                        .filter(session -> shaped.contains(
                                 session.sessionId()))
                         .map(session -> session.workspace().getWorkspaceId())
                         .collect(java.util.stream.Collectors.toSet());
         Map<String, ManagedWorkspaceRegistry.WorkspaceSummary> grants =
-                grantWorkspaces.isEmpty() ? Map.of()
-                        : workspaces.findReadable(tenantId, actorId,
-                                grantWorkspaces);
+                grantWorkspaces.isEmpty() || actorId == null
+                        || actorId.isEmpty() ? Map.of()
+                        : submitterGrants(tenantId, actorId, grantWorkspaces);
         return sessions.stream()
                 .map(session -> webShellSession(session,
                         latestTurns.get(session.sessionId()),
                         environmentEvents.get(session.sessionId()),
                         retention(session, closed),
-                        maySubmitWorkspaceTurn(session, creatorOwns, grants)))
+                        maySubmitWorkspaceTurn(session, grants)))
                 .toList();
+    }
+
+    // The registry key cannot encode every actor id a filter can supply;
+    // that caller's page simply advertises no Workspace Turns.
+    private Map<String, ManagedWorkspaceRegistry.WorkspaceSummary>
+            submitterGrants(String tenantId, String actorId,
+                    Set<String> workspaceIds) {
+        try {
+            return workspaces.findReadable(tenantId, actorId, workspaceIds);
+        } catch (IllegalArgumentException error) {
+            return Map.of();
+        }
     }
 
     private WebShellSession webShellSession(SessionRecord session,
@@ -813,9 +823,10 @@ public class ManagedAgentService {
     }
 
     // Later Turns of a Workspace-bound Session run under the creator's
-    // Workspace grants (WorkspaceExecutionStore.authorize), so only the
-    // creator may submit or cancel them or rename the Session, and only with
-    // Workspace files enabled. Everyone else keeps the existing refusal.
+    // Workspace grants (WorkspaceExecutionStore.authorize), but any actor
+    // holding the OPERATOR role may submit or cancel them or rename the
+    // Session, with the shape gates unchanged. Everyone else keeps the
+    // refusal requireLegacyWorkspace names.
     private void requireSubmitter(String tenantId, String actorId,
             String sessionId) {
         SessionRecord session = store.requireSession(tenantId, sessionId);
@@ -826,32 +837,27 @@ public class ManagedAgentService {
 
     private boolean maySubmitWorkspaceTurn(SessionRecord session,
             String actorId) {
-        if (!maySubmitShape(session)) {
+        if (!maySubmitShape(session) || actorId == null
+                || actorId.isEmpty()) {
             return false;
         }
-        // createdSession precedes findReadable: it answers false for an actor
-        // id the registry key cannot encode, where findReadable throws.
-        if (!workspaces.createdSession(session.tenantId(), actorId,
-                session.sessionId())) {
+        // findReadable throws on an actor id the registry key cannot
+        // encode; that caller is simply not a submitter.
+        ManagedWorkspaceRegistry.WorkspaceSummary summary;
+        try {
+            summary = workspaces.findReadable(session.tenantId(), actorId,
+                    session.workspace().getWorkspaceId());
+        } catch (IllegalArgumentException error) {
             return false;
         }
-        // The caller is the Session's creator, so this reads the creator's
-        // grant row, as the execution authority's join does: READER or
-        // above (the join's own filter) and OPERATOR for creation, on a
-        // registry whose state is ACTIVE.
-        ManagedWorkspaceRegistry.WorkspaceSummary summary =
-                workspaces.findReadable(session.tenantId(), actorId,
-                        session.workspace().getWorkspaceId());
         return summary != null && summary.canCreateSession();
     }
 
     // The page twin of the singular: the same rule answered from the batch
-    // reads the assembler already made.
+    // read the assembler already made.
     private boolean maySubmitWorkspaceTurn(SessionRecord session,
-            Set<String> creatorOwns,
             Map<String, ManagedWorkspaceRegistry.WorkspaceSummary> grants) {
-        if (!maySubmitShape(session)
-                || !creatorOwns.contains(session.sessionId())) {
+        if (!maySubmitShape(session)) {
             return false;
         }
         var summary = grants.get(session.workspace().getWorkspaceId());
@@ -879,16 +885,28 @@ public class ManagedAgentService {
                 actorId);
     }
 
+    // The submitter family's bound-refusal split: an actor without a read
+    // grant gets the invisible 404, a readable actor below OPERATOR the
+    // 403 of the sibling lifecycle refusal, and an OPERATOR blocked by the
+    // shape gates the family's domain 409.
     private void requireLegacyWorkspace(SessionRecord session,
             String actorId) {
         if (session.workspace() != null) {
+            String workspaceId = session.workspace().getWorkspaceId();
             if (!workspaces.canRead(session.tenantId(), actorId,
-                    session.workspace().getWorkspaceId())) {
+                    workspaceId)) {
                 throw new ApiException(HttpStatus.NOT_FOUND,
                         "session_not_found", "The Session was not found.");
             }
-            throw new ApiException(HttpStatus.CONFLICT, "workspace_unavailable",
-                    "Hosted Workspace execution is not available.");
+            if (workspaces.accessOf(session.tenantId(), actorId, workspaceId)
+                    .atLeast(WorkspaceAccess.OPERATOR)) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "workspace_unavailable",
+                        "Hosted Workspace execution is not available.");
+            }
+            throw new ApiException(HttpStatus.FORBIDDEN,
+                    "session_operation_forbidden",
+                    "Only a Workspace operator may use the Session.");
         }
     }
 

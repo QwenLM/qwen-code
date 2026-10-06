@@ -60,18 +60,18 @@ import org.springframework.transaction.PlatformTransactionManager;
 
 /**
  * The D6 acceptance probes: the test walks {@link SurfaceRegistry} and fires
- * today's standard refusal probes per rule class on every route — wrong
+ * the standard refusal probes per rule class on every route — wrong
  * tenant (403 {@code actor_scope_mismatch}), missing actor, below-read (404
- * without a Workspace grant), read-without-family-power (409
- * {@code workspace_unavailable} on the submitter family, 403
- * {@code session_operation_forbidden} on lifecycle and cwd, 403
+ * without a Workspace grant), read-below-OPERATE (403
+ * {@code session_operation_forbidden} on the Session mutation families, 403
  * {@code action_forbidden} on Action respond, 403
  * {@code artifact_content_forbidden} on artifact content with the policy
  * off) — plus one admitted-shape probe per rule class proving the request
- * reached business logic. Twin public/WebShell routes of one capability sit
- * in the same rule class, so the shared expectation table makes twin drift
- * fail. The refusal expectations pinned here are today's matrix; slice C
- * flips them with the role enforcement.
+ * reached business logic, fired by a non-owner OPERATOR on the OPERATOR
+ * families and by the recorded owner on lifecycle. Twin public/WebShell
+ * routes of one capability sit in the same rule class, so the shared
+ * expectation table makes twin drift fail. The refusal expectations pinned
+ * here are the post-v1.34 matrix.
  *
  * <p>The internal probes run two different credentials: the Session-store
  * routes carry the broker-issued writer HMAC (a wrong token is refused at
@@ -140,6 +140,8 @@ class SurfaceAdmissionAcceptanceTest {
     private String bound;
     private String legacy;
     private String pendingAction;
+    private String pendingActionPublic;
+    private String pendingActionWeb;
     private String pendingActionLegacy;
     private String artifactId;
     private String artifactItemId;
@@ -159,8 +161,8 @@ class SurfaceAdmissionAcceptanceTest {
                 + " 'ACTIVE')", ARTIFACT_TENANT, ARTIFACT_WORKSPACE);
         for (String actor : List.of(READER, OWNER)) {
             jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                    + " workspace_id, actor_id, can_read, can_create)"
-                    + " VALUES (?, ?, ?, TRUE, FALSE)", ARTIFACT_TENANT,
+                    + " workspace_id, actor_id, role)"
+                    + " VALUES (?, ?, ?, 'READER')", ARTIFACT_TENANT,
                     ARTIFACT_WORKSPACE, actor.getBytes(StandardCharsets.UTF_8));
         }
         var artifacts = fixture.results()
@@ -183,6 +185,11 @@ class SurfaceAdmissionAcceptanceTest {
         bound = createSession(tenant, OWNER, true);
         legacy = createSession(tenant, OWNER, false);
         pendingAction = insertAction(tenant, bound);
+        // An accepted answer consumes its Action, and the accepted probe
+        // parks an ACTION_RESPONSE operation nothing else may shadow: the
+        // admitted respond arms run on per-surface Actions of their own.
+        pendingActionPublic = insertAction(tenant, bound);
+        pendingActionWeb = insertAction(tenant, bound);
         pendingActionLegacy = insertAction(tenant, legacy);
     }
 
@@ -240,20 +247,27 @@ class SurfaceAdmissionAcceptanceTest {
             }
             case OPERATOR -> {
                 expect(entry, STRANGER, 404, "session_not_found");
-                expect(entry, READER, 409, "workspace_unavailable");
-                expect(entry, OPERATOR, 409, "workspace_unavailable");
-            }
-            case OWNER -> {
-                expect(entry, STRANGER, 404, "session_not_found");
                 String code = entry.capabilities().contains(
                         Capability.ACTION_RESPOND) ? "action_forbidden"
                         : "session_operation_forbidden";
                 expect(entry, READER, 403, code);
-                expect(entry, OPERATOR, 403, code);
+                // The admitted arm fires as an OPERATOR who is not the
+                // Session's owner: respond answers the pending Action,
+                // the Session families reach the files-opt-in domain 409.
+                if (entry.capabilities().contains(Capability.ACTION_RESPOND)) {
+                    expect(entry, OPERATOR, 202, "action_response");
+                } else {
+                    expect(entry, OPERATOR, 409, "workspace_unavailable");
+                }
                 if (entry.capabilities().contains(
                         Capability.SESSION_CWD_CHANGE)) {
                     expect(entry, null, 401, "actor_required");
                 }
+            }
+            case OWNER -> {
+                expect(entry, STRANGER, 404, "session_not_found");
+                expect(entry, READER, 403, "session_operation_forbidden");
+                expect(entry, OPERATOR, 403, "session_operation_forbidden");
             }
             case WORKSPACE_DISCOVERY ->
                 expect(entry, null, 401, "actor_required");
@@ -347,7 +361,7 @@ class SurfaceAdmissionAcceptanceTest {
     }
 
     @Test
-    void submitterRoutesAdmitTheLegacyArmAndTheCreatorHitsDomainRefusal()
+    void submitterRoutesAdmitTheLegacyArmAndAnOperatorHitsDomainRefusal()
             throws Exception {
         // Every admitted mutation gets its own legacy Session, so no
         // in-progress operation or Turn collides with the next probe.
@@ -393,25 +407,28 @@ class SurfaceAdmissionAcceptanceTest {
                                 + "\",\"turnId\":\"turn_missing\"}"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("turn_not_found"));
-        // Today's bound arm: even the creator meets the files gate, a
-        // domain 409 after admission.
-        mvc.perform(post("/v1/agents/sessions/" + bound + "/events")
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .header("Idempotency-Key", nextKey())
-                        .principal(actor(tenant, OWNER))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"type\":\"agent.session.input.message\","
-                                + message + "}"))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code")
-                        .value("workspace_unavailable"));
+        // The bound arm: an admitted OPERATOR — the owner here, a
+        // non-owner OPERATOR alongside — meets the files gate, a domain 409
+        // after the role admission passes.
+        for (String caller : List.of(OWNER, OPERATOR)) {
+            mvc.perform(post("/v1/agents/sessions/" + bound + "/events")
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .header("Idempotency-Key", nextKey())
+                            .principal(actor(tenant, caller))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"type\":\"agent.session.input.message\","
+                                    + message + "}"))
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error.code")
+                            .value("workspace_unavailable"));
+        }
     }
 
     @Test
-    void ownerRoutesAdmitTheRecordedCreatorAndTheLegacyArmWithDomainProofs()
+    void ownerRoutesAdmitTheRecordedOwnerAndTheLegacyArmWithDomainProofs()
             throws Exception {
-        // The creator on the bound arm: today's files gate answers a
-        // domain 409 after admission, proving the route was reached.
+        // The owner on the bound arm: the files gate answers a domain 409
+        // after admission, proving the route was reached.
         mvc.perform(post("/v1/agents/sessions/" + bound + "/close")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", nextKey())
@@ -430,7 +447,7 @@ class SurfaceAdmissionAcceptanceTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code")
                         .value("workspace_unavailable"));
-        // Action respond by the recorded creator is admitted.
+        // Action respond by the recorded owner is admitted.
         mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
                         + pendingAction + "/responses")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -463,7 +480,7 @@ class SurfaceAdmissionAcceptanceTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code")
                         .value("unsupported_feature"));
-        // The legacy arm of respond: the recorded creator answers. The
+        // The legacy arm of respond: the recorded owner answers. The
         // carrying Session is fresh: an accepted response parks an
         // ACTION_RESPONSE operation that must not shadow later probes.
         String answered = createSession(tenant, OWNER, false);
@@ -482,8 +499,54 @@ class SurfaceAdmissionAcceptanceTest {
                 .andExpect(jsonPath("$.type").value("action_response"));
     }
 
+    // R1's blocked approval handoff: a Workspace OPERATOR who is not the
+    // Session's owner answers a pending approval on both surfaces, and the
+    // READER below keeps the refusal.
     @Test
-    void actionRespondOnLegacyRefusesTheNonCreatorWithTheFamilyCode()
+    void secondOperatorAnswersPendingApprovalsOnBothSurfaces()
+            throws Exception {
+        String publicAction = insertAction(tenant, bound);
+        String webAction = insertAction(tenant, bound);
+        mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
+                        + publicAction + "/responses")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", nextKey())
+                        .principal(actor(tenant, OPERATOR))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"kind\":\"permission\",\"input_revision\":1,"
+                                + "\"policy_revision\":\"policy\","
+                                + "\"option_id\":\"allow\"}"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.type").value("action_response"));
+        mvc.perform(post("/api/agent/web-shell/v1/actions/respond")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, OPERATOR))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + bound
+                                + "\",\"actionId\":\"" + webAction
+                                + "\",\"idempotencyKey\":\"" + nextKey()
+                                + "\",\"response\":{\"kind\":\"permission\","
+                                + "\"inputRevision\":1,\"policyRevision\":"
+                                + "\"policy\",\"optionId\":\"allow\"}}"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.type").value("action_response"));
+        mvc.perform(post("/api/agent/web-shell/v1/actions/respond")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, READER))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + bound
+                                + "\",\"actionId\":\"" + webAction
+                                + "\",\"idempotencyKey\":\"" + nextKey()
+                                + "\",\"response\":{\"kind\":\"permission\","
+                                + "\"inputRevision\":1,\"policyRevision\":"
+                                + "\"policy\",\"optionId\":\"deny\"}}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code")
+                        .value("action_forbidden"));
+    }
+
+    @Test
+    void actionRespondOnLegacyRefusesTheNonOwnerWithTheFamilyCode()
             throws Exception {
         mvc.perform(post("/api/agent/web-shell/v1/actions/respond")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -729,7 +792,13 @@ class SurfaceAdmissionAcceptanceTest {
         variables.put("operationId", "op_0000000000000000");
         variables.put("taskId", "task_0000000000000000");
         variables.put("turnId", "turn_0000000000000000");
-        variables.put("actionId", pendingAction);
+        // An accepted respond consumes its Action: each surface's admitted
+        // probe runs on its own; the read probes keep a shared pending one.
+        variables.put("actionId", entry.capabilities().contains(
+                Capability.ACTION_RESPOND)
+                ? entry.surface() == Surface.PUBLIC ? pendingActionPublic
+                        : pendingActionWeb
+                : pendingAction);
         variables.put("workspaceId", "ws");
         variables.put("agentId", "agent-missing");
         variables.put("itemId", artifactItemId);
@@ -846,16 +915,20 @@ class SurfaceAdmissionAcceptanceTest {
             case ACTION_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case ACTION_GET -> "{\"sessionId\":\"" + session
                     + "\",\"actionId\":\"" + pendingAction + "\"}";
-            case ACTION_RESPOND -> publicSurface
+            case ACTION_RESPOND -> {
+                String respondAction = entry.surface() == Surface.PUBLIC
+                        ? pendingActionPublic : pendingActionWeb;
+                yield publicSurface
                     ? "{\"kind\":\"permission\",\"input_revision\":1,"
                             + "\"policy_revision\":\"policy\","
                             + "\"option_id\":\"allow\"}"
                     : "{\"sessionId\":\"" + session + "\",\"actionId\":\""
-                            + pendingAction + "\",\"idempotencyKey\":\""
+                            + respondAction + "\",\"idempotencyKey\":\""
                             + nextKey() + "\",\"response\":{\"kind\":"
                             + "\"permission\",\"inputRevision\":1,"
                             + "\"policyRevision\":\"policy\","
                             + "\"optionId\":\"allow\"}}";
+            }
             case TOOL_RESULT_GET -> "{\"sessionId\":\"" + session
                     + "\",\"itemId\":\"" + artifactItemId + "\"}";
             case ARTIFACT_GET -> "{\"sessionId\":\"" + session
@@ -946,9 +1019,10 @@ class SurfaceAdmissionAcceptanceTest {
 
     private void grant(String tenant, String actor, boolean canCreate) {
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                + " workspace_id, actor_id, can_read, can_create) VALUES"
-                + " (?, 'ws', ?, TRUE, ?)", tenant,
-                actor.getBytes(StandardCharsets.UTF_8), canCreate);
+                + " workspace_id, actor_id, role) VALUES"
+                + " (?, 'ws', ?, ?)", tenant,
+                actor.getBytes(StandardCharsets.UTF_8),
+                canCreate ? "OPERATOR" : "READER");
     }
 
     private String insertAction(String tenant, String session)

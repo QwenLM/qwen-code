@@ -28,8 +28,9 @@ public class ManagedWorkspaceRegistry {
     }
 
     /**
-     * Whether the actor created this Workspace-bound Session. Its later Turns
-     * run under the creator's grants, so only the creator may submit them.
+     * Whether the actor created this Workspace-bound Session. The create
+     * command is the owner of record for Sessions written before V40; later
+     * Turns still run under the creator's grants.
      */
     public boolean createdSession(String tenantId, String actorId,
             String sessionId) {
@@ -50,38 +51,63 @@ public class ManagedWorkspaceRegistry {
                 Integer.class, tenantId, sessionId, tenantId, key).isEmpty();
     }
 
-    public boolean isSessionCreator(String tenantId, String sessionId, String actorId) {
-        return createdSession(tenantId, actorId, sessionId);
-    }
-
-    /** The batch twin of createdSession for a page of Session ids. */
-    public java.util.Set<String> createdSessions(String tenantId,
-            String actorId, List<String> sessionIds) {
-        if (actorId == null || actorId.isEmpty() || sessionIds.isEmpty()) {
-            return java.util.Set.of();
+    /**
+     * Whether the actor owns this Session: the recorded owner
+     * ({@code owner_actor_key}), falling back to the creator records for
+     * Sessions written before V40.
+     */
+    public boolean isSessionOwner(String tenantId, String sessionId,
+            String actorId) {
+        if (actorId == null || actorId.isEmpty()) {
+            return false;
         }
         byte[] key;
         try {
             key = actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
-            return java.util.Set.of();
+            return false;
         }
-        String marks = String.join(", ",
-                java.util.Collections.nCopies(sessionIds.size(), "?"));
-        List<Object> arguments = new java.util.ArrayList<>(
-                sessionIds.size() + 3);
-        arguments.add(tenantId);
-        arguments.addAll(sessionIds);
-        arguments.add(tenantId);
-        arguments.add(key);
-        return new java.util.HashSet<>(jdbc.queryForList(
-                "SELECT session_id FROM managed_workspace_create_command"
-                        + " WHERE tenant_id = ? AND session_id IN (" + marks
-                        + ")"
+        List<byte[]> owners = jdbc.query(
+                "SELECT owner_actor_key, creator_actor_key FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND session_id = ?",
+                (result, row) -> {
+                    byte[] owner = result.getBytes(1);
+                    return owner != null ? owner : result.getBytes(2);
+                }, tenantId, sessionId);
+        if (!owners.isEmpty() && owners.getFirst() != null) {
+            return java.util.Arrays.equals(owners.getFirst(), key);
+        }
+        return createdSession(tenantId, actorId, sessionId);
+    }
+
+    /**
+     * The actor's role on the Workspace; {@link WorkspaceAccess#NONE} for no
+     * grant row or an actor id the registry key cannot encode.
+     */
+    public WorkspaceAccess accessOf(String tenantId, String actorId,
+            String workspaceId) {
+        if (actorId == null || actorId.isEmpty()) {
+            return WorkspaceAccess.NONE;
+        }
+        byte[] key;
+        try {
+            key = actorKey(tenantId, actorId);
+        } catch (IllegalArgumentException error) {
+            return WorkspaceAccess.NONE;
+        }
+        List<String> roles = jdbc.queryForList(
+                "SELECT role FROM managed_workspace_access"
+                        + " WHERE tenant_id = ? AND workspace_id = ?"
                         + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
                         + " = CAST(CONCAT(?, '!') AS BINARY(513))"
+                        + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND actor_id = ?",
-                String.class, arguments.toArray()));
+                String.class, tenantId, workspaceId, tenantId, workspaceId,
+                key);
+        return roles.isEmpty() ? WorkspaceAccess.NONE
+                : WorkspaceAccess.valueOf(roles.getFirst());
     }
 
     public boolean canRead(String tenantId, String actorId,

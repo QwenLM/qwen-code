@@ -24,11 +24,11 @@
 
 「仅创建者」是三种机制、三套拒绝词表：
 
-| 族 | 路由 | 校验 | 可读的非创建者得到 |
-| --- | --- | --- | --- |
-| Turn 提交 / 取消 / 改名 | 公开 `POST …/events`（提交与取消）、`PATCH …/{id}`；WebShell `turns/submit`、`turns/cancel`（改名没有 WebShell 路由） | `requireSubmitter` → `maySubmitWorkspaceTurn`（创建命令行 + 当前 `can_create`） | **409 `workspace_unavailable`** |
-| 生命周期（close、archive、unarchive、delete）+ cwd 变更 | `POST …/close|archive|unarchive`、`DELETE`、`POST …/cwd`，及 WebShell 孪生 | `requireWorkspaceCreator`（先 can_read 再创建命令行） | 403 `session_operation_forbidden` |
-| Action（审批）回答 | `POST …/actions/{id}/responses`、WebShell `actions/respond` | `requireOwner`（creator_actor_key，回退创建命令） | 403 `action_forbidden` |
+| 族                                                      | 路由                                                                                                                  | 校验                                                                            | 可读的非创建者得到                                   |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------- | ----------------------------------------------------- | --------------------------------- |
+| Turn 提交 / 取消 / 改名                                 | 公开 `POST …/events`（提交与取消）、`PATCH …/{id}`；WebShell `turns/submit`、`turns/cancel`（改名没有 WebShell 路由） | `requireSubmitter` → `maySubmitWorkspaceTurn`（创建命令行 + 当前 `can_create`） | **409 `workspace_unavailable`**                      |
+| 生命周期（close、archive、unarchive、delete）+ cwd 变更 | `POST …/close                                                                                                         | archive                                                                         | unarchive`、`DELETE`、`POST …/cwd`，及 WebShell 孪生 | `requireWorkspaceCreator`（先 can_read 再创建命令行） | 403 `session_operation_forbidden` |
+| Action（审批）回答                                      | `POST …/actions/{id}/responses`、WebShell `actions/respond`                                                           | `requireOwner`（creator_actor_key，回退创建命令）                               | 403 `action_forbidden`                               |
 
 其余已实现的规则形态：绑定读取与全部 list/stream/catalog 路由要求 `can_read`（否则 404）；绑定创建要求 actor + `can_create` + `ACTIVE` Workspace（按失败点返回 401/404/403/409）；artifact 字节读取叠加部署策略门（`403 artifact_content_forbidden`）；Workspace 发现只列出 `can_read` 行（无 actor 返回 401）；legacy（未绑定）Session 与 agent 定义是**租户级**的 —— 租户内任何 actor 今天都可以改它们；内部 store/publication 路由准入 writer HMAC 凭据而非 actor。公开面是 `/v1/agents/**` 加 `/api/agent/web-shell/v1/**`（`PublicSurface`），由十个 Spring controller 实现 —— 第 10 节的矩阵枚举当前的 32 条公开 + 24 条 WebShell + 22 条内部路由（切片 A 门禁实计共 78 条；#13088 新增 `receipts/verify` 处理器之前，这里写的是 77/21）。
 
@@ -48,7 +48,7 @@ workspace registry/access 行没有任何生产置备路径 —— 今天只有�
 
 ### D2 —— 角色属于 Workspace 绑定
 
-Q4 的答案：一张授权表，按 `(tenant_id, workspace_id, actor_id)` 键 —— 即已经存在、且已在每条绑定路由读路径上的 `managed_workspace_access` 表。不采用网关声明：`AuthenticatedTenantActor` 契约保持 tenant + actor，按 Workspace 的授权塞不进声明集。不采用按 Session 键：那会把行数乘以 sessions × actors，且每次创建都要为一组服务器无法枚举的 actor 做扇出插入；被阻塞的行为恰恰由谁共享 *Workspace 绑定* 定义。不采用按租户键：那无法表达「A 上是 reader、B 上是 operator」。
+Q4 的答案：一张授权表，按 `(tenant_id, workspace_id, actor_id)` 键 —— 即已经存在、且已在每条绑定路由读路径上的 `managed_workspace_access` 表。不采用网关声明：`AuthenticatedTenantActor` 契约保持 tenant + actor，按 Workspace 的授权塞不进声明集。不采用按 Session 键：那会把行数乘以 sessions × actors，且每次创建都要为一组服务器无法枚举的 actor 做扇出插入；被阻塞的行为恰恰由谁共享 _Workspace 绑定_ 定义。不采用按租户键：那无法表达「A 上是 reader、B 上是 operator」。
 
 具体地，迁移 V48 用一列取代两个布尔：
 
@@ -87,20 +87,20 @@ owner 的更新路径（移交命令）是建在此列之上的后续切片；�
 
 绑定 Session 面上每个已实现路由族的最低角色（已准入调用方行为保留：持 create 授权者映射为 OPERATOR，创建者映射为 owner）：
 
-| 族 | 今天 | 之后 |
-| --- | --- | --- |
-| Session/Turn/Item/task/Action/event 读、JSON+SSE、catalog、transcript | `can_read`（无则 404） | READER（无则 404）—— 不变 |
-| 绑定 Session 创建 | actor + `can_create` + ACTIVE（401/404/403/409） | actor + OPERATOR + ACTIVE —— 调用方不变 |
-| Turn 提交 / 取消 / 改名 | 创建者 + 当前 `can_create`，拒绝返回 409 | OPERATOR；拒绝改为 403 `session_operation_forbidden` |
-| cwd 变更 | 创建者，404/403 | OPERATOR，404/403 |
-| Action 回答 | 创建者，403 `action_forbidden` | OPERATOR，403 `action_forbidden` —— **第二个 operator 现在能回答了** |
-| close / archive / unarchive / delete | 创建者，404/403 | Session owner，404/403 —— 调用方不变 |
-| Artifacts（元数据） | actor + `can_read` | actor + READER —— 不变 |
-| Artifact 内容字节 | actor + 读 + 部署策略 | actor + READER + 策略 —— 不变 |
-| Workspace 发现 list/get | actor，按 `can_read` 过滤 | actor，按角色 ≥ READER 过滤 —— 不变 |
-| Legacy（未绑定）Session 路由 | 租户级 | 租户级 —— 不变（第 7 节） |
-| Agent 定义 | 租户级 | 租户级 —— 不变 |
-| 内部 store / tool-publication 路由 | writer HMAC，无 actor | 不变 |
+| 族                                                                    | 今天                                             | 之后                                                                 |
+| --------------------------------------------------------------------- | ------------------------------------------------ | -------------------------------------------------------------------- |
+| Session/Turn/Item/task/Action/event 读、JSON+SSE、catalog、transcript | `can_read`（无则 404）                           | READER（无则 404）—— 不变                                            |
+| 绑定 Session 创建                                                     | actor + `can_create` + ACTIVE（401/404/403/409） | actor + OPERATOR + ACTIVE —— 调用方不变                              |
+| Turn 提交 / 取消 / 改名                                               | 创建者 + 当前 `can_create`，拒绝返回 409         | OPERATOR；拒绝改为 403 `session_operation_forbidden`                 |
+| cwd 变更                                                              | 创建者，404/403                                  | OPERATOR，404/403                                                    |
+| Action 回答                                                           | 创建者，403 `action_forbidden`                   | OPERATOR，403 `action_forbidden` —— **第二个 operator 现在能回答了** |
+| close / archive / unarchive / delete                                  | 创建者，404/403                                  | Session owner，404/403 —— 调用方不变                                 |
+| Artifacts（元数据）                                                   | actor + `can_read`                               | actor + READER —— 不变                                               |
+| Artifact 内容字节                                                     | actor + 读 + 部署策略                            | actor + READER + 策略 —— 不变                                        |
+| Workspace 发现 list/get                                               | actor，按 `can_read` 过滤                        | actor，按角色 ≥ READER 过滤 —— 不变                                  |
+| Legacy（未绑定）Session 路由                                          | 租户级                                           | 租户级 —— 不变（第 7 节）                                            |
+| Agent 定义                                                            | 租户级                                           | 租户级 —— 不变                                                       |
+| 内部 store / tool-publication 路由                                    | writer HMAC，无 actor                            | 不变                                                                 |
 
 所有重读授权的在线行为（SSE 读授权复查、artifact 流中重验、执行期 `authorizePassiveAttachment`）按 `role` 以相同阈值查询，撤销因此保持今天的含义。
 
@@ -125,11 +125,11 @@ owner 的更新路径（移交命令）是建在此列之上的后续切片；�
 
 三个切片：两条并行 lane，然后一条收尾 lane。lane 按文件范围不相交切分，而不是按话题：
 
-| 切片 | 内容 | 改动范围 |
-| --- | --- | --- |
-| **A —— 注册表 + 门禁（先行 R2）** | 按今天规则建 `SurfaceRegistry`、对账门禁、验收探针、奇偶断言、本文档的双语路由矩阵 | 全部为新文件：`api/SurfaceRegistry.java`、两个测试类；不改生产代码 |
-| **B —— 角色存储（R1 存储）** | V48 迁移与回填、`WorkspaceAccess` 改名、注册表 store 读取改由 `role` 推导、`owner_actor_key` 列与创建时写入、fixture INSERT 更新（约 24 处）、迁移形态测试 | `store/**`、runtime-broker 枚举、`db/migration`、测试 fixture；不改任何准入判定 |
-| **C —— 强制执行（R1）** | 三个创建者辅助方法改指角色/owner、拒绝码归一、Action 回答向 OPERATOR 开放、按角色的 WebShell 能力广告、注册表规则翻转、探针期望翻转、契约 v1.34 与 OpenAPI 文本、契约测试更新 | `service/**`、`store/**` 校验点、controller、契约、A 的枚举与测试 |
+| 切片                              | 内容                                                                                                                                                                          | 改动范围                                                                        |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| **A —— 注册表 + 门禁（先行 R2）** | 按今天规则建 `SurfaceRegistry`、对账门禁、验收探针、奇偶断言、本文档的双语路由矩阵                                                                                            | 全部为新文件：`api/SurfaceRegistry.java`、两个测试类；不改生产代码              |
+| **B —— 角色存储（R1 存储）**      | V48 迁移与回填、`WorkspaceAccess` 改名、注册表 store 读取改由 `role` 推导、`owner_actor_key` 列与创建时写入、fixture INSERT 更新（约 24 处）、迁移形态测试                    | `store/**`、runtime-broker 枚举、`db/migration`、测试 fixture；不改任何准入判定 |
+| **C —— 强制执行（R1）**           | 三个创建者辅助方法改指角色/owner、拒绝码归一、Action 回答向 OPERATOR 开放、按角色的 WebShell 能力广告、注册表规则翻转、探针期望翻转、契约 v1.34 与 OpenAPI 文本、契约测试更新 | `service/**`、`store/**` 校验点、controller、契约、A 的枚举与测试               |
 
 A ∥ B 是安全的：文件不相交（A 纯新增；B 改 store 侧）。C 必须在两者合入后串行，因为它同时改写 A 的注册表条目与 B 的辅助方法 —— 这是唯一真实的阻塞依赖，所以被排序而不是被抢跑。C 关闭 #13535；A 与 B 引用它。
 
@@ -180,94 +180,92 @@ ToolPublicationController 变成 13 个 handler，所以当前挂载集是
 22 internal、合计 78；门禁从扫描推导一切，计数只是信息，不是被断言
 的常量。）
 
-规则类按今天的准入命名：`WORKSPACE_CREATE`（2）、`READER`（24）、
-`READER_ACTOR`（6）、`READER_ACTOR_POLICY`（1）、`OPERATOR` 作为今天的
-submitter 族（4）、`OWNER` 作为今天的 creator 各族 —— lifecycle、cwd
-与 Action respond（12）、`WORKSPACE_DISCOVERY`（4）、`TENANT_SCOPED`
+规则类按已实现的准入命名。切片 C 之后（契约 v1.34）：`WORKSPACE_CREATE`（2）、
+`READER`（24）、`READER_ACTOR`（6）、`READER_ACTOR_POLICY`（1）、`OPERATOR`
+—— submitter 族加 cwd 变更与 Action respond（8）、`OWNER`
+—— 仅 lifecycle 族（8）、`WORKSPACE_DISCOVERY`（4）、`TENANT_SCOPED`
 （3）、`INTERNAL_WRITER`（22）。设计列出的 `legacy_create` 与
 `legacy_tenant` 两个名字保留在类的文档里，作为 legacy 分支的名字：
-每条路由恰有一个规则类，按分离规则取的是绑定 Session 的类。切片 C
-会把 cwd 与 Action respond 从 `OWNER` 翻到 `OPERATOR`，归一
-submitter 族的拒绝码，并且只有在探针需要不同期望时才拆开 legacy
-分支。
+每条路由恰有一个规则类，按分离规则取的是绑定 Session 的类。下表的规则类列是
+切片 C 之后的矩阵；被它替换的切片前取值保存在 D4 表的「Rule today」列。
 
-| 路由 | 面 | 能力 | 规则类（今天） |
-| --- | --- | --- | --- |
-| `POST /v1/agents/sessions` | PUBLIC | SESSION_CREATE | WORKSPACE_CREATE |
-| `GET /v1/agents/sessions` | PUBLIC | SESSION_LIST | READER |
-| `GET /v1/agents/sessions/{sessionId}` | PUBLIC | SESSION_GET | READER |
-| `PATCH /v1/agents/sessions/{sessionId}` | PUBLIC | SESSION_RENAME | OPERATOR |
-| `POST /v1/agents/sessions/{sessionId}/close` | PUBLIC | SESSION_CLOSE | OWNER |
-| `POST /v1/agents/sessions/{sessionId}/archive` | PUBLIC | SESSION_ARCHIVE | OWNER |
-| `POST /v1/agents/sessions/{sessionId}/unarchive` | PUBLIC | SESSION_UNARCHIVE | OWNER |
-| `DELETE /v1/agents/sessions/{sessionId}` | PUBLIC | SESSION_DELETE | OWNER |
-| `GET /v1/agents/sessions/{sessionId}/operations/{operationId}` | PUBLIC | SESSION_OPERATION_GET | READER |
-| `POST /v1/agents/sessions/{sessionId}/cwd` | PUBLIC | SESSION_CWD_CHANGE | OWNER |
-| `POST /v1/agents/sessions/{sessionId}/events` | PUBLIC | TURN_SUBMIT, TURN_CANCEL | OPERATOR |
-| `GET /v1/agents/sessions/{sessionId}/events` | PUBLIC | TAIL_EVENTS | READER |
-| `GET /v1/agents/sessions/{sessionId}/items` | PUBLIC | ITEM_LIST | READER |
-| `GET /v1/agents/sessions/{sessionId}/turns` | PUBLIC | TURN_LIST | READER |
-| `GET /v1/agents/sessions/{sessionId}/turns/{turnId}` | PUBLIC | TURN_GET | READER |
-| `GET /v1/agents/sessions/{sessionId}/tasks` | PUBLIC | TASK_LIST | READER |
-| `GET /v1/agents/sessions/{sessionId}/tasks/{taskId}` | PUBLIC | TASK_GET | READER |
-| `GET /v1/agents/sessions/{sessionId}/tasks/{taskId}/events` | PUBLIC | TASK_EVENT_LIST | READER |
-| `GET /v1/agents/sessions/{sessionId}/actions` | PUBLIC | ACTION_LIST | READER |
-| `GET /v1/agents/sessions/{sessionId}/actions/{actionId}` | PUBLIC | ACTION_GET | READER |
-| `POST /v1/agents/sessions/{sessionId}/actions/{actionId}/responses` | PUBLIC | ACTION_RESPOND | OWNER |
-| `GET /v1/agents/sessions/{sessionId}/items/{itemId}/tool-result` | PUBLIC | TOOL_RESULT_GET | READER_ACTOR |
-| `GET /v1/agents/sessions/{sessionId}/artifacts` | PUBLIC | ARTIFACT_LIST | READER_ACTOR |
-| `GET /v1/agents/sessions/{sessionId}/artifacts/{artifactId}` | PUBLIC | ARTIFACT_GET | READER_ACTOR |
-| `GET /v1/agents/sessions/{sessionId}/artifacts/{artifactId}/content` | PUBLIC | ARTIFACT_CONTENT | READER_ACTOR_POLICY |
-| `GET /v1/agents/sessions/{sessionId}/hook-catalog` | PUBLIC | HOOK_CATALOG | READER |
-| `GET /v1/agents/sessions/{sessionId}/mcp-catalog` | PUBLIC | MCP_CATALOG | READER |
-| `GET /v1/agents/workspaces` | PUBLIC | WORKSPACE_LIST | WORKSPACE_DISCOVERY |
-| `GET /v1/agents/workspaces/{workspaceId}` | PUBLIC | WORKSPACE_GET | WORKSPACE_DISCOVERY |
-| `POST /v1/agents` | PUBLIC | AGENT_DEFINITION_CREATE | TENANT_SCOPED |
-| `GET /v1/agents/{agentId}` | PUBLIC | AGENT_DEFINITION_GET | TENANT_SCOPED |
-| `POST /v1/agents/{agentId}` | PUBLIC | AGENT_DEFINITION_UPDATE | TENANT_SCOPED |
-| `POST /api/agent/web-shell/v1/tasks/query` | WEBSHELL | TASK_LIST | READER |
-| `POST /api/agent/web-shell/v1/tasks/get` | WEBSHELL | TASK_GET | READER |
-| `POST /api/agent/web-shell/v1/tasks/events/query` | WEBSHELL | TASK_EVENT_LIST | READER |
-| `POST /api/agent/web-shell/v1/sessions/query` | WEBSHELL | SESSION_LIST | READER |
-| `POST /api/agent/web-shell/v1/sessions/get` | WEBSHELL | SESSION_GET | READER |
-| `POST /api/agent/web-shell/v1/transcript/query` | WEBSHELL | TRANSCRIPT_QUERY | READER |
-| `POST /api/agent/web-shell/v1/events/stream` | WEBSHELL | TAIL_EVENTS | READER |
-| `POST /api/agent/web-shell/v1/sessions/create` | WEBSHELL | SESSION_CREATE | WORKSPACE_CREATE |
-| `POST /api/agent/web-shell/v1/turns/submit` | WEBSHELL | TURN_SUBMIT | OPERATOR |
-| `POST /api/agent/web-shell/v1/turns/cancel` | WEBSHELL | TURN_CANCEL | OPERATOR |
-| `POST /api/agent/web-shell/v1/sessions/close` | WEBSHELL | SESSION_CLOSE | OWNER |
-| `POST /api/agent/web-shell/v1/sessions/archive` | WEBSHELL | SESSION_ARCHIVE | OWNER |
-| `POST /api/agent/web-shell/v1/sessions/delete` | WEBSHELL | SESSION_DELETE | OWNER |
-| `POST /api/agent/web-shell/v1/sessions/unarchive` | WEBSHELL | SESSION_UNARCHIVE | OWNER |
-| `POST /api/agent/web-shell/v1/operations/query` | WEBSHELL | SESSION_OPERATION_GET | READER |
-| `POST /api/agent/web-shell/v1/sessions/cwd/change` | WEBSHELL | SESSION_CWD_CHANGE | OWNER |
-| `POST /api/agent/web-shell/v1/actions/query` | WEBSHELL | ACTION_LIST | READER |
-| `POST /api/agent/web-shell/v1/actions/get` | WEBSHELL | ACTION_GET | READER |
-| `POST /api/agent/web-shell/v1/actions/respond` | WEBSHELL | ACTION_RESPOND | OWNER |
-| `POST /api/agent/web-shell/v1/tool-results/get` | WEBSHELL | TOOL_RESULT_GET | READER_ACTOR |
-| `POST /api/agent/web-shell/v1/artifacts/get` | WEBSHELL | ARTIFACT_GET | READER_ACTOR |
-| `POST /api/agent/web-shell/v1/artifacts/query` | WEBSHELL | ARTIFACT_LIST | READER_ACTOR |
-| `POST /api/agent/web-shell/v1/workspaces/query` | WEBSHELL | WORKSPACE_LIST | WORKSPACE_DISCOVERY |
-| `POST /api/agent/web-shell/v1/workspaces/get` | WEBSHELL | WORKSPACE_GET | WORKSPACE_DISCOVERY |
-| `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:acquire` | INTERNAL | STORE_WRITER_ACQUIRE | INTERNAL_WRITER |
-| `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:renew` | INTERNAL | STORE_WRITER_RENEW | INTERNAL_WRITER |
-| `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:seal` | INTERNAL | STORE_WRITER_SEAL | INTERNAL_WRITER |
-| `POST /internal/managed-session-store/v1/sessions/{sessionId}/recovery:block` | INTERNAL | STORE_RECOVERY_BLOCK | INTERNAL_WRITER |
-| `POST /internal/managed-session-store/v1/sessions/{sessionId}/transactions:commit` | INTERNAL | STORE_TRANSACTION_COMMIT | INTERNAL_WRITER |
-| `GET /internal/managed-session-store/v1/sessions/{sessionId}/restore` | INTERNAL | STORE_RESTORE | INTERNAL_WRITER |
-| `POST /internal/managed-session-store/v1/sessions/{sessionId}/tool-results:publish` | INTERNAL | STORE_TOOL_RESULT_PUBLISH | INTERNAL_WRITER |
-| `GET /internal/managed-session-store/v1/sessions/{sessionId}/transactions` | INTERNAL | STORE_TRANSACTION_LIST | INTERNAL_WRITER |
-| `GET /internal/managed-session-store/v1/sessions/{sessionId}/resources/{resourceId}` | INTERNAL | STORE_RESOURCE_GET | INTERNAL_WRITER |
-| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/grants` | INTERNAL | PUB_GRANT | INTERNAL_WRITER |
-| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/segments/{streamId}/{ordinal}` | INTERNAL | PUB_SEGMENT | INTERNAL_WRITER |
-| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/resources/{kind}/{slot}` | INTERNAL | PUB_RESOURCE | INTERNAL_WRITER |
-| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/streams/{streamId}/seal` | INTERNAL | PUB_STREAM_SEAL | INTERNAL_WRITER |
-| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/streams/{streamId}/prefix` | INTERNAL | PUB_STREAM_PREFIX | INTERNAL_WRITER |
-| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/finish` | INTERNAL | PUB_FINISH | INTERNAL_WRITER |
-| `GET /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/operations/{operationId}` | INTERNAL | PUB_OPERATION_GET | INTERNAL_WRITER |
-| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/operations/{operationId}/recover` | INTERNAL | PUB_OPERATION_RECOVER | INTERNAL_WRITER |
-| `GET /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/finished` | INTERNAL | PUB_FINISHED | INTERNAL_WRITER |
-| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/admissions/prepare` | INTERNAL | PUB_ADMISSION_PREPARE | INTERNAL_WRITER |
-| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/receipts/verify` | INTERNAL | PUB_RECEIPT_VERIFY | INTERNAL_WRITER |
-| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/receipts/commit` | INTERNAL | PUB_RECEIPT_COMMIT | INTERNAL_WRITER |
-| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/range` | INTERNAL | PUB_RANGE | INTERNAL_WRITER |
+| 路由                                                                                                                             | 面       | 能力                      | 规则类（切片 C 后） |
+| -------------------------------------------------------------------------------------------------------------------------------- | -------- | ------------------------- | ------------------- |
+| `POST /v1/agents/sessions`                                                                                                       | PUBLIC   | SESSION_CREATE            | WORKSPACE_CREATE    |
+| `GET /v1/agents/sessions`                                                                                                        | PUBLIC   | SESSION_LIST              | READER              |
+| `GET /v1/agents/sessions/{sessionId}`                                                                                            | PUBLIC   | SESSION_GET               | READER              |
+| `PATCH /v1/agents/sessions/{sessionId}`                                                                                          | PUBLIC   | SESSION_RENAME            | OPERATOR            |
+| `POST /v1/agents/sessions/{sessionId}/close`                                                                                     | PUBLIC   | SESSION_CLOSE             | OWNER               |
+| `POST /v1/agents/sessions/{sessionId}/archive`                                                                                   | PUBLIC   | SESSION_ARCHIVE           | OWNER               |
+| `POST /v1/agents/sessions/{sessionId}/unarchive`                                                                                 | PUBLIC   | SESSION_UNARCHIVE         | OWNER               |
+| `DELETE /v1/agents/sessions/{sessionId}`                                                                                         | PUBLIC   | SESSION_DELETE            | OWNER               |
+| `GET /v1/agents/sessions/{sessionId}/operations/{operationId}`                                                                   | PUBLIC   | SESSION_OPERATION_GET     | READER              |
+| `POST /v1/agents/sessions/{sessionId}/cwd`                                                                                       | PUBLIC   | SESSION_CWD_CHANGE        | OPERATOR            |
+| `POST /v1/agents/sessions/{sessionId}/events`                                                                                    | PUBLIC   | TURN_SUBMIT, TURN_CANCEL  | OPERATOR            |
+| `GET /v1/agents/sessions/{sessionId}/events`                                                                                     | PUBLIC   | TAIL_EVENTS               | READER              |
+| `GET /v1/agents/sessions/{sessionId}/items`                                                                                      | PUBLIC   | ITEM_LIST                 | READER              |
+| `GET /v1/agents/sessions/{sessionId}/turns`                                                                                      | PUBLIC   | TURN_LIST                 | READER              |
+| `GET /v1/agents/sessions/{sessionId}/turns/{turnId}`                                                                             | PUBLIC   | TURN_GET                  | READER              |
+| `GET /v1/agents/sessions/{sessionId}/tasks`                                                                                      | PUBLIC   | TASK_LIST                 | READER              |
+| `GET /v1/agents/sessions/{sessionId}/tasks/{taskId}`                                                                             | PUBLIC   | TASK_GET                  | READER              |
+| `GET /v1/agents/sessions/{sessionId}/tasks/{taskId}/events`                                                                      | PUBLIC   | TASK_EVENT_LIST           | READER              |
+| `GET /v1/agents/sessions/{sessionId}/actions`                                                                                    | PUBLIC   | ACTION_LIST               | READER              |
+| `GET /v1/agents/sessions/{sessionId}/actions/{actionId}`                                                                         | PUBLIC   | ACTION_GET                | READER              |
+| `POST /v1/agents/sessions/{sessionId}/actions/{actionId}/responses`                                                              | PUBLIC   | ACTION_RESPOND            | OPERATOR            |
+| `GET /v1/agents/sessions/{sessionId}/items/{itemId}/tool-result`                                                                 | PUBLIC   | TOOL_RESULT_GET           | READER_ACTOR        |
+| `GET /v1/agents/sessions/{sessionId}/artifacts`                                                                                  | PUBLIC   | ARTIFACT_LIST             | READER_ACTOR        |
+| `GET /v1/agents/sessions/{sessionId}/artifacts/{artifactId}`                                                                     | PUBLIC   | ARTIFACT_GET              | READER_ACTOR        |
+| `GET /v1/agents/sessions/{sessionId}/artifacts/{artifactId}/content`                                                             | PUBLIC   | ARTIFACT_CONTENT          | READER_ACTOR_POLICY |
+| `GET /v1/agents/sessions/{sessionId}/hook-catalog`                                                                               | PUBLIC   | HOOK_CATALOG              | READER              |
+| `GET /v1/agents/sessions/{sessionId}/mcp-catalog`                                                                                | PUBLIC   | MCP_CATALOG               | READER              |
+| `GET /v1/agents/workspaces`                                                                                                      | PUBLIC   | WORKSPACE_LIST            | WORKSPACE_DISCOVERY |
+| `GET /v1/agents/workspaces/{workspaceId}`                                                                                        | PUBLIC   | WORKSPACE_GET             | WORKSPACE_DISCOVERY |
+| `POST /v1/agents`                                                                                                                | PUBLIC   | AGENT_DEFINITION_CREATE   | TENANT_SCOPED       |
+| `GET /v1/agents/{agentId}`                                                                                                       | PUBLIC   | AGENT_DEFINITION_GET      | TENANT_SCOPED       |
+| `POST /v1/agents/{agentId}`                                                                                                      | PUBLIC   | AGENT_DEFINITION_UPDATE   | TENANT_SCOPED       |
+| `POST /api/agent/web-shell/v1/tasks/query`                                                                                       | WEBSHELL | TASK_LIST                 | READER              |
+| `POST /api/agent/web-shell/v1/tasks/get`                                                                                         | WEBSHELL | TASK_GET                  | READER              |
+| `POST /api/agent/web-shell/v1/tasks/events/query`                                                                                | WEBSHELL | TASK_EVENT_LIST           | READER              |
+| `POST /api/agent/web-shell/v1/sessions/query`                                                                                    | WEBSHELL | SESSION_LIST              | READER              |
+| `POST /api/agent/web-shell/v1/sessions/get`                                                                                      | WEBSHELL | SESSION_GET               | READER              |
+| `POST /api/agent/web-shell/v1/transcript/query`                                                                                  | WEBSHELL | TRANSCRIPT_QUERY          | READER              |
+| `POST /api/agent/web-shell/v1/events/stream`                                                                                     | WEBSHELL | TAIL_EVENTS               | READER              |
+| `POST /api/agent/web-shell/v1/sessions/create`                                                                                   | WEBSHELL | SESSION_CREATE            | WORKSPACE_CREATE    |
+| `POST /api/agent/web-shell/v1/turns/submit`                                                                                      | WEBSHELL | TURN_SUBMIT               | OPERATOR            |
+| `POST /api/agent/web-shell/v1/turns/cancel`                                                                                      | WEBSHELL | TURN_CANCEL               | OPERATOR            |
+| `POST /api/agent/web-shell/v1/sessions/close`                                                                                    | WEBSHELL | SESSION_CLOSE             | OWNER               |
+| `POST /api/agent/web-shell/v1/sessions/archive`                                                                                  | WEBSHELL | SESSION_ARCHIVE           | OWNER               |
+| `POST /api/agent/web-shell/v1/sessions/delete`                                                                                   | WEBSHELL | SESSION_DELETE            | OWNER               |
+| `POST /api/agent/web-shell/v1/sessions/unarchive`                                                                                | WEBSHELL | SESSION_UNARCHIVE         | OWNER               |
+| `POST /api/agent/web-shell/v1/operations/query`                                                                                  | WEBSHELL | SESSION_OPERATION_GET     | READER              |
+| `POST /api/agent/web-shell/v1/sessions/cwd/change`                                                                               | WEBSHELL | SESSION_CWD_CHANGE        | OPERATOR            |
+| `POST /api/agent/web-shell/v1/actions/query`                                                                                     | WEBSHELL | ACTION_LIST               | READER              |
+| `POST /api/agent/web-shell/v1/actions/get`                                                                                       | WEBSHELL | ACTION_GET                | READER              |
+| `POST /api/agent/web-shell/v1/actions/respond`                                                                                   | WEBSHELL | ACTION_RESPOND            | OPERATOR            |
+| `POST /api/agent/web-shell/v1/tool-results/get`                                                                                  | WEBSHELL | TOOL_RESULT_GET           | READER_ACTOR        |
+| `POST /api/agent/web-shell/v1/artifacts/get`                                                                                     | WEBSHELL | ARTIFACT_GET              | READER_ACTOR        |
+| `POST /api/agent/web-shell/v1/artifacts/query`                                                                                   | WEBSHELL | ARTIFACT_LIST             | READER_ACTOR        |
+| `POST /api/agent/web-shell/v1/workspaces/query`                                                                                  | WEBSHELL | WORKSPACE_LIST            | WORKSPACE_DISCOVERY |
+| `POST /api/agent/web-shell/v1/workspaces/get`                                                                                    | WEBSHELL | WORKSPACE_GET             | WORKSPACE_DISCOVERY |
+| `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:acquire`                                                   | INTERNAL | STORE_WRITER_ACQUIRE      | INTERNAL_WRITER     |
+| `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:renew`                                                     | INTERNAL | STORE_WRITER_RENEW        | INTERNAL_WRITER     |
+| `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:seal`                                                      | INTERNAL | STORE_WRITER_SEAL         | INTERNAL_WRITER     |
+| `POST /internal/managed-session-store/v1/sessions/{sessionId}/recovery:block`                                                    | INTERNAL | STORE_RECOVERY_BLOCK      | INTERNAL_WRITER     |
+| `POST /internal/managed-session-store/v1/sessions/{sessionId}/transactions:commit`                                               | INTERNAL | STORE_TRANSACTION_COMMIT  | INTERNAL_WRITER     |
+| `GET /internal/managed-session-store/v1/sessions/{sessionId}/restore`                                                            | INTERNAL | STORE_RESTORE             | INTERNAL_WRITER     |
+| `POST /internal/managed-session-store/v1/sessions/{sessionId}/tool-results:publish`                                              | INTERNAL | STORE_TOOL_RESULT_PUBLISH | INTERNAL_WRITER     |
+| `GET /internal/managed-session-store/v1/sessions/{sessionId}/transactions`                                                       | INTERNAL | STORE_TRANSACTION_LIST    | INTERNAL_WRITER     |
+| `GET /internal/managed-session-store/v1/sessions/{sessionId}/resources/{resourceId}`                                             | INTERNAL | STORE_RESOURCE_GET        | INTERNAL_WRITER     |
+| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/grants`                                                        | INTERNAL | PUB_GRANT                 | INTERNAL_WRITER     |
+| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/segments/{streamId}/{ordinal}`    | INTERNAL | PUB_SEGMENT               | INTERNAL_WRITER     |
+| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/resources/{kind}/{slot}`          | INTERNAL | PUB_RESOURCE              | INTERNAL_WRITER     |
+| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/streams/{streamId}/seal`          | INTERNAL | PUB_STREAM_SEAL           | INTERNAL_WRITER     |
+| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/streams/{streamId}/prefix`        | INTERNAL | PUB_STREAM_PREFIX         | INTERNAL_WRITER     |
+| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/finish`                           | INTERNAL | PUB_FINISH                | INTERNAL_WRITER     |
+| `GET /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/operations/{operationId}`          | INTERNAL | PUB_OPERATION_GET         | INTERNAL_WRITER     |
+| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/operations/{operationId}/recover` | INTERNAL | PUB_OPERATION_RECOVER     | INTERNAL_WRITER     |
+| `GET /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/finished`                          | INTERNAL | PUB_FINISHED              | INTERNAL_WRITER     |
+| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/admissions/prepare`               | INTERNAL | PUB_ADMISSION_PREPARE     | INTERNAL_WRITER     |
+| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/receipts/verify`                                               | INTERNAL | PUB_RECEIPT_VERIFY        | INTERNAL_WRITER     |
+| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/receipts/commit`                  | INTERNAL | PUB_RECEIPT_COMMIT        | INTERNAL_WRITER     |
+| `POST /internal/managed-tool-publications/v1/sessions/{sessionId}/publications/{publicationId}/range`                            | INTERNAL | PUB_RANGE                 | INTERNAL_WRITER     |

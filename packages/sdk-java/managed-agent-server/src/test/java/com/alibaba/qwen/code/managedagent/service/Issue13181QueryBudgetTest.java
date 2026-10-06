@@ -750,7 +750,7 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void boundWebShellPageBatchesTheCreatorSubmitCapability() {
+    void boundWebShellPageBatchesTheRoleSubmitCapability() {
         Fixture fixture = new Fixture();
         when(fixture.harness.isWorkspaceFilesAvailable()).thenReturn(true);
         String tenant = "tenant-" + UUID.randomUUID();
@@ -766,8 +766,8 @@ class Issue13181QueryBudgetTest {
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')",
                     tenant, actor.getBytes(StandardCharsets.UTF_8));
         }
-        // A second workspace where the actor reads but cannot create: its
-        // session exercises the grant's role term, and the page's two
+        // A second workspace where the actor's role lands below OPERATOR:
+        // its session exercises the grant's role term, and the page's two
         // workspaces make the grant batch's single-query shape
         // discriminable.
         fixture.jdbc.update("INSERT INTO managed_workspace_registry"
@@ -793,9 +793,8 @@ class Issue13181QueryBudgetTest {
                             new WorkspaceSelection(workspace, ".")))
                     .sessionId());
         }
-        // One creator-owned session is closed: the shape gate fences it even
-        // for its creator. The workspace2 grant then drops to READER: its
-        // session exercises the grant term.
+        // One session is closed: the shape gate fences it. The workspace2
+        // grant then drops to READER: its session exercises the role term.
         fixture.jdbc.update("UPDATE managed_agent_session SET status ="
                 + " 'CLOSED' WHERE tenant_id = ? AND session_id = ?", tenant,
                 ids.get(3));
@@ -807,20 +806,19 @@ class Issue13181QueryBudgetTest {
                 null, 20).data();
         assertThat(page).hasSize(7);
         System.out.println("[issue-13181] listWebShellSessions(7 mixed"
-                + " creator rows): " + fixture.ledger.summary());
-        // Page + latest turns + the close batch + the creator batch + the
-        // grant batch across both workspaces: constant, not per row.
-        assertThat(fixture.ledger.total()).isEqualTo(5);
-        assertThat(fixture.ledger.count(
-                "from managed_workspace_create_command")).isEqualTo(1);
+                + " role rows): " + fixture.ledger.summary());
+        // Page + latest turns + the close batch + the grant batch across
+        // both workspaces: constant, not per row.
+        assertThat(fixture.ledger.total()).isEqualTo(4);
         assertThat(fixture.ledger.count("from managed_workspace_registry"))
                 .isEqualTo(1);
-        // workspaceTurns holds exactly for the caller's own ACTIVE sessions
-        // on a workspace where the grant still allows creation.
+        // workspaceTurns holds exactly for ACTIVE sessions on a workspace
+        // where the caller's role is OPERATOR or above, whatever the
+        // Session's creator.
         for (var row : page) {
             int index = ids.indexOf(row.sessionId());
             assertThat(row.capabilities().workspaceTurns())
-                    .isEqualTo(index < 3);
+                    .isEqualTo(index != 3 && index != 6);
         }
     }
 

@@ -149,7 +149,7 @@ class ManagedCwdChangeOperationTest {
     }
 
     @Test
-    void admissionRequiresTheOptInAndTheCreatorGrant() {
+    void admissionRequiresTheOptInAndTheOperatorRole() {
         Fixture disabled = fixture(false);
         String gatedId = disabled.createBoundSession(TENANT, WS);
         assertThatThrownBy(() -> begin(disabled, gatedId, "key", "digest",
@@ -167,29 +167,36 @@ class ManagedCwdChangeOperationTest {
 
         Fixture fixture = fixture(true);
         String sessionId = fixture.createBoundSession(TENANT, WS);
-        // A stranger (no read grant) is invisible; a readable grantee who
-        // is not the creator gets the sibling operations' 403; a creator
-        // whose grant was revoked fails the shared Registry-fact gate that
-        // the settlement re-verifies the same way.
+        // A stranger (no read grant) is invisible; a readable grantee below
+        // OPERATOR gets the sibling operations' 403; any OPERATOR is
+        // admitted, owner or not; an owner whose role dropped to READER
+        // fails the role check, while the settlement still re-verifies the
+        // creator's grant set as before.
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1, "stranger", "digest-stranger"))
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
-        fixture.grant(TENANT, WS, "colleague", "OPERATOR");
+        fixture.grant(TENANT, WS, "colleague", "READER");
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1, "colleague", "digest-colleague"))
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.FORBIDDEN,
                                 "session_operation_forbidden"));
+        fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
+        OperationAdmission admitted = begin(fixture, sessionId, "key",
+                "digest", "services/b", 1, "operator-colleague",
+                "digest-operator");
+        assertThat(admitted.replayed()).isFalse();
+        assertThat(admitted.operation().state()).isEqualTo("PENDING");
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
                         + " role = 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ?", TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1))
                 .isInstanceOfSatisfying(ApiException.class,
-                        error -> assertRefusal(error, HttpStatus.CONFLICT,
-                                "workspace_unavailable"));
+                        error -> assertRefusal(error, HttpStatus.FORBIDDEN,
+                                "session_operation_forbidden"));
     }
 
     // A revoked read grant must also close the replay path: the actor
@@ -528,7 +535,8 @@ class ManagedCwdChangeOperationTest {
 
     // The refusal order is the design's post-precondition answer: a caller
     // outside the actor's scope never learns the state or the revision, and
-    // a readable non-creator sees the sibling 403 before the state checks.
+    // a readable actor below OPERATOR sees the sibling 403 before the state
+    // checks, while an admitted OPERATOR reaches the state checks.
     @Test
     void actorRefusalPrecedesTheStateAndRevisionChecks() {
         Fixture fixture = fixture(true);
@@ -541,12 +549,18 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
-        fixture.grant(TENANT, WS, "colleague", "OPERATOR");
+        fixture.grant(TENANT, WS, "colleague", "READER");
         assertThatThrownBy(() -> begin(fixture, archivedId, "key",
                 "digest", "a", 1, "colleague", "digest-colleague"))
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.FORBIDDEN,
                                 "session_operation_forbidden"));
+        fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
+        assertThatThrownBy(() -> begin(fixture, archivedId, "key",
+                "digest", "a", 1, "operator-colleague", "digest-operator"))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.CONFLICT,
+                                "session_state_conflict"));
         String activeId = fixture.createBoundSession(TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, activeId, "key", "digest",
                 "a", 7, "stranger", "digest-stranger"))

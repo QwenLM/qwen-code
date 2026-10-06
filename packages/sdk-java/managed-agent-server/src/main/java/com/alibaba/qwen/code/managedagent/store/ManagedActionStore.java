@@ -57,6 +57,12 @@ public class ManagedActionStore {
                 sessionId);
     }
 
+    // The responder gate: the Session's recorded owner (owner_actor_key,
+    // falling back to the creator records for pre-V40 Sessions) answers,
+    // and so does any actor holding OPERATOR on the Session's Workspace —
+    // the approval handoff the roles vocabulary exists for. An anonymous
+    // open-mode Session with neither an owner record nor a create command
+    // stays tenant-owned, matching its read semantics.
     public void requireOwner(String tenantId, String sessionId, String actorId) {
         byte[] key;
         try {
@@ -66,44 +72,67 @@ public class ManagedActionStore {
             throw new ApiException(HttpStatus.FORBIDDEN,
                     "actor_scope_mismatch", "Authenticated actor scope is invalid.");
         }
-        byte[] creator = DataAccessUtils.nullableSingleResult(jdbc.query(
-                "SELECT creator_actor_key FROM managed_agent_session WHERE"
+        OwnerRow session = DataAccessUtils.nullableSingleResult(jdbc.query(
+                "SELECT owner_actor_key, creator_actor_key, workspace_id"
+                        + " FROM managed_agent_session WHERE"
                         + " tenant_id = ? AND session_id = ?",
-                (result, row) -> result.getBytes(1), tenantId, sessionId));
-        if (creator != null) {
-            if (key != null && Arrays.equals(creator, key)) {
+                (result, row) -> new OwnerRow(result.getBytes(1),
+                        result.getBytes(2), result.getString(3)),
+                tenantId, sessionId));
+        byte[] recorded = session == null ? null
+                : session.owner() != null ? session.owner() : session.creator();
+        if (recorded != null) {
+            if (key != null && Arrays.equals(recorded, key)) {
                 return;
             }
-            throw forbidden();
+        } else {
+            int commands = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
+                            + " tenant_id = ? AND session_id = ?",
+                    Integer.class, tenantId, sessionId);
+            if (commands == 0) {
+                if (session == null || session.workspaceId() == null) {
+                    // No recorded owner: an anonymous open-mode Session is
+                    // tenant-owned, matching its read semantics.
+                    return;
+                }
+                // A bound Session without an owner record answers through
+                // the Workspace role arm alone.
+            } else if (key != null
+                    && jdbc.queryForObject(
+                            "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
+                                    + " tenant_id = ? AND session_id = ? AND actor_id = ?",
+                            Integer.class, tenantId, sessionId, key) == 1) {
+                return;
+            }
         }
-        int owners = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
-                        + " tenant_id = ? AND session_id = ?",
-                Integer.class, tenantId, sessionId);
-        if (owners == 0) {
-            // No recorded creator: an anonymous open-mode Session is
-            // tenant-owned, matching its read semantics.
-            return;
-        }
-        if (key != null
-                && jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
-                                        + " tenant_id = ? AND session_id = ? AND actor_id = ?",
-                                Integer.class,
-                                tenantId,
-                                sessionId,
-                                key)
-                        == 1) {
+        if (session != null && session.workspaceId() != null && key != null
+                && !jdbc.queryForList(
+                        "SELECT 1 FROM managed_workspace_access WHERE"
+                                + " tenant_id = ? AND workspace_id = ?"
+                                + " AND CAST(CONCAT(tenant_id, '!')"
+                                + " AS BINARY(513)) = CAST(CONCAT(?, '!')"
+                                + " AS BINARY(513))"
+                                + " AND CAST(CONCAT(workspace_id, '!')"
+                                + " AS BINARY(513)) = CAST(CONCAT(?, '!')"
+                                + " AS BINARY(513))"
+                                + " AND actor_id = ? AND role IN ('OPERATOR',"
+                                + " 'OWNER')",
+                        Integer.class, tenantId, session.workspaceId(),
+                        tenantId, session.workspaceId(), key).isEmpty()) {
             return;
         }
         throw forbidden();
+    }
+
+    private record OwnerRow(byte[] owner, byte[] creator, String workspaceId) {
     }
 
     private static ApiException forbidden() {
         return new ApiException(
                 HttpStatus.FORBIDDEN,
                 "action_forbidden",
-                "Only the Session's creator may answer its Actions.");
+                "Only the Session's owner or a Workspace operator may answer its Actions.");
     }
 
     void apply(

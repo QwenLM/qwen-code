@@ -70,6 +70,9 @@ class HostedPublicWorkspaceIT {
     private boolean approvals;
     private boolean durableClose;
     private final java.util.Set<String> answered = new java.util.HashSet<>();
+    // Sessions whose first approval was answered by the operator who is not
+    // the Session owner, proving R1's second-operator handoff.
+    private final java.util.Set<String> operatorAnswered = new java.util.HashSet<>();
 
     @Test
     @Timeout(150)
@@ -519,13 +522,14 @@ class HostedPublicWorkspaceIT {
             assertThat(request("POST", route, changed, workspace, "actor", 409).path("error").path("code").asText())
                     .isEqualTo("idempotency_conflict");
             request("GET", "/v1/agents/sessions/" + session, null, null, "other", 404);
-            // A later Turn runs under the creator's grants: another actor who can read the
-            // Session keeps the refusal, and the creator's second Turn runs the file tools again.
+            // A later Turn needs the OPERATOR role: a READER keeps the refusal,
+            // and the owner's second Turn runs the file tools again under the
+            // session owner admission.
             Map<String, Object> later = Map.of("type", "agent.session.input.message", "input",
                     List.of(Map.of("type", "input_text", "text", "G0_AGAIN")));
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
-                    "reader-later-" + workspace, "reader", 409).path("error").path("code").asText())
-                    .isEqualTo("workspace_unavailable");
+                    "reader-later-" + workspace, "reader", 403).path("error").path("code").asText())
+                    .isEqualTo("session_operation_forbidden");
             // WebShell advertises the same rule, per caller.
             for (String caller : List.of("actor", "reader")) {
                 assertThat(request("POST", "/api/agent/web-shell/v1/sessions/get", Map.of("sessionId", session),
@@ -561,8 +565,8 @@ class HostedPublicWorkspaceIT {
             // that a later Turn under approval-mode=default is admitted and completes.
             if (approvals) continue;
 
-            // The creator can cancel a running later Turn; the Hosted Harness aborts it before
-            // any tool runs. Another reader keeps the refusal.
+            // An OPERATOR can cancel a running later Turn; the Hosted Harness aborts it before
+            // any tool runs. The READER keeps the refusal.
             int beforeCancel = modelRequests.size();
             Map<String, Object> hold = Map.of("type", "agent.session.input.message", "input",
                     List.of(Map.of("type", "input_text", "text", "G0_CANCEL")));
@@ -571,8 +575,8 @@ class HostedPublicWorkspaceIT {
             await().atMost(Duration.ofSeconds(35)).until(() -> modelRequests.size() > beforeCancel);
             Map<String, Object> cancel = Map.of("type", "agent.session.cancel", "turn_id", heldTurn);
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", cancel,
-                    "reader-cancel-" + workspace, "reader", 409).path("error").path("code").asText())
-                    .isEqualTo("workspace_unavailable");
+                    "reader-cancel-" + workspace, "reader", 403).path("error").path("code").asText())
+                    .isEqualTo("session_operation_forbidden");
             request("POST", "/v1/agents/sessions/" + session + "/events", cancel, "cancel-" + workspace,
                     "actor", 202);
             await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
@@ -583,28 +587,29 @@ class HostedPublicWorkspaceIT {
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
                     Long.class, session)).isEqualTo(executions * 2);
 
-            // Only the creator may rename the bound Session.
+            // Any OPERATOR may rename the bound Session; the READER keeps the refusal.
             Map<String, Object> rename = Map.of("title", "Renamed " + workspace);
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "reader-rename-" + workspace,
-                    "reader", 409).path("error").path("code").asText()).isEqualTo("workspace_unavailable");
+                    "reader", 403).path("error").path("code").asText()).isEqualTo("session_operation_forbidden");
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "rename-" + workspace,
                     "actor", 200).path("metadata").path("title").asText()).isEqualTo("Renamed " + workspace);
 
-            // A creator whose grant drops to READER keeps read access but loses
-            // admission: submit, cancel and rename all answer workspace_unavailable,
-            // nothing new executes, and no PENDING command row is left behind.
+            // An owner whose role drops to READER keeps read access but loses
+            // submitter admission: submit, cancel and rename all answer
+            // session_operation_forbidden, nothing new executes, and no
+            // PENDING command row is left behind.
             jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
-                    "nocreate-later-" + workspace, "actor", 409).path("error").path("code").asText())
-                    .isEqualTo("workspace_unavailable");
+                    "nocreate-later-" + workspace, "actor", 403).path("error").path("code").asText())
+                    .isEqualTo("session_operation_forbidden");
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", cancel,
-                    "nocreate-cancel-" + workspace, "actor", 409).path("error").path("code").asText())
-                    .isEqualTo("workspace_unavailable");
+                    "nocreate-cancel-" + workspace, "actor", 403).path("error").path("code").asText())
+                    .isEqualTo("session_operation_forbidden");
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
-                    "nocreate-rename-" + workspace, "actor", 409).path("error").path("code").asText())
-                    .isEqualTo("workspace_unavailable");
+                    "nocreate-rename-" + workspace, "actor", 403).path("error").path("code").asText())
+                    .isEqualTo("session_operation_forbidden");
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
                     Long.class, session)).isEqualTo(executions * 2);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
@@ -737,8 +742,14 @@ class HostedPublicWorkspaceIT {
         // The reader grant exists in both runs so the later-Turn block can also run under
         // approval-mode=default without colliding with the access table's primary key.
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                        + " VALUES (?, ?, ?, ?)", tenant, workspace, "reader".getBytes(StandardCharsets.UTF_8),
-                !approvals ? "OPERATOR" : "READER");
+                        + " VALUES (?, ?, ?, 'READER')", tenant, workspace, "reader".getBytes(StandardCharsets.UTF_8));
+        if (approvals) {
+            // R1's second operator: a Workspace OPERATOR who is not the
+            // Session owner answers a pending approval.
+            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                            + " VALUES (?, ?, ?, 'OPERATOR')", tenant, workspace,
+                    "operator2".getBytes(StandardCharsets.UTF_8));
+        }
     }
 
     private void answerActions(String session, boolean web) throws Exception {
@@ -760,9 +771,13 @@ class HostedPublicWorkspaceIT {
             Map<String, Object> body = web ? Map.of("sessionId", session, "actionId", id, "idempotencyKey", id,
                     "requestId", "d6b-action", "response", response) : response;
             assertThat(request("POST", route, body, id, "reader", 403).at("/error/code").asText()).isEqualTo("action_forbidden");
-            JsonNode operation = request("POST", route, body, id, "actor", 202);
+            // The first approval of each session is answered by a second
+            // OPERATOR who is not the Session owner (R1's handoff); the
+            // rest by the owner, so both responder paths stay covered.
+            String responder = operatorAnswered.add(session) ? "operator2" : "actor";
+            JsonNode operation = request("POST", route, body, id, responder, 202);
             String op = operation.path(web ? "operationId" : "id").asText();
-            JsonNode replay = request("POST", route, body, id, "actor", 202);
+            JsonNode replay = request("POST", route, body, id, responder, 202);
             assertThat(replay.path(web ? "operationId" : "id").asText()).isEqualTo(op);
             assertThat(replay.path("replayed").asBoolean()).isTrue();
             await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
