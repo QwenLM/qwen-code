@@ -5,7 +5,8 @@
     "mcp_configuration": null,
     "mcp_operation": null,
     "hook_registration": null,
-    "hook_execution": null
+    "hook_execution": null,
+    "child_run": "background_shell"
   },
   "taskStates": [
     "pending",
@@ -61,7 +62,7 @@
       "id": "unicode-record-id",
       "sessionId": "550e8400-e29b-41d4-a716-446655440000",
       "domain": "monitor_run",
-      "recordId": "monitor-\u00e9\u4e2d-1",
+      "recordId": "monitor-é中-1",
       "recordKey": "78e4e63db652e0ec519beea6aaaf58fc14de1e27694bf934bd9814e6799b0988",
       "taskId": "task_78e4e63db652e0ec519beea6aaaf58fc14de1e27694bf934bd9814e6799b0988"
     },
@@ -3853,6 +3854,174 @@
         "definitionRevision": null,
         "createdAt": 1000,
         "startedAt": 1000,
+        "settledAt": null
+      },
+      "deliveryPending": false
+    },
+    {
+      "id": "h3-draining-attached",
+      "run": {
+        "state": "waiting",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "running_attached",
+        "runtime": {
+          "runtimeBindingId": "binding-1",
+          "generation": "1"
+        },
+        "delivery": null
+      },
+      "occurredAt": 3000,
+      "stopRequested": true,
+      "view": {
+        "state": "waiting",
+        "runtimeState": "draining",
+        "definitionRevision": null,
+        "createdAt": 3000,
+        "startedAt": 3000,
+        "settledAt": null
+      },
+      "deliveryPending": false
+    },
+    {
+      "id": "h3-draining-provisioning",
+      "run": {
+        "state": "running",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "dispatch_started",
+        "runtime": {
+          "runtimeBindingId": "binding-1",
+          "generation": "1"
+        },
+        "delivery": null
+      },
+      "occurredAt": 3000,
+      "stopRequested": true,
+      "view": {
+        "state": "running",
+        "runtimeState": "draining",
+        "definitionRevision": null,
+        "createdAt": 3000,
+        "startedAt": 3000,
+        "settledAt": null
+      },
+      "deliveryPending": false
+    },
+    {
+      "id": "h3-draining-lost-kept",
+      "run": {
+        "state": "recovery_blocked",
+        "reason": "runtime_lost",
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "outcome_unknown",
+        "runtime": {
+          "runtimeBindingId": "binding-1",
+          "generation": "1"
+        },
+        "delivery": null
+      },
+      "occurredAt": 3000,
+      "stopRequested": true,
+      "view": {
+        "state": "recovery_blocked",
+        "runtimeState": "lost",
+        "definitionRevision": null,
+        "createdAt": 3000,
+        "startedAt": null,
+        "settledAt": null
+      },
+      "deliveryPending": false
+    },
+    {
+      "id": "h3-draining-terminal-nulled",
+      "run": {
+        "state": "settled",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "settled",
+        "runtime": {
+          "runtimeBindingId": "binding-1",
+          "generation": "1"
+        },
+        "delivery": null
+      },
+      "occurredAt": 3000,
+      "stopRequested": true,
+      "view": {
+        "state": "completed",
+        "runtimeState": null,
+        "definitionRevision": null,
+        "createdAt": 3000,
+        "startedAt": 3000,
+        "settledAt": 3000
+      },
+      "deliveryPending": false
+    },
+    {
+      "id": "h3-draining-unbound",
+      "run": {
+        "state": "running",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "intent",
+        "runtime": null,
+        "delivery": null
+      },
+      "occurredAt": 3000,
+      "stopRequested": true,
+      "view": {
+        "state": "running",
+        "runtimeState": "unbound",
+        "definitionRevision": null,
+        "createdAt": 3000,
+        "startedAt": 3000,
+        "settledAt": null
+      },
+      "deliveryPending": false
+    },
+    {
+      "id": "h3-draining-no-execution",
+      "run": {
+        "state": "waiting",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": null
+      },
+      "occurredAt": 3000,
+      "stopRequested": true,
+      "view": {
+        "state": "waiting",
+        "runtimeState": null,
+        "definitionRevision": null,
+        "createdAt": 3000,
+        "startedAt": 3000,
         "settledAt": null
       },
       "deliveryPending": false

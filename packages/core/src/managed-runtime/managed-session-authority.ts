@@ -10,6 +10,7 @@ import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import {
   isDefinitionPinConsistent,
+  parseMonitorRun,
   parseOperationGrant,
   type ExtensionRun,
   type OperationGrant,
@@ -69,6 +70,7 @@ import {
   parseHookRegistration,
   parseHookExecution,
 } from './managed-hook-record.js';
+import { parseChildRun } from './managed-child-run-record.js';
 import {
   ManagedSessionCommitRejectedError,
   managedSessionActivationStateFrom,
@@ -1301,6 +1303,15 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
+   * Every domain may commit into any header this writer creates: readers
+   * since #12837 parse them all, so nothing here distinguishes Sessions
+   * by their minimumReader. Only the enablement list gates a domain.
+   */
+  private assertDomainAdmittable(domain: ManagedSessionDomain): void {
+    assertManagedSessionDomainEnabled(domain);
+  }
+
+  /**
    * Commits one registered domain record. The body is published as a resource
    * first, because the event carries only a reference to it; the authority
    * composes the envelope so a caller cannot choose its own revision or break
@@ -1314,7 +1325,7 @@ export class LocalManagedSessionAuthority {
     },
     actor: ManagedSessionActor,
   ): Promise<ManagedSessionDomainReceipt> {
-    assertManagedSessionDomainEnabled(request.domain);
+    this.assertDomainAdmittable(request.domain);
     const store = this.resources;
     if (store === undefined) {
       throw new ManagedSessionRecordError(
@@ -1419,7 +1430,7 @@ export class LocalManagedSessionAuthority {
           }
         });
       }
-      assertManagedSessionDomainEnabled(request.domain);
+      this.assertDomainAdmittable(request.domain);
       const parsed = body.parse(request.record);
       await this.verifyExtensionResources(request.domain, parsed.record);
       this.assertExtensionRevision(
@@ -1779,6 +1790,9 @@ export class LocalManagedSessionAuthority {
                 previous?.task ?? null,
                 parsed.run,
                 occurredAt,
+                domain === 'child_run'
+                  ? parseChildRun(parsed.record).stopRequested
+                  : false,
               ),
             }),
     });
@@ -1941,6 +1955,17 @@ export class LocalManagedSessionAuthority {
     } else if (domain === 'hook_execution') {
       const execution = parseHookExecution(record);
       refs = [execution.planRef, execution.inputRef, execution.resultRef];
+    } else if (domain === 'child_run') {
+      const child = parseChildRun(record);
+      refs = [child.commandRef, child.startReceiptRef, child.outputRef];
+    } else if (domain === 'monitor_run') {
+      const monitor = parseMonitorRun(record);
+      refs = [
+        monitor.commandRef,
+        monitor.startReceiptRef,
+        monitor.outputRef,
+        monitor.lastObservationRef,
+      ];
     }
     // Every read settles before a failure is reported, so none outlives
     // the commit or the open it belongs to.
@@ -2095,7 +2120,7 @@ export class LocalManagedSessionAuthority {
       // Only an enabled domain commits records, whatever the path: the
       // generic appends would otherwise take any name in the index.
       if (event.kind === 'domain.committed') {
-        assertManagedSessionDomainEnabled(
+        this.assertDomainAdmittable(
           event.payload['domain'] as ManagedSessionDomain,
         );
       }

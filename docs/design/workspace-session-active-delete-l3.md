@@ -201,10 +201,15 @@ accept those Sessions; this PR does not implement compaction recovery.
 
 ## 4. Compatibility and rollout
 
-Add lifecycle migration V45 after the existing V35 tool-profile, V36–V39
-journal/query, V40 creator and V41–V44 CSI/dispatch migrations; preserve those
-migrations and V32. The lifecycle SQL is unchanged when its unmerged version
-moves from V41 to V45; this integration does not add CSI lifecycle support.
+Add lifecycle migration V46 after the existing V35 tool-profile, V36–V39
+journal/query, V40 creator, V41–V44 CSI/dispatch and V45 H3 task-journal
+migrations; preserve those migrations and V32. The unmerged lifecycle SQL is
+unchanged when its version moves from V45 to V46. This integration preserves
+H3 background Shell/Monitor behavior and does not add lifecycle support for
+CSI, Shell or MCP profiles. The shared Harness closes its Monitor wake
+scheduler only after detach authorization succeeds, so a refused detach leaves
+the live Session and its scheduler intact. The synchronous closing/busy fence
+still prevents a wake from starting while authorization is pending.
 Historical admitted operations retain their original protocol and evidence,
 without new Hook identities.
 Live protocol-zero close attachments retain their legacy DELETE and original
