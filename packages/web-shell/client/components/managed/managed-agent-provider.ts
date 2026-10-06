@@ -1,3 +1,4 @@
+import type { components } from './generated/managed-agent-api';
 import type { ManagedToolResultReader } from './managed-tool-result-types';
 
 export type ManagedAgentSessionPhase =
@@ -108,6 +109,7 @@ export interface ManagedAgentPendingAction {
   policyRevision: string;
   expiresAt: number;
   options: Array<{ id: string; label: string }>;
+  inputPreview?: components['schemas']['WebShellActionInputPreview'];
 }
 
 export interface ManagedAgentProvider {

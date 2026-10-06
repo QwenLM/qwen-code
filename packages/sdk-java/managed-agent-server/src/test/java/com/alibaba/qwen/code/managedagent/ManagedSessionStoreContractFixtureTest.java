@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,7 +38,8 @@ class ManagedSessionStoreContractFixtureTest {
                 fieldNames(headers).keySet());
         assertEquals(Set.of("maxInlineResourceBytes",
                 "maxResourcesPerTransaction", "maxTransactionBytes",
-                "maxTransactionEvents", "maxJsonDepth",
+                "maxTransactionEvents", "maxJsonDepth", "maxEventBytes",
+                "maxCommitMarkerBytes",
                 "minimumWriterTokenLength", "maximumWriterTokenLength",
                 "minimumLeaseDurationMs", "maximumLeaseDurationMs"),
                 fieldNames(limits).keySet());
@@ -55,6 +57,10 @@ class ManagedSessionStoreContractFixtureTest {
                 limits.required("maxTransactionEvents").intValue());
         assertEquals(ManagedSessionStoreModels.MAX_JSON_DEPTH,
                 limits.required("maxJsonDepth").intValue());
+        assertEquals(ManagedSessionStoreModels.MAX_EVENT_BYTES,
+                limits.required("maxEventBytes").intValue());
+        assertEquals(ManagedSessionStoreModels.MAX_COMMIT_MARKER_BYTES,
+                limits.required("maxCommitMarkerBytes").intValue());
         assertEquals(ManagedSessionStoreModels.MIN_WRITER_TOKEN_LENGTH,
                 limits.required("minimumWriterTokenLength").intValue());
         assertEquals(ManagedSessionStoreModels.MAX_WRITER_TOKEN_LENGTH,
@@ -63,6 +69,8 @@ class ManagedSessionStoreContractFixtureTest {
                 limits.required("minimumLeaseDurationMs").longValue());
         assertEquals(ManagedSessionStoreModels.MAX_LEASE_MILLIS,
                 limits.required("maximumLeaseDurationMs").longValue());
+        assertEquals(JSON.valueToTree(ManagedExtensionRecords.EVENT_KINDS),
+                contract.required("eventKinds"));
     }
 
     @Test

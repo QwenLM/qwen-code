@@ -652,7 +652,14 @@ function ManagedSessionsContent({
                   role="status"
                   className="text-sm text-muted-foreground"
                 >
-                  {t('managed.approval.argumentsUnavailable')}
+                  {approvals.action?.inputPreview
+                    ? t(
+                        approvals.action.inputPreview.truncated
+                          ? 'managed.approval.previewTruncated'
+                          : 'managed.approval.previewComplete',
+                        { bytes: approvals.action.inputPreview.byteLength },
+                      )
+                    : t('managed.approval.argumentsUnavailable')}
                 </p>
               )}
             </div>
