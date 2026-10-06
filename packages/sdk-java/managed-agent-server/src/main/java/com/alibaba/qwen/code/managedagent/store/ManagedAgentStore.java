@@ -284,14 +284,10 @@ public class ManagedAgentStore implements AgentStateStore {
         if (existing.isEmpty()) {
             return Optional.empty();
         }
-        WorkspaceCommand command = existing.getFirst();
-        if (!command.requestDigest().equals(requestDigest)) {
-            throw new ApiException(HttpStatus.CONFLICT,
-                    "idempotency_conflict",
-                    "The idempotency key was reused with different content.");
-        }
-        return Optional.of(new Admission(command.sessionId(),
-                command.turnId(), true, false));
+        // The pre-gate probe re-runs the sibling's re-checks — a replay must
+        // not outlive the Workspace binding or the caller's read grant.
+        return Optional.of(replayWorkspaceCommand(tenantId, actorId,
+                requestDigest, existing.getFirst()));
     }
 
     @Override
@@ -1879,12 +1875,13 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     public void deferTurnRetry(String tenantId, String sessionId,
             String turnId, String owner, long retryAfter) {
-        jdbc.update("UPDATE managed_agent_turn SET retry_after = ?,"
-                        + " dispatch_owner = NULL, dispatch_lease_until ="
-                        + " NULL, updated_at = ?, version = version + 1 WHERE"
-                        + " tenant_id = ? AND session_id = ? AND turn_id = ?"
-                        + " AND dispatch_owner = ? AND status IN"
-                        + " ('ACCEPTED', 'RUNNING', 'CANCELLING')",
+        jdbc.update("UPDATE managed_agent_turn SET retry_count = retry_count"
+                        + " + 1, retry_after = ?, dispatch_owner = NULL,"
+                        + " dispatch_lease_until = NULL, updated_at = ?,"
+                        + " version = version + 1 WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = ? AND dispatch_owner"
+                        + " = ? AND status IN ('ACCEPTED', 'RUNNING',"
+                        + " 'CANCELLING')",
                 retryAfter, clock.millis(), tenantId, sessionId, turnId,
                 owner);
     }

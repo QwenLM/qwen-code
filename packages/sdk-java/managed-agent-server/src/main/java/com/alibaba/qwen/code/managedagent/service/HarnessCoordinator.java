@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.HarnessDisabledException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
@@ -223,6 +224,14 @@ public class HarnessCoordinator {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
         if (session.workspace() != null && !harness.isWorkspaceFilesAvailable()) {
+            if (!claimed.submissionAttempted()) {
+                // Before submission a Workspace-files outage holds the Turn
+                // like a Harness outage: a replay may already have answered
+                // 202 for it. Once submitted, the Turn stays terminal here.
+                return deferOutage(claimed, "workspace_unavailable",
+                        "Hosted Workspace execution remained unavailable"
+                                + " before Turn admission.");
+            }
             return fail(claimed, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
@@ -628,17 +637,9 @@ public class HarnessCoordinator {
     private boolean transientFailure(TurnRecord turn,
             boolean submissionAttempted, RuntimeException error) {
         if (!submissionAttempted && isHarnessDisabled(error)) {
-            // An outage defers the turn without spending its pre-admission
-            // budget: a replay answered 202 relies on this hold, and the
-            // recovery sweep (already gated on availability) picks the turn
-            // back up once the Harness returns.
-            long defer = clock.millis() + retryInitialDelay.toMillis();
-            store.deferTurnRetry(turn.tenantId(), turn.sessionId(),
-                    turn.turnId(), owner, defer);
-            LOG.warn("Managed Turn coordination deferred while Harness"
-                            + " unavailable tenant={} session={} turn={}",
-                    turn.tenantId(), turn.sessionId(), turn.turnId());
-            return true;
+            return deferOutage(turn, "hosted_harness_unavailable",
+                    "Hosted Harness remained unavailable before Turn"
+                            + " admission.");
         }
         if (!submissionAttempted
                 && turn.retryCount() >= maxPreAdmissionRetries) {
@@ -667,9 +668,32 @@ public class HarnessCoordinator {
         return true;
     }
 
+    // An outage hold never strands a Turn: the defer still spends the
+    // pre-admission budget, so a permanent disable terminates with an
+    // actionable code instead of an eternal ACCEPTED, and the backoff grows
+    // like any other retry. The availability-gated recovery sweep picks the
+    // Turn back up once the Harness returns before the budget runs out.
+    private boolean deferOutage(TurnRecord turn, String exhaustionCode,
+            String exhaustionMessage) {
+        if (turn.retryCount() >= maxPreAdmissionRetries) {
+            LOG.error("Managed Turn coordination exhausted outage deferrals"
+                            + " tenant={} session={} turn={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId());
+            return fail(turn, exhaustionCode, exhaustionMessage);
+        }
+        long delay = retryDelay(retryInitialDelay, retryMaxDelay,
+                turn.retryCount());
+        store.deferTurnRetry(turn.tenantId(), turn.sessionId(),
+                turn.turnId(), owner, clock.millis() + delay);
+        LOG.warn("Managed Turn coordination deferred tenant={} session={}"
+                        + " turn={} retry={} delayMs={}",
+                turn.tenantId(), turn.sessionId(), turn.turnId(),
+                turn.retryCount() + 1, delay);
+        return true;
+    }
+
     private static boolean isHarnessDisabled(RuntimeException error) {
-        return error instanceof IllegalStateException
-                && "Hosted Harness is disabled".equals(error.getMessage());
+        return error instanceof HarnessDisabledException;
     }
 
     private static String failureLabel(RuntimeException error) {

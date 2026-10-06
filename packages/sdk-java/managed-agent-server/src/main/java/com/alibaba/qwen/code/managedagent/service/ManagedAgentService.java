@@ -238,16 +238,17 @@ public class ManagedAgentService {
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "input", input));
-        // Replay before every availability gate — the submitter check
-        // included — so a workspace-bound retry answers while Workspace
-        // files are off, like the legacy path. See createSession.
+        // The actor gate stays above the replay: an idempotency key answers
+        // its recorded outcome only to an actor authorized for the Session.
+        requireSubmitter(tenantId, actorId, sessionId);
+        // Replay before the harness gate, so a recorded submit still answers
+        // during a Harness outage. See createSession.
         Admission replay = replay(tenantId, SUBMIT, idempotencyKey,
                 requestDigest);
         if (replay != null) {
             dispatch(tenantId, replay);
             return response(replay);
         }
-        requireSubmitter(tenantId, actorId, sessionId);
         requireHarness();
         String payloadDigest = SubmitHarnessTurn.computePayloadDigest(input);
         Admission admission;
@@ -296,13 +297,31 @@ public class ManagedAgentService {
             String tenantId, String actorId, String idempotencyKey, String sessionId,
             String title) {
         validateIdempotencyKey(idempotencyKey);
+        // A recorded rename answers before the shape and availability gates
+        // a deleted Session can no longer pass. The actor check stays ahead
+        // of the outcome, and the read-only probe never writes the PENDING
+        // row beginSessionMutation would create for a fresh key.
+        StoreModels.CommandRecord recorded = store.findCommand(tenantId,
+                RENAME, idempotencyKey).orElse(null);
+        if (recorded != null && "COMPLETED".equals(recorded.status())) {
+            SessionRecord session = store.requireSession(tenantId,
+                    recorded.sessionId());
+            requireReplayActor(session, actorId);
+            if (!recorded.requestDigest().equals(renameDigest(sessionId,
+                    title)) || !recorded.sessionId().equals(sessionId)) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "idempotency_conflict",
+                        "The idempotency key was reused with different"
+                                + " content.");
+            }
+            return new SessionMutationResult<>(publicSession(
+                    asLastVisible(session)), true);
+        }
         requireSubmitter(tenantId, actorId, sessionId);
         String effectiveTitle = validRenameTitle(title);
-        String requestDigest = digests.digest(Map.of(
-                "sessionId", sessionId, "title", effectiveTitle));
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
-                RENAME, idempotencyKey, requestDigest, sessionId,
-                SessionMutationKind.RENAME);
+                RENAME, idempotencyKey, renameDigest(sessionId, title),
+                sessionId, SessionMutationKind.RENAME);
         if (!"COMPLETED".equals(command.status())) {
             try {
                 requireHarness();
@@ -856,6 +875,31 @@ public class ManagedAgentService {
         SessionRecord session = store.requireSession(tenantId, sessionId);
         if (!maySubmitWorkspaceTurn(session, actorId)) {
             requireLegacyWorkspace(session, actorId);
+        }
+    }
+
+    // The digest is computed from the validated title, so validation always
+    // runs ahead of beginSessionMutation and its command row.
+    private String renameDigest(String sessionId, String title) {
+        return digests.digest(Map.of("sessionId", sessionId, "title",
+                validRenameTitle(title)));
+    }
+
+    // The delete-tolerant half of requireSubmitter for answering a recorded
+    // mutation: no status or availability gates, which a deleted or drained
+    // Session cannot pass, but the same per-actor rule — a bound Session's
+    // outcomes answer only to its creator; a legacy Session has no
+    // per-actor mutation gate at all.
+    private void requireReplayActor(SessionRecord session, String actorId) {
+        if (session.workspace() == null) {
+            return;
+        }
+        requireReadGrant(session, actorId);
+        if (!workspaces.createdSession(session.tenantId(), actorId,
+                session.sessionId())) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
         }
     }
 

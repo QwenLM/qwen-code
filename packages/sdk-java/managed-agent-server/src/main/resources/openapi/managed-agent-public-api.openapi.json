@@ -282,7 +282,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Sessions ordered by created_at and id descending (creation time is immutable, so a paging cursor cannot skip or duplicate rows).",
+            "description": "Sessions ordered by created_at and id descending; a Session's own row keeps its created_at key, so paging never reorders it \u2014 a page boundary skips or repeats a row only when another Session is created or deleted between pages.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1966,7 +1966,7 @@
         "tags": ["Public Sessions"],
         "operationId": "unarchiveSession",
         "x-qwen-implementation-status": "partial",
-        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the creator with current read access (404 unreadable, 403 readable non-creator). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made.",
+        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the creator with current read access (404 unreadable, 403 readable non-creator). Bound keys are tenant/Session/actor scoped. Replay returns the recorded outcome without repeating the mutation; a replay after delete answers with the Session as last visible \u2014 its pre-delete status \u2014 rather than 404. The permanent close fence is preserved and no Harness or Runtime call is made.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -3366,7 +3366,7 @@
             }
           }
         },
-        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the creator with current read access (404 unreadable, 403 readable non-creator). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made."
+        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the creator with current read access (404 unreadable, 403 readable non-creator). Bound keys are tenant/Session/actor scoped. Replay returns the recorded outcome without repeating the mutation; a replay after delete answers with the Session as last visible \u2014 its pre-delete status \u2014 rather than 404. The permanent close fence is preserved and no Harness or Runtime call is made."
       }
     },
     "/v1/agent-channels/{channelId}/deliveries/{deliveryId}": {
