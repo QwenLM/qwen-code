@@ -231,6 +231,11 @@ public class ManagedExtensionRecordStore {
                             + " has the unknown subtype " + subtype
                             + " after the Managed header.");
                 }
+                // Every line inside the transaction's event range is an
+                // event line: the reader refuses any other record there.
+                require(index >= eventCount, "Record line " + (index + 1)
+                        + " is not an event line, yet it sits among the"
+                        + " transaction's events.");
                 shaped &= index >= eventCount;
                 requireLineBytes(lines[index], index,
                         COMMIT_SUBTYPE.equals(subtype)
@@ -367,6 +372,10 @@ public class ManagedExtensionRecordStore {
         require(closed, "event must be an object with exactly "
                 + EVENT_FIELDS
                 + (allowSubject ? " and an optional subject" : ""));
+        // The reader checks the payload's value shape for every kind,
+        // before any per-kind schema.
+        require(event.get("payload").isObject(),
+                "event.payload must be a JSON object");
         long occurredAt;
         try {
             ManagedExtensionRecords.count(event.get("v"), 1, 1, "event.v");

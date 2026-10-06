@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -456,6 +457,32 @@ class ManagedExtensionRecordStoreTest {
                         + " Managed header", event -> {
                 }, records -> records.replaceFirst("\n",
                         "\n{\"subtype\":\"not_a_subtype\"}\n"), 1);
+        refuseOrdinary("an event line with an extra envelope field", goal,
+                "event must be an object with exactly",
+                event -> event.put("extra", 1), records -> records, 0);
+        refuseOrdinary("an event line with a numeric payload", goal,
+                "event.payload must be a JSON object",
+                event -> event.set("payload", JsonNodeFactory.instance
+                        .numberNode(42)), records -> records, 0);
+        refuseOrdinary("an event line with a null payload", goal,
+                "event.payload must be a JSON object",
+                event -> event.putNull("payload"), records -> records, 0);
+        refuseOrdinary("an event line with a numeric subject", goal,
+                "event.subject must be a JSON object",
+                event -> event.set("subject", JsonNodeFactory.instance
+                        .numberNode(42)), records -> records, 0);
+        refuseOrdinary("a line of an unknown subtype ahead of the events",
+                goal, "is not an event line", event -> event.put("sequence",
+                        event.get("sequence").asLong() + 1),
+                records -> "{\"subtype\":\"not_a_subtype\"}\n" + records, 1);
+        refuseOrdinary("a stray commit marker among the events", goal,
+                "is not an event line", event -> {
+                }, records -> records.replaceFirst("\n",
+                        "\n{\"subtype\":\"managed_session_commit_v1\"}\n"), 1);
+        refuseOrdinary("a repeated Managed header among the events", goal,
+                "is not an event line", event -> {
+                }, records -> records.replaceFirst("\n",
+                        "\n{\"subtype\":\"managed_session_header_v1\"}\n"), 1);
         refuseOrdinary("a body-less domain.committed with a fifth payload"
                         + " field", goal,
                 "event.payload must be an object with exactly",
@@ -505,6 +532,17 @@ class ManagedExtensionRecordStoreTest {
                             return first + "\n" + second + records.substring(
                                     records.indexOf('\n'));
                         }, 1)));
+        // A cross-domain reserved id on a body-bearing line would collide
+        // with the other domain's next Stage H record.
+        String reserved = UUID.randomUUID().toString();
+        ExtensionRecordJournal reservedJournal = journal(reserved);
+        assertRefused("a Stage H line with another domain's reserved id",
+                reserved, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "is not its domain's reserved monitor_run:<n> id",
+                () -> reservedJournal.commit(reservedJournal.request(
+                        ExtensionRecordJournal.OPERATION, "refused", start,
+                        1_000, event -> event.put("eventId",
+                                "hook_execution:1"), records -> records)));
     }
 
     /** A refused ordinary body-less domain commit. The {@code inject} of 5
@@ -1001,5 +1039,217 @@ class ManagedExtensionRecordStoreTest {
 
     private static JsonNode fixtures() throws Exception {
         return ManagedExtensionProjectionContractTest.fixtures();
+    }
+
+    // Restored verbatim from main (b2c95e04dc): H3 task-journal and resource
+    // witnesses this PR deleted although they do not assert the stream channel.
+    @Test
+    void keepsCommittingRecordsWhenTheTaskJournalRefusesPastItsBound()
+            throws Exception {
+        JsonNode chain = fixtures().required("monitorChainCases").get(0);
+        JsonNode first = chain.required("revisions").get(0);
+        JsonNode second = chain.required("revisions").get(1);
+        // The witness only bites if the second revision actually changes the
+        // task view, because only a view change appends a journal event.
+        assertThat(ManagedExtensionProjectionContractTest
+                .view(second.required("view")))
+                .isNotEqualTo(ManagedExtensionProjectionContractTest
+                        .view(first.required("view")));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode monitor = first.required("monitorRun");
+        journal.commitMonitor("wedge-0", monitor,
+                first.required("occurredAt").longValue());
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "monitor_run",
+                        monitor.required("monitorId").textValue()));
+
+        // One unarchived output pins the retention floor, so the automatic
+        // pass cannot expire anything and the bound starts refusing. The
+        // output admission gate reads the durable Session row, so bind this
+        // Session to its workspace first.
+        if (jdbc.update("UPDATE managed_agent_session SET workspace_id = ?"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                WORKSPACE, TENANT, sessionId) == 0) {
+            jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                            + " session_id, agent_id, status, created_at,"
+                            + " updated_at, workspace_id,"
+                            + " workspace_generation, workspace_storage_id,"
+                            + " cwd_relative, context_config_ref,"
+                            + " context_revision, workspace_config_ref,"
+                            + " workspace_policy_ref) VALUES"
+                            + " (?, ?, 'qwen-code', 'ACTIVE', 1, 1,"
+                            + " ?, 1, 'storage-1', '.', ?, 1,"
+                            + " 'config', 'policy')",
+                    TENANT, sessionId, WORKSPACE,
+                    "sha256:" + ExtensionRecordJournal.sha256(
+                            "config\u0000policy"));
+        }
+        ManagedTaskEventStore events = new ManagedTaskEventStore(jdbc);
+        events.appendOutput(TENANT, sessionId, taskId, "x", false, null,
+                null, null, null, 0);
+        for (int round = 0; round < ManagedTaskEventStore.BACKLOG_BOUND - 1;
+                round++) {
+            events.appendStateChange(TENANT, sessionId, taskId, "running",
+                    "ready", round);
+        }
+        assertThatThrownBy(() -> events.appendStateChange(TENANT, sessionId,
+                taskId, "running", "ready", 0))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo(
+                                ManagedTaskEventStore.CODE_BACKLOG_FULL));
+
+        // The record row is the authoritative state; a full derived feed
+        // degrades the feed and never wedges the commit that feeds it.
+        journal.commitMonitor("wedge-1", second.required("monitorRun"),
+                second.required("occurredAt").longValue());
+        assertThat(records.findTask(TENANT, sessionId, taskId).orElseThrow()
+                .projection())
+                .isEqualTo(ManagedExtensionProjectionContractTest
+                        .view(second.required("view")));
+    }
+
+    @Test
+    void answersCursorExpiredRatherThanAGappedPageWhenTheFloorMoved()
+            throws Exception {
+        JsonNode chain = fixtures().required("monitorChainCases").get(0);
+        JsonNode first = chain.required("revisions").get(0);
+        String sessionId = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                        + " session_id, agent_id, status, created_at,"
+                        + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
+                TENANT, sessionId);
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode monitor = first.required("monitorRun");
+        journal.commitMonitor("race-0", monitor,
+                first.required("occurredAt").longValue());
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "monitor_run",
+                        monitor.required("monitorId").textValue()));
+        // The floor stands at 2 when the read begins and at 7 once the
+        // events have loaded: an expiry that deleted everything through 7
+        // happened mid-read, so the contract's 409 must stand where a
+        // gapped page previously was — the marker flips at the read itself
+        // because that is what concurrent expiry means here.
+        final java.util.concurrent.atomic.AtomicBoolean readHappened =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        ManagedTaskEventStore racing = new ManagedTaskEventStore(jdbc) {
+            @Override
+            public CursorPositions positions(String tenantId,
+                    String session, String task) {
+                return new CursorPositions(9, readHappened.get() ? 7 : 2,
+                        List.of());
+            }
+
+            @Override
+            public EventPage read(String tenantId, String session,
+                    String task, long afterSequence, int limit) {
+                readHappened.set(true);
+                return new EventPage(List.of(), false);
+            }
+        };
+        ManagedTaskService service = new ManagedTaskService(agents, records,
+                racing);
+        String cursor = ManagedTaskEventStore.encodeCursor(taskId, 2);
+        assertThatThrownBy(() -> service.queryWebShellTaskEvents(TENANT,
+                TENANT, sessionId, taskId, cursor, 10))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("cursor_expired");
+                });
+    }
+
+    @Test
+    void pagesFreshEventsAgainstTheRealJournal() throws Exception {
+        JsonNode chain = fixtures().required("monitorChainCases").get(0);
+        JsonNode first = chain.required("revisions").get(0);
+        String sessionId = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                        + " session_id, agent_id, status, created_at,"
+                        + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)",
+                TENANT, sessionId);
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode monitor = first.required("monitorRun");
+        journal.commitMonitor("fresh-0", monitor,
+                first.required("occurredAt").longValue());
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "monitor_run",
+                        monitor.required("monitorId").textValue()));
+        var page = tasks.queryWebShellTaskEvents(TENANT, TENANT, sessionId,
+                taskId, null, 10);
+        assertThat(page.data()).hasSize(1);
+        assertThat(page.nextCursor()).isEqualTo(
+                ManagedTaskEventStore.encodeCursor(taskId, 1));
+        // An as-of-now explicit cursor still admits: the floor did not move
+        // past it while the read was happening.
+        assertThat(tasks.queryWebShellTaskEvents(TENANT, TENANT, sessionId,
+                taskId, page.nextCursor(), 10).data()).isEmpty();
+    }
+
+    @Test
+    void answersTheThreeResourceRefusals() throws Exception {
+        byte[] start = ExtensionRecordJournal.bytes(chain().get(0)
+                .required("monitorRun"));
+        // A body the reference names was never committed.
+        String missing = UUID.randomUUID().toString();
+        ExtensionRecordJournal missingJournal = journal(missing);
+        assertThatThrownBy(() -> missingJournal.commit(
+                missingJournal.request(ExtensionRecordJournal.OPERATION,
+                        "missing", start, 1_000,
+                        event -> ((ObjectNode) event.at(
+                                "/payload/recordRef")).put("resourceId",
+                                        "missing-body-1"),
+                        records -> records))).isInstanceOfSatisfying(
+                ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo(
+                            ManagedSessionStoreModels.ERROR_RESOURCE_MISSING);
+                    assertThat(error.getStatus()).isEqualTo(
+                            HttpStatus.CONFLICT);
+                });
+        // A row that no longer reads back, two ways the store knows it.
+        String corruptSession = UUID.randomUUID().toString();
+        ExtensionRecordJournal corruptJournal = journal(corruptSession);
+        JsonNode first = chain().get(0).required("monitorRun");
+        corruptJournal.commitMonitor("corrupt-1", first, 1_000);
+        String corruptId = jdbc.queryForObject(
+                "SELECT record_resource_id FROM"
+                        + " qwen_managed_session_extension_record"
+                        + " WHERE tenant_id = ? AND session_id = ? LIMIT 1",
+                String.class, TENANT, corruptSession);
+        // Its bytes no longer hold its recorded digest.
+        byte[] shifted = ExtensionRecordJournal.bytes(((ObjectNode) first
+                .deepCopy()).put("maxEvents", 1));
+        jdbc.update("UPDATE qwen_managed_session_resource SET"
+                        + " inline_bytes = ?, byte_length = ? WHERE"
+                        + " tenant_id = ? AND resource_id = ?",
+                shifted, shifted.length, TENANT, corruptId);
+        assertThatThrownBy(() -> corruptJournal.commitMonitor("corrupt-2",
+                chain().get(1).required("monitorRun"), 2_000))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo(
+                            "managed_session_resource_corrupt");
+                    assertThat(error.getStatus()).isEqualTo(
+                            HttpStatus.INTERNAL_SERVER_ERROR);
+                });
+        // Its Session is not the request's, though the row says otherwise.
+        String foreignSession = UUID.randomUUID().toString();
+        ExtensionRecordJournal foreignJournal = journal(foreignSession);
+        foreignJournal.commitMonitor("foreign-1", first, 1_000);
+        String foreignId = jdbc.queryForObject(
+                "SELECT record_resource_id FROM"
+                        + " qwen_managed_session_extension_record"
+                        + " WHERE tenant_id = ? AND session_id = ? LIMIT 1",
+                String.class, TENANT, foreignSession);
+        jdbc.update("UPDATE qwen_managed_session_resource SET"
+                        + " tenant_id = 'other-tenant' WHERE tenant_id = ?"
+                        + " AND resource_id = ?",
+                TENANT, foreignId);
+        assertThatThrownBy(() -> foreignJournal.commitMonitor("foreign-2",
+                chain().get(1).required("monitorRun"), 2_000))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo(
+                            "managed_session_not_found");
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.NOT_FOUND);
+                });
     }
 }
