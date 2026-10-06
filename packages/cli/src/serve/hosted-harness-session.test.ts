@@ -139,6 +139,7 @@ const state = vi.hoisted(() => ({
       toolTurn?: HostedWorkspaceToolTurn;
       hooks?: import('./hosted-hook-session.js').HostedHookSession;
       promptId?: string;
+      history?: readonly ChatRecord[];
       modelScope?: import('@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js').ManagedHookModelScope;
       resumeFromToolResults?: readonly unknown[];
     }) => ({
@@ -6975,6 +6976,97 @@ describe('Hosted Harness tool approvals', () => {
     },
   );
 
+  it('does not replay cancelled tool-profile history into a fresh turn', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: files,
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    state.model.mockImplementationOnce(
+      ({ signal }) =>
+        new Promise<never>((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => reject(new Error('cancelled')),
+            { once: true },
+          );
+        }),
+    );
+    const send = async (promptId: string, text: string) => {
+      const prompt = [{ type: 'text', text }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+    };
+    const waitForSettled = () =>
+      waitFor(async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+
+    await send(PROMPT_ID, 'cancelled request');
+    await waitFor(() => expect(state.model).toHaveBeenCalledOnce());
+    await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`))
+      .set('X-Qwen-Client-Id', clientId)
+      .expect(204);
+    await waitForSettled();
+    const cancelledTranscript = await headers(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(cancelledTranscript.body.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'turn_complete',
+          promptId: PROMPT_ID,
+          data: expect.objectContaining({ stopReason: 'cancelled' }),
+        }),
+      ]),
+    );
+
+    state.model.mockImplementationOnce(async () => ({
+      text: 'completed',
+      model: 'test-model',
+    }));
+    const completedPromptId = '44444444-4444-4444-8444-444444444444';
+    await send(completedPromptId, 'completed request');
+    await waitForSettled();
+
+    let freshHistory: readonly ChatRecord[] | undefined;
+    state.model.mockImplementationOnce(async ({ history }) => {
+      freshHistory = history;
+      return { text: 'fresh response', model: 'test-model' };
+    });
+    await send('55555555-5555-4555-8555-555555555555', 'fresh request');
+    await waitForSettled();
+
+    expect(freshHistory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ daemonPromptId: completedPromptId }),
+      ]),
+    );
+    expect(
+      freshHistory?.some((record) => record.daemonPromptId === PROMPT_ID),
+    ).toBe(false);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
   it('keeps a yolo tool Session definition unchanged', async () => {
     const created = await headers(
       supertest(await app(true)).post('/session'),
@@ -8209,7 +8301,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
    * execute hangs until the owner is "crashed" via cancel, leaving the turn
    * unsettled in the journal.
    */
-  async function parkToolTurn(toolProfile = FILE_PROFILE) {
+  async function parkToolTurn(
+    toolProfile = FILE_PROFILE,
+    beforePark?: (server: Server, clientId: string) => Promise<void>,
+  ) {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     acquireSpy = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
@@ -8240,6 +8335,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
       toolProfile,
     });
     expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    if (beforePark) {
+      await beforePark(server, clientId);
+      execute.mockClear();
+    }
     state.model.mockImplementationOnce(
       async ({ toolTurn, signal }) =>
         toolTurn!.execute(
@@ -8262,7 +8362,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const admitted = await headers(
       supertest(server).post(`/session/${SESSION_ID}/prompt`),
     )
-      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .set('X-Qwen-Client-Id', clientId)
       .send({ prompt, promptId: PROMPT_ID, payloadDigest });
     expect(admitted.status).toBe(202);
     await vi.waitFor(() => expect(execute).toHaveBeenCalled(), {
@@ -8270,13 +8370,13 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
     await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`)).set(
       'X-Qwen-Client-Id',
-      created.body.clientId as string,
+      clientId,
     );
     await vi.waitFor(
       async () => {
         const status = await headers(
           supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
@@ -8286,8 +8386,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
     expect(closed.status).toBe(204);
-    // Only the parked owner's own acquires are behind us; a takeover's
-    // acquire must be visible to the asserting test.
     acquireSpy.mockClear();
   }
 
@@ -9450,6 +9548,131 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const answered = await first;
     expect(answered.status).toBe(200);
     expect(replayed.body.lastEventId).toBe(answered.body.lastEventId);
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('excludes cancelled tool records from recovery history', async () => {
+    const cancelledPromptId = '99999999-9999-4999-8999-999999999999';
+    let toolReady!: () => void;
+    const toolComplete = new Promise<void>((resolve) => {
+      toolReady = resolve;
+    });
+    await parkToolTurn(FILE_PROFILE, async (server, clientId) => {
+      vi.mocked(HostedWorkspaceBroker.prototype.prepare).mockResolvedValueOnce(
+        '88888888-8888-4888-8888-888888888888',
+      );
+      vi.mocked(HostedWorkspaceBroker.prototype.execute).mockResolvedValueOnce({
+        executionStatus: 'success',
+        responseParts: [{ text: 'cancelled result' }],
+      } as never);
+      const cancelledCall = {
+        ...CALL,
+        callId: 'cancelled-call',
+        prompt_id: cancelledPromptId,
+      };
+      state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+        await toolTurn!.execute(
+          [cancelledCall],
+          [
+            {
+              functionCall: {
+                id: cancelledCall.callId,
+                name: cancelledCall.name,
+                args: cancelledCall.args,
+              },
+            },
+          ],
+          'test-model',
+          signal,
+        );
+        toolReady();
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted')), {
+            once: true,
+          });
+        });
+      });
+      const prompt = [{ type: 'text', text: 'write then cancel' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: cancelledPromptId,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await toolComplete;
+      await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`))
+        .set('X-Qwen-Client-Id', clientId)
+        .expect(204);
+      await vi.waitFor(async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      );
+      expect(journal.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'turn.settled',
+            payload: expect.objectContaining({
+              turnId: cancelledPromptId,
+              outcome: 'cancelled',
+            }),
+          }),
+        ]),
+      );
+    });
+
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'parked result' }],
+    } as never);
+    const { server, loaded } = await loadReplacement();
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { checkpointId: string; activationId: string };
+    let continuedHistory:
+      | ReadonlyArray<{ daemonPromptId?: string }>
+      | undefined;
+    state.model.mockImplementationOnce(async ({ history }) => {
+      continuedHistory = history;
+      return { text: 'continued', model: 'test-model' };
+    });
+    const clientId = loaded.body.clientId as string;
+    await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      })
+      .expect(200);
+    await vi.waitFor(async () => {
+      const status = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+    expect(continuedHistory).toBeDefined();
+    expect(
+      continuedHistory!.some(
+        (record) => record.daemonPromptId === cancelledPromptId,
+      ),
+    ).toBe(false);
+    expect(JSON.stringify(continuedHistory)).not.toContain('cancelled-call');
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );

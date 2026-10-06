@@ -131,6 +131,67 @@ function nativeInput(event: HookEventName): HookInput {
 describe('Hosted Harness model boundary', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('installs selected tool-profile history in the model chat', async () => {
+    const model = config([{ type: LlmEventType.Finished }]);
+    const history = [
+      {
+        type: 'user',
+        daemonPromptId: 'completed-prompt',
+        message: { role: 'user', parts: [{ text: 'completed request' }] },
+      },
+      {
+        type: 'assistant',
+        daemonPromptId: 'completed-prompt',
+        message: { role: 'model', parts: [{ text: 'completed response' }] },
+      },
+      {
+        type: 'tool_result',
+        daemonPromptId: 'completed-prompt',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { text: 'contents' },
+              },
+            },
+          ],
+        },
+      },
+    ] as never;
+    const toolTurn = {
+      execute: vi.fn(),
+      consumeResults: vi.fn(async () => undefined),
+      declarations: async () => [],
+      setPromptHookRunner: vi.fn(),
+    };
+    await runHostedHarnessTextTurn({ ...input, history, toolTurn });
+    expect(model.setHistory).toHaveBeenCalledWith([
+      {
+        role: 'user',
+        parts: [{ text: 'completed request' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'completed response' }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'read_file',
+              response: { text: 'contents' },
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
   it('removes local tools before a text model request', async () => {
     const hooks = config([
       { type: LlmEventType.Content, value: 'hello back' },
