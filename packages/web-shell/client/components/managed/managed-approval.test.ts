@@ -140,4 +140,35 @@ describe('Managed approval presentation', () => {
       'Write notes.md',
     );
   });
+
+  it('ignores a call with the same ID in a later Turn', () => {
+    // Call IDs restart per Turn, so the later Turn's call must not win.
+    const messages = [
+      toolGroup('turn-2', 'call-1'),
+      toolGroup('turn-3', 'call-1'),
+    ];
+    expect(findManagedApprovalTool(messages, action)?.callId).toBe(
+      'turn-2:call-1',
+    );
+    const itemRows = managedEventsToMessages(
+      ['turn-2', 'turn-3'].map((turnId, index) => ({
+        id: 10 + index,
+        at: 10 + index,
+        type: 'tool_started' as const,
+        sessionId: 's1',
+        turnId,
+        data: {
+          itemId: `item_tool_${turnId}`,
+          toolCallId: 'call-1',
+          toolName: 'write_file',
+          input: { file_path: 'notes.md', content: turnId },
+        },
+      })),
+      '[truncated]',
+    );
+    expect(toManagedPermissionRequest(action, itemRows).rawInput).toEqual({
+      file_path: 'notes.md',
+      content: 'turn-2',
+    });
+  });
 });

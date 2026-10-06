@@ -5,7 +5,12 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
+import {
+  createHash,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { Mutex } from 'async-mutex';
@@ -23,7 +28,12 @@ import {
   MAX_ACKNOWLEDGED_OUTBOX,
   MAX_THREAD_MESSAGES,
   MAX_THREAD_RUNS,
+  AGENT_HOSTS_SCHEMA_VERSION,
+  AGENT_HOST_REPLACEMENT_REQUIRED,
   AGENTS_SCHEMA_VERSION,
+  type AgentHost,
+  type AgentHostView,
+  type AgentHostsFile,
   type WorkspaceAgent,
   type WorkspaceAgentsFile,
   type AgentWorkspaceState,
@@ -42,6 +52,8 @@ import {
   THREAD_PRIORITY_ORDER,
   isThreadTerminal,
   DEFAULT_THREAD_PRIORITY,
+  hostOffersProgram,
+  isAgentProgram,
 } from './types.js';
 
 const debug = createDebugLogger('WORKSPACE_AGENTS_STORE');
@@ -49,7 +61,9 @@ const debug = createDebugLogger('WORKSPACE_AGENTS_STORE');
 const AGENTS_DIRNAME = 'agent-host';
 const WORKSPACE_FILENAME = 'workspace.json';
 const AGENTS_FILENAME = 'agents.json';
+const HOSTS_FILENAME = 'hosts.json';
 const THREADS_DIRNAME = 'threads';
+const HOST_ENROLLMENT_TTL_MS = 15 * 60 * 1_000;
 
 const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,
@@ -110,6 +124,10 @@ export function getAgentsFilePath(projectRoot: string): string {
   return path.join(getAgentsDir(projectRoot), AGENTS_FILENAME);
 }
 
+export function getAgentHostsFilePath(projectRoot: string): string {
+  return path.join(getAgentsDir(projectRoot), HOSTS_FILENAME);
+}
+
 export function getThreadsDir(projectRoot: string): string {
   return path.join(getAgentsDir(projectRoot), THREADS_DIRNAME);
 }
@@ -118,6 +136,10 @@ const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 export function generateAgentId(): string {
   return `ag_${randomUUID()}`;
+}
+
+function generateAgentHostId(): string {
+  return `host_${randomUUID()}`;
 }
 
 export function generateThreadId(): string {
@@ -181,6 +203,18 @@ export function isValidAgentName(value: unknown): value is string {
 
 function isValidAgent(value: unknown): value is WorkspaceAgent {
   if (!isRecord(value)) return false;
+  const execution = value['execution'];
+  const validExecution =
+    execution === undefined ||
+    (isRecord(execution) &&
+      (execution['mode'] === 'local' ||
+        (execution['mode'] === 'managed-host' &&
+          Array.isArray(execution['hostIds']) &&
+          execution['hostIds'].length > 0 &&
+          execution['hostIds'].every(isValidId) &&
+          new Set(execution['hostIds']).size === execution['hostIds'].length &&
+          (execution['provider'] === undefined ||
+            isAgentProgram(execution['provider'])))));
   return (
     isValidId(value['id']) &&
     isValidAgentName(value['name']) &&
@@ -202,7 +236,8 @@ function isValidAgent(value: unknown): value is WorkspaceAgent {
     (value['retiredAt'] === undefined ||
       isFiniteTimestamp(value['retiredAt'])) &&
     (value['maxConcurrentRuns'] === undefined ||
-      isPositiveInteger(value['maxConcurrentRuns']))
+      isPositiveInteger(value['maxConcurrentRuns'])) &&
+    validExecution
   );
 }
 
@@ -361,9 +396,23 @@ function isValidProgress(value: unknown): boolean {
   );
 }
 
+const HOST_RESULT_DIGEST = /^[a-f0-9]{64}$/;
+
+function isValidHostResultReceipt(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isPositiveInteger(value['attempt']) &&
+    isNonEmptyString(value['leaseId']) &&
+    typeof value['digest'] === 'string' &&
+    HOST_RESULT_DIGEST.test(value['digest'])
+  );
+}
+
 function isValidRun(value: unknown): value is ThreadRun {
   if (!isRecord(value)) return false;
   const valid =
+    (value['hostResultReceipt'] === undefined ||
+      isValidHostResultReceipt(value['hostResultReceipt'])) &&
     isValidProgress(value['progress']) &&
     isValidId(value['id']) &&
     isValidId(value['agentId']) &&
@@ -377,6 +426,10 @@ function isValidRun(value: unknown): value is ThreadRun {
     isOptionalNonNegativeInteger(value['contextThroughSequence']) &&
     (value['closeKind'] === undefined ||
       CLOSE_KINDS.has(value['closeKind'] as RunCloseKind)) &&
+    // Malformed fails the record rather than being dropped: a dropped lease
+    // reads as "nobody holds this run", which is the one answer that lets two
+    // Hosts execute the same work.
+    (value['lease'] === undefined || isValidRunLease(value['lease'])) &&
     isOptionalNonNegativeInteger(value['closeAcknowledgedAtSequence']) &&
     (value['finalMessageId'] === undefined ||
       isValidId(value['finalMessageId'])) &&
@@ -522,6 +575,17 @@ function isValidThread(value: unknown): value is Thread {
   return value['nextMessageSequence'] > previousSequence;
 }
 
+function isValidRunLease(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['hostId']) &&
+    isNonEmptyString(value['leaseId']) &&
+    isNonNegativeInteger(value['attempt']) &&
+    isFiniteTimestamp(value['expiresAt']) &&
+    isFiniteTimestamp(value['acquiredAt'])
+  );
+}
+
 function isValidA2AGrant(value: unknown): value is A2AGrant {
   return (
     isRecord(value) &&
@@ -548,6 +612,61 @@ function isValidWorkspace(value: unknown): value is AgentWorkspaceState {
       (Array.isArray(value['callerGrants']) &&
         value['callerGrants'].every(isValidA2AGrant)))
   );
+}
+
+function isValidAgentHost(value: unknown): value is AgentHost {
+  return (
+    isRecord(value) &&
+    isValidId(value['id']) &&
+    isNonEmptyString(value['name']) &&
+    isNonEmptyString(value['secretHash']) &&
+    isNonEmptyString(value['workspaceCwd']) &&
+    Array.isArray(value['providers']) &&
+    value['providers'].every(isNonEmptyString) &&
+    isFiniteTimestamp(value['createdAt']) &&
+    (value['lastSeenAt'] === undefined ||
+      isFiniteTimestamp(value['lastSeenAt']))
+  );
+}
+
+function isValidAgentHostsFile(value: unknown): value is AgentHostsFile {
+  if (
+    !isRecord(value) ||
+    value['schemaVersion'] !== AGENT_HOSTS_SCHEMA_VERSION ||
+    !Array.isArray(value['hosts']) ||
+    !value['hosts'].every(isValidAgentHost)
+  ) {
+    return false;
+  }
+  const ids = new Set((value['hosts'] as AgentHost[]).map((host) => host.id));
+  if (ids.size !== value['hosts'].length) return false;
+  const enrollment = value['enrollment'];
+  return (
+    enrollment === undefined ||
+    (isRecord(enrollment) &&
+      isNonEmptyString(enrollment['tokenHash']) &&
+      isFiniteTimestamp(enrollment['expiresAt']) &&
+      (enrollment['supersedesHostId'] === undefined ||
+        isValidId(enrollment['supersedesHostId'])) &&
+      (enrollment['replacementHostId'] === undefined ||
+        (isValidId(enrollment['supersedesHostId']) &&
+          isValidId(enrollment['replacementHostId']))))
+  );
+}
+
+function hashAgentHostSecret(secret: string): string {
+  return createHash('sha256').update(secret).digest('hex');
+}
+
+function matchesAgentHostSecret(secret: string, expectedHash: string): boolean {
+  const actual = Buffer.from(hashAgentHostSecret(secret), 'hex');
+  const expected = Buffer.from(expectedHash, 'hex');
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function publicAgentHost(host: AgentHost): AgentHostView {
+  const { secretHash: _secretHash, ...view } = host;
+  return view;
 }
 
 function assertKnownVersion(value: unknown, filePath: string): void {
@@ -1235,6 +1354,279 @@ export async function readAgentWorkspace(
   });
 }
 
+/** For callers already inside the workspace lock (a store transaction). */
+export async function readAgentHostsUnlocked(
+  projectRoot: string,
+): Promise<AgentHostsFile> {
+  const filePath = getAgentHostsFilePath(projectRoot);
+  const parsed = await readJsonFile(filePath);
+  if (parsed === undefined) {
+    return { schemaVersion: AGENT_HOSTS_SCHEMA_VERSION, hosts: [] };
+  }
+  if (!isValidAgentHostsFile(parsed)) {
+    throw new Error(`Malformed Agent Host registry in ${filePath}.`);
+  }
+  return parsed;
+}
+
+async function writeAgentHostsUnlocked(
+  projectRoot: string,
+  registry: AgentHostsFile,
+): Promise<void> {
+  if (!isValidAgentHostsFile(registry)) {
+    throw new Error('Refusing to write malformed Agent Host registry.');
+  }
+  await atomicWriteJSON(
+    getAgentHostsFilePath(projectRoot),
+    registry,
+    STORE_FILE_OPTIONS,
+  );
+}
+
+export async function readAgentHosts(
+  projectRoot: string,
+): Promise<AgentHostView[]> {
+  return withWorkspaceLock(projectRoot, async () => {
+    await ensureMigratedUnlocked(projectRoot);
+    const registry = await readAgentHostsUnlocked(projectRoot);
+    return registry.hosts.map(publicAgentHost);
+  });
+}
+
+function pendingAgentHostReplacementError(registry: AgentHostsFile): Error {
+  const oldId = registry.enrollment?.supersedesHostId;
+  const old = registry.hosts.find((host) => host.id === oldId);
+  return new Error(
+    `Retry the pending Agent Host replacement first: select "${old?.name ?? oldId}" (${oldId}) in Runtimes, choose Replace, generate a fresh join command and run it on the replacement machine. Link expiry does not cancel the pending replacement.`,
+  );
+}
+
+export async function issueAgentHostEnrollment(
+  projectRoot: string,
+  supersedesHostId?: string,
+): Promise<{ token: string; expiresAt: number; replacementHostId?: string }> {
+  return withWorkspaceLock(projectRoot, async () => {
+    await ensureMigratedUnlocked(projectRoot);
+    const registry = await readAgentHostsUnlocked(projectRoot);
+    if (
+      supersedesHostId !== undefined &&
+      !registry.hosts.some((host) => host.id === supersedesHostId)
+    ) {
+      throw new Error('Agent Host to replace not found.');
+    }
+    const pending = registry.enrollment?.replacementHostId;
+    if (pending && supersedesHostId !== registry.enrollment?.supersedesHostId) {
+      throw pendingAgentHostReplacementError(registry);
+    }
+    const token = randomBytes(32).toString('base64url');
+    const expiresAt = Date.now() + HOST_ENROLLMENT_TTL_MS;
+    await writeAgentHostsUnlocked(projectRoot, {
+      ...registry,
+      enrollment: {
+        tokenHash: hashAgentHostSecret(token),
+        expiresAt,
+        ...(supersedesHostId !== undefined ? { supersedesHostId } : {}),
+        ...(pending ? { replacementHostId: pending } : {}),
+      },
+    });
+    return {
+      token,
+      expiresAt,
+      ...(pending ? { replacementHostId: pending } : {}),
+    };
+  });
+}
+
+export async function enrollAgentHost(
+  projectRoot: string,
+  input: {
+    token: string;
+    name: string;
+    workspaceCwd: string;
+    providers: string[];
+  },
+): Promise<{ host: AgentHostView; secret: string }> {
+  const name = input.name.trim();
+  const workspaceCwd = input.workspaceCwd.trim();
+  const providers = [...new Set(input.providers.map((value) => value.trim()))];
+  if (!input.token || !name || name.length > 80) {
+    throw new Error('Invalid Agent Host enrollment.');
+  }
+  if (!workspaceCwd || workspaceCwd.length > 4_096) {
+    throw new Error('Invalid Agent Host workspace.');
+  }
+  if (
+    providers.length === 0 ||
+    providers.length > 20 ||
+    providers.some((provider) => !provider || provider.length > 80)
+  ) {
+    throw new Error('Invalid Agent Host providers.');
+  }
+  return withAgentStoreTransaction(projectRoot, async (transaction) => {
+    const registry = await readAgentHostsUnlocked(projectRoot);
+    if (
+      !registry.enrollment ||
+      registry.enrollment.expiresAt < Date.now() ||
+      !matchesAgentHostSecret(input.token, registry.enrollment.tokenHash)
+    ) {
+      throw new Error('Invalid or expired Agent Host enrollment token.');
+    }
+    const supersedesHostId = registry.enrollment.supersedesHostId;
+    if (
+      supersedesHostId !== undefined &&
+      !registry.hosts.some((host) => host.id === supersedesHostId)
+    ) {
+      throw new Error('Agent Host to replace not found.');
+    }
+    const secret = randomBytes(32).toString('base64url');
+    const host: AgentHost = {
+      id: registry.enrollment.replacementHostId ?? generateAgentHostId(),
+      name,
+      secretHash: hashAgentHostSecret(secret),
+      workspaceCwd,
+      providers,
+      createdAt: Date.now(),
+    };
+    if (supersedesHostId !== undefined) {
+      // Files commit independently. Persist the new identity before moving
+      // bindings, and retain its id in the token so an I/O failure is retryable.
+      await writeAgentHostsUnlocked(projectRoot, {
+        ...registry,
+        hosts: [
+          ...registry.hosts.filter((entry) => entry.id !== host.id),
+          host,
+        ],
+        enrollment: { ...registry.enrollment, replacementHostId: host.id },
+      });
+      const { replaceAgentHostInTransaction } = await import('./host-lease.js');
+      await replaceAgentHostInTransaction(
+        transaction,
+        supersedesHostId,
+        host.id,
+      );
+    }
+    const { enrollment: _used, ...rest } = registry;
+    await writeAgentHostsUnlocked(projectRoot, {
+      ...rest,
+      hosts: [
+        ...registry.hosts.filter(
+          (entry) => entry.id !== supersedesHostId && entry.id !== host.id,
+        ),
+        host,
+      ],
+    });
+    return { host: publicAgentHost(host), secret };
+  });
+}
+
+export async function heartbeatAgentHost(
+  projectRoot: string,
+  hostId: string,
+  secret: string,
+  input: {
+    workspaceCwd: string;
+    providers: string[];
+    enrollmentToken?: string;
+  },
+): Promise<AgentHostView | undefined> {
+  return withWorkspaceLock(projectRoot, async () => {
+    await ensureMigratedUnlocked(projectRoot);
+    const registry = await readAgentHostsUnlocked(projectRoot);
+    const current = registry.hosts.find((host) => host.id === hostId);
+    if (!current || !matchesAgentHostSecret(secret, current.secretHash)) {
+      return undefined;
+    }
+    if (
+      input.enrollmentToken !== undefined &&
+      (!registry.enrollment ||
+        registry.enrollment.expiresAt < Date.now() ||
+        !matchesAgentHostSecret(
+          input.enrollmentToken,
+          registry.enrollment.tokenHash,
+        ))
+    ) {
+      return undefined;
+    }
+    if (
+      input.enrollmentToken !== undefined &&
+      registry.enrollment?.supersedesHostId !== undefined
+    ) {
+      throw new Error(AGENT_HOST_REPLACEMENT_REQUIRED);
+    }
+    const workspaceCwd = input.workspaceCwd.trim();
+    const providers = [
+      ...new Set(input.providers.map((value) => value.trim())),
+    ];
+    if (
+      !workspaceCwd ||
+      workspaceCwd.length > 4_096 ||
+      providers.length === 0 ||
+      providers.length > 20 ||
+      providers.some((provider) => !provider || provider.length > 80)
+    ) {
+      throw new Error('Invalid Agent Host heartbeat.');
+    }
+    const next: AgentHost = {
+      ...current,
+      workspaceCwd,
+      providers,
+      lastSeenAt: Date.now(),
+    };
+    const { enrollment: _used, ...withoutEnrollment } = registry;
+    await writeAgentHostsUnlocked(projectRoot, {
+      ...(input.enrollmentToken === undefined ? registry : withoutEnrollment),
+      hosts: registry.hosts.map((host) =>
+        host.id === current.id ? next : host,
+      ),
+    });
+    return publicAgentHost(next);
+  });
+}
+
+/**
+ * Checks a Host's credential without the workspace lock.
+ *
+ * The registry is replaced atomically, so a read outside the lock sees either
+ * the old or the new file, never a torn one; and a request with a wrong secret
+ * must not be able to queue on the lock the dispatcher and the UI share.
+ */
+export async function authenticateAgentHost(
+  projectRoot: string,
+  hostId: string,
+  secret: string,
+): Promise<AgentHostView | undefined> {
+  const host = (await readAgentHostsUnlocked(projectRoot)).hosts.find(
+    (candidate) => candidate.id === hostId,
+  );
+  return host && matchesAgentHostSecret(secret, host.secretHash)
+    ? publicAgentHost(host)
+    : undefined;
+}
+
+/**
+ * Drops a Host from the registry, which revokes its secret. For callers inside
+ * the workspace lock; `removeAgentHost` also unbinds agents and settles runs.
+ */
+export async function removeAgentHostUnlocked(
+  projectRoot: string,
+  hostId: string,
+): Promise<boolean> {
+  const registry = await readAgentHostsUnlocked(projectRoot);
+  if (!registry.hosts.some((host) => host.id === hostId)) return false;
+  if (
+    registry.enrollment?.replacementHostId &&
+    (registry.enrollment.supersedesHostId === hostId ||
+      registry.enrollment.replacementHostId === hostId)
+  ) {
+    throw pendingAgentHostReplacementError(registry);
+  }
+  await writeAgentHostsUnlocked(projectRoot, {
+    ...registry,
+    hosts: registry.hosts.filter((host) => host.id !== hostId),
+  });
+  return true;
+}
+
 /**
  * Read-modify-write the caller grants under the workspace lock.
  *
@@ -1327,7 +1719,10 @@ type WorkspaceAgentRosterChange =
   | 'updated'
   | 'not_found'
   | 'has_live_work'
-  | 'retired';
+  | 'retired'
+  | 'host_not_found'
+  | 'program_unavailable'
+  | 'managed_host_persona_unsupported';
 
 async function agentHasLiveWork(
   transaction: AgentStoreTransaction,
@@ -1351,30 +1746,64 @@ async function agentHasLiveWork(
   );
 }
 
-export async function setWorkspaceAgentEnabled(
+export async function updateWorkspaceAgent(
   projectRoot: string,
   agentId: string,
-  enabled: boolean,
+  patch: {
+    enabled?: boolean;
+    execution?: WorkspaceAgent['execution'];
+    applyConfig?: (agent: WorkspaceAgent) => WorkspaceAgent;
+  },
 ): Promise<WorkspaceAgentRosterChange> {
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
     const agents = await transaction.readAgents();
     const agent = agents.find((candidate) => candidate.id === agentId);
     if (!agent) return 'not_found';
-    // A retired identity is a record, not a switch. Enabling one would report
-    // success and change nothing a caller can observe — `isAgentAddressable`
-    // still refuses it — which is worse than saying no.
     if (agent.retiredAt !== undefined) return 'retired';
-    if (enabled && agent.enabled !== false) return 'updated';
-    const pending = enabled ? undefined : await transaction.listThreads();
+    let next = patch.applyConfig ? patch.applyConfig(agent) : agent;
+    if ('execution' in patch) next = { ...next, execution: patch.execution };
+    if (
+      patch.enabled !== undefined &&
+      (agent.enabled !== false) !== patch.enabled
+    ) {
+      next = { ...next, enabled: patch.enabled };
+    }
+    if (
+      (patch.applyConfig || 'execution' in patch) &&
+      next.execution?.mode === 'managed-host' &&
+      (next.agentType || next.model)
+    ) {
+      return 'managed_host_persona_unsupported';
+    }
+    if ('execution' in patch) {
+      if (await agentHasLiveWork(transaction, agentId)) return 'has_live_work';
+      const execution = next.execution;
+      if (execution?.mode === 'managed-host') {
+        const hosts = (await readAgentHostsUnlocked(projectRoot)).hosts;
+        const placed = hosts.filter((host) =>
+          execution.hostIds.includes(host.id),
+        );
+        if (placed.length !== execution.hostIds.length) return 'host_not_found';
+        const { provider } = execution;
+        if (
+          provider &&
+          !placed.some((host) => hostOffersProgram(host, provider))
+        ) {
+          return 'program_unavailable';
+        }
+      }
+    }
+    const pending =
+      patch.enabled === false ? await transaction.listThreads() : undefined;
     if (pending && pending.unreadable.length > 0) {
       throw new Error(
         `Cannot change the agent roster while thread records are unreadable: ${pending.unreadable.join(', ')}.`,
       );
     }
-    if ((agent.enabled !== false) !== enabled) {
+    if (next !== agent) {
       await transaction.writeAgents(
         agents.map((candidate) =>
-          candidate.id === agentId ? { ...candidate, enabled } : candidate,
+          candidate.id === agentId ? next : candidate,
         ),
       );
     }
@@ -1403,6 +1832,14 @@ export async function setWorkspaceAgentEnabled(
     }
     return 'updated';
   });
+}
+
+export async function setWorkspaceAgentEnabled(
+  projectRoot: string,
+  agentId: string,
+  enabled: boolean,
+): Promise<WorkspaceAgentRosterChange> {
+  return updateWorkspaceAgent(projectRoot, agentId, { enabled });
 }
 
 /**
@@ -1452,6 +1889,20 @@ export function findAgentByName(
 
 export function isAgentEnabled(agent: WorkspaceAgent): boolean {
   return agent.enabled !== false;
+}
+
+export function isAgentLocal(agent: WorkspaceAgent): boolean {
+  return agent.execution === undefined || agent.execution.mode === 'local';
+}
+
+export function isAgentExecutableByHost(
+  agent: WorkspaceAgent,
+  hostId: string,
+): boolean {
+  return (
+    agent.execution?.mode === 'managed-host' &&
+    agent.execution.hostIds.includes(hostId)
+  );
 }
 
 /** How many threads this agent may work at once. Absent means one. */

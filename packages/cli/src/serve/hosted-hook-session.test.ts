@@ -39,6 +39,7 @@ import {
 import { ManagedHookRuntime } from './managed-hook-runtime.js';
 import { HttpHookRunner } from '@qwen-code/qwen-code-core/hooks/httpHookRunner.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
+import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 
 let root: string;
 let session: ManagedSession;
@@ -1165,6 +1166,170 @@ it.each([
     expect(Boolean(replacement.broker.runtime)).toBe(allowed);
   },
 );
+
+async function operate(
+  managed: ManagedSession,
+  target: HostedHookSession,
+  id: string,
+): Promise<void> {
+  catalog = {
+    ...catalog,
+    hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Notification }],
+  };
+  await target.ensureReady();
+  await new ManagedHookActivationController(managed).runHookOperation(
+    {
+      operationId: id,
+      occurrenceId: hostedHookOccurrenceId(HookEventName.Notification, id),
+      originTurnId: null,
+    },
+    () => target.fire(HookEventName.Notification, id, {}, signal()),
+  );
+}
+
+function released(): string[] {
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  const ids = release.mock.contexts.map(
+    (broker) => (broker as HostedWorkspaceBroker).runtimeSessionId,
+  );
+  release.mockClear();
+  return ids;
+}
+
+it.each([true, false])(
+  'releases only load owners after Hook operations replace the activation (detached: %s)',
+  async (detached) => {
+    for (const id of ['a', 'b', 'c']) await operate(session, hooks, id);
+    if (detached) {
+      await hooks.close();
+      expect(released()).toEqual([hooks.broker.runtimeSessionId]);
+    }
+    await reopenSession();
+    const replacement = new HostedHookSession(options, session, pin);
+    await operate(session, replacement, 'd');
+    expect(released()).toEqual([hooks.broker.runtimeSessionId]);
+    await operate(session, replacement, 'e');
+    await replacement.close();
+    expect(released()).toEqual([replacement.broker.runtimeSessionId]);
+  },
+);
+
+it('skips the restore after a Hook operation activation fails to install', async () => {
+  vi.spyOn(session.authority, 'installActivation').mockRejectedValueOnce(
+    new Error('install resource failed'),
+  );
+  await expect(operate(session, hooks, 'a')).rejects.toThrow(
+    'install resource failed',
+  );
+  await hooks.close();
+  expect(released()).toEqual([hooks.broker.runtimeSessionId]);
+});
+
+it('skips a restore that replaces an unrestored Hook operation activation', async () => {
+  const install = session.authority.installActivation.bind(session.authority);
+  vi.spyOn(session.authority, 'installActivation')
+    .mockImplementationOnce(install)
+    .mockRejectedValueOnce(new Error('restore install failed'));
+  await expect(operate(session, hooks, 'a')).rejects.toThrow(
+    'restore install failed',
+  );
+  // The next restore derives from the first operation's own activation.
+  await operate(session, hooks, 'b');
+  await hooks.close();
+  expect(released()).toEqual([hooks.broker.runtimeSessionId]);
+});
+
+it.each([
+  ['after its install', false],
+  ['after the Hook operation activation it renews is released', true],
+])('skips an activation renewal recorded %s', async (_, late) => {
+  const { authority } = session;
+  const append = authority.appendExecutionEvent.bind(authority);
+  const renewals: Array<Promise<unknown>> = [];
+  if (late)
+    vi.spyOn(authority, 'appendExecutionEvent').mockImplementation(
+      (command, event, actor) => {
+        const pending = append(command, event, actor);
+        // The renewal timer can fire while the release is still committing.
+        if (
+          command.operation === 'releaseActivation' &&
+          authority.currentActivationSubject?.type === 'hook_operation'
+        )
+          renewals.push(authority.renewActivation({ leaseDurationMs: 60_000 }));
+        return pending;
+      },
+    );
+  await operate(session, hooks, 'a');
+  if (!late) await authority.renewActivation({ leaseDurationMs: 60_000 });
+  await Promise.all(renewals);
+  const changes = authority
+    .eventsInSequenceRange(1, authority.committedSequence)
+    .filter((event) => event.kind === 'activation.changed');
+  // A late renewal is possible only because renewActivation checks the phase
+  // outside the authority's serial queue. Once that race is closed, the late
+  // case can no longer be produced and should be removed.
+  expect(
+    changes.some(
+      (event, index) =>
+        event.payload['renewalSeq'] !== undefined &&
+        changes[index - 1].payload['phase'] === 'released' &&
+        changes[index - 1].payload['activationId'] ===
+          event.payload['activationId'],
+    ),
+  ).toBe(late);
+  await hooks.close();
+  expect(released()).toEqual([hooks.broker.runtimeSessionId]);
+});
+
+it.each([
+  ['released before another worker loads', true, false],
+  ['still open when the same worker installs', false, true],
+  ['released before the same worker loads again', true, true],
+])(
+  'still releases a load that follows an unrestored Hook operation activation (%s)',
+  async (_, releasedFirst, sameWorker) => {
+    await hooks.ensureReady();
+    await session.replaceActivation({
+      type: 'hook_operation',
+      operationId: 'lost',
+      occurrenceId: 'lost',
+    });
+    if (releasedFirst) await session.releaseActivation();
+    let crashed: HostedHookSession;
+    if (sameWorker) {
+      const activation = await session.authority.installActivation({
+        activationId: randomUUID(),
+        workerId: 'worker',
+        leaseDurationMs: 60_000,
+      });
+      crashed = new HostedHookSession(options, { ...session, activation }, pin);
+    } else {
+      await reopenSession();
+      crashed = new HostedHookSession(options, session, pin);
+    }
+    await crashed.acquire();
+    await reopenSession();
+    const replacement = new HostedHookSession(options, session, pin);
+    vi.mocked(HostedWorkspaceBroker.prototype.release).mockClear();
+    await replacement.acquire();
+    expect(released()).toEqual([
+      hooks.broker.runtimeSessionId,
+      crashed.broker.runtimeSessionId,
+    ]);
+  },
+);
+
+it('shares one acquisition between parallel callers', async () => {
+  await hooks.ensureReady();
+  await reopenSession();
+  const replacement = new HostedHookSession(options, session, pin);
+  const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+  vi.mocked(HostedWorkspaceBroker.prototype.release).mockClear();
+  acquire.mockClear();
+  await Promise.all([replacement.acquire(), replacement.acquire()]);
+  expect(released()).toEqual([hooks.broker.runtimeSessionId]);
+  expect(acquire).toHaveBeenCalledOnce();
+});
 
 it('leaves a shared MCP broker for its owner to release', async () => {
   const shared = new HostedWorkspaceBroker(

@@ -299,6 +299,10 @@ export class ManagedShellPublisherRegistry
   private readonly sessions = new Map<string, ShellPublisherDescriptor>();
   private readonly executions = new Map<string, ShellPublisherDescriptor>();
 
+  get hasInstalledPublication(): boolean {
+    return this.sessions.size > 0 || this.executions.size > 0;
+  }
+
   hasSession(sessionId: string): boolean {
     return this.sessions.has(sessionId);
   }

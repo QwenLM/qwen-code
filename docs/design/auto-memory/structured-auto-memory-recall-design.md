@@ -191,6 +191,31 @@ The fast scorer and selector read the same snapshot but have different roles:
 4. A refined selector result is delivered at a later safe injection point and
    merged with fast results by ref. It never narrows the Complete Tree snapshot.
 
+Steps 2 and 4 are conditional while the experimental skip-selector knob
+(`QWEN_CODE_MEMORY_RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT`, off by default)
+is set: a single fast hit matching the query by title or keyword, whose body
+is not already in context, suppresses the selector — and only when that hit is
+also the unique title or keyword match in the pool the suppressed selector
+would have been handed, so a second match ranked below the published fast
+window keeps the selector. Metadata-only substring matches and already-present
+or stale bodies keep the selector. In this gate a non-CJK title or keyword of
+any length counts only on a token boundary, so a memory titled `ai` does not
+skip the selector for `explain`, one titled `log conventions` does not skip it
+for `catalog conventions`, and a keyword `log` does not skip it for `catalog`.
+CJK edges keep substring matching because they are written without word
+separators. Mixed-script values still require boundaries at non-CJK edges;
+an adjacent CJK character also separates a non-CJK token. `Git文档` must not skip the selector for `Legit文档`. The pool count includes ranking and strict matches so CJK-adjacent short
+keywords cannot be missed. Candidates are counted before prompt trimming so a second match cannot disappear from the guard. No refined
+result arrives after a skip; the shared client delivers it as the fast phase.
+This is an ablation experiment; default behavior is unchanged.
+
+Extraction cadence is unchanged. The #13004 cooldown implementation was removed
+from #13158: its shutdown tail and suspended oldest windows require durable
+replay before skipped facts can be preserved. Its raw-window, timestamp,
+failure-limit and compaction changes are also removed. Historical code remains
+at `a4568de26e49`; #13004 stays open. Selector-only validation must not be cited
+as extraction, quality, or token-savings acceptance.
+
 Short Latin keywords require token boundaries, so `ai` does not match
 `explain`. Han, Hiragana, Katakana, and Hangul use a shared CJK tokenizer. Body
 text is a low-weight fallback and cannot override clear metadata matches.

@@ -45,6 +45,19 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
   // Downloaded updates execute as the user; a project must not select them.
   'QWEN_UPDATE_BASE_URL',
+  // The model catalog is written to the global cache that every project
+  // reads, so all three of its keys are operator decisions. A project must
+  // not choose where it is downloaded from; and because `qwen serve`
+  // snapshots and freezes this environment before any workspace file loads
+  // — every workspace child inherits that snapshot, and a workspace can only
+  // add absent keys (`setRuntimeEnvIfUnset`) — a repository's own config
+  // would otherwise decide catalog behaviour for every *other* workspace the
+  // daemon hosts, and override an operator's exported `off` on the reload
+  // path. The rejection is silent (it is not a loader key), so nothing else
+  // reports it either.
+  'QWEN_CODE_MODELS_DEV_URL',
+  'QWEN_CODE_MODELS_DEV',
+  'QWEN_CODE_MODELS_DEV_REFRESH',
   // This points to a host temp file that carries build warnings. A project
   // `.env` must not redirect it to an arbitrary file to read or delete.
   'QWEN_CODE_WARNINGS_FILE',
@@ -440,6 +453,21 @@ export function isLoaderEnvKey(key: string): boolean {
   const canonical = canonicalLoaderKey(key);
   return canonical.startsWith('bash-func-') || LOADER_ENV_KEYS.has(canonical);
 }
+
+/**
+ * Whether `key` names NODE_OPTIONS, in any spelling that the predicate above
+ * accepts.
+ */
+export function isNodeOptionsEnvKey(key: string): boolean {
+  return canonicalLoaderKey(key) === 'node-options';
+}
+
+/**
+ * The loader vars this process booted with, kept when its own boot scrub
+ * removed them. A qwen process it starts for itself, such as a Managed
+ * session's Runtime worker, boots the same way and scrubs them in turn.
+ */
+export const processBootLoaderEnv = new Map<string, string>();
 
 export function scrubInheritedLoaderEnv(
   env: NodeJS.ProcessEnv,

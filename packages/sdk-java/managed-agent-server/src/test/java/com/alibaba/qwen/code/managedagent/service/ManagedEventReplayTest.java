@@ -33,6 +33,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletResponse;
@@ -61,7 +62,9 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
         "qwen.managed-agent.events.heartbeat-interval=60s",
         "qwen.managed-agent.events.materialize-interval=10ms"
 })
-@AutoConfigureMockMvc
+// Streaming flows write the Mock response from a background thread while a
+// printing handler would walk the same headers.
+@AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 class ManagedEventReplayTest {
     private static final String TENANT = TenantContextFilter.HEADER;
     private static final Pattern ID = Pattern.compile("(?m)^id:(\\d+)$");
