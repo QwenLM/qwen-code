@@ -51,8 +51,10 @@ class ManagedChildAcceptanceRecordContractTest {
             String id = fixture.get("id").textValue();
             var body = ManagedExtensionProjection.RECORD_BODIES
                     .get("child_acceptance");
-            JsonNode record = merge(fixtures.get("templates")
-                    .get("child_acceptance"), fixture.get("patch"));
+            JsonNode record = merge(java.util.Objects.requireNonNull(
+                    fixtures.get("templates").get("child_acceptance"),
+                    () -> "case " + id + " names an unknown template"),
+                    fixture.get("patch"));
             assertNull(body.taskKindOf().apply(record), id);
             if (fixture.get("valid").booleanValue()) {
                 body.require().accept(record);
@@ -75,7 +77,10 @@ class ManagedChildAcceptanceRecordContractTest {
     void validatesTheSharedSuccessors() throws IOException {
         JsonNode fixtures = fixtures();
         for (JsonNode fixture : fixtures.get("successors")) {
-            JsonNode base = fixtures.get("templates").get("child_acceptance");
+            JsonNode base = java.util.Objects.requireNonNull(
+                    fixtures.get("templates").get("child_acceptance"),
+                    () -> "successor " + fixture.get("id").textValue()
+                            + " names an unknown template");
             assertEquals(fixture.get("valid").booleanValue(),
                     ManagedExtensionProjection.RECORD_BODIES
                             .get("child_acceptance").isSuccessor().test(

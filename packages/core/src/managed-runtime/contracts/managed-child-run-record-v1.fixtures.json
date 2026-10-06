@@ -105,12 +105,7 @@
     {
       "id": "reserved-start",
       "domain": "child_run",
-      "patch": {
-        "run": {
-          "state": "reserved",
-          "execution": null
-        }
-      },
+      "patch": { "run": { "state": "reserved", "execution": null } },
       "valid": true,
       "start": true
     },
@@ -127,9 +122,7 @@
     {
       "id": "extra-key",
       "domain": "child_run",
-      "patch": {
-        "extra": true
-      },
+      "patch": { "extra": true },
       "valid": false,
       "error": "exactly",
       "start": false
@@ -156,10 +149,7 @@
       "patch": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         }
       },
       "valid": false,
@@ -193,9 +183,7 @@
           "byteLength": 2,
           "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         },
-        "run": {
-          "execution": "running_attached"
-        }
+        "run": { "execution": "running_attached" }
       },
       "valid": false,
       "error": "needs the Runtime binding",
@@ -207,10 +195,7 @@
       "patch": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -245,10 +230,7 @@
       "patch": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -274,10 +256,7 @@
       "patch": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -305,10 +284,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -330,10 +306,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -355,10 +328,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -381,10 +351,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -406,10 +373,7 @@
         "run": {
           "state": "settled",
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -429,10 +393,7 @@
       "id": "settled-no-receipt",
       "domain": "child_run",
       "patch": {
-        "run": {
-          "state": "settled",
-          "execution": "settled"
-        },
+        "run": { "state": "settled", "execution": "settled" },
         "stopReason": "exited",
         "exitCode": 0
       },
@@ -481,10 +442,7 @@
         "run": {
           "state": "failed",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -520,10 +478,7 @@
           "state": "failed",
           "reason": "rate_limit",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -541,10 +496,7 @@
       "id": "settled-null-execution",
       "domain": "child_run",
       "patch": {
-        "run": {
-          "state": "settled",
-          "execution": null
-        },
+        "run": { "state": "settled", "execution": null },
         "stopReason": "exited",
         "exitCode": 0
       },
@@ -559,10 +511,7 @@
         "run": {
           "state": "failed",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -600,10 +549,7 @@
           "state": "failed",
           "reason": "rate_limit",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -625,10 +571,7 @@
         "run": {
           "state": "failed",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -650,10 +593,7 @@
         "run": {
           "state": "cancelled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -675,10 +615,7 @@
         "run": {
           "state": "cancelled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -696,18 +633,14 @@
     {
       "id": "start-with-stop-request",
       "domain": "child_run",
-      "patch": {
-        "stopRequested": true
-      },
+      "patch": { "stopRequested": true },
       "valid": true,
       "start": false
     },
     {
       "id": "stop-request-type",
       "domain": "child_run",
-      "patch": {
-        "stopRequested": "yes"
-      },
+      "patch": { "stopRequested": "yes" },
       "valid": false,
       "error": "must be boolean",
       "start": false
@@ -719,10 +652,7 @@
         "run": {
           "state": "running",
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -745,10 +675,7 @@
         "run": {
           "state": "failed",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -771,10 +698,7 @@
         "run": {
           "state": "cancelled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -797,10 +721,7 @@
         "run": {
           "state": "running",
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -822,10 +743,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -848,10 +766,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -874,10 +789,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -899,10 +811,7 @@
       "patch": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -930,10 +839,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -956,10 +862,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -983,10 +886,7 @@
           "state": "recovery_blocked",
           "reason": "runtime_lost",
           "execution": "outcome_unknown",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -1016,12 +916,7 @@
       "id": "delivery-present",
       "domain": "child_run",
       "patch": {
-        "run": {
-          "delivery": {
-            "target": "session",
-            "state": "planned"
-          }
-        }
+        "run": { "delivery": { "target": "session", "state": "planned" } }
       },
       "valid": false,
       "error": "must name its start call and nothing else",
@@ -1030,11 +925,7 @@
     {
       "id": "effect-id-present",
       "domain": "child_run",
-      "patch": {
-        "run": {
-          "effectId": "effect-1"
-        }
-      },
+      "patch": { "run": { "effectId": "effect-1" } },
       "valid": false,
       "error": "names one physical identity at most",
       "start": false
@@ -1058,11 +949,7 @@
     {
       "id": "no-start-call",
       "domain": "child_run",
-      "patch": {
-        "run": {
-          "executionCallId": null
-        }
-      },
+      "patch": { "run": { "executionCallId": null } },
       "valid": false,
       "error": "needs an executionCallId or an effectId",
       "start": false
@@ -1074,10 +961,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -1283,6 +1167,55 @@
     {
       "template": "child_agent",
       "domain": "child_run",
+      "id": "agent-child-failed",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "child_failed",
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-quota-exceeded",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "quota_exceeded",
+        "run": {
+          "state": "failed",
+          "reason": "count_limit",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
       "id": "agent-start-stop-requested",
       "patch": {
         "stopRequested": true
@@ -1465,6 +1398,16 @@
     {
       "template": "child_agent",
       "domain": "child_run",
+      "id": "agent-depth-eight",
+      "patch": {
+        "depth": 8
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
       "id": "agent-child-run-id-empty",
       "patch": {
         "childRunId": ""
@@ -1483,6 +1426,44 @@
       "valid": false,
       "start": false,
       "error": "ownerScopeId must be a non-empty string"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-input-ref-digest-bad",
+      "patch": {
+        "inputRef": {
+          "resourceId": "input-1",
+          "kind": "managed-input",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "xyz"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "inputRef.digest must be a lowercase SHA-256 hex digest"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-predecessor-set",
+      "patch": {
+        "predecessorChildRunId": "run-0"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-predecessor-empty",
+      "patch": {
+        "predecessorChildRunId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "predecessorChildRunId must be a non-empty string"
     },
     {
       "template": "child_agent",
@@ -1586,6 +1567,61 @@
     {
       "template": "child_agent",
       "domain": "child_run",
+      "id": "agent-working-dir-drive",
+      "patch": {
+        "workingDirectory": "C:/evil"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-drive-relative",
+      "patch": {
+        "workingDirectory": "C:evil"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-nfd",
+      "patch": {
+        "workingDirectory": "café"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-long",
+      "patch": {
+        "workingDirectory": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-control",
+      "patch": {
+        "workingDirectory": "a\u0007b"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
       "id": "agent-session-before-dispatch",
       "patch": {
         "childSessionId": "session-2"
@@ -1597,9 +1633,57 @@
     {
       "template": "child_agent",
       "domain": "child_run",
+      "id": "agent-attached-without-runtime",
+      "patch": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "needs the Runtime binding that hosts it"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-dispatched-without-definition",
+      "patch": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "dispatchId": "dispatch-1",
+          "definition": null,
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must pin the definition it dispatched"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
       "id": "agent-result-version-two",
       "patch": {
         "resultVersion": 2
+      },
+      "valid": false,
+      "start": false,
+      "error": "resultVersion must be 1 in schema version 1"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-result-version-overflow",
+      "patch": {
+        "resultVersion": 1e400
       },
       "valid": false,
       "start": false,
@@ -1654,6 +1738,10 @@
         "run": {
           "state": "failed",
           "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
           "delivery": {
             "target": "session",
             "state": "cancelled"
@@ -1700,7 +1788,11 @@
         "stopReason": "child_failed",
         "run": {
           "state": "failed",
-          "execution": "settled"
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
         }
       },
       "valid": false,
@@ -1731,6 +1823,10 @@
         "run": {
           "state": "settled",
           "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
           "delivery": {
             "target": "session",
             "state": "cancelled"
@@ -1773,6 +1869,10 @@
         "run": {
           "state": "failed",
           "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
           "delivery": {
             "target": "session",
             "state": "cancelled"
@@ -1823,6 +1923,10 @@
         "run": {
           "state": "failed",
           "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
           "delivery": {
             "target": "session",
             "state": "cancelled"
@@ -1844,6 +1948,10 @@
           "state": "failed",
           "reason": "count_limit",
           "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
           "delivery": {
             "target": "session",
             "state": "cancelled"
@@ -1864,6 +1972,10 @@
         "run": {
           "state": "failed",
           "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
           "delivery": {
             "target": "session",
             "state": "cancelled"
@@ -2002,6 +2114,25 @@
     {
       "template": "child_agent",
       "domain": "child_run",
+      "id": "agent-recovery-unknown-delivery",
+      "patch": {
+        "run": {
+          "state": "recovery_blocked",
+          "execution": "outcome_unknown",
+          "dispatchId": "dispatch-1",
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "cannot hand over a result before the run ends"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
       "id": "agent-start-delivery-accepting",
       "patch": {
         "run": {
@@ -2025,10 +2156,7 @@
         "run": {
           "state": "running",
           "execution": "dispatch_started",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         }
       },
       "valid": true
@@ -2040,20 +2168,14 @@
         "run": {
           "state": "running",
           "execution": "dispatch_started",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         }
       },
       "after": {
         "run": {
           "state": "waiting",
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2073,10 +2195,7 @@
         "run": {
           "state": "running",
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2094,10 +2213,7 @@
       "before": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2110,10 +2226,7 @@
       "after": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2131,10 +2244,7 @@
       "before": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2147,10 +2257,7 @@
       "after": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-2",
@@ -2170,10 +2277,7 @@
           "state": "recovery_blocked",
           "reason": "runtime_lost",
           "execution": "outcome_unknown",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2188,10 +2292,7 @@
           "state": "running",
           "reason": "runtime_lost",
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-2",
-            "generation": "2"
-          }
+          "runtime": { "runtimeBindingId": "binding-2", "generation": "2" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2211,10 +2312,7 @@
           "state": "recovery_blocked",
           "reason": "runtime_lost",
           "execution": "outcome_unknown",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2229,10 +2327,7 @@
           "state": "running",
           "reason": "runtime_lost",
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-2",
-            "generation": "2"
-          }
+          "runtime": { "runtimeBindingId": "binding-2", "generation": "2" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-2",
@@ -2252,10 +2347,7 @@
           "state": "recovery_blocked",
           "reason": "runtime_lost",
           "execution": "outcome_unknown",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2270,10 +2362,7 @@
           "state": "running",
           "reason": "runtime_lost",
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-2",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-2", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-2",
@@ -2291,10 +2380,7 @@
       "before": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2307,10 +2393,7 @@
       "after": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2335,10 +2418,7 @@
       "before": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2358,10 +2438,7 @@
       "after": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2379,10 +2456,7 @@
       "before": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2402,10 +2476,7 @@
       "after": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2431,10 +2502,7 @@
         "run": {
           "state": "waiting",
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2448,10 +2516,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2472,10 +2537,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2491,10 +2553,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2515,10 +2574,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2534,10 +2590,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2555,9 +2608,7 @@
       "id": "owner-scope-changed",
       "domain": "child_run",
       "before": {},
-      "after": {
-        "ownerScopeId": "scope-other"
-      },
+      "after": { "ownerScopeId": "scope-other" },
       "valid": false
     },
     {
@@ -2567,10 +2618,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2586,10 +2634,7 @@
         "run": {
           "state": "running",
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2607,10 +2652,7 @@
       "before": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2624,10 +2666,7 @@
         "run": {
           "state": "cancelled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2648,10 +2687,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2667,10 +2703,7 @@
         "run": {
           "state": "settled",
           "execution": "settled",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2703,9 +2736,7 @@
       "id": "fixed-shell-id",
       "domain": "child_run",
       "before": {},
-      "after": {
-        "shellId": "shell-2"
-      },
+      "after": { "shellId": "shell-2" },
       "valid": false
     },
     {
@@ -2714,10 +2745,7 @@
       "before": {
         "run": {
           "execution": "running_attached",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -2732,10 +2760,7 @@
           "state": "recovery_blocked",
           "reason": "runtime_lost",
           "execution": "outcome_unknown",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
         },
         "startReceiptRef": {
           "resourceId": "receipt-1",
@@ -3135,7 +3160,16 @@
         }
       },
       "after": {
-        "childSessionId": "session-3"
+        "childSessionId": "session-3",
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
       },
       "valid": false
     },
@@ -3318,26 +3352,6 @@
     {
       "template": "child_agent",
       "domain": "child_run",
-      "id": "agent-version-bumped",
-      "before": {
-        "run": {
-          "state": "running",
-          "execution": "dispatch_started",
-          "dispatchId": "dispatch-1",
-          "runtime": {
-            "runtimeBindingId": "binding-1",
-            "generation": "1"
-          }
-        }
-      },
-      "after": {
-        "resultVersion": 2
-      },
-      "valid": false
-    },
-    {
-      "template": "child_agent",
-      "domain": "child_run",
       "id": "agent-stop-cleared",
       "before": {
         "stopRequested": true,
@@ -3473,16 +3487,6 @@
         "stopRequested": true
       },
       "valid": true
-    },
-    {
-      "template": "child_agent",
-      "domain": "child_run",
-      "id": "agent-kind-changed",
-      "before": {},
-      "after": {
-        "kind": "shell"
-      },
-      "valid": false
     }
   ],
   "childAgentKeys": [

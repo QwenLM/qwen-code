@@ -1136,6 +1136,7 @@ describe('Hosted Harness no-tool session', () => {
   async function prewriteDetachedOutput(
     family: DetachedFamily,
     publication: boolean,
+    withChildAgent = false,
   ): Promise<void> {
     const key = {
       tenantId: 'tenant',
@@ -1280,6 +1281,61 @@ describe('Hosted Harness no-tool session', () => {
         await monitors.advanceOutput('bg-1', tip);
         await monitors.settleQuiet('bg-1', 'exited');
       }
+      if (withChildAgent) {
+        // A child agent record beside the detached shell one: it owns no
+        // output manifest, so the workspace restore must skip it rather
+        // than refuse the whole Session.
+        const inputRef = await resources.publish(
+          'managed-input',
+          Buffer.from('{"prompt":"audit the diff"}'),
+        );
+        await managed.authority.commitExtensionRecord(
+          {
+            operation: 'commitExtensionRecord',
+            commandId: 'agent-1',
+            sessionKey: key,
+            contentDigest: 'd'.repeat(64),
+          },
+          {
+            domain: 'child_run',
+            record: {
+              kind: 'child_agent',
+              childRunId: 'agent-1',
+              ownerScopeId: key.sessionId,
+              rootSessionId: key.sessionId,
+              depth: 1,
+              completion: 'sent',
+              inputRef,
+              workspaceMode: 'shared',
+              workingDirectory: '.',
+              childSessionId: null,
+              predecessorChildRunId: null,
+              resultVersion: 1,
+              resultRef: null,
+              terminalReceiptRef: null,
+              stopReason: null,
+              stopRequested: false,
+              run: {
+                state: 'admitted',
+                reason: null,
+                definition: {
+                  definitionId: 'agent-def-1',
+                  definitionRevision: 1,
+                  definitionDigest: 'f'.repeat(64),
+                },
+                executionCallId: 'agent-call-1',
+                effectId: null,
+                dispatchId: null,
+                deliveryId: null,
+                execution: 'intent',
+                runtime: null,
+                delivery: { target: 'session', state: 'planned' },
+              },
+            },
+          },
+          { class: 'trusted_entry' },
+        );
+      }
     } finally {
       await managed.close().catch(() => undefined);
     }
@@ -1331,6 +1387,23 @@ describe('Hosted Harness no-tool session', () => {
       ).toBe(204);
     },
   );
+
+  it('restores a Session whose detached lineage sits beside a child agent record', async () => {
+    domainEnablement.childRun = true;
+    // The child_run domain holds both kinds at H4: the shell lineage must
+    // still verify while the child agent record is skipped, not misparsed.
+    await prewriteDetachedOutput('child_run', false, true);
+    const { server, loaded } = await loadDetachedSession();
+    expect(loaded.status).toBe(200);
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          loaded.body.clientId as string,
+        )
+      ).status,
+    ).toBe(204);
+  });
 
   it('still refuses the restore when a detached capture loses page content', async () => {
     domainEnablement.childRun = true;

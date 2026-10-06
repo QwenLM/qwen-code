@@ -66,13 +66,16 @@ class ManagedChildRunRecordContractTest {
                     ? fixture.get("template").textValue() : domain;
             String id = fixture.get("id").textValue();
             var body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
-            JsonNode record = merge(fixtures.get("templates").get(template),
-                    fixture.get("patch"));
-            if ("shell".equals(template)) {
-                assertEquals("background_shell", body.taskKindOf().apply(record), id);
-            }
-            if ("child_agent".equals(template)) {
-                assertEquals("child_agent", body.taskKindOf().apply(record), id);
+            JsonNode base = java.util.Objects.requireNonNull(
+                    fixtures.get("templates").get(template),
+                    () -> "case " + id + " names an unknown template");
+            JsonNode record = merge(base, fixture.get("patch"));
+            // The kind the merged record carries decides the task kind, so
+            // each valid case pins its own mapping.
+            if (fixture.get("valid").booleanValue()) {
+                assertEquals("shell".equals(record.get("kind").textValue())
+                        ? "background_shell" : "child_agent",
+                        body.taskKindOf().apply(record), id);
             }
             if (fixture.get("valid").booleanValue()) {
                 body.require().accept(record);
@@ -95,7 +98,10 @@ class ManagedChildRunRecordContractTest {
             String domain = fixture.get("domain").textValue();
             String template = fixture.hasNonNull("template")
                     ? fixture.get("template").textValue() : domain;
-            JsonNode base = fixtures.get("templates").get(template);
+            JsonNode base = java.util.Objects.requireNonNull(
+                    fixtures.get("templates").get(template),
+                    () -> "successor " + fixture.get("id").textValue()
+                            + " names an unknown template");
             assertEquals(fixture.get("valid").booleanValue(),
                     ManagedExtensionProjection.RECORD_BODIES.get(domain).isSuccessor().test(
                             merge(base, fixture.get("before")), merge(base, fixture.get("after"))),

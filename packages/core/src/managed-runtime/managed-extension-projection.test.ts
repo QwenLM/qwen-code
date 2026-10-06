@@ -45,7 +45,11 @@ interface Revision {
 
 interface FixtureSuite {
   readonly contractVersion: 1;
-  readonly recordBodies: Record<string, string | null>;
+  // child_run's entry is the per-kind map the body dispatches on.
+  readonly recordBodies: Record<
+    string,
+    string | null | Record<string, string | null>
+  >;
   readonly taskStates: readonly string[];
   readonly pendingDeliveryStates: readonly string[];
   readonly runtimeStates: readonly string[];

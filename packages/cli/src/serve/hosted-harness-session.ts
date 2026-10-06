@@ -43,7 +43,7 @@ import {
   parseToolResultManifestBytes,
   type ToolResultManifest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
-import { parseChildShellRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   ResourceToolResultSegmentStore,
@@ -931,12 +931,15 @@ async function verifyWorkspaceRestore(
     );
     const record =
       domain === 'child_run'
-        ? parseChildShellRun(
+        ? parseChildRun(
             JSON.parse((await resources.read(recordRef)).toString('utf8')),
           )
         : parseMonitorRun(
             JSON.parse((await resources.read(recordRef)).toString('utf8')),
           );
+    // A child agent owns no output manifest — its result travels the
+    // Session delivery line — so it has no detached lineage to verify.
+    if ('kind' in record && record.kind === 'child_agent') continue;
     if (record.run.executionCallId !== null)
       detached.set(record.run.executionCallId, record.outputRef);
   }

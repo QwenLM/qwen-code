@@ -14,6 +14,7 @@ import {
   CHILD_AGENT_STOP_REASONS,
   CHILD_RUN_STOP_REASONS,
   parseChildRun,
+  parseChildShellRun,
 } from './managed-child-run-record.js';
 import { MANAGED_SESSION_ENABLED_DOMAINS } from './managed-session-records.js';
 
@@ -70,6 +71,20 @@ function merge(
         : replacement;
   }
   return value;
+}
+
+/** Resolves a fixture's template, or fails loudly: a silent miss degenerates. */
+function templateOf(fixture: {
+  id: string;
+  domain: string;
+  template?: string;
+}) {
+  const name = fixture.template ?? fixture.domain;
+  const template = fixtures.templates[name];
+  if (template === undefined) {
+    throw new Error(`fixture ${fixture.id} names an unknown template`);
+  }
+  return template;
 }
 
 describe('managed-child-run-record/1 shared contract', () => {
@@ -157,10 +172,7 @@ describe('managed-child-run-record/1 shared contract', () => {
 
   it.each(fixtures.cases)('$id', (fixture) => {
     const body = MANAGED_EXTENSION_RECORD_BODIES[fixture.domain]!;
-    const record = merge(
-      fixtures.templates[fixture.template ?? fixture.domain]!,
-      fixture.patch,
-    );
+    const record = merge(templateOf(fixture), fixture.patch);
     if (fixture.valid) {
       const parsed = body.parse(record);
       // The committed body round-trips the input and is deeply frozen.
@@ -186,12 +198,21 @@ describe('managed-child-run-record/1 shared contract', () => {
   });
 
   it.each(fixtures.successors)('$id', (fixture) => {
-    const template = fixtures.templates[fixture.template ?? fixture.domain]!;
+    const template = templateOf(fixture);
     expect(
       MANAGED_EXTENSION_RECORD_BODIES[fixture.domain]!.isSuccessor(
         merge(template, fixture.before),
         merge(template, fixture.after),
       ),
     ).toBe(fixture.valid);
+  });
+
+  it('refuses a child_agent body at the shell-only entry point', () => {
+    expect(() => parseChildShellRun(fixtures.templates['child_agent'])).toThrow(
+      "Child run kind must be 'shell' for this consumer, got child_agent.",
+    );
+    expect(parseChildShellRun(fixtures.templates['child_run']).kind).toBe(
+      'shell',
+    );
   });
 });

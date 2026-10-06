@@ -751,11 +751,24 @@ public final class ManagedExtensionRecords {
                         CHILD_STOP_REASONS.get("cancelled")),
                 "childRun.stopReason");
         JsonNode stopRequested = child.get("stopRequested");
+        String state = text(run, "state");
+        String reason = text(run, "reason");
+        // These five run in the TypeScript helpers' place and order, so a
+        // doubly broken body reports the same clause in both languages.
+        require((stopReason == null) != TERMINAL.contains(state),
+                "childRun.stopReason is set exactly when the run ends");
+        require(stopReason == null
+                || CHILD_STOP_REASONS.get(state).contains(stopReason),
+                "childRun.stopReason does not fit the " + state + " state");
         require(stopRequested.isBoolean(),
                 "childRun.stopRequested must be boolean");
         require(!"stop_requested".equals(stopReason)
                 || stopRequested.booleanValue(),
                 "childRun stop_requested needs its stop request");
+        require("quota_exceeded".equals(stopReason)
+                == (reason != null && QUOTA_REASONS.contains(reason)),
+                "childRun.stopReason is quota_exceeded exactly for a "
+                        + "quota reason");
         JsonNode exitCode = child.get("exitCode");
         if (!exitCode.isNull()) {
             count(exitCode, 0, 255, "childRun.exitCode");
@@ -766,13 +779,6 @@ public final class ManagedExtensionRecords {
                         && EXIT_SIGNAL.matcher(exitSignal.textValue())
                                 .matches(),
                 "childRun.exitSignal must be an uppercase signal name");
-        String state = text(run, "state");
-        String reason = text(run, "reason");
-        require((stopReason == null) != TERMINAL.contains(state),
-                "childRun.stopReason is set exactly when the run ends");
-        require(stopReason == null
-                || CHILD_STOP_REASONS.get(state).contains(stopReason),
-                "childRun.stopReason does not fit the " + state + " state");
         // Every terminal run names the ending execution line: a natural
         // exit is proven only by an observed settled execution under its
         // receipt, a pre-start failure lands on not_started_proven, and an
@@ -799,10 +805,6 @@ public final class ManagedExtensionRecords {
                 || "settled".equals(execution),
                 "childRun.stopReason process failure needs its settled "
                         + "execution");
-        require("quota_exceeded".equals(stopReason)
-                == (reason != null && QUOTA_REASONS.contains(reason)),
-                "childRun.stopReason is quota_exceeded exactly for a "
-                        + "quota reason");
         // Exit evidence is proven exactly when a Shell exits: any other
         // end carries no exit status.
         require("exited".equals(stopReason)
@@ -834,6 +836,13 @@ public final class ManagedExtensionRecords {
         require(!delivery.isNull()
                 && "session".equals(delivery.get("target").textValue()),
                 "Child run delivery must target the parent session");
+        // The launched definition is pinned no later than the dispatch
+        // that admits the creation; the shared successor rule makes it
+        // unaddable after that dispatch, so an absence is unrepairable.
+        String executionState = text(run, "execution");
+        require(executionState == null || "intent".equals(executionState)
+                || !run.get("definition").isNull(),
+                "Child run must pin the definition it dispatched");
         count(child.get("depth"), 1, CHILD_MAX_DEPTH, "Child run depth");
         require(child.get("completion").isTextual()
                 && List.of("tool", "sent").contains(
@@ -861,12 +870,19 @@ public final class ManagedExtensionRecords {
                 || !"running_attached".equals(execution)
                         && !"settled".equals(execution),
                 "Child run childSessionId is set once creation is proven");
+        // The Session the child runs in is hosted by a Runtime binding,
+        // set with the dispatch and unaddable once dispatched, like the
+        // definition pin.
+        require(session.isNull() || !run.get("runtime").isNull(),
+                "Child run childSessionId needs the Runtime binding that"
+                        + " hosts it");
         JsonNode predecessor = child.get("predecessorChildRunId");
         if (!predecessor.isNull()) {
             id(predecessor, "predecessorChildRunId");
         }
         JsonNode resultVersion = child.get("resultVersion");
         require(resultVersion.isNumber()
+                && Double.isFinite(resultVersion.doubleValue())
                 && resultVersion.decimalValue()
                         .compareTo(java.math.BigDecimal.ONE) == 0,
                 "Child run resultVersion must be 1 in schema version 1");
@@ -954,9 +970,12 @@ public final class ManagedExtensionRecords {
                 + " relative directory";
         require(directory != null && directory.isTextual(), message);
         String value = directory.textValue();
+        // A drive spec (`C:/x`, drive-relative `C:x`) resolves absolute
+        // on Windows — the platform the backslash clause defends.
         require(".".equals(value)
                 || !value.startsWith("/") && !value.endsWith("/")
                         && !value.contains("\\")
+                        && !value.matches("^[A-Za-z]:.*")
                         && Stream.of(value.split("/", -1))
                                 .noneMatch(segment -> segment.isEmpty()
                                         || segment.equals(".")
@@ -1050,10 +1069,7 @@ public final class ManagedExtensionRecords {
                 && (!previous.get("stopRequested").booleanValue()
                         || next.get("stopRequested").booleanValue())
                 && setOnce(previous.get("childSessionId"),
-                        next.get("childSessionId"))
-                && setOnce(previous.get("resultRef"), next.get("resultRef"))
-                && setOnce(previous.get("terminalReceiptRef"),
-                        next.get("terminalReceiptRef"));
+                        next.get("childSessionId"));
     }
 
     private static boolean setOnce(JsonNode before, JsonNode after) {
@@ -1097,6 +1113,7 @@ public final class ManagedExtensionRecords {
         durableRef(acceptance.get("terminalReceiptRef"), "terminalReceiptRef");
         JsonNode resultVersion = acceptance.get("resultVersion");
         require(resultVersion.isNumber()
+                && Double.isFinite(resultVersion.doubleValue())
                 && resultVersion.decimalValue()
                         .compareTo(java.math.BigDecimal.ONE) == 0,
                 "Child acceptance resultVersion must be 1 in schema version 1");

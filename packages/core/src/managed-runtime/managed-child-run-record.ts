@@ -32,8 +32,6 @@ import { MANAGED_TOOL_RESULT_KINDS } from './managed-tool-result.js';
 // the same cases. See docs/design/2026-10-03-managed-shell-monitor-runtime.md
 // and docs/design/2026-10-06-managed-child-agent-runtime.md.
 
-export type ChildRunKind = 'shell' | 'child_agent';
-
 /** Why a background Shell ended, by the state its run ended in. */
 export const CHILD_RUN_STOP_REASONS = Object.freeze({
   settled: Object.freeze(['exited'] as const),
@@ -124,6 +122,9 @@ export interface ChildAgentRun {
  * parse returns it for `kind: "shell"`.
  */
 export type AnyChildRun = ChildRun | ChildAgentRun;
+
+/** The `kind` vocabulary any consumer of the union may switch on. */
+export type ChildRunKind = AnyChildRun['kind'];
 
 const SHELL_KEYS = [
   'commandRef',
@@ -313,7 +314,7 @@ export function parseChildShellRun(value: unknown): ChildRun {
   const record = parseChildRun(value);
   if (record.kind !== 'shell') {
     fail(
-      'Child run kind must be one of shell, child_agent in schema version 1.',
+      `Child run kind must be 'shell' for this consumer, got ${record.kind}.`,
     );
   }
   return record;
@@ -371,24 +372,8 @@ function parseChildShellRecord(value: unknown): ChildRun {
   if (outputRef !== null && startReceiptRef === null) {
     fail('Child run outputRef needs a start receipt.');
   }
-  const stopReason = nullable(body.stopReason, (reason) => {
-    if (
-      typeof reason !== 'string' ||
-      !Object.values(CHILD_RUN_STOP_REASONS).some((fitting) =>
-        (fitting as readonly string[]).includes(reason),
-      )
-    ) {
-      fail('Child run stopReason is not a closed stop reason.');
-    }
-    return reason as ChildRunStopReason;
-  });
-  const stopRequested = body.stopRequested;
-  if (typeof stopRequested !== 'boolean') {
-    fail('Child run stopRequested must be boolean.');
-  }
-  if (stopReason === 'stop_requested' && !stopRequested) {
-    fail('Child run stop_requested needs its stop request.');
-  }
+  const stopReason = stopReasonOf(body.stopReason, CHILD_RUN_STOP_REASONS, run);
+  const stopRequested = stopFlags(stopReason, body.stopRequested, run);
   const exitCode = nullable(body.exitCode, (code) => {
     if (
       typeof code !== 'number' ||
@@ -406,22 +391,6 @@ function parseChildShellRecord(value: unknown): ChildRun {
     }
     return signal;
   });
-  if ((stopReason === null) !== !TERMINAL_RUN_STATES.includes(run.state)) {
-    fail('Child run stopReason is set exactly when the run ends.');
-  }
-  if (stopReason !== null) {
-    const fitting: readonly ChildRunStopReason[] = Object.hasOwn(
-      CHILD_RUN_STOP_REASONS,
-      run.state,
-    )
-      ? CHILD_RUN_STOP_REASONS[run.state as keyof typeof CHILD_RUN_STOP_REASONS]
-      : [];
-    if (!fitting.includes(stopReason)) {
-      fail(
-        `Child run stopReason ${stopReason} does not fit the ${run.state} state.`,
-      );
-    }
-  }
   // Every terminal run names the ending execution line: a natural exit is
   // proven only by an observed settled execution under its receipt, a
   // pre-start failure lands on not_started_proven, and an honored stop or a
@@ -453,12 +422,6 @@ function parseChildShellRecord(value: unknown): ChildRun {
     execution !== 'settled'
   ) {
     fail('Child run process failure needs its settled execution.');
-  }
-  const quota =
-    run.reason !== null &&
-    (MANAGED_EXTENSION_REASONS.quota as readonly string[]).includes(run.reason);
-  if ((stopReason === 'quota_exceeded') !== quota) {
-    fail('Child run stopReason is quota_exceeded exactly for a quota reason.');
   }
   // Exit evidence is proven exactly when a Shell exits: a stop by anyone
   // else carries no exit status, and a failure proves none either.
@@ -502,6 +465,16 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
   const delivery = run.delivery;
   if (delivery === null || delivery.target !== 'session') {
     fail('Child run delivery must target the parent session.');
+  }
+  // The launched definition is pinned no later than the dispatch that
+  // admits the creation; the shared successor rule makes it unaddable
+  // after that dispatch, so its absence can never be repaired.
+  if (
+    run.execution !== null &&
+    run.execution !== 'intent' &&
+    run.definition === null
+  ) {
+    fail('Child run must pin the definition it dispatched.');
   }
   const depth = body.depth;
   if (
@@ -548,6 +521,11 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
     (run.execution === 'running_attached' || run.execution === 'settled')
   ) {
     fail('Child run childSessionId is set once creation is proven.');
+  }
+  // The Session the child runs in is hosted by a Runtime binding, set with
+  // the dispatch and unaddable once dispatched, like the definition pin.
+  if (childSessionId !== null && run.runtime === null) {
+    fail('Child run childSessionId needs the Runtime binding that hosts it.');
   }
   const predecessorChildRunId = nullable(body.predecessorChildRunId, (each) =>
     id(each, 'predecessorChildRunId'),
@@ -639,7 +617,14 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
 /** A normalized relative directory: `.` or NFC text without `.`/`..` segments. */
 function isRelativeDirectory(value: string): boolean {
   if (value === '.') return true;
-  if (value.startsWith('/') || value.endsWith('/') || value.includes('\\')) {
+  // A drive spec (`C:/x`, drive-relative `C:x`) resolves absolute on
+  // Windows — the platform the backslash clause defends.
+  if (
+    value.startsWith('/') ||
+    value.endsWith('/') ||
+    value.includes('\\') ||
+    /^[A-Za-z]:/.test(value)
+  ) {
     return false;
   }
   if (
@@ -682,10 +667,12 @@ export function isChildRunStart(value: unknown): boolean {
  * Whether `next` may follow `previous` as a later revision of the same
  * record, per kind: the identity is fixed, the run moves forward, a Shell's
  * start receipt is set once and never changes while its output may only
- * grow, a child agent's Session is created once and its result and receipt
- * may only appear, either kind's stop request is set but never cleared, and
- * once the run is terminal the remaining rules freeze everything but the
- * child agent's delivery line.
+ * grow, a child agent's Session is created once, either kind's stop
+ * request is set but never cleared, and once the run is terminal the
+ * remaining rules freeze everything but the child agent's delivery line.
+ * The result and its receipt need no set-once rule here: they appear
+ * exactly at the settling revision, and the terminal freeze forbids any
+ * restatement from then on.
  */
 export function isChildRunSuccessor(previous: unknown, next: unknown): boolean {
   return accepts(() => {
@@ -725,9 +712,7 @@ export function isChildRunSuccessor(previous: unknown, next: unknown): boolean {
       CHILD_AGENT_FIXED_KEYS.every((key) => same(before[key], after[key])) &&
       isExtensionRunSuccessor(before.run, after.run) &&
       (!before.stopRequested || after.stopRequested) &&
-      setOnce(before.childSessionId, after.childSessionId) &&
-      setOnce(before.resultRef, after.resultRef) &&
-      setOnce(before.terminalReceiptRef, after.terminalReceiptRef)
+      setOnce(before.childSessionId, after.childSessionId)
     );
   });
 }

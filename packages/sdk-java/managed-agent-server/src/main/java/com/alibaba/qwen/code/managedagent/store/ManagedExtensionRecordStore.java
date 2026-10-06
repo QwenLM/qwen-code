@@ -494,6 +494,12 @@ public class ManagedExtensionRecordStore {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
                 }
             }
+            require(!"child_agent".equals(record.get("kind").textValue())
+                    || record.get("depth").longValue() != 1
+                    || record.get("rootSessionId").textValue()
+                            .equals(sessionId),
+                    "Child run rootSessionId must be this Session for a"
+                            + " first-level child.");
         }
         if (domain.equals("child_acceptance")) {
             for (String field : List.of("contentRef", "terminalReceiptRef")) {
