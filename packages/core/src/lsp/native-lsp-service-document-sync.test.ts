@@ -2924,6 +2924,58 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.llmContent).toMatch(/^No diagnostics found/);
     });
 
+    it('lets an excused -32601 refusal veto when no answering server owns the file', async () => {
+      // clangd is the only server that can own main.cpp and answers -32601;
+      // pyright returns an empty report for a file it never declared. The
+      // refusal excused out of `failures` must still veto when nothing that
+      // could own the file answered — otherwise a broken file certifies
+      // clean.
+      const [cppPath] = addFile('main.cpp', 'int main() { return 1 }\n');
+      const pyright = createConnection();
+      mockDiagnosticsResponses(pyright);
+      withServers([
+        ['cpp', serverOn('clangd', ['cpp'], refusingConnection(-32601))],
+        ['pyright', serverOn('pyright', ['python'], pyright)],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: cppPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'does not support pull diagnostics',
+      );
+    });
+
+    it('lets an excused -32601 refusal veto when the answering sibling is keyed by server name', async () => {
+      // The pyright entry is keyed by server name, so its derived extension
+      // set is unattributable and it counts as relevant — but it declares
+      // `pyright`, not `typescript`, so it is no owner of main.ts either.
+      const [tsPath] = addFile('main.ts', 'const value: number = "";\n');
+      const pyright = createConnection();
+      mockDiagnosticsResponses(pyright);
+      withServers([
+        ['pyright', serverOn('pyright', ['pyright'], pyright)],
+        [
+          'typescript',
+          serverOn(
+            'typescript-language-server',
+            ['typescript'],
+            refusingConnection(-32601),
+          ),
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: tsPath,
+      });
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+    });
+
     it('still reports a real problem when a push-only sibling answers -32601', async () => {
       // Excusing the refusal must not blunt the answer that was retrieved.
       const [brokenPath] = addFile('broken.ts', 'const value: number = "";\n');

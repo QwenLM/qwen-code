@@ -2079,6 +2079,10 @@ export class NativeLspService {
     // positively exclude. Only the latter can back a clean answer: an empty
     // report from a server that could never own the file certifies nothing.
     let answeredRelevant = 0;
+    // An excused `-32601` refusal must not outvote a file no owner backed:
+    // count the answers from servers that positively declare the queried
+    // extension, so a refusal beside only non-owners stays a refusal.
+    let answeredOwner = 0;
 
     for (const [name, handle] of handles) {
       // A sync failure must reject, not report incomplete diagnostics as clean.
@@ -2129,6 +2133,12 @@ export class NativeLspService {
               });
             } else if (!this.serverDeclaredIrrelevant(handle, extension)) {
               answeredRelevant++;
+              if (
+                extension !== undefined &&
+                this.declaredDiagnosticExtensions(handle).has(extension)
+              ) {
+                answeredOwner++;
+              }
             }
           } else {
             // A report without an `items` array (or a bare array) answered
@@ -2188,7 +2198,10 @@ export class NativeLspService {
       // either answers, records a failure or refuses the method outright, so
       // both ledgers are empty here only when an excused server answered and
       // nothing else went wrong — that case needs its own reason string.
-      if (answeredRelevant === 0) {
+      if (
+        answeredRelevant === 0 ||
+        (unsupported.length > 0 && answeredOwner === 0)
+      ) {
         throw failures.length > 0 || unsupported.length > 0
           ? nothingRetrievedForDiagnostics(
               [...failures, ...unsupported],
