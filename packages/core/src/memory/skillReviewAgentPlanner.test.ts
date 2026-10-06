@@ -450,15 +450,15 @@ describe('runSkillReviewByAgent limit wiring', () => {
     expect(call?.tools).toEqual([READ_FILE, WRITE_FILE, EDIT]);
   });
 
-  it('reports a cancelled run as cancelled, not as a failure', async () => {
+  it('words the stop reason instead of passing the mode token through', async () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'cancelled',
-      terminateReason: 'CANCELLED',
+      status: 'failed',
+      terminateReason: 'MAX_TURNS',
       filesTouched: [],
     });
 
     await expect(review()).rejects.toThrow(
-      'Skill review agent cancelled before completion',
+      'Agent stopped: maximum turns reached.',
     );
   });
 });

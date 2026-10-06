@@ -350,12 +350,12 @@ export async function runAutoMemoryExtractionByAgent(
   });
 
   if (result.status !== 'completed') {
+    // No cancelled arm: this planner passes no abortSignal, so
+    // runForkedAgent cannot resolve 'cancelled' here.
     throw new Error(
       terminateReasonMessage(
         result.terminateReason,
-        result.status === 'cancelled'
-          ? 'Extraction agent cancelled before completion'
-          : 'Extraction agent did not complete successfully',
+        'Extraction agent did not complete successfully',
       ),
     );
   }

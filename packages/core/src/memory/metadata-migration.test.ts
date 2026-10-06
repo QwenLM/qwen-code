@@ -1577,6 +1577,34 @@ describe('memory metadata migration', () => {
     expect(updated).toContain('name: Migrated memory');
   });
 
+  it('reports a cancelled migration as cancelled, not as a failure', async () => {
+    // The abort rethrow at the candidate loop only lets a message escape
+    // when the caller's signal is aborted, so the mock has to abort during
+    // the agent call and the test must not inject its own generateMetadata.
+    await write('project/legacy.md', legacyContent());
+    const controller = new AbortController();
+    vi.mocked(runForkedAgent).mockImplementationOnce(async () => {
+      controller.abort();
+      return {
+        status: 'cancelled',
+        terminateReason: 'CANCELLED',
+        filesTouched: [],
+      };
+    });
+
+    await expect(
+      runMemoryMetadataMigration({
+        config: {
+          getMemoryAgentTimeoutMinutes: () => undefined,
+        } as unknown as Config,
+        projectRoot,
+        root: memoryRoot,
+        scope: 'project',
+        abortSignal: controller.signal,
+      }),
+    ).rejects.toThrow('Metadata migration agent cancelled before completion');
+  });
+
   it('caps the content handed to the agent, not just the reported char count', async () => {
     await write('project/large.md', legacyContent('x'.repeat(50_000)));
     let receivedContentLength = -1;

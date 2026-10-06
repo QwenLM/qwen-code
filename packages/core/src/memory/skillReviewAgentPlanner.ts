@@ -467,12 +467,12 @@ export async function runSkillReviewByAgent(params: {
   });
 
   if (result.status !== 'completed') {
+    // No cancelled arm: this planner passes no abortSignal, so
+    // runForkedAgent cannot resolve 'cancelled' here.
     throw new Error(
       terminateReasonMessage(
         result.terminateReason,
-        result.status === 'cancelled'
-          ? 'Skill review agent cancelled before completion'
-          : 'Skill review agent did not complete successfully',
+        'Skill review agent did not complete successfully',
       ),
     );
   }

@@ -624,16 +624,18 @@ describe('runAutoMemoryExtractionByAgent', () => {
     ).rejects.toThrow('timeout');
   });
 
-  it('reports a cancelled run as cancelled, not as a failure', async () => {
+  it('words the stop reason instead of passing the mode token through', async () => {
+    // The case above feeds a free-form reason, which passes through by
+    // design, so only this one fails if the conversion is reverted.
     vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'cancelled',
-      terminateReason: 'CANCELLED',
+      status: 'failed',
+      terminateReason: 'MAX_TURNS',
       filesTouched: [],
     });
 
     await expect(
       runAutoMemoryExtractionByAgent(mockConfig, '/tmp/project'),
-    ).rejects.toThrow('Extraction agent cancelled before completion');
+    ).rejects.toThrow('Agent stopped: maximum turns reached.');
   });
 
   it('ignores non-memory file paths in filesTouched', async () => {
