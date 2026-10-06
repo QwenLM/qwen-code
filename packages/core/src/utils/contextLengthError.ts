@@ -30,6 +30,9 @@ const CONTEXT_LENGTH_PATTERNS = [
   /\btoo many tokens\b/i,
   /\btokens?\s*>\s*[\d,]+\s*(?:maximum|max|limit)\b/i,
   /\b(?:input|prompt|messages?|context)\b[^\n]{0,120}\btokens?\b[^\n]{0,120}\bexceed(?:s|ed|ing)?\b/i,
+  // llama.cpp: "request (279935 tokens) exceeds the available context size
+  // (262144 tokens), try increasing it" (#13415).
+  /\bexceeds the available context size\b/i,
 ];
 
 function parseInteger(value: string): number {
@@ -86,6 +89,21 @@ function parseTokenCounts(text: string): {
   if (rangeMatch) {
     return {
       limitTokens: parseInteger(rangeMatch[1]!),
+    };
+  }
+
+  // llama.cpp: "request (279935 tokens) exceeds the available context size
+  // (262144 tokens), try increasing it" — the SECOND number is the server's
+  // real ceiling (its `-c` / model `n_ctx`), which routinely differs from the
+  // window we inferred from the model id. Parsed for parity and telemetry:
+  // the reactive-compaction anchor consumes `actualTokens`, not this.
+  const llamaCppMatch = text.match(
+    /\(\s*(\d[\d,]*)\s*tokens?\s*\)\s*exceeds the available context size\s*\(\s*(\d[\d,]*)\s*tokens?\s*\)/i,
+  );
+  if (llamaCppMatch) {
+    return {
+      actualTokens: parseInteger(llamaCppMatch[1]!),
+      limitTokens: parseInteger(llamaCppMatch[2]!),
     };
   }
 
