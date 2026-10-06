@@ -76,6 +76,7 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  describeBridgedArgumentError,
   resolveDeferredToolCall,
 } from '../tools/tool-call.js';
 import type {
@@ -3373,6 +3374,15 @@ export class CoreToolScheduler {
           );
           if (recordPrevalidationCancellation()) continue;
           if (invocationOrError instanceof Error) {
+            // A target reached through tool_call reports its own validation
+            // error; name it so the model does not blame the envelope.
+            const targetMessage =
+              reqInfo.modelFacingName !== undefined
+                ? describeBridgedArgumentError(
+                    reqInfo.name,
+                    invocationOrError.message,
+                  )
+                : invocationOrError.message;
             // Attach guidance that matches the actual cause. Both flags mean
             // the arguments arrived incomplete; only the first means the
             // output token limit did it, and claiming max_tokens when the
@@ -3384,8 +3394,10 @@ export class CoreToolScheduler {
                 ? INCOMPLETE_ARGS_PARAM_GUIDANCE
                 : undefined;
             const displayError = paramGuidance
-              ? new Error(`${invocationOrError.message} ${paramGuidance}`)
-              : invocationOrError;
+              ? new Error(`${targetMessage} ${paramGuidance}`)
+              : reqInfo.modelFacingName !== undefined
+                ? new Error(targetMessage)
+                : invocationOrError;
 
             // Track validation retry for loop detection. Counts accumulate per
             // (tool, error message) pair so a different validation mistake on
@@ -3397,9 +3409,7 @@ export class CoreToolScheduler {
 
             const finalError =
               count >= VALIDATION_RETRY_LOOP_THRESHOLD
-                ? new Error(
-                    `${invocationOrError.message}${RETRY_LOOP_STOP_DIRECTIVE}`,
-                  )
+                ? new Error(`${targetMessage}${RETRY_LOOP_STOP_DIRECTIVE}`)
                 : displayError;
 
             newToolCalls.push({

@@ -4261,6 +4261,15 @@ describe('Settings Loading and Merging', () => {
       },
     );
 
+    it('lists both memory budgets as workspace-restricted', () => {
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
+        'memory.agentMaxTurns',
+      );
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
+        'memory.agentTimeoutMinutes',
+      );
+    });
+
     it('selects the complete highest-priority operator Mem0 config', () => {
       const mem0 = { baseUrl: 'https://system.example', protocol: 'mem0-v3' };
       (mockFsExistsSync as Mock).mockReturnValue(true);
@@ -4368,7 +4377,9 @@ describe('Settings Loading and Merging', () => {
         workspacePayload[section][key] =
           key === 'allowedInsecureVoiceBaseUrls'
             ? ['http://voice.example/v1']
-            : true;
+            : key === 'agentMaxTurns' || key === 'agentTimeoutMinutes'
+              ? 0 // numeric budgets; 0 disables the limit, the value being guarded against
+              : true;
       }
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {

@@ -114,7 +114,18 @@ class ManagedAgentServerIntegrationTest {
     private PlatformTransactionManager transactionManager;
 
     @AfterEach
-    void restoreHarnessAvailability() {
+    void settleLeftoverTurnsAndRestoreHarness() {
+        // Settle every Turn the test left non-terminal before the scanner
+        // re-arms: this H2 database backs only this class, and a leftover
+        // ACCEPTED/RUNNING/CANCELLING Turn (what findDispatchable reads)
+        // would otherwise be claimed once its dispatch lease expires and
+        // poison the counter-sensitive tests that run later in this shared
+        // context.
+        jdbc.update("UPDATE managed_agent_turn SET status = 'FAILED',"
+                + " error_code = 'test_cleanup', completed_at = ?,"
+                + " dispatch_owner = NULL, dispatch_lease_until = NULL,"
+                + " retry_after = NULL WHERE status IN ('ACCEPTED',"
+                + " 'RUNNING', 'CANCELLING')", System.currentTimeMillis());
         harness.setAvailable(true);
     }
 
@@ -343,7 +354,7 @@ class ManagedAgentServerIntegrationTest {
         String tenant = "tenant-runtime-recovery";
         HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
         when(recovery.hasUnknownOutcome()).thenReturn(true);
-        harness.returnRuntimeRecovery(recovery);
+        harness.returnRuntimeRecovery(tenant, recovery);
         int submissions = harness.submitCount();
 
         MvcResult created = mvc.perform(post("/v1/agents/sessions")
@@ -1310,7 +1321,8 @@ class ManagedAgentServerIntegrationTest {
                 .doesNotContain(target);
         assertThat(store.claimTurn(tenant, session.sessionId(), turn.turnId(),
                 "retry-owner-2", Duration.ofMinutes(1))).isEmpty();
-        assertThat(store.findDispatchable(retryAfter, 100)).contains(target);
+        assertThat(store.findDispatchable(retryAfter, 100))
+                .contains(target);
     }
 
     @Test
@@ -1490,7 +1502,8 @@ class ManagedAgentServerIntegrationTest {
                         .singleElement().satisfies(item ->
                                 assertThat(item.content()).singleElement()
                                         .satisfies(part -> assertThat(
-                                                part.text()).isEqualTo("kept"))));
+                                                part.text())
+                                                .isEqualTo("kept"))));
         assertEventsNameTheSnapshot(tenant, session.sessionId());
     }
 
@@ -1757,7 +1770,8 @@ class ManagedAgentServerIntegrationTest {
                 ConcurrentHashMap.newKeySet();
         private volatile boolean available = true;
         private volatile String closeAnswer = BOOT_ID;
-        private volatile HarnessRuntimeRecovery runtimeRecovery;
+        private final Map<String, HarnessRuntimeRecovery>
+                tenantRecoveries = new ConcurrentHashMap<>();
 
         @Override
         public boolean isAvailable() {
@@ -1768,9 +1782,10 @@ class ManagedAgentServerIntegrationTest {
         public Attachment createOrLoad(String tenantId, String sessionId,
                 boolean created) {
             sessions.add(sessionId);
-            HarnessRuntimeRecovery recovery = runtimeRecovery;
-            runtimeRecovery = null;
-            return new Attachment(BOOT_ID, recovery);
+            // Keyed by tenant: a shared-scope fixture consumes its own arm;
+            // another test's background claim can never steal it.
+            return new Attachment(BOOT_ID,
+                    tenantRecoveries.remove(tenantId));
         }
 
         @Override
@@ -1945,8 +1960,9 @@ class ManagedAgentServerIntegrationTest {
             available = value;
         }
 
-        void returnRuntimeRecovery(HarnessRuntimeRecovery recovery) {
-            runtimeRecovery = recovery;
+        void returnRuntimeRecovery(String tenantId,
+                HarnessRuntimeRecovery recovery) {
+            tenantRecoveries.put(tenantId, recovery);
         }
 
         int cancelCount() {
