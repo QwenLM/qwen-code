@@ -592,7 +592,9 @@ export async function verifyRecoverySession(
         ((envelope.executionStatus === 'not_started' &&
           envelope.capture === null) ||
           (outcome['decision'] === 'committed' &&
-            envelope.capture?.captureStatus === 'complete')),
+            envelope.capture?.captureStatus === 'complete') ||
+          (outcome['decision'] === 'blocked' &&
+            envelope.capture?.captureStatus === 'detached')),
       'unsettled or conflicting Shell receipt',
     );
     if (outcome['version'] === 1) {
@@ -647,6 +649,10 @@ export async function verifyRecoverySession(
         'invalid Shell reader history',
       );
       if (envelope.executionStatus === 'not_started') return;
+      // A detached start handle owns no publication delivery: the durable
+      // proof of its process is the child_run record, not a publication
+      // receipt, so replay stops at the family check for it.
+      if (envelope.capture?.captureStatus === 'detached') return;
       const receipt = await io.publicationReceipt({
         sessionId: source.sessionId,
         executionCallId: event.payload['executionCallId'] as string,
