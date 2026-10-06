@@ -63,6 +63,7 @@ public class HarnessCoordinator {
     private final int batchMaxBytes;
     private final String owner = UUID.randomUUID().toString();
     private final Set<String> active = ConcurrentHashMap.newKeySet();
+    private final Set<String> cancellations = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService renewer =
             Executors.newSingleThreadScheduledExecutor(runnable -> {
                 Thread thread = new Thread(runnable,
@@ -603,7 +604,21 @@ public class HarnessCoordinator {
             // needed for new work and could replace the running attachment.
             if (session.harnessBootId() != null && store.bindHarness(tenantId,
                     sessionId, turnId, owner, session.harnessBootId())) {
-                harness.cancel(session.tenantId(), session.sessionId());
+                // Renewal requeues this poller while the Turn is still
+                // settling, so only one concurrent poller may send the
+                // cancel; a failed send releases the claim so the next
+                // renewal retries it.
+                String cancelKey = key(tenantId, sessionId, turnId) + "\n"
+                        + turn.harnessEventEpoch();
+                if (cancellations.add(cancelKey)) {
+                    try {
+                        harness.cancel(session.tenantId(),
+                                session.sessionId());
+                    } catch (RuntimeException error) {
+                        cancellations.remove(cancelKey);
+                        throw error;
+                    }
+                }
             }
         } catch (RuntimeException error) {
             LOG.warn("Managed Turn cancellation awaits lease renewal tenant={}"
