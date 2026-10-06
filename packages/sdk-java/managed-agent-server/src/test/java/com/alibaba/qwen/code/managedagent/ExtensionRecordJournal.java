@@ -132,6 +132,48 @@ final class ExtensionRecordJournal {
             byte[] body, long occurredAt, Consumer<ObjectNode> editEvent,
             UnaryOperator<String> editRecords, int extraEvents, String domain,
             List<CommitResource> resources) {
+        if ("monitor_run".equals(domain) && resources.isEmpty()) {
+            try {
+                JsonNode maybeMonitor;
+                try (var parser = JSON.getFactory().createParser(body)) {
+                    maybeMonitor = parser.readValueAsTree();
+                    if (parser.nextToken() != null) {
+                        maybeMonitor = null;
+                    }
+                }
+                if (maybeMonitor != null && maybeMonitor.isObject()) {
+                    ObjectNode rewritten = maybeMonitor.deepCopy();
+                    List<CommitResource> gathered = new ArrayList<>();
+                    for (String field : List.of("commandRef", "startReceiptRef",
+                            "outputRef", "lastObservationRef")) {
+                        JsonNode ref = rewritten.get(field);
+                        if (ref != null && ref.isObject() && !ref.isNull()) {
+                            byte[] placeholder = new byte[(int) ref.required("byteLength").longValue()];
+                            String digest = sha256(placeholder);
+                            rewritten.putObject(field)
+                                    .put("resourceId", ref.required("resourceId").textValue())
+                                    .put("kind", ref.required("kind").textValue())
+                                    .put("schemaVersion", ref.required("schemaVersion").intValue())
+                                    .put("byteLength", placeholder.length)
+                                    .put("digest", digest);
+                            gathered.add(new CommitResource(
+                                    ref.required("resourceId").textValue(),
+                                    ref.required("kind").textValue(),
+                                    ref.required("schemaVersion").intValue(),
+                                    placeholder.length, digest,
+                                    Base64.getEncoder().encodeToString(placeholder)));
+                        }
+                    }
+                    if (!gathered.isEmpty()) {
+                        return request(operation, commandId, bytes(rewritten),
+                                occurredAt, editEvent, editRecords, extraEvents,
+                                domain, gathered);
+                    }
+                }
+            } catch (Exception notAMonitor) {
+                // Not a JSON monitor body: the generic request path handles it.
+            }
+        }
         String resourceId = resourceId(body);
         ObjectNode recordRef = JSON.createObjectNode()
                 .put("resourceId", resourceId)

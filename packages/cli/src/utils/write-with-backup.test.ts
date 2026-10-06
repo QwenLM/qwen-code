@@ -20,7 +20,9 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof fs>();
   return {
     ...actual,
+    mkdtempSync: vi.fn(actual.mkdtempSync),
     writeFileSync: vi.fn(actual.writeFileSync),
+    chmodSync: vi.fn(actual.chmodSync),
     copyFileSync: vi.fn(actual.copyFileSync),
     renameSync: vi.fn(actual.renameSync),
     readFileSync: vi.fn(actual.readFileSync),
@@ -34,7 +36,9 @@ describe('writeWithBackup', () => {
   let targetPath: string;
 
   beforeEach(() => {
+    vi.mocked(fs.mkdtempSync).mockImplementation(nativeFs.mkdtempSync);
     vi.mocked(fs.writeFileSync).mockImplementation(nativeFs.writeFileSync);
+    vi.mocked(fs.chmodSync).mockImplementation(nativeFs.chmodSync);
     vi.mocked(fs.copyFileSync).mockImplementation(nativeFs.copyFileSync);
     vi.mocked(fs.renameSync).mockImplementation(nativeFs.renameSync);
     vi.mocked(fs.readFileSync).mockImplementation(nativeFs.readFileSync);
@@ -64,6 +68,259 @@ describe('writeWithBackup', () => {
       expect(fs.readFileSync(targetPath, 'utf8')).toBe(content);
       expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
     }
+  });
+
+  it('publishes a new file when the target disappears before the mode probe', () => {
+    nativeFs.writeFileSync(targetPath, 'old');
+    vi.mocked(fs.mkdtempSync).mockImplementationOnce((...args) => {
+      const directory = nativeFs.mkdtempSync(...args);
+      nativeFs.unlinkSync(targetPath);
+      return directory;
+    });
+
+    writeWithBackupSync(targetPath, 'new');
+
+    expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+    expect(fs.chmodSync).not.toHaveBeenCalled();
+    expect(fs.copyFileSync).not.toHaveBeenCalled();
+    expect(fs.renameSync).toHaveBeenCalledOnce();
+    expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+  });
+
+  it.each(['ENOSYS', 'ENOTSUP', 'EPERM'])(
+    'publishes when chmod is unavailable and staged permissions are no broader (%s)',
+    (code) => {
+      nativeFs.writeFileSync(targetPath, 'old');
+      vi.mocked(fs.chmodSync).mockImplementation(() => {
+        throw Object.assign(new Error(code), { code });
+      });
+
+      writeWithBackupSync(targetPath, 'new');
+
+      expect(fs.chmodSync).toHaveBeenCalledOnce();
+      expect(fs.renameSync).toHaveBeenCalledOnce();
+      expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+      expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+    },
+  );
+
+  describe.skipIf(process.platform === 'win32')('POSIX permissions', () => {
+    it.each([
+      [null, 0o022],
+      [null, 0o077],
+      [0o644, 0o022],
+      [0o644, 0o077],
+      [0o777, 0o022],
+      [0o777, 0o077],
+    ] as const)(
+      'uses default permissions when replacing a symlink to mode %s under umask %o',
+      (sourceMode, mask) => {
+        const referent =
+          sourceMode === null ? '/dev/null' : path.join(tempDir, 'referent');
+        if (sourceMode !== null) {
+          nativeFs.writeFileSync(referent, 'original');
+          nativeFs.chmodSync(referent, sourceMode);
+        }
+        fs.symlinkSync(referent, targetPath);
+        const previousMask = process.umask(mask);
+        try {
+          vi.mocked(fs.renameSync).mockImplementation((...args) => {
+            expect(nativeFs.statSync(args[0]).mode & 0o777).toBe(0o666 & ~mask);
+            expect(nativeFs.lstatSync(targetPath).isSymbolicLink()).toBe(true);
+            nativeFs.renameSync(...args);
+          });
+
+          writeWithBackupSync(targetPath, 'new');
+
+          expect(fs.lstatSync(targetPath).isFile()).toBe(true);
+          expect(fs.statSync(targetPath).mode & 0o777).toBe(0o666 & ~mask);
+          expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+          expect(fs.chmodSync).not.toHaveBeenCalled();
+          if (sourceMode !== null) {
+            expect(fs.readFileSync(referent, 'utf8')).toBe('original');
+            expect(fs.statSync(referent).mode & 0o777).toBe(sourceMode);
+          }
+          expect(fs.readdirSync(tempDir)).toEqual(
+            sourceMode === null
+              ? ['settings.json']
+              : ['referent', 'settings.json'],
+          );
+        } finally {
+          process.umask(previousMask);
+        }
+      },
+    );
+
+    it('rejects a symlink to a directory without leaving artifacts', () => {
+      const directory = path.join(tempDir, 'directory');
+      fs.mkdirSync(directory);
+      fs.symlinkSync(directory, targetPath);
+
+      expect(() => writeWithBackupSync(targetPath, 'new')).toThrow('directory');
+
+      expect(fs.lstatSync(targetPath).isSymbolicLink()).toBe(true);
+      expect(fs.statSync(directory).isDirectory()).toBe(true);
+      expect(fs.readdirSync(tempDir)).toEqual(['directory', 'settings.json']);
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+      expect(fs.renameSync).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['ENOSYS', 0o022],
+      ['ENOTSUP', 0o022],
+      ['EPERM', 0o022],
+      ['ENOSYS', 0o077],
+      ['ENOTSUP', 0o077],
+      ['EPERM', 0o077],
+    ] as const)(
+      'does not widen permissions when chmod returns %s under umask %o',
+      (code, mask) => {
+        const previousMask = process.umask(mask);
+        try {
+          vi.mocked(fs.chmodSync).mockImplementation(() => {
+            throw Object.assign(new Error(code), { code });
+          });
+          for (const mode of [0o600, 0o640]) {
+            nativeFs.writeFileSync(targetPath, 'old');
+            nativeFs.chmodSync(targetPath, mode);
+            vi.mocked(fs.renameSync).mockImplementation((...args) => {
+              expect(nativeFs.statSync(args[0]).mode & 0o777).toBe(
+                mode & ~mask,
+              );
+              expect(nativeFs.statSync(targetPath).mode & 0o777).toBe(mode);
+              nativeFs.renameSync(...args);
+            });
+
+            writeWithBackupSync(targetPath, 'new');
+
+            expect(fs.chmodSync).toHaveBeenLastCalledWith(
+              expect.any(String),
+              mode,
+            );
+            expect(fs.statSync(targetPath).mode & 0o777).toBe(mode & ~mask);
+            expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+            expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+          }
+        } finally {
+          process.umask(previousMask);
+        }
+      },
+    );
+
+    it.each([0o022, 0o077])(
+      'preserves existing modes under umask %o',
+      (mask) => {
+        const previousMask = process.umask(mask);
+        try {
+          for (const mode of [0o600, 0o640, 0o644, 0o666]) {
+            nativeFs.writeFileSync(targetPath, 'old');
+            nativeFs.chmodSync(targetPath, mode);
+            vi.mocked(fs.renameSync).mockImplementation((...args) => {
+              expect(nativeFs.statSync(args[0]).mode & 0o777).toBe(mode);
+              expect(nativeFs.statSync(targetPath).mode & 0o777).toBe(mode);
+              nativeFs.renameSync(...args);
+            });
+
+            writeWithBackupSync(targetPath, 'new');
+
+            expect(fs.statSync(targetPath).mode & 0o777).toBe(mode);
+            expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+            expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+          }
+        } finally {
+          process.umask(previousMask);
+        }
+      },
+    );
+
+    it.each([0o4600, 0o2640, 0o1644])(
+      'drops special permission bits from mode %o',
+      (mode) => {
+        nativeFs.writeFileSync(targetPath, 'old');
+        nativeFs.chmodSync(targetPath, mode);
+        expect(fs.statSync(targetPath).mode & 0o7777).toBe(mode);
+        vi.mocked(fs.renameSync).mockImplementation((...args) => {
+          expect(nativeFs.statSync(args[0]).mode & 0o7777).toBe(mode & 0o777);
+          nativeFs.renameSync(...args);
+        });
+
+        writeWithBackupSync(targetPath, 'new');
+
+        expect(fs.statSync(targetPath).mode & 0o7777).toBe(mode & 0o777);
+        expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+        expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+      },
+    );
+
+    it.each([0o022, 0o077])(
+      'keeps default new-file permissions under umask %o',
+      (mask) => {
+        const previousMask = process.umask(mask);
+        try {
+          writeWithBackupSync(targetPath, 'new');
+          expect(fs.statSync(targetPath).mode & 0o777).toBe(0o666 & ~mask);
+          expect(fs.readFileSync(targetPath, 'utf8')).toBe('new');
+          expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+        } finally {
+          process.umask(previousMask);
+        }
+      },
+    );
+
+    it.each(['ENOSYS', 'ENOTSUP', 'EPERM'])(
+      'refuses broader staged permissions when chmod returns %s',
+      (code) => {
+        nativeFs.writeFileSync(targetPath, 'old');
+        nativeFs.chmodSync(targetPath, 0o600);
+        const failure = Object.assign(new Error('chmod failed'), { code });
+        vi.mocked(fs.writeFileSync).mockImplementation((...args) => {
+          nativeFs.writeFileSync(...args);
+          nativeFs.chmodSync(args[0] as string, 0o644);
+        });
+        vi.mocked(fs.chmodSync).mockImplementation(() => {
+          throw failure;
+        });
+
+        let error: unknown;
+        try {
+          writeWithBackupSync(targetPath, 'new');
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBe(failure);
+        expect(fs.readFileSync(targetPath, 'utf8')).toBe('old');
+        expect(fs.statSync(targetPath).mode & 0o777).toBe(0o600);
+        expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+        expect(fs.copyFileSync).not.toHaveBeenCalled();
+        expect(fs.renameSync).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([undefined, 'EACCES', 'EIO', 'EROFS'])(
+      'preserves the target when staging chmod fails (%s)',
+      (code) => {
+        nativeFs.writeFileSync(targetPath, 'old');
+        nativeFs.chmodSync(targetPath, 0o600);
+        const failure = new Error('chmod failed');
+        if (code !== undefined) Object.assign(failure, { code });
+        vi.mocked(fs.chmodSync).mockImplementation(() => {
+          throw failure;
+        });
+
+        let error: unknown;
+        try {
+          writeWithBackupSync(targetPath, 'new');
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBe(failure);
+        expect(fs.readFileSync(targetPath, 'utf8')).toBe('old');
+        expect(fs.statSync(targetPath).mode & 0o777).toBe(0o600);
+        expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+        expect(fs.copyFileSync).not.toHaveBeenCalled();
+        expect(fs.renameSync).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('keeps the sandbox policy and loaded scope readable until publication', () => {

@@ -441,7 +441,8 @@ also cancel a running Turn while they can still read the Workspace, under the
 cancel rule below. Workspace close follows
 its separate close capability and lifecycle admission. Archive, delete and
 unarchive follow their separate retention capabilities after reliable Workspace
-close. Cwd operations and broad Workspace capability advertisement remain gated. Shell and in-flight recovery are separate slices.
+close. Controlled cwd changes ship below (W2); broad Workspace capability
+advertisement remains gated. Shell and in-flight recovery are separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
 
@@ -496,6 +497,46 @@ model-generated commands) should configure a binding key even on loopback.
 
 Design: [English](../../../docs/design/managed-agent-broker-auth.md)
 | [简体中文](../../../docs/design/managed-agent-broker-auth.zh-CN.md).
+
+### Controlled cwd change (W2)
+
+Under the same `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED` opt-in, the creator
+of a bound Session moves its relative directory within the same Workspace:
+
+```bash
+curl -sS -X POST \
+  http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/cwd \
+  -H 'Content-Type: application/json' \
+  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'Idempotency-Key: cwd-1' \
+  -d '{"cwd_relative":"services/api","expected_context_revision":1}'
+```
+
+`202` admits a durable `cwd_change` operation; it does not activate the
+directory. The change is same-Workspace only and creator-only, requires an idle
+Session (`409 session_context_busy` while a Turn or another operation is open)
+and a matching `expected_context_revision` (`409 context_revision_conflict`
+otherwise); a retry with the same key returns the original operation even after
+it completes. A background worker verifies the target against the deployment
+mounts and commits one transaction that bumps `cwd_relative` and
+`context_revision`, marks the operation completed and appends
+`session.context.changed`; poll the operation through the existing query route
+or await the event. A target the mount cannot verify fails the operation with
+`failure_code` and leaves the Session's binding untouched; refused changes
+never retry, while a mount fault the probe cannot reach (a stale export)
+retries internally up to an 8-attempt budget and then fails the same type,
+releasing the Session back to turns and lifecycle operations. Legacy Sessions answer `400 unsupported_feature`, an unreadable
+actor `404 session_not_found` and a readable non-creator `403
+session_operation_forbidden`, matching the sibling lifecycle refusals; a
+probe refusal the turn layer would share also uses `409
+workspace_unavailable`. The WebShell adapter offers the same flow as
+`/api/agent/web-shell/v1/sessions/cwd/change` plus `/operations/query`.
+Subsequent turns acquire a fresh Runtime Session and install the new context
+before tools run, so an unverifiable change can never redirect tool execution.
+
+Design:
+[English](../../../docs/design/2026-10-02-managed-workspace-w2-cwd-change.md) |
+[简体中文](../../../docs/design/2026-10-02-managed-workspace-w2-cwd-change.zh-CN.md).
 
 ### Broker deployment
 
