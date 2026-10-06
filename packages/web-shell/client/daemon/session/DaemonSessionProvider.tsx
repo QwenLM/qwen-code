@@ -4214,6 +4214,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           clearEventStream();
           if (pendingStrictDetachRef.current) {
             await pendingStrictDetachRef.current.catch(() => undefined);
+            // A completed clear settles pending loads before releasing the
+            // attachment. Their stale errors must not replace the fresh draft.
+            if (
+              manualSessionClearRef.current === true &&
+              sessionRef.current === undefined &&
+              pendingSessionLoadRef.current === undefined
+            ) {
+              clearPendingTranscriptEvents();
+              return;
+            }
           }
           if (session && sessionRef.current !== session) {
             clearPendingTranscriptEvents();
@@ -4805,7 +4815,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
             if (sessionRef.current === session) {
-              if (missingSession) {
+              if (missingSession && !pendingStrictDetachRef.current) {
                 manualSessionClearRef.current = true;
               }
               sessionRef.current = undefined;

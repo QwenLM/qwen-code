@@ -14356,6 +14356,10 @@ describe('DaemonSessionProvider', () => {
     ['effect', 'success'],
     ['heartbeat', 'none'],
     ['heartbeat', 'failure'],
+    ['heartbeat404', 'success'],
+    ['heartbeat404', 'failure'],
+    ['heartbeat410', 'success'],
+    ['heartbeat410', 'failure'],
   ] as const)(
     'keeps recovery usable after %s interrupts strict detach (%s)',
     async (path, detachOutcome) => {
@@ -14382,6 +14386,7 @@ describe('DaemonSessionProvider', () => {
         clientId: 'ownership-client',
         session: metadata,
         events: createIdleEvents(),
+        replaySnapshot: createTextReplaySnapshot('current transcript'),
         heartbeat: vi.fn(() => heartbeat.promise),
         detach: vi.fn(() => detach.promise),
       });
@@ -14417,9 +14422,11 @@ describe('DaemonSessionProvider', () => {
       sdkMocks.sessions.push(original, recovered);
       let actions: DaemonSessionActions | undefined;
       let connection: DaemonConnectionState | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
       function Harness() {
         actions = useDaemonActions();
         connection = useDaemonConnection();
+        blocks = useDaemonTranscriptBlocks();
         return null;
       }
       const baseProps = {
@@ -14466,7 +14473,7 @@ describe('DaemonSessionProvider', () => {
           await flushPromises();
         });
       };
-      if (path === 'heartbeat') {
+      if (path.startsWith('heartbeat')) {
         await act(async () => {
           await vi.waitFor(
             () => expect(original.heartbeat).toHaveBeenCalled(),
@@ -14475,12 +14482,21 @@ describe('DaemonSessionProvider', () => {
         });
         await act(async () => {
           heartbeat.reject(
-            Object.assign(new Error('Unauthorized'), { status: 401 }),
+            Object.assign(new Error('Heartbeat failed'), {
+              status:
+                path === 'heartbeat404'
+                  ? 404
+                  : path === 'heartbeat410'
+                    ? 410
+                    : 401,
+            }),
           );
           await flushPromises();
         });
         expect(connection?.sessionId).toBeUndefined();
-        expect(connection?.errorStatus).toBe(401);
+        expect(connection?.errorStatus).toBe(
+          path === 'heartbeat404' ? 404 : path === 'heartbeat410' ? 410 : 401,
+        );
       } else {
         await rerender();
       }
@@ -14494,9 +14510,13 @@ describe('DaemonSessionProvider', () => {
           await flushPromises();
         });
       }
-      if (path === 'heartbeat') await rerender();
+      if (path.startsWith('heartbeat')) await rerender();
       if (detachOutcome === 'success') {
         expect(clearResult.error).toBeUndefined();
+        expect(blocks).toEqual([]);
+        expect(connection?.missingSession).toBe(false);
+        expect(connection?.error).toBeUndefined();
+        expect(connection?.status).toBe('connected');
         expect(recoveredEvents).not.toHaveBeenCalled();
         expect(
           sdkMocks.MockDaemonSessionClient.loadStandalone,
@@ -14531,6 +14551,121 @@ describe('DaemonSessionProvider', () => {
       expect(connection?.status).toBe('connected');
       expect(submitPrompt).toHaveBeenCalledOnce();
       expect(promptError).toBeUndefined();
+    },
+  );
+
+  it.each([
+    [401, 'success'],
+    [403, 'success'],
+    [401, 'failure'],
+    [403, 'failure'],
+  ] as const)(
+    'handles a pending reload error %s during strict detach %s',
+    async (status, detachOutcome) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status: 204 })),
+      );
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/primary',
+        features: ['standalone_sessions_v1'],
+      });
+      const replacement = createDeferred<MockSession>();
+      const detached = createDeferred<void>();
+      const session = createMockSession({
+        sessionId: 'reload-delete',
+        session: {
+          sessionId: 'reload-delete',
+          workspaceCwd: '/private/reload-delete',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          workingDirectory: { state: 'ready' },
+        },
+        replaySnapshot: createTextReplaySnapshot('current transcript'),
+        events: createIdleEvents(),
+        detach: vi.fn(() => detached.promise),
+      });
+      sdkMocks.sessions.push(session);
+      let actions: DaemonSessionActions | undefined;
+      let connection: DaemonConnectionState | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      function Harness() {
+        actions = useDaemonActions();
+        connection = useDaemonConnection();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId: session.sessionId,
+        sessionContext: { kind: 'standalone' },
+      });
+      sdkMocks.MockDaemonSessionClient.loadStandalone.mockImplementationOnce(
+        () => replacement.promise,
+      );
+      let reloadSettled = false;
+      let reloadError: unknown;
+      act(() => {
+        void requireActions(actions)
+          .reloadSession(new AbortController().signal)
+          .then(
+            () => {
+              reloadSettled = true;
+            },
+            (error: unknown) => {
+              reloadSettled = true;
+              reloadError = error;
+            },
+          );
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(
+        sdkMocks.MockDaemonSessionClient.loadStandalone,
+      ).toHaveBeenCalledTimes(2);
+      expect(connection?.sessionId).toBe(session.sessionId);
+      let clearing!: Promise<unknown>;
+      act(() => {
+        clearing = requireActions(actions)
+          .clearSession({
+            requireDetachSessionId: session.sessionId,
+          })
+          .catch((error: unknown) => error);
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(session.detach).toHaveBeenCalledOnce();
+      const failure = Object.assign(new Error('Reload denied'), { status });
+      await act(async () => {
+        replacement.reject(failure);
+        await flushPromises();
+      });
+      expect(reloadSettled).toBe(false);
+      const detachFailure = new Error('Detach failed');
+      let clearResult: unknown;
+      await act(async () => {
+        if (detachOutcome === 'success') detached.resolve();
+        else detached.reject(detachFailure);
+        clearResult = await clearing;
+        await flushPromises();
+      });
+      expect(reloadSettled).toBe(true);
+      if (detachOutcome === 'failure') {
+        expect(clearResult).toBe(detachFailure);
+        expect(reloadError).toBe(failure);
+        expect(connection?.error).toBe('Reload denied');
+        expect(connection?.errorStatus).toBe(status);
+        expect(connection?.status).toBe('error');
+        return;
+      }
+      expect(clearResult).toBeUndefined();
+      expect(reloadError).toMatchObject({ message: 'Session cleared' });
+      expect(connection?.error).toBeUndefined();
+      expect(connection?.sessionId).toBeUndefined();
+      expect(connection?.status).not.toBe('error');
+      expect(blocks).toEqual([]);
     },
   );
 
