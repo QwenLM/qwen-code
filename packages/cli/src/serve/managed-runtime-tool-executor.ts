@@ -275,6 +275,9 @@ export class ManagedToolExecutor {
       if (entry.toolName === ShellTool.Name)
         blockers.add('shell_lifecycle_unqualified');
       if (entry.state === 'unknown') blockers.add('execution_outcome_unknown');
+      // An acknowledged call is settled and its outcome durably committed by
+      // the caller: it holds neither pending work nor a result to check.
+      else if (entry.state === 'acknowledged') continue;
       else if (entry.state !== 'settled') pendingInvocations++;
       else if (entry.version === 2 && !entry.result)
         blockers.add('execution_result_missing');

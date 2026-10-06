@@ -1461,6 +1461,27 @@ describe('ManagedToolExecutor acknowledgement', () => {
     expect(() => executor.closeSessionAdmission('session-a')).not.toThrow();
   });
 
+  it('reports a drained worker quiescent once its settled call is acknowledged', async () => {
+    const executor = ManagedToolExecutor.forWorkspace(
+      workspace(),
+      'runtime-01',
+    );
+    const result = await executor.execute(sessionReference, 'read_file', {
+      file_path: 'a.txt',
+    });
+    expect(result.executionStatus).toBe('success');
+    executor.sealAdmission(retirementId);
+
+    expect(executor.acknowledge(sessionReference)?.state).toBe('acknowledged');
+    expect(executor.getDrainObservation(retirementId)).toEqual({
+      state: 'DRAINING',
+      workState: 'QUIESCENT',
+      pendingStarts: 0,
+      pendingInvocations: 0,
+      blockers: [],
+    });
+  });
+
   it('answers unknown for a reference the Runtime never saw', () => {
     const executor = ManagedToolExecutor.forWorkspace(
       workspace(),
