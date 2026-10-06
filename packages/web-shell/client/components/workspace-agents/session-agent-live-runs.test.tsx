@@ -43,9 +43,7 @@ describe('describeRun', () => {
       text: 'reviewer is waiting for your approval',
       attention: true,
     });
-    expect(describeRun(run(), 1_000 + STALL_NOTICE_MS, t).attention).toBe(
-      true,
-    );
+    expect(describeRun(run(), 1_000 + STALL_NOTICE_MS, t).attention).toBe(true);
     expect(describeRun(run({ status: 'failed' }), 0, t).attention).toBe(true);
     expect(
       describeRun(run({ status: 'completed' }), 0, t).text,
@@ -229,9 +227,7 @@ describe('SessionAgentLiveRuns', () => {
     expect(node.textContent).toContain('reviewer');
     expect(node.textContent).toContain('Partial answer');
     expect(node.textContent).toContain('Read: a.ts');
-    expect(node.textContent).toContain(
-      `${(1500).toLocaleString()} tokens`,
-    );
+    expect(node.textContent).toContain(`${(1500).toLocaleString()} tokens`);
     const stop = [...node.querySelectorAll('button')].find(
       (button) => button.textContent === 'Stop',
     );
@@ -418,9 +414,9 @@ describe('squad engagements', () => {
         </I18nProvider>,
       ),
     );
-    expect(
-      node.querySelector('[data-squad-id="sq_1"]')?.textContent,
-    ).toContain('lead is deciding');
+    expect(node.querySelector('[data-squad-id="sq_1"]')?.textContent).toContain(
+      'lead is deciding',
+    );
     act(() => root.unmount());
   });
 });

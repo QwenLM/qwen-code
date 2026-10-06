@@ -881,9 +881,7 @@ describe('AssistantMessage agent replies', () => {
       />,
     );
 
-    expect(
-      container.querySelector('button[aria-label="Copy"]'),
-    ).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Copy"]')).not.toBeNull();
     expect(container.querySelector('button[aria-label="Branch"]')).toBeNull();
     expect(container.querySelector('button[aria-pressed]')).toBeNull();
     expect(container.textContent).toContain('Failed');

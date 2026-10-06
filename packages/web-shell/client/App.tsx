@@ -18857,8 +18857,7 @@ export function App({
     [blocks],
   );
   const settledAgentRunIds = useMemo(
-    () =>
-      new Set(settledAgentRunsKey ? settledAgentRunsKey.split('\n') : []),
+    () => new Set(settledAgentRunsKey ? settledAgentRunsKey.split('\n') : []),
     [settledAgentRunsKey],
   );
   const sessionAgentRuns = useSessionAgentRuns({

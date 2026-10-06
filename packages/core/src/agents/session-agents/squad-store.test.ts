@@ -100,9 +100,7 @@ describe('squad store', () => {
     expect((await refusal(create({ name: 'Alice' }))).status).toBe(409);
     expect((await refusal(create({ name: 'gone' }))).code).toBe('name_taken');
     await create();
-    expect((await refusal(create({ name: 'REVIEW' }))).code).toBe(
-      'name_taken',
-    );
+    expect((await refusal(create({ name: 'REVIEW' }))).code).toBe('name_taken');
   });
 
   it('requires an enabled, unretired leader', async () => {
@@ -232,9 +230,7 @@ describe('squad helpers', () => {
     expect(squadLeaderIssue({ leaderAgentId: 'ag_gone' }, roster)).toBe(
       'retired',
     );
-    expect(squadLeaderIssue({ leaderAgentId: 'ag_x' }, roster)).toBe(
-      'missing',
-    );
+    expect(squadLeaderIssue({ leaderAgentId: 'ag_x' }, roster)).toBe('missing');
   });
 
   it('prunes retired and missing members only', () => {

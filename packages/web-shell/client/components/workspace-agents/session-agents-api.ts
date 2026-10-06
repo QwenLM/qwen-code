@@ -96,10 +96,7 @@ export function createSessionAgentsHttpApi(
         {},
       ),
     retryRun: (sessionId, runId) =>
-      post(
-        `${session(sessionId)}/runs/${encodeURIComponent(runId)}/retry`,
-        {},
-      ),
+      post(`${session(sessionId)}/runs/${encodeURIComponent(runId)}/retry`, {}),
     stopAll: (sessionId) => post(`${session(sessionId)}/stop`, {}),
     respondToPermission: (sessionId, runId, requestId, optionId) =>
       post(

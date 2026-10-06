@@ -157,7 +157,10 @@ export function parseQwenAgentMessageMeta(
     return undefined;
   }
   const record = value as Record<string, unknown>;
-  if (record['kind'] !== 'agent_message' && record['kind'] !== 'agent_mention') {
+  if (
+    record['kind'] !== 'agent_message' &&
+    record['kind'] !== 'agent_mention'
+  ) {
     return undefined;
   }
   const authorRaw = record['author'];

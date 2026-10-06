@@ -6066,33 +6066,36 @@ describe('session agent messages', () => {
   };
 
   it('renders an agent reply as its own authored message, apart from the main assistant text around it', () => {
-    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
-      update({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'Main answer.' },
-      }),
-      update({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'Looks good to me.' },
-        _meta: {
-          source: 'agent_message',
-          qwenDiscreteMessage: true,
-          qwenTranscript: { segmentId: 'agent:run-1' },
-          qwenAgentMessage: {
-            kind: 'agent_message',
-            author,
-            runId: 'run-1',
-            status: 'completed',
-            steps: [{ id: 's1', title: 'Read: a.ts', status: 'completed' }],
-            totalTokens: 1234,
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      [
+        update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Main answer.' },
+        }),
+        update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Looks good to me.' },
+          _meta: {
+            source: 'agent_message',
+            qwenDiscreteMessage: true,
+            qwenTranscript: { segmentId: 'agent:run-1' },
+            qwenAgentMessage: {
+              kind: 'agent_message',
+              author,
+              runId: 'run-1',
+              status: 'completed',
+              steps: [{ id: 's1', title: 'Read: a.ts', status: 'completed' }],
+              totalTokens: 1234,
+            },
           },
-        },
-      }),
-      update({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'Main follow-up.' },
-      }),
-    ].flat());
+        }),
+        update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Main follow-up.' },
+        }),
+      ].flat(),
+    );
     const assistants = transcriptBlocksToDaemonMessages(state.blocks).filter(
       (message) => message.role === 'assistant',
     );
@@ -6148,20 +6151,23 @@ describe('session agent messages', () => {
   });
 
   it('renders an @-mention as an ordinary user message', () => {
-    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
-      update({
-        sessionUpdate: 'user_message_chunk',
-        content: { type: 'text', text: '@reviewer please check' },
-        _meta: {
-          source: 'agent_mention',
-          qwenDiscreteMessage: true,
-          qwenAgentMessage: {
-            kind: 'agent_mention',
-            mentionedAgentIds: ['agent-1'],
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      [
+        update({
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: '@reviewer please check' },
+          _meta: {
+            source: 'agent_mention',
+            qwenDiscreteMessage: true,
+            qwenAgentMessage: {
+              kind: 'agent_mention',
+              mentionedAgentIds: ['agent-1'],
+            },
           },
-        },
-      }),
-    ].flat());
+        }),
+      ].flat(),
+    );
     const [message] = transcriptBlocksToDaemonMessages(state.blocks);
     expect(message).toMatchObject({
       role: 'user',
@@ -6173,21 +6179,24 @@ describe('session agent messages', () => {
   });
 
   it('names the agent on a post an agent made into the session', () => {
-    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
-      update({
-        sessionUpdate: 'user_message_chunk',
-        content: { type: 'text', text: '@writer your turn' },
-        _meta: {
-          source: 'agent_mention',
-          qwenDiscreteMessage: true,
-          qwenAgentMessage: {
-            kind: 'agent_mention',
-            author,
-            mentionedAgentIds: ['agent-2'],
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      [
+        update({
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: '@writer your turn' },
+          _meta: {
+            source: 'agent_mention',
+            qwenDiscreteMessage: true,
+            qwenAgentMessage: {
+              kind: 'agent_mention',
+              author,
+              mentionedAgentIds: ['agent-2'],
+            },
           },
-        },
-      }),
-    ].flat());
+        }),
+      ].flat(),
+    );
     const [message] = transcriptBlocksToDaemonMessages(state.blocks);
     expect(message).toMatchObject({
       role: 'user',

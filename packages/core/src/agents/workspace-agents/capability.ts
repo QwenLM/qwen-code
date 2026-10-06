@@ -204,7 +204,9 @@ export function createAgentToolInvocationGuard(
  * definition may still narrow the surface; that narrowing is kept.
  * Thread tools are never offered: there is no thread behind such a session.
  */
-export function buildSessionAgentToolConfig(definition?: ToolConfig): ToolConfig {
+export function buildSessionAgentToolConfig(
+  definition?: ToolConfig,
+): ToolConfig {
   const threadTools = new Set<string>(THREAD_TOOL_NAMES);
   const definitionNames = definition?.tools.map((tool) =>
     typeof tool === 'string' ? tool : tool.name,

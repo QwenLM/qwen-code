@@ -19,24 +19,22 @@ import {
   sessionSendPath,
 } from './session-agents.js';
 
-const { orchestrator, getOrchestrator, ensureOrchestrator } = vi.hoisted(
-  () => {
-    const orchestrator = {
-      snapshot: vi.fn<(...args: unknown[]) => Promise<unknown[]>>(),
-      mention: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
-      cancel: vi.fn<(...args: unknown[]) => Promise<boolean>>(),
-      retry: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
-      stopAll: vi.fn<(...args: unknown[]) => Promise<string[]>>(),
-      resolvePermission: vi.fn<(...args: unknown[]) => void>(),
-      postFromAgent: vi.fn<(...args: unknown[]) => Promise<void>>(),
-    };
-    return {
-      orchestrator,
-      getOrchestrator: vi.fn<() => typeof orchestrator | undefined>(),
-      ensureOrchestrator: vi.fn<(...args: unknown[]) => typeof orchestrator>(),
-    };
-  },
-);
+const { orchestrator, getOrchestrator, ensureOrchestrator } = vi.hoisted(() => {
+  const orchestrator = {
+    snapshot: vi.fn<(...args: unknown[]) => Promise<unknown[]>>(),
+    mention: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+    cancel: vi.fn<(...args: unknown[]) => Promise<boolean>>(),
+    retry: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+    stopAll: vi.fn<(...args: unknown[]) => Promise<string[]>>(),
+    resolvePermission: vi.fn<(...args: unknown[]) => void>(),
+    postFromAgent: vi.fn<(...args: unknown[]) => Promise<void>>(),
+  };
+  return {
+    orchestrator,
+    getOrchestrator: vi.fn<() => typeof orchestrator | undefined>(),
+    ensureOrchestrator: vi.fn<(...args: unknown[]) => typeof orchestrator>(),
+  };
+});
 
 vi.mock('../session-agents/orchestrator.js', async (importOriginal) => ({
   ...(await importOriginal<
@@ -86,7 +84,9 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const app of apps) {
-    (app.locals['stopSessionAgentOrchestrators'] as (() => void) | undefined)?.();
+    (
+      app.locals['stopSessionAgentOrchestrators'] as (() => void) | undefined
+    )?.();
   }
   apps = [];
 });
@@ -180,9 +180,9 @@ describe('session agent routes', () => {
   it('cancels, retries, stops and answers permissions', async () => {
     const app = setup();
     orchestrator.cancel.mockResolvedValueOnce(true);
-    expect(
-      (await request(app).post(`${BASE}/runs/r1/cancel`)).body,
-    ).toEqual({ cancelled: true });
+    expect((await request(app).post(`${BASE}/runs/r1/cancel`)).body).toEqual({
+      cancelled: true,
+    });
     orchestrator.cancel.mockResolvedValueOnce(false);
     expect((await request(app).post(`${BASE}/runs/r2/cancel`)).status).toBe(
       404,

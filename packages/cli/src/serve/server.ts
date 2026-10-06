@@ -169,8 +169,10 @@ import {
   registerSessionAgentRoutes,
   registerSessionAgentSendRoute,
 } from './routes/session-agents.js';
-import { normalizeAgentChainLimit,
-  normalizeAgentTokenBudget } from '@qwen-code/qwen-code-core/agents/session-agents/chain.js';
+import {
+  normalizeAgentChainLimit,
+  normalizeAgentTokenBudget,
+} from '@qwen-code/qwen-code-core/agents/session-agents/chain.js';
 import { strandLocalRuns } from '@qwen-code/qwen-code-core';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
@@ -3707,9 +3709,8 @@ export function createServeApp(
   // createServeApp must not dial out on the strength of ~/.qwen.
   if (deps.manageScheduledTaskSessions) {
     const agentHostRestore = new AbortController();
-    (
-      app.locals as { stopAgentHostRestore?: () => void }
-    ).stopAgentHostRestore = () => agentHostRestore.abort();
+    (app.locals as { stopAgentHostRestore?: () => void }).stopAgentHostRestore =
+      () => agentHostRestore.abort();
     void import('./agent-host-connections.js')
       .then(({ restoreAgentHostConnections }) =>
         restoreAgentHostConnections({

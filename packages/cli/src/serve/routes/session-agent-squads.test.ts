@@ -67,7 +67,11 @@ beforeEach(() => {
 });
 
 function setup(
-  options: { enabled?: boolean; trusted?: boolean; strictCalls?: string[] } = {},
+  options: {
+    enabled?: boolean;
+    trusted?: boolean;
+    strictCalls?: string[];
+  } = {},
 ) {
   const runtime = {
     workspaceId: 'ws',
@@ -76,7 +80,8 @@ function setup(
     bridge: {},
   } as unknown as WorkspaceRuntime;
   const registry = { list: () => [runtime] } as unknown as WorkspaceRegistry;
-  const mutate = (opts?: { strict?: boolean }): RequestHandler =>
+  const mutate =
+    (opts?: { strict?: boolean }): RequestHandler =>
     (req, _res, next) => {
       if (opts?.strict) options.strictCalls?.push(`${req.method} ${req.path}`);
       next();

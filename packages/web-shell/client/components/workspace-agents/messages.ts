@@ -61,8 +61,7 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.squad.retired': 'Retired',
   'collab.squad.needsLeader': 'Needs a new leader',
   'collab.squad.leaderPaused': 'Leader is paused',
-  'collab.squad.summary': (v) =>
-    `Leader ${v?.leader} · ${v?.count} member(s)`,
+  'collab.squad.summary': (v) => `Leader ${v?.leader} · ${v?.count} member(s)`,
   'collab.squad.noAction': 'no action needed',
   'collab.squad.engagement': (v) => `Squad ${v?.squad}`,
   'collab.squad.engagementMembers': (v) => `working: ${v?.names}`,

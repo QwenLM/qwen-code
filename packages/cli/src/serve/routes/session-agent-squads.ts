@@ -109,7 +109,9 @@ export function registerSessionAgentSquadRoutes(
   };
 
   const body = (req: Request): Record<string, unknown> =>
-    typeof req.body === 'object' && req.body !== null && !Array.isArray(req.body)
+    typeof req.body === 'object' &&
+    req.body !== null &&
+    !Array.isArray(req.body)
       ? (req.body as Record<string, unknown>)
       : {};
 

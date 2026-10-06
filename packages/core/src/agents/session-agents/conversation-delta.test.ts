@@ -34,7 +34,11 @@ function assistant(uuid: string, text: string): ConversationRecordLike {
 const records: ConversationRecordLike[] = [
   user('u1', 'first question'),
   assistant('a1', 'main answer'),
-  { uuid: 't1', type: 'tool_result', message: { parts: [{ text: 'TOOL OUTPUT' }] } },
+  {
+    uuid: 't1',
+    type: 'tool_result',
+    message: { parts: [{ text: 'TOOL OUTPUT' }] },
+  },
   { uuid: 's1', type: 'system', subtype: 'chat_compression' },
   {
     uuid: 'm1',
@@ -61,7 +65,10 @@ const records: ConversationRecordLike[] = [
     uuid: 'm2',
     type: 'user',
     subtype: 'agent_mention',
-    systemPayload: { displayText: '@bob please look', mentionedAgentIds: ['ag_b'] },
+    systemPayload: {
+      displayText: '@bob please look',
+      mentionedAgentIds: ['ag_b'],
+    },
   },
 ];
 
@@ -71,7 +78,9 @@ describe('buildAgentInput', () => {
     expect(input.prompt).toContain('You are @bob');
     expect(input.prompt).toContain('<message from="User">\nfirst question');
     expect(input.prompt).toContain('<message from="Qwen">\nmain answer');
-    expect(input.prompt).toContain('<message from="alice (agent)">\nalice reply');
+    expect(input.prompt).toContain(
+      '<message from="alice (agent)">\nalice reply',
+    );
     expect(input.prompt).toContain(
       '<message from="User" addressed_to_you="true">\n@bob please look',
     );
@@ -183,7 +192,9 @@ describe('squad briefing', () => {
       budgetChars: 100_000,
       squad,
     });
-    const briefingAt = input.prompt.indexOf('<squad_briefing squad="reviewers">');
+    const briefingAt = input.prompt.indexOf(
+      '<squad_briefing squad="reviewers">',
+    );
     expect(briefingAt).toBe(0);
     expect(input.prompt.indexOf('You are @bob, an agent')).toBeGreaterThan(
       briefingAt,

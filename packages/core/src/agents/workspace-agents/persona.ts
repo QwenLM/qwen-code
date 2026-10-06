@@ -59,7 +59,10 @@ export function buildRemoteSessionAgentSystemPrompt(persona: {
 }): string {
   return buildSystemPrompt(
     '',
-    { name: persona.name, instructions: persona.instructions } as WorkspaceAgent,
+    {
+      name: persona.name,
+      instructions: persona.instructions,
+    } as WorkspaceAgent,
     'session',
   );
 }

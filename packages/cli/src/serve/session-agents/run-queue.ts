@@ -57,7 +57,8 @@ export function enqueueTrigger(
 ): EnqueueTriggerOutcome {
   const live = runs.filter(
     (run) =>
-      run.agentId === input.agentId && (isQueuedRun(run) || isExecutingRun(run)),
+      run.agentId === input.agentId &&
+      (isQueuedRun(run) || isExecutingRun(run)),
   );
   const duplicate = live.find((run) =>
     run.triggerRecordIds.includes(input.recordId),
@@ -66,10 +67,7 @@ export function enqueueTrigger(
   const queued = live.find(isQueuedRun);
   if (queued) {
     queued.triggerRecordIds.push(input.recordId);
-    queued.chainDepth = coalesceChainDepth(
-      queued.chainDepth,
-      input.chainDepth,
-    );
+    queued.chainDepth = coalesceChainDepth(queued.chainDepth, input.chainDepth);
     if (input.squadId !== undefined) queued.squadId ??= input.squadId;
     return { kind: 'coalesced', run: queued };
   }
@@ -97,9 +95,7 @@ export function nextRunnable(
 ): SessionAgentRun | undefined {
   const mine = runs.filter((run) => run.agentId === agentId);
   if (mine.some(isExecutingRun)) return undefined;
-  return mine
-    .filter(isQueuedRun)
-    .sort((a, b) => a.createdAt - b.createdAt)[0];
+  return mine.filter(isQueuedRun).sort((a, b) => a.createdAt - b.createdAt)[0];
 }
 
 /**
@@ -113,7 +109,10 @@ export function queuePosition(
 ): number | undefined {
   if (!isQueuedRun(run)) return undefined;
   const queued = runs
-    .filter((candidate) => candidate.agentId === run.agentId && isQueuedRun(candidate))
+    .filter(
+      (candidate) =>
+        candidate.agentId === run.agentId && isQueuedRun(candidate),
+    )
     .sort((a, b) => a.createdAt - b.createdAt);
   const index = queued.findIndex((candidate) => candidate.id === run.id);
   return index === -1 ? undefined : index + 1;

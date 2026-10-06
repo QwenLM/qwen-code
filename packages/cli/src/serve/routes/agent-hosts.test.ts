@@ -30,6 +30,7 @@ const { heartbeat, authenticate, orchestrator, getOrchestrator, ensure } =
       completeHostTurn: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
       decisionsForHost: vi.fn<(...args: unknown[]) => unknown[]>(),
       releaseHostAssignment: vi.fn<(...args: unknown[]) => boolean>(),
+      ready: vi.fn(async () => {}),
     };
     return {
       heartbeat: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
@@ -52,6 +53,11 @@ vi.mock(
 );
 vi.mock('../session-agents/orchestrator.js', () => ({
   getSessionAgentOrchestrator: getOrchestrator,
+}));
+// The session-agent routes are not registered here, so there is no factory
+// to create an orchestrator on demand; lookups fall back to the mock above.
+vi.mock('./session-agents.js', () => ({
+  ensureSessionAgentOrchestratorForRuntime: () => undefined,
 }));
 vi.mock('../agent-host-program-agents.js', () => ({
   createHostProgramAgentEnsurer: () => ensure,

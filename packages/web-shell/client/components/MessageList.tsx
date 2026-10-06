@@ -5971,9 +5971,7 @@ export const MessageList = memo(
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
                 (agentReply ||
-                  finalAssistantTurnIdByAssistantId.has(
-                    displayItem.message.id,
-                  ))
+                  finalAssistantTurnIdByAssistantId.has(displayItem.message.id))
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&

@@ -18,10 +18,7 @@ import {
   AgentTokenUsage,
 } from '../messages/agent-message-details';
 import { Button } from '../ui/button';
-import type {
-  PermissionOption,
-  PermissionRequest,
-} from '../../adapters/types';
+import type { PermissionOption, PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { formatElapsed } from './agents-view-logic';
 import { isTerminalRunStatus } from './use-session-agent-runs';

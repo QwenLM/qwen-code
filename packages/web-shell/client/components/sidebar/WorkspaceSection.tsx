@@ -697,13 +697,7 @@ export function WorkspaceSection({
       sourceType,
       mapSession,
     );
-  }, [
-    contentSearchHits,
-    mapSession,
-    searchQuery,
-    sessions,
-    sourceType,
-  ]);
+  }, [contentSearchHits, mapSession, searchQuery, sessions, sourceType]);
   const renderSessionWithSnippet = (session: DaemonSessionSummary) =>
     renderSession(session, {
       // Explicit options override renderSessionRow's guarded default, so

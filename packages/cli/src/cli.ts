@@ -602,9 +602,7 @@ export async function runCliEntry(
     );
     const url = readSessionSendMcpUrl(argv.slice(2));
     if (!url) {
-      writeStderrLine(
-        'Usage: qwen agents session-send-mcp --url <endpoint>',
-      );
+      writeStderrLine('Usage: qwen agents session-send-mcp --url <endpoint>');
       process.exitCode = 1;
       return;
     }

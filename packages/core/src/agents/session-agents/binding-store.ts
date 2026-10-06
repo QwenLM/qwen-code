@@ -71,9 +71,7 @@ const EXECUTING_RUN_STATUSES: ReadonlySet<SessionAgentRunStatus> = new Set([
   'awaiting_approval',
 ]);
 
-export function isValidSessionAgentsSessionId(
-  value: unknown,
-): value is string {
+export function isValidSessionAgentsSessionId(value: unknown): value is string {
   return typeof value === 'string' && SESSION_ID_PATTERN.test(value);
 }
 
@@ -266,9 +264,7 @@ export function trimTerminalRuns(
   if (terminal.length <= max) return [...runs];
   const keep = new Set(
     [...terminal]
-      .sort(
-        (a, b) => (b.endedAt ?? b.createdAt) - (a.endedAt ?? a.createdAt),
-      )
+      .sort((a, b) => (b.endedAt ?? b.createdAt) - (a.endedAt ?? a.createdAt))
       .slice(0, Math.max(0, max))
       .map((run) => run.id),
   );

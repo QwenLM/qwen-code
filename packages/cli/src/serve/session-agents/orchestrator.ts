@@ -984,7 +984,8 @@ export class SessionAgentOrchestrator {
         ),
         decision,
       ];
-      this.publish(live);
+      // Unthrottled: this frame is the Host's wake-up, not streaming.
+      this.publish(live, { immediate: true });
       return;
     }
     const pending = live.pendingPermissions.get(requestId);
@@ -1115,7 +1116,8 @@ export class SessionAgentOrchestrator {
     }
     const local = [...this.live.values()].filter(
       (live) =>
-        !live.remote && live.author.runtimeId === LOCAL_SESSION_AGENT_RUNTIME_ID,
+        !live.remote &&
+        live.author.runtimeId === LOCAL_SESSION_AGENT_RUNTIME_ID,
     );
     // Queued first, so finishing an executing run cannot start one of them.
     local.sort(
@@ -2854,10 +2856,10 @@ export class SessionAgentOrchestrator {
     };
   }
 
-  private publish(live: LiveRun): void {
+  private publish(live: LiveRun, options: { immediate?: boolean } = {}): void {
     live.frame.status = live.run.status;
     live.frame.author = live.author;
-    this.hub.publish(this.buildFrame(live));
+    this.hub.publish(this.buildFrame(live), options);
   }
 
   /** Serialized whole-file write of the in-memory state. */

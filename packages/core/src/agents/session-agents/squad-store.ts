@@ -127,7 +127,9 @@ export function parseSquadsFile(
 }
 
 /** For callers inside the workspace lock. Absent file = no squads. */
-async function readSquadsUnlocked(projectRoot: string): Promise<SessionSquad[]> {
+async function readSquadsUnlocked(
+  projectRoot: string,
+): Promise<SessionSquad[]> {
   const filePath = getSquadsFilePath(projectRoot);
   let raw: string;
   try {
@@ -161,7 +163,11 @@ async function writeSquadsUnlocked(
     recursive: true,
     mode: STORE_DIR_MODE,
   });
-  await atomicWriteJSON(getSquadsFilePath(projectRoot), record, STORE_FILE_OPTIONS);
+  await atomicWriteJSON(
+    getSquadsFilePath(projectRoot),
+    record,
+    STORE_FILE_OPTIONS,
+  );
 }
 
 /** Why `leaderAgentId` cannot lead right now, or undefined when it can. */
@@ -494,28 +500,23 @@ export async function retireSquad(
   squadId: string,
   now = Date.now(),
 ): Promise<SessionSquadView> {
-  const { result, agents } = await mutateSquads(
-    projectRoot,
-    (squads) => {
-      const existing = squads.find((squad) => squad.id === squadId);
-      if (!existing) {
-        throw new SquadStoreError(404, 'squad_not_found', 'No such squad.');
-      }
-      if (existing.retiredAt !== undefined) {
-        return { squads, result: existing };
-      }
-      const retired: SessionSquad = {
-        ...existing,
-        retiredAt: now,
-        updatedAt: now,
-      };
-      return {
-        squads: squads.map((squad) =>
-          squad.id === squadId ? retired : squad,
-        ),
-        result: retired,
-      };
-    },
-  );
+  const { result, agents } = await mutateSquads(projectRoot, (squads) => {
+    const existing = squads.find((squad) => squad.id === squadId);
+    if (!existing) {
+      throw new SquadStoreError(404, 'squad_not_found', 'No such squad.');
+    }
+    if (existing.retiredAt !== undefined) {
+      return { squads, result: existing };
+    }
+    const retired: SessionSquad = {
+      ...existing,
+      retiredAt: now,
+      updatedAt: now,
+    };
+    return {
+      squads: squads.map((squad) => (squad.id === squadId ? retired : squad)),
+      result: retired,
+    };
+  });
   return toSquadView(result, agents);
 }

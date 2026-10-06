@@ -437,7 +437,11 @@ export interface AgentAdapterTurnInput {
    * The `session_send` MCP server to expose to the program for this turn
    * (stdio command). Undefined when the runtime cannot offer it.
    */
-  sessionSendServer?: { command: string; args: string[]; env?: Record<string, string> };
+  sessionSendServer?: {
+    command: string;
+    args: string[];
+    env?: Record<string, string>;
+  };
   signal: AbortSignal;
   onEvent(event: AgentAdapterEvent): void;
   /** Resolves with the chosen optionId; the adapter answers the program. */
@@ -538,7 +542,9 @@ export interface HostProgramProbe {
 }
 
 /** Minimum CLI versions, following Multica's floors (server/pkg/agent/version.go). */
-export const MIN_PROGRAM_VERSIONS: Readonly<Record<'claude' | 'codex', string>> = {
+export const MIN_PROGRAM_VERSIONS: Readonly<
+  Record<'claude' | 'codex', string>
+> = {
   claude: '2.0.0',
   // `codex app-server --listen stdio://` arrived in 0.100.0.
   codex: '0.100.0',

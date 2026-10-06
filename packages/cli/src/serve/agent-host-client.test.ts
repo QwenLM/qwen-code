@@ -50,6 +50,12 @@ vi.mock('./agent-host-programs.js', () => ({
 }));
 vi.mock('./session-agents/adapters/index.js', () => ({ getAdapter }));
 vi.mock('./agent-host-relay.js', () => ({ openAgentHostRelayRun: openRelay }));
+// A remote qwen turn writes a Host-local session-agents binding first; keep
+// that off the real agent store in these tests.
+vi.mock(
+  '@qwen-code/qwen-code-core/agents/session-agents/binding-store.js',
+  () => ({ updateSessionAgents: vi.fn(async () => ({})) }),
+);
 
 function assignment(
   runId: string,

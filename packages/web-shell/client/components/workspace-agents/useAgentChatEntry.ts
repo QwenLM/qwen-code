@@ -366,7 +366,8 @@ export function useAgentChatEntry({
           const ensured = await ensureSessionRef.current();
           const target: AgentMentionSession | undefined =
             typeof ensured === 'string' ? { sessionId: ensured } : ensured;
-          if (!target?.sessionId) throw new Error(t('collab.mention.noSession'));
+          if (!target?.sessionId)
+            throw new Error(t('collab.mention.noSession'));
           // A new chat whose workspace picker pointed elsewhere created its
           // session in that workspace: its routes are the ones that know it.
           // The server re-resolves the names against that workspace's roster

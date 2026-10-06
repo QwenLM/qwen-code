@@ -119,9 +119,7 @@ for (const theme of THEMES) {
     await expect(
       page.locator('[data-web-shell-composer-editor]:visible .cm-content'),
     ).toContainText('@reviewer');
-    expect(requested.filter((entry) => entry.includes('/threads'))).toEqual(
-      [],
-    );
+    expect(requested.filter((entry) => entry.includes('/threads'))).toEqual([]);
   });
 
   test(`collaboration agents page (${theme})`, async ({ page }, testInfo) => {

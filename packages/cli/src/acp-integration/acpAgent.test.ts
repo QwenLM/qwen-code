@@ -9607,9 +9607,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         ...request,
       }),
     ).resolves.toEqual({ sessionId, recordId: 'record-1', created: true });
-    expect(lastSessionMock!.appendExternalRecord).toHaveBeenCalledWith(
-      request,
-    );
+    expect(lastSessionMock!.appendExternalRecord).toHaveBeenCalledWith(request);
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionExternalRecord, {
         sessionId,

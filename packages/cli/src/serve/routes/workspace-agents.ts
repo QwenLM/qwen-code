@@ -815,8 +815,7 @@ export function registerWorkspaceAgentRoutes(
               (count, thread) =>
                 count +
                 thread.runs.filter(
-                  (run) =>
-                    agentIds.has(run.agentId) && run.status === 'queued',
+                  (run) => agentIds.has(run.agentId) && run.status === 'queued',
                 ).length,
               0,
             ) + sessionRunsOf(agentIds, host.id).queued,

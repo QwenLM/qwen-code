@@ -154,4 +154,3 @@ it('cancels the hidden prompt on Ctrl+C and skips it without a TTY', async () =>
   ).resolves.toBeUndefined();
   expect(piped.modes).toEqual([]);
 });
-

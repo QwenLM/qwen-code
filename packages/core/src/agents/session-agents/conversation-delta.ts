@@ -67,7 +67,11 @@ export interface BuildAgentInputOptions {
    * external record while a main-model turn runs. Appended after the delta,
    * newest last; `id` is the trigger id the caller used for it.
    */
-  pendingMessages?: ReadonlyArray<{ id: string; speaker: string; text: string }>;
+  pendingMessages?: ReadonlyArray<{
+    id: string;
+    speaker: string;
+    text: string;
+  }>;
   /**
    * Set when the agent runs as a squad leader: a squad briefing (roster and
    * protocol) is put before the header. It is never cut for budget; the
@@ -120,9 +124,9 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function authorOf(payload: Record<string, unknown> | undefined):
-  | Pick<SessionAgentAuthor, 'agentId' | 'name'>
-  | undefined {
+function authorOf(
+  payload: Record<string, unknown> | undefined,
+): Pick<SessionAgentAuthor, 'agentId' | 'name'> | undefined {
   const author = asRecord(payload?.['author']);
   if (
     !author ||
@@ -182,10 +186,7 @@ function toMessage(
     }
     // A background subagent's input, not the person's.
     if (record.agentId !== undefined) return undefined;
-    if (
-      record.provenance !== undefined &&
-      record.provenance !== 'real_user'
-    ) {
+    if (record.provenance !== undefined && record.provenance !== 'real_user') {
       return undefined;
     }
     speaker = 'User';
@@ -297,7 +298,9 @@ export function renderSquadBriefing(
     lines.push('Squad instructions:', defangTags(instructions));
   }
   if (squad.members.length === 0) {
-    lines.push('Squad members: none yet. Tell the person the squad has no members.');
+    lines.push(
+      'Squad members: none yet. Tell the person the squad has no members.',
+    );
   } else {
     lines.push('Squad members:');
     for (const member of squad.members) {

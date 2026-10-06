@@ -287,8 +287,8 @@ describe('SessionAgentOrchestrator', () => {
       expect(
         bridge.records.find(
           (record) =>
-            (record.systemPayload as { author?: { agentId?: string } })
-              ?.author?.agentId === 'ag_bob',
+            (record.systemPayload as { author?: { agentId?: string } })?.author
+              ?.agentId === 'ag_bob',
         )?.systemPayload,
       ).toMatchObject({
         status: 'completed',
@@ -437,7 +437,11 @@ describe('SessionAgentOrchestrator', () => {
       }),
     ).toMatchObject({ ok: true });
     expect(
-      orchestrator.acceptHostEvents('h1', { ...lease, sequence: 1, events: [] }),
+      orchestrator.acceptHostEvents('h1', {
+        ...lease,
+        sequence: 1,
+        events: [],
+      }),
     ).toEqual({ ok: true, duplicate: true });
     expect(
       orchestrator.renewLease('h1', runId, 1, assignment!.leaseId),
@@ -450,11 +454,15 @@ describe('SessionAgentOrchestrator', () => {
 
     expect(await orchestrator.cancel(SESSION, runId)).toBe(true);
     const cancelled = { ok: false, reason: 'cancelled', cancelled: true };
-    expect(orchestrator.renewLease('h1', runId, 1, assignment!.leaseId)).toEqual(
-      cancelled,
-    );
     expect(
-      orchestrator.acceptHostEvents('h1', { ...lease, sequence: 2, events: [] }),
+      orchestrator.renewLease('h1', runId, 1, assignment!.leaseId),
+    ).toEqual(cancelled);
+    expect(
+      orchestrator.acceptHostEvents('h1', {
+        ...lease,
+        sequence: 2,
+        events: [],
+      }),
     ).toEqual(cancelled);
     expect(
       await orchestrator.completeHostTurn('h1', {
@@ -723,7 +731,10 @@ describe('SessionAgentOrchestrator', () => {
     await vi.waitFor(async () =>
       expect(
         (await fileFor()).runs.find((run) => run.id === 'sr_old'),
-      ).toMatchObject({ status: 'failed', error: SESSION_AGENT_RESTARTED_ERROR }),
+      ).toMatchObject({
+        status: 'failed',
+        error: SESSION_AGENT_RESTARTED_ERROR,
+      }),
     );
 
     // Dismissing one drops its card.
@@ -754,9 +765,10 @@ describe('SessionAgentOrchestrator', () => {
       status: 409,
       code: 'run_already_retried',
     });
-    await expect(orchestrator.retry(SESSION, 'sr_nope')).rejects.toMatchObject(
-      { status: 404, code: 'run_not_found' },
-    );
+    await expect(orchestrator.retry(SESSION, 'sr_nope')).rejects.toMatchObject({
+      status: 404,
+      code: 'run_not_found',
+    });
   });
 
   it('resets the read cursor when a resume was rejected', async () => {
@@ -896,7 +908,10 @@ describe('SessionAgentOrchestrator squads', () => {
     name: 'crew',
     instructions: 'Keep it short.',
     leaderAgentId: 'ag_lead',
-    members: [{ agentId: 'ag_alice', role: 'writes code' }, { agentId: 'ag_bob' }],
+    members: [
+      { agentId: 'ag_alice', role: 'writes code' },
+      { agentId: 'ag_bob' },
+    ],
     createdAt: 1,
     updatedAt: 1,
   };

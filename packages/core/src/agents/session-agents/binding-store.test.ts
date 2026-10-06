@@ -85,7 +85,7 @@ describe('session agents binding store', () => {
     expect(await listSessionAgentsSessionIds(projectRoot)).toEqual([SESSION]);
   });
 
-  it('round-trips squad engagements and a run\'s squadId', async () => {
+  it("round-trips squad engagements and a run's squadId", async () => {
     await updateSessionAgents(projectRoot, SESSION, (file) => {
       file.runs.push(run('sr_1', 'queued', { squadId: 'sq_1' }));
       file.squads = {
@@ -157,9 +157,7 @@ describe('session agents binding store', () => {
     await updateSessionAgents(projectRoot, SESSION, (file) => {
       file.runs[0]!.status = 'running';
     });
-    expect(
-      await findSessionAgentBinding(projectRoot, NATIVE, 'ag_1'),
-    ).toEqual({
+    expect(await findSessionAgentBinding(projectRoot, NATIVE, 'ag_1')).toEqual({
       chatSessionId: SESSION,
       agentId: 'ag_1',
       runId: 'sr_1',

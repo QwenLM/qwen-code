@@ -1148,7 +1148,11 @@ async function connectAgentHost(
       // Host's roster, so write a binding that carries the coordinator's
       // persona (`remotePersona`, see acpAgent session authorization).
       if (assignment.program === 'qwen' && nativeSessionId) {
-        await markRemoteQwenTurn(options.workspaceCwd, assignment, nativeSessionId);
+        await markRemoteQwenTurn(
+          options.workspaceCwd,
+          assignment,
+          nativeSessionId,
+        );
         remoteQwenBound = true;
       }
       // qwen: the per-binding relay above, handed to the adapter. Other

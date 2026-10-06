@@ -56,14 +56,27 @@ export class SessionAgentEventHub {
     };
   }
 
-  publish(frame: SessionAgentEventFrame): void {
+  /**
+   * `immediate` skips the throttle for a frame whose delivery matters even
+   * though nothing streaming changed (a recorded permission decision wakes
+   * the Host's decisions poll, which follows these frames).
+   */
+  publish(
+    frame: SessionAgentEventFrame,
+    options: { immediate?: boolean } = {},
+  ): void {
     if (frame.type !== 'run') {
       this.deliver(frame);
       return;
     }
     const key = `${frame.sessionId}\u0000${frame.runId}`;
     const existing = this.pending.get(key);
-    const statusChanged = this.deliveredStatus.get(key) !== frame.status;
+    // Status, record state and the pending approval are state changes, not
+    // streaming: a throttled frame would be replaced by the next one and the
+    // change (e.g. "record write failed, retrying") would never be seen.
+    const statusChanged =
+      options.immediate === true ||
+      this.deliveredStatus.get(key) !== frameStateKey(frame);
     if (statusChanged) {
       if (existing) clearTimeout(existing.timer);
       this.pending.delete(key);
@@ -103,7 +116,7 @@ export class SessionAgentEventHub {
   }
 
   private deliverRun(key: string, frame: SessionAgentRunFrame): void {
-    this.deliveredStatus.set(key, frame.status);
+    this.deliveredStatus.set(key, frameStateKey(frame));
     this.deliver(frame);
   }
 
@@ -137,4 +150,14 @@ export function getSessionAgentEventHub(
     hubs.set(workspaceCwd, hub);
   }
   return hub;
+}
+
+/** The parts of a run frame whose change must reach clients unthrottled. */
+function frameStateKey(frame: SessionAgentRunFrame): string {
+  return [
+    frame.status,
+    frame.recorded === undefined ? '' : String(frame.recorded),
+    frame.permission?.requestId ?? '',
+    frame.retryable ? 'retryable' : '',
+  ].join('|');
 }
