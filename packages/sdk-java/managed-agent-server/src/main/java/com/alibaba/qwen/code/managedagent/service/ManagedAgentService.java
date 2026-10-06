@@ -836,9 +836,9 @@ public class ManagedAgentService {
             return false;
         }
         // The caller is the Session's creator, so this reads the creator's
-        // grant row, as the execution authority's join does: can_read (the
-        // join's own filter) and can_create, on a registry whose state is
-        // ACTIVE.
+        // grant row, as the execution authority's join does: READER or
+        // above (the join's own filter) and OPERATOR for creation, on a
+        // registry whose state is ACTIVE.
         ManagedWorkspaceRegistry.WorkspaceSummary summary =
                 workspaces.findReadable(session.tenantId(), actorId,
                         session.workspace().getWorkspaceId());

@@ -990,8 +990,8 @@ class ManagedAgentApiContractTest {
                             + " 'ACTIVE')", workspaceTenant, workspaceId,
                     workspaceId);
             jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                            + " workspace_id, actor_id, can_read, can_create)"
-                            + " VALUES (?, ?, ?, TRUE, TRUE)", workspaceTenant,
+                            + " workspace_id, actor_id, role)"
+                            + " VALUES (?, ?, ?, 'OPERATOR')", workspaceTenant,
                     workspaceId, actor.actorId().getBytes(StandardCharsets.UTF_8));
         }
         jdbc.update("INSERT INTO managed_workspace_default"

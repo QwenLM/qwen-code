@@ -511,8 +511,8 @@ class ManagedAgentMySqlIT {
                         id, "config-a", "policy-a");
                 jdbc.update("INSERT INTO managed_workspace_access"
                                 + " (tenant_id, workspace_id, actor_id,"
-                                + " can_read, can_create)"
-                                + " VALUES (?, ?, ?, TRUE, TRUE)",
+                                + " role)"
+                                + " VALUES (?, ?, ?, 'OPERATOR')",
                         tenant, id, "actor-a".getBytes(StandardCharsets.UTF_8));
             }
             jdbc.update("INSERT INTO managed_workspace_default"
@@ -593,13 +593,13 @@ class ManagedAgentMySqlIT {
                             + " 'ACTIVE')", tenant, workspace);
             jdbc.update("INSERT INTO managed_workspace_access"
                             + " (tenant_id, workspace_id, actor_id,"
-                            + " can_read, can_create)"
-                            + " VALUES (?, ?, ?, TRUE, TRUE)",
+                            + " role)"
+                            + " VALUES (?, ?, ?, 'OPERATOR')",
                     tenant, workspace, actor.getBytes(StandardCharsets.UTF_8));
             jdbc.update("INSERT INTO managed_workspace_access"
                             + " (tenant_id, workspace_id, actor_id,"
-                            + " can_read, can_create)"
-                            + " VALUES (?, 'Workspace-0', ?, TRUE, TRUE)",
+                            + " role)"
+                            + " VALUES (?, 'Workspace-0', ?, 'OPERATOR')",
                     tenant, "other".getBytes(StandardCharsets.UTF_8));
             Admission created = transactions.execute(status ->
                     store.insertWorkspaceSessionCommand(tenant, actor,

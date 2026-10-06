@@ -176,14 +176,14 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
-        fixture.grant(TENANT, WS, "colleague", true, true);
+        fixture.grant(TENANT, WS, "colleague", "OPERATOR");
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1, "colleague", "digest-colleague"))
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.FORBIDDEN,
                                 "session_operation_forbidden"));
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                        + " can_create = FALSE WHERE tenant_id = ? AND"
+                        + " role = 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ?", TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1))
@@ -202,8 +202,8 @@ class ManagedCwdChangeOperationTest {
         OperationAdmission admitted = begin(fixture, sessionId, "key",
                 "digest", "services/b", 1);
         assertThat(admitted.replayed()).isFalse();
-        fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                + " can_read = FALSE WHERE tenant_id = ? AND"
+        fixture.jdbc.update("DELETE FROM managed_workspace_access"
+                + " WHERE tenant_id = ? AND"
                 + " workspace_id = ? AND actor_id = ?", TENANT, WS,
                 ACTOR.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
@@ -441,7 +441,7 @@ class ManagedCwdChangeOperationTest {
         OperationRecord revokedClaim = claim(fixture, revokedId, revokedOp,
                 "owner");
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                        + " can_create = FALSE WHERE tenant_id = ? AND"
+                        + " role = 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ?", TENANT, WS);
         assertThat(settle(fixture,
                 revokedId, revokedOp, "owner",
@@ -541,7 +541,7 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
-        fixture.grant(TENANT, WS, "colleague", true, true);
+        fixture.grant(TENANT, WS, "colleague", "OPERATOR");
         assertThatThrownBy(() -> begin(fixture, archivedId, "key",
                 "digest", "a", 1, "colleague", "digest-colleague"))
                 .isInstanceOfSatisfying(ApiException.class,
@@ -1326,7 +1326,7 @@ class ManagedCwdChangeOperationTest {
                                 + " DUPLICATE KEY UPDATE workspace_id ="
                                 + " workspace_id", tenant, workspaceId,
                                 STORAGE, workspaceId);
-                        grant(tenant, workspaceId, ACTOR, true, true);
+                        grant(tenant, workspaceId, ACTOR, "OPERATOR");
                         return store.insertWorkspaceSessionCommand(tenant,
                                 ACTOR, "create-" + UUID.randomUUID(),
                                 "create-digest", "qwen-code", null, null,
@@ -1337,13 +1337,13 @@ class ManagedCwdChangeOperationTest {
         }
 
         void grant(String tenant, String workspaceId, String actor,
-                boolean read, boolean create) {
+                String role) {
             jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                            + " workspace_id, actor_id, can_read,"
-                            + " can_create) VALUES (?, ?, ?, ?, ?)"
+                            + " workspace_id, actor_id, role)"
+                            + " VALUES (?, ?, ?, ?)"
                             + " ON DUPLICATE KEY UPDATE actor_id = actor_id",
                     tenant, workspaceId, actor.getBytes(java.nio.charset
-                            .StandardCharsets.UTF_8), read, create);
+                            .StandardCharsets.UTF_8), role);
         }
 
         void insertAction(String sessionId, String actionId,
