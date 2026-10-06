@@ -43,17 +43,24 @@ after-commit fan-out is the in-process `SessionEventHub`, and on the TypeScript
 side session activation is the in-process `EmbeddedHarnessScheduler` over
 file-backed activation leases. Neither can notify another Java node.
 
-Shared-SQL materialization between Java nodes is **covered today** —
-`MessageMaterializer` polls its Session head on a scheduled SQL scan
-(default 100 ms) and reads `findMaterializationTargets`, so a worker on node
-B materializes what node A committed inside one poll interval; that counter
-evidence invalidates any claim that cross-node materialization is impossible.
-What is **still absent** is the distribution of committed facts WITHOUT the
-SQL scan poll: for a background Shell follow-up routed to node A, node B's
-Harness hears only when its own materializer happens to poll, neither
-woken on commit nor told of deliveries the journal records —
-and the existing scan-bounded path is a ceiling on latency and load, not a
-distributed transport.
+Shared-SQL **projection** materialization between Java nodes is **covered
+today, at the projection layer** — `MessageMaterializer` polls on a
+scheduled SQL scan (default 100 ms) and runs its `materializeNextBatch`
+projection batch; a projection worker on node B recomputes the committed
+rows node A wrote, in one poll interval. That strict limitation is also the
+shape of the remaining need: the existing path only recomputes projections —
+it **does not wake a Harness**, and no `wake.requested` activation,
+delivery receipt, or `domain.committed` fact reaches another node through
+it (the in-process `EmbeddedHarnessScheduler` inside each host keeps wake
+local; the in-process hub's `SessionEventHub` buffer likewise stays local).
+What is **still absent** is the distribution of committed facts on commit:
+for a background Shell follow-up routed to node A, node B's Harness never
+gets woken — not by the scan (which recomputes projection batches only),
+not from the journal (whose facts persevere in-session only), and no
+activation generator exists between them. The earlier statement that a
+materialization worker on B "learns nothing" was accurate only at the
+wake-delivery layer; at the projection layer, the shared-SQL read is the
+counter-evidence this paragraph already corrected.
 
 The canonical design already names the missing element. Its architecture flow
 reads (verbatim):
@@ -331,13 +338,21 @@ the lease generation decide; the envelope only accelerates the attempt.
 Materialization consumers trigger the same materialization the in-process
 path performs (`MessageMaterializer` today, single-node). Every consumer:
 
-- dedups on `(tenantId, sessionId, sequence)` against the durable watermark
-  it re-reads from SQL;
+- dedups on `(tenantId, sessionId, stream, sequence)` against the durable
+  watermark it re-reads from SQL, where `stream` names one of the two
+  independent sources and is carried on the envelope: `public_event` rows,
+  whose `sequence` is the row's `sequence_id` allocated from
+  `managed_agent_session.last_sequence`, and `authoritative_journal` facts
+  (`domain.committed`, `wake.requested`, receipts, commit markers), whose
+  `sequence` is the record's own journal-commit sequence from
+  `qwen_managed_session_journal_tx` — two counters that never compare across
+  streams, so an envelope always names its stream;
 - on a sequence gap, re-reads the Snapshot-plus-tail from SQL before applying
   anything newer (the `SessionEventHub overflowed` discipline, generalized);
 - writes no recovery-relevant state whose durability depends on the broker;
 - treats a wake for a settled, re-routed, or differently-fenced Session as a
-  no-op.
+  no-op. Below-stream dedupe keys are never unified: one `sequence` without
+  a source is not an identity.
 
 ## 7. Phase plan and gates
 
@@ -355,18 +370,18 @@ selected broker.
 
 ## 8. Deployment fault matrix — 设计预留·未交付
 
-| Fault                                             | Required behavior                                                                                                                                                                                                   |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Duplicate delivery of one envelope                | Consumer dedup `(tenantId, sessionId, sequence)` against the SQL watermark; the duplicate is a no-op. Activation enqueue stays idempotent.                                                                          |
-| Reordered delivery within one Session             | Sequence watermark + gap detection; consumer re-reads Snapshot-plus-tail from SQL before applying anything newer. A later record never lands ahead of an unseen earlier one from MQ alone.                          |
-| Broker redelivery after processed-but-ACK-lost    | Same as duplicate delivery.                                                                                                                                                                                         |
-| Consumer crash before processing                  | Broker redelivers (per selected broker's at-least-once path — must be verified in §5.1 before MQ2); the Session is woken late but from SQL truth.                                                                   |
-| Consumer crash after a local effect, before ACK   | Duplicate path on restart; every local effect is idempotent on committed identities.                                                                                                                                |
-| Producer crash between SQL commit and publish     | Message never sent; the committed SQL delivery line is still complete. Recovery comes from SQL-side scans (overflow/re-read discipline), as today for `SessionEventHub`. MQ is not recreated as an outbox of truth. |
-| Broker short outage                               | Producer retries with bounded buffer; local post-commit SSE unaffected; wake latency degrades only.                                                                                                                 |
-| Broker long outage                                | Transport consumers idle; Sessions are still discoverable by SQL scans and lease-fencing; no capability data loss because no truth lives on the broker.                                                             |
-| Clock skew between Java nodes                     | Fencing and leases use the database clock (the house lease pattern); envelope `committedAt` is advisory only.                                                                                                       |
-| Stale wake after a Session re-route or epoch bump | Activation fence rejects; no-op.                                                                                                                                                                                    |
+| Fault                                             | Required behavior                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Duplicate delivery of one envelope                | Consumer dedup `(tenantId, sessionId, stream, sequence)` against the SQL watermark; the duplicate is a no-op. Activation enqueue stays idempotent. The `stream` is the delivered lane (`public_event` from `last_sequence`, `authoritative_journal` from the journal-commit sequence). |
+| Reordered delivery within one Session             | The per-stream sequence watermark + gap detection; consumer re-reads Snapshot-plus-tail from SQL before applying anything newer. A later record never lands ahead of an unseen earlier one from MQ alone.                                                                              |
+| Broker redelivery after processed-but-ACK-lost    | Same as duplicate delivery.                                                                                                                                                                                                                                                            |
+| Consumer crash before processing                  | Broker redelivers (per selected broker's at-least-once path — must be verified in §5.1 before MQ2); the Session is woken late but from SQL truth.                                                                                                                                      |
+| Consumer crash after a local effect, before ACK   | Duplicate path on restart; every local effect is idempotent on committed identities.                                                                                                                                                                                                   |
+| Producer crash between SQL commit and publish     | Message never sent; the committed SQL delivery line is still complete. Recovery comes from SQL-side scans (overflow/re-read discipline), as today for `SessionEventHub`. MQ is not recreated as an outbox of truth.                                                                    |
+| Broker short outage                               | Producer retries with bounded buffer; local post-commit SSE unaffected; wake latency degrades only.                                                                                                                                                                                    |
+| Broker long outage                                | Transport consumers idle; Sessions are still discoverable by SQL scans and lease-fencing; no capability data loss because no truth lives on the broker.                                                                                                                                |
+| Clock skew between Java nodes                     | Fencing and leases use the database clock (the house lease pattern); envelope `committedAt` is advisory only.                                                                                                                                                                          |
+| Stale wake after a Session re-route or epoch bump | Activation fence rejects; no-op.                                                                                                                                                                                                                                                       |
 
 ## 9. Constraints and risks
 

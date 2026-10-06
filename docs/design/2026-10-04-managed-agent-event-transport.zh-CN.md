@@ -34,13 +34,13 @@ Java 侧 after-commit 扇出是进程内的 `SessionEventHub`，TypeScript 侧�
 是进程内的 `EmbeddedHarnessScheduler`（基于文件 activation 租约）。两者都无法通知另一台
 Java 节点。
 
-Java 节点之间的共享 SQL 物化**今天就有**——`MessageMaterializer` 以定时 SQL 扫描
-（默认 100 ms）读取其 Session head 与 `findMaterializationTargets`，因此节点 B 的物化
-worker 会在一个轮询周期内物化节点 A 的提交；这条反证足以推翻「跨节点物化不可能」。
-**仍缺的**是不依赖 SQL 轮询的已提交事实分发：路由到节点 A 的后台 Shell 后续轮次，
-节点 B 的 Harness 只能等本机 materializer 轮到时才听到——既不随提交被唤醒，
-也拿不到 journal 记录的交付消息；现有以扫描下限为天花板的形态是延迟与负载的天花板，
-而不是分布式 transport。
+Java 节点之间的共享 SQL **投影物化**今天就有——`MessageMaterializer` 以定时 SQL 扫描
+（默认 100 ms）运行其 `materializeNextBatch` 投影批量,节点 B 的投影 worker 会在一个轮询周期内
+用共享 SQL 重算节点 A 已提交的记录；这条反证足以推翻「跨节点物化不可能」。但它覆盖的只到**投影层**：
+它**不送唤醒**——`wake.requested` 激活、交付回执与 `domain.committed` 事实不经过它到另一台节点
+（每台的 `EmbeddedHarnessScheduler` 把唤醒留在本进程;`SessionEventHub` 的缓冲亦然）。**仍缺的**是在
+提交时的事实分发——路由到节点 A 的后台 Shell 后续轮次，节点 B 的 Harness 既不被扫描唤醒（扫描只跑
+投影批量），也读不到 journal 的另节点事实。
 
 权威设计已经命名了这个缺失的元素，其架构流程（原文照录）：
 
@@ -108,9 +108,11 @@ Java 可信入口 → SQL 事务提交领域记录 + outbox + WakeIntent
    领域提交通道；它携带的是指向已提交事实的指针，而不是新的提交。
 
 5. **消费者在重复投递下幂等，以已提交序列为键。** 重复投递、重复或乱序的消息，
-   对照持久水位必须是无操作：消费者的判定键是从 SQL 读到的已提交
-   `(tenantId, sessionId, sequence)`，而不是 broker 汇报的任何信息。这与现有
-   `SessionEventHub` 的纪律一致（`overflowed` → 订阅者重读 store）。
+   对照持久水位必须是无操作；判定键按 **stream 分源**:(`public_event` 位于
+   `managed_agent_session.last_sequence` 分配的 `sequence_id`,`authoritative_journal`
+   位于 `qwen_managed_session_journal_tx` 的自提交序）——两个计数器绝不在流间
+   比较，因此判定键是 `(tenantId, sessionId, stream, sequence)`，来自 SQL 而不是 broker
+   的任何汇报。这与现有 `SessionEventHub` 的纪律一致（`overflowed` → 订阅者重读 store）。
 
 6. **未知副作用不盲重试。** _「未知副作用不盲重试。」_ 目标 Session 已被指派、被
    fence 到另一代际或已结算的唤醒一律是无操作；由 activation 准入与 activation
@@ -260,7 +262,7 @@ SSE（#12380 约束）；SQL 中的持久 delivery 行保持完整，任何漏�
 Session 激活——由 activation fence 与租约代际决定；信封只是加速这次尝试。物化
 消费者触发的物化与进程内路径一致（今天的 `MessageMaterializer`，单节点）。每个消费者：
 
-- 以 `(tenantId, sessionId, sequence)` 对照从 SQL 重读的持久水位去重；
+- 以 `(tenantId, sessionId, stream, sequence)` 对照从 SQL 重读的持久水位去重——`stream` 名来源（`public_event` 由 `last_sequence`、`authoritative_journal` 由 journal 提交序），两个计数器绝不在流间比较；
 - 出现序列缺口时，先把 Snapshot+tail 从 SQL 重读，再应用任何更新的消息
   （`SessionEventHub` 溢出纪律的推广）；
 - 不写任何持久性依赖 broker 的恢复相关状态；
