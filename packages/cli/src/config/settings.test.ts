@@ -139,11 +139,16 @@ vi.mock('node:fs', async (importOriginal) => {
     openSync: vi.fn(),
     closeSync: vi.fn(),
     fchmodSync: vi.fn(),
+    chmodSync: vi.fn(),
     ftruncateSync: vi.fn(),
     mkdirSync: vi.fn(),
     mkdtempSync: vi.fn((prefix: string) => `${prefix}test`),
     rmSync: vi.fn(),
-    statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
+    statSync: vi.fn(() => ({
+      isDirectory: () => false,
+      isFile: () => true,
+      mode: 0o600,
+    })),
     realpathSync: vi.fn((p: fs.PathLike) => p.toString()),
   };
 });
@@ -166,11 +171,16 @@ vi.mock('fs', async (importOriginal) => {
     openSync: vi.fn(),
     closeSync: vi.fn(),
     fchmodSync: vi.fn(),
+    chmodSync: vi.fn(),
     ftruncateSync: vi.fn(),
     mkdirSync: vi.fn(),
     mkdtempSync: vi.fn((prefix: string) => `${prefix}test`),
     rmSync: vi.fn(),
-    statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
+    statSync: vi.fn(() => ({
+      isDirectory: () => false,
+      isFile: () => true,
+      mode: 0o600,
+    })),
     realpathSync: vi.fn((p: fs.PathLike) => p.toString()),
   };
 });

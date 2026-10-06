@@ -40,6 +40,7 @@ interface Revision {
   readonly run: unknown;
   readonly view: ManagedTaskProjection;
   readonly deliveryPending: boolean;
+  readonly stopRequested?: boolean;
 }
 
 interface FixtureSuite {
@@ -222,7 +223,14 @@ describe('managed-extension-projection/1 fixtures', () => {
 
   it.each(fixtures.viewCases)('projects one revision: $id', (each) => {
     const run = parseExtensionRun(each.run);
-    expect(projectManagedTask(null, run, each.occurredAt)).toEqual(each.view);
+    expect(
+      projectManagedTask(
+        null,
+        run,
+        each.occurredAt,
+        each.stopRequested ?? false,
+      ),
+    ).toEqual(each.view);
     expect(isExtensionDeliveryPending(run)).toBe(each.deliveryPending);
   });
 

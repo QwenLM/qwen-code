@@ -9,6 +9,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -33,6 +34,7 @@ import {
   type ChatRecord,
 } from '../services/chatRecordingService.js';
 import { SessionExecutionEngineError } from '../services/session-execution-engine.js';
+import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { SessionService } from '../services/sessionService.js';
 import {
   getSessionWriterLockPath,
@@ -1335,6 +1337,209 @@ describe('Managed Session log recording', () => {
     expect(() => recorder.bindManagedSink(writer)).toThrow(
       SessionWriterUnavailableError,
     );
+  });
+
+  it('blocks a restore whose log shows Runtime work that never settled', async () => {
+    const created = await start(managedConfig());
+    await created.getManagedRuntimeOutcomes()!.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await created.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    const block = restored.getManagedSessionBlock();
+    expect(block).toBeInstanceOf(ManagedRuntimeOutcomeUnknownError);
+    expect(block?.message).toContain('never settled');
+    await restored.closeSessionWriter();
+  });
+
+  it('blocks a restore whose newest checkpoint state cannot be read', async () => {
+    const created = await start(managedConfig());
+    await created.getManagedRuntimeOutcomes()!.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await created.closeSessionWriter();
+
+    // A crash-damaged store: the checkpoint's state body no longer reads.
+    const stateRoot = path.join(runtimeDir, 'resources', SESSION_ID);
+    let zeroed = 0;
+    for (const kind of await readdir(stateRoot)) {
+      const dir = path.join(stateRoot, kind);
+      for (const file of await readdir(dir)) {
+        if (file.startsWith('.')) continue;
+        const candidate = path.join(dir, file);
+        if ((await readFile(candidate)).includes('ckpt-')) {
+          await writeFile(candidate, Buffer.alloc(0));
+          zeroed += 1;
+        }
+      }
+    }
+    expect(zeroed).toBeGreaterThan(0);
+
+    // The restore repair leaves the unreadable checkpoint to the gate: the
+    // session opens blocked rather than failing to open at all.
+    const restored = await start(restoringConfig());
+    const block = restored.getManagedSessionBlock();
+    expect(block).toBeInstanceOf(ManagedRuntimeOutcomeUnknownError);
+    expect(block?.message).toContain('cannot be read');
+    await restored.closeSessionWriter();
+  });
+
+  it('restores a log whose Runtime calls settled, without blocking', async () => {
+    const created = await start(managedConfig());
+    const outcomes = created.getManagedRuntimeOutcomes()!;
+    await outcomes.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await outcomes.settle({
+      functionCallId: 'call-a',
+      executionStatus: 'success',
+      payload: { executionStatus: 'success', responseParts: [] },
+    });
+    await created.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    expect(restored.getManagedSessionBlock()).toBeUndefined();
+    await restored.closeSessionWriter();
+  });
+
+  it('proves a call whose settle failed after its receipt committed, on both opens', async () => {
+    const created = await start(managedConfig());
+    const outcomes = created.getManagedRuntimeOutcomes()!;
+    // The crash window: the outcome and the receipt commit, then the
+    // checkpoint's resolve fails.
+    const harness = (
+      outcomes as unknown as {
+        harness: {
+          resolveAwaitRuntime: (id: string, ref: never) => Promise<unknown>;
+        };
+      }
+    ).harness;
+    let sabotaged = false;
+    const settling = harness.resolveAwaitRuntime.bind(harness);
+    harness.resolveAwaitRuntime = async (id, ref) => {
+      if (!sabotaged) {
+        sabotaged = true;
+        throw new Error('crashed between the receipt and the settlement');
+      }
+      return settling(id, ref);
+    };
+    await outcomes.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await expect(
+      outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: { executionStatus: 'success', responseParts: [] },
+      }),
+    ).rejects.toThrow('crashed between');
+    // The receipt the failure left behind is the durable proof the call took
+    // effect — and what proves a call may never block.
+    expect(outcomes.hasCommittedReceipt('call-a')).toBe(true);
+    expect(outcomes.hasCommittedReceipt('call-b')).toBe(false);
+    await created.closeSessionWriter();
+
+    // The same durable bytes open unblocked: the restore repair settles the
+    // item the failed resolve left in progress.
+    const restored = await start(restoringConfig());
+    expect(restored.getManagedSessionBlock()).toBeUndefined();
+    await restored.closeSessionWriter();
+  });
+
+  it('hands the reopen the history its own repair writes', async () => {
+    const created = await start(managedConfig());
+    const outcomes = created.getManagedRuntimeOutcomes()!;
+    const harness = (
+      outcomes as unknown as {
+        harness: {
+          resolveAwaitRuntime: (id: string, ref: never) => Promise<unknown>;
+        };
+      }
+    ).harness;
+    let sabotaged = false;
+    const settling = harness.resolveAwaitRuntime.bind(harness);
+    harness.resolveAwaitRuntime = async (id, ref) => {
+      if (!sabotaged) {
+        sabotaged = true;
+        throw new Error('crashed between the receipt and the settlement');
+      }
+      return settling(id, ref);
+    };
+    recordUser(created, 'read the file');
+    // The model's call is on the log; its result never lands — the crash
+    // window the restore repair exists for.
+    created.getChatRecordingService()!.recordAssistantTurn({
+      model: 'test-model',
+      message: [
+        {
+          functionCall: {
+            id: 'call-a',
+            name: 'read_file',
+            args: { file_path: path.join(projectDir, 'a.txt') },
+          },
+        },
+      ],
+    });
+    await created.getChatRecordingService()!.flush();
+    await outcomes.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await expect(
+      outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: {
+          executionStatus: 'success',
+          responseParts: [{ type: 'text', text: 'the recovered answer' }],
+        },
+      }),
+    ).rejects.toThrow('crashed between');
+    await created.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    expect(restored.getManagedSessionBlock()).toBeUndefined();
+    // The repair re-records the settled result, and the projection this open
+    // seeds the chat from must carry it: otherwise the first request after a
+    // crash hands the model a functionCall that nothing answers.
+    const apiHistory = restored.getSessionRestoreRuntime()?.apiHistory ?? [];
+    const functionResponses = apiHistory
+      .flatMap((content) => content.parts ?? [])
+      .map((part) => part?.functionResponse)
+      .filter((response) => response !== undefined);
+    expect(functionResponses).toContainEqual(
+      expect.objectContaining({
+        id: 'call-a',
+        name: 'read_file',
+        response: { output: 'the recovered answer' },
+      }),
+    );
+    await restored.closeSessionWriter();
   });
 });
 

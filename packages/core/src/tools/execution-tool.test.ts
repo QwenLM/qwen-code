@@ -105,6 +105,22 @@ describe('execution tool facade', () => {
     expect(prepare).toHaveBeenCalledTimes(2);
   });
 
+  it("prepares with the scheduler's call id the invocation carries", async () => {
+    const file = await writeWorkspaceFile('call-id.txt', 'content\n');
+    const prepare = vi.spyOn(environment, 'prepare');
+    const invocation = wrap().build({ file_path: file }) as ReturnType<
+      ReturnType<typeof wrap>['build']
+    > & { setCallId(id: string): void };
+    invocation.setCallId('model-call-1');
+    await invocation.execute(signal);
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(prepare.mock.calls[0]![0]).toMatchObject({
+      callId: 'model-call-1',
+    });
+    // The environment-facing id stays the invocation's own.
+    expect(prepare.mock.calls[0]![0].id).not.toBe('model-call-1');
+  });
+
   it('prepares once when the parameters did not change', async () => {
     const file = await writeWorkspaceFile('same.txt', 'same\n');
     const prepare = vi.spyOn(environment, 'prepare');
