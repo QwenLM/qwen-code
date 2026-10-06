@@ -607,6 +607,37 @@ public class ManagedExtensionRecordStore {
                     "Child acceptance must bind the result and receipt its"
                             + " child run committed.");
         }
+        if (domain.equals("child_run") && "child_agent".equals(
+                record.get("kind").textValue())) {
+            // H4b decision 7 (the reverse of the acceptance's check): the
+            // acceptance record is authoritative — the run's delivery may
+            // reach accepted/consumed only after its acceptance chain
+            // exists, and may never retract to unknown/rejected once it
+            // does.
+            String delivery = record.get("run").get("delivery").get("state")
+                    .textValue();
+            String acceptanceKey = ManagedExtensionProjection.recordKey(
+                    sessionId, "child_acceptance",
+                    record.get("childRunId").textValue());
+            boolean acceptanceExists = !jdbc
+                    .query("SELECT record_resource_id FROM"
+                                    + " qwen_managed_session_extension_record"
+                                    + " WHERE session_scope_key = ? AND record_key = ?",
+                            (result, row) -> result.getString(
+                                    "record_resource_id"),
+                            scopeKey, acceptanceKey)
+                    .isEmpty();
+            require(
+                    !(delivery.equals("accepted") || delivery.equals("consumed"))
+                            || acceptanceExists,
+                    "Child run delivery reaches accepted or consumed only with"
+                            + " its acceptance record.");
+            require(
+                    !(delivery.equals("unknown") || delivery.equals("rejected"))
+                            || !acceptanceExists,
+                    "Child run delivery cannot go unknown or rejected after its"
+                            + " acceptance record.");
+        }
         StoredRow previous = jdbc.query("SELECT * FROM"
                         + " qwen_managed_session_extension_record WHERE"
                         + " session_scope_key = ? AND record_key = ?",

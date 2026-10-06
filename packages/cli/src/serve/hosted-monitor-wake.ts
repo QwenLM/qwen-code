@@ -21,10 +21,16 @@ import { pendingSessionInputs } from './hosted-wake-intake.js';
 // model-free on the close path. See
 // docs/design/2026-10-03-managed-shell-monitor-runtime.md.
 
-/** One pending monitor notification, ready to be delivered to its turn. */
+/** One pending notification, ready to be delivered to its turn. */
 export interface HostedMonitorWakeTurn {
   readonly turnId: string;
   readonly text: string;
+  /**
+   * The committed input's source (`monitor`, or H4b's `child_agent`): the
+   * session wrapper consumes a child acceptance's evidence after the turn
+   * settles, which a monitor notification never owes.
+   */
+  readonly source?: string;
 }
 
 export type HostedMonitorWakeState = 'idle' | 'busy' | 'blocked';
@@ -161,12 +167,12 @@ export class HostedMonitorWakeScheduler {
 }
 
 /**
- * The unadmittable path: a monitor notification that never ran a turn
- * settles cancelled without a model turn, under the turn-result record's
- * own idempotency key. Called on the close path so no wedged notification
- * parks the Session as `hosted_turn_recovery_required` at its next open.
- * A notification whose wake turn already started belongs to the recovery
- * fleet, never to a `cancelled` line on top of a turn that ran.
+ * The unadmittable path: a monitor or child-agent notification that never
+ * ran a turn settles cancelled without a model turn, under the turn-result
+ * record's own idempotency key. Called on the close path so no wedged
+ * notification parks the Session as `hosted_turn_recovery_required` at its
+ * next open. A notification whose wake turn already started belongs to the
+ * recovery fleet, never to a `cancelled` line on top of a turn that ran.
  */
 export async function settlePendingMonitorInputs(params: {
   readonly authority: LocalManagedSessionAuthority;
@@ -184,7 +190,7 @@ export async function settlePendingMonitorInputs(params: {
     authority.eventsInSequenceRange(1, authority.committedSequence),
   ).filter(
     (input) =>
-      input.source === 'monitor' &&
+      (input.source === 'monitor' || input.source === 'child_agent') &&
       !wakeHasPriorAttempt(attempted, input.turnId),
   );
   for (const input of pending) {

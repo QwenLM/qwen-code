@@ -4,14 +4,19 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore.CwdChangeOutcome;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -53,6 +58,8 @@ public class SessionLifecycleCoordinator {
     private final ManagedSessionStore sessionStore;
     private final HarnessConnector harness;
     private final RuntimeWarmer runtimeWarmer;
+    private final ChildResultRelayStore childScopes;
+    private final ObjectMapper objectMapper;
     private final ExecutorService executor;
     private final Clock clock;
     private final Duration leaseDuration;
@@ -75,12 +82,15 @@ public class SessionLifecycleCoordinator {
 
     public SessionLifecycleCoordinator(AgentStateStore store,
             ManagedSessionStore sessionStore, HarnessConnector harness,
-            RuntimeWarmer runtimeWarmer, ExecutorService executor,
+            RuntimeWarmer runtimeWarmer, ChildResultRelayStore childScopes,
+            ObjectMapper objectMapper, ExecutorService executor,
             Clock clock, ManagedAgentProperties properties) {
         this.store = store;
         this.sessionStore = sessionStore;
         this.harness = harness;
         this.runtimeWarmer = runtimeWarmer;
+        this.childScopes = childScopes;
+        this.objectMapper = objectMapper;
         this.executor = executor;
         this.clock = clock;
         this.leaseDuration = properties.getDispatch().getLeaseDuration();
@@ -262,6 +272,10 @@ public class SessionLifecycleCoordinator {
                 && ("CLOSED".equals(operation.sessionStatusBefore()) || "ARCHIVED".equals(operation.sessionStatusBefore()))) {
             return false;
         }
+        if (operation.kind() == OperationKind.CLOSE
+                || operation.kind() == OperationKind.DELETE) {
+            cascadeChildScopes(operation);
+        }
         if (bound) {
             if (!runtimeWarmer.supportsWorkspaceClose()) {
                 throw new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(409,
@@ -295,5 +309,57 @@ public class SessionLifecycleCoordinator {
             runtimeWarmer.drain(operation.sessionId()).toCompletableFuture().join();
         }
         return harnessConfirmed;
+    }
+
+    /**
+     * H4b close cascade (reference design §12): after the admission
+     * barriers seal new work and before the Harness closes, every
+     * non-terminal child run of the closing Session takes its durable stop
+     * request, its child Session closes through the ordinary idempotent
+     * close, and its terminal revision commits — recursively, since each
+     * child's own close runs this same step for its children. Nothing here
+     * rewrites an unproven end as cancelled: a child that fails to close
+     * throws, and the whole close operation re-arms through the dispatch
+     * retry instead of settling on suspicion.
+     */
+    private void cascadeChildScopes(OperationRecord operation) {
+        String tenantId = operation.tenantId();
+        String sessionId = operation.sessionId();
+        for (ChildResultRelayStore.LiveScope scope : childScopes
+                .findLiveScopes(tenantId, sessionId)) {
+            String childSessionId = null;
+            try {
+                String body = childScopes.readResource(tenantId,
+                        scope.recordResourceId());
+                if (body != null) {
+                    JsonNode record = objectMapper.readTree(body);
+                    JsonNode value = record.get("childSessionId");
+                    if (value != null && !value.isNull()) {
+                        childSessionId = value.asText();
+                    }
+                }
+            } catch (Exception error) {
+                throw new IllegalStateException(
+                        "Child scope evidence is unreadable", error);
+            }
+            Map<String, Object> cancel = new LinkedHashMap<>();
+            cancel.put("operationId", UUID.randomUUID().toString());
+            cancel.put("kind", "cancel");
+            cancel.put("childRunId", scope.childRunId());
+            harness.runChildOperation(tenantId, sessionId, cancel);
+            if (childSessionId != null && harness.isAvailable()) {
+                harness.closeSession(tenantId, childSessionId);
+            }
+            Map<String, Object> closeScope = new LinkedHashMap<>();
+            closeScope.put("operationId", UUID.randomUUID().toString());
+            closeScope.put("kind", "close_scope");
+            closeScope.put("childRunId", scope.childRunId());
+            closeScope.put("started", childSessionId != null);
+            harness.runChildOperation(tenantId, sessionId, closeScope);
+            LOG.info("Managed Session close cascade settled a child scope"
+                            + " tenant={} session={} childRun={} child={}",
+                    tenantId, sessionId, scope.childRunId(),
+                    childSessionId == null ? "unstarted" : childSessionId);
+        }
     }
 }

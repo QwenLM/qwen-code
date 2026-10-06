@@ -290,6 +290,141 @@ public class ManagedAgentStore implements AgentStateStore {
                 existing.getFirst());
     }
 
+    private static String childActorOf(String parentSessionId) {
+        return "child:" + parentSessionId;
+    }
+
+    @Override
+    @Transactional
+    public Admission insertChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest, String title, List<Map<String, Object>> input,
+            String payloadDigest, StoreModels.SessionLineage lineage) {
+        SessionRecord parent = requireSessionForUpdate(tenantId,
+                parentSessionId);
+        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "child_parent_unavailable",
+                    "The parent Session cannot admit a child.");
+        }
+        if (!input.isEmpty() && !workspaceFilesEnabled) {
+            throw workspaceExecutionUnavailable();
+        }
+        List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
+                childActorOf(parentSessionId), idempotencyKey);
+        if (!existing.isEmpty()) {
+            WorkspaceCommand command = existing.getFirst();
+            if (!command.requestDigest().equals(requestDigest)) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "idempotency_conflict",
+                        "The idempotency key was reused with different content.");
+            }
+            return new Admission(command.sessionId(), command.turnId(), true,
+                    false);
+        }
+        long now = clock.millis();
+        String sessionId = UUID.randomUUID().toString();
+        String turnId = input.isEmpty() ? null : publicId("turn");
+        String promptId = input.isEmpty() ? null : UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                        + " session_id, agent_id, agent_revision, title,"
+                        + " status, created_at, updated_at, workspace_id,"
+                        + " workspace_generation, workspace_storage_id,"
+                        + " cwd_relative, context_config_ref,"
+                        + " context_revision, workspace_config_ref,"
+                        + " workspace_policy_ref, tool_profile,"
+                        + " creator_actor_key, approval_mode,"
+                        + " parent_session_id, root_session_id,"
+                        + " parent_child_run_id, child_depth)"
+                        + " SELECT tenant_id, ?, agent_id,"
+                        + " agent_revision, ?, 'ACTIVE', ?, ?,"
+                        + " workspace_id, workspace_generation,"
+                        + " workspace_storage_id, cwd_relative,"
+                        + " context_config_ref, context_revision,"
+                        + " workspace_config_ref, workspace_policy_ref,"
+                        + " tool_profile, creator_actor_key, approval_mode,"
+                        + " ?, ?, ?, ?"
+                        + " FROM managed_agent_session"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                sessionId, title, now, now,
+                lineage.parentSessionId(), lineage.rootSessionId(),
+                lineage.parentChildRunId(), lineage.depth(),
+                tenantId, parentSessionId);
+        jdbc.update("INSERT INTO managed_agent_consumer_progress"
+                        + " (tenant_id, session_id, consumer_name,"
+                        + " covered_sequence, updated_at) VALUES"
+                        + " (?, ?, ?, 0, ?)",
+                tenantId, sessionId, MESSAGE_PROJECTION, now);
+        if (turnId != null) {
+            insertTurn(tenantId, sessionId, turnId, promptId, input,
+                    payloadDigest, now);
+        }
+        jdbc.update("INSERT INTO managed_workspace_create_command"
+                        + " (tenant_id, actor_id, idempotency_key,"
+                        + " request_digest, session_id, turn_id, created_at)"
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                tenantId,
+                ManagedWorkspaceRegistry.actorKey(tenantId,
+                        childActorOf(parentSessionId)),
+                idempotencyKey, requestDigest, sessionId, turnId, now);
+        appendEvent(tenantId, sessionId, null, "session.created",
+                Map.of("sessionId", sessionId), false, null, now);
+        if (turnId != null) {
+            appendEvent(tenantId, sessionId, turnId, "turn.accepted",
+                    acceptedData(turnId, input), false, null, now);
+        }
+        return new Admission(sessionId, turnId, false, true);
+    }
+
+    @Override
+    @Transactional
+    public Admission replayChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest) {
+        List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
+                childActorOf(parentSessionId), idempotencyKey);
+        if (existing.isEmpty()) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "idempotency_conflict", "The creation command is missing.");
+        }
+        WorkspaceCommand command = existing.getFirst();
+        if (!command.requestDigest().equals(requestDigest)) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "idempotency_conflict",
+                    "The idempotency key was reused with different content.");
+        }
+        return new Admission(command.sessionId(), command.turnId(), true,
+                false);
+    }
+
+    @Override
+    public StoreModels.SessionLineage findChildLineage(String tenantId,
+            String sessionId) {
+        return jdbc.query("SELECT parent_session_id, root_session_id,"
+                        + " parent_child_run_id, child_depth"
+                        + " FROM managed_agent_session"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                (result, row) -> {
+                    String parent = result.getString("parent_session_id");
+                    if (parent == null) {
+                        return null;
+                    }
+                    return new StoreModels.SessionLineage(parent,
+                            result.getString("root_session_id"),
+                            result.getString("parent_child_run_id"),
+                            result.getInt("child_depth"));
+                }, tenantId, sessionId).stream().findFirst().orElse(null);
+    }
+
+    @Override
+    public List<SessionRecord> listSessionChildren(String tenantId,
+            String parentSessionId) {
+        return jdbc.query("SELECT * FROM managed_agent_session"
+                        + " WHERE tenant_id = ? AND parent_session_id = ?"
+                        + " ORDER BY created_at DESC, session_id DESC",
+                sessionMapper, tenantId, parentSessionId);
+    }
+
     private Admission replayWorkspaceCommand(String tenantId, String actorId,
             String requestDigest, WorkspaceCommand command) {
         if (!command.requestDigest().equals(requestDigest)) {

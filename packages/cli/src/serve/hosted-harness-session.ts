@@ -70,6 +70,7 @@ import {
   hostedHookOccurrenceId,
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
+import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
 import {
   HostedMonitorWakeScheduler,
@@ -190,6 +191,11 @@ interface HostedSession {
   hooks?: HostedHookSession;
   childRuns?: HostedChildRunSession;
   monitors?: HostedMonitorSession;
+  childAgents?: HostedChildAgentSession;
+  /** Depth of this Session in its child tree; absent or 0 is the root. */
+  childDepth?: number;
+  /** Tool-arm results answered by a turn; flushed at that turn's settle. */
+  readonly childConsumption: Set<string>;
   hooksBusy?: boolean;
   mcpBusy?: boolean;
   mcpClosing?: boolean;
@@ -817,6 +823,8 @@ async function verifyWorkspaceRestore(
         // their own record parsers up front.
         'child_run',
         'monitor_run',
+        // H4b: the parent acceptance joins its child_run chains.
+        'child_acceptance',
       ].includes(event.payload['domain'] as string)
     )
       throw new Error('Hosted recovery domain is unsupported.');
@@ -1394,6 +1402,12 @@ async function executeHostedTurn(
                 session.childRuns,
                 session.monitors,
                 session.backgroundLane,
+                session.childAgents && {
+                  funnel: session.childAgents,
+                  depth: session.childDepth ?? 0,
+                  queueConsumption: (childRunId) =>
+                    session.childConsumption.add(childRunId),
+                },
               )
             : undefined;
         if (resumeFromToolResults) {
@@ -1454,6 +1468,21 @@ async function executeHostedTurn(
           }
         }
         await toolTurn?.finish();
+        // H4b: the tool-arm results this turn answered are consumed
+        // facts only once the turn settles — they commit ahead of the
+        // turn record, and a crashed turn leaves them accepted alone,
+        // never widened.
+        if (
+          state === 'completed' &&
+          session.childAgents &&
+          session.childConsumption.size > 0
+        ) {
+          const consumed = [...session.childConsumption];
+          session.childConsumption.clear();
+          for (const childRunId of consumed) {
+            await session.childAgents.markConsumed(childRunId);
+          }
+        }
         turnResult = record(session, sessionId, 'system', null, {
           subtype: 'turn_result',
           systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
@@ -1579,6 +1608,48 @@ export function registerHostedHarnessSessionRoutes(
     }
     if (store.writerId !== contract.bootId) {
       error(res, 409, 'hosted_harness_generation_mismatch');
+      return;
+    }
+    // H4b: a child Session arrives with its ancestry; the definition
+    // document persists it so a later load answers the same depth.
+    let lineage:
+      | {
+          parentSessionId: string;
+          rootSessionId: string;
+          parentChildRunId: string;
+          depth: number;
+        }
+      | undefined;
+    try {
+      const value = object(body?.['lineage']);
+      if (value !== undefined && value !== null) {
+        const parentSessionId = value['parentSessionId'];
+        const rootSessionId = value['rootSessionId'];
+        const parentChildRunId = value['parentChildRunId'];
+        const depth = value['depth'];
+        if (
+          !create ||
+          typeof parentSessionId !== 'string' ||
+          !HOSTED_UUID.test(parentSessionId) ||
+          typeof rootSessionId !== 'string' ||
+          !HOSTED_UUID.test(rootSessionId) ||
+          typeof parentChildRunId !== 'string' ||
+          parentChildRunId.length < 1 ||
+          parentChildRunId.length > 128 ||
+          !Number.isSafeInteger(depth) ||
+          (depth as number) < 1 ||
+          (depth as number) > 8
+        )
+          throw new Error('Invalid child lineage.');
+        lineage = {
+          parentSessionId,
+          rootSessionId,
+          parentChildRunId,
+          depth: depth as number,
+        };
+      }
+    } catch {
+      error(res, 400, 'invalid_hosted_lineage');
       return;
     }
     // One shape for every successful open/load answer — a takeover load
@@ -1716,6 +1787,9 @@ export function registerHostedHarnessSessionRoutes(
                     ? { captureBytes }
                     : {}),
                   ...(approval ? hostedApprovalDefinition(approval) : {}),
+                  // H4b: a child's ancestry persists with its definition,
+                  // so a load answers its depth without a second channel.
+                  ...(lineage ? { lineage } : {}),
                 }),
               ),
             ),
@@ -1806,6 +1880,7 @@ export function registerHostedHarnessSessionRoutes(
         streams: new Set(),
         admissions: new Map(),
         blocked: false,
+        childConsumption: new Set(),
         waiters: new HostedApprovalWaiters(),
         ...(toolProfile ? { toolProfile } : {}),
         ...(isHostedWorkspaceShellProfile(toolProfile) &&
@@ -1831,6 +1906,15 @@ export function registerHostedHarnessSessionRoutes(
             }
           : {}),
       };
+      const savedLineage = object(definition?.['lineage']);
+      if (
+        savedLineage &&
+        Number.isSafeInteger(savedLineage['depth']) &&
+        (savedLineage['depth'] as number) >= 1 &&
+        (savedLineage['depth'] as number) <= 8
+      ) {
+        session.childDepth = savedLineage['depth'] as number;
+      }
       const pinned = toolProfile
         ? readHostedApprovalDefinition(definition)
         : undefined;
@@ -1856,7 +1940,7 @@ export function registerHostedHarnessSessionRoutes(
           hookCatalog,
           session.mcp?.broker,
         );
-      if (session.toolProfile && brokerOptions)
+      if (session.toolProfile && brokerOptions) {
         session.childRuns = new HostedChildRunSession(
           {
             authority: session.managed.authority,
@@ -1864,6 +1948,18 @@ export function registerHostedHarnessSessionRoutes(
           },
           session.managed.authority.sessionHeader.sessionKey,
         );
+        // H4b: the Session's own child orchestrator, on the Shell lanes
+        // the notification wake is proven over — files profiles keep their
+        // exact current surface (their child admission is its own gate).
+        if (session.shell || session.backgroundLane)
+          session.childAgents = new HostedChildAgentSession(
+            {
+              authority: session.managed.authority,
+              resources: session.managed.resources,
+            },
+            session.managed.authority.sessionHeader.sessionKey,
+          );
+      }
       if (
         session.toolProfile &&
         brokerOptions &&
@@ -1876,13 +1972,14 @@ export function registerHostedHarnessSessionRoutes(
           },
           session.managed.authority.sessionHeader.sessionKey,
         );
-      // H3: the embedded wake scheduler of a Monitor-capable Session. A
-      // notification rides its observation revision; the pump delivers it
-      // as an ordinary text turn while the Session idles, queues in the
-      // journal while a turn runs, and leaves the remainder accurately
-      // pending the moment anything is parked or blocked.
+      // H3: the embedded wake scheduler of a notification-capable Session.
+      // A notification rides its observation revision (H4b: its child
+      // acceptance) the same way; the pump delivers it as an ordinary text
+      // turn while the Session idles, queues in the journal while a turn
+      // runs, and leaves the remainder accurately pending the moment
+      // anything is parked or blocked.
       if (
-        session.monitors &&
+        (session.monitors || session.childAgents) &&
         brokerOptions &&
         (session.shell || session.backgroundLane)
       ) {
@@ -1905,43 +2002,69 @@ export function registerHostedHarnessSessionRoutes(
             const authority = session.managed.authority;
             const first = pendingSessionInputs(
               authority.eventsInSequenceRange(1, authority.committedSequence),
-            ).find((input) => input.source === 'monitor');
+            ).find(
+              (input) =>
+                input.source === 'monitor' || input.source === 'child_agent',
+            );
             if (first === undefined) return undefined;
             const ref = assertManagedSessionDurableRef(
               first.contentRef,
-              'monitor wake input',
+              'notification wake input',
             );
             if (ref.kind !== 'managed-input')
-              throw new Error('Monitor wake input is not an input resource.');
+              throw new Error('Wake input is not an input resource.');
             const body = object(
               JSON.parse(
                 (await session.managed.resources.read(ref)).toString('utf8'),
               ),
             );
             if (typeof body?.['text'] !== 'string')
-              throw new Error('Monitor wake input has no text.');
-            return { turnId: first.turnId, text: body['text'] };
+              throw new Error('Wake input has no text.');
+            return {
+              turnId: first.turnId,
+              text: body['text'],
+              source: first.source,
+            };
           },
           state: () =>
             wakeBlocked() ? 'blocked' : wakeBusy() ? 'busy' : 'idle',
-          runTurn: createMonitorWakeRunTurn({
-            session,
-            sessionId,
-            cwd,
-            executeHostedTurn: (promptId, text, abort) =>
-              executeHostedTurn(
-                session,
-                sessionId,
-                cwd,
-                promptId,
-                text,
-                abort,
-                brokerOptions,
-              ),
-            busy: wakeBusy,
-            needsRecovery: monitorWakeNeedsRecovery,
-            writeStderr: writeStderrLineSafe,
-          }),
+          runTurn: (() => {
+            const runWakeTurn = createMonitorWakeRunTurn({
+              session,
+              sessionId,
+              cwd,
+              executeHostedTurn: (promptId, text, abort) =>
+                executeHostedTurn(
+                  session,
+                  sessionId,
+                  cwd,
+                  promptId,
+                  text,
+                  abort,
+                  brokerOptions,
+                ),
+              busy: wakeBusy,
+              needsRecovery: monitorWakeNeedsRecovery,
+              writeStderr: writeStderrLineSafe,
+            });
+            // H4b: the wake turn consumed the child's result input; the
+            // consumption commits follow its settle, the acceptance's
+            // step before the run's, never before the turn is real.
+            return async (turn) => {
+              const outcome = await runWakeTurn(turn);
+              if (
+                outcome === 'settled' &&
+                turn.source === 'child_agent' &&
+                turn.turnId.endsWith(':accept:notify') &&
+                session.childAgents
+              ) {
+                await session.childAgents.markConsumed(
+                  turn.turnId.slice(0, -':accept:notify'.length),
+                );
+              }
+              return outcome;
+            };
+          })(),
           failed: (cause) => {
             session.blocked = true;
             writeStderrLineSafe(
@@ -2992,6 +3115,188 @@ export function registerHostedHarnessSessionRoutes(
       });
   };
 
+  /**
+   * H4b: the control plane's child operations onto this Session's journal.
+   * Each verb maps to one funnel act; replay-safety rides the funnel's
+   * derived command ids, so a retried relay never mints a second revision.
+   * A turn in flight is not a refusal: on the tool arm the turn waits for
+   * exactly these commits.
+   */
+  app.post('/session/:id/children/operations', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.childAgents)
+      return error(res, 409, 'hosted_children_unavailable');
+    if (session.blocked)
+      return error(res, 409, 'hosted_turn_recovery_required');
+    const body = object(req.body);
+    const operationId = body?.['operationId'];
+    const childRunId = body?.['childRunId'];
+    const kind = body?.['kind'];
+    if (
+      typeof operationId !== 'string' ||
+      !HOSTED_UUID.test(operationId) ||
+      typeof childRunId !== 'string' ||
+      childRunId.length < 1 ||
+      childRunId.length > 320
+    ) {
+      return error(res, 400, 'invalid_child_operation');
+    }
+    const children = session.childAgents;
+    try {
+      switch (kind) {
+        case 'dispatch_started': {
+          const dispatchId = body?.['dispatchId'];
+          const runtimeBindingId = body?.['runtimeBindingId'];
+          const generationValue = body?.['generation'];
+          if (
+            typeof dispatchId !== 'string' ||
+            dispatchId.length < 1 ||
+            typeof runtimeBindingId !== 'string' ||
+            runtimeBindingId.length < 1 ||
+            typeof generationValue !== 'string' ||
+            !/^[1-9][0-9]{0,18}$/.test(generationValue)
+          ) {
+            return error(res, 400, 'invalid_child_operation');
+          }
+          await children.dispatchStarted(childRunId, {
+            dispatchId,
+            runtime: {
+              runtimeBindingId,
+              generation: generationValue,
+            },
+          });
+          break;
+        }
+        case 'attach': {
+          const childSessionId = body?.['childSessionId'];
+          if (
+            typeof childSessionId !== 'string' ||
+            !HOSTED_UUID.test(childSessionId)
+          ) {
+            return error(res, 400, 'invalid_child_operation');
+          }
+          await children.attach(childRunId, childSessionId);
+          break;
+        }
+        case 'commit_result': {
+          const result = body?.['result'];
+          const receipt = body?.['receipt'];
+          if (
+            typeof result !== 'string' ||
+            Buffer.byteLength(result, 'utf8') < 1 ||
+            receipt === undefined
+          ) {
+            return error(res, 400, 'invalid_child_operation');
+          }
+          await children.settleCompleted(childRunId, {
+            result: Buffer.from(result, 'utf8'),
+            receipt: Buffer.from(
+              typeof receipt === 'string' ? receipt : JSON.stringify(receipt),
+              'utf8',
+            ),
+          });
+          break;
+        }
+        case 'accept': {
+          const notification = object(body?.['notification']);
+          if (
+            notification !== null &&
+            notification !== undefined &&
+            typeof notification['description'] !== 'string'
+          ) {
+            return error(res, 400, 'invalid_child_operation');
+          }
+          await children.accept(
+            childRunId,
+            notification
+              ? {
+                  notification: {
+                    description: notification['description'] as string,
+                  },
+                }
+              : {},
+          );
+          session.monitorWake?.kick();
+          break;
+        }
+        case 'mark_accepted':
+          await children.markAccepted(childRunId);
+          break;
+        case 'fail': {
+          const stopReason = body?.['stopReason'];
+          const reason = body?.['reason'];
+          const started = body?.['started'];
+          const QUOTA = [
+            'count_limit',
+            'rate_limit',
+            'depth_limit',
+            'byte_limit',
+            'budget_exhausted',
+            'duration_limit',
+          ];
+          if (
+            typeof stopReason !== 'string' ||
+            !['creation_failed', 'child_failed', 'quota_exceeded'].includes(
+              stopReason,
+            ) ||
+            typeof started !== 'boolean' ||
+            !(
+              reason === null ||
+              reason === undefined ||
+              (typeof reason === 'string' && QUOTA.includes(reason))
+            )
+          ) {
+            return error(res, 400, 'invalid_child_operation');
+          }
+          await children.settleFailed(childRunId, {
+            stopReason: stopReason as
+              | 'creation_failed'
+              | 'child_failed'
+              | 'quota_exceeded',
+            reason:
+              (reason as
+                | 'count_limit'
+                | 'rate_limit'
+                | 'depth_limit'
+                | 'byte_limit'
+                | 'budget_exhausted'
+                | 'duration_limit') ?? null,
+            started,
+          });
+          break;
+        }
+        case 'cancel':
+          await children.requestStop(childRunId);
+          break;
+        case 'close_scope': {
+          const started = body?.['started'];
+          if (typeof started !== 'boolean') {
+            return error(res, 400, 'invalid_child_operation');
+          }
+          await children.settleCancelled(childRunId, { started });
+          break;
+        }
+        default:
+          return error(res, 400, 'invalid_child_operation');
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (
+        message.includes('conflict') ||
+        message.includes('cannot follow') ||
+        message.includes('already')
+      ) {
+        return error(res, 409, 'child_operation_conflict', message);
+      }
+      writeStderrLineSafe(
+        `qwen serve: Hosted child operation ${kind} of session ${req.params['id']} failed: ${message}`,
+      );
+      return error(res, 503, 'child_operation_failed', message);
+    }
+    res.status(202).json({ operationId, state: 'settled' });
+  });
+
   app.post('/session/:id/managed-runtime/continue', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
@@ -3177,6 +3482,12 @@ export function registerHostedHarnessSessionRoutes(
           session.childRuns,
           session.monitors,
           session.backgroundLane,
+          session.childAgents && {
+            funnel: session.childAgents,
+            depth: session.childDepth ?? 0,
+            queueConsumption: (childRunId) =>
+              session.childConsumption.add(childRunId),
+          },
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         try {

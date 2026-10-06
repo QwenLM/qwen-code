@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore.CwdChangeOutcome;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
@@ -1388,7 +1389,8 @@ class ManagedCwdChangeOperationTest {
 
         SessionLifecycleCoordinator coordinator(RuntimeWarmer warmer) {
             return new SessionLifecycleCoordinator(store, null, null,
-                    warmer, new AbstractExecutorService() {
+                    warmer, new ChildResultRelayStore(jdbc),
+                    new ObjectMapper(), new AbstractExecutorService() {
                         @Override
                         public void shutdown() {
                         }

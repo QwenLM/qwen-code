@@ -111,6 +111,12 @@ vi.mock(
         if (domain === 'monitor_run' && domainEnablement.monitorRun) return;
         actual.assertManagedSessionDomainEnabled(domain);
       },
+      // H4b: record commits gate per kind, beside the admission mock.
+      assertManagedSessionChildRunKindEnabled: (kind: string) => {
+        if (!domainEnablement.childRun) {
+          actual.assertManagedSessionChildRunKindEnabled(kind);
+        }
+      },
     };
   },
 );
@@ -4046,7 +4052,14 @@ describe('Hosted Harness no-tool session', () => {
         (await toolTurn!.declarations(new AbortController().signal)).map(
           (tool) => tool.name,
         ),
-      ).toEqual(['read_file', 'write_file', 'edit', 'run_shell_command']);
+      ).toEqual([
+        'read_file',
+        'write_file',
+        'edit',
+        'run_shell_command',
+        // H4b: a Shell-laned root Session advertises its Agent tool.
+        'agent',
+      ]);
       return { text: 'text without side effects', model: 'test-model' };
     });
     const prompt = [{ type: 'text', text: 'hello' }];
@@ -4121,6 +4134,8 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'run_shell_command',
       'monitor',
+      // H4b: a Shell-laned root Session advertises its Agent tool.
+      'agent',
     ]);
     expect(state.model).toHaveBeenCalledTimes(2);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(

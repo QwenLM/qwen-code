@@ -47,6 +47,7 @@ import {
   type ToolResultEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
+  assertManagedSessionChildRunKindEnabled,
   assertManagedSessionDomainEnabled,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
@@ -76,6 +77,16 @@ import type {
   HostedPromptHookRunner,
 } from './hosted-hook-session.js';
 import type { HostedChildRunSession } from './hosted-child-run-session.js';
+import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { childLaunchAdmission } from './hosted-child-agent-session.js';
+import {
+  encodeChildLaunchEnvelope,
+  MANAGED_CHILD_LIMITS,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import {
+  managedExtensionRecordKey,
+  managedTaskId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
 import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { HostedMonitorRemoteExecutor } from './hosted-monitor-remote-executor.js';
@@ -173,6 +184,18 @@ function childRunAdmissionsEnabled(): boolean {
 function monitorRunAdmissionsEnabled(): boolean {
   try {
     assertManagedSessionDomainEnabled('monitor_run');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// H4b: child-agent admissions exist only while the child_run domain's
+// child_agent kind is enabled for commits; H3's shell keeps its own gate,
+// so this never reads the plain domain list.
+function childAgentAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionChildRunKindEnabled('child_agent');
     return true;
   } catch {
     return false;
@@ -304,6 +327,38 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
   ...HOSTED_WORKSPACE_SHELL_TOOLS,
   HOSTED_GLOB_TOOL,
 ];
+
+/**
+ * H4b: launch one child Session from the Session's own definition. The
+ * result crosses exactly once: a background child completes through a
+ * later durable notification input, a foreground child through its own
+ * tool result — never both paths.
+ */
+export const HOSTED_AGENT_TOOL: FunctionDeclaration = {
+  name: 'agent',
+  description:
+    "Launch one child agent as an independent Session of this Workspace, running this Session's own agent definition. Runs in the background by default: the child's terminal result arrives later as a notification input. With run_in_background false the call waits and returns the child's result directly. A child never inherits this Session's model context; give it a complete prompt. Nesting, custom subagent types and isolated workspaces are unavailable in this profile.",
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      description: {
+        type: 'string',
+        description: 'A short label for the child task, at most 512 bytes.',
+      },
+      prompt: {
+        type: 'string',
+        description: 'The complete first prompt the child Session runs.',
+      },
+      run_in_background: {
+        type: 'boolean',
+        description:
+          'Run the child in the background and notify at completion (default true).',
+      },
+    },
+    required: ['description', 'prompt'],
+    additionalProperties: false,
+  },
+};
 function physicalToolStatus(
   response: Record<string, unknown> | undefined,
 ): 'success' | 'error' | 'cancelled' {
@@ -345,6 +400,9 @@ export class HostedWorkspaceToolTurn {
   private readonly hookPermission = new Map<string, 'allow' | 'deny'>();
   private readonly childRuns?: HostedChildRunSession;
   private readonly monitors?: HostedMonitorSession;
+  private readonly childAgents?: HostedChildAgentSession;
+  private readonly childDepth: number;
+  private readonly childConsumption: (childRunId: string) => void;
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -373,9 +431,17 @@ export class HostedWorkspaceToolTurn {
     childRuns?: HostedChildRunSession,
     monitors?: HostedMonitorSession,
     private readonly backgroundLane?: HostedShellTurnOptions,
+    childAgents?: {
+      readonly funnel: HostedChildAgentSession;
+      readonly depth: number;
+      readonly queueConsumption: (childRunId: string) => void;
+    },
   ) {
     this.childRuns = childRuns;
     this.monitors = monitors;
+    this.childAgents = childAgents?.funnel;
+    this.childDepth = childAgents?.depth ?? 0;
+    this.childConsumption = childAgents?.queueConsumption ?? (() => undefined);
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
         ? publicationOrShell
@@ -427,6 +493,17 @@ export class HostedWorkspaceToolTurn {
           : tool,
       ),
       ...(this.mcp?.tools() ?? []),
+      // H4b: the Agent tool joins the declaration set only on a
+      // Shell-laned Session whose own child orchestrator exists (never in
+      // a child's), behind the kind gate — files profiles and the public
+      // files/1 flow keep their exact current vocabulary, mirrored by the
+      // admission check in prepareRequests.
+      ...(this.childAgents !== undefined &&
+      (this.shell !== undefined || this.backgroundLane !== undefined) &&
+      this.childDepth === 0 &&
+      childAgentAdmissionsEnabled()
+        ? [HOSTED_AGENT_TOOL]
+        : []),
     ];
     return this.advertised;
   }
@@ -900,6 +977,8 @@ export class HostedWorkspaceToolTurn {
         let input: Record<string, unknown>;
         let backgroundAdmitted = false;
         let monitorAdmitted = false;
+        let agentAdmitted = false;
+        let agentBackground = true;
         if (mcpInput) {
           input = { ...mcpInput.input };
         } else if (isShell) {
@@ -1065,6 +1144,57 @@ export class HostedWorkspaceToolTurn {
               'Hosted Monitor max_events must be an integer from 1 to 10000.';
           }
           input = { ...args, is_monitor: true };
+        } else if (call.name === 'agent') {
+          const args = call.args;
+          // H4b: an Agent call is admitted exactly when this Shell-laned
+          // Session owns its child orchestrator (a child Session's own
+          // turn does not), behind the kind gate — the deliberate refusals
+          // below keep their texts otherwise.
+          agentAdmitted =
+            this.childAgents !== undefined &&
+            (this.shell !== undefined || this.backgroundLane !== undefined) &&
+            this.childDepth === 0 &&
+            childAgentAdmissionsEnabled();
+          const unsupportedKey = Object.keys(args).find(
+            (key) =>
+              !['description', 'prompt', 'run_in_background'].includes(key),
+          );
+          const backgroundValue = args['run_in_background'];
+          agentBackground = !(
+            backgroundValue === false ||
+            (typeof backgroundValue === 'string' &&
+              backgroundValue.toLowerCase() === 'false')
+          );
+          const backgroundIllFormed =
+            backgroundValue !== undefined &&
+            backgroundValue !== true &&
+            backgroundValue !== false &&
+            !(
+              typeof backgroundValue === 'string' &&
+              ['true', 'false'].includes(backgroundValue.toLowerCase())
+            );
+          if (!agentAdmitted) {
+            validationError =
+              'Hosted child agents are unavailable on this Session profile; read work through ordinary tools instead.';
+          } else if (unsupportedKey !== undefined) {
+            validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition in the shared Workspace, without nesting: fork_*, working_dir, isolation, name, model and subagent_type belong to the legacy Agent tool.`;
+          } else if (backgroundIllFormed) {
+            validationError =
+              'Hosted child agent run_in_background must be a boolean.';
+          } else if (
+            typeof args['description'] !== 'string' ||
+            !args['description'].trim() ||
+            Buffer.byteLength(args['description'], 'utf8') >
+              MANAGED_CHILD_LIMITS.maxDescriptionBytes
+          ) {
+            validationError = `Hosted child agent requires a nonempty description of at most ${MANAGED_CHILD_LIMITS.maxDescriptionBytes} bytes.`;
+          } else if (
+            typeof args['prompt'] !== 'string' ||
+            !args['prompt'].trim()
+          ) {
+            validationError = 'Hosted child agent requires a nonempty prompt.';
+          }
+          input = { ...args };
         } else {
           const file = call.args['file_path'];
           input = { ...call.args };
@@ -1102,6 +1232,8 @@ export class HostedWorkspaceToolTurn {
           runtimeCallId,
           background: mcpInput === undefined && backgroundAdmitted,
           monitoring: mcpInput === undefined && monitorAdmitted,
+          agent: mcpInput === undefined && agentAdmitted,
+          agentBackground,
         };
       });
     };
@@ -1388,6 +1520,10 @@ export class HostedWorkspaceToolTurn {
       const bindings = [];
       for (const [ordinal, request] of requests.entries()) {
         if (refusals[ordinal] !== undefined) continue;
+        // A child-agent launch has no Runtime execution to reserve: the
+        // control plane's relay owns its side effect, so it never enters
+        // the Broker pipeline below.
+        if (request.agent) continue;
         if (request.mcp) {
           const renewed = this.mcp!.toolInput(
             request.call.name,
@@ -1723,6 +1859,12 @@ export class HostedWorkspaceToolTurn {
         if (refused) {
           await this.commit('tool_result', refused, model);
           responses.push(...refused);
+          continue;
+        }
+        if (request.agent) {
+          responses.push(
+            ...(await this.acceptChildAgent(request, model, signal)),
+          );
           continue;
         }
         const executionCallId = reserved.get(index)!;
@@ -2265,6 +2407,150 @@ export class HostedWorkspaceToolTurn {
       );
     }
     return converted;
+  }
+
+  /**
+   * H4b: launch one child Session and complete the call through its own
+   * arm. The intent commits before any physical effect; the control
+   * plane's relay owns creation and delivery from there. The launch is
+   * replay-safe by its derived record key: a re-driven batch names the
+   * same child Run id, so nothing creates a second child Session.
+   */
+  private async acceptChildAgent(
+    request: {
+      call: ToolCallRequestInfo;
+      agentBackground: boolean;
+    },
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    const children = this.childAgents!;
+    const authority = this.session.authority;
+    const key = authority.sessionHeader.sessionKey;
+    const description = (request.call.args['description'] as string).trim();
+    const prompt = request.call.args['prompt'] as string;
+    const childRunId = `${this.promptId}:${request.call.callId}`;
+    // The v1 pin: the parent's own definition, documented by its
+    // definition resource's digest (the control plane reads the pin from
+    // the committed body when it stamps the child's lineage).
+    const definition = {
+      definitionId: `hosted-agent/${this.profile ?? 'unknown'}`,
+      definitionRevision: 1,
+      definitionDigest: authority.sessionHeader.definitionRef.digest,
+    };
+    const admission = childLaunchAdmission({
+      workspaceMode: 'shared',
+      sameDefinition: true,
+      closing: authority.currentActivation?.phase !== 'active',
+      activeInScope: children.activeChildRunsOf(key.sessionId).length,
+      envelopeBytes: encodeChildLaunchEnvelope({
+        description,
+        prompt,
+        definition,
+      }).byteLength,
+    });
+    if (!admission.admitted) {
+      const refused = convertToFunctionErrorResponse(
+        request.call.name,
+        request.call.callId,
+        [],
+        `Hosted child agent refused this launch (${admission.reason}).`,
+      );
+      await this.commit('tool_result', refused, model);
+      return refused;
+    }
+    await children.admit({
+      childRunId,
+      ownerScopeId: key.sessionId,
+      rootSessionId: key.sessionId,
+      completion: request.agentBackground ? 'sent' : 'tool',
+      description,
+      prompt,
+      definition,
+      workingDirectory: '.',
+      executionCallId: childRunId,
+    });
+    if (!request.agentBackground) {
+      return await this.awaitChildToolResult(
+        children,
+        request,
+        childRunId,
+        model,
+        signal,
+      );
+    }
+    const taskId = managedTaskId(
+      managedExtensionRecordKey(key.sessionId, 'child_run', childRunId),
+    );
+    const started = convertToFunctionResponse(
+      request.call.name,
+      request.call.callId,
+      [
+        {
+          text: `Child agent started in the background as ${taskId}; watch the task surface or wait for its completion notification rather than polling. Its terminal result arrives as a durable notification input.`,
+        },
+      ],
+    );
+    await this.commit('tool_result', started, model);
+    return started;
+  }
+
+  /**
+   * The foreground arm: the call's answer always re-derives from the
+   * committed chain — a crashed Session resumes into this same wait and
+   * answers from the settled run and its acceptance, never from relay
+   * memory. A failed or cancelled child is read and told, never revived.
+   */
+  private async awaitChildToolResult(
+    children: HostedChildAgentSession,
+    request: { call: ToolCallRequestInfo },
+    childRunId: string,
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    for (;;) {
+      if (signal.aborted) {
+        const abandoned = convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          'The turn was cancelled before the child agent finished; the child keeps running and its committed result is retained.',
+        );
+        await this.commit('tool_result', abandoned, model);
+        return abandoned;
+      }
+      const record = children.record(childRunId);
+      if (record !== undefined) {
+        if (record.run.state === 'failed' || record.run.state === 'cancelled') {
+          const ended = convertToFunctionErrorResponse(
+            request.call.name,
+            request.call.callId,
+            [],
+            `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).`,
+          );
+          await this.commit('tool_result', ended, model);
+          return ended;
+        }
+        const acceptance = children.acceptance(childRunId);
+        if (acceptance !== undefined) {
+          const text = (
+            await this.session.resources.read(acceptance.contentRef)
+          ).toString('utf8');
+          const parts = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [{ text }],
+          );
+          if (!this.messageFitsInline('tool_result', parts, model))
+            throw new Error('Child agent result cannot be recorded.');
+          await this.commit('tool_result', parts, model);
+          await children.markAccepted(childRunId);
+          this.childConsumption(childRunId);
+          return parts;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
   }
 
   /**

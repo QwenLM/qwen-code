@@ -83,6 +83,22 @@ public final class InMemoryRuntimeSessionRepository
     }
 
     @Override
+    public synchronized RuntimeSessionRecord findLatestByHarnessSession(
+            String harnessSessionId) {
+        String id = BrokerValues.requireId(harnessSessionId,
+                "harnessSessionId");
+        return records.values().stream()
+                .flatMap(scopedRecords -> scopedRecords.values().stream())
+                .filter(record -> id.equals(
+                        record.getSession().getHarnessSessionId()))
+                .max(Comparator.comparingLong(
+                        RuntimeSessionRecord::getRuntimeGeneration)
+                        .thenComparing(
+                                RuntimeSessionRecord::getRuntimeSessionId))
+                .orElse(null);
+    }
+
+    @Override
     public synchronized java.util.List<RuntimeSessionRecord> findByBinding(String bindingId,
             long generation, String afterSessionId, int limit) {
         if (limit < 1 || limit > 100) {

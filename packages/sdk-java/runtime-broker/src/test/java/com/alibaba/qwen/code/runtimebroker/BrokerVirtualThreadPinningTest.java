@@ -167,6 +167,12 @@ class BrokerVirtualThreadPinningTest {
         }
 
         @Override
+        public RuntimeSessionRecord findLatestByHarnessSession(
+                String harnessSessionId) {
+            return delegate.findLatestByHarnessSession(harnessSessionId);
+        }
+
+        @Override
         public RuntimeSessionRecord findById(RuntimeScope scope,
                 String runtimeSessionId) {
             if (!armed.get()) {

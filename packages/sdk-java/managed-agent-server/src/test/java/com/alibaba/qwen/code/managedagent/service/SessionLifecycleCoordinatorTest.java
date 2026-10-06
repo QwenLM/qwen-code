@@ -6,6 +6,7 @@ import static org.awaitility.Awaitility.await;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
@@ -55,7 +56,8 @@ class SessionLifecycleCoordinatorTest {
         };
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(store, new ManagedSessionStore(jdbc),
-                    new UnavailableHarnessConnector(), unsupported, executor, Clock.systemUTC(), properties);
+                    new UnavailableHarnessConnector(), unsupported, new ChildResultRelayStore(jdbc),
+                    new ObjectMapper(), executor, Clock.systemUTC(), properties);
             try {
                 coordinator.dispatch("tenant", session, operation);
                 await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->

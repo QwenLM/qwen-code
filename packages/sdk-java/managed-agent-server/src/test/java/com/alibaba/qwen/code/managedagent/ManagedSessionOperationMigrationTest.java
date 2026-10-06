@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleService;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
@@ -67,7 +68,8 @@ class ManagedSessionOperationMigrationTest {
             SessionLifecycleCoordinator coordinator =
                     new SessionLifecycleCoordinator(store,
                             new ManagedSessionStore(jdbc), harness,
-                            new DrainedRuntime(), executor, Clock.systemUTC(),
+                            new DrainedRuntime(), new ChildResultRelayStore(jdbc),
+                            new ObjectMapper(), executor, Clock.systemUTC(),
                             properties);
             SessionLifecycleService lifecycle = new SessionLifecycleService(
                     store, new ManagedAgentService(store, digests, null,

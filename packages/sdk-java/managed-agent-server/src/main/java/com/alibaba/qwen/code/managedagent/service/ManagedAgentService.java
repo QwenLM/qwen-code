@@ -46,6 +46,8 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -216,6 +218,86 @@ public class ManagedAgentService {
         }
         dispatch(tenantId, admission);
         return response(admission);
+    }
+
+    /**
+     * H4b: creates a child Session under its parent's exact Workspace
+     * binding, called only by the control plane's child result relay. The
+     * idempotency key derives from the parent's committed launch record
+     * (tenant | parent | childRunId), so a redriven creation answers the
+     * original admission and never mints a second Session, and the launch
+     * input becomes the child's first turn. The lineage stamps in the same
+     * transaction, and the relay reads it back from the row.
+     */
+    public CommandAdmission createChildSession(String tenantId,
+            String parentSessionId, String childRunId, String description,
+            String prompt) {
+        SessionRecord parent = store.requireSession(tenantId, parentSessionId);
+        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "child_parent_unavailable",
+                    "The parent Session cannot admit a child.");
+        }
+        String creationKey = childCreationKey(parentSessionId, childRunId);
+        List<InputBlock> blocks = List.of(new InputBlock("input_text",
+                description.isBlank() ? prompt
+                        : "[" + description + "]\n\n" + prompt));
+        List<Map<String, Object>> input = input(blocks, false);
+        if (!input.isEmpty() && !harness.isWorkspaceFilesAvailable()) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
+        StoreModels.SessionLineage parentLineage = store.findChildLineage(
+                tenantId, parentSessionId);
+        StoreModels.SessionLineage lineage = new StoreModels.SessionLineage(
+                parentSessionId,
+                parentLineage == null ? parentSessionId
+                        : parentLineage.rootSessionId(),
+                childRunId, parentLineage == null ? 1
+                        : parentLineage.depth() + 1);
+        String title = description.isBlank() ? "child agent"
+                : description.length() > 256 ? description.substring(0, 256)
+                        : description;
+        Map<String, Object> semantic = new LinkedHashMap<>();
+        semantic.put("child", childRunId);
+        semantic.put("title", title);
+        semantic.put("input", input);
+        String requestDigest = digests.digest(semantic);
+        StoreModels.Admission admission;
+        try {
+            admission = store.insertChildSessionCommand(tenantId,
+                    parentSessionId, creationKey, requestDigest, title, input,
+                    SubmitHarnessTurn.computePayloadDigest(input), lineage);
+        } catch (DuplicateKeyException error) {
+            admission = store.replayChildSessionCommand(tenantId,
+                    parentSessionId, creationKey, requestDigest);
+        }
+        if (!admission.replayed()) {
+            dispatch(tenantId, admission);
+        }
+        return response(admission);
+    }
+
+    /** The derivation of H4a decision 3: the launch's own record key,
+     * sha256 of sessionId | domain | recordId joined by NUL — exactly the
+     * extension-record key the parent's journal derives. */
+    public static String childCreationKey(String parentSessionId,
+            String childRunId) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hashed = digest.digest((parentSessionId + '\u0000'
+                    + "child_run" + '\u0000' + childRunId)
+                    .getBytes(StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(64);
+            for (byte value : hashed) {
+                out.append(Character.forDigit((value >> 4) & 0xf, 16));
+                out.append(Character.forDigit(value & 0xf, 16));
+            }
+            return out.toString();
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     public CommandAdmission submitTurn(String tenantId, String actorId,

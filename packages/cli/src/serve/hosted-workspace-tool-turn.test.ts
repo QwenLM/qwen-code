@@ -111,6 +111,13 @@ vi.mock(
         if (domain === 'monitor_run' && enablement.monitorRun) return;
         actual.assertManagedSessionDomainEnabled(domain);
       },
+      // H4b: record commits gate per kind; the admission mock above keeps
+      // its plain-domain meaning, this one carries the commit side.
+      assertManagedSessionChildRunKindEnabled: (kind: string) => {
+        if (!enablement.childRun) {
+          actual.assertManagedSessionChildRunKindEnabled(kind);
+        }
+      },
     };
   },
 );
