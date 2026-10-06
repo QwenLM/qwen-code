@@ -1040,6 +1040,7 @@ describe('Session', () => {
       getChatRecordingService: vi
         .fn()
         .mockReturnValue(mockChatRecordingService),
+      getManagedRuntimeOutcomes: vi.fn().mockReturnValue(undefined),
       getSessionService: vi.fn().mockReturnValue({
         setSessionPrBoundCallback: vi.fn(),
       }),
@@ -3163,6 +3164,128 @@ describe('Session', () => {
         expect.any(Function),
         { terminalWidth: 80, terminalHeight: 24, showColor: false },
       );
+    });
+  });
+
+  describe('Managed Runtime batch close', () => {
+    function driveToolTurn() {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'hi',
+        returnDisplay: 'hi',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'run_shell_command',
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue({
+          params: { command: 'echo hi' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('echo hi'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute,
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-shell-1',
+                    name: 'run_shell_command',
+                    args: { command: 'echo hi' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+      return execute;
+    }
+
+    it('flushes the recorded results and closes the continuation in that order', async () => {
+      const order: string[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mockChatRecordingService.recordToolResult.mockImplementation(() => {
+        order.push('recordToolResult');
+      });
+      mockChatRecordingService.flush.mockImplementation(async () => {
+        order.push('flush');
+        await gate;
+      });
+      const finalizeBatch = vi.fn().mockImplementation(async () => {
+        order.push('finalizeBatch');
+      });
+      mockConfig.getManagedRuntimeOutcomes = vi.fn().mockReturnValue({
+        finalizeBatch,
+      });
+      const execute = driveToolTurn();
+      const sendSpy = mockChat.sendMessageStream;
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run it' }],
+      });
+
+      await vi.waitFor(() =>
+        expect(mockChatRecordingService.flush).toHaveBeenCalled(),
+      );
+      // A fire-and-forget close could not hold it: while the flush is
+      // uncommitted the model is never asked again.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(execute).toHaveBeenCalled();
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      release();
+      await prompt;
+      expect(order).toEqual(['recordToolResult', 'flush', 'finalizeBatch']);
+      await vi.waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(2));
+    });
+
+    it('degrades a latched recording failure without closing the batch', async () => {
+      // ChatRecordingService latches a write failure permanently, so every
+      // later flush re-throws it; the close must not follow a flush whose
+      // records never landed, and the turn must still reach the model.
+      mockChatRecordingService.flush.mockRejectedValueOnce(
+        new Error('transcript lease taken over'),
+      );
+      const finalizeBatch = vi.fn().mockResolvedValue(undefined);
+      mockConfig.getManagedRuntimeOutcomes = vi.fn().mockReturnValue({
+        finalizeBatch,
+      });
+      const execute = driveToolTurn();
+      const sendSpy = mockChat.sendMessageStream;
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run it' }],
+      });
+
+      expect(execute).toHaveBeenCalled();
+      await vi.waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(2));
+      expect(finalizeBatch).not.toHaveBeenCalled();
+    });
+
+    it('runs neither for a Legacy session', async () => {
+      const order: string[] = [];
+      mockChatRecordingService.flush.mockImplementation(async () => {
+        order.push('flush');
+      });
+      mockConfig.getManagedRuntimeOutcomes = vi.fn().mockReturnValue(undefined);
+      const execute = driveToolTurn();
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run it' }],
+      });
+
+      expect(execute).toHaveBeenCalled();
+      expect(order).toEqual([]);
     });
   });
 
