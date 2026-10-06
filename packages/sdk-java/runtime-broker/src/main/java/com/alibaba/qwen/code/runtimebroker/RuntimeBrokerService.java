@@ -65,6 +65,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
      * Floor for {@code v3ResultWindow}: refuses sub-second durations. A
      * suffix-less config value binds as seconds, so a stale
      * milliseconds-style override is accepted — always write the suffix.
+     * A bare value meant in minutes (30 binds 30 seconds) clears this
+     * floor; the startup sweep warns when a seconds-convention field
+     * binds at least 10x below its default.
      */
     public static final Duration MIN_V3_RESULT_WINDOW = Duration.ofSeconds(1);
     private static final Duration DEFAULT_V3_RESULT_WINDOW =

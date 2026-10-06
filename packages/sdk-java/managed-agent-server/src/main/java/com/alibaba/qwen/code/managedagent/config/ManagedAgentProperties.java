@@ -88,6 +88,10 @@ public class ManagedAgentProperties {
 
     @PostConstruct
     void validateWorkspaceFiles() {
+        // The sweep runs first: a stale milliseconds-scale approval timeout
+        // is always past the range ceiling below, so the unit hint must
+        // fire before that check fails the boot.
+        warnOnSecondScaleOverrides();
         long timeout = harness.getApprovalTimeout().toMillis();
         if (timeout < 1000 || timeout > 86400000) {
             throw new IllegalStateException("Hosted approval timeout must be between 1s and 24h");
@@ -108,14 +112,17 @@ public class ManagedAgentProperties {
                             + " a supported Harness, Session Store and Session-isolated"
                             + " local-process Broker with Workspace mounts");
         }
-        warnOnSecondScaleOverrides();
     }
 
     // A suffix-less override bound milliseconds before the @DurationUnit
     // sweep and now binds seconds; a bound value at 1000x its field
     // default or more is that flip's signature (every shipped value is
-    // suffixed, so a default never trips this). Warn, never refuse: a
-    // deliberate large value must still boot.
+    // suffixed, so a default never trips this). The mirror band catches
+    // the other direction: a bare value meant in a larger unit binds at
+    // least 10x below the default (zero is unambiguous and never trips).
+    // A required field ships no default to compare against, so it warns
+    // from one hour up instead. Warn, never refuse: a deliberate value
+    // must still boot.
     private void warnOnSecondScaleOverrides() {
         warnOnSecondScaleOverrides("qwen.managed-agent.", this,
                 new ManagedAgentProperties());
@@ -153,18 +160,45 @@ public class ManagedAgentProperties {
                     .toLowerCase(Locale.ROOT);
             if (duration) {
                 DurationUnit unit = field.getAnnotation(DurationUnit.class);
+                Duration basisDefault = basis instanceof Duration basisDuration
+                        ? basisDuration : null;
                 if (unit != null && unit.value() == ChronoUnit.SECONDS
-                        && value instanceof Duration boundValue
-                        && basis instanceof Duration basisDefault
-                        && boundValue.compareTo(
-                                basisDefault.multipliedBy(1000)) >= 0) {
-                    LOG.warn("{} resolved to {}, at least 1000x its default"
-                            + " ({}) — the signature of a stale"
-                            + " milliseconds-style override: a suffix-less"
-                            + " number now binds as seconds. Write an"
-                            + " explicit suffix (for example 1800000ms)"
-                            + " to confirm the intent.",
-                            property, boundValue, basisDefault);
+                        && value instanceof Duration boundValue) {
+                    if (basisDefault != null
+                            && boundValue.compareTo(
+                                    basisDefault.multipliedBy(1000)) >= 0) {
+                        LOG.warn("{} resolved to {}, at least 1000x its"
+                                + " default ({}) — the signature of a stale"
+                                + " milliseconds-style override: a"
+                                + " suffix-less number now binds as"
+                                + " seconds. Write an explicit suffix"
+                                + " (for example 1800000ms) to confirm"
+                                + " the intent.",
+                                property, boundValue, basisDefault);
+                    } else if (basisDefault != null && !boundValue.isZero()
+                            && !boundValue.isNegative()
+                            && boundValue.compareTo(
+                                    basisDefault.dividedBy(10)) <= 0) {
+                        LOG.warn("{} resolved to {}, at least 10x below its"
+                                + " default ({}) — a suffix-less number"
+                                + " now binds as seconds, so a value meant"
+                                + " in a larger unit shrinks this far."
+                                + " Write an explicit suffix (for example"
+                                + " 30m) to confirm the intent.",
+                                property, boundValue, basisDefault);
+                    } else if (basisDefault == null
+                            && boundValue.compareTo(Duration.ofHours(1))
+                                    >= 0) {
+                        LOG.warn("{} resolved to {} — this required setting"
+                                + " ships no default to compare against: a"
+                                + " suffix-less number now binds as"
+                                + " seconds, and this scale is the"
+                                + " signature of a stale milliseconds-style"
+                                + " override. Write an explicit suffix"
+                                + " (for example 1800000ms) to confirm"
+                                + " the intent.",
+                                property, boundValue);
+                    }
                 }
             } else if (value != null) {
                 warnOnSecondScaleOverrides(property + ".", value, basis);

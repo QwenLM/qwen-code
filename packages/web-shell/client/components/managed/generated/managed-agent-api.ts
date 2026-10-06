@@ -484,7 +484,7 @@ export interface components {
             sessionId: string;
             turnId: string;
         };
-        /** @description Arbitrary caller metadata. Accepted and ignored in Phase 1: nothing from it is persisted (the Session title travels in the sibling `title` field). Any shape and any keys are valid. */
+        /** @description Arbitrary caller metadata, as a JSON object (or null). Accepted and ignored in Phase 1: nothing from it is persisted. On WebShellCreateRequest the Session title travels in that request's own `title` field; WebShellSubmitRequest has no title surface. Any keys are valid. */
         WebShellMetadata: {
             [key: string]: unknown;
         } | null;
