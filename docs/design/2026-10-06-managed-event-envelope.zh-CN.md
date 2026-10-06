@@ -14,7 +14,7 @@ Managed 路径上每个异步能力都是「持久资源 + 触发意图」，因
 2. **时间。** `occurredAt` 是事件写方（recorder）随事件提交的时间戳——原事件的时间，不是 commit 时间，也不是 Session 次序；次序按 `(tenantId, sessionId, sequence)`。
 3. **去重键含租户。** 精确键判等 `(tenantId, sessionId, sequence)` —— Session 只在租户内结束身份(journal head 按 `(tenant_id, session_id)` 键），因此跨租户的同 sessionId 是另一会话，判绝不重投递（fixture `different-tenant-same-key` 翻为 false 钉边界）；同键异环境仍指向同一事实。
 4. **不泄内部。** 命名字段禁集（`absolutePath`、`localPath`、`pid`、`pod`、`runtimeBindingId`、`runtimeEndpoint`、`secretHandle`、`sidecar`）在形状检查前按名拒绝，逐字段带 fixture；信封不暴露任何 Runtime 内部、本地路径或凭据。
-5. **从构造上不启用。** 契约不加注册项、无运行路径消费——结构性门禁（import-graph 扫描，断言零生产引用）就是「传输切片自己的阶段落地前不会被悄悄挂上」的证明。
+5. **从构造上不启用。** 契约不加注册项、无运行路径消费——结构性门禁（源码扫描：断言被遍历的工作区下没有生产文件按路径引用本模块）就是「传输切片自己的阶段落地前不会被悄悄挂上」的证明。它是扫描而非依赖图：re-export 与动态 specifier 不在其视野内，明言而非隐含。
 
 ## 暂不冻结（明确记录）
 
@@ -23,5 +23,5 @@ Managed 路径上每个异步能力都是「持久资源 + 触发意图」，因
 
 ## 验证
 
-- `npx vitest run src/managed-runtime/managed-event-envelope.test.ts` —— 78/78，含：带真 digest 的 from-row 推导;去重对（等值重投递、异环境、租户边界 false、不可解析）;每个禁泄漏字段被拒；17 种 kind 逐一一枚有效信封;schema↔模块一致双向钉；import-graph 非启用扫描。
+- `npx vitest run src/managed-runtime/managed-event-envelope.test.ts` —— 94/94，含：带真 digest 的 from-row 推导;去重对（等值重投递、异环境、租户边界 false、不可解析）;每个禁泄漏字段被拒；17 种 kind 逐一一枚有效信封;每个声明边界的双侧行（sequence 下限、id 字节上限、digest 长度上限）;按字段 UTF-16/NFC/字节限行；字面幂等键；两条构造路径的深度冻结;schema↔模块一致双向钉；结构性非启用扫描。
 - 发布时全部 4 个文件 prettier 净。

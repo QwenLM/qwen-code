@@ -1066,6 +1066,249 @@
         },
         "sidecar": "leaked"
       }
+    },
+    {
+      "id": "sequence-one",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 1,
+        "eventId": "evt-000001",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000101,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-exactly-512-bytes",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 119,
+        "eventId": "evt-000119",
+        "kind": "message.committed",
+        "occurredAt": 1760000000019,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "workspace-and-digest-vary",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-2",
+        "sequence": 122,
+        "eventId": "evt-000122",
+        "kind": "message.committed",
+        "occurredAt": 1760000000022,
+        "payloadRef": {
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      }
+    },
+    {
+      "id": "digest-long",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 120,
+        "eventId": "evt-000120",
+        "kind": "message.committed",
+        "occurredAt": 1760000000020,
+        "payloadRef": {
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
+        }
+      }
+    },
+    {
+      "id": "session-id-lone-surrogate",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "x\ud800x",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 121,
+        "eventId": "evt-000121",
+        "kind": "message.committed",
+        "occurredAt": 1760000000021,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "event-id-not-nfc",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 123,
+        "eventId": "e\u0301x",
+        "kind": "message.committed",
+        "occurredAt": 1760000000023,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "event-id-lone-surrogate",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 124,
+        "eventId": "x\ud800x",
+        "kind": "message.committed",
+        "occurredAt": 1760000000024,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "tenant-id-not-nfc",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "e\u0301x",
+        "workspaceId": "workspace-1",
+        "sequence": 125,
+        "eventId": "evt-000125",
+        "kind": "message.committed",
+        "occurredAt": 1760000000025,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "tenant-id-over-512-bytes",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac",
+        "workspaceId": "workspace-1",
+        "sequence": 126,
+        "eventId": "evt-000126",
+        "kind": "message.committed",
+        "occurredAt": 1760000000026,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "tenant-id-lone-surrogate",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "x\ud800x",
+        "workspaceId": "workspace-1",
+        "sequence": 127,
+        "eventId": "evt-000127",
+        "kind": "message.committed",
+        "occurredAt": 1760000000027,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "workspace-id-empty",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "",
+        "sequence": 128,
+        "eventId": "evt-000128",
+        "kind": "message.committed",
+        "occurredAt": 1760000000028,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "workspace-id-not-nfc",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "e\u0301x",
+        "sequence": 129,
+        "eventId": "evt-000129",
+        "kind": "message.committed",
+        "occurredAt": 1760000000029,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "workspace-id-over-512-bytes",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac",
+        "sequence": 130,
+        "eventId": "evt-000130",
+        "kind": "message.committed",
+        "occurredAt": 1760000000030,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "workspace-id-lone-surrogate",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "x\ud800x",
+        "sequence": 131,
+        "eventId": "evt-000131",
+        "kind": "message.committed",
+        "occurredAt": 1760000000031,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "envelope-null",
+      "valid": false,
+      "envelope": null
     }
   ],
   "dedupeCases": [

@@ -53,10 +53,13 @@ export const MANAGED_EVENT_ENVELOPE_FORBIDDEN_FIELDS = Object.freeze([
 ] as const);
 
 /**
- * The identity by which a receiver fetches the body from the SQL record:
- * the digest of the full committed event in the same canonical form the
- * commit marker's `eventsDigest` uses, over the one-event range this
- * envelope announces. The body itself never travels.
+ * The body this envelope binds, never a lookup handle: the receiver
+ * locates the row by the envelope key `(tenantId, sessionId, sequence)`
+ * and recomputes this value over the single event to confirm it has not
+ * been altered. It is the digest of the full committed event in the same
+ * canonical form the commit marker's `eventsDigest` uses — over the
+ * one-event range this envelope announces, so a multi-event transaction
+ * stores no column equal to it. The body itself never travels.
  */
 export interface ManagedEventEnvelopePayloadRef {
   readonly digest: string;

@@ -14,7 +14,7 @@ Every asynchronous capability on the Managed path is a durable resource plus a t
 2. **Time.** `occurredAt` is the writer's recorder timestamp committed with the event — the original event's time, not a commit time, and not a Session order. Ordering per Session is decided by `(tenantId, sessionId, sequence)`.
 3. **Dedupe key is tenant-scoped.** Identity-dedupe is exact-key equality on `(tenantId, sessionId, sequence)` — a Session only ends identity inside its tenant (the journal head is keyed by `(tenant_id, session_id)`), so an identical session id under another tenant is another Session, and never redelivers (fixture `different-tenant-same-key` flips false to pin the boundary). Different surroundings with the same key still name one fact.
 4. **No internal leaks.** A named forbidden-field set (`absolutePath`, `localPath`, `pid`, `pod`, `runtimeBindingId`, `runtimeEndpoint`, `secretHandle`, `sidecar`) is rejected by name before shape checks, each with a fixture; nothing in an envelope exposes Runtime internals, local paths, or credentials.
-5. **Non-enablement by construction.** The contract adds no registry entry and is consumed by no runtime path — the structural gate (an import-graph scan asserting zero production references) is the proof an early transport cannot consume it quietly until its own phase lands.
+5. **Non-enablement by construction.** The contract adds no registry entry and is consumed by no runtime path — the structural gate (a source scan asserting that no production file under the walked workspaces references the module by path) is the proof an early transport cannot consume it quietly until its own phase lands. It stays a scan, not a graph: re-exports and computed specifiers are out of its reach, named as such rather than implied.
 
 ## Record-of-pending-open (deliberately not frozen)
 
@@ -23,5 +23,5 @@ Every asynchronous capability on the Managed path is a durable resource plus a t
 
 ## Validation
 
-- `npx vitest run src/managed-runtime/managed-event-envelope.test.ts` — 78/78, including: derivation-from-row cases with real digests; dedupe pairs (identical redelivery, differing surroundings, tenant boundary at false, unparseable); every forbidden field rejected; every kind of the 17 mirrored from the record contract in one valid envelope; schema-vs-module agreement pinned both directions; the import-graph non-enablement scan.
+- `npx vitest run src/managed-runtime/managed-event-envelope.test.ts` — 94/94, including: derivation-from-row cases with real digests; dedupe pairs (identical redelivery, differing surroundings, tenant boundary at false, unparseable); every forbidden field rejected; every kind of the 17 mirrored from the record contract in one valid envelope; boundary rows from both sides of every declared limit (sequence floor, id byte ceiling, digest length ceiling); per-field UTF-16/NFC/byte-limit rows; the literal idempotence key; deep-frozenness on both construction paths; the structural non-enablement scan.
 - Prettier on all four files clean on ship.

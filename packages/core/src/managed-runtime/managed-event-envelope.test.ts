@@ -16,6 +16,7 @@ import {
   MANAGED_EVENT_ENVELOPE_FORMAT_VERSION,
   isManagedEventEnvelopeRedelivered,
   managedEventEnvelopeFrom,
+  managedEventEnvelopeKey,
   parseManagedEventEnvelope,
   type ManagedEventEnvelope,
 } from './managed-event-envelope.js';
@@ -62,12 +63,21 @@ interface SchemaDefinition {
 
 /**
  * Values the schema accepts although the contract refuses them: JSON Schema
- * cannot state UTF-8 byte limits or NFC normalization.
+ * cannot state UTF-8 byte limits, NFC normalization or well-formed UTF-16.
  */
 const BEYOND_SCHEMA = [
+  'event-id-lone-surrogate',
+  'event-id-not-nfc',
   'event-id-over-512-bytes',
+  'session-id-lone-surrogate',
   'session-id-not-nfc',
   'session-id-over-512-bytes',
+  'tenant-id-lone-surrogate',
+  'tenant-id-not-nfc',
+  'tenant-id-over-512-bytes',
+  'workspace-id-lone-surrogate',
+  'workspace-id-not-nfc',
+  'workspace-id-over-512-bytes',
 ];
 
 const thisDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -124,6 +134,9 @@ describe('Managed event envelope contract', () => {
   it('validates the shared fixtures against the shared schema', () => {
     expect(validateSuite(fixtures)).toBe(true);
     expect(validateSuite.errors).toBeNull();
+    expect(parseManagedEventEnvelope(fixtures.envelope)).toStrictEqual(
+      fixtures.envelope,
+    );
   });
 
   it('closes every record definition of the schema', () => {
@@ -211,7 +224,9 @@ describe('Managed event envelope contract', () => {
       (field) =>
         !fixtures.envelopeCases.some(
           (fixture) =>
-            field in (fixture.envelope as Record<string, unknown>) &&
+            typeof fixture.envelope === 'object' &&
+            fixture.envelope !== null &&
+            Object.hasOwn(fixture.envelope as Record<string, unknown>, field) &&
             !fixture.valid,
         ),
     );
@@ -227,15 +242,30 @@ describe('Managed event envelope contract', () => {
     },
   );
 
+  // Written from the fixture literals, never recomputed from the parsed
+  // envelope — a recomputed expectation is self-referential exactly the way
+  // an unpinned key would be.
+  it('derives the idempotence key from the parsed envelope', () => {
+    const parsed = parseManagedEventEnvelope(fixtures.envelope);
+
+    expect(managedEventEnvelopeKey(parsed)).toStrictEqual({
+      tenantId: 'tenant-1',
+      sessionId: 'session-1',
+      sequence: 42,
+    });
+  });
+
   it.each(fixtures.fromEventCases)(
     'derives the $id envelope from the committed row',
     (fixture) => {
       const event = parseManagedSessionEvent(fixture.event);
+      const derived = managedEventEnvelopeFrom(event);
 
-      expect(managedEventEnvelopeFrom(event)).toStrictEqual(fixture.envelope);
-      expect(managedEventEnvelopeFrom(event).payloadRef.digest).toBe(
+      expect(derived).toStrictEqual(fixture.envelope);
+      expect(derived.payloadRef.digest).toBe(
         managedSessionEventsDigest([event]),
       );
+      expect(isDeepFrozen(derived)).toBe(true);
     },
   );
 
@@ -271,13 +301,46 @@ describe('Managed event envelope contract', () => {
     expect(throwsContractError(() => parseManagedEventEnvelope(callable))).toBe(
       true,
     );
+    expect(() => parseManagedEventEnvelope(inherited)).toThrow(
+      /^envelope must be a plain JSON object\.$/,
+    );
+    expect(() => parseManagedEventEnvelope(callable)).toThrow(
+      /^envelope must be a plain JSON object\.$/,
+    );
   });
 
   it('declares the contract without enabling any consumer', () => {
     // The house enablement pattern gates on a registry (e.g. the enabled
     // domain list); this contract adds no registry entry, so its non-
-    // enablement is structural: no production file may import it.
-    const packageSourceRoot = path.join(thisDirectory, '..');
+    // enablement is structural: no production file may import it. The scan
+    // walks every workspace package's src, not just this package's — the
+    // wildcard exports of @qwen-code/qwen-code-core make this module
+    // deep-importable from any workspace package, so a narrower walk could
+    // never see the consumer it exists to bar. Re-exports and dynamic
+    // specifiers stay out of reach by design.
+    const repoRoot = path.resolve(thisDirectory, '..', '..', '..', '..');
+    const { workspaces = [] } = JSON.parse(
+      fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'),
+    ) as { readonly workspaces?: readonly string[] };
+    const sourceRoots = new Set<string>();
+    for (const workspace of workspaces) {
+      if (workspace.startsWith('!')) {
+        continue;
+      }
+      if (workspace.endsWith('/*')) {
+        const parent = path.join(repoRoot, workspace.slice(0, -2));
+        if (!fs.existsSync(parent)) {
+          continue;
+        }
+        for (const child of fs.readdirSync(parent, { withFileTypes: true })) {
+          if (child.isDirectory()) {
+            sourceRoots.add(path.join(parent, child.name, 'src'));
+          }
+        }
+      } else {
+        sourceRoots.add(path.join(repoRoot, workspace, 'src'));
+      }
+    }
     const consumers: string[] = [];
     const walk = (directory: string): void => {
       for (const entry of fs.readdirSync(directory, {
@@ -285,7 +348,9 @@ describe('Managed event envelope contract', () => {
       })) {
         const full = path.join(directory, entry.name);
         if (entry.isDirectory()) {
-          walk(full);
+          if (entry.name !== 'node_modules' && entry.name !== 'dist') {
+            walk(full);
+          }
           continue;
         }
         if (
@@ -296,11 +361,15 @@ describe('Managed event envelope contract', () => {
           continue;
         }
         if (fs.readFileSync(full, 'utf8').includes('managed-event-envelope')) {
-          consumers.push(path.relative(packageSourceRoot, full));
+          consumers.push(path.relative(repoRoot, full));
         }
       }
     };
-    walk(packageSourceRoot);
+    for (const sourceRoot of sourceRoots) {
+      if (fs.existsSync(sourceRoot)) {
+        walk(sourceRoot);
+      }
+    }
 
     expect(consumers).toEqual([]);
   });
