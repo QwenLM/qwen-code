@@ -249,6 +249,7 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
   const tools = body['tools'] as Array<{ function: { name: string } }>;
   assert.deepEqual(tools.map((tool) => tool.function.name).sort(), [
     'edit',
+    ...(shellProfile ? ['monitor'] : []),
     'read_file',
     ...(shellProfile ? ['run_shell_command'] : []),
     'write_file',
