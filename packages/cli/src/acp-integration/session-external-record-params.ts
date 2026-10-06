@@ -10,6 +10,16 @@ import type { BridgeSessionExternalRecordRequest } from '@qwen-code/acp-bridge/b
 export const MAX_EXTERNAL_RECORD_KEY_LENGTH = 256;
 /** Longest `modelText` / `payload.displayText` accepted, in characters. */
 export const MAX_EXTERNAL_RECORD_TEXT_LENGTH = 65_536;
+/** Most `payload.steps` an `agent_message` may carry. */
+export const MAX_EXTERNAL_RECORD_STEPS = 64;
+/** Most ids in `payload.mentionedAgentIds` / `payload.mentionedSquadIds`. */
+export const MAX_EXTERNAL_RECORD_MENTION_IDS = 32;
+/** Longest id (agent, squad, step) accepted, in characters. */
+export const MAX_EXTERNAL_RECORD_ID_LENGTH = 256;
+/** Longest step title accepted, in characters. */
+export const MAX_EXTERNAL_RECORD_STEP_TITLE_LENGTH = 1_024;
+
+const STEP_STATUSES = new Set(['running', 'completed', 'failed']);
 
 const TERMINAL_STATUSES = new Set([
   'completed',
@@ -20,6 +30,35 @@ const TERMINAL_STATUSES = new Set([
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isBoundedString(value: unknown, maxLength: number): boolean {
+  return typeof value === 'string' && value.length <= maxLength;
+}
+
+/** An id list: at most `MAX_EXTERNAL_RECORD_MENTION_IDS` bounded ids. */
+function isIdList(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length <= MAX_EXTERNAL_RECORD_MENTION_IDS &&
+    value.every((id) => isBoundedString(id, MAX_EXTERNAL_RECORD_ID_LENGTH))
+  );
+}
+
+function isSteps(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length <= MAX_EXTERNAL_RECORD_STEPS &&
+    value.every(
+      (step) =>
+        isObject(step) &&
+        isBoundedString(step['id'], MAX_EXTERNAL_RECORD_ID_LENGTH) &&
+        typeof step['title'] === 'string' &&
+        step['title'].length <= MAX_EXTERNAL_RECORD_STEP_TITLE_LENGTH &&
+        typeof step['status'] === 'string' &&
+        STEP_STATUSES.has(step['status']),
+    )
+  );
 }
 
 function isAuthor(value: unknown): boolean {
@@ -37,10 +76,10 @@ function isAuthor(value: unknown): boolean {
  * but `sessionId`, which the caller checks). Returns the request, or the
  * reason it is invalid.
  *
- * Only the fields the ACP child reads are checked; the payload is persisted as
- * given otherwise, since the daemon that sent it is a trusted private parent.
- * TODO(multi-agent): bound `steps` / `mentionedAgentIds` sizes if the daemon
- * ever forwards them unbounded.
+ * Only the fields the ACP child reads are checked, plus the sizes of the
+ * lists a record carries (`steps`, `mentionedAgentIds`, `mentionedSquadIds`)
+ * so one record cannot grow without bound; the payload is persisted as given
+ * otherwise, since the daemon that sent it is a trusted private parent.
  */
 export function parseSessionExternalRecordParams(
   params: Record<string, unknown>,
@@ -83,6 +122,9 @@ export function parseSessionExternalRecordParams(
     ) {
       return 'Invalid agent_message payload.status';
     }
+    if (payload['steps'] !== undefined && !isSteps(payload['steps'])) {
+      return 'Invalid or oversized agent_message payload.steps';
+    }
     return {
       kind,
       recordKey,
@@ -93,11 +135,14 @@ export function parseSessionExternalRecordParams(
       >['payload'],
     };
   }
+  if (!isIdList(payload['mentionedAgentIds'])) {
+    return 'Invalid or oversized agent_mention payload.mentionedAgentIds';
+  }
   if (
-    !Array.isArray(payload['mentionedAgentIds']) ||
-    !payload['mentionedAgentIds'].every((id) => typeof id === 'string')
+    payload['mentionedSquadIds'] !== undefined &&
+    !isIdList(payload['mentionedSquadIds'])
   ) {
-    return 'Invalid agent_mention payload.mentionedAgentIds';
+    return 'Invalid or oversized agent_mention payload.mentionedSquadIds';
   }
   if (payload['author'] !== undefined && !isAuthor(payload['author'])) {
     return 'Invalid agent_mention payload.author';

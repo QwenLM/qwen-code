@@ -237,10 +237,9 @@ export function buildSessionAgentToolConfig(
  * The guard for a session-agents agent session: the upstream guard, the
  * definition's execution allowlist when it has one, and no thread tools.
  * Unlike {@link createAgentToolInvocationGuard} there is no read-only
- * classification; approval of writes is left to the session's approval mode.
- * TODO(multi-agent): a session whose approval mode is YOLO/auto-edit lets the
- * agent write without asking. Decide whether agent sessions should pin
- * `default` approval mode regardless of the user's setting.
+ * classification; writes go through the session's approval flow, which
+ * always asks: `Config.markSessionAgentSession` pins such a session to
+ * `default` approval and refuses YOLO / auto-edit / auto for it later.
  */
 export function createSessionAgentToolInvocationGuard(
   upstream?: ToolInvocationGuard,

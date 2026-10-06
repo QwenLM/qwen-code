@@ -99,7 +99,6 @@ import {
   nextChainDepth,
   normalizeAgentChainLimit,
   normalizeAgentTokenBudget,
-  resolveMentionTargets,
   resolveMentionTargetsWithSquads,
   type UnavailableSquadTarget,
 } from '@qwen-code/qwen-code-core/agents/session-agents/chain.js';
@@ -146,7 +145,9 @@ const MAX_OUTPUT_CHARS = 262_144;
 const MAX_THOUGHT_CHARS = 65_536;
 const MAX_FRAME_STEPS = 8;
 const CLIENT_MESSAGE_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
-const MAX_MENTION_TEXT_CHARS = 100_000;
+// Matches the ACP child's limit on a record's display text
+// (session-external-record-params.ts), so an accepted mention can be recorded.
+const MAX_MENTION_TEXT_CHARS = 65_536;
 /** How long a deferred post is carried before it is assumed recorded. */
 const PENDING_POST_TTL_MS = 60 * 60_000;
 /** First re-check of a deferred / failed `agent_message` record write. */
@@ -270,6 +271,13 @@ export interface SessionAgentOrchestratorOptions {
    * loopback) means local turns are not offered the `session_send` tool.
    */
   sessionSendUrl?: (sessionId: string, agentId: string) => string | undefined;
+  /**
+   * Brings a chat session that is not live back into the bridge, before an
+   * external record is written to it again. Default: `bridge.resumeSession`.
+   * A standalone (daemon-owned) chat session restores through its own
+   * service instead (routes/session-agents.ts).
+   */
+  restoreSession?: (sessionId: string) => Promise<void>;
   /** Set false in tests to drive sweeps by hand. */
   startTimers?: boolean;
 }
@@ -325,7 +333,27 @@ interface SettledRun {
   request?: RecordRequest;
   /** `error` to show once the record lands (a write error is cleared). */
   recordedError?: string;
+  /**
+   * Leaders a member reply owes a wake: fired with the record's uuid once it
+   * lands, or with the reply carried as a post if the watcher gives up. The
+   * engagement stays active meanwhile.
+   */
+  wakes?: PendingWake[];
   timer?: ReturnType<typeof setTimeout>;
+}
+
+/** A squad leader to wake once a member reply's record settles. */
+interface PendingWake {
+  squadId: string;
+  /** As read when the member finished; its run re-checks the roster. */
+  leader: WorkspaceAgent;
+  chainDepth: number;
+}
+
+/** A squad an agent's post addressed, with the leader it runs. */
+interface SquadTarget {
+  squad: SessionSquad;
+  leader: WorkspaceAgent;
 }
 
 interface CancelledLease {
@@ -604,6 +632,7 @@ export class SessionAgentOrchestrator {
     agentId: string,
   ) => string | undefined;
   private readonly recordWatchMs: number;
+  private readonly restoreSession: (sessionId: string) => Promise<void>;
   private readonly loadDefinition: (
     workspaceCwd: string,
     name: string,
@@ -654,6 +683,14 @@ export class SessionAgentOrchestrator {
     this.leaseMs = options.leaseMs ?? HOST_TURN_LEASE_MS;
     this.sessionSendUrl = options.sessionSendUrl;
     this.recordWatchMs = options.recordWatchMs ?? RECORD_WATCH_INITIAL_MS;
+    this.restoreSession =
+      options.restoreSession ??
+      (async (sessionId) => {
+        await this.bridge.resumeSession({
+          sessionId,
+          workspaceCwd: this.workspaceCwd,
+        });
+      });
     this.loadDefinition = options.loadDefinition ?? defaultLoadDefinition;
     this.recovered = this.recoverOnStartup().catch((error) => {
       writeStderrLine(
@@ -924,10 +961,26 @@ export class SessionAgentOrchestrator {
 
   /** "Stop all agents" for one chat session. Returns the runs it stopped. */
   async stopAll(sessionId: string): Promise<string[]> {
+    // A member reply still being recorded no longer wakes its leader.
+    let droppedWakes = false;
+    for (const settled of this.settled.values()) {
+      if (settled.sessionId === sessionId && settled.wakes) {
+        delete settled.wakes;
+        droppedWakes = true;
+      }
+    }
     const runs = [...this.live.values()].filter(
       (live) => live.sessionId === sessionId,
     );
-    if (runs.length === 0) return [];
+    if (runs.length === 0) {
+      if (droppedWakes) {
+        const state = await this.session(sessionId);
+        if (this.settleEngagements(state)) {
+          await this.persist(state).catch(() => {});
+        }
+      }
+      return [];
+    }
     const state = await this.session(sessionId);
     // Queued first, so finishing an executing run cannot start one of them.
     runs.sort(
@@ -1964,9 +2017,22 @@ export class SessionAgentOrchestrator {
   ): Promise<void> {
     if (text.trim().length === 0) return;
     const roster = await this.readAgents(this.workspaceCwd);
-    // TODO(multi-agent): an agent's `@squad` is not routed (only a person
-    // starts an engagement); a leader naming its own squad must not loop.
-    const targets = resolveMentionTargets(text, roster, live.run.agentId);
+    const targets = resolveMentionTargetsWithSquads(
+      text,
+      roster,
+      await this.loadSquads(),
+      live.run.agentId,
+    );
+    const squadTargets = this.agentSquadTargets(
+      state,
+      live.run.agentId,
+      targets.squads,
+      roster,
+    );
+    const squadError =
+      targets.unavailableSquads.length > 0
+        ? squadUnavailableError(targets.unavailableSquads)
+        : undefined;
     const squadMembers = await this.squadMembersFor(live);
     live.sendCount += 1;
     const recordKey = `send:${live.run.id}:${live.sendCount}`;
@@ -1977,13 +2043,20 @@ export class SessionAgentOrchestrator {
         recordKey,
         modelText: formatAgentMentionModelText(
           text,
-          targets.agents.map((agent) => agent.name),
+          [
+            ...targets.agents.map((agent) => agent.name),
+            ...squadTargets.map(({ squad }) => squad.name),
+          ],
           { authorName: live.author.name },
         ),
         payload: {
           displayText: text,
           mentionedAgentIds: targets.agents.map((agent) => agent.id),
+          ...(squadTargets.length > 0
+            ? { mentionedSquadIds: squadTargets.map(({ squad }) => squad.id) }
+            : {}),
           author: live.author,
+          ...(squadError ? { error: squadError } : {}),
         },
       });
     } catch (error) {
@@ -2007,6 +2080,7 @@ export class SessionAgentOrchestrator {
       targets.agents,
       triggerId,
       squadMembers,
+      squadTargets,
     );
     if (limitError) {
       live.frame.error = limitError;
@@ -2015,8 +2089,8 @@ export class SessionAgentOrchestrator {
   }
 
   /**
-   * Starts follow-up runs for agents an agent addressed. Returns the chain
-   * limit error when the hop is refused, undefined otherwise.
+   * Starts follow-up runs for agents and squads an agent addressed. Returns
+   * the chain limit error when the hop is refused, undefined otherwise.
    */
   private routeMentions(
     state: SessionState,
@@ -2024,25 +2098,31 @@ export class SessionAgentOrchestrator {
     agents: readonly WorkspaceAgent[],
     recordId: string,
     squadMembers?: ReadonlySet<string>,
+    squads: readonly SquadTarget[] = [],
   ): string | undefined {
-    if (agents.length === 0 || this.stopped) return undefined;
+    if ((agents.length === 0 && squads.length === 0) || this.stopped) {
+      return undefined;
+    }
+    const names = [
+      ...agents.map((agent) => agent.name),
+      ...squads.map(({ squad }) => squad.name),
+    ];
     const depth = nextChainDepth({
       kind: 'agent',
       chainDepth: author.run.chainDepth,
     });
     const limit = normalizeAgentChainLimit(this.chainLimit());
     if (!isWithinChainLimit(depth, limit)) {
-      return chainLimitError(
-        limit,
-        agents.map((agent) => agent.name),
-      );
+      return chainLimitError(limit, names);
     }
     const budget = normalizeAgentTokenBudget(this.tokenBudget());
     if (!isWithinTokenBudget(state.file.chainTokens ?? 0, budget)) {
-      return tokenBudgetError(
-        budget,
-        agents.map((agent) => agent.name),
-      );
+      return tokenBudgetError(budget, names);
+    }
+    // Squads first, so a leader also named directly runs in squad mode.
+    for (const { squad, leader } of squads) {
+      this.startEngagement(state, squad, recordId);
+      this.enqueue(state, leader, recordId, depth, squad.id);
     }
     for (const agent of agents) {
       const summary = this.enqueue(state, agent, recordId, depth);
@@ -2053,6 +2133,7 @@ export class SessionAgentOrchestrator {
     void this.persist(state)
       .catch(() => {})
       .then(() => {
+        for (const { leader } of squads) this.pumpAgent(leader.id);
         for (const agent of agents) this.pumpAgent(agent.id);
       });
     return undefined;
@@ -2125,15 +2206,35 @@ export class SessionAgentOrchestrator {
 
     // Route before writing so a refused hop is recorded on the message.
     let followUps: WorkspaceAgent[] = [];
+    /** Squads the reply addressed: each starts (or joins) an engagement. */
+    let squadFollowUps: SquadTarget[] = [];
     let error = outcome.error;
     if (outcome.status === 'completed' && displayText.trim() && !this.stopped) {
       try {
         const roster = await this.readAgents(this.workspaceCwd);
-        followUps = resolveMentionTargets(
+        const targets = resolveMentionTargetsWithSquads(
           displayText,
           roster,
+          await this.loadSquads(),
           run.agentId,
-        ).agents;
+        );
+        followUps = targets.agents;
+        squadFollowUps = this.agentSquadTargets(
+          state,
+          run.agentId,
+          targets.squads,
+          roster,
+        );
+        if (targets.unavailableSquads.length > 0) {
+          error = joinErrors(
+            error,
+            squadUnavailableError(targets.unavailableSquads),
+          );
+        }
+        const names = [
+          ...followUps.map((agent) => agent.name),
+          ...squadFollowUps.map(({ squad }) => squad.name),
+        ];
         const depth = nextChainDepth({
           kind: 'agent',
           chainDepth: run.chainDepth,
@@ -2144,24 +2245,19 @@ export class SessionAgentOrchestrator {
         const spent =
           (state.file.chainTokens ?? 0) +
           (outcome.totalTokens ?? live.totalTokens ?? 0);
-        if (followUps.length > 0 && !isWithinChainLimit(depth, limit)) {
-          error = chainLimitError(
-            limit,
-            followUps.map((agent) => agent.name),
-          );
+        if (names.length > 0 && !isWithinChainLimit(depth, limit)) {
+          error = joinErrors(error, chainLimitError(limit, names));
           followUps = [];
-        } else if (
-          followUps.length > 0 &&
-          !isWithinTokenBudget(spent, budget)
-        ) {
-          error = tokenBudgetError(
-            budget,
-            followUps.map((agent) => agent.name),
-          );
+          squadFollowUps = [];
+        } else if (names.length > 0 && !isWithinTokenBudget(spent, budget)) {
+          error = joinErrors(error, tokenBudgetError(budget, names));
           followUps = [];
+          squadFollowUps = [];
         }
       } catch (routeError) {
         error = `Could not route mentions: ${getErrorMessage(routeError)}`;
+        followUps = [];
+        squadFollowUps = [];
       }
     }
 
@@ -2267,9 +2363,27 @@ export class SessionAgentOrchestrator {
       const refusal = recordWriteError(writeError);
       error = `Could not record the reply: ${refusal.message}`;
       followUps = [];
+      squadFollowUps = [];
       // A managed session refuses every write; anything else is retried by
       // the record watcher, which also reports when it lands.
       watch = refusal.code !== 'managed_session_unsupported';
+    }
+    const nextDepth = nextChainDepth({
+      kind: 'agent',
+      chainDepth: run.chainDepth,
+    });
+    // What the leaders this reply owes a wake read it by. A reply whose write
+    // is being retried wakes them once it lands (see watchRecord); one that
+    // will never be recorded is carried to them as a post, with the error.
+    let wakeTrigger = recordId;
+    if (!wakeTrigger && wakes.length > 0 && !watch) {
+      wakeTrigger = this.addUnrecordedReply(
+        state.sessionId,
+        run.id,
+        this.authorOf(live),
+        displayText,
+        error,
+      );
     }
 
     const binding = state.file.bindings[run.agentId] ?? {
@@ -2320,15 +2434,25 @@ export class SessionAgentOrchestrator {
         frame: this.buildFrame(live),
         request,
         ...(payload.error ? { recordedError: payload.error } : {}),
+        ...(!wakeTrigger && wakes.length > 0
+          ? {
+              wakes: wakes.map(({ squadId, leader }) => ({
+                squadId,
+                leader,
+                chainDepth: nextDepth,
+              })),
+            }
+          : {}),
       });
       this.watchRecord(run.id);
     }
 
-    const nextDepth = nextChainDepth({
-      kind: 'agent',
-      chainDepth: run.chainDepth,
-    });
-    if (recordId && followUps.length > 0) {
+    if (recordId) {
+      // Squads first, so a leader also named directly runs in squad mode.
+      for (const { squad, leader } of squadFollowUps) {
+        this.startEngagement(state, squad, recordId);
+        this.enqueue(state, leader, recordId, nextDepth, squad.id);
+      }
       for (const agent of followUps) {
         const summary = this.enqueue(state, agent, recordId, nextDepth);
         if (squadMembers?.has(agent.id)) {
@@ -2336,18 +2460,74 @@ export class SessionAgentOrchestrator {
         }
       }
     }
-    // TODO(multi-agent): a member reply whose record could not be written
-    // (no trigger id) does not wake its leader; the engagement then ends.
-    if (recordId) {
+    if (wakeTrigger) {
       for (const { squadId, leader } of wakes) {
-        this.enqueue(state, leader, recordId, nextDepth, squadId);
+        this.enqueue(state, leader, wakeTrigger, nextDepth, squadId);
       }
     }
     this.settleEngagements(state);
     await this.persist(state).catch(() => {});
     this.pumpAgent(run.agentId);
+    for (const { leader } of squadFollowUps) this.pumpAgent(leader.id);
     for (const agent of followUps) this.pumpAgent(agent.id);
-    if (recordId) for (const { leader } of wakes) this.pumpAgent(leader.id);
+    if (wakeTrigger) for (const { leader } of wakes) this.pumpAgent(leader.id);
+  }
+
+  /**
+   * A member reply that will never be in the transcript (its write was
+   * refused, or its watcher gave up): carried as a pending post so the
+   * leader still reads it, and why it is missing. Returns its trigger id.
+   * TODO(multi-agent): model-facing text — needs eval before release.
+   */
+  private addUnrecordedReply(
+    sessionId: string,
+    runId: string,
+    author: SessionAgentAuthor,
+    displayText: string,
+    error: string | undefined,
+  ): string {
+    const id = `pending:unrecorded:${runId}`;
+    const note = error
+      ? `[This reply is not in the conversation record: ${error}]`
+      : '[This reply is not in the conversation record.]';
+    this.addPendingPost({
+      sessionId,
+      id,
+      kind: 'agent_message',
+      speaker: `${author.name} (agent)`,
+      text: `${displayText.trim() ? displayText : '(no reply text)'}\n\n${note}`,
+      authorAgentId: author.agentId,
+      runId,
+      createdAt: this.now(),
+    });
+    return id;
+  }
+
+  /**
+   * Wakes the leaders a member reply owed once its record settled (see
+   * {@link SettledRun.wakes}). Synchronous up to the enqueue, so no settle
+   * can end the engagement in between; a person who stopped everything
+   * meanwhile already dropped the wakes.
+   */
+  private wakeLeaders(
+    sessionId: string,
+    wakes: readonly PendingWake[],
+    triggerId: string,
+  ): void {
+    const state = this.states.get(sessionId);
+    if (!state || this.stopped) return;
+    const woken: string[] = [];
+    for (const { squadId, leader, chainDepth } of wakes) {
+      if (!state.file.squads?.[squadId]?.active) continue;
+      this.enqueue(state, leader, triggerId, chainDepth, squadId);
+      woken.push(leader.id);
+    }
+    this.settleEngagements(state);
+    void this.persist(state)
+      .catch(() => {})
+      .then(() => {
+        for (const agentId of woken) this.pumpAgent(agentId);
+      });
   }
 
   private addPendingPost(post: PendingPost): void {
@@ -2396,9 +2576,9 @@ export class SessionAgentOrchestrator {
   /**
    * Writes an external record, restoring the chat session once when it is
    * not live (closed by the idle reaper while an agent worked), the way
-   * create-sub-session.ts delivers to a parent that is no longer resident.
-   * TODO(multi-agent): standalone (daemon-owned) chat sessions restore
-   * through their own service, not `resumeSession`; not handled here.
+   * create-sub-session.ts delivers to a parent that is no longer resident
+   * (a standalone chat session through its own service, see
+   * {@link SessionAgentOrchestratorOptions.restoreSession}).
    */
   private async appendRecord(
     sessionId: string,
@@ -2408,10 +2588,7 @@ export class SessionAgentOrchestrator {
       return await this.bridge.appendExternalRecord(sessionId, request);
     } catch (error) {
       if (!(error instanceof SessionNotFoundError)) throw error;
-      await this.bridge.resumeSession({
-        sessionId,
-        workspaceCwd: this.workspaceCwd,
-      });
+      await this.restoreSession(sessionId);
       return this.bridge.appendExternalRecord(sessionId, request);
     }
   }
@@ -2550,7 +2727,8 @@ export class SessionAgentOrchestrator {
    * the record written again (restoring the session) if it is not there.
    * Backs off from {@link recordWatchMs} to 15s; gives up after
    * {@link RECORD_WATCH_MAX_MS}, leaving the run in the snapshot with
-   * `recorded: false`.
+   * `recorded: false`. Either way, the squad leaders the reply owes a wake
+   * ({@link SettledRun.wakes}) are woken then.
    */
   private watchRecord(runId: string): void {
     const settled = this.settled.get(runId);
@@ -2598,9 +2776,26 @@ export class SessionAgentOrchestrator {
         else delete frame.error;
         this.hub.publish(frame);
         this.hub.forgetRun(sessionId, runId);
+        if (settled.wakes) this.wakeLeaders(sessionId, settled.wakes, recordId);
         return;
       }
-      if (this.now() - startedAt >= RECORD_WATCH_MAX_MS) return;
+      if (this.now() - startedAt >= RECORD_WATCH_MAX_MS) {
+        // Given up: the leaders it owed a wake still get the reply, and why
+        // it is not recorded, so they can decide.
+        const wakes = settled.wakes;
+        if (wakes && request.kind === 'agent_message') {
+          delete settled.wakes;
+          const trigger = this.addUnrecordedReply(
+            sessionId,
+            runId,
+            request.payload.author,
+            request.payload.displayText,
+            settled.frame.error,
+          );
+          this.wakeLeaders(sessionId, wakes, trigger);
+        }
+        return;
+      }
       delayMs = Math.min(delayMs * 2, RECORD_WATCH_MAX_INTERVAL_MS);
       schedule();
     };
@@ -2701,6 +2896,32 @@ export class SessionAgentOrchestrator {
       outstandingRunIds: [],
       active: true,
     };
+  }
+
+  /**
+   * The squads an agent's post starts (or joins) an engagement for, with
+   * their leaders: agents may @-mention squads, as in Multica's comment
+   * triggers. Not a squad the author leads (it would wake itself), nor one
+   * whose engagement is active while the author is a member of it (its reply
+   * wakes the leader through the member rule when the leader waits on it).
+   */
+  private agentSquadTargets(
+    state: SessionState,
+    authorAgentId: string,
+    squads: readonly SessionSquad[],
+    roster: readonly WorkspaceAgent[],
+  ): SquadTarget[] {
+    return squads.flatMap((squad) => {
+      if (squad.leaderAgentId === authorAgentId) return [];
+      if (
+        state.file.squads?.[squad.id]?.active &&
+        squad.members.some((member) => member.agentId === authorAgentId)
+      ) {
+        return [];
+      }
+      const leader = roster.find((agent) => agent.id === squad.leaderAgentId);
+      return leader ? [{ squad, leader }] : [];
+    });
   }
 
   /** An active engagement in this session led by `agentId`, if any. */
@@ -2804,6 +3025,13 @@ export class SessionAgentOrchestrator {
           !isTerminalSessionAgentRunStatus(live.run.status),
       );
       if (leading) continue;
+      // A member reply still being recorded will wake the leader.
+      const owed = [...this.settled.values()].some(
+        (settled) =>
+          settled.sessionId === state.sessionId &&
+          settled.wakes?.some((wake) => wake.squadId === squadId) === true,
+      );
+      if (owed) continue;
       engagement.active = false;
       changed = true;
     }

@@ -11,12 +11,15 @@
  * the coordinator adds an agent named `<program>-<host name>` that runs that
  * program on that Host, unless the roster already has one for the pair. A
  * retired agent still counts, so deleting an auto-created agent sticks.
+ * Agents and squads share one @-name space, so a name a squad holds gets a
+ * suffix too.
  */
 
+import type { SessionSquad } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
+import { updateWorkspaceAgentsWithSquads } from '@qwen-code/qwen-code-core/agents/session-agents/squad-store.js';
 import {
   generateAgentId,
   isValidAgentName,
-  updateWorkspaceAgents,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import {
   hostAvailablePrograms,
@@ -55,9 +58,13 @@ function hasAgentFor(
 function uniqueAgentName(
   base: string,
   agents: readonly WorkspaceAgent[],
+  squads: readonly Pick<SessionSquad, 'name'>[],
 ): string | undefined {
-  // Retired agents keep their names (the create route refuses them too).
-  const taken = new Set(agents.map((agent) => agent.name.toLowerCase()));
+  // Retired agents and squads keep their names (the create route refuses
+  // them too).
+  const taken = new Set(
+    [...agents, ...squads].map((entry) => entry.name.toLowerCase()),
+  );
   const trimmed = base.slice(0, MAX_AGENT_NAME).replace(/[-_]+$/, '');
   if (isValidAgentName(trimmed) && !taken.has(trimmed.toLowerCase())) {
     return trimmed;
@@ -75,21 +82,29 @@ function uniqueAgentName(
 }
 
 /**
- * The agents to add for `programs` on `host`, given the current roster.
- * Pure, so the naming rules are testable without a store.
+ * The agents to add for `programs` on `host`, given the current roster and
+ * squads. Pure, so the naming rules are testable without a store.
  */
 export function planHostProgramAgents(
   agents: readonly WorkspaceAgent[],
   host: Pick<AgentHostView, 'id' | 'name'>,
   programs: readonly AgentProgram[],
-  options: { now?: number; newId?: () => string } = {},
+  options: {
+    now?: number;
+    newId?: () => string;
+    squads?: readonly Pick<SessionSquad, 'name'>[];
+  } = {},
 ): WorkspaceAgent[] {
   const added: WorkspaceAgent[] = [];
   const hostPart = sanitizeHostNameForAgent(host.name);
   for (const program of programs) {
     const roster = [...agents, ...added];
     if (hasAgentFor(roster, host.id, program)) continue;
-    const name = uniqueAgentName(`${program}-${hostPart}`, roster);
+    const name = uniqueAgentName(
+      `${program}-${hostPart}`,
+      roster,
+      options.squads ?? [],
+    );
     if (!name) continue;
     added.push({
       id: (options.newId ?? generateAgentId)(),
@@ -111,7 +126,7 @@ export function planHostProgramAgents(
  * every 5 s heartbeat.
  */
 export function createHostProgramAgentEnsurer(
-  update: typeof updateWorkspaceAgents = updateWorkspaceAgents,
+  update: typeof updateWorkspaceAgentsWithSquads = updateWorkspaceAgentsWithSquads,
 ): (workspaceCwd: string, host: AgentHostView) => Promise<WorkspaceAgent[]> {
   const ensured = new Map<string, Set<AgentProgram>>();
   return async (workspaceCwd, host) => {
@@ -122,8 +137,8 @@ export function createHostProgramAgentEnsurer(
     );
     if (missing.length === 0) return [];
     let added: WorkspaceAgent[] = [];
-    await update(workspaceCwd, (agents) => {
-      added = planHostProgramAgents(agents, host, missing);
+    await update(workspaceCwd, (agents, squads) => {
+      added = planHostProgramAgents(agents, host, missing, { squads });
       return added.length > 0 ? [...agents, ...added] : agents;
     });
     for (const program of missing) known.add(program);

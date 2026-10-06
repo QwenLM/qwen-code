@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import type { SessionSquad } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 import type {
   AgentHostView,
   WorkspaceAgent,
@@ -80,6 +81,17 @@ describe('planHostProgramAgents', () => {
     expect(agent?.name).toBe(`claude-${'x'.repeat(39)}-2`);
     expect(agent?.name.length).toBeLessThanOrEqual(48);
   });
+
+  it('does not take a name a squad holds', () => {
+    const [agent] = planHostProgramAgents(
+      [],
+      { id: 'host_3', name: 'mac' },
+      ['claude'],
+      { ...options, squads: [{ name: 'Claude-mac' }] },
+    );
+
+    expect(agent?.name).toBe('claude-mac-2');
+  });
 });
 
 describe('createHostProgramAgentEnsurer', () => {
@@ -88,9 +100,21 @@ describe('createHostProgramAgentEnsurer', () => {
     const update = vi.fn(
       async (
         _cwd: string,
-        mutate: (agents: WorkspaceAgent[]) => WorkspaceAgent[],
+        mutate: (
+          agents: WorkspaceAgent[],
+          squads: readonly SessionSquad[],
+        ) => WorkspaceAgent[],
       ) => {
-        roster = mutate(roster);
+        roster = mutate(roster, [
+          {
+            id: 'sq_1',
+            name: 'claude-mac',
+            leaderAgentId: 'ag_x',
+            members: [],
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ]);
         return roster;
       },
     );
@@ -113,11 +137,11 @@ describe('createHostProgramAgentEnsurer', () => {
 
     expect(
       (await ensure('/ws', view(['qwen', 'claude']))).map((a) => a.name),
-    ).toEqual(['claude-mac']);
+    ).toEqual(['claude-mac-2']);
     expect(update).toHaveBeenCalledTimes(2);
     expect(roster.map((agent) => agent.name)).toEqual([
       'qwen-mac',
-      'claude-mac',
+      'claude-mac-2',
     ]);
   });
 });

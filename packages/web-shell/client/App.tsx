@@ -204,13 +204,17 @@ import {
   saveManagedSelection,
 } from './components/managed/managed-session-storage';
 import { AgentsManagerPage } from './components/agents/AgentsManagerPage';
-import { useAgentChatEntry } from './components/workspace-agents/useAgentChatEntry';
+import {
+  recordedAgentMentionTexts,
+  useAgentChatEntry,
+} from './components/workspace-agents/useAgentChatEntry';
 import { createSessionAgentsHttpApi } from './components/workspace-agents/session-agents-api';
 import {
   settledAgentRunKey,
   useSessionAgentRuns,
 } from './components/workspace-agents/use-session-agent-runs';
 import {
+  PendingAgentMentions,
   SessionAgentLiveRuns,
   StopAllAgentsButton,
 } from './components/workspace-agents/session-agent-live-runs';
@@ -18924,22 +18928,15 @@ export function App({
     },
     [reportAgentError, retrySessionAgentRunRequest],
   );
-  const sessionAgentTail = useMemo(
-    () =>
-      sessionAgentRuns.runs.length > 0 ? (
-        <SessionAgentLiveRuns
-          runs={sessionAgentRuns.runs}
-          onCancel={cancelSessionAgentRun}
-          onRespond={respondToSessionAgentPermission}
-          onRetry={retrySessionAgentRun}
-        />
-      ) : undefined,
-    [
-      cancelSessionAgentRun,
-      respondToSessionAgentPermission,
-      retrySessionAgentRun,
-      sessionAgentRuns.runs,
-    ],
+  // The @-mentions recorded in the shown session, keyed so the list keeps its
+  // identity across streamed deltas (it changes far less often than blocks).
+  const recordedMentionTextsKey = useMemo(
+    () => JSON.stringify(recordedAgentMentionTexts(blocks)),
+    [blocks],
+  );
+  const recordedMentionTexts = useMemo(
+    () => JSON.parse(recordedMentionTextsKey) as string[],
+    [recordedMentionTextsKey],
   );
   const agentChatEntry = useAgentChatEntry({
     enabled: collaborationAvailable,
@@ -18951,6 +18948,8 @@ export function App({
     ensureSession: ensureAgentMentionSession,
     onSubmit: handleEditorSubmit,
     onError: handleAgentCollaborationError,
+    sessionId: connection.sessionId,
+    recordedMentionTexts,
     onCreateAgent: () => {
       setAgentsNav((current) => ({
         view: 'new-agent',
@@ -18960,6 +18959,28 @@ export function App({
       openPanel('agents');
     },
   });
+  const sessionAgentTail = useMemo(
+    () =>
+      sessionAgentRuns.runs.length > 0 ||
+      agentChatEntry.pendingMentions.length > 0 ? (
+        <>
+          <PendingAgentMentions mentions={agentChatEntry.pendingMentions} />
+          <SessionAgentLiveRuns
+            runs={sessionAgentRuns.runs}
+            onCancel={cancelSessionAgentRun}
+            onRespond={respondToSessionAgentPermission}
+            onRetry={retrySessionAgentRun}
+          />
+        </>
+      ) : undefined,
+    [
+      agentChatEntry.pendingMentions,
+      cancelSessionAgentRun,
+      respondToSessionAgentPermission,
+      retrySessionAgentRun,
+      sessionAgentRuns.runs,
+    ],
+  );
   const composerAtProviders = useMemo(
     () =>
       collaborationAvailable

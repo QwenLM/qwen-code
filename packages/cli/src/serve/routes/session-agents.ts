@@ -53,6 +53,7 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
+import type { StandaloneSessionService } from '../conversations/standalone-session-service.js';
 import { isLoopbackAddress } from '../loopback-binds.js';
 
 let orchestratorFactory:
@@ -92,6 +93,14 @@ export interface RegisterSessionAgentRoutesDeps {
    * `Host: 127.0.0.1:<port>` for a wildcard or `localhost` bind.
    */
   daemonLoopbackBaseUrl?: () => string | undefined;
+  /**
+   * The daemon's standalone (daemon-owned) chat session service, when it has
+   * one. Those sessions live in the Conversations runtime and are restored
+   * through it (pinned working directory), not with `bridge.resumeSession`.
+   */
+  standaloneSessionService?: () =>
+    | Pick<StandaloneSessionService, 'resume'>
+    | undefined;
 }
 
 /**
@@ -163,6 +172,20 @@ export function registerSessionAgentRoutes(
         const base = deps.daemonLoopbackBaseUrl?.();
         if (!base) return undefined;
         return `${base.replace(/\/+$/, '')}${sessionSendPath(workspaceId, sessionId, agentId)}`;
+      },
+      restoreSession: async (sessionId) => {
+        // The Conversations runtime owns the standalone chat sessions; it
+        // restores one the way create-sub-session.ts restores a parent (the
+        // attached client is left to the idle reaper).
+        const standalone =
+          runtime.provenance === 'live-conversation'
+            ? deps.standaloneSessionService?.()
+            : undefined;
+        if (standalone) {
+          await standalone.resume(sessionId);
+          return;
+        }
+        await runtime.bridge.resumeSession({ sessionId, workspaceCwd });
       },
     });
     owners.set(workspaceCwd, {

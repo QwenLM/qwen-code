@@ -383,6 +383,28 @@ async function mutateSquads<T>(
   });
 }
 
+/**
+ * Read-modify-write of the agent roster that also sees the squads, under the
+ * one workspace lock: an agent name checked against the squads here cannot
+ * be taken by a squad before the roster is written (squad writes check the
+ * agents the same way, in {@link mutateSquads}). Always writes, like
+ * `updateWorkspaceAgents`.
+ */
+export async function updateWorkspaceAgentsWithSquads(
+  projectRoot: string,
+  mutate: (
+    agents: WorkspaceAgent[],
+    squads: readonly SessionSquad[],
+  ) => WorkspaceAgent[],
+): Promise<WorkspaceAgent[]> {
+  return withAgentStoreTransaction(projectRoot, async (transaction) => {
+    const squads = await readSquadsUnlocked(projectRoot);
+    const next = mutate(await transaction.readAgents(), squads);
+    await transaction.writeAgents(next);
+    return next;
+  });
+}
+
 /** Every squad (retired included), with gone members dropped. */
 export async function readSquads(projectRoot: string): Promise<SessionSquad[]> {
   return withAgentStoreTransaction(projectRoot, async (transaction) => {

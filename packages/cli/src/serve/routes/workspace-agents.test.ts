@@ -23,6 +23,7 @@ import {
   updateWorkspaceAgents,
   writeThread,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
+import { createSquad } from '@qwen-code/qwen-code-core/agents/session-agents/squad-store.js';
 import type { ThreadRun } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
 import { publishAgentEvent } from '../workspace-agents/agent-events.js';
 import {
@@ -611,4 +612,20 @@ it('refuses a local program this machine does not have', async () => {
     mode: 'local',
     provider: 'claude',
   });
+});
+
+it('refuses an agent named like a squad', async () => {
+  const workspaceCwd = path.join(runtimeDir, 'squad-name');
+  await updateWorkspaceAgents(workspaceCwd, () => [
+    { id: 'ag_lead', name: 'lead', createdAt: 1 },
+  ]);
+  await createSquad(workspaceCwd, { name: 'crew', leaderAgentId: 'ag_lead' });
+
+  await request(appFor(runtimeAt(workspaceCwd)))
+    .post('/workspaces/workspace/agent/agents')
+    .send({ name: 'Crew' })
+    .expect(409, { error: 'A squad named "Crew" already exists.' });
+  expect(
+    (await readWorkspaceAgents(workspaceCwd)).map((agent) => agent.name),
+  ).toEqual(['lead']);
 });

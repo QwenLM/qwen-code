@@ -12,6 +12,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { Markdown } from '../messages/Markdown';
 import { AuthorAvatar } from '../messages/AuthorAvatar';
+import { UserMessage } from '../messages/UserMessage';
 import { parseTitle, ToolApproval } from '../messages/ToolApproval';
 import {
   AgentStepList,
@@ -496,6 +497,31 @@ export function SessionAgentLiveRuns({
           onRespond={onRespond}
           onRetry={onRetry}
         />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The user's @-mentions the daemon holds until the running main-model turn
+ * settles, shown as their messages until the recorded ones replace them.
+ */
+export function PendingAgentMentions({
+  mentions,
+}: {
+  mentions: ReadonlyArray<{ id: string; text: string }>;
+}) {
+  if (mentions.length === 0) return null;
+  return (
+    <div data-testid="agent-mentions-pending">
+      {mentions.map((mention) => (
+        <div
+          key={mention.id}
+          className={styles.pendingMention}
+          data-testid="agent-mention-pending"
+        >
+          <UserMessage content={mention.text} />
+        </div>
       ))}
     </div>
   );

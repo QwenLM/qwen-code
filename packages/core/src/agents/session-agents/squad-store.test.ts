@@ -10,7 +10,10 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { Storage } from '../../config/storage.js';
-import { updateWorkspaceAgents } from '../workspace-agents/store.js';
+import {
+  readWorkspaceAgents,
+  updateWorkspaceAgents,
+} from '../workspace-agents/store.js';
 import type { WorkspaceAgent } from '../workspace-agents/types.js';
 import {
   SquadStoreError,
@@ -23,6 +26,7 @@ import {
   retireSquad,
   squadLeaderIssue,
   updateSquad,
+  updateWorkspaceAgentsWithSquads,
 } from './squad-store.js';
 import type { SessionSquad } from './contract.js';
 
@@ -201,6 +205,29 @@ describe('squad store', () => {
     expect(raw.squads[0]!.members).toEqual([
       { agentId: 'ag_a', role: 'reads diffs' },
     ]);
+  });
+
+  it('hands an agent roster write the squads read under the same lock', async () => {
+    await create();
+    const next = await updateWorkspaceAgentsWithSquads(
+      projectRoot,
+      (agents, squads) => {
+        expect(squads.map((squad) => squad.name)).toEqual(['review']);
+        return squads.some((squad) => squad.name === 'review')
+          ? agents
+          : [...agents, agent('ag_new', 'review')];
+      },
+    );
+    expect(next.map((entry) => entry.id)).not.toContain('ag_new');
+    // No squads file yet reads as none.
+    await fs.rm(getSquadsFilePath(projectRoot));
+    await updateWorkspaceAgentsWithSquads(projectRoot, (agents, squads) => {
+      expect(squads).toEqual([]);
+      return [...agents, agent('ag_new', 'review')];
+    });
+    expect((await readWorkspaceAgents(projectRoot)).at(-1)?.name).toBe(
+      'review',
+    );
   });
 
   it('refuses a malformed file instead of reading it as empty', async () => {

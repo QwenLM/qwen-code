@@ -303,6 +303,13 @@ function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
   };
 }
 
+/** An `agent_mention` / `agent_message` record found by its key. */
+export interface ExternalAgentRecordRef {
+  uuid: string;
+  /** The record's own ISO 8601 timestamp. */
+  timestamp: string;
+}
+
 /**
  * Where a Managed session's records go instead of the transcript: the record
  * sink of its Managed Session authority. Declared structurally so this module
@@ -519,6 +526,12 @@ export interface ChatRecord {
   agentRound?: number;
   /** Source kind for injected external input records. */
   externalInputKind?: 'message' | 'notification';
+  /**
+   * Idempotency key of an `agent_mention` / `agent_message` record the daemon
+   * asked for (`recordExternalAgentRecordStrict`). Persisted so a re-sent
+   * request after a restart finds the record instead of writing a second one.
+   */
+  externalRecordKey?: string;
 
   /**
    * Set on every record of a forked session to record its lineage.
@@ -1164,6 +1177,16 @@ export class ChatRecordingService {
   private writeFailure: Error | undefined;
   private integrityFailure: Error | undefined;
   private readonly writerLeaseRequired: boolean;
+  /**
+   * `externalRecordKey` -> record of the active chain, built from the
+   * transcript on first use and extended by every external record written.
+   */
+  private externalRecordIndex: Map<string, ExternalAgentRecordRef> | undefined;
+  private externalRecordIndexLoad:
+    | Promise<Map<string, ExternalAgentRecordRef>>
+    | undefined;
+  /** Bumped whenever recorder state is rebuilt; a stale index load is dropped. */
+  private externalRecordIndexGeneration = 0;
   /** In-memory cache of the current session's custom title (for re-append on exit) */
   private currentCustomTitle: string | undefined;
   /**
@@ -1366,6 +1389,7 @@ export class ChatRecordingService {
   ): void {
     this.lastRecordUuid = sessionData?.lastCompletedUuid ?? null;
     this.lastPersistedRecordUuid = this.lastRecordUuid;
+    this.resetExternalRecordIndex();
     this.currentCustomTitle = undefined;
     this.currentTitleSource = undefined;
     this.currentParentSessionId = undefined;
@@ -1439,6 +1463,7 @@ export class ChatRecordingService {
   private restoreProjectedState(state: ChatRecordingRestoreState): void {
     this.lastRecordUuid = state.lastCompletedUuid;
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
+    this.resetExternalRecordIndex();
     this.activeBranchBaseUuid = state.lastCompletedUuid;
     this.turnParentUuids = [...state.turnParentUuids];
     this.currentCustomTitle = state.customTitle;
@@ -2284,6 +2309,7 @@ export class ChatRecordingService {
     }
     this.chatsDirEnsured = false;
     this.cachedConversationFile = undefined;
+    this.resetExternalRecordIndex();
   }
 
   /**
@@ -2468,12 +2494,18 @@ export class ChatRecordingService {
   /**
    * Durably records a session multi-agent record (`agent_mention` or
    * `agent_message`) the daemon asked the ACP child to write, and returns
-   * its uuid (the agents' read-cursor anchor).
+   * its uuid (the agents' read-cursor anchor) and its own timestamp, so a live
+   * update can carry exactly what replay will.
    *
    * Written as `type: 'user'` so the main model reads it as input on its next
    * turn (resume rebuilds it through `appendApiHistoryRecord`). It never
    * starts a turn, never feeds the auto title (only subtype-less user records
    * do), and is never trimmed as a cold notification.
+   *
+   * Idempotent per `recordKey`, durably: the key is persisted on the record
+   * (`externalRecordKey`) and a repeat returns the existing record with
+   * `created: false`, also after a restart (see
+   * {@link findExternalAgentRecord}).
    *
    * Managed sessions: `ManagedSessionRecordSink.canCarry` has no mapping for
    * these subtypes, so `appendRecordStrict` throws
@@ -2496,7 +2528,10 @@ export class ChatRecordingService {
           payload: AgentMessageRecordPayload;
           recordKey: string;
         },
-  ): Promise<string> {
+  ): Promise<ExternalAgentRecordRef & { created: boolean }> {
+    const existing = await this.findExternalAgentRecord(input.recordKey);
+    if (existing) return { ...existing, created: false };
+    const generation = this.externalRecordIndexGeneration;
     const record: ChatRecord = {
       ...this.createBaseRecord('user'),
       subtype: input.kind,
@@ -2506,6 +2541,7 @@ export class ChatRecordingService {
           : 'external_agent',
       message: createUserContent([{ text: input.modelText }]),
       systemPayload: input.payload,
+      externalRecordKey: input.recordKey,
       ...(input.kind === 'agent_message'
         ? {
             agentId: input.payload.author.agentId,
@@ -2518,10 +2554,78 @@ export class ChatRecordingService {
     };
     // Not part of any background notification turn.
     delete record.backgroundTurn;
-    // TODO(multi-agent): `recordKey` is not persisted on the record; dedupe
-    // is in-memory in the ACP Session only and does not survive a restart.
     await this.appendRecordStrict(record);
-    return record.uuid;
+    const ref = { uuid: record.uuid, timestamp: record.timestamp };
+    // A rebuilt index (generation moved) reads this record from disk instead.
+    if (generation === this.externalRecordIndexGeneration) {
+      this.externalRecordIndex?.set(input.recordKey, ref);
+    }
+    return { ...ref, created: true };
+  }
+
+  /**
+   * The external record written for `recordKey` on the active chain, if any.
+   * The first call reads the transcript once (`readActiveTranscriptChain`);
+   * later calls are answered from memory. Throws when that read fails, so a
+   * caller never mistakes an unreadable transcript for a missing record.
+   */
+  async findExternalAgentRecord(
+    recordKey: string,
+  ): Promise<ExternalAgentRecordRef | undefined> {
+    return (await this.loadExternalRecordIndex()).get(recordKey);
+  }
+
+  private loadExternalRecordIndex(): Promise<
+    Map<string, ExternalAgentRecordRef>
+  > {
+    if (this.externalRecordIndex) {
+      return Promise.resolve(this.externalRecordIndex);
+    }
+    if (this.externalRecordIndexLoad) return this.externalRecordIndexLoad;
+    const generation = this.externalRecordIndexGeneration;
+    const load = (async () => {
+      const index = new Map<string, ExternalAgentRecordRef>();
+      // Nothing persisted yet (a fresh session, whose transcript cannot be
+      // loaded at all), or a Managed log, which refuses these records anyway.
+      if (this.lastPersistedRecordUuid !== null && !this.managedSink) {
+        for (const record of await this.readActiveTranscriptChain()) {
+          if (
+            typeof record.externalRecordKey === 'string' &&
+            (record.subtype === 'agent_mention' ||
+              record.subtype === 'agent_message')
+          ) {
+            index.set(record.externalRecordKey, {
+              uuid: record.uuid,
+              timestamp: record.timestamp,
+            });
+          }
+        }
+      }
+      return index;
+    })();
+    this.externalRecordIndexLoad = load;
+    void load.then(
+      (index) => {
+        if (this.externalRecordIndexLoad !== load) return;
+        this.externalRecordIndexLoad = undefined;
+        if (generation === this.externalRecordIndexGeneration) {
+          this.externalRecordIndex = index;
+        }
+      },
+      () => {
+        // Retried on the next call.
+        if (this.externalRecordIndexLoad === load) {
+          this.externalRecordIndexLoad = undefined;
+        }
+      },
+    );
+    return load;
+  }
+
+  private resetExternalRecordIndex(): void {
+    this.externalRecordIndexGeneration += 1;
+    this.externalRecordIndex = undefined;
+    this.externalRecordIndexLoad = undefined;
   }
 
   private recordNotificationLike(
@@ -3099,6 +3203,7 @@ export class ChatRecordingService {
    * `lastRecordUuid` to the last record in the chain.
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
+    this.resetExternalRecordIndex();
     this.turnParentUuids = [];
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;

@@ -4931,6 +4931,9 @@ class QwenAgent implements Agent {
               error,
             );
           }
+          // Session multi-agent records deferred behind the turn that just
+          // settled land now, while the recorder still accepts writes.
+          await session.flushDeferredExternalRecords?.();
           recorder?.finalize();
           let flushError: unknown;
           try {
@@ -14923,9 +14926,13 @@ class QwenAgent implements Agent {
             // them on DEFAULT too — pushing the file value (or the AUTO fold
             // of a missing key) into a safe-mode session would silently
             // strip its approval restriction.
-            const reloadedSessionMode = isRestrictedApprovalModeConfig(config)
-              ? ApprovalMode.DEFAULT
-              : reloadedApprovalMode;
+            // Session-agent sessions are pinned to DEFAULT too: every write
+            // they make asks in the chat session (Config refuses other modes).
+            const reloadedSessionMode =
+              isRestrictedApprovalModeConfig(config) ||
+              config.isSessionAgentSession?.() === true
+                ? ApprovalMode.DEFAULT
+                : reloadedApprovalMode;
             const previousMode = config.getApprovalMode();
             const convergedMode = this.sessionApprovalModeConverged.get(id);
             if (

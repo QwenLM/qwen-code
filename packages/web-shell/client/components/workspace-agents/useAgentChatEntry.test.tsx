@@ -8,7 +8,9 @@ const createThreadsHttpApi = vi.hoisted(() => vi.fn());
 vi.mock('./threads-api', () => ({ createThreadsHttpApi }));
 
 const {
+  isPendingMentionRecorded,
   mentionTokens,
+  recordedAgentMentionTexts,
   resolveMentionedAgents,
   resolveMentionedSquads,
   SQUAD_PICKER_ICON,
@@ -56,6 +58,8 @@ function Probe({
   ensureSession,
   api,
   sessionApiFor,
+  sessionId,
+  recordedMentionTexts,
 }: {
   enabled?: boolean;
   onSubmit: (...args: unknown[]) => boolean | void;
@@ -65,6 +69,8 @@ function Probe({
   >;
   api?: SessionAgentsApi;
   sessionApiFor?: (workspaceCwd: string) => SessionAgentsApi;
+  sessionId?: string;
+  recordedMentionTexts?: readonly string[];
 }) {
   latestEntry = useAgentChatEntry({
     enabled,
@@ -75,6 +81,8 @@ function Probe({
     ensureSession,
     onSubmit: onSubmit as never,
     onError,
+    sessionId,
+    recordedMentionTexts,
     t: ((key: string) => key) as never,
   });
   return null;
@@ -85,6 +93,8 @@ function mount(props: Parameters<typeof Probe>[0]) {
   const root = createRoot(node);
   mounted.push({ root, node });
   act(() => root.render(<Probe {...props} />));
+  return (next: Parameters<typeof Probe>[0]) =>
+    act(() => root.render(<Probe {...next} />));
 }
 
 async function settle() {
@@ -176,6 +186,98 @@ it('posts a resolvable @-mention to the current session, with no thread and no l
   expect(onSubmit).not.toHaveBeenCalled();
   expect(onError).not.toHaveBeenCalled();
   expect(latestEntry.pending).toBe(false);
+});
+
+describe('a deferred @-mention', () => {
+  const mentionBlock = (text: string, kind = 'agent_mention') =>
+    ({
+      kind: 'user',
+      id: `block-${text}`,
+      text,
+      meta: { qwenAgentMessage: { kind, mentionedAgentIds: [] } },
+    }) as never;
+
+  it('reads recorded mentions from the transcript, and counts repeats', () => {
+    const texts = recordedAgentMentionTexts([
+      mentionBlock('@reviewer hi'),
+      { kind: 'user', id: 'plain', text: '@reviewer hi' } as never,
+      mentionBlock('@reviewer hi'),
+    ]);
+    expect(texts).toEqual(['@reviewer hi', '@reviewer hi']);
+    const pending = {
+      id: 'm1',
+      sessionId: 's1',
+      text: '@reviewer hi',
+      recordedBefore: 2,
+    };
+    expect(isPendingMentionRecorded(pending, texts)).toBe(false);
+    expect(isPendingMentionRecorded(pending, [...texts, '@reviewer hi '])).toBe(
+      true,
+    );
+  });
+
+  it('is shown as pending until its record lands', async () => {
+    createThreadsHttpApi.mockReturnValue({
+      listAgents: vi.fn().mockResolvedValue({ agents: [agent('reviewer')] }),
+    });
+    const api = sessionApi();
+    api.mention.mockResolvedValue({ recordId: '', deferred: true, runs: [] });
+    const props = {
+      onSubmit: vi.fn(),
+      onError: vi.fn(),
+      ensureSession: vi.fn().mockResolvedValue('session-1'),
+      api,
+      sessionId: 'session-1',
+      // The same text was mentioned before: that record must not settle it.
+      recordedMentionTexts: ['@reviewer hi'],
+    };
+    const rerender = mount(props);
+    await settle();
+    expect(latestEntry.pendingMentions).toEqual([]);
+
+    act(() => {
+      latestEntry.submit('@reviewer hi');
+    });
+    await settle();
+    expect(latestEntry.pendingMentions).toEqual([
+      expect.objectContaining({
+        sessionId: 'session-1',
+        text: '@reviewer hi',
+        id: api.mention.mock.calls[0][1].clientMessageId,
+      }),
+    ]);
+
+    // Another session shows none of it.
+    rerender({ ...props, sessionId: 'session-2', recordedMentionTexts: [] });
+    expect(latestEntry.pendingMentions).toEqual([]);
+
+    rerender({ ...props, recordedMentionTexts: ['@reviewer hi'] });
+    expect(latestEntry.pendingMentions).toHaveLength(1);
+    rerender({
+      ...props,
+      recordedMentionTexts: ['@reviewer hi', '@reviewer hi'],
+    });
+    expect(latestEntry.pendingMentions).toEqual([]);
+  });
+
+  it('is not echoed when the record was written at once', async () => {
+    createThreadsHttpApi.mockReturnValue({
+      listAgents: vi.fn().mockResolvedValue({ agents: [agent('reviewer')] }),
+    });
+    mount({
+      onSubmit: vi.fn(),
+      onError: vi.fn(),
+      ensureSession: vi.fn().mockResolvedValue('session-1'),
+      api: sessionApi(),
+      sessionId: 'session-1',
+    });
+    await settle();
+    act(() => {
+      latestEntry.submit('@reviewer hi');
+    });
+    await settle();
+    expect(latestEntry.pendingMentions).toEqual([]);
+  });
 });
 
 it('creates the session first in a new chat', async () => {

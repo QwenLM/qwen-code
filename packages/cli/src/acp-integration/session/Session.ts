@@ -4605,6 +4605,7 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    this.#dropDeferredExternalRecords();
     this.cancelMcpAppCalls();
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(SESSION_DISPOSE_ABORT_REASON);
@@ -11083,8 +11084,9 @@ export class Session implements SessionContext {
    * and queue its model text for the main model's next turn. Never starts a
    * turn.
    *
-   * Idempotent per `recordKey` for this process: a repeat (including one that
-   * arrives while the first write is still in flight) returns the first
+   * Idempotent per `recordKey`: a repeat (including one that arrives while the
+   * first write is still in flight, and one re-sent after a restart, which
+   * the recorder finds by the key persisted on the record) returns the first
    * record with `created: false` and emits nothing.
    *
    * Throws when the session is closing, when the recorder is unavailable, and
@@ -11101,7 +11103,11 @@ export class Session implements SessionContext {
     const inFlight = this.#externalRecordWrites.get(request.recordKey);
     if (inFlight) {
       const first = await inFlight;
-      return { recordId: first.recordId, created: false };
+      return {
+        recordId: first.recordId,
+        created: false,
+        ...(first.deferred ? { deferred: true } : {}),
+      };
     }
     const write = this.#writeExternalRecord(request);
     this.#externalRecordWrites.set(request.recordKey, write);
@@ -11120,6 +11126,21 @@ export class Session implements SessionContext {
     if (this.disposed || this.closing) {
       throw new Error(`Session ${this.sessionId} is closing`);
     }
+    const recording = this.config.getChatRecordingService();
+    if (!recording) {
+      throw new Error(`Session ${this.sessionId} has no chat recorder`);
+    }
+    // Before deferring: a request re-sent after a restart, for a record that
+    // is already in the transcript, must get its id back now rather than be
+    // deferred (and answered with an empty id) again.
+    const existing = await recording.findExternalAgentRecord(request.recordKey);
+    if (existing) {
+      this.#rememberExternalRecord(request.recordKey, existing.uuid);
+      return { recordId: existing.uuid, created: false };
+    }
+    if (this.disposed || this.closing) {
+      throw new Error(`Session ${this.sessionId} is closing`);
+    }
     // A record must not land while a main-model turn is in flight: written
     // between a functionCall and its functionResponse it would, on resume,
     // rebuild as a user entry between them and break tool_use/tool_result
@@ -11130,29 +11151,20 @@ export class Session implements SessionContext {
       this.#deferExternalRecord(request);
       return { recordId: '', created: true, deferred: true };
     }
-    const recording = this.config.getChatRecordingService();
-    if (!recording) {
-      throw new Error(`Session ${this.sessionId} has no chat recorder`);
+    const written = await this.#persistExternalRecord(request);
+    if (!written.created) {
+      return { recordId: written.uuid, created: false };
     }
-    const recordId = await recording.recordExternalAgentRecordStrict(request);
-    // TODO(multi-agent): in-memory only; a restarted child forgets the keys
-    // and a replayed request would write a second record.
-    this.#externalRecordIds.set(request.recordKey, recordId);
-    if (this.#externalRecordIds.size > MAX_EXTERNAL_RECORD_KEYS) {
-      const oldest = this.#externalRecordIds.keys().next().value;
-      if (oldest !== undefined) this.#externalRecordIds.delete(oldest);
-    }
+    const recordId = written.uuid;
     if (this.disposed || this.closing) return { recordId, created: true };
 
-    // The same projection replay produces for this record, so a client that
-    // reloads sees exactly what it saw live.
+    // The same projection replay produces for this record (timestamp
+    // included), so a client that reloads sees exactly what it saw live.
     const update = createAgentRecordTranscriptUpdate({
       recordId,
       subtype: request.kind,
       payload: request.payload,
-      // TODO(multi-agent): the record's own timestamp differs by the write
-      // latency; plumb it back from the recorder if clients key on it.
-      timestamp: Date.now(),
+      timestamp: written.timestamp,
     });
     if (update) {
       try {
@@ -11167,6 +11179,27 @@ export class Session implements SessionContext {
     return { recordId, created: true };
   }
 
+  /** Writes the record (deduped by key in the recorder) and remembers its id. */
+  async #persistExternalRecord(
+    request: BridgeSessionExternalRecordRequest,
+  ): Promise<{ uuid: string; timestamp: string; created: boolean }> {
+    const recording = this.config.getChatRecordingService();
+    if (!recording) {
+      throw new Error(`Session ${this.sessionId} has no chat recorder`);
+    }
+    const written = await recording.recordExternalAgentRecordStrict(request);
+    this.#rememberExternalRecord(request.recordKey, written.uuid);
+    return written;
+  }
+
+  #rememberExternalRecord(recordKey: string, recordId: string): void {
+    this.#externalRecordIds.set(recordKey, recordId);
+    if (this.#externalRecordIds.size > MAX_EXTERNAL_RECORD_KEYS) {
+      const oldest = this.#externalRecordIds.keys().next().value;
+      if (oldest !== undefined) this.#externalRecordIds.delete(oldest);
+    }
+  }
+
   readonly #deferredExternalRecords: BridgeSessionExternalRecordRequest[] = [];
   #deferredExternalRecordTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -11174,6 +11207,12 @@ export class Session implements SessionContext {
    * Hold an external record until no main-model turn is running, then write
    * it through the normal path. Polling keeps this independent of the many
    * turn-completion paths (prompt, cron, notification, goal, channel task).
+   * Idempotent per `recordKey`: a re-sent request already queued is not
+   * queued twice.
+   *
+   * While the session is closing the queue waits: a close that goes through
+   * writes it with {@link flushDeferredExternalRecords} before the recorder
+   * closes, and a released close gate (a live restore) lets the timer resume.
    */
   #deferExternalRecord(request: BridgeSessionExternalRecordRequest): void {
     if (
@@ -11186,12 +11225,8 @@ export class Session implements SessionContext {
     this.#deferredExternalRecords.push(request);
     if (this.#deferredExternalRecordTimer) return;
     this.#deferredExternalRecordTimer = setInterval(() => {
-      if (this.disposed || this.closing) {
-        clearInterval(this.#deferredExternalRecordTimer);
-        this.#deferredExternalRecordTimer = undefined;
-        // TODO(multi-agent): records still deferred when the session closes
-        // are lost; the daemon keeps the run's output and could re-send.
-        this.#deferredExternalRecords.length = 0;
+      if (this.disposed) {
+        this.#dropDeferredExternalRecords();
         return;
       }
       if (!this.isTurnIdle()) return;
@@ -11211,6 +11246,46 @@ export class Session implements SessionContext {
       })();
     }, 500);
     this.#deferredExternalRecordTimer.unref?.();
+  }
+
+  /**
+   * Close path: write the external records still deferred, once the session's
+   * turns have settled and before its recorder is finalized and closed. No
+   * live update and no model text: the session is going away, and a later
+   * load reads both from the records. A record that cannot be written is
+   * dropped with a log line; the daemon re-sends it after the session is
+   * restored, and the key persisted on each record keeps that from
+   * duplicating one written here.
+   */
+  async flushDeferredExternalRecords(): Promise<void> {
+    clearInterval(this.#deferredExternalRecordTimer);
+    this.#deferredExternalRecordTimer = undefined;
+    // Writes the timer already started run to completion first.
+    await Promise.allSettled([...this.#externalRecordWrites.values()]);
+    const pending = this.#deferredExternalRecords.splice(0);
+    for (const request of pending) {
+      if (this.#externalRecordIds.has(request.recordKey)) continue;
+      try {
+        await this.#persistExternalRecord(request);
+      } catch (error) {
+        debugLogger.warn(
+          `Dropped deferred external record on close [session ${this.sessionId}, key ${request.recordKey}]: ${this.#formatError(error)}`,
+        );
+      }
+    }
+  }
+
+  #dropDeferredExternalRecords(): void {
+    clearInterval(this.#deferredExternalRecordTimer);
+    this.#deferredExternalRecordTimer = undefined;
+    const dropped = this.#deferredExternalRecords.splice(0);
+    if (dropped.length > 0) {
+      debugLogger.warn(
+        `Dropped ${dropped.length} deferred external record(s) on dispose [session ${this.sessionId}]; the daemon re-sends them after restore: ${dropped
+          .map((request) => request.recordKey)
+          .join(', ')}`,
+      );
+    }
   }
 
   async #persistDaemonBackgroundNotification(

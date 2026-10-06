@@ -3756,6 +3756,7 @@ export function createServeApp(
       agentChainLimitFor,
       agentTokenBudgetFor,
       daemonLoopbackBaseUrl,
+      standaloneSessionService: () => standaloneSessionService,
     });
     // Squads: a leader agent that coordinates member agents in a session.
     registerSessionAgentSquadRoutes(app, {

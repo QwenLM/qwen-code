@@ -35,7 +35,7 @@ import type {
   ThreadRun,
 } from '@qwen-code/qwen-code-core';
 import type { SessionAgentProgram } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
-import { readSquads } from '@qwen-code/qwen-code-core/agents/session-agents/squad-store.js';
+import { updateWorkspaceAgentsWithSquads } from '@qwen-code/qwen-code-core/agents/session-agents/squad-store.js';
 import {
   assignThread,
   createAssignedThread,
@@ -61,7 +61,6 @@ import {
   maxConcurrentRunsFor,
   updateWorkspaceAgent,
   threadTokens,
-  updateWorkspaceAgents,
   withAgentStoreTransaction,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import { strandLocalRuns } from '@qwen-code/qwen-code-core/agents/workspace-agents/stranded-runs.js';
@@ -1595,27 +1594,25 @@ export function registerWorkspaceAgentRoutes(
           res.status(500).json({ error: 'config_patch_unavailable' });
           return;
         }
-        // Agents and squads share one @-name space.
-        // TODO(multi-agent): this read is not under the roster write below, so
-        // a squad created concurrently with the same name can still slip in.
-        const squads = await readSquads(root);
-        if (
-          squads.some(
-            (squad) => squad.name.toLowerCase() === name.toLowerCase(),
-          )
-        ) {
-          res
-            .status(409)
-            .json({ error: `A squad named "${name}" already exists.` });
-          return;
-        }
         let created: WorkspaceAgent | undefined;
         let duplicate = false;
         // A retired agent still holds its name. Saying so is the difference
         // between a person renaming and a person hunting for an agent that is
         // not in the list.
         let duplicateRetired = false;
-        await updateWorkspaceAgents(root, (agents) => {
+        let squadClash = false;
+        // Agents and squads share one @-name space; the squads are read under
+        // the same lock as this roster write, so neither can take the name in
+        // between.
+        await updateWorkspaceAgentsWithSquads(root, (agents, squads) => {
+          if (
+            squads.some(
+              (squad) => squad.name.toLowerCase() === name.toLowerCase(),
+            )
+          ) {
+            squadClash = true;
+            return agents;
+          }
           const clash = agents.find(
             (agent) => agent.name.toLowerCase() === name.toLowerCase(),
           );
@@ -1632,6 +1629,12 @@ export function registerWorkspaceAgentRoutes(
           });
           return [...agents, created];
         });
+        if (squadClash) {
+          res
+            .status(409)
+            .json({ error: `A squad named "${name}" already exists.` });
+          return;
+        }
         if (duplicate) {
           res.status(409).json({
             error: duplicateRetired

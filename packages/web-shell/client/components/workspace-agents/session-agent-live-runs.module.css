@@ -94,3 +94,8 @@
   color: var(--foreground);
   font-weight: 600;
 }
+
+/* A deferred @-mention, shown until its record lands. */
+.pendingMention {
+  opacity: 0.7;
+}

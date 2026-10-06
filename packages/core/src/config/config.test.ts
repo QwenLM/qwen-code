@@ -12265,6 +12265,43 @@ describe('applyWorkspaceAgentPersona', () => {
     }
   });
 
+  it('pins a session-agents session to default approval', () => {
+    // Every write or command a session agent runs asks the person in the chat
+    // session, whatever the settings say (plan §8-1).
+    const config = new Config({
+      ...baseParams,
+      agentCollaborationEnabled: true,
+      approvalMode: ApprovalMode.YOLO,
+    });
+    config.setSessionSource('agent', 'ag_alice');
+    expect(config.getApprovalMode()).toBe(ApprovalMode.YOLO);
+    config.markSessionAgentSession();
+    expect(config.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+
+    for (const mode of [
+      ApprovalMode.YOLO,
+      ApprovalMode.AUTO_EDIT,
+      ApprovalMode.AUTO,
+    ]) {
+      expect(() => config.setApprovalMode(mode)).toThrow(/stays "default"/);
+      expect(config.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+    }
+    expect(() => config.setPlanMode(true, ApprovalMode.AUTO_EDIT)).toThrow(
+      /stays "default"/,
+    );
+    config.setApprovalMode(ApprovalMode.PLAN);
+    expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+    config.setApprovalMode(ApprovalMode.DEFAULT);
+    expect(config.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+    // A subagent it starts cannot widen it either.
+    expect(
+      deriveApprovalModeConfig(
+        config,
+        ApprovalMode.YOLO,
+      ).config.getApprovalMode(),
+    ).toBe(ApprovalMode.DEFAULT);
+  });
+
   it('refuses on a session that is not an agent', () => {
     // Otherwise any session could be handed a persona and post under a name
     // that is not its own.

@@ -16,7 +16,12 @@ import {
   type SessionAgentsApi,
 } from './session-agents-api';
 import type { WorkspaceAgentSummaryView } from './ThreadsPage';
-import type { SessionSquadView } from '@qwen-code/sdk/daemon';
+import {
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
+  type DaemonTranscriptBlock,
+  type SessionSquadView,
+} from '@qwen-code/sdk/daemon';
 
 type Submit = ComponentProps<typeof ChatEditor>['onSubmit'];
 
@@ -113,6 +118,62 @@ export interface AgentMentionSession {
   workspaceCwd?: string;
 }
 
+/**
+ * An @-mention the daemon accepted but deferred behind a running main-model
+ * turn (`deferred: true`): its record, and so the user's message, only lands
+ * once that turn settles. Shown as the user's message until then.
+ */
+export interface PendingAgentMention {
+  /** The post's `clientMessageId`. */
+  id: string;
+  sessionId: string;
+  text: string;
+  /**
+   * Recorded mentions with this text the session already had, plus earlier
+   * pending ones, when it was posted: the record that settles this one is
+   * the next.
+   */
+  recordedBefore: number;
+}
+
+/**
+ * The text of each recorded @-mention (`agent_mention` user message) in the
+ * transcript, in order. Compare with {@link isPendingMentionRecorded}.
+ */
+export function recordedAgentMentionTexts(
+  blocks: readonly DaemonTranscriptBlock[],
+): string[] {
+  const texts: string[] = [];
+  for (const block of blocks) {
+    if (block.kind !== 'user') continue;
+    const meta = (block as { meta?: Record<string, unknown> }).meta;
+    const value = meta?.[QWEN_AGENT_MESSAGE_META_KEY];
+    if (value === undefined) continue;
+    if (parseQwenAgentMessageMeta(value)?.kind === 'agent_mention') {
+      texts.push((block as { text: string }).text);
+    }
+  }
+  return texts;
+}
+
+function countMentionText(texts: readonly string[], text: string): number {
+  const wanted = text.trim();
+  return texts.reduce(
+    (count, entry) => count + Number(entry.trim() === wanted),
+    0,
+  );
+}
+
+/** True once the record of `mention` is among the recorded mention texts. */
+export function isPendingMentionRecorded(
+  mention: PendingAgentMention,
+  recordedTexts: readonly string[],
+): boolean {
+  return countMentionText(recordedTexts, mention.text) > mention.recordedBefore;
+}
+
+const NO_MENTION_TEXTS: readonly string[] = [];
+
 /** Idempotency key for one @-mention post (`[A-Za-z0-9_.:-]{1,128}`). */
 function newClientMessageId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
@@ -132,6 +193,8 @@ export function useAgentChatEntry({
   onSubmit,
   onError,
   onCreateAgent,
+  sessionId,
+  recordedMentionTexts = NO_MENTION_TEXTS,
   t,
 }: {
   enabled: boolean;
@@ -155,6 +218,13 @@ export function useAgentChatEntry({
   onError: (message: string) => void;
   /** Offered as the picker's last item: open the New agent page. */
   onCreateAgent?: () => void;
+  /** The session the chat shows; only its pending @-mentions are returned. */
+  sessionId?: string;
+  /**
+   * {@link recordedAgentMentionTexts} of that session's transcript, memoized:
+   * a pending @-mention is dropped once its record shows up here.
+   */
+  recordedMentionTexts?: readonly string[];
   /**
    * The caller's translator. App calls this hook above its I18nProvider, where
    * useI18n() would hand back the default that echoes keys.
@@ -186,6 +256,33 @@ export function useAgentChatEntry({
   const [pending, setPending] = useState(false);
   const busy = useRef(false);
   const submission = useRef(0);
+  const [pendingMentions, setPendingMentions] = useState<PendingAgentMention[]>(
+    [],
+  );
+  const pendingMentionsRef = useRef(pendingMentions);
+  pendingMentionsRef.current = pendingMentions;
+  const recordedMentions = useRef({ sessionId, texts: recordedMentionTexts });
+  recordedMentions.current = { sessionId, texts: recordedMentionTexts };
+  // A record landed: its echo goes, so the message is never shown twice.
+  useEffect(() => {
+    setPendingMentions((current) => {
+      const next = current.filter(
+        (mention) =>
+          mention.sessionId !== sessionId ||
+          !isPendingMentionRecorded(mention, recordedMentionTexts),
+      );
+      return next.length === current.length ? current : next;
+    });
+  }, [sessionId, recordedMentionTexts]);
+  const visiblePendingMentions = useMemo(
+    () =>
+      pendingMentions.filter(
+        (mention) =>
+          mention.sessionId === sessionId &&
+          !isPendingMentionRecorded(mention, recordedMentionTexts),
+      ),
+    [pendingMentions, sessionId, recordedMentionTexts],
+  );
   // The composer receives these straight as props, so both identities have to
   // survive re-renders: `atProviders` feeds a memoized ChatEditor comparison
   // and `submit` a memoized onSubmit prop.
@@ -380,18 +477,42 @@ export function useAgentChatEntry({
             ? (sessionApiForRef.current?.(otherWorkspace) ??
               createSessionAgentsHttpApi(baseUrl, token, otherWorkspace))
             : sessionApi;
-          const sessionId = target.sessionId;
-          // No local echo: the daemon records the @-mention and streams it
-          // back as a user message, live and on replay alike.
-          // TODO(multi-agent): a 202 with `deferred: true` (a main-model turn
-          // is running) clears the composer, but the @ message only appears
-          // once that turn settles and the record is written; until then only
-          // the agents' run cards show. A local echo would double it.
-          const result = await routes.mention(sessionId, {
+          const targetSessionId = target.sessionId;
+          // Counted before posting, so a record that lands quickly is still
+          // the one that settles this message.
+          const shown = recordedMentions.current;
+          const recordedBefore =
+            (shown.sessionId === targetSessionId
+              ? countMentionText(shown.texts, text)
+              : 0) +
+            pendingMentionsRef.current.filter(
+              (mention) =>
+                mention.sessionId === targetSessionId &&
+                mention.text.trim() === text.trim(),
+            ).length;
+          const clientMessageId = newClientMessageId();
+          // The daemon records the @-mention and streams it back as a user
+          // message, live and on replay alike, so there is no local echo...
+          const result = await routes.mention(targetSessionId, {
             text,
-            clientMessageId: newClientMessageId(),
+            clientMessageId,
           });
           commit?.();
+          // ...unless a main-model turn is running: the record waits for it
+          // to settle, and the message is shown as pending until it lands.
+          // TODO(multi-agent): matched by text; the live record does not
+          // carry the post's clientMessageId to match on.
+          if (result?.deferred) {
+            setPendingMentions((current) => [
+              ...current,
+              {
+                id: clientMessageId,
+                sessionId: targetSessionId,
+                text,
+                recordedBefore,
+              },
+            ]);
+          }
           // Posted, but a squad in it could not start (its leader cannot run).
           if (result?.squadError) onErrorRef.current(result.squadError);
         } catch (error) {
@@ -409,5 +530,10 @@ export function useAgentChatEntry({
     },
     [api, sessionApi, cwd, baseUrl, token, onSubmit, listAgents, listSquads, t],
   );
-  return { providers, submit, pending };
+  return {
+    providers,
+    submit,
+    pending,
+    pendingMentions: visiblePendingMentions,
+  };
 }
