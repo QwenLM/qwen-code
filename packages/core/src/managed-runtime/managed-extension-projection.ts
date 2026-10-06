@@ -40,6 +40,14 @@ import {
   isChildRunSuccessor,
   parseChildRun,
 } from './managed-child-run-record.js';
+import {
+  isChannelDeliveryStart,
+  isChannelDeliverySuccessor,
+  isChannelRouteStart,
+  isChannelRouteSuccessor,
+  parseChannelDelivery,
+  parseChannelRoute,
+} from './managed-channel-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -156,6 +164,24 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     },
     isStart: isChildRunStart,
     isSuccessor: isChildRunSuccessor,
+  }),
+  channel_route: Object.freeze({
+    taskKind: null,
+    parse: (value: unknown) => {
+      const record = parseChannelRoute(value);
+      return { record, recordId: record.routeId, run: record.run };
+    },
+    isStart: isChannelRouteStart,
+    isSuccessor: isChannelRouteSuccessor,
+  }),
+  channel_delivery: Object.freeze({
+    taskKind: null,
+    parse: (value: unknown) => {
+      const record = parseChannelDelivery(value);
+      return { record, recordId: record.deliveryId, run: record.run };
+    },
+    isStart: isChannelDeliveryStart,
+    isSuccessor: isChannelDeliverySuccessor,
   }),
 });
 
