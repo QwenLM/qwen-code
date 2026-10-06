@@ -144,7 +144,7 @@ function computeExampleRanges(
 
   // Over the cap the lexer is skipped and every regex-matched tag is taken at
   // face value, which is the regex-only behaviour this replaced.
-  const skipLexer = text.length > MAX_LEXER_SCAN_LENGTH;
+  let skipLexer = text.length > MAX_LEXER_SCAN_LENGTH;
   const tagPositions = new Set<number>();
   function collectTags(tokens: Token[], raw: string, baseOffset: number) {
     let cursor = 0;
@@ -174,9 +174,8 @@ function computeExampleRanges(
     try {
       collectTags(Lexer.lexInline(prose), prose, 0);
     } catch {
-      // The regex-only implementation this replaced could not throw; a lexer
-      // failure must degrade to "no example ranges", not abort the turn.
-      tagPositions.clear();
+      // Preserve example filtering with the same fallback as oversized text.
+      skipLexer = true;
     }
   }
 

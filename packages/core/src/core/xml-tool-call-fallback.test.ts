@@ -922,22 +922,24 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     }
   });
 
-  it('degrades to no example filtering when the lexer throws', () => {
-    const spy = vi.spyOn(Lexer, 'lexInline').mockImplementation((): never => {
-      throw new Error('lexer boom');
+  it('preserves examples when nested emphasis overflows the markdown lexer', () => {
+    const prose = '*'.repeat(4096) + 'nested emphasis' + '*'.repeat(4096);
+    const documentedCall = invoke(
+      'write_file',
+      param('file_path', 'example.txt') + param('content', 'x'.repeat(3000)),
+    );
+    const documentation = '<example>model:\n' + documentedCall + EXAMPLE_CLOSE;
+    const text = prose + '\n' + documentation + '\n' + readBlock;
+    expect(text.length).toBeLessThan(64 * 1024);
+
+    const result = tryRecoverXmlToolCalls(text);
+    expect(
+      result.functionCallParts.map((part) => part.functionCall?.name),
+    ).toEqual(['read_file']);
+    expect(result.functionCallParts[0]?.functionCall?.args).toEqual({
+      file_path: 'b.ts',
     });
-    try {
-      const text = '<example>model:\n' + readBlock;
-      let result!: ReturnType<typeof tryRecoverXmlToolCalls>;
-      expect(() => {
-        result = tryRecoverXmlToolCalls(text);
-      }).not.toThrow();
-      expect(
-        result.functionCallParts.map((part) => part.functionCall?.name),
-      ).toEqual(['read_file']);
-    } finally {
-      spy.mockRestore();
-    }
+    expect(result.remainingText).toContain(documentation);
   });
 
   it('does not let a rejected block parameter swallow a later valid call', () => {
