@@ -168,7 +168,261 @@ class HostedPublicWorkspaceIT {
         }
     }
 
-    private void runFiles() throws Exception {
+    // W2: a controlled cwd change settles through the production server and
+    // the deployment's real Workspace probe, on both API surfaces.
+    @Test
+    @Timeout(150)
+    void workspaceCwdChangeSettlesThroughBothSurfaces() throws Exception {
+        List<Path> roots = boot();
+        Files.createDirectory(roots.get(0).resolve("child2"));
+        register("workspace-0", "storage-0");
+        register("workspace-1", "storage-1");
+        Map<String, Object> creation = Map.of("agent_id", "qwen-code",
+                "input", List.of(Map.of("type", "input_text", "text",
+                        "G0_FILES")), "workspace",
+                Map.of("workspace_id", "workspace-0", "cwd_relative", "child"));
+        String session = request("POST", "/v1/agents/sessions", creation,
+                "w2-create", "actor", 202).path("id").asText();
+        // The Session first runs a real tool Turn in the original
+        // directory, so the later Turn has something to escape from.
+        awaitTurn(session, null, "child", roots.get(0));
+
+        Map<String, Object> change = Map.of("cwd_relative", "child2//",
+                "expected_context_revision", 1);
+        JsonNode operation = request("POST",
+                "/v1/agents/sessions/" + session + "/cwd", change, "w2-cwd-1",
+                "actor", 202);
+        assertThat(operation.path("type").asText()).isEqualTo("cwd_change");
+        assertThat(operation.path("target_cwd_relative").asText())
+                .isEqualTo("child2");
+        assertThat(operation.path("expected_context_revision").asLong())
+                .isEqualTo(1);
+        assertThat(operation.path("status").asText())
+                .isIn("pending", "installing");
+        assertThat(operation.path("replayed").asBoolean()).isFalse();
+        String operationId = operation.path("id").asText();
+
+        // The same key replays even spelled differently once normalized.
+        JsonNode replay = request("POST",
+                "/v1/agents/sessions/" + session + "/cwd",
+                Map.of("cwd_relative", "child2/./",
+                        "expected_context_revision", 1),
+                "w2-cwd-1", "actor", 202);
+        assertThat(replay.path("id").asText()).isEqualTo(operationId);
+        assertThat(replay.path("replayed").asBoolean()).isTrue();
+
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+            JsonNode polled = request("GET", "/v1/agents/sessions/" + session
+                    + "/operations/" + operationId, null, null, "actor", 200);
+            assertThat(polled.path("status").asText()).isEqualTo("completed");
+            assertThat(polled.path("result_context_revision").asLong())
+                    .isEqualTo(2);
+            assertThat(polled.path("replayed").asBoolean()).isFalse();
+        });
+        JsonNode read = request("GET", "/v1/agents/sessions/" + session,
+                null, null, "actor", 200);
+        assertThat(read.at("/workspace/cwd_relative").asText())
+                .isEqualTo("child2");
+        assertThat(read.at("/workspace/context_revision").asLong())
+                .isEqualTo(2);
+        assertThat(read.at("/workspace/state").asText()).isEqualTo("ready");
+        JsonNode events = request("GET", "/v1/agents/sessions/" + session
+                + "/events", null, null, "actor", 200);
+        JsonNode changed = null;
+        for (JsonNode event : events.path("data")) {
+            if ("session.context.changed"
+                    .equals(event.path("type").asText())) {
+                changed = event;
+            }
+        }
+        assertThat(changed).as("session.context.changed in %s", events)
+                .isNotNull();
+        assertThat(changed.path("data").path("cwdRelative").asText())
+                .isEqualTo("child2");
+        assertThat(changed.path("data").path("contextRevision").asLong())
+                .isEqualTo(2);
+        assertThat(changed.path("data").path("workspaceId").asText())
+                .isEqualTo("workspace-0");
+
+        Map<String, Object> webChange = Map.of("sessionId", session,
+                "idempotencyKey", "w2-cwd-web-1", "cwdRelative", ".",
+                "expectedContextRevision", 2);
+        JsonNode webOperation = request("POST",
+                "/api/agent/web-shell/v1/sessions/cwd/change", webChange,
+                null, "actor", 202);
+        assertThat(webOperation.path("type").asText())
+                .isEqualTo("cwd_change");
+        String webOperationId = webOperation.path("operationId").asText();
+        JsonNode webReplay = request("POST",
+                "/api/agent/web-shell/v1/sessions/cwd/change", webChange,
+                null, "actor", 202);
+        assertThat(webReplay.path("operationId").asText())
+                .isEqualTo(webOperationId);
+        assertThat(webReplay.path("replayed").asBoolean()).isTrue();
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+            JsonNode polled = request("POST",
+                    "/api/agent/web-shell/v1/operations/query",
+                    Map.of("sessionId", session,
+                            "operationId", webOperationId),
+                    null, "actor", 200);
+            assertThat(polled.path("status").asText()).isEqualTo("completed");
+            assertThat(polled.path("resultContextRevision").asLong())
+                    .isEqualTo(3);
+        });
+
+        assertRefusal(request("POST",
+                "/v1/agents/sessions/" + session + "/cwd",
+                Map.of("cwd_relative", "..", "expected_context_revision",
+                        3), "w2-bad-lexical", "actor", 400), "invalid_cwd");
+        assertRefusal(request("POST",
+                "/v1/agents/sessions/" + session + "/cwd",
+                Map.of("cwd_relative", "child",
+                        "expected_context_revision", 1),
+                "w2-stale-revision", "actor", 409), "context_revision_conflict");
+        String legacy = request("POST", "/v1/agents/sessions",
+                Map.of("agent_id", "qwen-code"), "w2-legacy", null, 202)
+                .path("id").asText();
+        assertRefusal(request("POST",
+                "/v1/agents/sessions/" + legacy + "/cwd",
+                Map.of("cwd_relative", ".", "expected_context_revision",
+                        1), "w2-legacy-cwd", "actor", 400),
+                "unsupported_feature");
+        request("POST", "/v1/agents/sessions/" + session + "/cwd",
+                Map.of("cwd_relative", "child",
+                        "expected_context_revision", 3),
+                "w2-stranger", "stranger", 404);
+
+        // A missing target fails the operation, never the Session.
+        JsonNode missing = request("POST",
+                "/v1/agents/sessions/" + session + "/cwd",
+                Map.of("cwd_relative", "missing",
+                        "expected_context_revision", 3),
+                "w2-missing-dir", "actor", 202);
+        String missingOperation = missing.path("id").asText();
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+            JsonNode polled = request("GET", "/v1/agents/sessions/" + session
+                    + "/operations/" + missingOperation, null, null,
+                    "actor", 200);
+            assertThat(polled.path("status").asText()).isEqualTo("failed");
+            assertThat(polled.path("failure_code").asText())
+                    .isEqualTo("workspace_unavailable");
+            assertThat(polled.path("result_context_revision")
+                    .isMissingNode()).isTrue();
+        });
+        read = request("GET", "/v1/agents/sessions/" + session, null, null,
+                "actor", 200);
+        assertThat(read.at("/workspace/cwd_relative").asText())
+                .isEqualTo(".");
+        assertThat(read.at("/workspace/context_revision").asLong())
+                .isEqualTo(3);
+
+        // The WebShell twin's failed projection must carry failureCode too —
+        // the contract condition requires it, and generated clients read it.
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            JsonNode polled = request("POST",
+                    "/api/agent/web-shell/v1/operations/query",
+                    Map.of("sessionId", session,
+                            "operationId", missingOperation),
+                    null, "actor", 200);
+            assertThat(polled.path("status").asText()).isEqualTo("failed");
+            assertThat(polled.path("failureCode").asText())
+                    .isEqualTo("workspace_unavailable");
+        });
+
+        // The Session is not wedged: the next admitted change completes.
+        String recovered = request("POST",
+                "/v1/agents/sessions/" + session + "/cwd",
+                Map.of("cwd_relative", "child2",
+                        "expected_context_revision", 3),
+                "w2-recovered", "actor", 202).path("id").asText();
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+            JsonNode polled = request("GET", "/v1/agents/sessions/" + session
+                    + "/operations/" + recovered, null, null, "actor", 200);
+            assertThat(polled.path("status").asText()).isEqualTo("completed");
+            assertThat(polled.path("result_context_revision").asLong())
+                    .isEqualTo(4);
+        });
+
+        events = request("GET", "/v1/agents/sessions/" + session + "/events",
+                null, null, "actor", 200);
+        long changedEvents = 0;
+        for (JsonNode event : events.path("data")) {
+            if ("session.context.changed"
+                    .equals(event.path("type").asText())) {
+                changedEvents++;
+            }
+        }
+        // Each completed change emitted once; the refused one emitted none.
+        assertThat(changedEvents).isEqualTo(3);
+
+        // #13112 landed the missing half of the pivot: a bound later Turn
+        // installs the committed binding on its fresh Runtime Session, so
+        // the turn's file writes land only in the changed directory — a
+        // stale-runtime reuse would land them back in the original one.
+        // The sentinel makes the direction discriminating: identical bytes
+        // flowed through both Turns of the fixture model otherwise.
+        Files.writeString(roots.get(0).resolve("child")
+                .resolve("proof.txt"), "sentinel");
+        String laterTurn = request("POST",
+                "/v1/agents/sessions/" + session + "/events",
+                Map.of("type", "agent.session.input.message", "input",
+                        List.of(Map.of("type", "input_text", "text",
+                                "G0_FILES"))),
+                "w2-later-turn", "actor", 202).path("turn_id").asText();
+        awaitTurn(session, laterTurn, "child2", roots.get(0));
+        assertThat(Files.readString(roots.get(0).resolve("child2")
+                .resolve("proof.txt"))).isEqualTo("after");
+        assertThat(roots.get(0).resolve("proof.txt")).doesNotExist();
+        // The sentinel survives: a reused pre-change installation would
+        // have overwritten it with the fixture's "before"->"after".
+        assertThat(Files.readString(roots.get(0).resolve("child")
+                .resolve("proof.txt"))).isEqualTo("sentinel");
+    }
+
+    private static void assertRefusal(JsonNode refusal, String code) {
+        assertThat(refusal.path("error").path("code").asText())
+                .isEqualTo(code);
+    }
+
+    // Waits a Turn out to COMPLETED with the same diagnostics the sibling
+    // flows dump on failure, and pins the directory it was supposed to
+    // write in — the pivot evidence for the later Turn.
+    private void awaitTurn(String session, String turnId, String cwd,
+            Path workspaceRoot) throws Exception {
+        await().atMost(Duration.ofSeconds(35)).failFast(() -> {
+            if ("FAILED".equals(turnStatus(session, turnId))) {
+                throw new AssertionError(String.format("Turn failed. Turn:"
+                        + " %s; events: %s; model requests: %s; Harness: %s",
+                        jdbc.queryForList("SELECT status, error_code FROM"
+                                + " managed_agent_turn WHERE session_id = ?",
+                                session),
+                        jdbc.queryForList("SELECT event_type, data_json FROM"
+                                + " managed_agent_event WHERE session_id = ?",
+                                session), modelRequests.size(),
+                        Files.readString(
+                                temporary.resolve("harness.log"))));
+            }
+        }).untilAsserted(() -> {
+            assertThat(modelFailure.get()).isNull();
+            assertThat(turnStatus(session, turnId))
+                    .isEqualTo("COMPLETED");
+        });
+        assertThat(workspaceRoot.resolve(cwd).resolve("proof.txt"))
+                .exists();
+    }
+
+    private String turnStatus(String session, String turnId) {
+        if (turnId == null) {
+            return jdbc.queryForObject("SELECT status FROM"
+                    + " managed_agent_turn WHERE session_id = ?",
+                    String.class, session);
+        }
+        return jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+                + " WHERE session_id = ? AND turn_id = ?", String.class,
+                session, turnId);
+    }
+
+    private List<Path> boot() throws Exception {
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath();
         assertThat(cli).as("Build and bundle the CLI first").isRegularFile();
         node = System.getProperty("node.executable");
@@ -192,6 +446,11 @@ class HostedPublicWorkspaceIT {
         model.start();
         startSpring(cli, roots, harnessPort, brokerPort);
         startHarness(cli, harnessPort, brokerPort);
+        return roots;
+    }
+
+    private void runFiles() throws Exception {
+        List<Path> roots = boot();
 
         for (int index = 0; index < roots.size(); index++) {
             String workspace = "workspace-" + index;
