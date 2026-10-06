@@ -151,7 +151,7 @@ interface ManagedSessionResourceStore {
 
 message-commit 投影发布的序列化 `ChatRecord` 正文不超过 65,536 UTF-8 字节时沿用 `managed-message`。更大的正文使用 schema version 1 的 `managed-message-chunks` 资源，内容为 `{ parts: DurableRef[] }`；有序的 `managed-message-part` 每片最多保存 61,440 原始字节。完整 JSON 文档按字节偏移切分，拼接后才统一解码，因此保留多字节字符和所有记录字段。分片与清单进入同一 journal 事务的引用闭包。服务端 8 MiB 的 inline 资源总预算包含正文分片和清单，因此不承诺支持整整 8 MiB 的消息正文；超限事务仍被原子拒绝。该上限约束提交的资源，不约束暂存堆内存：被拒绝或部分发布的资源可能保留到 writer seal；暂存清理由独立资源生命周期工作跟进。本地 Managed Session 也使用相同分片格式，即使文件适配器没有 inline 大小守卫，仍承担每片持久 I/O；默认的 legacy CLI 路径不受影响。
 
-所有消息消费方使用同一重组助手：冷热历史投影、Hosted 事件 envelope 和 Workspace 恢复。分片顺序读取，因为恢复 worker 的 RPC 只允许一个请求在途；每次资源读取校验字节长度和摘要。缺片或损坏使整次读取失败。HTTP 事务适配器与 CSI 只读快照校验器共用资源依赖遍历，包含消息清单及其分片；快照历史也使用同一重组助手。原始分片不能单独当 JSON 解析。消息 UUID、parent UUID 和 delta 身份保持一致，已流式输出正文的最终记录不会再次追加全文。新读取方兼容历史单资源消息。新增资源 kind 不改变 journal 事件、公开 API 或 SQL 表结构，但旧 Harness/恢复工具无法读取分片记录；开始写入前统一升级所有消费方，之后不要回退读取方。
+所有消息消费方使用同一重组助手：冷热历史投影、Hosted 事件 envelope、Workspace 恢复和本地 Runtime 回执对账。对账先读取完整工具结果记录，再检查调用 ID，因此重开已结算批次时不会为分片记录再次追加结果。分片顺序读取，因为恢复 worker 的 RPC 只允许一个请求在途；每次资源读取校验字节长度和摘要。缺片或损坏使整次读取失败。HTTP 事务适配器与 CSI 只读快照校验器共用资源依赖遍历，包含消息清单及其分片；快照历史也使用同一重组助手。原始分片不能单独当 JSON 解析。消息 UUID、parent UUID 和 delta 身份保持一致，已流式输出正文的最终记录不会再次追加全文。新读取方兼容历史单资源消息。新增资源 kind 不改变 journal 事件、公开 API 或 SQL 表结构，但旧 Harness/恢复工具无法读取分片记录；开始写入前统一升级所有消费方，之后不要回退读取方。
 
 打包栈回归入口为 `npm run test:e2e:managed-agent-server -- --big-output`。它以分段前缀各不相同的确定性 192,000 个 UTF-16 code unit / 224,000 字节模型回答（避开 provider 的累积流启发式）和 8,000 字符对照回答，运行真实 MySQL 与 Java 存储，比较模型原文、公开 delta 和持久记录，删除两个 owner 的本地 home，并核对替换 owner 的模型请求包含完整首条回答。每个 Turn 只接受一次成功终态。Workspace 恢复测试还通过实际单请求 RPC 完成 bundle 捕获与校验，并拒绝缺片或摘要损坏。
 

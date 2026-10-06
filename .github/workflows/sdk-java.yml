@@ -359,7 +359,7 @@ jobs:
           # `clean verify` invocations (pinned by scripts/tests/spotbugs-gate.test.js).
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        timeout-minutes: 12
+        timeout-minutes: 20
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"

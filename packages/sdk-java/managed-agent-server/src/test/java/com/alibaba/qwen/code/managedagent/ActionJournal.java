@@ -17,6 +17,7 @@ final class ActionJournal {
     final String id = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
     final ObjectNode options;
     private final ExtensionRecordJournal journal;
+    private byte[] input;
     private int changes;
 
     ActionJournal(
@@ -46,6 +47,13 @@ final class ActionJournal {
                         .put("expiresAt", expiry);
         options.putArray("options").addObject().put("id", "allow").put("label", "Allow");
         options.withArray("options").addObject().put("id", "deny").put("label", "Deny");
+    }
+
+    ActionJournal withInput(byte[] bytes) {
+        input = bytes;
+        options.put("v", 2);
+        options.set("inputRef", reference(bytes, "managed-tool-input"));
+        return this;
     }
 
     CommitTransactionRequest request(String state, JsonNode response) throws Exception {
@@ -97,6 +105,7 @@ final class ActionJournal {
                         records -> records);
         List<CommitResource> resources = new ArrayList<>();
         resources.add(resource(bytes, "managed-action-options"));
+        if (input != null) resources.add(resource(input, "managed-tool-input"));
         if (decision != null) resources.add(resource(decision, "managed-action-decision"));
         ObjectNode request = JSON.valueToTree(original);
         request.set("resources", JSON.valueToTree(resources));
