@@ -79,6 +79,10 @@ final class ActionJournal {
                         options.path("createdAt").asLong(),
                         event -> {
                             event.put("kind", "action.changed");
+                            // The authority assigns action.changed event ids
+                            // as action:<requestId>:<state>; the extension
+                            // journal's <domain>:<n> shape is reserved.
+                            event.put("eventId", "action:" + id + ":" + state);
                             if ("requested".equals(state)) {
                                 event.putObject("subject")
                                         .put("type", "activation")

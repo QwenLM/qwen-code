@@ -2563,6 +2563,10 @@ public class ManagedAgentStore implements AgentStateStore {
         if (itemId == null) {
             itemId = EventIdentity.assistantItemId(event.turnId());
         }
+        // The previous part of the same series is the one with the greatest
+        // last_sequence, whatever events sit between the two deltas — an
+        // announcement row must not split an assistant message in two
+        // (#13300 R3-3, symmetric with the write-side identity lookup).
         List<String> preceding = jdbc.query("SELECT part_id FROM"
                         + " managed_agent_item_part WHERE tenant_id = ?"
                         + " AND session_id = ? AND item_id = ? AND"

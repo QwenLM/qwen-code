@@ -19,6 +19,10 @@ public final class ManagedSessionStoreModels {
     public static final int MAX_TRANSACTION_EVENTS = 256;
     /** The deepest record line the Session authority's reader accepts. */
     public static final int MAX_JSON_DEPTH = 64;
+    /** The largest record line the authority's reader parses. */
+    public static final int MAX_EVENT_BYTES = 1024 * 1024;
+    /** The largest commit marker the authority's reader derives a digest of. */
+    public static final int MAX_COMMIT_MARKER_BYTES = 64 * 1024;
     public static final int MIN_WRITER_TOKEN_LENGTH = 32;
     public static final int MAX_WRITER_TOKEN_LENGTH = 512;
     public static final long MIN_LEASE_MILLIS = 1_000;

@@ -95,7 +95,7 @@ class WorkspaceLifecycleStoreTest {
             String[] firstLines = new String(Base64.getDecoder().decode(first.recordBytesBase64()), StandardCharsets.UTF_8).split("\n");
             String[] secondLines = new String(Base64.getDecoder().decode(second.recordBytesBase64()), StandardCharsets.UTF_8).split("\n");
             var event = (ObjectNode) fixture.json.readTree(secondLines[0]);
-            event.withObject("/managedSession").put("sequence", first.lastSequence() + 1).put("eventId", "resumed-event");
+            event.withObject("/managedSession").put("sequence", first.lastSequence() + 1).put("eventId", "hook_execution:" + (first.lastSequence() + 1));
             byte[] bytes = (firstLines[0] + "\n" + event + "\n" + firstLines[1] + "\n").getBytes(StandardCharsets.UTF_8);
             var closure = new java.util.ArrayList<>(first.resources());
             closure.addAll(second.resources());
@@ -110,15 +110,17 @@ class WorkspaceLifecycleStoreTest {
         int resources = fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource", Integer.class);
         Runnable commit = () -> fixture.transactions.executeWithoutResult(ignored -> store.commit("tenant", fixture.session,
                 "extension-writer-token-0123456789", commitRequest, authority ? WorkspaceLifecycleStore.authority(operation) : null));
-        if (accepted) {
+        if (accepted && !batch) {
             commit.run();
             assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM qwen_managed_session_journal_head", Long.class))
                     .isEqualTo(revision + 1);
         } else {
             assertThatThrownBy(commit::run).isInstanceOfSatisfying(ApiException.class, error -> {
                 assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
-                assertThat(error.getCode()).isEqualTo(draining ? "workspace_lifecycle_claim_fenced" : authority && !replacement
+                assertThat(error.getCode()).isEqualTo(accepted && batch ? "managed_session_extension_record_rejected"
+                        : draining ? "workspace_lifecycle_claim_fenced" : authority && !replacement
                         ? "workspace_lifecycle_authorization_revoked" : "workspace_lifecycle_admission_closed");
+                if (accepted && batch) assertThat(error.getMessage()).contains("at most one Stage H record");
             });
             assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM qwen_managed_session_journal_head", Long.class)).isEqualTo(revision);
             assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource", Integer.class)).isEqualTo(resources);
@@ -266,7 +268,7 @@ class WorkspaceLifecycleStoreTest {
         var header = fixture.json.createObjectNode().put("subtype", "managed_session_header_v1");
         header.putObject("managedSession").putObject("definitionRef").put("resourceId", "definition")
                 .put("kind", "managed-session-definition").put("schemaVersion", 1).put("byteLength", definition.length).put("digest", digest);
-        byte[] bytes = (header + "\n{}\n").getBytes(StandardCharsets.UTF_8);
+        byte[] bytes = ("{\"subtype\":\"session_execution_engine\"}\n" + header + "\n").getBytes(StandardCharsets.UTF_8);
         var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "original", writer.writerGeneration(),
                 0, 0, "transaction", "session.create", "command", "a".repeat(64), 0, 0, 0, null, null, null, 0, null, 2,
                 Base64.getEncoder().encodeToString(bytes), HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)),
@@ -340,7 +342,7 @@ class WorkspaceLifecycleStoreTest {
         var header = new ObjectMapper().createObjectNode().put("subtype", "managed_session_header_v1");
         header.putObject("managedSession").putObject("definitionRef").put("resourceId", "definition")
                 .put("kind", "managed-session-definition").put("schemaVersion", 1).put("byteLength", definition.length).put("digest", digest);
-        byte[] bytes = (header + "\n{}\n").getBytes(StandardCharsets.UTF_8);
+        byte[] bytes = ("{\"subtype\":\"session_execution_engine\"}\n" + header + "\n").getBytes(StandardCharsets.UTF_8);
         var commit = new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "original", writer.writerGeneration(),
                 0, 0, "transaction", "session.create", "command", "a".repeat(64), 0, 0, 0, null, null, null, 0, null, 2,
                 Base64.getEncoder().encodeToString(bytes), HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)),
