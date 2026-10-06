@@ -54,14 +54,10 @@ export interface QueuedPeerSubmission {
 /**
  * A peer envelope taken by the mid-turn drain. Same payload as the idle
  * submission: attribution and the recipient re-check need both fields, which
- * the raw `string[]` steer channel cannot carry.
+ * the raw `string[]` steer channel cannot carry. An alias, not a re-declaration,
+ * so a field added to the idle submission cannot silently drop off this route.
  */
-export interface QueuedPeerSteer {
-  modelText: string;
-  displayText: string;
-  displayed?: boolean;
-  delivery?: PeerQueuedDelivery;
-}
+export type QueuedPeerSteer = Omit<QueuedPeerSubmission, 'kind'>;
 
 export type QueuedSubmission =
   | QueuedUserSubmission
