@@ -38,7 +38,7 @@ import {
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
-import { PEER_MID_TURN_BUDGET_DEFAULT } from '../peerMessaging/peer-messaging.js';
+import { PEER_MID_TURN_BUDGET_DEFAULT } from '../peerMessaging/mid-turn-constants.js';
 import type { Mem0Settings } from './mem0-settings.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;

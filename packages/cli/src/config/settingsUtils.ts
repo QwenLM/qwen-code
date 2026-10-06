@@ -14,7 +14,7 @@ import type {
 import { getSettingsSchema } from './settingsSchema.js';
 import { t } from '../i18n/index.js';
 import { isAutoLanguage } from '../i18n/languageUtils.js';
-import { PEER_MID_TURN_BUDGET_DEFAULT } from '../peerMessaging/peer-messaging.js';
+import { PEER_MID_TURN_BUDGET_DEFAULT } from '../peerMessaging/mid-turn-constants.js';
 
 // The schema is now nested, but many parts of the UI and logic work better
 // with a flattened structure and dot-notation keys. This section flattens the

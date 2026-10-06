@@ -44,13 +44,15 @@ import {
   MAX_ACCEPTED_BACKLOG,
   MESSAGING_SOCKET_ENV,
   MESSAGING_TOKEN_ENV,
-  PEER_MID_TURN_BUDGET_DEFAULT,
-  PEER_MID_TURN_WINDOW_MS,
   PeerMidTurnBudget,
   PeerMessaging,
   peerMidTurnBudgetOf,
   type PeerQueuedDelivery,
 } from './peer-messaging.js';
+import {
+  PEER_MID_TURN_BUDGET_DEFAULT,
+  PEER_MID_TURN_WINDOW_MS,
+} from './mid-turn-constants.js';
 
 // Holds the inbox's post-listen socket chmod, keeping startPeerInbox
 // pending while the socket already accepts connections.

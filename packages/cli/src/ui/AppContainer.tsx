@@ -279,11 +279,11 @@ import {
 } from '../peerMessaging/PeerMessagingContext.js';
 import {
   MAX_ACCEPTED_BACKLOG,
-  PEER_MID_TURN_WINDOW_MS,
   PeerMidTurnBudget,
   peerMidTurnBudgetOf,
   type PeerMessaging,
 } from '../peerMessaging/peer-messaging.js';
+import { PEER_MID_TURN_WINDOW_MS } from '../peerMessaging/mid-turn-constants.js';
 import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
 import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {

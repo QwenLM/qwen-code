@@ -118,10 +118,8 @@ import type {
   PeerQueuedDelivery,
   PeerReceipt,
 } from '../peerMessaging/peer-messaging.js';
-import {
-  MAX_ACCEPTED_BACKLOG,
-  PEER_MID_TURN_BUDGET_DEFAULT,
-} from '../peerMessaging/peer-messaging.js';
+import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
+import { PEER_MID_TURN_BUDGET_DEFAULT } from '../peerMessaging/mid-turn-constants.js';
 import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';

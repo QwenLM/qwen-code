@@ -66,6 +66,10 @@ import {
   settleSentPeerMessage,
   startPeerInbox,
 } from '@qwen-code/qwen-code-core';
+import {
+  PEER_MID_TURN_BUDGET_DEFAULT,
+  PEER_MID_TURN_WINDOW_MS,
+} from './mid-turn-constants.js';
 
 const debugLogger = createDebugLogger('PEER_MESSAGING');
 
@@ -109,12 +113,6 @@ export type PeerSubmitFn = (
  * the same leak the hold buffer's ceiling exists to prevent.
  */
 export const MAX_ACCEPTED_BACKLOG = MAX_HELD_MESSAGES;
-
-/** Rolling window over which the mid-turn peer delivery budget is counted. */
-export const PEER_MID_TURN_WINDOW_MS = 5 * 60 * 1000;
-
-/** Envelopes a session may steer into a running turn per window by default. */
-export const PEER_MID_TURN_BUDGET_DEFAULT = 3;
 
 /**
  * Reads the budget setting without trusting it. A negative or unparseable value
