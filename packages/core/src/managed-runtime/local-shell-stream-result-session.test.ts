@@ -276,7 +276,11 @@ describe('LocalShellStreamResultSession record admission', () => {
       run: {
         state: 'admitted',
         reason: null,
-        definition: null,
+        definition: {
+          definitionId: 'agent-1',
+          definitionRevision: 1,
+          definitionDigest: 'f'.repeat(64),
+        },
         executionCallId: 'agent-1',
         effectId: null,
         dispatchId: null,
@@ -316,7 +320,7 @@ describe('LocalShellStreamResultSession record admission', () => {
     // Same record domain and call id, but a child agent's run is not a
     // Background Shell's proven start.
     await expect(admission.prepare(requestFor('agent-1'))).rejects.toThrow(
-      'Child run kind must be one of shell, child_agent',
+      "Child run kind must be 'shell' for this consumer",
     );
     await fix.segments.close();
     await fix.session.close();

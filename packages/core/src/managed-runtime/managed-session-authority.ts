@@ -1816,6 +1816,18 @@ export class LocalManagedSessionAuthority {
         );
       }
     }
+    if (domain === 'child_run') {
+      const child = parseChildRun(parsed.record);
+      if (
+        child.kind === 'child_agent' &&
+        child.depth === 1 &&
+        child.rootSessionId !== this.sessionKey.sessionId
+      ) {
+        reject(
+          'Child run rootSessionId must be this Session for a first-level child.',
+        );
+      }
+    }
     if (domain === 'child_acceptance') {
       const acceptance = parsed.record as ChildAcceptance;
       const target = this.extensionRecord('child_run', acceptance.childRunId);

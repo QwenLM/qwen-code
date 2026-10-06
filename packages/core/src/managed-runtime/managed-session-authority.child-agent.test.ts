@@ -145,11 +145,18 @@ async function publishRefs(harness: Harness): Promise<ChildRefs> {
   };
 }
 
+// The dispatched definition pin the contract requires from the dispatch on.
+const DEFINITION_PIN = {
+  definitionId: 'agent-def-1',
+  definitionRevision: 1,
+  definitionDigest: 'f'.repeat(64),
+};
+
 function runBlock(overrides: Record<string, unknown>) {
   return {
     state: 'admitted',
     reason: null,
-    definition: null,
+    definition: DEFINITION_PIN,
     executionCallId: 'call-agent-1',
     effectId: null,
     dispatchId: null,
@@ -396,7 +403,7 @@ describe('managed session authority child_agent records', () => {
           kind: 'child_agent',
           state: 'pending',
           runtimeState: 'unbound',
-          definitionRevision: null,
+          definitionRevision: 1,
           createdAt: 1_000,
           startedAt: null,
           settledAt: null,
@@ -416,7 +423,7 @@ describe('managed session authority child_agent records', () => {
           kind: 'child_agent',
           state: 'running',
           runtimeState: 'provisioning',
-          definitionRevision: null,
+          definitionRevision: 1,
           createdAt: 1_000,
           startedAt: 2_000,
           settledAt: null,
@@ -448,7 +455,7 @@ describe('managed session authority child_agent records', () => {
           kind: 'child_agent',
           state: 'completed',
           runtimeState: null,
-          definitionRevision: null,
+          definitionRevision: 1,
           createdAt: 1_000,
           startedAt: 2_000,
           settledAt: 4_000,
@@ -485,6 +492,45 @@ describe('managed session authority child_agent records', () => {
       expect(authority.taskViews()[0]).toMatchObject({
         kind: 'child_agent',
         state: 'completed',
+      });
+    });
+  });
+
+  it('projects draining once a stop is requested of an unsettled child', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = life(refs);
+    await withAuthority(harness, async (authority) => {
+      for (const [index, record] of chain.slice(0, 3).entries()) {
+        harness.now = 1_000 * (index + 1);
+        await authority.commitExtensionRecord(
+          command(`run-1:${index + 1}`),
+          { domain: 'child_run', record },
+          TRUSTED,
+        );
+      }
+      harness.now = 4_000;
+      await authority.commitExtensionRecord(
+        command('run-1:4'),
+        {
+          domain: 'child_run',
+          record: childAgent(
+            refs,
+            {
+              state: 'running',
+              execution: 'running_attached',
+              dispatchId: 'dispatch-1',
+              runtime: BINDING_1,
+            },
+            { childSessionId: 'session-child', stopRequested: true },
+          ),
+        },
+        TRUSTED,
+      );
+      expect(authority.taskViews()[0]).toMatchObject({
+        kind: 'child_agent',
+        state: 'running',
+        runtimeState: 'draining',
       });
     });
   });
@@ -552,7 +598,7 @@ describe('managed session authority child_agent records', () => {
             kind: 'child_agent',
             state: 'completed',
             runtimeState: null,
-            definitionRevision: null,
+            definitionRevision: 1,
             createdAt: 1_000,
             startedAt: 2_000,
             settledAt: 4_000,
@@ -572,6 +618,26 @@ describe('managed session authority child_agent records', () => {
       },
       { create: false },
     );
+  });
+
+  it('refuses a first-level child agent rooted at another Session', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    await withAuthority(harness, async (authority) => {
+      await expect(
+        authority.commitExtensionRecord(
+          command('run-1:1'),
+          {
+            domain: 'child_run',
+            record: childAgent(refs, {}, { rootSessionId: 'session-other' }),
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        'rootSessionId must be this Session for a first-level child',
+      );
+      expect(await publishedBodies(harness, 'child_run')).toBe(0);
+    });
   });
 
   it('refuses an acceptance without its child run', async () => {
@@ -806,6 +872,30 @@ describe('managed session authority child_agent records', () => {
           TRUSTED,
         ),
       ).rejects.toThrow('resource result-never-published is not present');
+      expect(await publishedBodies(harness, 'child_run')).toBe(3);
+    });
+  });
+
+  it('closes a settling revision over its terminal receipt', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const unheld = { ...refs.receipt, resourceId: 'receipt-never-published' };
+    await withAuthority(harness, async (authority) => {
+      const chain = life({ ...refs, receipt: unheld });
+      for (const [index, record] of chain.slice(0, 3).entries()) {
+        await authority.commitExtensionRecord(
+          command(`run-1:${index + 1}`),
+          { domain: 'child_run', record },
+          TRUSTED,
+        );
+      }
+      await expect(
+        authority.commitExtensionRecord(
+          command('run-1:4'),
+          { domain: 'child_run', record: chain[3] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow('resource receipt-never-published is not present');
       expect(await publishedBodies(harness, 'child_run')).toBe(3);
     });
   });

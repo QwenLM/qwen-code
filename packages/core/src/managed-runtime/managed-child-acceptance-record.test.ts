@@ -100,7 +100,11 @@ describe('managed-child-acceptance-record/1 shared contract', () => {
 
   it.each(fixtures.cases)('$id', (fixture) => {
     const body = MANAGED_EXTENSION_RECORD_BODIES[fixture.domain]!;
-    const record = merge(fixtures.templates[fixture.domain]!, fixture.patch);
+    const template = fixtures.templates[fixture.domain];
+    if (template === undefined) {
+      throw new Error(`fixture ${fixture.id} names an unknown template`);
+    }
+    const record = merge(template, fixture.patch);
     if (fixture.valid) {
       const parsed = body.parse(record);
       expect(parsed.record).toEqual(record);
@@ -126,7 +130,10 @@ describe('managed-child-acceptance-record/1 shared contract', () => {
   });
 
   it.each(fixtures.successors)('$id', (fixture) => {
-    const template = fixtures.templates[fixture.domain]!;
+    const template = fixtures.templates[fixture.domain];
+    if (template === undefined) {
+      throw new Error(`fixture ${fixture.id} names an unknown template`);
+    }
     expect(
       MANAGED_EXTENSION_RECORD_BODIES[fixture.domain]!.isSuccessor(
         merge(template, fixture.before),
