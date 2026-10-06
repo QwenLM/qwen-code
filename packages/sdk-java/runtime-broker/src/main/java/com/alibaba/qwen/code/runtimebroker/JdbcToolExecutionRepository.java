@@ -340,6 +340,30 @@ public final class JdbcToolExecutionRepository
     }
 
     @Override
+    public ToolExecutionRecord settlePrepared(ToolExecutionRecord expected,
+            Map<String, Object> result, Instant settlementTime) {
+        if (expected == null || result == null || settlementTime == null) {
+            throw new IllegalArgumentException(
+                    "expected, result and time are required");
+        }
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            ToolExecutionRecord current = selectByExecutionId(connection,
+                    expected.getExecutionCallId(), true);
+            if (current == null || !current.sameIdentity(expected)
+                    || current.getVersion() != expected.getVersion()
+                    || current.isTerminal()
+                    || current.getState() != ToolExecutionRecord.State.PREPARED) {
+                return null;
+            }
+            ToolExecutionRecord settled = current.withResult(result,
+                    current.getLastSequence(), settlementTime)
+                    .withVersion(current.getVersion() + 1);
+            updateExecution(connection, settled);
+            return settled;
+        });
+    }
+
+    @Override
     public ToolExecutionRecord resolveUnknown(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
         return resolve(expected, resolutionResult, resolutionTime, true);
@@ -406,6 +430,66 @@ public final class JdbcToolExecutionRepository
                     }
                 }
                 return List.copyOf(records);
+            }
+        });
+    }
+
+    @Override
+    public List<ToolExecutionRecord> findBackgroundProcesses(
+            RuntimeSessionRecord session, String afterExecutionCallId, int limit) {
+        if (session == null || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("session and limit in [1, 100] are required");
+        }
+        String after = afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            List<ToolExecutionRecord> matches = new ArrayList<>();
+            String cursor = after;
+            // The dispatch mode lives in the reference payload, so SQL
+            // pages the ownership-and-state window and the filter runs row
+            // by row; the scan stops as soon as a page of matches is full
+            // or the window is exhausted, keeping "short page means done".
+            for (;;) {
+                String sql = "SELECT " + EXECUTION_COLUMNS + " FROM qwen_tool_execution "
+                        + "WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_key = ? "
+                        + "AND harness_session_id = ? AND execution_call_id_hash > ? "
+                        + "AND execution_state NOT IN ('SETTLED', 'ABANDONED') "
+                        + "ORDER BY execution_call_id_hash LIMIT ?";
+                List<ToolExecutionRecord> batch = new ArrayList<>();
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    statement.setString(1, session.getBindingId());
+                    statement.setLong(2, session.getRuntimeGeneration());
+                    statement.setString(3, JdbcRepositorySupport.valueKey(session.getRuntimeSessionId()));
+                    statement.setString(4, session.getSession().getHarnessSessionId());
+                    statement.setString(5, cursor);
+                    statement.setInt(6, limit);
+                    try (ResultSet result = statement.executeQuery()) {
+                        while (result.next()) {
+                            ToolExecutionRecord record = mapExecution(result);
+                            if (!record.belongsTo(session)) {
+                                throw new IllegalStateException("Execution scan ownership differs");
+                            }
+                            batch.add(record);
+                        }
+                    }
+                }
+                if (batch.isEmpty()) {
+                    return List.copyOf(matches);
+                }
+                for (ToolExecutionRecord record : batch) {
+                    if ("background_v3_process".equals(
+                            record.getReference().get("dispatchMode"))) {
+                        matches.add(record);
+                        if (matches.size() == limit) {
+                            return List.copyOf(matches);
+                        }
+                    }
+                }
+                if (batch.size() < limit) {
+                    return List.copyOf(matches);
+                }
+                cursor = JdbcRepositorySupport.valueKey(
+                        batch.get(batch.size() - 1).getExecutionCallId());
             }
         });
     }
@@ -490,14 +574,33 @@ public final class JdbcToolExecutionRepository
             long runtimeGeneration, String runtimeSessionId) {
         return JdbcRepositorySupport.read(dataSource, connection ->
                 hasActiveByRuntimeSession(connection, bindingId,
-                        runtimeGeneration, runtimeSessionId));
+                        runtimeGeneration, runtimeSessionId,
+                        java.util.Set.of()));
+    }
+
+    @Override
+    public boolean hasActiveByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds) {
+        return JdbcRepositorySupport.read(dataSource, connection ->
+                hasActiveByRuntimeSession(connection, bindingId,
+                        runtimeGeneration, runtimeSessionId,
+                        excludingExecutionCallIds));
     }
 
     static boolean hasActiveByRuntimeSession(Connection connection,
             String bindingId, long runtimeGeneration, String runtimeSessionId)
             throws SQLException {
+        return hasActiveByRuntimeSession(connection, bindingId,
+                runtimeGeneration, runtimeSessionId, java.util.Set.of());
+    }
+
+    static boolean hasActiveByRuntimeSession(Connection connection,
+            String bindingId, long runtimeGeneration, String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds)
+            throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT binding_id, runtime_session_id FROM qwen_tool_execution "
+                "SELECT binding_id, runtime_session_id, execution_call_id FROM qwen_tool_execution "
                         + "WHERE binding_id = ? AND runtime_generation = ? "
                         + "AND runtime_session_key = ? "
                         + "AND execution_state NOT IN ('SETTLED', 'ABANDONED')")) {
@@ -507,7 +610,8 @@ public final class JdbcToolExecutionRepository
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
                     if (bindingId.equals(result.getString("binding_id"))
-                            && runtimeSessionId.equals(result.getString("runtime_session_id"))) {
+                            && runtimeSessionId.equals(result.getString("runtime_session_id"))
+                            && !excludingExecutionCallIds.contains(result.getString("execution_call_id"))) {
                         return true;
                     }
                 }

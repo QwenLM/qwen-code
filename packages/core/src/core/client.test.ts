@@ -618,6 +618,9 @@ describe('Gemini Client (client.ts)', () => {
   let mockConfig: Config;
   let client: LlmClient;
   let mockGenerateContentFn: Mock;
+  /** Backing state for the prompt-surface setters/getters on the mock. */
+  let promptToolSnapshot: ReadonlySet<string> | undefined;
+  let promptAgentReachable: boolean | undefined;
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
     getSnapshots: ReturnType<typeof vi.fn>;
@@ -757,6 +760,8 @@ describe('Gemini Client (client.ts)', () => {
   beforeEach(async () => {
     vi.resetAllMocks();
     contents = [userText('hello')];
+    promptToolSnapshot = undefined;
+    promptAgentReachable = undefined;
     mockInteractionTelemetry.outputCaptures.length = 0;
     mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue({});
     // The client concatenates these with the auto-memory suffix, so the
@@ -840,6 +845,7 @@ describe('Gemini Client (client.ts)', () => {
       warmAll: vi.fn().mockResolvedValue(undefined),
       ensureTool: vi.fn().mockResolvedValue(null),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
+      getAllToolNames: vi.fn().mockReturnValue([ToolNames.AGENT]),
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       clearRevealedDeferredTools: vi.fn(),
       clearReviewedDeclarations: vi.fn(),
@@ -878,6 +884,14 @@ describe('Gemini Client (client.ts)', () => {
       isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
       setStaticSystemPrefix: vi.fn(),
+      setPromptAgentReachable: vi.fn((reachable: boolean) => {
+        promptAgentReachable = reachable;
+      }),
+      setPromptToolSnapshot: vi.fn((snapshot: ReadonlySet<string>) => {
+        promptToolSnapshot = snapshot;
+      }),
+      getPromptAgentReachable: vi.fn(() => promptAgentReachable),
+      getPromptToolSnapshot: vi.fn(() => promptToolSnapshot),
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
@@ -1672,6 +1686,34 @@ describe('Gemini Client (client.ts)', () => {
     const sessionStartBlock = (context: string) =>
       `\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\n${context}\n</qwen:session-start-context>`;
 
+    it('records bridge-reachable Agent for prompt guidance', async () => {
+      const reg = deferredToolRegistry(bridgeOnly, [
+        ToolNames.AGENT,
+        'delegate work',
+      ]);
+      reg.getFunctionDeclarations.mockReturnValue([
+        { name: ToolNames.TOOL_SEARCH },
+        { name: ToolNames.TOOL_CALL },
+      ]);
+      const setReachable = vi.mocked(mockConfig.setPromptAgentReachable);
+      setReachable.mockClear();
+
+      await client.startChat();
+
+      expect(setReachable).toHaveBeenLastCalledWith(true);
+      // Record-to-read wiring: the instruction built later in the same
+      // startChat must read back exactly what the setters recorded (the
+      // mocked getters are backed by that state), or gating renders with
+      // `declaredTools === undefined` and never engages.
+      const surface = vi.mocked(getCoreSystemPrompt).mock.calls.at(-1)?.[7] as
+        | { declaredTools?: ReadonlySet<string>; agentReachable?: boolean }
+        | undefined;
+      expect(surface?.agentReachable).toBe(true);
+      expect(surface?.declaredTools).toEqual(
+        new Set([ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL]),
+      );
+    });
+
     it('re-reveals deferred tools that appear in resumed history', async () => {
       // Resume contract: a transcript calling deferred `cron_create` must
       // re-reveal it so its schema is declared, or a follow-up call is rejected
@@ -1730,6 +1772,97 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_list');
       expect(reg.revealDeferredTool).not.toHaveBeenCalledWith('write_file');
+    });
+
+    it('snapshots eagerly revealed Agent when the incomplete bridge reveals it', async () => {
+      // The incomplete-bridge fallback reveals ordinary deferred tools into
+      // the declaration list, so the prompt snapshot must be taken after
+      // that reveal: a snapshot taken before it reports agent as neither
+      // declared nor bridge-reachable and gates the Agent (and, via the
+      // shared conjunct, Codebase Search) guidance out of the system prompt
+      // for a session that declares agent to the model.
+      const reg = deferredToolRegistry(
+        () => null,
+        [ToolNames.AGENT, 'delegate work'],
+      );
+      reg.isPermissionDeferred.mockReturnValue(false);
+      // The declaration list picks agent up only once the eager reveal fires.
+      reg.getFunctionDeclarations.mockImplementation(() =>
+        reg.revealDeferredTool.mock.calls.length > 0
+          ? [{ name: ToolNames.AGENT }]
+          : [],
+      );
+      reg.revealDeferredTool.mockClear();
+      const setReachable = vi.mocked(mockConfig.setPromptAgentReachable);
+      const setSnapshot = vi.mocked(mockConfig.setPromptToolSnapshot);
+      setReachable.mockClear();
+      setSnapshot.mockClear();
+
+      await client.startChat();
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith(ToolNames.AGENT);
+      expect(setReachable).toHaveBeenLastCalledWith(true);
+      expect(setSnapshot).toHaveBeenLastCalledWith(new Set([ToolNames.AGENT]));
+    });
+
+    it('records Agent unreachable when the session has no Agent at all', async () => {
+      // tools.disabled: ['agent'] removes the tool entirely — not declared,
+      // not in the deferred summary — so no path reaches it and the prompt
+      // must gate the Agent guidance away.
+      const reg = deferredToolRegistry(bridgeOnly);
+      reg.getFunctionDeclarations.mockReturnValue([
+        { name: ToolNames.TOOL_SEARCH },
+        { name: ToolNames.TOOL_CALL },
+      ]);
+      reg.getDeferredToolSummary.mockReturnValue([]);
+      const setReachable = vi.mocked(mockConfig.setPromptAgentReachable);
+      setReachable.mockClear();
+
+      await client.startChat();
+
+      expect(setReachable).toHaveBeenLastCalledWith(false);
+    });
+
+    it('does not count a non-Agent deferred tool as Agent reachability', async () => {
+      // Pins the second disjunct's name match: a mutant reading
+      // `deferredSummary.length > 0` would record reachable here, and the
+      // prompt would point the model at an uncallable tool.
+      const reg = deferredToolRegistry(bridgeOnly);
+      reg.getFunctionDeclarations.mockReturnValue([
+        { name: ToolNames.TOOL_SEARCH },
+        { name: ToolNames.TOOL_CALL },
+      ]);
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'monitor', description: 'watch a process' },
+      ]);
+      const setReachable = vi.mocked(mockConfig.setPromptAgentReachable);
+      setReachable.mockClear();
+
+      await client.startChat();
+
+      expect(setReachable).toHaveBeenLastCalledWith(false);
+    });
+
+    it('records Agent unreachable when an incomplete bridge withholds a permission-deferred Agent', async () => {
+      // The incomplete-bridge fallback deliberately withholds permission-
+      // deferred tools from the eager reveal, so this session can neither
+      // declare agent nor reach it through the (absent) bridge.
+      const reg = deferredToolRegistry(
+        () => null,
+        [ToolNames.AGENT, 'delegate work'],
+      );
+      reg.getFunctionDeclarations.mockReturnValue([]);
+      reg.isPermissionDeferred.mockImplementation(
+        (name: string) => name === ToolNames.AGENT,
+      );
+      reg.revealDeferredTool.mockClear();
+      const setReachable = vi.mocked(mockConfig.setPromptAgentReachable);
+      setReachable.mockClear();
+
+      await client.startChat();
+
+      expect(reg.revealDeferredTool).not.toHaveBeenCalledWith(ToolNames.AGENT);
+      expect(setReachable).toHaveBeenLastCalledWith(false);
     });
 
     it('does NOT eagerly reveal when both bridge tools are available', async () => {
@@ -2485,6 +2618,242 @@ describe('Gemini Client (client.ts)', () => {
         expect(lastRequest()).toContain(reminder);
       },
     );
+
+    it.each(['agent', 'AGENT', 'Agent', 'task'])(
+      'forces the active todo reminder for a bridged %s result under the tool_call envelope',
+      async (agentToolName) => {
+        // A bridged delegation returns with the model-facing envelope name
+        // (coreToolScheduler preserves `modelFacingName` on the response part),
+        // so the result is recognised by correlating its call id with the
+        // functionCall recorded in history — the resolved target, not the
+        // envelope, decides whether delegated work just returned.
+        const reminder =
+          '<system-reminder>unfinished todo: follow up on the delegated node</system-reminder>';
+        vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+          (_promptId, force) => (force ? reminder : undefined),
+        );
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'response' };
+          })(),
+        );
+        client.getChat().setHistory([
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-bridged-agent',
+                  name: ToolNames.TOOL_CALL,
+                  args: {
+                    name: agentToolName,
+                    arguments: {
+                      description: 'd',
+                      prompt: 'p',
+                      subagent_type: 'Explore',
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ]);
+
+        const stream = client.sendMessageStream(
+          [
+            {
+              functionResponse: {
+                id: 'call-bridged-agent',
+                name: ToolNames.TOOL_CALL,
+                response: { output: 'subagent finished the investigation' },
+              },
+            },
+          ],
+          new AbortController().signal,
+          'prompt-bridged-agent-result',
+          { type: SendMessageType.ToolResult },
+        );
+        for await (const _ of stream) {
+          // drain
+        }
+
+        expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+          'prompt-bridged-agent-result',
+          true,
+        );
+        const request = mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+        expect(request).toContain(reminder);
+      },
+    );
+
+    it('keeps the turn budget for a bridged result that did not resolve to Agent', async () => {
+      // The goal tools are bridged through the same envelope; forcing on
+      // every tool_call result would fire the reminder for them too, and
+      // per-turn injection grows context linearly — the unwrap must stay
+      // specific to a resolved Agent target.
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(undefined);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      client.getChat().setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-bridged-goal',
+                name: ToolNames.TOOL_CALL,
+                args: { name: 'get_goal', args: {} },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const stream = client.sendMessageStream(
+        [
+          {
+            functionResponse: {
+              id: 'call-bridged-goal',
+              name: ToolNames.TOOL_CALL,
+              response: { output: 'goal snapshot' },
+            },
+          },
+        ],
+        new AbortController().signal,
+        'prompt-bridged-goal-result',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+
+      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+        'prompt-bridged-goal-result',
+      );
+    });
+
+    it.each([
+      DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+      DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+    ])(
+      'keeps the turn budget for an unexecuted bridged Agent (%s)',
+      async (prefix) => {
+        // A refusal (or cancellation) still arrives as a `tool_call`-named
+        // functionResponse with the same call id, but with `error` in place of
+        // `output` — no Agent invocation ever ran, so the reminder force would
+        // fire on shape alone and reset the cadence for nothing.
+        vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(undefined);
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'response' };
+          })(),
+        );
+        client.getChat().setHistory([
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-refused',
+                  name: ToolNames.TOOL_CALL,
+                  args: {
+                    name: 'agent',
+                    args: { description: 'd', prompt: 'p' },
+                  },
+                },
+              },
+            ],
+          },
+        ]);
+
+        const stream = client.sendMessageStream(
+          [
+            {
+              functionResponse: {
+                id: 'call-refused',
+                name: ToolNames.TOOL_CALL,
+                response: {
+                  error: `${prefix}Agent invocation never started.`,
+                },
+              },
+            },
+          ],
+          new AbortController().signal,
+          'prompt-bridged-agent-refused',
+          { type: SendMessageType.ToolResult },
+        );
+        for await (const _ of stream) {
+          // drain
+        }
+
+        expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+          'prompt-bridged-agent-refused',
+        );
+        expect(mockConfig.takeActiveTodoReminder).not.toHaveBeenCalledWith(
+          'prompt-bridged-agent-refused',
+          true,
+        );
+      },
+    );
+
+    it('forces the active todo reminder for a bridged Agent that ran and failed', async () => {
+      // A bridged delegation that resolved and then threw carries a generic
+      // `error` string with no refusal/cancellation prefix — real work ran,
+      // so the reminder force must fire exactly as it does for the
+      // direct-Agent path. Goes red if the guard skips any error-carrying
+      // response instead of only the two prefixed ones.
+      const reminder =
+        '<system-reminder>unfinished todo: follow up on the delegated node</system-reminder>';
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(reminder);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      client.getChat().setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-bridged-agent-failed',
+                name: ToolNames.TOOL_CALL,
+                args: {
+                  name: 'agent',
+                  args: { description: 'd', prompt: 'p' },
+                },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const stream = client.sendMessageStream(
+        [
+          {
+            functionResponse: {
+              id: 'call-bridged-agent-failed',
+              name: ToolNames.TOOL_CALL,
+              response: { error: 'subagent crashed with ECONNRESET' },
+            },
+          },
+        ],
+        new AbortController().signal,
+        'prompt-bridged-agent-failed',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+
+      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+        'prompt-bridged-agent-failed',
+        true,
+      );
+    });
 
     it('keeps the turn budget for tool results without an Agent execution', async () => {
       vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(undefined);
@@ -11885,7 +12254,15 @@ Other open files:
         outputStyle,
         false,
         codeModeOnly,
-        { declaredTools: undefined },
+        // The prompt-surface getters on the mock are backed by what
+        // startChat recorded: no declarations in the registry mock, and no
+        // bridge-reachable Agent.
+        {
+          declaredTools: new Set(),
+          agentReachable: false,
+          executionSandboxFilesystem: undefined,
+          executionSandboxBackend: undefined,
+        },
       ] as const;
     /** generateContent args whose config carries `systemInstruction`. */
     const withInstruction = (systemInstruction: string) =>

@@ -500,7 +500,7 @@ it('rejects a relative file path that resolves outside the workspace', async () 
     executionStatus: 'error',
     error: {
       message: expect.stringContaining(
-        'not within any of the registered workspace directories',
+        'not within the Session working directory',
       ),
     },
   });
@@ -541,7 +541,7 @@ it('rejects a relative read path that escapes the workspace, by traversal or lin
       executionStatus: 'error',
       error: {
         message: expect.stringContaining(
-          'not within any of the registered workspace directories',
+          'not within the Session working directory',
         ),
       },
     });
@@ -595,6 +595,57 @@ it('admits history preparation beside async Hooks while retaining their close an
   });
   executor.closeSessionAdmission(runtime);
 });
+
+it.skipIf(process.platform === 'win32')(
+  'records and rewinds the path consumed by an escaped write',
+  async () => {
+    const file = path.join(workspace, 'notes file.txt');
+    await writeFile(file, 'before');
+    const runtime = randomUUID();
+    const executor = new ManagedToolExecutor(async () =>
+      createManagedToolSet(workspace, runtime),
+    );
+    const control = (
+      operation: Parameters<typeof executor.controlFileHistory>[2],
+    ) => executor.controlFileHistory(owner, runtime, operation);
+    try {
+      await control({ kind: 'raw-file-history', action: 'bind', state: null });
+      await control({
+        kind: 'raw-file-history',
+        action: 'prepare',
+        promptId: runtime,
+        paths: ['notes file.txt'],
+      });
+      const answer = await executor.execute(
+        {
+          sessionId: runtime,
+          promptId: runtime,
+          callId: randomUUID(),
+          argsDigest: 'digest',
+        },
+        'write_file',
+        { file_path: String.raw`notes\ file.txt`, content: 'after' },
+      );
+      expect(answer.executionStatus).toBe('success');
+      expect(await readFile(file, 'utf8')).toBe('after');
+      const saved = parseHostedFileHistoryState(
+        await control({ kind: 'raw-file-history', action: 'snapshot' }),
+        owner,
+      );
+      expect(Object.keys(saved.files)).toEqual(['notes file.txt']);
+      expect(
+        await control({
+          kind: 'raw-file-history',
+          action: 'rewind',
+          promptId: runtime,
+        }),
+      ).toMatchObject({ conflict: false, filesChanged: ['notes file.txt'] });
+      expect(await readFile(file, 'utf8')).toBe('before');
+    } finally {
+      await executor.close();
+    }
+  },
+);
 
 it('wires history to the real raw executor and preserves its original invocation', async () => {
   const runtime = randomUUID();
