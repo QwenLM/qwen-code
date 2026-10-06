@@ -53,7 +53,7 @@ class WorkspaceMigrationMySqlIT {
 
     @Test
     void upgradesCurrentMainWithoutChangingAppliedMigrations() {
-        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("44").load().migrate();
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("45").load().migrate();
         var applied = jdbc.queryForList("SELECT * FROM flyway_schema_history ORDER BY installed_rank");
         int lastRank = jdbc.queryForObject("SELECT MAX(installed_rank) FROM flyway_schema_history", Integer.class);
         Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
@@ -61,14 +61,14 @@ class WorkspaceMigrationMySqlIT {
                 + " WHERE installed_rank <= ? ORDER BY installed_rank", lastRank)).isEqualTo(applied);
         assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history"
                 + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
-                String.class, lastRank)).containsExactly("45", "46", "47");
+                String.class, lastRank)).containsExactly("46", "47", "48");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Integer.class)).isZero();
     }
 
     @Test
     void upgradesBinaryScopeWithoutRewritingOperationEvidence() {
-        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("46").load().migrate();
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("47").load().migrate();
         for (String tenant : new String[] {"Tenant", "tenant"}) {
             jdbc.update("INSERT INTO managed_workspace_migration (operation_id, tenant_id, storage_id, request_digest,"
                     + " request_json, state, history_identity_json, target_registration_id)"
