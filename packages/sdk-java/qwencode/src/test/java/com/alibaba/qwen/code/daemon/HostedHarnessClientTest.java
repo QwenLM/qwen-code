@@ -937,8 +937,11 @@ class HostedHarnessClientTest {
         createSessionRoute();
         AtomicInteger promptCalls = new AtomicInteger();
         server.createContext("/session/" + SESSION_ID + "/prompt",
-                exchange -> sendSessionJson(exchange, 409,
-                        "{\"code\":\"hosted_prompt_recovery_required\"}"));
+                exchange -> {
+                    promptCalls.incrementAndGet();
+                    sendSessionJson(exchange, 409,
+                            "{\"code\":\"hosted_prompt_recovery_required\"}");
+                });
         Map<String, Object> block = Map.of(
                 "type", "text", "text", "recovery-required");
 
@@ -1470,9 +1473,13 @@ class HostedHarnessClientTest {
                                     + "\",\"clientId\":\"" + CLIENT_ID
                                     + "\",\"lastSeenAt\":123}");
                 });
+        AtomicInteger deletes = new AtomicInteger();
         server.createContext("/session/" + SESSION_ID,
-                exchange -> sendSessionJson(exchange, 404,
-                        "{\"code\":\"session_not_found\"}"));
+                exchange -> {
+                    deletes.incrementAndGet();
+                    sendSessionJson(exchange, 404,
+                            "{\"code\":\"session_not_found\"}");
+                });
 
         HostedHarnessClient client = HostedHarnessClient.builder()
                 .baseUri(baseUri)
@@ -1488,6 +1495,46 @@ class HostedHarnessClientTest {
             int first = heartbeats.get();
             Thread.sleep(60);
             assertEquals(first, heartbeats.get());
+        } finally {
+            client.close();
+        }
+        assertEquals(1, deletes.get());
+    }
+
+    @Test
+    void aBootHeaderlessCloseKeepsTheAttachment() throws Exception {
+        // A gateway-shaped 502 on the private DELETE channel is
+        // outcome-unknown: the attachment and its heartbeat survive
+        // (definitive answers are the only ones that retire it).
+        createSessionRoute();
+        AtomicInteger heartbeats = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/heartbeat",
+                exchange -> {
+                    heartbeats.incrementAndGet();
+                    sendSessionJson(exchange, 200,
+                            "{\"sessionId\":\"" + SESSION_ID
+                                    + "\",\"clientId\":\"" + CLIENT_ID
+                                    + "\",\"lastSeenAt\":123}");
+                });
+        server.createContext("/session/" + SESSION_ID,
+                exchange -> sendJson(exchange, 502, "bad gateway", false));
+
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMillis(10))
+                .build();
+        try {
+            HarnessSessionRef session = createSession(client);
+            awaitHeartbeat(heartbeats);
+            assertThrows(MutationOutcomeUnknownException.class,
+                    () -> client.closeSession(session));
+            Thread.sleep(60);
+            int first = heartbeats.get();
+            Thread.sleep(60);
+            assertTrue(heartbeats.get() > first,
+                    "heartbeat must keep beating after an unknown answer");
         } finally {
             client.close();
         }
@@ -1826,15 +1873,12 @@ class HostedHarnessClientTest {
     }
 
     @Test
-    void aLocalExecutorRejectionIsNotReportedAsOutcomeUnknown() {
-        // R1-45: probed on JDK 11/17/21 - 17 and 21 surface a send to a
-        // terminated executor as an IOException caused by
-        // RejectedExecutionException, while 11 parks the call; either way
-        // the request never left the JVM, so it must not be classified as
-        // outcome-unknown. closeSession(String) is currently the only
-        // public entry without an ensureOpen() guard, so it is the one
-        // deterministic way to reach send() on a terminated executor.
-        Assumptions.assumeTrue(Runtime.version().feature() >= 17);
+    void closeSessionByIdFailsFastAfterClientClose() {
+        // closeSession(String) now has the same ensureOpen() guard as every
+        // other public entry, so the closed-client path is JVM-independent:
+        // IllegalStateException on every release floor, and no DELETE ever
+        // reaches the wire. The terminated-executor saturated classification
+        // is pinned separately by aTerminatedHttpExecutorReleasesTheOwnedMarker.
         AtomicInteger deletes = new AtomicInteger();
         server.createContext("/session/" + SESSION_ID, exchange -> {
             deletes.incrementAndGet();
@@ -1843,10 +1887,10 @@ class HostedHarnessClientTest {
 
         HostedHarnessClient client = newClient();
         client.close();
-        DaemonTransportException failure = assertThrows(
-                DaemonTransportException.class,
+        IllegalStateException failure = assertThrows(
+                IllegalStateException.class,
                 () -> client.closeSession(SESSION_ID));
-        assertTrue(failure.getMessage().contains("saturated"),
+        assertEquals("HostedHarnessClient is closed",
                 failure.getMessage());
         assertEquals(0, deletes.get());
     }
@@ -2567,6 +2611,164 @@ class HostedHarnessClientTest {
             int first = heartbeats.get();
             Thread.sleep(60);
             assertEquals(first, heartbeats.get());
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    void aRefusedCloseStillTearsDownTheHeartbeat() throws Exception {
+        // Mirror of the detach teardown rule on the close path: a
+        // definitive refusal (DELETE 403) still retires the attachment
+        // and the ledger.
+        createSessionRoute();
+        AtomicInteger heartbeats = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/heartbeat",
+                exchange -> {
+                    heartbeats.incrementAndGet();
+                    sendSessionJson(exchange, 200,
+                            "{\"sessionId\":\"" + SESSION_ID
+                                    + "\",\"clientId\":\"" + CLIENT_ID
+                                    + "\",\"lastSeenAt\":123}");
+                });
+        server.createContext("/session/" + SESSION_ID,
+                exchange -> sendSessionJson(exchange, 403,
+                        "{\"code\":\"forbidden\"}"));
+
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMillis(10))
+                .build();
+        try {
+            HarnessSessionRef session = createSession(client);
+            awaitHeartbeat(heartbeats);
+            DaemonHttpException failure = assertThrows(
+                    DaemonHttpException.class,
+                    () -> client.closeSession(session));
+            assertEquals(403, failure.getStatusCode());
+            Thread.sleep(100);
+            int first = heartbeats.get();
+            Thread.sleep(60);
+            assertEquals(first, heartbeats.get());
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    void aRefusedCloseByIdStillTearsDownTheHeartbeat() throws Exception {
+        // Same teardown rule for the by-id overload.
+        createSessionRoute();
+        AtomicInteger heartbeats = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/heartbeat",
+                exchange -> {
+                    heartbeats.incrementAndGet();
+                    sendSessionJson(exchange, 200,
+                            "{\"sessionId\":\"" + SESSION_ID
+                                    + "\",\"clientId\":\"" + CLIENT_ID
+                                    + "\",\"lastSeenAt\":123}");
+                });
+        server.createContext("/session/" + SESSION_ID,
+                exchange -> sendControlPlaneSessionJson(exchange, 403,
+                        "{\"code\":\"forbidden\"}"));
+
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMillis(10))
+                .build();
+        try {
+            HarnessSessionRef session = createSession(client);
+            awaitHeartbeat(heartbeats);
+            DaemonHttpException failure = assertThrows(
+                    DaemonHttpException.class,
+                    () -> client.closeSession(session.getHarnessSessionId()));
+            assertEquals(403, failure.getStatusCode());
+            Thread.sleep(100);
+            int first = heartbeats.get();
+            Thread.sleep(60);
+            assertEquals(first, heartbeats.get());
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    void anUnexpectedDetachAnswerKeepsTheAttachment() throws Exception {
+        // An unexpected-success detach is outcome-unknown: the attachment
+        // and its heartbeat must survive, or the lease can be reclaimed
+        // while the server is still deciding.
+        createSessionRoute();
+        AtomicInteger heartbeats = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/heartbeat",
+                exchange -> {
+                    heartbeats.incrementAndGet();
+                    sendSessionJson(exchange, 200,
+                            "{\"sessionId\":\"" + SESSION_ID
+                                    + "\",\"clientId\":\"" + CLIENT_ID
+                                    + "\",\"lastSeenAt\":123}");
+                });
+        server.createContext("/session/" + SESSION_ID + "/detach",
+                exchange -> sendSessionJson(exchange, 200,
+                        "{\"detached\":true}"));
+
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMillis(10))
+                .build();
+        try {
+            HarnessSessionRef session = createSession(client);
+            awaitHeartbeat(heartbeats);
+            assertThrows(MutationOutcomeUnknownException.class,
+                    () -> client.detachSession(session));
+            Thread.sleep(60);
+            int first = heartbeats.get();
+            Thread.sleep(60);
+            assertTrue(heartbeats.get() > first,
+                    "heartbeat must keep beating after an unknown answer");
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    void anUnexpectedCloseAnswerKeepsTheAttachment() throws Exception {
+        // Same outcome-unknown survival on the close path.
+        createSessionRoute();
+        AtomicInteger heartbeats = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/heartbeat",
+                exchange -> {
+                    heartbeats.incrementAndGet();
+                    sendSessionJson(exchange, 200,
+                            "{\"sessionId\":\"" + SESSION_ID
+                                    + "\",\"clientId\":\"" + CLIENT_ID
+                                    + "\",\"lastSeenAt\":123}");
+                });
+        server.createContext("/session/" + SESSION_ID,
+                exchange -> sendSessionJson(exchange, 200,
+                        "{\"closed\":true}"));
+
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMillis(10))
+                .build();
+        try {
+            HarnessSessionRef session = createSession(client);
+            awaitHeartbeat(heartbeats);
+            assertThrows(MutationOutcomeUnknownException.class,
+                    () -> client.closeSession(session));
+            Thread.sleep(60);
+            int first = heartbeats.get();
+            Thread.sleep(60);
+            assertTrue(heartbeats.get() > first,
+                    "heartbeat must keep beating after an unknown answer");
         } finally {
             client.close();
         }

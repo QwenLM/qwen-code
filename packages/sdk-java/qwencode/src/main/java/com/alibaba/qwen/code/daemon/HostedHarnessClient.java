@@ -632,16 +632,19 @@ public final class HostedHarnessClient implements AutoCloseable {
                 Collections.emptyMap(), ref.getHarnessClientId(),
                 "POST /session/:id/detach");
         // sendMutation has already classified every ambiguous status, so
-        // anything here is definitive: the local attachment and its
-        // heartbeat timer are torn down no matter the server's answer,
-        // otherwise each failed detach leaks a timer until close().
+        // anything here is definitive; on an outcome-unknown surface the
+        // local attachment must survive, or the lease it keeps alive can
+        // be reclaimed while the server is still deciding the turn.
         try {
             if (response.getStatusCode() != 404) {
                 requireMutationStatus(response, 204,
                         "POST /session/:id/detach");
             }
-        } finally {
             removeAttachment(ref);
+        } catch (DaemonHttpException e) {
+            // A definitive refusal retires the attachment as well.
+            removeAttachment(ref);
+            throw e;
         }
     }
 
@@ -674,15 +677,33 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     public void closeSession(HarnessSessionRef session) {
         HarnessSessionRef ref = requireSessionRef(session);
-        closeSession(ref.getHarnessSessionId(), ref.getHarnessClientId());
-        removeAttachment(ref);
-        activePrompts.remove(ref.getHarnessSessionId());
+        try {
+            closeSession(ref.getHarnessSessionId(), ref.getHarnessClientId());
+            removeAttachment(ref);
+            activePrompts.remove(ref.getHarnessSessionId());
+        } catch (DaemonHttpException e) {
+            // A definitive refusal still retires the local state; an
+            // outcome-unknown surface keeps it, same rule as detach.
+            removeAttachment(ref);
+            activePrompts.remove(ref.getHarnessSessionId());
+            throw e;
+        }
     }
 
     public void closeSession(String harnessSessionId) {
+        ensureOpen();
         String sessionId = requireUuid(harnessSessionId,
                 "harnessSessionId");
-        closeSession(sessionId, null);
+        try {
+            closeSession(sessionId, null);
+            discardLocalSessionState(sessionId);
+        } catch (DaemonHttpException e) {
+            discardLocalSessionState(sessionId);
+            throw e;
+        }
+    }
+
+    private void discardLocalSessionState(String sessionId) {
         AttachmentState state = attachments.remove(sessionId);
         if (state != null) {
             state.cancel();
