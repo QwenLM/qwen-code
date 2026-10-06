@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-api-contract.md) | [简体中文](2026-09-27-managed-agent-api-contract.zh-CN.md)
 
-Status: D1 implemented; D2 implemented in [Session query](2026-09-27-managed-agent-session-query.md); D3 pending
+Status: D1 implemented; D2 implemented in [Session query](2026-09-27-managed-agent-session-query.md); D3 implemented in [Event replay](2026-09-27-managed-agent-event-replay.md); the lifecycle work implemented as D4 of [#12867](https://github.com/QwenLM/qwen-code/issues/12867) in [Durable lifecycle](2026-09-28-managed-agent-durable-lifecycle.md); D5 implemented in [Turn queries](2026-09-28-managed-agent-turn-queries.md); D6 designed in [Actions](2026-09-30-managed-agent-actions.md), with its Hosted Harness part (D6a) implemented
 Date: 2026-09-27
 Issue: [#12793](https://github.com/QwenLM/qwen-code/issues/12793), part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 
@@ -90,9 +90,11 @@ so v1.13 records all four as `partial`:
 
 ### 4.4 `agent_revision` before AgentDefinition
 
-`PublicSession.agent_revision` is required, but `/v1/agents` is still
-`planned`. Until AgentDefinition lands, D2 returns a fixed revision taken from
-the server's agent configuration. D1 only records the missing field.
+`PublicSession.agent_revision` is required. D2 returns a fixed revision taken
+from the server's agent configuration, and D1 only records the missing field.
+D8a (v1.29) implements the `/v1/agents` routes as stored, immutable revisions;
+Sessions keep the configured revision until D8b pins a stored one. See
+[AgentDefinition revisions](2026-10-01-managed-agent-definitions.md).
 
 ### 4.5 W0d discovery and empty-session binding
 
@@ -125,11 +127,13 @@ by JSON Pointer into the spec, so `$ref` resolves inside the one file.
 
 ### 5.1 Routes
 
-The test reads every route under `/v1/agents` and `/api/agent/web-shell/v1`
+The test reads every route under `/v1/agent` and `/api/agent/web-shell/v1`
 from Spring's `RequestMappingHandlerMapping` and compares them with the spec.
-A mapped route that is absent from the spec or marked `planned` fails; so does
-a `partial` or `implemented` route that is not mapped. There are no route gaps
-after 4.3 and 4.5.
+The first prefix covers `/v1/agents` and the `/v1/agent-*` resources that the
+[H0a task contract](2026-09-27-managed-agent-task-contract.md) names; D1 read
+only `/v1/agents`. A mapped route that is absent from the spec or marked
+`planned` fails; so does a `partial` or `implemented` route that is not mapped.
+There are no route gaps after 4.3 and 4.5.
 
 ### 5.2 Records
 

@@ -12,6 +12,7 @@ import type {
 } from '../services/shellExecutionService.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 import {
+  impliedStatus,
   MANAGED_TOOL_RESULT_KINDS,
   MANAGED_TOOL_RESULT_LIMITS,
   MANAGED_TOOL_RESULT_PROTOCOL,
@@ -87,7 +88,11 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
   private started = false;
   private processResult: ShellExecutionResult | null = null;
   private failed = false;
-  private failureReason: 'storage_failed' | 'size_limit' | null = null;
+  private failureReason:
+    | 'storage_failed'
+    | 'size_limit'
+    | 'quota_exhausted'
+    | null = null;
   private finalEnvelope: ToolResultEnvelope | null = null;
 
   constructor(
@@ -107,6 +112,10 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
 
   setProcessResult(result: ShellExecutionResult): void {
     this.processResult = result;
+  }
+
+  failCapture(): void {
+    this.fail(new Error('Capture transport failed.'));
   }
 
   write(id: StreamId, chunk: Buffer): Promise<void> {
@@ -169,7 +178,9 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
     this.failureReason =
       cause instanceof Error && cause.message === 'size_limit'
         ? 'size_limit'
-        : 'storage_failed';
+        : cause instanceof Error && cause.message === 'quota_exhausted'
+          ? 'quota_exhausted'
+          : 'storage_failed';
   }
 
   private async publishSegment(state: StreamState): Promise<void> {
@@ -284,15 +295,10 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
           body: { pages: state.pages },
         }))
       : [];
-    const captureStatus =
-      contents.length === 0 ||
-      contents.every(
-        (entry) => entry.state === 'incomplete' && entry.byteLength === 0,
-      )
-        ? 'unavailable'
-        : contents.every((entry) => entry.state === 'sealed')
-          ? 'complete'
-          : 'partial';
+    // An open descriptor cannot be part of this finalize — the envelope's
+    // status set has no 'pending'; the shared rule only differs there.
+    const implied = impliedStatus(contents);
+    const captureStatus = implied === 'pending' ? 'partial' : implied;
     const captureReason =
       captureStatus === 'complete'
         ? null

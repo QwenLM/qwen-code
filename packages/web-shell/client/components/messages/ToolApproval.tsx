@@ -15,7 +15,10 @@ import { GoalApprovalContent } from './GoalApprovalContent';
 import { PlanExecutionView } from './PlanExecutionView';
 import { isExitPlanApprovalRequest } from '../../utils/todos';
 import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
-import { localizeToolDisplayName } from './toolFormatting';
+import {
+  getEmptyMcpToolTitleDescription,
+  localizeToolDisplayName,
+} from './toolFormatting';
 import {
   ThinkingTranslateButton,
   type SessionContentGenerator,
@@ -41,6 +44,14 @@ interface ToolApprovalProps {
    * it — it just never grabs focus on its own.
    */
   keyboardActive?: boolean;
+  /**
+   * Id of an extra description the caller renders beside this panel, added to
+   * `aria-describedby`. The Managed approvals card states there that the tool
+   * arguments are unavailable, which is exactly the case where the panel's own
+   * description (tool name only) would let a screen-reader user confirm blind.
+   * Pass it only while that element is mounted, so no IDREF dangles.
+   */
+  extraDescriptionId?: string;
   planTodos?: readonly TodoItem[];
   planExecutionMode?: string;
   generateContent?: SessionContentGenerator;
@@ -104,6 +115,14 @@ function getDescriptionText(request: PermissionRequest): string | undefined {
   const description = request.rawInput?.description;
   if (typeof description === 'string' && description.trim()) {
     return description.trim();
+  }
+  const emptyMcpDescription = getEmptyMcpToolTitleDescription(
+    request.toolName,
+    request.title,
+    request.rawInput,
+  );
+  if (emptyMcpDescription !== undefined) {
+    return emptyMcpDescription || undefined;
   }
   return request.title;
 }
@@ -236,6 +255,7 @@ export function ToolApproval({
   variant = 'inline',
   disabled = false,
   keyboardActive = true,
+  extraDescriptionId,
   planTodos = [],
   planExecutionMode,
   generateContent,
@@ -587,6 +607,7 @@ export function ToolApproval({
       aria-describedby={[
         questionId,
         descriptionText ? descId : null,
+        extraDescriptionId ?? null,
         showsCommandBlock || isGoal ? commandId : null,
         execWarningsText ? contentId : null,
       ]

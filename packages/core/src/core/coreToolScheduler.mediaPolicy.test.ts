@@ -58,13 +58,12 @@ function makeConfig(options: {
   interactive?: boolean;
   isToolEnabled?: (name: string) => Promise<boolean>;
 }): Config {
+  const find = (name: string) =>
+    name === options.tool.name ? options.tool : undefined;
   const mockToolRegistry = {
-    getTool: (name: string) =>
-      name === options.tool.name ? options.tool : undefined,
-    ensureTool: async (name: string) =>
-      name === options.tool.name ? options.tool : undefined,
-    getToolByName: (name: string) =>
-      name === options.tool.name ? options.tool : undefined,
+    getTool: find,
+    ensureTool: async (name: string) => find(name),
+    getToolByName: find,
     getAllToolNames: () => [options.tool.name],
     getFunctionDeclarations: () => [],
     getAllTools: () => [options.tool],
@@ -132,20 +131,41 @@ const request = (
   ...overrides,
 });
 
+/** An omni_compress_image media-policy tool running `execute`. */
+const mediaTool = (
+  execute: Mock,
+  extra: Partial<ConstructorParameters<typeof MockTool>[0]> = {},
+) =>
+  new MockMediaPolicyTool({ name: 'omni_compress_image', execute, ...extra });
+
+/** A mock `execute` resolving to a text result, with optional artifacts. */
+const resolving = (text: string, artifacts?: ToolResult['artifacts']) =>
+  vi.fn().mockResolvedValue({
+    llmContent: text,
+    returnDisplay: text,
+    ...(artifacts ? { artifacts } : {}),
+  } satisfies ToolResult);
+
+const modelAccessFor = (
+  modelAccess: NonNullable<OmniPolicyToolsSettings[string]>['modelAccess'],
+): OmniPolicyToolsSettings => ({ omni_compress_image: { modelAccess } });
+
+/** Runs one call of `tool` through the non-interactive executor. */
+const run = (
+  tool: MockTool,
+  call: Partial<ToolCallRequestInfo> = {},
+  options: Omit<Parameters<typeof makeConfig>[0], 'tool'> = {},
+) =>
+  executeToolCall(
+    makeConfig({ tool, ...options }),
+    request({ name: tool.name, ...call }),
+    new AbortController().signal,
+  );
+
 describe('CoreToolScheduler media-policy modelAccess gate', () => {
   it('rejects a call with a missing executionOrigin (fails closed as model) when modelAccess is absent', async () => {
     const executeFn = vi.fn();
-    const tool = new MockMediaPolicyTool({
-      name: 'omni_compress_image',
-      execute: executeFn,
-    });
-    const config = makeConfig({ tool });
-
-    const response = await executeToolCall(
-      config,
-      request({ name: tool.name }),
-      new AbortController().signal,
-    );
+    const response = await run(mediaTool(executeFn));
 
     expect(response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
     expect(response.error?.message).toContain(
@@ -155,31 +175,17 @@ describe('CoreToolScheduler media-policy modelAccess gate', () => {
   });
 
   it('executes an enabled tool with defaults + model args + lockedArguments merged', async () => {
-    const executeFn: Mock = vi.fn().mockResolvedValue({
-      llmContent: 'ok',
-      returnDisplay: 'ok',
-    } satisfies ToolResult);
-    const tool = new MockMediaPolicyTool({
-      name: 'omni_compress_image',
-      execute: executeFn,
-    });
-    const config = makeConfig({
-      tool,
-      omniPolicyTools: {
-        omni_compress_image: {
-          modelAccess: {
-            enabled: true,
-            defaultArguments: { quality: 80, format: 'jpeg' },
-            lockedArguments: { output_dir: '/objects' },
-          },
-        },
+    const executeFn = resolving('ok');
+    const response = await run(
+      mediaTool(executeFn),
+      { args: { quality: 55, source: 'a.png' } },
+      {
+        omniPolicyTools: modelAccessFor({
+          enabled: true,
+          defaultArguments: { quality: 80, format: 'jpeg' },
+          lockedArguments: { output_dir: '/objects' },
+        }),
       },
-    });
-
-    const response = await executeToolCall(
-      config,
-      request({ name: tool.name, args: { quality: 55, source: 'a.png' } }),
-      new AbortController().signal,
     );
 
     expect(response.error).toBeUndefined();
@@ -193,26 +199,15 @@ describe('CoreToolScheduler media-policy modelAccess gate', () => {
 
   it('rejects explicit lockedArguments keys as INVALID_TOOL_PARAMS', async () => {
     const executeFn = vi.fn();
-    const tool = new MockMediaPolicyTool({
-      name: 'omni_compress_image',
-      execute: executeFn,
-    });
-    const config = makeConfig({
-      tool,
-      omniPolicyTools: {
-        omni_compress_image: {
-          modelAccess: {
-            enabled: true,
-            lockedArguments: { output_dir: '/objects' },
-          },
-        },
+    const response = await run(
+      mediaTool(executeFn),
+      { args: { output_dir: '/evil' } },
+      {
+        omniPolicyTools: modelAccessFor({
+          enabled: true,
+          lockedArguments: { output_dir: '/objects' },
+        }),
       },
-    });
-
-    const response = await executeToolCall(
-      config,
-      request({ name: tool.name, args: { output_dir: '/evil' } }),
-      new AbortController().signal,
     );
 
     expect(response.errorType).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
@@ -222,20 +217,9 @@ describe('CoreToolScheduler media-policy modelAccess gate', () => {
 
   it('rejects a forged fixed_policy origin on a non-media-policy tool', async () => {
     const executeFn = vi.fn();
-    const tool = new MockTool({
-      name: 'run_shell_command',
-      execute: executeFn,
-    });
-    const config = makeConfig({ tool });
-
-    const response = await executeToolCall(
-      config,
-      request({
-        name: tool.name,
-        args: { command: 'rm -rf /' },
-        executionOrigin: FIXED_ORIGIN,
-      }),
-      new AbortController().signal,
+    const response = await run(
+      new MockTool({ name: 'run_shell_command', execute: executeFn }),
+      { args: { command: 'rm -rf /' }, executionOrigin: FIXED_ORIGIN },
     );
 
     expect(response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
@@ -246,29 +230,14 @@ describe('CoreToolScheduler media-policy modelAccess gate', () => {
 
 describe('CoreToolScheduler fixed_policy execution', () => {
   it('executes a fixed_policy call without confirmation even when modelAccess is disabled', async () => {
-    const executeFn: Mock = vi.fn().mockResolvedValue({
-      llmContent: 'compressed',
-      returnDisplay: 'compressed',
-    } satisfies ToolResult);
+    const executeFn = resolving('compressed');
     const getDefaultPermission = vi.fn(async () => 'ask' as const);
-    const tool = new MockMediaPolicyTool({
-      name: 'omni_compress_image',
-      execute: executeFn,
-      getDefaultPermission,
-    });
     // No omniPolicyTools at all: modelAccess disabled by default, but the
     // fixed-policy orchestrator path must still work.
-    const config = makeConfig({ tool });
-
-    const response = await executeToolCall(
-      config,
-      request({
-        name: tool.name,
-        args: { source: 'a.png' },
-        executionOrigin: FIXED_ORIGIN,
-      }),
-      new AbortController().signal,
-    );
+    const response = await run(mediaTool(executeFn, { getDefaultPermission }), {
+      args: { source: 'a.png' },
+      executionOrigin: FIXED_ORIGIN,
+    });
 
     expect(response.error).toBeUndefined();
     expect(executeFn).toHaveBeenCalledWith({ source: 'a.png' });
@@ -278,9 +247,7 @@ describe('CoreToolScheduler fixed_policy execution', () => {
 
   it('keeps confirmation for model-origin calls of the same enabled tool (bypass is origin-keyed)', async () => {
     const executeFn = vi.fn();
-    const tool = new MockMediaPolicyTool({
-      name: 'omni_compress_image',
-      execute: executeFn,
+    const tool = mediaTool(executeFn, {
       getDefaultPermission: async () => 'ask' as const,
       getConfirmationDetails: async () => ({
         type: 'info' as const,
@@ -292,9 +259,7 @@ describe('CoreToolScheduler fixed_policy execution', () => {
     const config = makeConfig({
       tool,
       interactive: true,
-      omniPolicyTools: {
-        omni_compress_image: { modelAccess: { enabled: true } },
-      },
+      omniPolicyTools: modelAccessFor({ enabled: true }),
     });
 
     const onToolCallsUpdate = vi.fn();
@@ -322,22 +287,10 @@ describe('CoreToolScheduler fixed_policy execution', () => {
 
   it('still enforces PermissionManager.isToolEnabled for fixed_policy calls', async () => {
     const executeFn = vi.fn();
-    const tool = new MockMediaPolicyTool({
-      name: 'omni_compress_image',
-      execute: executeFn,
-    });
-    const config = makeConfig({
-      tool,
-      isToolEnabled: async () => false,
-    });
-
-    const response = await executeToolCall(
-      config,
-      request({
-        name: tool.name,
-        executionOrigin: FIXED_ORIGIN,
-      }),
-      new AbortController().signal,
+    const response = await run(
+      mediaTool(executeFn),
+      { executionOrigin: FIXED_ORIGIN },
+      { isToolEnabled: async () => false },
     );
 
     expect(response.error).toBeDefined();
@@ -355,25 +308,10 @@ describe('CoreToolScheduler policyArtifacts capture', () => {
   ];
 
   it('captures raw artifacts of a successful media-policy call into policyArtifacts', async () => {
-    const tool = new MockMediaPolicyTool({
-      name: 'omni_compress_image',
-      execute: vi.fn().mockResolvedValue({
-        llmContent: 'ok',
-        returnDisplay: 'ok',
-        artifacts: ARTIFACTS,
-      } satisfies ToolResult),
+    const response = await run(mediaTool(resolving('ok', ARTIFACTS)), {
+      callId: 'staging-invocation-7',
+      executionOrigin: FIXED_ORIGIN,
     });
-    const config = makeConfig({ tool });
-
-    const response = await executeToolCall(
-      config,
-      request({
-        name: tool.name,
-        callId: 'staging-invocation-7',
-        executionOrigin: FIXED_ORIGIN,
-      }),
-      new AbortController().signal,
-    );
 
     expect(response.error).toBeUndefined();
     expect(response.policyArtifacts).toEqual({
@@ -385,25 +323,10 @@ describe('CoreToolScheduler policyArtifacts capture', () => {
   });
 
   it('reports a model origin in policyArtifacts for enabled model-origin calls', async () => {
-    const tool = new MockMediaPolicyTool({
-      name: 'omni_compress_image',
-      execute: vi.fn().mockResolvedValue({
-        llmContent: 'ok',
-        returnDisplay: 'ok',
-        artifacts: ARTIFACTS,
-      } satisfies ToolResult),
-    });
-    const config = makeConfig({
-      tool,
-      omniPolicyTools: {
-        omni_compress_image: { modelAccess: { enabled: true } },
-      },
-    });
-
-    const response = await executeToolCall(
-      config,
-      request({ name: tool.name }),
-      new AbortController().signal,
+    const response = await run(
+      mediaTool(resolving('ok', ARTIFACTS)),
+      {},
+      { omniPolicyTools: modelAccessFor({ enabled: true }) },
     );
 
     expect(response.policyArtifacts?.executionOrigin).toEqual({
@@ -412,20 +335,11 @@ describe('CoreToolScheduler policyArtifacts capture', () => {
   });
 
   it('does not emit policyArtifacts for ordinary tools with artifacts', async () => {
-    const tool = new MockTool({
-      name: 'ordinary_tool',
-      execute: vi.fn().mockResolvedValue({
-        llmContent: 'ok',
-        returnDisplay: 'ok',
-        artifacts: ARTIFACTS,
-      } satisfies ToolResult),
-    });
-    const config = makeConfig({ tool });
-
-    const response = await executeToolCall(
-      config,
-      request({ name: tool.name }),
-      new AbortController().signal,
+    const response = await run(
+      new MockTool({
+        name: 'ordinary_tool',
+        execute: resolving('ok', ARTIFACTS),
+      }),
     );
 
     expect(response.error).toBeUndefined();
@@ -435,20 +349,9 @@ describe('CoreToolScheduler policyArtifacts capture', () => {
   });
 
   it('does not emit policyArtifacts when a media-policy call produced no artifacts', async () => {
-    const tool = new MockMediaPolicyTool({
-      name: 'omni_compress_image',
-      execute: vi.fn().mockResolvedValue({
-        llmContent: 'nothing to do',
-        returnDisplay: 'nothing to do',
-      } satisfies ToolResult),
+    const response = await run(mediaTool(resolving('nothing to do')), {
+      executionOrigin: FIXED_ORIGIN,
     });
-    const config = makeConfig({ tool });
-
-    const response = await executeToolCall(
-      config,
-      request({ name: tool.name, executionOrigin: FIXED_ORIGIN }),
-      new AbortController().signal,
-    );
 
     expect(response.error).toBeUndefined();
     expect(response.policyArtifacts).toBeUndefined();

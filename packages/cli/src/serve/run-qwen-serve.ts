@@ -1903,6 +1903,8 @@ export interface RunHandle {
   resolvedToken?: string;
   /** Resolves when the full REST/Web/ACP runtime has been mounted. */
   runtimeReady: Promise<void>;
+  /** Current primary runtime for callers that must inherit its trust lifetime. */
+  getPrimaryWorkspaceRuntime(): WorkspaceRuntime | undefined;
   /**
    * The Local Control service, once the runtime app exists.
    *
@@ -2294,6 +2296,7 @@ async function loadServeRuntimeModules() {
     workspaceRegistryModule,
     workspaceRuntimeCoordinatorModule,
     promptLedgerModule,
+    sessionExecutionEngineSelectorModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -2308,6 +2311,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-registry.js'),
     import('./workspace-runtime-coordinator.js'),
     import('./prompt-terminal-ledger.js'),
+    import('./session-execution-engine-selector.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -2338,6 +2342,8 @@ async function loadServeRuntimeModules() {
     getWorkspaceRuntimeCoordinatorIfSupported:
       workspaceRuntimeCoordinatorModule.getWorkspaceRuntimeCoordinatorIfSupported,
     createPromptLedgerSink: promptLedgerModule.createPromptLedgerSink,
+    createPairedExecutionEngines:
+      sessionExecutionEngineSelectorModule.createPairedExecutionEngines,
   };
 }
 
@@ -6193,7 +6199,14 @@ async function runQwenServeImpl(
         ),
         sessionShellCommandEnabled,
         childEnvOverrides,
-        channelFactory,
+        ...(opts.experimentalPairedEngines
+          ? {
+              executionEngines: runtime.createPairedExecutionEngines({
+                legacy: channelFactory,
+                runtimeBaseDir: primarySessionRuntimeBaseDir,
+              }),
+            }
+          : { channelFactory }),
         externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: daemonTelemetry,
@@ -6794,7 +6807,14 @@ async function runQwenServeImpl(
         ),
         sessionShellCommandEnabled,
         childEnvOverrides,
-        channelFactory: secondaryChannelFactory,
+        ...(opts.experimentalPairedEngines
+          ? {
+              executionEngines: runtime.createPairedExecutionEngines({
+                legacy: secondaryChannelFactory,
+                runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
+              }),
+            }
+          : { channelFactory: secondaryChannelFactory }),
         externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
@@ -7501,7 +7521,18 @@ async function runQwenServeImpl(
                     PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
                 }
               : childEnvOverrides,
-          channelFactory: wsChannelFactory,
+          // The Conversations runtime hosts only daemon-owned standalone
+          // conversations and the sessions they start, which stay on Legacy,
+          // so it keeps a single factory.
+          ...(opts.experimentalPairedEngines &&
+          provenance !== 'live-conversation'
+            ? {
+                executionEngines: runtime.createPairedExecutionEngines({
+                  legacy: wsChannelFactory,
+                  runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
+                }),
+              }
+            : { channelFactory: wsChannelFactory }),
           externalToolGuard: daemonToolGuardHandler,
           onDiagnosticLine: diagnosticSink,
           telemetry: createRuntimeBridgeTelemetry(wsHash),
@@ -8214,10 +8245,22 @@ async function runQwenServeImpl(
           import('./channel-management-service.js'),
           import('./channel-settings-store.js'),
         ]);
+        const manager = await ensureChannelWorkerManager();
+        const workerRuntime = await ensureChannelRuntime();
+        const settingsRuntime = await loadSettingsRuntimeModules();
         return createChannelManagementService({
           workspaceCwd: targetRuntime.workspaceCwd,
           store: new WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd),
-          manager: await ensureChannelWorkerManager(),
+          manager,
+          loadChannelsConfig: (cwd) =>
+            workerRuntime.loadChannelsConfig(
+              cwd,
+              settingsRuntime.settings.loadSettings(cwd, {
+                skipLoadEnvironment: true,
+                skipWorkspaceSettings: !targetRuntime.trusted,
+                workspaceTrusted: targetRuntime.trusted,
+              }),
+            ),
           restoreFailures: channelRestoreFailures,
         });
       })();
@@ -8756,12 +8799,20 @@ async function runQwenServeImpl(
       // through (and start the runtime) exactly like the warm app would.
       // Dynamic import keeps web-shell-static out of the serve fast-path
       // static closure (see the import-boundary guards in fast-path.test.ts).
-      isPreAuthRequest: webShellMounted
-        ? (req) =>
-            import('./web-shell-static.js').then((webShellStatic) =>
-              webShellStatic.isPreAuthWebShellRequest(req),
-            )
-        : undefined,
+      // Agent Host transport routes authenticate with their own scoped
+      // credential on the mounted route; during a coordinator restart the
+      // bearer gate would answer a 401 the Host could misread as revocation,
+      // so those requests instead wait for the runtime like the warm path.
+      isPreAuthRequest: async (req) => {
+        if (req.path.startsWith('/agent-hosts/')) {
+          return true;
+        }
+        if (!webShellMounted) {
+          return false;
+        }
+        const webShellStatic = await import('./web-shell-static.js');
+        return webShellStatic.isPreAuthWebShellRequest(req);
+      },
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
@@ -10042,6 +10093,13 @@ async function runQwenServeImpl(
         webShellMounted,
         resolvedToken: token,
         runtimeReady,
+        getPrimaryWorkspaceRuntime: () => {
+          const registry = runtimeApp?.locals?.['workspaceRegistry'] as
+            | WorkspaceRegistry
+            | undefined;
+          const entry = registry?.primaryEntry;
+          return entry?.state === 'active' ? entry.current?.runtime : undefined;
+        },
         getLocalControl: () =>
           (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
             'localControlService'

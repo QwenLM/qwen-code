@@ -23,7 +23,9 @@ import {
   FolderClosedIcon,
   FolderOpenIcon,
   Globe2Icon,
+  InboxIcon,
 } from 'lucide-react';
+import { Empty, EmptyMedia, EmptyDescription } from '../ui/empty';
 import { useI18n } from '../../i18n';
 import { formatDateTime } from '../../utils/formatDateTime';
 import {
@@ -120,9 +122,11 @@ export interface WorkspaceHeaderActionsContext {
 }
 
 interface WorkspaceSectionProps {
+  additionalSessions?: readonly DaemonSessionSummary[];
   workspace: DaemonWorkspaceCapability;
   remote?: boolean;
   renderHeader?: (expanded: boolean) => ReactNode;
+  hideHeader?: boolean;
   client: DaemonClient;
   reloadToken: number;
   untrustedLabel: string;
@@ -233,9 +237,11 @@ interface WorkspaceSectionProps {
 }
 
 export function WorkspaceSection({
+  additionalSessions,
   workspace,
   remote = false,
   renderHeader,
+  hideHeader = false,
   client,
   reloadToken,
   untrustedLabel,
@@ -674,7 +680,16 @@ export function WorkspaceSection({
   );
   const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    const scoped = sessions.map((session) => mapSession?.(session) ?? session);
+    const mapped = sessions.map((session) => mapSession?.(session) ?? session);
+    // Only a merge with collaboration rows is re-sorted, so the daemon's own
+    // order stands for everyone who has none.
+    const timeOf = (session: DaemonSessionSummary) =>
+      Date.parse(session.updatedAt ?? session.createdAt ?? '') || 0;
+    const newestFirst = (a: DaemonSessionSummary, b: DaemonSessionSummary) =>
+      timeOf(b) - timeOf(a);
+    const scoped = additionalSessions?.length
+      ? [...mapped, ...additionalSessions].sort(newestFirst)
+      : mapped;
     if (!query) return scoped;
     const localMatches = scoped.filter((session) => {
       const label = (session.displayName || '').toLowerCase();
@@ -693,7 +708,14 @@ export function WorkspaceSection({
       sourceType,
       mapSession,
     );
-  }, [contentSearchHits, mapSession, searchQuery, sessions, sourceType]);
+  }, [
+    additionalSessions,
+    contentSearchHits,
+    mapSession,
+    searchQuery,
+    sessions,
+    sourceType,
+  ]);
   const renderSessionWithSnippet = (session: DaemonSessionSummary) =>
     renderSession(session, {
       // Explicit options override renderSessionRow's guarded default, so
@@ -857,7 +879,7 @@ export function WorkspaceSection({
   );
   return (
     <div className={styles.section}>
-      {overviewEnabled && !renderHeader && !disabled ? (
+      {hideHeader ? null : overviewEnabled && !renderHeader && !disabled ? (
         <WorkspaceDetailsTooltip
           label={workspaceLabel(workspace)}
           cwd={workspace.ssh ? sshWorkspaceLabel(workspace.ssh) : gitPollCwd}
@@ -934,7 +956,17 @@ export function WorkspaceSection({
               // page settles there is no data yet, so the "no sessions" notice
               // would flash for a whole fetch round-trip.
               pendingSession ||
-              (sessionsLoading && sessionsPage === undefined) ? null : (
+              (sessionsLoading &&
+                sessionsPage === undefined) ? null : hideHeader ? (
+                <Empty className="gap-2 py-8">
+                  <EmptyMedia className="mb-0 text-muted-foreground/40">
+                    <InboxIcon size={40} strokeWidth={1} aria-hidden="true" />
+                  </EmptyMedia>
+                  <EmptyDescription className="text-xs">
+                    {noSessionsLabel}
+                  </EmptyDescription>
+                </Empty>
+              ) : (
                 <div className={styles.empty}>{noSessionsLabel}</div>
               )
             ) : channelSessionGroups ? (

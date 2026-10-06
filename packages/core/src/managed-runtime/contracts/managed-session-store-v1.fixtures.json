@@ -9,6 +9,7 @@
     "maxResourcesPerTransaction": 1024,
     "maxTransactionBytes": 8388608,
     "maxTransactionEvents": 256,
+    "maxJsonDepth": 64,
     "minimumWriterTokenLength": 32,
     "maximumWriterTokenLength": 512,
     "minimumLeaseDurationMs": 1000,
@@ -130,6 +131,10 @@
     "resourceNotFound": {
       "status": 404,
       "code": "managed_session_resource_not_found"
+    },
+    "writerCredentialInvalid": {
+      "status": 403,
+      "code": "writer_credential_invalid"
     },
     "ossDisabled": {
       "status": 501,

@@ -4,28 +4,6 @@
 # ManagedAgentApiContractTest fails on any drift that is not listed here and on
 # any listed gap that no longer occurs. Close a gap by fixing the server, then
 # delete its line. Never delete a schema field to make a gap disappear.
-# Stage D slices are tracked in https://github.com/QwenLM/qwen-code/issues/12793.
-
-# D3: event versions and top-level Item and Part identity.
-record PublicEvent -> PublicEvent: missing content_part_id
-record PublicEvent -> PublicEvent: missing item_id
-record PublicEvent -> PublicEvent: missing projection_version
-record PublicEvent -> PublicEvent: missing schema_version
-record WebShellEvent -> WebShellEvent: missing contentPartId
-record WebShellEvent -> WebShellEvent: missing itemId
-record WebShellEvent -> WebShellEvent: missing projectionVersion
-record WebShellEvent -> WebShellEvent: missing schemaVersion
-response getSessionEvents 200: /data/* required projection_version
-response getSessionEvents 200: /data/* required schema_version
-response getSessionEvents 200 text/event-stream: / required projection_version
-response getSessionEvents 200 text/event-stream: / required schema_version
-
-# D3: event and transcript pages cap limit at 100; the contract allows 1000.
-response getSessionEvents: expected 200, got 400 invalid_limit
-response webShellTranscript: expected 200, got 400 invalid_limit
-
-# Lifecycle work (outside Stage D): archive and delete answer synchronously
-# instead of returning a durable 202 command operation.
-record DeletedSession has no schema
-response archiveSession: expected 202, got 200
-response deleteSession: expected 202, got 200
+# D1 to D3 were tracked in https://github.com/QwenLM/qwen-code/issues/12793;
+# the remaining Stage D slices are tracked in
+# https://github.com/QwenLM/qwen-code/issues/12867.

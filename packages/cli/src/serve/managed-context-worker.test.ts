@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import express from 'express';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -37,8 +38,18 @@ import {
   type ManagedToolReference,
 } from './managed-runtime-tool-executor.js';
 import { computeManagedContextDigest } from './managed-workspace-binding.js';
+import {
+  registerManagedContextRoutes,
+  selectShellCapturePublisher,
+} from './managed-context-worker.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import {
+  ManagedShellPublisherRegistry,
+  MANAGED_SHELL_PUBLISHER_ROUTE,
+} from './managed-shell-publisher.js';
+import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
 import {
   WORKSPACE_ACTIVATION_ROUTE,
   WORKSPACE_CAPABILITY_DIGEST,
@@ -342,7 +353,7 @@ describe('Managed context worker boot', () => {
     expect(toolStatuses).toEqual([400, 400, 400]);
   });
 
-  it('mounts Tool v3 only when a local publisher is injected', async () => {
+  it('mounts Tool v3 when a local publisher is injected', async () => {
     const worker = await startManagedRuntimeAttestationWorker(BOOT, {
       prepare: async () => {
         throw new Error('unexpected capture');
@@ -374,6 +385,22 @@ describe('Managed context worker boot', () => {
       toolResult: 'managed-tool-result/1',
       state: 'unknown',
     });
+  });
+
+  it('keeps both publication install routes on the standalone worker', async () => {
+    const worker = await startManagedRuntimeAttestationWorker(
+      { ...BOOT, capabilityDigest: WORKSPACE_CAPABILITY_DIGEST },
+      undefined,
+      new ManagedShellPublisherRegistry(),
+    );
+    openWorkers.add(worker);
+    for (const route of [
+      MANAGED_SHELL_PUBLISHER_ROUTE,
+      PUBLICATION_INSTALL_ROUTE,
+    ]) {
+      const response = await post(worker.ready.url, route.path, {});
+      expect([400, 409]).toContain(response.status);
+    }
   });
 
   it('answers 404 to the v3 routes under boot v1', async () => {
@@ -1168,6 +1195,73 @@ describe('Managed context tool gate', () => {
         .split(/\r?\n/),
     ).toHaveLength(1);
   });
+
+  it.each(['v2 tools', 'v3 tools', 'v3 capture'] as const)(
+    'refuses a legacy call whose Session the provider claimed while it awaited %s',
+    async (point) => {
+      // The entry checks pass before the claim; only the re-check after each
+      // await stands between the raw call and a provider-owned Session.
+      const root = workspace();
+      const input = { command: 'echo run > ran.txt' };
+      const reference: ManagedToolReference = {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        callId: 'call-1',
+        argsDigest: managedToolDigest(input),
+      };
+      const capture = {
+        tenantId: 'tenant-a',
+        sessionId: 'session-a',
+        turnId: 'turn-a',
+        executionCallId: 'execution-a',
+        bindingGeneration: '1',
+        capturePolicy: 'complete_required' as const,
+      };
+      let enter!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => (enter = resolve));
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const suspend = async () => {
+        enter();
+        await gate;
+      };
+      const accept = vi.fn();
+      const prepare = vi.fn(async () => {
+        if (point === 'v3 capture') await suspend();
+        return { identity: {} as never, sink: {} as never };
+      });
+      const executor = new ManagedToolExecutor(
+        async () => {
+          if (point !== 'v3 capture') await suspend();
+          return tools(root);
+        },
+        { prepare, accept },
+      );
+      const legacy =
+        point === 'v2 tools'
+          ? executor.execute(reference, 'run_shell_command', input)
+          : executor.executeV3({
+              reference,
+              capture,
+              toolName: 'run_shell_command',
+              input,
+            });
+      await entered;
+      executor.claimProviderSession(reference.sessionId);
+      release();
+
+      await expect(legacy).rejects.toThrow(
+        'Managed Runtime protocol conflicts.',
+      );
+      expect(executor.hasActiveSession(reference.sessionId)).toBe(false);
+      if (point === 'v2 tools') expect(executor.status(reference)).toBeNull();
+      else expect(executor.statusV3(reference)).toEqual({ state: 'unknown' });
+      expect(prepare).toHaveBeenCalledTimes(point === 'v3 capture' ? 1 : 0);
+      expect(accept).not.toHaveBeenCalled();
+      expect(fs.existsSync(path.join(root, 'ran.txt'))).toBe(false);
+      await executor.close();
+    },
+  );
 });
 
 describe('Managed Workspace execution activation', () => {
@@ -1460,5 +1554,104 @@ describe('Managed Workspace execution activation', () => {
     await expect(pending).rejects.toThrow('unavailable');
     expect(executor.status(reference)).toBeNull();
     expect(fs.existsSync(path.join(root, 'late.txt'))).toBe(false);
+  });
+});
+
+describe('background Shell supervisor injection', () => {
+  const saved = process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'];
+  afterEach(() => {
+    if (saved === undefined) {
+      delete process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'];
+    } else {
+      process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'] = saved;
+    }
+  });
+
+  it('injects a supervisor only when the delegated cgroup root is set', () => {
+    delete process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'];
+    const withoutRoot = registerManagedContextRoutes(express(), BOOT);
+    expect(
+      (withoutRoot as unknown as { backgroundSupervisor?: unknown })
+        .backgroundSupervisor,
+    ).toBeUndefined();
+
+    process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'] = path.join(
+      os.tmpdir(),
+      'no-such-cgroup-root',
+    );
+    const withRoot = registerManagedContextRoutes(express(), BOOT);
+    expect(
+      (withRoot as unknown as { backgroundSupervisor?: unknown })
+        .backgroundSupervisor,
+    ).toBeDefined();
+  });
+});
+
+describe('selectShellCapturePublisher', () => {
+  const request = (background: boolean) => ({
+    reference: { sessionId: 's', promptId: 'p', callId: 'c' },
+    capture: { executionCallId: 'e', background },
+  });
+  const doubles = (local: boolean, remote: boolean) => ({
+    remotePublishers: {
+      hasSession: vi.fn(() => local),
+      prepare: vi.fn(async () => ({ identity: { lane: 'local' } })),
+    },
+    remotePublisher: {
+      hasExecution: vi.fn(() => remote),
+      prepare: vi.fn(async () => ({ identity: { lane: 'remote' } })),
+    },
+  });
+
+  it('hands a background capture to its Session publisher', async () => {
+    const { remotePublishers, remotePublisher } = doubles(true, true);
+    const publisher = selectShellCapturePublisher(
+      remotePublishers as never,
+      remotePublisher as never,
+    );
+    const prepared = await publisher.prepare(request(true) as never);
+    expect(remotePublishers.prepare).toHaveBeenCalledOnce();
+    expect(remotePublisher.prepare).not.toHaveBeenCalled();
+    expect(prepared.identity).toEqual({ lane: 'local' });
+    expect(prepared.publisher).toBe(remotePublishers);
+  });
+
+  it('refuses a background capture whose Session never registered a publisher', async () => {
+    const { remotePublishers, remotePublisher } = doubles(false, true);
+    const publisher = selectShellCapturePublisher(
+      remotePublishers as never,
+      remotePublisher as never,
+    );
+    await expect(publisher.prepare(request(true) as never)).rejects.toThrow(
+      'Background captures require their Session publisher.',
+    );
+    expect(remotePublisher.prepare).not.toHaveBeenCalled();
+  });
+
+  it('hands a foreground execution its own publication while the Session lane is registered', async () => {
+    const { remotePublishers, remotePublisher } = doubles(true, true);
+    const publisher = selectShellCapturePublisher(
+      remotePublishers as never,
+      remotePublisher as never,
+    );
+    // The mixed topology is ordinary now: the execution belongs to its
+    // publication grant, the background lane to the Session — sharing them
+    // is never a conflict.
+    const prepared = await publisher.prepare(request(false) as never);
+    expect(remotePublisher.prepare).toHaveBeenCalledOnce();
+    expect(remotePublishers.prepare).not.toHaveBeenCalled();
+    expect(prepared.identity).toEqual({ lane: 'remote' });
+    expect(prepared.publisher).toBe(remotePublisher);
+  });
+
+  it('keeps the Session publisher for a foreground capture when it is the only owner', async () => {
+    const { remotePublishers, remotePublisher } = doubles(true, false);
+    const publisher = selectShellCapturePublisher(
+      remotePublishers as never,
+      remotePublisher as never,
+    );
+    const prepared = await publisher.prepare(request(false) as never);
+    expect(prepared.identity).toEqual({ lane: 'local' });
+    expect(prepared.publisher).toBe(remotePublishers);
   });
 });

@@ -3,7 +3,8 @@
 [English](2026-09-24-managed-runtime-tool-contract.md) | [简体中文](2026-09-24-managed-runtime-tool-contract.zh-CN.md)
 
 Status: contract, worker handlers, and Java tool transport implemented;
-Broker transport wiring remains follow-up work
+Broker transport wired through `managed-runtime-provider/1` (see
+[2026-09-27-broker-provider-control.md](2026-09-27-broker-provider-control.md))
 
 Related: #12380 (Managed Agent staged delivery), the attestation contract in
 [2026-09-22-managed-runtime-attestation-contract.md](2026-09-22-managed-runtime-attestation-contract.md),
@@ -11,10 +12,10 @@ and the reconciliation thread on #12380 that this contract answers.
 
 ## 1. Problem
 
-The owned Managed Runtime worker extends attestation with three tool
-operations — `execute`, `status`, and `cancel`. The TypeScript worker and the
-Java transport share one wire contract, with the evidence rules the recovery
-design already demands:
+The owned Managed Runtime worker extends attestation with four tool
+operations — `execute`, `status`, `cancel`, and `acknowledge`. The TypeScript
+worker and the Java transport share one wire contract, with the evidence rules
+the recovery design already demands:
 
 - A Runtime never sees the Broker's execution id; it identifies a call by the
   original `reference` (`sessionId`, `promptId`, `callId`, `argsDigest`).
@@ -23,6 +24,11 @@ design already demands:
   rather than 404 or 500.
 - `status` is read-only: it must never enter the prepare path, attach a
   session, or execute anything.
+- `acknowledge` is the caller's receipt for its own durable commit: once the
+  caller has settled the call in its store, it may tell the Runtime to drop
+  the call's parameters and result payload. The journal fact stays, so a
+  repeat is still a repeat. A caller that never acknowledges changes nothing
+  for the Runtime.
 
 ## 2. Scope
 
@@ -30,22 +36,31 @@ In scope: route manifest declarations, the shared schema and conformance
 fixtures, and the worker handlers with their raw HTTP gate admission.
 TypeScript contract tests and the Java fixture consumer share the contract;
 the worker tests exercise the mounted handlers. The Java `HttpRuntimeTransport`
-implements `execute`, `status`, and `cancel` against this contract.
+implements `execute`, `status`, and `cancel` against this contract. A
+seven-field prepared reference, the Session verbs and the provider controls
+use `managed-runtime-provider/1` instead: `acquire` answers Broker-local, and
+`release` and each control go through the provider control route (see
+[2026-09-27-broker-provider-control.md](2026-09-27-broker-provider-control.md)).
 
-Out of scope: wiring `HttpRuntimeTransport` into `RuntimeTransport`,
-Harness-side tool wiring, and a
+Out of scope: ~~wiring `HttpRuntimeTransport` into `RuntimeTransport`~~
+(landed through `managed-runtime-provider/1`), Harness-side tool wiring, and a
 `not_started_proven` outcome, which needs the durable receipt store.
 
 ## 3. Design
 
 ### 3.1 Routes
 
-All three operations are declared in `OWNED_MANAGED_RUNTIME_ROUTES` with the
+All four operations are declared in `OWNED_MANAGED_RUNTIME_ROUTES` with the
 attestation discipline: `POST` on an exact path, protocol version 2, closed
 JSON bodies, `no-store` on both directions, bearer authentication before
 parsing, and the lease id and epoch headers. `execute` accepts up to 256 KiB of
-request so a tool call's `input` fits; `status` and `cancel` accept up to 16 KiB.
-Every operation answers at most 1 MiB.
+request so a tool call's `input` fits; the other three accept up to 16 KiB.
+Every operation answers at most 1 MiB. After authorization, every answer also
+names the worker's incarnation in `X-Qwen-Managed-Runtime-Incarnation`. No
+request carries the incarnation, so a client can tell its worker's answers from
+those of a process that took the port after the worker exited; the
+ordinary-host Managed engine reads no result or state from an answer without
+it.
 Larger tool outputs travel through the artifact delivery track, never through
 these envelopes; its contract is the
 [Managed Tool Result Contract](2026-09-26-managed-tool-result-contract.md),
@@ -55,10 +70,10 @@ The fixture header objects are closed to the five protocol headers. This
 constrains fixture declarations, not ordinary HTTP headers added by clients
 or intermediaries. Negative cases use explicit omission/replacement directives.
 
-The worker mounts all four declared handlers.
-`ownedManagedRuntimeRouteGate` admits exactly their declared methods and
-paths, including `execute`, `status`, and `cancel`. Undeclared paths, wrong
-methods, trailing slashes, and query strings return an empty 404.
+The worker mounts all the declared handlers.
+`ownedManagedRuntimeRouteGate` admits exactly the declared methods and
+paths, including `execute`, `status`, `cancel`, and `acknowledge`. Undeclared
+paths, wrong methods, trailing slashes, and query strings return an empty 404.
 
 ### 3.2 Requests
 
@@ -68,6 +83,7 @@ Every request is a closed object:
 - `status`: `protocolVersion`, `reference`, and an optional non-negative
   `afterSequence` cursor.
 - `cancel`: `protocolVersion`, `reference`.
+- `acknowledge`: `protocolVersion`, `reference`.
 
 The reference is the original call identity the harness assigned; the Runtime
 never learns any Broker-side identifier.
@@ -80,10 +96,16 @@ the encoded input so retries compare strings without re-encoding stored data.
 ### 3.3 Responses
 
 Every success is a closed object carrying `protocolVersion` and a `state` of
-`prepared`, `executing`, `cancel_requested`, `settled`, or `unknown`:
+`prepared`, `executing`, `cancel_requested`, `settled`, `acknowledged`, or
+`unknown`:
 
 - `unknown` means the Runtime holds no record of that reference. It is a 200,
-  and it is not evidence of non-execution.
+  and it is not evidence of non-execution. `acknowledge` answers it the same
+  way when the reference names nothing the Runtime holds.
+- `acknowledged` means the caller's acknowledgement landed: the Runtime
+  dropped the call's payload and `status` answers this state for the
+  reference. `acknowledge` is idempotent: an acknowledged entry answers
+  `acknowledged` again.
 - `result` is required when the state is `settled` and forbidden otherwise; it carries
   `executionStatus` (`not_started`, `success`, `error`, or `cancelled`),
   `responseParts`, and an optional `error` with `message` and optional `type`.
@@ -108,19 +130,19 @@ are shared across routes; each parser enforces its own route's body cap.
 
 ### 3.4 Conformance fixtures
 
-`managed-runtime-tool-v2.fixtures.json` mirrors the attestation suite: three
+`managed-runtime-tool-v2.fixtures.json` mirrors the attestation suite: four
 routes, one identity, and per-route canonical requests with cases covering the
 success shapes and the negative discipline. `unknown-is-ok` cases pin the
-evidence rule for `status` and `cancel`. The Java consumer pins the route
-contract, every outcome classification, and the closed request/response field
-sets.
+evidence rule for `status`, `cancel`, and `acknowledge`. The Java consumer
+pins the route contract, every outcome classification, and the closed
+request/response field sets.
 
 The shared schema enforces each route's exact request fields, for both the
 canonical request and any per-case body override. It also requires every `ok`
 case to carry a response body, requires `result` exactly when the state is
 `settled`, and permits `lastSequence` only on `status`. Each route has exactly
 one suite, with fixed envelope limits and error-code vocabulary. Cases cover
-all five states and all four execution statuses, including the closed error
+all six states and all four execution statuses, including the closed error
 object and a status request without a cursor. TypeScript mutation tests remove
 required fields or add route-invalid fields to prove these constraints are
 load-bearing, and pin the declared manifest to the fixture routes. Raw HTTP
@@ -137,6 +159,12 @@ fixtures, schema mutations, exact gate admission, and real tool execution.
 The Java suite consumes the same contract files.
 
 ### 4.1 Java transport
+
+`acknowledge` is not a Broker operation: the Java transport does not expose or
+send it, and a worker answers it exactly as the schema declares. The ordinary
+(`qwen serve`) Managed host calls it after its own outcome commit. The Java
+conformance consumer pins the added route and the new state vocabulary so a
+worker that implements it stays compatible.
 
 `HttpRuntimeTransport` validates the caller's reference keys before sending.
 For `execute`, the caller map contains the four identity fields plus
@@ -170,9 +198,15 @@ The worker handlers described below serve these routes.
 
 ## 5. Follow-up work
 
-- Complete the session verbs and wire `HttpRuntimeTransport` into
-  `RuntimeTransport`. Supply `toolName`/`input` separately from the stored
-  reference as described in §4.1, and cover real Broker dispatch end to end.
+- ~~Complete the session verbs and wire `HttpRuntimeTransport` into
+  `RuntimeTransport`.~~ Landed via the `managed-runtime-provider/1` protocol;
+  see
+  [2026-09-27-broker-provider-control.md](2026-09-27-broker-provider-control.md).
+  The remaining gap from §4.1: the immediate `POST /executions` route still
+  reads `toolName`/`input` from the stored reference, so its callers must
+  persist tool arguments in `reference_json`; use the deferred reserve/start
+  path or the provider protocol instead. Giving the immediate route the same
+  payload separation remains open.
 - The `UNKNOWN` execution reconciler shipped in #12655. Its transport must
   validate the status wire envelope, then project it to `{state, result}`
   (`result` only for `settled`). Strip `protocolVersion` and `lastSequence`;
@@ -182,7 +216,7 @@ The worker handlers described below serve these routes.
 
 ## 6. Worker implementation
 
-The merged attestation worker now mounts the three routes beside `attest`.
+The merged attestation worker now mounts the four tool routes beside `attest`.
 Its executor admits exactly the first-slice ordinary tools — `read_file`,
 `write_file`, `edit`, and foreground `run_shell_command` — over a real
 `Config` rooted at the attested workspace cwd, with checkpointing disabled.
@@ -220,6 +254,16 @@ Semantics mounted on the contract:
   idempotent thereafter. A cancel the Runtime honored settles the invocation
   as `cancelled` whether the tool surfaces the abort as an error or as an
   early result.
+- `acknowledge` applies only to a settled invocation: it drops the journal
+  entry's input, encoded input and result payload, keeps the reference and
+  the digests, and moves the entry to the terminal `acknowledged` state. A
+  later `execute` with the same `callId` is a 409 identity conflict,
+  `status` answers `acknowledged` for the reference after its payload is
+  dropped, and a repeated `acknowledge` answers it again. The entry keeps
+  the reference, with its `argsDigest`, so the repeat still mismatches. A known entry that has not settled —
+  `prepared`, `executing`, or `cancel_requested` — is a 409 identity
+  conflict; the caller retries only after the call settles. An unknown
+  reference gets the 200 `unknown` answer.
 - The worker keeps its 5-second HTTP `requestTimeout`, which bounds receipt
   of the request body, not the duration of a complete request's execution.
   Per-tool timeouts govern execution; headers and keep-alive bounds stay as
@@ -244,6 +288,10 @@ values; and settle invalid values without starting a command.
 
 Still follow-up: harness-side `RuntimeBackedTool` wiring, file-history
 settlement, capability-digest verification against the admitted tool set,
-journal retention bounds, image input support for the synthetic
+image input support for the synthetic
 `managed-runtime-worker` model, and the artifact delivery track for large
-outputs.
+outputs. For the ordinary Managed host the journal's payloads are bounded
+by the caller's acknowledgement (§4.1); each entry's reference stays as a
+repeat marker for the worker's lifetime regardless, and the Broker path
+acknowledges nothing today, so bounding a Broker-driven generation's
+journal remains follow-up.

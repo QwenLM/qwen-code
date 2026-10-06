@@ -16,6 +16,11 @@
  * and how to interpret the results.
  */
 
+import {
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+  type HookExecutionOwner,
+} from '../../hooks/hook-execution-context.js';
 import { runWithAgentChat } from './agent-context.js';
 import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
@@ -81,6 +86,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { LlmChat } from '../../core/llm-chat.js';
+import { toolCallArgumentsWereIncomplete } from '../../core/incomplete-tool-call-args.js';
 import { assembleSystemPrompt } from '../../core/prompts.js';
 import {
   dedupeToolCallsById,
@@ -120,6 +126,11 @@ import { type ContextState, templateString } from './agent-headless.js';
 import { getResponseText } from '../../utils/partUtils.js';
 import { getThoughtSummary } from '../../utils/thoughtUtils.js';
 import {
+  bindRetryWaitObserver,
+  runWithRetryWaitObserver,
+  type RetryWaitEvent,
+} from '../../utils/retry-wait.js';
+import {
   getTeammateContext,
   runWithTeammateIdentity,
 } from '../team/identity.js';
@@ -133,6 +144,7 @@ import {
   isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
   isToolExcludedForCurrentContext,
+  toolConfigAllowsSkill,
 } from './subagent-plan-tool-policy.js';
 
 // The tool-exclusion sets and the context-aware selector now live in
@@ -296,6 +308,25 @@ export interface ReasoningLoopOptions {
    * future external inputs instead of finalizing immediately.
    */
   shouldWaitForExternalMessages?: () => boolean;
+  /**
+   * Enforce `maxTimeMinutes` while the round's request sleeps in a retry
+   * backoff, ending the loop with TIMEOUT instead of waiting out the backoff.
+   * Internal opt-in for workflow dispatches; other agents keep checking the
+   * limit only between rounds.
+   */
+  enforceTimeLimitDuringRetryWait?: boolean;
+}
+
+/** Largest delay `setTimeout` accepts without overflowing to ~immediate. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/** Observes the retry waits of one round's request. */
+interface RetryWaitScope {
+  run<T>(fn: () => T): T;
+  bind<T>(iterator: AsyncIterator<T>): AsyncIterableIterator<T>;
+  /** True once the time limit aborted the round during a retry wait. */
+  timedOut(): boolean;
+  close(): void;
 }
 
 /**
@@ -357,7 +388,10 @@ Important Rules:
   return assembleSystemPrompt({
     base: finalPrompt,
     contextFiles: runtimeContext.getUserMemory(),
-    autoMemory: runtimeContext.getAutoMemoryPrompt(),
+    autoMemory:
+      runtimeContext.getMemoryRecallMode() === 'structured'
+        ? ''
+        : runtimeContext.getAutoMemoryPrompt(),
   });
 }
 
@@ -378,6 +412,7 @@ export class AgentCore {
   private executionChat?: LlmChat;
   private promptOrdinal = 0;
   readonly subagentId: string;
+  private readonly hookExecutionOwner: HookExecutionOwner | undefined;
   readonly name: string;
   /** Business/task name used for local per-invocation usage labels. */
   readonly taskName?: string;
@@ -466,6 +501,11 @@ export class AgentCore {
   ) {
     this.subagentId =
       subagentId ?? `${name}-${randomUUID().replace(/-/g, '').slice(0, 8)}`;
+    // Internal forks without an explicit identity retain the caller's hook scope.
+    this.hookExecutionOwner = captureHookExecutionOwner(
+      runtimeContext,
+      subagentId,
+    );
     this.name = name;
     this.taskName = taskName;
     this.runtimeContext = runtimeContext;
@@ -595,20 +635,18 @@ export class AgentCore {
    * Returns true if this agent's effective tool surface will include the Skill
    * tool. Used before `prepareTools()` to decide whether to inject the
    * `<available_skills>` snapshot.
+   *
+   * Delegates to the predicate `SubagentManager` uses to decide whether this
+   * agent's Config holds a SkillManager, so the listing and a bundled
+   * reference's pointer cannot disagree (#12424). That predicate also honours
+   * `disallowedTools`, which this method used to ignore — a `'*'` agent that
+   * disallowed `skill` was still shown every skill it could not load.
    */
   private willHaveSkillTool(): boolean {
-    if (!this.toolConfig) {
-      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-    }
-    const asStrings = this.toolConfig.tools.filter(
-      (t): t is string => typeof t === 'string',
+    return toolConfigAllowsSkill(
+      this.toolConfig,
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
     );
-    const hasWildcard = asStrings.includes('*');
-    if (hasWildcard) {
-      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-    }
-    // An explicit empty list has no tools at all — and no skill tool.
-    return asStrings.includes(ToolNames.SKILL);
   }
 
   /**
@@ -686,10 +724,20 @@ export class AgentCore {
               (inheritsCodeModeBindings &&
                 getToolExposure(name) === 'code-mode-callable')) &&
             !isExcluded(name) &&
-            !isHiddenByEagerAllowList(name) &&
             !isDisallowed(name) &&
             this.isToolExecutionAllowed(name),
         );
+      if (
+        allowedNames.some(
+          (name) => getToolExposure(name) === 'code-mode-callable',
+        ) &&
+        toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
+        !allowedNames.includes(ToolNames.TOOL_SEARCH) &&
+        !isExcluded(ToolNames.TOOL_SEARCH) &&
+        this.isToolExecutionAllowed(ToolNames.TOOL_SEARCH)
+      ) {
+        allowedNames.push(ToolNames.TOOL_SEARCH);
+      }
       this.codeModeAllowedToolNames = Object.freeze(
         allowedNames.filter(
           (name) => getToolExposure(name) === 'code-mode-callable',
@@ -844,6 +892,10 @@ export class AgentCore {
     );
   }
 
+  runInHookFrame<T>(fn: () => T): T {
+    return runWithHookExecutionOwner(this.hookExecutionOwner, fn);
+  }
+
   /**
    * Run `fn` inside both ALS frames this agent owns:
    * 1. {@link subagentNameContext} so token-attribution code resolves to
@@ -937,9 +989,11 @@ export class AgentCore {
           },
         ),
       );
-    return inheritedTeammateIdentity
-      ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
-      : runInner();
+    return this.runInHookFrame(() =>
+      inheritedTeammateIdentity
+        ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
+        : runInner(),
+    );
   }
 
   /**
@@ -1017,10 +1071,18 @@ export class AgentCore {
       // parent propagation; the try/finally below guarantees reverse-cleanup
       // fires for every exit (success, break, return, throw).
       const roundAbortController = createChildAbortController(abortController);
+      let retryWaitScope: RetryWaitScope | undefined;
 
       try {
         const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
         turnCounter += 1;
+        retryWaitScope = this.createRetryWaitScope(
+          turnCounter,
+          promptId,
+          roundAbortController,
+          startTime,
+          options,
+        );
 
         if (this.runtimeContext.getExecutionEnvironment?.()) {
           toolsList = await this.prepareTools();
@@ -1042,7 +1104,9 @@ export class AgentCore {
           ],
           config: {
             abortSignal: roundAbortController.signal,
-            tools: [{ functionDeclarations: toolsList }],
+            tools: toolsList.length
+              ? [{ functionDeclarations: toolsList }]
+              : [],
             ...(stickyMaxOutputTokens !== undefined
               ? { maxOutputTokens: stickyMaxOutputTokens }
               : {}),
@@ -1050,13 +1114,20 @@ export class AgentCore {
         };
 
         const roundStreamStart = Date.now();
-        const responseStream = await chat.sendMessageStream(
-          this.modelConfig.model ||
-            this.runtimeContext.getModel() ||
-            DEFAULT_QWEN_MODEL,
-          messageParams,
-          promptId,
-        );
+        const sendMessage = () =>
+          chat.sendMessageStream(
+            this.modelConfig.model ||
+              this.runtimeContext.getModel() ||
+              DEFAULT_QWEN_MODEL,
+            messageParams,
+            promptId,
+          );
+        // The request (and any send-time compaction) runs partly before the
+        // stream is returned and partly while it is iterated; both belong to
+        // this round's retry-wait observer.
+        const responseStream = retryWaitScope
+          ? retryWaitScope.bind(await retryWaitScope.run(sendMessage))
+          : await sendMessage();
         this.eventEmitter?.emit(AgentEventType.ROUND_START, {
           subagentId: this.subagentId,
           round: turnCounter,
@@ -1084,7 +1155,9 @@ export class AgentCore {
           if (roundAbortController.signal.aborted) {
             return {
               text: finalText,
-              terminateMode: AgentTerminateMode.CANCELLED,
+              terminateMode: retryWaitScope?.timedOut()
+                ? AgentTerminateMode.TIMEOUT
+                : AgentTerminateMode.CANCELLED,
               turnsUsed: turnCounter,
             };
           }
@@ -1272,7 +1345,7 @@ export class AgentCore {
 
         // Update token usage if available
         if (lastUsage) {
-          this.recordTokenUsage(lastUsage, turnCounter, roundStreamStart);
+          this.recordTokenUsage(lastUsage, cumulativeRounds, roundStreamStart);
         }
 
         if (functionCalls.length > 0) {
@@ -1413,7 +1486,16 @@ export class AgentCore {
           promptId,
           timestamp: Date.now(),
         } as AgentRoundEvent);
+      } catch (error) {
+        // The time limit aborted a retry wait: the request or its stream
+        // rejects with the abort, which is this agent's TIMEOUT, not an error.
+        if (retryWaitScope?.timedOut()) {
+          terminateMode = AgentTerminateMode.TIMEOUT;
+          break;
+        }
+        throw error;
       } finally {
+        retryWaitScope?.close();
         // Reverse-cleanup fires whether the iteration ended normally, broke,
         // returned, or threw — preventing parent-listener accumulation on
         // long-running parents like the per-message roundAbortController in
@@ -1429,6 +1511,92 @@ export class AgentCore {
       ...(terminateMode === AgentTerminateMode.LOOP_DETECTED
         ? { loopType: loopDetector.getLastLoopType() }
         : {}),
+    };
+  }
+
+  /**
+   * Observes the retry waits of one round's request: republishes them as
+   * RETRY_WAIT events and, under `enforceTimeLimitDuringRetryWait`, aborts the
+   * round once the agent's time limit passes while a wait is active. `close()`
+   * ends every wait still registered and ignores later notifications, so a
+   * late callback cannot reach the next round.
+   */
+  private createRetryWaitScope(
+    round: number,
+    promptId: string,
+    roundAbortController: AbortController,
+    startTime: number,
+    options?: ReasoningLoopOptions,
+  ): RetryWaitScope | undefined {
+    const deadline =
+      options?.enforceTimeLimitDuringRetryWait && options.maxTimeMinutes
+        ? startTime + options.maxTimeMinutes * 60 * 1000
+        : undefined;
+    const emitter = this.eventEmitter;
+    if (!emitter && deadline === undefined) return undefined;
+
+    const active = new Set<string>();
+    let closed = false;
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const clearTimer = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    };
+    const armDeadline = (): void => {
+      if (deadline === undefined) return;
+      // Deferred even when already past, so the abort never runs inside the
+      // retry layer's own start notification.
+      timer = setTimeout(
+        () => {
+          timer = undefined;
+          if (closed || active.size === 0) return;
+          if (roundAbortController.signal.aborted) return;
+          if (Date.now() < deadline) {
+            armDeadline();
+            return;
+          }
+          timedOut = true;
+          roundAbortController.abort(
+            new Error('Agent time limit reached during a retry wait.'),
+          );
+        },
+        Math.min(Math.max(0, deadline - Date.now()), MAX_TIMER_DELAY_MS),
+      );
+    };
+    const publish = (event: RetryWaitEvent): void => {
+      emitter?.emit(AgentEventType.RETRY_WAIT, {
+        ...event,
+        subagentId: this.subagentId,
+        round,
+        promptId,
+        timestamp: Date.now(),
+      });
+    };
+    const observer = (event: RetryWaitEvent): void => {
+      if (closed) return;
+      if (event.phase === 'start') {
+        if (active.has(event.waitId)) return;
+        active.add(event.waitId);
+        publish(event);
+        if (active.size === 1) armDeadline();
+        return;
+      }
+      if (!active.delete(event.waitId)) return;
+      publish(event);
+      if (active.size === 0) clearTimer();
+    };
+    return {
+      run: (fn) => runWithRetryWaitObserver(observer, fn),
+      bind: (iterator) => bindRetryWaitObserver(observer, iterator),
+      timedOut: () => timedOut,
+      close: () => {
+        if (closed) return;
+        closed = true;
+        clearTimer();
+        for (const waitId of active) publish({ phase: 'end', waitId });
+        active.clear();
+      },
     };
   }
 
@@ -1730,12 +1898,13 @@ export class AgentCore {
     }
     if (this.executionAllowedTools === undefined) {
       // Code mode declares exec unconditionally (getCodeModeFunctionDeclarations
-      // keeps exposure 'exec' regardless of the allowed set), so a finite
-      // configured list that omits it must not refuse the only tool the model
-      // was shown — the same carve-out the executionAllowedTools branch
-      // applies below.
+      // keeps exposure 'exec' regardless of the allowed set), and prepareTools
+      // adds tool_search beside it, so a finite configured list that omits
+      // them must not refuse the tools the model was shown — the same
+      // carve-out the executionAllowedTools branch applies below. Both
+      // gateways apply the agent's scoped nested-tool allowlist themselves.
       if (
-        toolName === ToolNames.EXEC &&
+        (toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
         this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
       ) {
         return true;
@@ -1747,7 +1916,7 @@ export class AgentCore {
       );
     }
     if (
-      toolName === ToolNames.EXEC &&
+      (toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
       this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
     ) {
       return true;
@@ -2386,7 +2555,14 @@ export class AgentCore {
         prompt_id: promptId,
         response_id: responseId,
         wasOutputTruncated,
-        ...(toolName === ToolNames.EXEC &&
+        // Mirror `turn.ts`: the data-loss guard keys on the fact that the
+        // arguments arrived unterminated, which is independent of whether the
+        // output token limit was what cut them (QwenLM/qwen-code#12970).
+        ...(toolCallArgumentsWereIncomplete(fc)
+          ? { hadIncompleteArguments: true }
+          : {}),
+        ...((toolName === ToolNames.EXEC ||
+          toolName === ToolNames.TOOL_SEARCH) &&
         this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
           ? {
               codeModeAllowedToolNames: this.codeModeAllowedToolNames ?? [],

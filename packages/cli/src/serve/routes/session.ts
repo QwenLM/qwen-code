@@ -58,6 +58,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
+  SESSION_ATTACHMENT_CHUNK_BYTES,
+  SessionAttachmentUploadError,
+} from '@qwen-code/acp-bridge/sessionAttachments';
+import {
   CHANNEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -172,6 +176,10 @@ import {
   withPromptTerminals,
 } from '../prompt-terminal-ledger.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
 import {
   omitSkillDetailsForSdkSurface,
   omitSkillDetailsFromReplayArrays,
@@ -415,7 +423,6 @@ function mediaBlockParseError(
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
-  'POST /session/:id/side-task',
   'POST /session/:id/fork',
 ] as const;
 type PrimaryOnlyLiveSessionRoute =
@@ -788,6 +795,20 @@ function parseRequestedSessionSource(
   body: Record<string, unknown>,
   res: Response,
 ): { sourceType?: string; sourceId?: string } | null {
+  // Agent sessions are created by the dispatcher in-process, never through
+  // this route. Accepting the source here would let a client relabel a
+  // session it restores so the dispatcher sends a real run into it.
+  if (
+    body['sourceType'] === AGENT_HOST_SESSION_SOURCE_TYPE ||
+    body['sourceType'] === AGENT_SESSION_SOURCE_TYPE
+  ) {
+    res.status(400).json({
+      error:
+        'The requested session source is reserved for daemon-owned agent sessions.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
   if (
     isReservedStandaloneSessionSource({
       sourceType:
@@ -1499,6 +1520,10 @@ export function registerSessionRoutes(
         archiveState: 'active',
         size: 1,
         signal,
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
       });
       signal.throwIfAborted();
       return page.items.length > 0;
@@ -1870,6 +1895,19 @@ export function registerSessionRoutes(
     });
   };
 
+  const sendStandaloneActionUnsupported = (
+    res: Response,
+    route: string,
+    sessionId: string,
+  ): void => {
+    res.status(400).json({
+      error: 'This action is not supported in a standalone session.',
+      code: 'unsupported_action',
+      sessionId,
+      route,
+    });
+  };
+
   const isStandaloneOwner = (
     runtime: WorkspaceRuntime,
     sessionId: string,
@@ -1924,6 +1962,7 @@ export function registerSessionRoutes(
       options: {
         cwdBound?: 'always' | 'rewind-files' | 'sync-output-language';
         promptAdmission?: boolean;
+        rejectStandalone?: boolean;
       } = {},
     ): RequestHandler =>
     async (req, res) => {
@@ -1933,6 +1972,10 @@ export function registerSessionRoutes(
         const owner = await resolveOwnerSessionRuntime(sessionId, res, route);
         if (!owner) return;
         const { runtime, standalone } = owner;
+        if (options.rejectStandalone && standalone) {
+          sendStandaloneActionUnsupported(res, route, sessionId);
+          return;
+        }
         const cwdBound =
           options.cwdBound === 'always' ||
           (options.cwdBound === 'rewind-files' &&
@@ -2827,12 +2870,7 @@ export function registerSessionRoutes(
         if (!owner) return;
         const { runtime, standalone } = owner;
         if (options.rejectStandalone && standalone) {
-          res.status(400).json({
-            error: 'This action is not supported in a standalone session.',
-            code: 'unsupported_action',
-            sessionId,
-            route,
-          });
+          sendStandaloneActionUnsupported(res, route, sessionId);
           return;
         }
         if (
@@ -3068,7 +3106,16 @@ export function registerSessionRoutes(
         // by a "new chat" does not block a fresh branch session.
         const sharedCheckoutSession = runtime.bridge
           .listWorkspaceSessions(workspaceCwd)
-          .find((session) => !session.worktree && session.clientCount > 0);
+          .find(
+            (session) =>
+              session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE &&
+              // Mesh agent bodies hold no user edits and are driven by the
+              // daemon, not by a person at a checkout — they must not block
+              // branch creation in the workspace they happen to share.
+              session.sourceType !== AGENT_SESSION_SOURCE_TYPE &&
+              !session.worktree &&
+              session.clientCount > 0,
+          );
         if (sharedCheckoutSession) {
           res.status(409).json({
             error:
@@ -3949,9 +3996,8 @@ export function registerSessionRoutes(
         // The coordinator canonicalizes lock keys (every case variant of a
         // caller id contends on one key), so the request spelling alone
         // covers the raw-spelled batch delete/archive/unarchive locks.
-        const session = await archiveCoordinator.runSharedMany(
-          [sessionId],
-          async () => {
+        const session = await runWithWorkspaceRuntimeStorage(runtime, () =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
             const sessionService =
               createWorkspaceRuntimeSessionService(runtime);
             const persistedSessionId = await resolveSessionIdForRestore(
@@ -4002,9 +4048,15 @@ export function registerSessionRoutes(
               sourceId: _reservedSourceId,
               ...metadataWithoutSource
             } = metadata;
+            // Agent-source sessions strip their source on restore as well:
+            // the restore is a person reading history, and the admission gate
+            // in acpAgent refuses `sourceType: 'agent'` materialisation with
+            // no live run behind it — keeping the source would make a finished
+            // agent's transcript unopenable while it stays listed.
             const restoreMetadata =
-              !isInternalWorkspaceRuntime(runtime) &&
-              isReservedStandaloneSessionSource(metadata)
+              (!isInternalWorkspaceRuntime(runtime) &&
+                isReservedStandaloneSessionSource(metadata)) ||
+              metadata.sourceType === AGENT_SESSION_SOURCE_TYPE
                 ? metadataWithoutSource
                 : metadata;
             const hasPersistedSource =
@@ -4244,7 +4296,7 @@ export function registerSessionRoutes(
               }
             }
             return restored;
-          },
+          }),
         );
         const cleanupRestoredSession = async (): Promise<void> => {
           if (deferRestoreAskUserQuestionPrompt) {
@@ -5078,8 +5130,9 @@ export function registerSessionRoutes(
               try {
                 assertRuntimeGenerationOpen?.();
                 // 1. The replacement spawns in the root workspace with the
-                // same thread-scope and source metadata conventions as a
-                // fresh worktree creation, minus worktree creation.
+                // same thread-scope, source and worktree metadata conventions
+                // as a fresh worktree creation, minus worktree creation. The
+                // worktree metadata also keeps it on the Legacy engine.
                 const spawned = await runtime.bridge.spawnOrAttach({
                   workspaceCwd,
                   modelServiceId,
@@ -5091,6 +5144,11 @@ export function registerSessionRoutes(
                   ...(source.sourceId !== undefined
                     ? { sourceId: source.sourceId }
                     : {}),
+                  worktree: {
+                    slug: effectiveOldSidecar.slug,
+                    path: realTarget,
+                    branch: effectiveOldSidecar.worktreeBranch,
+                  },
                 });
                 spawnedNew = { sessionId: spawned.sessionId };
                 // 2. Relocate into the checkout.
@@ -5951,7 +6009,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/side-task',
     mutate(),
-    withRestrictedMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/side-task',
       async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
@@ -7494,6 +7552,172 @@ export function registerSessionRoutes(
         res.status(200).json(result);
       },
       { cwdBound: 'always' },
+    ),
+  );
+
+  const attachmentUploadBodyError: ErrorRequestHandler = (
+    error,
+    _req,
+    res,
+    next,
+  ) => {
+    const status =
+      error && typeof error === 'object' && 'status' in error
+        ? error.status
+        : undefined;
+    if (status === 400 || status === 413 || status === 415) {
+      res.status(status).json({
+        error:
+          status === 413
+            ? 'Attachment upload request body exceeds its limit'
+            : 'Invalid attachment upload request body',
+        code:
+          status === 413
+            ? 'attachment_upload_too_large'
+            : status === 415
+              ? error.type === 'encoding.unsupported'
+                ? 'invalid_attachment_upload_encoding'
+                : 'invalid_attachment_upload_content_type'
+              : 'invalid_attachment_upload_body',
+      });
+      return;
+    }
+    next(error);
+  };
+
+  app.post(
+    '/session/:id/attachment-uploads',
+    mutate(),
+    express.json({ limit: '4kb', inflate: false }),
+    attachmentUploadBodyError,
+    withOwnerMutableSession(
+      'POST /session/:id/attachment-uploads',
+      (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        if (
+          typeof body['name'] !== 'string' ||
+          typeof body['mimeType'] !== 'string' ||
+          !body['mimeType'].trim() ||
+          typeof body['size'] !== 'number'
+        ) {
+          throw new SessionAttachmentUploadError(
+            400,
+            'invalid_attachment_upload_metadata',
+            'name, mimeType, and size are required',
+          );
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        try {
+          const upload = runtime.bridge.createSessionAttachmentUpload(
+            sessionId,
+            {
+              name: body['name'],
+              mimeType: body['mimeType'].trim().toLowerCase(),
+              size: body['size'],
+            },
+            clientId === undefined ? undefined : { clientId },
+          );
+          res.set('Cache-Control', 'no-store').status(201).json(upload);
+        } catch (error) {
+          if (error instanceof TypeError || error instanceof RangeError) {
+            throw new SessionAttachmentUploadError(
+              error instanceof RangeError ? 413 : 400,
+              'invalid_attachment_upload_metadata',
+              error.message,
+            );
+          }
+          throw error;
+        }
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/attachment-uploads/:uploadId/chunks',
+    mutate(),
+    express.raw({
+      type: '*/*',
+      limit: SESSION_ATTACHMENT_CHUNK_BYTES,
+      inflate: false,
+    }),
+    attachmentUploadBodyError,
+    withOwnerMutableSession(
+      'POST /session/:id/attachment-uploads/:uploadId/chunks',
+      (req, res, sessionId, runtime) => {
+        if (
+          req.headers['content-type']
+            ?.split(';', 1)[0]
+            ?.trim()
+            .toLowerCase() !== 'application/octet-stream'
+        ) {
+          throw new SessionAttachmentUploadError(
+            415,
+            'invalid_attachment_upload_content_type',
+            'Chunks require application/octet-stream',
+          );
+        }
+        const offset = req.query['offset'];
+        if (
+          typeof offset !== 'string' ||
+          !/^\d+$/.test(offset) ||
+          !Number.isSafeInteger(Number(offset)) ||
+          !Buffer.isBuffer(req.body)
+        ) {
+          throw new SessionAttachmentUploadError(
+            400,
+            'invalid_attachment_upload_chunk',
+            'A raw chunk and a non-negative integer offset are required',
+          );
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = runtime.bridge.appendSessionAttachmentUpload(
+          sessionId,
+          req.params['uploadId']!,
+          Number(offset),
+          req.body,
+          clientId === undefined ? undefined : { clientId },
+        );
+        res.set('Cache-Control', 'no-store').status(200).json(result);
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/attachment-uploads/:uploadId/complete',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/attachment-uploads/:uploadId/complete',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const reference = await runtime.bridge.completeSessionAttachmentUpload(
+          sessionId,
+          req.params['uploadId']!,
+          clientId === undefined ? undefined : { clientId },
+          captureRuntimeGenerationAssertion(runtime),
+        );
+        res.set('Cache-Control', 'no-store').status(200).json(reference);
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/attachment-uploads/:uploadId',
+    mutate(),
+    withOwnerMutableSession(
+      'DELETE /session/:id/attachment-uploads/:uploadId',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        runtime.bridge.cancelSessionAttachmentUpload(
+          sessionId,
+          req.params['uploadId']!,
+          clientId === undefined ? undefined : { clientId },
+        );
+        res.status(204).end();
+      },
     ),
   );
 
@@ -9410,6 +9634,9 @@ export function registerSessionRoutes(
       }
       const sessions = bridge
         .listWorkspaceSessions(runtime.workspaceCwd)
+        .filter(
+          (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
+        )
         .map((session) => ({
           sessionId: session.sessionId,
           clientCount: session.clientCount,

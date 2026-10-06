@@ -91,6 +91,7 @@ import {
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
+  computeResumedPromptCountSeed,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
 import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
@@ -158,6 +159,7 @@ import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import {
   computeApiTruncationIndex,
+  isIdentifiedRetainedTurn,
   isRealUserTurn,
 } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
@@ -1223,17 +1225,13 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         loadHistoryWithLatchReconciliation(historyItems);
 
-        // Seed the prompt counter from the resumed conversation so new
-        // promptIds don't collide with restored file history snapshots.
-        const userTurnCount = resumedSessionData.conversation.messages.filter(
-          (m) =>
-            m.type === 'user' &&
-            m.subtype !== 'mid_turn_user_message' &&
-            m.subtype !== 'realtime_message',
-        ).length;
-        if (userTurnCount > 0) {
-          seedPromptCount(userTurnCount);
-        }
+        // Seed past identities already claimed by the resumed transcript.
+        seedPromptCount(
+          computeResumedPromptCountSeed(
+            resumedSessionData.conversation.messages,
+            config.getSessionId(),
+          ),
+        );
 
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
@@ -1904,6 +1902,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // re-arms the latch when the rebuilt history has no announcement.
     loadHistory: loadHistoryWithLatchReconciliation,
     startNewSession,
+    seedPromptCount,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
@@ -1914,6 +1913,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings,
     historyManager,
     startNewSession,
+    seedPromptCount,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
@@ -4255,6 +4255,7 @@ export const AppContainer = (props: AppContainerProps) => {
           );
           return;
         }
+
         // For 'both', validate that conversation can be truncated BEFORE
         // touching files — otherwise we'd roll back the workspace while
         // the conversation stays at the newer state.
@@ -4290,9 +4291,16 @@ export const AppContainer = (props: AppContainerProps) => {
               historyManager.addItem(
                 {
                   type: 'error',
-                  text: t(
-                    'Cannot rewind to a turn that was compressed. Try a more recent turn.',
-                  ),
+                  text: isIdentifiedRetainedTurn(
+                    historyManager.history,
+                    userItem.id,
+                  )
+                    ? t(
+                        'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
+                      )
+                    : t(
+                        'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+                      ),
                 },
                 Date.now(),
               );

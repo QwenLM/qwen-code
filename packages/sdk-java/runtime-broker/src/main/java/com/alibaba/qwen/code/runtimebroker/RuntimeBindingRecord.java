@@ -11,6 +11,7 @@ public final class RuntimeBindingRecord {
         DRAINING,
         LOST,
         RECOVERY_BLOCKED,
+        OPERATOR_RECOVERY,
         FAILED,
         RELEASED
     }
@@ -31,6 +32,9 @@ public final class RuntimeBindingRecord {
     private final Instant lastHealthAt;
     private final Instant lastReconciledAt;
     private final Instant lastActiveAt;
+    private final RuntimeRecoveryEvidence lossEvidence;
+    private final RuntimeRecoveryEvidence stopEvidence;
+    private final RuntimeDrainReceipt drainReceipt;
 
     public RuntimeBindingRecord(String bindingId,
             RuntimeProvisionRequest request, long generation, State state,
@@ -65,6 +69,35 @@ public final class RuntimeBindingRecord {
             String operationOwner, Instant operationLeaseUntil,
             long operationGeneration, long version, Instant lastHealthAt,
             Instant lastReconciledAt, Instant lastActiveAt) {
+        this(bindingId, request, provisionSeed, generation, state, lease,
+                resourceHandle, attestationGeneration, drainRequested,
+                operationOwner, operationLeaseUntil, operationGeneration,
+                version, lastHealthAt, lastReconciledAt, lastActiveAt, null, null);
+    }
+
+    RuntimeBindingRecord(String bindingId, RuntimeProvisionRequest request,
+            RuntimeProvisionSeed provisionSeed, long generation, State state,
+            RuntimeLease lease, RuntimeResourceHandle resourceHandle,
+            long attestationGeneration, boolean drainRequested,
+            String operationOwner, Instant operationLeaseUntil,
+            long operationGeneration, long version, Instant lastHealthAt,
+            Instant lastReconciledAt, Instant lastActiveAt,
+            RuntimeRecoveryEvidence lossEvidence, RuntimeRecoveryEvidence stopEvidence) {
+        this(bindingId, request, provisionSeed, generation, state, lease, resourceHandle,
+                attestationGeneration, drainRequested, operationOwner, operationLeaseUntil,
+                operationGeneration, version, lastHealthAt, lastReconciledAt, lastActiveAt,
+                lossEvidence, stopEvidence, null);
+    }
+
+    RuntimeBindingRecord(String bindingId, RuntimeProvisionRequest request,
+            RuntimeProvisionSeed provisionSeed, long generation, State state,
+            RuntimeLease lease, RuntimeResourceHandle resourceHandle,
+            long attestationGeneration, boolean drainRequested,
+            String operationOwner, Instant operationLeaseUntil,
+            long operationGeneration, long version, Instant lastHealthAt,
+            Instant lastReconciledAt, Instant lastActiveAt,
+            RuntimeRecoveryEvidence lossEvidence, RuntimeRecoveryEvidence stopEvidence,
+            RuntimeDrainReceipt drainReceipt) {
         this.bindingId = BrokerValues.requireId(bindingId, "bindingId");
         if (request == null) {
             throw new IllegalArgumentException("request is required");
@@ -132,6 +165,69 @@ public final class RuntimeBindingRecord {
         this.lastHealthAt = lastHealthAt;
         this.lastReconciledAt = lastReconciledAt;
         this.lastActiveAt = lastActiveAt;
+        requireEvidence(lossEvidence, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST);
+        requireEvidence(stopEvidence, RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED);
+        if (lossEvidence != null && state != State.LOST && state != State.RELEASED
+                && state != State.OPERATOR_RECOVERY) {
+            throw new IllegalArgumentException("Loss evidence requires a fenced binding");
+        }
+        if (stopEvidence != null && (lossEvidence == null
+                || !stopEvidence.hostDomain().equals(lossEvidence.hostDomain()))) {
+            throw new IllegalArgumentException("Stop evidence must prove the original writer domain");
+        }
+        this.lossEvidence = lossEvidence;
+        this.stopEvidence = stopEvidence;
+        if (drainReceipt != null && (!drainRequested || !drainReceipt.matches(this))) {
+            throw new IllegalArgumentException("Drain receipt identity differs");
+        }
+        this.drainReceipt = drainReceipt;
+    }
+
+    private void requireEvidence(RuntimeRecoveryEvidence evidence,
+            RuntimeRecoveryEvidence.Fact fact) {
+        if (evidence != null && (evidence.fact() != fact
+                || !evidence.matches(provisionSeed, resourceHandle, lease))) {
+            throw new IllegalArgumentException("Recovery evidence identity differs");
+        }
+    }
+
+    public RuntimeRecoveryEvidence getLossEvidence() {
+        return lossEvidence;
+    }
+
+    public RuntimeRecoveryEvidence getStopEvidence() {
+        return stopEvidence;
+    }
+
+    public boolean hasStoppedWriters() {
+        return lossEvidence != null && stopEvidence != null;
+    }
+
+    public RuntimeBindingRecord withRecoveryEvidence(RuntimeRecoveryEvidence loss,
+            RuntimeRecoveryEvidence stop, Instant activeAt) {
+        requireEvidence(loss, RuntimeRecoveryEvidence.Fact.JOURNAL_LOST);
+        requireEvidence(stop, RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED);
+        return new RuntimeBindingRecord(bindingId, request, provisionSeed,
+                generation, State.LOST, lease, resourceHandle,
+                attestationGeneration, drainRequested, operationOwner,
+                operationLeaseUntil, operationGeneration, version,
+                lastHealthAt, lastReconciledAt, activeAt,
+                lossEvidence == null ? loss : lossEvidence,
+                stopEvidence == null ? stop : stopEvidence, drainReceipt);
+    }
+
+    public RuntimeDrainReceipt getDrainReceipt() {
+        return drainReceipt;
+    }
+
+    public RuntimeBindingRecord withDrainReceipt(RuntimeDrainReceipt receipt) {
+        if (!drainRequested || receipt == null || !receipt.matches(this)) {
+            throw new IllegalArgumentException("Drain receipt identity differs");
+        }
+        return new RuntimeBindingRecord(bindingId, request, provisionSeed, generation, state,
+                lease, receipt.resourceHandle(), attestationGeneration, drainRequested,
+                operationOwner, operationLeaseUntil, operationGeneration, version, lastHealthAt,
+                lastReconciledAt, lastActiveAt, lossEvidence, stopEvidence, receipt);
     }
 
     public String getBindingId() {
@@ -260,6 +356,77 @@ public final class RuntimeBindingRecord {
                 lastReconciledAt, lastActiveAt);
     }
 
+    boolean blocksPlacement(RuntimeProvisionRequest candidate) {
+        // A local worker without a lease or attested generation never
+        // admitted a Session; failed startup still blocks its own slot.
+        boolean unreclaimed = state == State.LOST
+                || state == State.DRAINING
+                || state == State.OPERATOR_RECOVERY
+                || state == State.RECOVERY_BLOCKED
+                        && (!LocalProcessRuntimeProvisioner.KIND.equals(
+                                        request.getProvisionerKind())
+                                || lease != null
+                                || attestationGeneration > 0)
+                || state == State.FAILED && provisionSeed != null;
+        return unreclaimed
+                && request.getScope().getTenantId().equals(candidate.getScope().getTenantId())
+                && (!request.isManagedContext()
+                        || (state == State.OPERATOR_RECOVERY || state == State.LOST || state == State.DRAINING
+                                || state == State.RECOVERY_BLOCKED || state == State.FAILED)
+                                && (request.getStorageId().equals(candidate.getStorageId())
+                                        || request.getScope().getCanonicalCwd().equals(
+                                                candidate.getScope().getCanonicalCwd()))
+                        || request.getScope().getWorkspaceId().equals(
+                                candidate.getScope().getWorkspaceId()));
+    }
+
+    public boolean hasSameLease(RuntimeLease other) {
+        return lease == other || lease != null && other != null
+                && lease.getRuntimeInstanceId().equals(other.getRuntimeInstanceId())
+                && lease.getEndpoint().equals(other.getEndpoint())
+                && lease.getToken().equals(other.getToken())
+                && lease.getLeaseId().equals(other.getLeaseId())
+                && lease.getEpoch() == other.getEpoch();
+    }
+
+    void requireSafeReplacement(RuntimeBindingRecord replacement) {
+        if (drainReceipt != null && !drainReceipt.equals(replacement.drainReceipt)) {
+            throw new IllegalArgumentException("Drain proof cannot be overwritten");
+        }
+        if ("kubernetes-workspace".equals(request.getProvisionerKind()) && resourceHandle != null
+                && !Objects.equals(resourceHandle, replacement.resourceHandle)) {
+            throw new IllegalArgumentException("Original CSI resource identity cannot be replaced");
+        }
+        if ("kubernetes-workspace".equals(request.getProvisionerKind()) && drainRequested
+                && (!replacement.drainRequested || replacement.state != state
+                        || !hasSameLease(replacement.lease)
+                        || !Objects.equals(resourceHandle, replacement.resourceHandle)
+                        || attestationGeneration != replacement.attestationGeneration)) {
+            throw new IllegalArgumentException("Sealed CSI binding requires durable retirement");
+        }
+        if (!Objects.equals(lossEvidence, replacement.lossEvidence)
+                        && lossEvidence != null
+                || !Objects.equals(stopEvidence, replacement.stopEvidence)
+                        && stopEvidence != null) {
+            throw new IllegalArgumentException("Recovery evidence cannot be overwritten");
+        }
+        if ((state == State.LOST && replacement.state != State.LOST
+                && !(replacement.state == State.RELEASED && replacement.drainReceipt != null))
+                || state == State.OPERATOR_RECOVERY
+                        && replacement.state != State.OPERATOR_RECOVERY
+                        && replacement.state != State.LOST) {
+            throw new IllegalArgumentException("Lost binding requires atomic recovery");
+        }
+        if (state == State.OPERATOR_RECOVERY && replacement.state == State.LOST
+                && !replacement.hasStoppedWriters()) {
+            throw new IllegalArgumentException("Operator recovery requires stopped-writer evidence");
+        }
+        if ((state == State.READY || state == State.RECOVERY_BLOCKED
+                || state == State.DRAINING) && replacement.state == State.FAILED) {
+            throw new IllegalArgumentException("Unproved runtime loss cannot free a placement");
+        }
+    }
+
     boolean sameIdentity(RuntimeBindingRecord other) {
         return other != null && bindingId.equals(other.bindingId)
                 && request.equals(other.request)
@@ -288,6 +455,6 @@ public final class RuntimeBindingRecord {
                 generation, nextState, nextLease, nextHandle,
                 nextAttestationGeneration, requested, owner, leaseUntil,
                 nextOperationGeneration, nextVersion, healthAt,
-                reconciledAt, activeAt);
+                reconciledAt, activeAt, lossEvidence, stopEvidence, drainReceipt);
     }
 }

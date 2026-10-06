@@ -609,6 +609,19 @@ function normalizeInlineTagRemovalChanges(
 
 let nextComposerTagTooltipId = 0;
 
+// Root.unmount() flushes pending sync work across ALL roots (#12826). Callers
+// pass the roots they captured before nulling the widget fields, so a fresh
+// root created by a later re-render is never unmounted here.
+function deferComposerTagRootUnmount(
+  contentRoot: Root | null,
+  tooltipRoot: Root | null,
+): void {
+  queueMicrotask(() => {
+    contentRoot?.unmount();
+    tooltipRoot?.unmount();
+  });
+}
+
 class ComposerTagWidget extends WidgetType {
   private contentRoot: Root | null = null;
   private tooltipRoot: Root | null = null;
@@ -714,8 +727,9 @@ class ComposerTagWidget extends WidgetType {
         chip.appendChild(content);
         renderedCustomContent = true;
       } catch (error) {
-        this.contentRoot?.unmount();
+        const contentRoot = this.contentRoot;
         this.contentRoot = null;
+        deferComposerTagRootUnmount(contentRoot, null);
         console.warn('[WebShell] inline tag renderContent failed', error);
       }
     }
@@ -801,8 +815,9 @@ class ComposerTagWidget extends WidgetType {
       tooltipElement.id = `composer-tag-tooltip-${++nextComposerTagTooltipId}`;
       chip.setAttribute('aria-describedby', tooltipElement.id);
     } catch (error) {
-      this.tooltipRoot?.unmount();
+      const tooltipRoot = this.tooltipRoot;
       this.tooltipRoot = null;
+      deferComposerTagRootUnmount(null, tooltipRoot);
       if (this.tag.tooltipText) {
         chip.title = this.tag.tooltipText;
       }
@@ -873,10 +888,14 @@ class ComposerTagWidget extends WidgetType {
   }
 
   destroy() {
-    this.contentRoot?.unmount();
-    this.tooltipRoot?.unmount();
+    const contentRoot = this.contentRoot;
+    const tooltipRoot = this.tooltipRoot;
     this.contentRoot = null;
     this.tooltipRoot = null;
+    if (!contentRoot && !tooltipRoot) return;
+    // WidgetType.destroy() runs inside CodeMirror's update cycle, so the
+    // unmount has to leave that cycle before React flushes sync work.
+    deferComposerTagRootUnmount(contentRoot, tooltipRoot);
   }
 
   ignoreEvent(): boolean {
@@ -2851,9 +2870,22 @@ export function useComposerCore(
     const prompt = buildComposerPrompt(text, tags);
     const isShellMode = shellModeRef.current;
     const promptText = isShellMode && prompt ? `!${prompt}` : prompt;
+    // Inline chip placements are offsets into the pre-substitution editor
+    // document; they stay valid for `text` only while substitution preserves
+    // their length, and the annotation generator validates each range (with
+    // a unique-match fallback) for anything else. Shift them past the prompt
+    // prefix (top tags plus the blank separator, and the shell-mode `!`) so
+    // annotations land on the chips instead of earlier plain text spelled
+    // the same (#12980).
+    const promptPrefixLength = promptText.length - text.length;
     const generatedInputAnnotations = createInputAnnotationsFromComposerTags(
       promptText,
-      [...tags, ...normalizedInlineTags.map((placement) => placement.tag)],
+      tags,
+      normalizedInlineTags.map((placement) => ({
+        start: placement.start + promptPrefixLength,
+        end: placement.end + promptPrefixLength,
+        tag: placement.tag,
+      })),
     );
     const inputAnnotations = [...generatedInputAnnotations];
     const annotationKeys = new Set(

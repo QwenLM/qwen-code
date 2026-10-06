@@ -151,7 +151,10 @@ import {
   buildAgentDelegationSection,
   resolveAgentDelegationSurface,
 } from '../../skills/agent-delegation-skill.js';
-import type { BundledReferenceSurface } from '../../skills/bundled-reference.js';
+import {
+  type BundledReferenceSurface,
+  toolSearchBridgeSentence,
+} from '../../skills/bundled-reference.js';
 
 const EXTERNAL_USAGE_NOTICE =
   '\n\n[External executor token usage and cost are unavailable.]';
@@ -758,6 +761,14 @@ export function stampBackgroundPromptPolicy(
   config.getShouldAvoidPermissionPrompts = () => !shouldBubble;
 }
 
+// The deferred-tool catalog renders `description.split('\n')[0]`, so this
+// first line is the tool's entire up-front surface until discovery. The
+// constructor serves it before `refreshSubagents()` resolves and
+// `updateDescriptionAndSchema()` rebuilds from it after — define it once so
+// the cold-start copy cannot drift away from the tested, assembled one.
+const AGENT_DESCRIPTION_FIRST_LINE =
+  'Delegate complex, independent work to specialized agents for explicit parallel requests or broad codebase research that clearly needs more than 3 searches.';
+
 /**
  * Agent tool that enables primary agents to delegate tasks to specialized agents.
  * The tool dynamically loads available agents and includes them in its description
@@ -876,11 +887,12 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     super(
       AgentTool.Name,
       ToolDisplayNames.AGENT,
-      'Launch a new agent to handle complex, multi-step tasks autonomously.\n\nThe Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tools they have access to:\n',
+      `${AGENT_DESCRIPTION_FIRST_LINE}\n\nThe Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tools they have access to:\n`,
       Kind.Agent,
       initialSchema,
       true, // isOutputMarkdown
       true, // canUpdateOutput - Enable live output updates for real-time progress
+      true, // shouldDefer
     );
 
     this.delegationSurface = resolveAgentDelegationSurface(config);
@@ -957,7 +969,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     const delegationSection = buildAgentDelegationSection(
       this.delegationSurface,
     );
-    const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
+    const baseDescription = `${AGENT_DESCRIPTION_FIRST_LINE}
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
 Available agent types and the tools they have access to:
@@ -990,6 +1002,8 @@ ${todoGuidance}- Delegate only concrete, bounded tasks that can run independentl
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 
 ## Working with background agents
+
+In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)}
 
 **Don't peek.** Do not read or tail a background agent's output file while it runs. You get a completion notification; trust it. Reading the transcript mid-flight pulls the agent's tool noise into your context, which defeats the point of delegating.
 
@@ -4138,18 +4152,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 isFork ? 'fork' : 'background',
               ),
               turnAbortController.signal,
-              (recordOutcome) =>
-                runWithAgentContext(
-                  hookOpts.agentId,
-                  () =>
-                    bgBody(
-                      turnContextState,
-                      turnAbortController,
-                      recordOutcome,
-                      fireStartHook,
-                    ),
-                  launchDepth,
-                ),
+              (recordOutcome) => {
+                const body = () =>
+                  bgBody(
+                    turnContextState,
+                    turnAbortController,
+                    recordOutcome,
+                    fireStartHook,
+                  );
+                return runWithAgentContext(hookOpts.agentId, body, launchDepth);
+              },
             );
           return isFork ? runInForkContext(framedBgBody) : framedBgBody();
         };
@@ -4161,13 +4173,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
 
         const residentController: ResidentBackgroundAgent = {
-          continue: (message) => {
+          continue: (input) => {
             if (!canStayResident || disposeRequested || runtimeDisposed) {
-              return false;
+              return 'fallback';
             }
             if (needsAutoPermissionLease()) {
               requestRuntimeDisposal();
-              return false;
+              return 'fallback';
+            }
+
+            const currentEntry = registry.get(hookOpts.agentId);
+            if (!registry.canStartBackgroundAgent(currentEntry?.model)) {
+              return 'capacity_wait';
             }
 
             const nextAbortController = new AbortController();
@@ -4181,7 +4198,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               debugLogger.warn(
                 `[Agent] Could not continue resident background agent ${hookOpts.agentId}: ${error instanceof Error ? error.message : String(error)}`,
               );
-              return false;
+              return registry.canStartBackgroundAgent(currentEntry?.model)
+                ? 'fallback'
+                : 'capacity_wait';
             }
             if (
               !restarted ||
@@ -4190,7 +4209,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               registry.get(hookOpts.agentId) !== restarted ||
               restarted.status !== 'running'
             ) {
-              return false;
+              return 'fallback';
             }
 
             liveToolCallCount = 0;
@@ -4211,7 +4230,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             });
 
             const nextContextState = new ContextState();
-            nextContextState.set('task_prompt', message);
+            if (typeof input === 'string') {
+              nextContextState.set('task_prompt', input);
+            } else {
+              nextContextState.set('external_inputs_override', [input]);
+            }
             nextContextState.set('hook_context', '');
             const previousTurn = currentTurnPromise ?? Promise.resolve();
             currentTurnPromise = previousTurn
@@ -4225,7 +4248,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 );
               });
             currentTurnPromise.catch(reportUnexpectedBackgroundError);
-            return true;
+            return 'continued';
           },
           dispose: requestRuntimeDisposal,
         };

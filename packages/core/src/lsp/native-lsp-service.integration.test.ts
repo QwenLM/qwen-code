@@ -13,55 +13,20 @@ import type { IdeContextStore } from '../ide/ideContext.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import type { LspDiagnostic, LspLocation } from './types.js';
 
-/**
- * Mock LSP server responses for integration testing.
- * This simulates real LSP server behavior without requiring an actual server.
- */
+/** An LSP range from line `sl`, character `sc` to line `el`, character `ec`. */
+const range = (sl: number, sc: number, el: number, ec: number) => ({
+  start: { line: sl, character: sc },
+  end: { line: el, character: ec },
+});
+
+/** LSP server responses, shaped as a real server would send them. */
 const MOCK_LSP_RESPONSES = {
-  initialize: {
-    capabilities: {
-      textDocumentSync: 1,
-      completionProvider: {},
-      hoverProvider: true,
-      definitionProvider: true,
-      referencesProvider: true,
-      documentSymbolProvider: true,
-      workspaceSymbolProvider: true,
-      codeActionProvider: true,
-      diagnosticProvider: {
-        interFileDependencies: true,
-        workspaceDiagnostics: true,
-      },
-    },
-    serverInfo: {
-      name: 'mock-lsp-server',
-      version: '1.0.0',
-    },
-  },
   'textDocument/definition': [
-    {
-      uri: 'file:///test/workspace/src/types.ts',
-      range: {
-        start: { line: 10, character: 0 },
-        end: { line: 10, character: 20 },
-      },
-    },
+    { uri: 'file:///test/workspace/src/types.ts', range: range(10, 0, 10, 20) },
   ],
   'textDocument/references': [
-    {
-      uri: 'file:///test/workspace/src/app.ts',
-      range: {
-        start: { line: 5, character: 10 },
-        end: { line: 5, character: 20 },
-      },
-    },
-    {
-      uri: 'file:///test/workspace/src/utils.ts',
-      range: {
-        start: { line: 15, character: 5 },
-        end: { line: 15, character: 15 },
-      },
-    },
+    { uri: 'file:///test/workspace/src/app.ts', range: range(5, 10, 5, 20) },
+    { uri: 'file:///test/workspace/src/utils.ts', range: range(15, 5, 15, 15) },
   ],
   'textDocument/hover': {
     contents: {
@@ -69,35 +34,20 @@ const MOCK_LSP_RESPONSES = {
       value:
         '```typescript\nfunction testFunc(): void\n```\n\nA test function.',
     },
-    range: {
-      start: { line: 10, character: 0 },
-      end: { line: 10, character: 8 },
-    },
+    range: range(10, 0, 10, 8),
   },
   'textDocument/documentSymbol': [
     {
       name: 'TestClass',
       kind: 5, // Class
-      range: {
-        start: { line: 0, character: 0 },
-        end: { line: 20, character: 1 },
-      },
-      selectionRange: {
-        start: { line: 0, character: 6 },
-        end: { line: 0, character: 15 },
-      },
+      range: range(0, 0, 20, 1),
+      selectionRange: range(0, 6, 0, 15),
       children: [
         {
           name: 'constructor',
           kind: 9, // Constructor
-          range: {
-            start: { line: 2, character: 2 },
-            end: { line: 4, character: 3 },
-          },
-          selectionRange: {
-            start: { line: 2, character: 2 },
-            end: { line: 2, character: 13 },
-          },
+          range: range(2, 2, 4, 3),
+          selectionRange: range(2, 2, 2, 13),
         },
       ],
     },
@@ -108,10 +58,7 @@ const MOCK_LSP_RESPONSES = {
       kind: 5, // Class
       location: {
         uri: 'file:///test/workspace/src/test.ts',
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 20, character: 1 },
-        },
+        range: range(0, 0, 20, 1),
       },
     },
     {
@@ -119,21 +66,9 @@ const MOCK_LSP_RESPONSES = {
       kind: 12, // Function
       location: {
         uri: 'file:///test/workspace/src/utils.ts',
-        range: {
-          start: { line: 5, character: 0 },
-          end: { line: 10, character: 1 },
-        },
+        range: range(5, 0, 10, 1),
       },
       containerName: 'utils',
-    },
-  ],
-  'textDocument/implementation': [
-    {
-      uri: 'file:///test/workspace/src/impl.ts',
-      range: {
-        start: { line: 20, character: 0 },
-        end: { line: 40, character: 1 },
-      },
     },
   ],
   'textDocument/prepareCallHierarchy': [
@@ -142,14 +77,8 @@ const MOCK_LSP_RESPONSES = {
       kind: 12, // Function
       detail: '(param: string) => void',
       uri: 'file:///test/workspace/src/utils.ts',
-      range: {
-        start: { line: 5, character: 0 },
-        end: { line: 10, character: 1 },
-      },
-      selectionRange: {
-        start: { line: 5, character: 9 },
-        end: { line: 5, character: 21 },
-      },
+      range: range(5, 0, 10, 1),
+      selectionRange: range(5, 9, 5, 21),
     },
   ],
   'callHierarchy/incomingCalls': [
@@ -158,21 +87,10 @@ const MOCK_LSP_RESPONSES = {
         name: 'callerFunction',
         kind: 12,
         uri: 'file:///test/workspace/src/caller.ts',
-        range: {
-          start: { line: 10, character: 0 },
-          end: { line: 15, character: 1 },
-        },
-        selectionRange: {
-          start: { line: 10, character: 9 },
-          end: { line: 10, character: 23 },
-        },
+        range: range(10, 0, 15, 1),
+        selectionRange: range(10, 9, 10, 23),
       },
-      fromRanges: [
-        {
-          start: { line: 12, character: 2 },
-          end: { line: 12, character: 16 },
-        },
-      ],
+      fromRanges: [range(12, 2, 12, 16)],
     },
   ],
   'callHierarchy/outgoingCalls': [
@@ -181,41 +99,24 @@ const MOCK_LSP_RESPONSES = {
         name: 'helperFunction',
         kind: 12,
         uri: 'file:///test/workspace/src/helper.ts',
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 5, character: 1 },
-        },
-        selectionRange: {
-          start: { line: 0, character: 9 },
-          end: { line: 0, character: 23 },
-        },
+        range: range(0, 0, 5, 1),
+        selectionRange: range(0, 9, 0, 23),
       },
-      fromRanges: [
-        {
-          start: { line: 7, character: 2 },
-          end: { line: 7, character: 16 },
-        },
-      ],
+      fromRanges: [range(7, 2, 7, 16)],
     },
   ],
   'textDocument/diagnostic': {
     kind: 'full',
     items: [
       {
-        range: {
-          start: { line: 5, character: 0 },
-          end: { line: 5, character: 10 },
-        },
+        range: range(5, 0, 5, 10),
         severity: 1, // Error
         code: 'TS2304',
         source: 'typescript',
         message: "Cannot find name 'undeclaredVar'.",
       },
       {
-        range: {
-          start: { line: 10, character: 0 },
-          end: { line: 10, character: 15 },
-        },
+        range: range(10, 0, 10, 15),
         severity: 2, // Warning
         code: 'TS6133',
         source: 'typescript',
@@ -231,10 +132,7 @@ const MOCK_LSP_RESPONSES = {
         uri: 'file:///test/workspace/src/app.ts',
         items: [
           {
-            range: {
-              start: { line: 5, character: 0 },
-              end: { line: 5, character: 10 },
-            },
+            range: range(5, 0, 5, 10),
             severity: 1,
             code: 'TS2304',
             source: 'typescript',
@@ -247,10 +145,7 @@ const MOCK_LSP_RESPONSES = {
         uri: 'file:///test/workspace/src/utils.ts',
         items: [
           {
-            range: {
-              start: { line: 10, character: 0 },
-              end: { line: 10, character: 15 },
-            },
+            range: range(10, 0, 10, 15),
             severity: 2,
             code: 'TS6133',
             source: 'typescript',
@@ -266,10 +161,7 @@ const MOCK_LSP_RESPONSES = {
       kind: 'quickfix',
       diagnostics: [
         {
-          range: {
-            start: { line: 0, character: 0 },
-            end: { line: 0, character: 5 },
-          },
+          range: range(0, 0, 0, 5),
           severity: 1,
           message: "Cannot find name 'React'.",
         },
@@ -278,10 +170,7 @@ const MOCK_LSP_RESPONSES = {
         changes: {
           'file:///test/workspace/src/app.tsx': [
             {
-              range: {
-                start: { line: 0, character: 0 },
-                end: { line: 0, character: 0 },
-              },
+              range: range(0, 0, 0, 0),
               newText: "import React from 'react';\n",
             },
           ],
@@ -296,10 +185,7 @@ const MOCK_LSP_RESPONSES = {
         changes: {
           'file:///test/workspace/src/app.tsx': [
             {
-              range: {
-                start: { line: 0, character: 0 },
-                end: { line: 5, character: 0 },
-              },
+              range: range(0, 0, 5, 0),
               newText:
                 "import { Component } from 'react';\nimport { helper } from './utils';\n",
             },
@@ -310,9 +196,6 @@ const MOCK_LSP_RESPONSES = {
   ],
 };
 
-/**
- * Mock configuration for testing.
- */
 class MockConfig {
   rootPath = '/test/workspace';
   private trusted = true;
@@ -334,9 +217,6 @@ class MockConfig {
   }
 }
 
-/**
- * Mock workspace context for testing.
- */
 class MockWorkspaceContext {
   rootPath = '/test/workspace';
 
@@ -375,9 +255,6 @@ class MockWorkspaceContext {
   }
 }
 
-/**
- * Mock file discovery service for testing.
- */
 class MockFileDiscoveryService {
   async discoverFiles(_root: string, _options: unknown): Promise<string[]> {
     return [
@@ -393,9 +270,6 @@ class MockFileDiscoveryService {
   }
 }
 
-/**
- * Mock IDE context store for testing.
- */
 class MockIdeContextStore {}
 
 describe('NativeLspService Integration Tests', () => {
@@ -406,6 +280,20 @@ describe('NativeLspService Integration Tests', () => {
   let mockIdeStore: MockIdeContextStore;
   let eventEmitter: EventEmitter;
 
+  /** A service over this test's mocks. */
+  const createService = (
+    options?: ConstructorParameters<typeof NativeLspService>[5],
+    workspace: MockWorkspaceContext = mockWorkspace,
+  ) =>
+    new NativeLspService(
+      mockConfig as unknown as CoreConfig,
+      workspace as unknown as WorkspaceContext,
+      eventEmitter,
+      mockFileDiscovery as unknown as FileDiscoveryService,
+      mockIdeStore as unknown as IdeContextStore,
+      options,
+    );
+
   beforeEach(() => {
     mockConfig = new MockConfig();
     mockWorkspace = new MockWorkspaceContext();
@@ -413,16 +301,7 @@ describe('NativeLspService Integration Tests', () => {
     mockIdeStore = new MockIdeContextStore();
     eventEmitter = new EventEmitter();
 
-    lspService = new NativeLspService(
-      mockConfig as unknown as CoreConfig,
-      mockWorkspace as unknown as WorkspaceContext,
-      eventEmitter,
-      mockFileDiscovery as unknown as FileDiscoveryService,
-      mockIdeStore as unknown as IdeContextStore,
-      {
-        workspaceRoot: mockWorkspace.rootPath,
-      },
-    );
+    lspService = createService({ workspaceRoot: mockWorkspace.rootPath });
   });
 
   afterEach(() => {
@@ -447,17 +326,10 @@ describe('NativeLspService Integration Tests', () => {
 
     it('should skip discovery for untrusted workspace', async () => {
       mockConfig.setTrusted(false);
-      const untrustedService = new NativeLspService(
-        mockConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        {
-          workspaceRoot: mockWorkspace.rootPath,
-          requireTrustedWorkspace: true,
-        },
-      );
+      const untrustedService = createService({
+        workspaceRoot: mockWorkspace.rootPath,
+        requireTrustedWorkspace: true,
+      });
 
       await untrustedService.discoverAndPrepare();
       const status = untrustedService.getStatus();
@@ -641,13 +513,7 @@ describe('NativeLspService Integration Tests', () => {
       const emptyWorkspace = new MockWorkspaceContext();
       emptyWorkspace.getDirectories = () => [];
 
-      const service = new NativeLspService(
-        mockConfig as unknown as CoreConfig,
-        emptyWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-      );
+      const service = createService(undefined, emptyWorkspace);
 
       await expect(service.discoverAndPrepare()).resolves.not.toThrow();
     });
@@ -666,17 +532,17 @@ describe('NativeLspService Integration Tests', () => {
 
     it('should return empty code actions when no server is ready', async () => {
       const uri = 'file:///test/workspace/src/app.ts';
-      const range = {
-        start: { line: 0, character: 0 },
-        end: { line: 0, character: 10 },
-      };
       const context = {
         diagnostics: [],
         only: undefined,
         triggerKind: 'invoked' as const,
       };
 
-      const results = await lspService.codeActions(uri, range, context);
+      const results = await lspService.codeActions(
+        uri,
+        range(0, 0, 0, 10),
+        context,
+      );
       expect(results).toEqual([]);
     });
   });
@@ -685,16 +551,7 @@ describe('NativeLspService Integration Tests', () => {
     it('should respect trust requirements', async () => {
       mockConfig.setTrusted(false);
 
-      const strictService = new NativeLspService(
-        mockConfig as unknown as CoreConfig,
-        mockWorkspace as unknown as WorkspaceContext,
-        eventEmitter,
-        mockFileDiscovery as unknown as FileDiscoveryService,
-        mockIdeStore as unknown as IdeContextStore,
-        {
-          requireTrustedWorkspace: true,
-        },
-      );
+      const strictService = createService({ requireTrustedWorkspace: true });
 
       await strictService.discoverAndPrepare();
       const status = strictService.getStatus();
@@ -717,10 +574,7 @@ describe('LSP Response Type Validation', () => {
   describe('LspDiagnostic', () => {
     it('should have correct structure', () => {
       const diagnostic: LspDiagnostic = {
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 0, character: 10 },
-        },
+        range: range(0, 0, 0, 10),
         severity: 'error',
         code: 'TS2304',
         source: 'typescript',
@@ -736,10 +590,7 @@ describe('LSP Response Type Validation', () => {
 
     it('should support optional fields', () => {
       const minimalDiagnostic: LspDiagnostic = {
-        range: {
-          start: { line: 0, character: 0 },
-          end: { line: 0, character: 10 },
-        },
+        range: range(0, 0, 0, 10),
         message: 'Error message',
       };
 
@@ -753,10 +604,7 @@ describe('LSP Response Type Validation', () => {
     it('should have correct structure', () => {
       const location: LspLocation = {
         uri: 'file:///test/file.ts',
-        range: {
-          start: { line: 10, character: 5 },
-          end: { line: 10, character: 15 },
-        },
+        range: range(10, 5, 10, 15),
       };
 
       expect(location.uri).toBe('file:///test/file.ts');

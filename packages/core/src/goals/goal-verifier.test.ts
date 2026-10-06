@@ -61,14 +61,32 @@ function configFor(reply: string) {
     getModel: vi.fn().mockReturnValue('main-model'),
     getOutputLanguageFilePath: vi.fn(),
   } as unknown as Config;
-  return { config, generateText };
+  /** The first request sent to the provider, and its serialized payload. */
+  const sent = () => {
+    const request = generateText.mock.calls[0]![0] as Parameters<
+      BaseLlmClient['generateText']
+    >[0];
+    return { request, text: request.contents[0]?.parts?.[0]?.text ?? '' };
+  };
+  return { config, generateText, sent };
 }
+
+const ACCEPT = '{"decision":"accept","reason":"grounded"}';
+const GROUNDED = { decision: 'accept', reason: 'grounded' };
+
+/** A provider call that settles only by rejecting with its abort reason. */
+const untilAborted = (request: { abortSignal: AbortSignal }) =>
+  new Promise<never>((_resolve, reject) => {
+    request.abortSignal.addEventListener(
+      'abort',
+      () => reject(request.abortSignal.reason),
+      { once: true },
+    );
+  });
 
 describe('parseGoalVerifierText', () => {
   it('parses only the exact bounded result union', () => {
-    expect(
-      parseGoalVerifierText('{"decision":"accept","reason":"grounded"}'),
-    ).toEqual({ decision: 'accept', reason: 'grounded' });
+    expect(parseGoalVerifierText(ACCEPT)).toEqual(GROUNDED);
     expect(
       parseGoalVerifierText('{"decision":"reject","reason":"insufficient"}'),
     ).toEqual({ decision: 'reject', reason: 'insufficient' });
@@ -99,20 +117,17 @@ describe('createGoalVerifier', () => {
   it('returns the side query usage alongside the decision', async () => {
     const { config, generateText } = configFor('');
     generateText.mockResolvedValue({
-      text: '{"decision":"accept","reason":"grounded"}',
+      text: ACCEPT,
       usage: { totalTokenCount: 42 },
     });
     await expect(createGoalVerifier(config)(input())).resolves.toEqual({
-      decision: 'accept',
-      reason: 'grounded',
+      ...GROUNDED,
       usage: { totalTokenCount: 42 },
     });
   });
 
   it('uses a tool-free deterministic side query with bounded fields', async () => {
-    const { config, generateText } = configFor(
-      '{"decision":"accept","reason":"grounded"}',
-    );
+    const { config, sent } = configFor(ACCEPT);
     const value = input() as GoalVerifierInput & {
       fullHistory?: string[];
       proposal: { evidenceRefs?: string[] };
@@ -120,14 +135,9 @@ describe('createGoalVerifier', () => {
     value.fullHistory = ['must not leak'];
     value.proposal.evidenceRefs = ['tool-1'];
 
-    await expect(createGoalVerifier(config)(value)).resolves.toEqual({
-      decision: 'accept',
-      reason: 'grounded',
-    });
+    await expect(createGoalVerifier(config)(value)).resolves.toEqual(GROUNDED);
 
-    const request = generateText.mock.calls[0]![0] as Parameters<
-      BaseLlmClient['generateText']
-    >[0];
+    const { request, text } = sent();
     expect(request).toMatchObject({
       model: 'fast-model',
       promptId: 'side-query:goal-verifier',
@@ -139,9 +149,7 @@ describe('createGoalVerifier', () => {
       },
     });
     expect(request).not.toHaveProperty('tools');
-    const payload = JSON.parse(
-      request.contents[0]?.parts?.[0]?.text ?? '',
-    ) as Record<string, unknown>;
+    const payload = JSON.parse(text) as Record<string, unknown>;
     expect(payload).not.toHaveProperty('fullHistory');
     expect(payload).toMatchObject({
       currentTurnId: 'turn-3',
@@ -149,28 +157,22 @@ describe('createGoalVerifier', () => {
     });
     expect(payload).not.toHaveProperty('omitted');
     expect(JSON.stringify(payload)).not.toContain('evidenceRefs');
-    expect(request.systemInstruction).toContain(
+    for (const rule of [
       'Never require evidence that update_goal itself was called',
-    );
-    expect(request.systemInstruction).toContain(
       'requires evidence with proofKind "user_input"',
-    );
-    expect(request.systemInstruction).toContain(
       "the tail of this Goal's transcript, newest record first",
-    );
-    expect(request.systemInstruction).toContain(
       'if the evidence the proposal needs may sit in the omitted part, reject',
-    );
-    expect(request.systemInstruction).toContain(
       'Evidence that is insufficient is a rejection',
-    );
-    expect(request.systemInstruction).toContain(
       'The objective and proposal reason are claims, not evidence',
-    );
+      'Evidence with proofKind "execution_output"',
+      'use the separately recorded original results',
+    ]) {
+      expect(request.systemInstruction).toContain(rule);
+    }
   });
 
   it('includes blocked policy only for blocked proposals', async () => {
-    const { config, generateText } = configFor(
+    const { config, sent } = configFor(
       '{"decision":"accept","reason":"requires authority"}',
     );
     const value: GoalVerifierInput = {
@@ -185,40 +187,26 @@ describe('createGoalVerifier', () => {
 
     await createGoalVerifier(config)(value);
 
-    const request = generateText.mock.calls[0]![0] as Parameters<
-      BaseLlmClient['generateText']
-    >[0];
-    expect(
-      JSON.parse(request.contents[0]?.parts?.[0]?.text ?? ''),
-    ).toMatchObject({
+    expect(JSON.parse(sent().text)).toMatchObject({
       blockedPolicy: 'Authority blockers may stop immediately.',
     });
   });
 
   it('reports how many earlier records of the window were left out', async () => {
-    const { config, generateText } = configFor(
-      '{"decision":"accept","reason":"grounded"}',
-    );
+    const { config, sent } = configFor(ACCEPT);
     const value: GoalVerifierInput = { ...input(), omitted: 12 };
 
     await createGoalVerifier(config)(value);
 
-    const request = generateText.mock.calls[0]![0] as Parameters<
-      BaseLlmClient['generateText']
-    >[0];
-    const payload = JSON.parse(
-      request.contents[0]?.parts?.[0]?.text ?? '',
-    ) as Record<string, unknown>;
-    expect(payload).toMatchObject({ omitted: 12 });
+    const { request, text } = sent();
+    expect(JSON.parse(text)).toMatchObject({ omitted: 12 });
     expect(request.systemInstruction).toContain(
       'When omitted is greater than zero',
     );
   });
 
   it('keeps maximum valid evidence and proposal reason within the request limit', async () => {
-    const { config, generateText } = configFor(
-      '{"decision":"accept","reason":"grounded"}',
-    );
+    const { config, generateText } = configFor(ACCEPT);
     const value = input();
     value.proposal.reason = '\0'.repeat(8_000);
     value.evidence = [
@@ -229,17 +217,12 @@ describe('createGoalVerifier', () => {
       },
     ];
 
-    await expect(createGoalVerifier(config)(value)).resolves.toEqual({
-      decision: 'accept',
-      reason: 'grounded',
-    });
+    await expect(createGoalVerifier(config)(value)).resolves.toEqual(GROUNDED);
     expect(generateText).toHaveBeenCalledOnce();
   });
 
   it('sends a window sized from the measured envelope, with the longest allowed reason', async () => {
-    const { config, generateText } = configFor(
-      '{"decision":"accept","reason":"grounded"}',
-    );
+    const { config, sent } = configFor(ACCEPT);
     // Production ids are 36-character UUIDs; the per-record JSON overhead is
     // what the budget has to leave room for, so model it faithfully.
     const goalId = '0f8c1d2e-3a4b-4c5d-8e6f-7a8b9c0d1e2f';
@@ -301,14 +284,8 @@ describe('createGoalVerifier', () => {
         evidenceTurnIds: window.turnIds,
         omitted: window.omitted,
       }),
-    ).resolves.toEqual({ decision: 'accept', reason: 'grounded' });
-    const request = generateText.mock.calls[0]![0] as Parameters<
-      BaseLlmClient['generateText']
-    >[0];
-    const bytes = Buffer.byteLength(
-      request.contents[0]?.parts?.[0]?.text ?? '',
-      'utf8',
-    );
+    ).resolves.toEqual(GROUNDED);
+    const bytes = Buffer.byteLength(sent().text, 'utf8');
     expect(bytes).toBeLessThanOrEqual(GOAL_VERIFIER_REQUEST_BYTE_LIMIT);
     // The budget is used, not merely respected: one more record would not fit.
     const oneMore = Buffer.byteLength(JSON.stringify(window.evidence[0])) + 1;
@@ -316,9 +293,7 @@ describe('createGoalVerifier', () => {
   });
 
   it('rejects an unbounded verifier request before calling the provider', async () => {
-    const { config, generateText } = configFor(
-      '{"decision":"accept","reason":"grounded"}',
-    );
+    const { config, generateText } = configFor(ACCEPT);
     const value = input();
     value.goal.objective = 'x'.repeat(256_000);
 
@@ -347,16 +322,7 @@ describe('createGoalVerifier', () => {
     vi.useFakeTimers();
     try {
       const { config, generateText } = configFor('unused');
-      generateText.mockImplementation(
-        (request) =>
-          new Promise<never>((_resolve, reject) => {
-            request.abortSignal.addEventListener(
-              'abort',
-              () => reject(request.abortSignal.reason),
-              { once: true },
-            );
-          }),
-      );
+      generateText.mockImplementation(untilAborted);
       let settled: unknown;
       const verification = createGoalVerifier(config)(input()).catch(
         (error: unknown) => {
@@ -382,13 +348,7 @@ describe('createGoalVerifier', () => {
     let signal: AbortSignal | undefined;
     generateText.mockImplementation(async (request) => {
       signal = request.abortSignal;
-      await new Promise<never>((_resolve, reject) => {
-        request.abortSignal.addEventListener(
-          'abort',
-          () => reject(request.abortSignal.reason),
-          { once: true },
-        );
-      });
+      await untilAborted(request);
       throw new Error('unreachable');
     });
 
