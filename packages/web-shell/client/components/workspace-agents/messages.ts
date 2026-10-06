@@ -151,7 +151,7 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.tabs.runtimeHint':
     'Runtimes are the computers agents run on: this one, and any that joined with a link.',
   'collab.tabs.squadsHint':
-    'A leader agent and its members. @ the squad in a chat: the leader hands the work to members and reports back.',
+    'A squad is a leader and the agents it hands work to. @ the squad in any chat and the leader splits the work and reports back.',
   'collab.agent.new': 'New agent',
   'collab.agent.roles': 'Role templates',
   'collab.agent.mentionIt': 'Mention in chat',
@@ -388,7 +388,7 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.tabs.runtimeHint':
     'Runtime 是运行 Agent 的电脑：这台电脑，以及用链接加入的其他电脑。',
   'collab.tabs.squadsHint':
-    '一个负责人 Agent 加若干成员。在对话里 @ 小队，负责人把工作分给成员并汇报结果。',
+    '小队由一个负责人和它分派工作的成员组成。在任意对话里 @ 小队，负责人拆分工作并汇报结果。',
   'collab.agent.new': '新建 Agent',
   'collab.agent.roles': '角色模板',
   'collab.agent.mentionIt': '在对话中 @',

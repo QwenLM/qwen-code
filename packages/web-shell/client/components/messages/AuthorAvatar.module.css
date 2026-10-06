@@ -42,7 +42,8 @@
   border-radius: 999px;
   /* Relative to what it sits on, like the avatar: dark --muted equals --card. */
   background: color-mix(in srgb, var(--foreground) 8%, transparent);
-  color: var(--muted-foreground);
+  /* --muted-foreground on the tint falls below readable contrast in light. */
+  color: color-mix(in srgb, var(--foreground) 72%, transparent);
   font-size: 12px;
   font-weight: 400;
   line-height: 18px;

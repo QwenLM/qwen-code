@@ -79,9 +79,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 6px 14px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg, 8px);
+  padding: 2px 0;
   color: var(--muted-foreground);
   font-size: 12px;
 }

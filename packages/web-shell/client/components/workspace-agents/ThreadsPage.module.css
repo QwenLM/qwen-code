@@ -207,6 +207,8 @@
    subgrid of it. */
 .squadRoster {
   --squad-rail-x: 9px; /* under the centre of the 20px leader avatar */
+  /* --border is near-invisible on the card in both themes. */
+  --squad-rail-color: color-mix(in srgb, var(--foreground) 28%, transparent);
   --squad-row-gap: 4px;
   display: grid;
   grid-template-columns: fit-content(16rem) minmax(0, 1fr);
@@ -246,8 +248,8 @@
   left: var(--squad-rail-x);
   width: 8px;
   height: calc(50% + var(--squad-row-gap));
-  border-bottom: 1px solid var(--border);
-  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--squad-rail-color);
+  border-left: 1px solid var(--squad-rail-color);
   content: '';
 }
 
@@ -258,7 +260,7 @@
   top: 50%;
   bottom: 0;
   left: var(--squad-rail-x);
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--squad-rail-color);
   content: '';
 }
 

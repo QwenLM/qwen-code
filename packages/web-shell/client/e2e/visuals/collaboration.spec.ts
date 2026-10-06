@@ -710,5 +710,10 @@ for (const theme of THEMES) {
     await expect(
       page.locator('[data-run-id="run-docs-1"]').getByText('12,480 tokens'),
     ).toBeVisible();
+
+    // The earlier ask sits above the fold; capture its no-action line too.
+    await noAction.scrollIntoViewIfNeeded();
+    await clearFocus(page);
+    await captureScreenshot(page, `collab-squad-no-action-${theme}`);
   });
 }
