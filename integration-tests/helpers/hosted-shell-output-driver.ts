@@ -14,7 +14,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
-import { relayedHeaders } from './hosted-relay-headers.js';
+import { relayUpstream } from './hosted-relay-headers.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -238,8 +238,7 @@ const proxy = createServer(async (req, res) => {
     }
     if (restoring && store && url.pathname.endsWith('/transactions'))
       current.restoreTransactions.push(...json.transactions);
-    res.writeHead(upstream.status, relayedHeaders(upstream.headers));
-    res.end(bytes);
+    relayUpstream(res, upstream, bytes);
   } catch (cause) {
     proxyFailure = cause;
     res.destroy();

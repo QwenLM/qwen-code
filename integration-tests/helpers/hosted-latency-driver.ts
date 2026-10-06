@@ -21,7 +21,7 @@ import {
   type HostedLatencyMeasurement,
   type HostedLatencySample,
 } from './hosted-latency-baseline.js';
-import { relayedHeaders } from './hosted-relay-headers.js';
+import { relayUpstream } from './hosted-relay-headers.js';
 
 const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   tenantId: string;
@@ -209,8 +209,7 @@ const proxy = createServer(async (req, res) => {
     } else {
       const bytes = Buffer.from(await upstream.arrayBuffer());
       if (isWarm) active.runtimeReadyMs = elapsed();
-      res.writeHead(upstream.status, relayedHeaders(upstream.headers));
-      res.end(bytes);
+      relayUpstream(res, upstream, bytes);
     }
   } catch (cause) {
     proxyFailures.push(cause);

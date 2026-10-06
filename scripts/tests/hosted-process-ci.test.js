@@ -168,6 +168,9 @@ describe('Hosted real-process gates', () => {
         'npx vitest run helpers/hosted-relay-headers.test.ts',
     );
     expect(job.steps[relay]['continue-on-error']).toBeUndefined();
+    expect(job.steps[relay].if).toBeUndefined();
+    expect(job.steps[relay].shell).toBeUndefined();
+    expect(job.steps[relay]['working-directory']).toBeUndefined();
     expect(relay).toBeLessThan(job.steps.indexOf(run));
     const pom = read('packages/sdk-java/managed-agent-server/pom.xml').replace(
       /<!--[\s\S]*?-->/g,

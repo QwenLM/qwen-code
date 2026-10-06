@@ -16,7 +16,7 @@ import {
   type FakeOpenAIHandler,
 } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
-import { relayedHeaders } from './hosted-relay-headers.js';
+import { relayUpstream } from './hosted-relay-headers.js';
 
 const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   tenantId: string;
@@ -165,8 +165,7 @@ const storeProxy = createServer(async (req, res) => {
           durableReceipts.push(record.managedSession);
       }
     }
-    res.writeHead(response.status, relayedHeaders(response.headers));
-    res.end(output);
+    relayUpstream(res, response, output);
   } catch (cause) {
     res.writeHead(503);
     res.end(String(cause));
