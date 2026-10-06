@@ -77,18 +77,6 @@ export class ManagedHookError extends Error {
 
 class ManagedHookImportAbortedError extends Error {}
 
-// A handler module can reject with a value String() cannot convert, so the
-// settle path converts under a guard: a throw here would escape as an
-// unhandled rejection and kill the worker (the derived promise below is
-// fire-and-forget).
-function asError(value: unknown): Error {
-  try {
-    return value instanceof Error ? value : new Error(String(value));
-  } catch {
-    return new ManagedHookError('managed_hook_handler_unavailable');
-  }
-}
-
 // Module evaluation runs before HookRunner enforces the abort signal, so race
 // it with a budget and the operation signal: a stuck top-level await must not
 // pin an admission slot or hold close() open forever. ESM evaluation itself
@@ -145,13 +133,16 @@ function importHookModule(
           });
           finish(undefined, module as Record<string, unknown>);
         },
-        (error: unknown) => {
+        () => {
           entry.moduleEvaluationPending = false;
           settleAbandoned(entry, {
             state: 'settled',
             error: { code: 'managed_hook_handler_unavailable' },
           });
-          finish(asError(error));
+          // The caller's catch maps every import failure to the same code,
+          // so the module's own rejection reason is never read; the terminal
+          // .catch below covers a throw inside this handler.
+          finish(new ManagedHookError('managed_hook_handler_unavailable'));
         },
       )
       // Terminal handler for the derived promise: a throw inside either

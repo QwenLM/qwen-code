@@ -79,6 +79,7 @@ import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type {
   ManagedHookCatalog,
   ManagedHookControl,
+  ManagedHookOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
 import { HostedMonitorLoop } from './hosted-monitor-loop.js';
@@ -1795,6 +1796,118 @@ describe('Hosted Harness no-tool session', () => {
         .send(definition)
         .expect(200);
       expect(loaded.body.recoveryRequired).toBeUndefined();
+    },
+  );
+
+  it.each([
+    {
+      code: 'managed_hook_module_evaluation_abandoned',
+      outcome: 'cancelled',
+    },
+    {
+      code: 'managed_hook_module_evaluation_timeout',
+      outcome: 'timeout',
+    },
+  ] as const)(
+    'settles a turn an evaluation fence parked once the Runtime republishes ($code)',
+    async ({ code, outcome }) => {
+      const { server, authorize, catalog, requests } = await hookApp();
+      Object.assign(catalog, {
+        hooks: [
+          { ...catalog.hooks[0], eventName: HookEventName.UserPromptSubmit },
+        ],
+      });
+      const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl');
+      const original = control.getMockImplementation()!;
+      const republished = new Map<string, ManagedHookOperationView>();
+      let fence = true;
+      control.mockImplementation(async function (
+        this: HostedWorkspaceBroker,
+        operation,
+      ) {
+        if (operation.kind === 'hook-execute' && fence) {
+          fence = false;
+          requests.push(operation);
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            error: { code },
+          };
+        }
+        if (
+          (operation.kind === 'hook-status' ||
+            operation.kind === 'hook-cancel') &&
+          republished.has(operation.targetOperationId)
+        )
+          return republished.get(operation.targetOperationId)!;
+        return original.call(this, operation);
+      });
+      // The mock stands in for the whole turn body, so fire the
+      // UserPromptSubmit Hook from it the way runHostedHarnessTextTurn would.
+      state.model.mockImplementationOnce(
+        async ({ hooks, promptId, signal }) => {
+          await hooks!.fire(
+            HookEventName.UserPromptSubmit,
+            promptId!,
+            { prompt_id: promptId },
+            signal,
+          );
+          throw new Error('The fenced Hook must stop this turn.');
+        },
+      );
+      const prompt = [{ type: 'text', text: 'hello' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: true,
+          });
+        },
+        { timeout: 10_000 },
+      );
+      // Once the evaluation definitively ends the Runtime republishes its
+      // receipt, and the next prompt reconciles the fence, settles the parked
+      // turn, and is admitted rather than refused for the Session's life.
+      const child = requests.find((entry) => entry.kind === 'hook-execute')!;
+      republished.set(child.operationId, {
+        operationId: child.operationId,
+        state: 'settled',
+        result: { success: false, outcome, duration: 0 },
+      });
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({ prompt, promptId: randomUUID(), payloadDigest })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: false,
+          });
+        },
+        { timeout: 10_000 },
+      );
+      const transcript = await authorize(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      );
+      expect(transcript.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'turn_complete',
+            promptId: PROMPT_ID,
+            data: expect.objectContaining({ stopReason: 'cancelled' }),
+          }),
+        ]),
+      );
     },
   );
 

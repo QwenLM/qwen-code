@@ -1287,6 +1287,50 @@ describe('ManagedHookRuntime', () => {
       readFile(path.join(directory, 'counter'), 'utf8'),
     ).rejects.toThrow();
   });
+  it('republishes an over-budget evaluation that later rejects as handler unavailable', async () => {
+    const modulePath = path.join(directory, 'late-reject-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise((resolve) => setTimeout(resolve, 900));
+       throw new Error('boom');
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 10 },
+        handler: {
+          handlerId: 'late-reject',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_module_evaluation_timeout' },
+    });
+    expect(receipt.result).toBeUndefined();
+    expect(instance.hasHolds('runtime-session')).toBe(true);
+    // The reject arm republishes the one thing then provable — the handler is
+    // unavailable — instead of keeping the stale evaluation-timeout fence for
+    // the worker's lifetime. hasHolds cannot witness this: it clears either
+    // way, so the republished receipt's code is the discriminator.
+    await vi.waitFor(
+      async () => {
+        expect(await instance.control('runtime-session', call)).toMatchObject({
+          state: 'settled',
+          error: { code: 'managed_hook_handler_unavailable' },
+        });
+      },
+      { timeout: 3000 },
+    );
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+  });
   it('fences a stuck module evaluation cancelled mid-evaluation without wedging close', async () => {
     const modulePath = path.join(directory, 'stuck-cancel-handler.mjs');
     await writeFile(

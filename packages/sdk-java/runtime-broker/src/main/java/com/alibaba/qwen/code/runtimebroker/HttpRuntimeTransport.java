@@ -1138,7 +1138,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 case "managed_runtime_provider_invalid", "managed_runtime_tool_invalid" -> 400;
                 case "managed_runtime_identity_conflict", "managed_context_unavailable",
                         "managed_context_conflict", "managed_runtime_provider_operation_failed",
-                        "managed_runtime_provider_incompatible" -> 409;
+                        "managed_runtime_provider_incompatible", "managed_runtime_owner_hold_pending" -> 409;
                 case "managed_runtime_provider_too_large" -> 413;
                 case "managed_runtime_provider_unsupported" -> 501;
                 default -> 0;

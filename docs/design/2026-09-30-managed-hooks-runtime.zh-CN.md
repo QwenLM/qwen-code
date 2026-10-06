@@ -149,18 +149,22 @@ not_started_proven——或提交确定的取消。该围闭不是终态：求�
 会以此时可证明的事实重发回执——模块已加载时 callback 可证明从未派发，因此因取消或
 关停而弃用的求值重发 cancelled 结果、超预算的求值重发 timeout 结果；模块本身失败时
 重发 `managed_hook_handler_unavailable`——于是下一次 status 轮询即可核对该记录——无论这次
-轮询来自显式 status 调用、来自回合路径在拒绝新 occurrence 之前的一次核对，还是来自
-drain——Session 保持可用、可删除。只有永不结束的求值才会在
+轮询来自显式 status 调用、来自回合路径在拒绝新 occurrence 之前的一次核对、来自被阻塞
+Session 在拒绝下一个 prompt 之前的对账，还是来自 drain。带结果的重发还会结算被围闭
+搁浅的那个回合，Session 保持可用、可删除；而重发的
+`managed_hook_handler_unavailable` 会对账为 `not_started_proven`，这会解除 hold 并让
+DELETE 完成，但记录仍为 `recovery_blocked`，因此该 Session 的后续回合仍需恢复。只有永不结束的求值才会在
 worker 生命周期内保留该围闭及其恢复屏障。求值失败的模块以
 `managed_hook_handler_unavailable` 结算，
 Harness 记为 not_started_proven——无论是在任何顶层语句执行前被拒绝、在顶层执行
 中途被拒绝，还是在完整求值之后才被拒绝（例如形状或 handlerRevision 校验）；
 因此该证明并不覆盖任何已经发生的顶层副作用。
 Harness 释放此前 owner 时 Broker 可能拒绝：因 owner 已不存在而拒绝
-（404 `runtime_session_not_found`）时记为已释放且不再重试。被 Harness 以
+（404 `runtime_session_not_found`）时记为已释放、写入 debug 日志且不再重试。被 Harness 以
 outcome_unknown 围闭的执行永远不会被 drain 越过、也不会进入释放集合，因此 hold
-围闭的拒绝只会来自在围闭存在之前就把被弃用求值认证为已取消的 Runtime。两处 pending-work 生产者都用专用编码
-`managed_runtime_owner_hold_pending` 命名这一种情况：通用的 conflict 编码仍是身份不匹配
+围闭的拒绝只会来自在围闭存在之前就把被弃用求值认证为已取消的 Runtime。两处 pending-work
+生产者都用专用编码 `managed_runtime_owner_hold_pending` 命名这一种情况：该 Runtime
+Session 仍持有任何类型的未完成工作。通用的 conflict 编码仍是身份不匹配
 或任何未预期 provider 错误也会共用的兜底值，因此只有该专用编码被读作 hold，其余拒绝
 一律按原样向上传播。被 hold 围闭的
 owner 拒绝（409 `managed_runtime_owner_hold_pending`）时本次跳过、写入 daemon 的 stderr

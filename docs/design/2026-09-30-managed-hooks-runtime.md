@@ -203,8 +203,13 @@ demonstrably never dispatched, so an abandoned evaluation settles as a
 cancelled result and an over-budget one as a timeout result, while a module
 that itself failed settles as `managed_hook_handler_unavailable` — so the next
 status poll reconciles the record, whether it comes from an explicit status
-call, from the turn path polling once before it refuses a new occurrence, or
-from drain, and the Session stays usable and deletable. Only an evaluation that never ends keeps the fence, and with it the
+call, from the turn path polling once before it refuses a new occurrence, from
+the reconciliation a blocked Session runs before refusing its next prompt, or
+from drain. A result-bearing republish also settles the turn its fence parked,
+and the Session stays usable and deletable; a republished
+`managed_hook_handler_unavailable` reconciles to `not_started_proven`, which
+retires the hold and lets DELETE complete, but leaves the record
+`recovery_blocked`, so later turns of that Session still require recovery. Only an evaluation that never ends keeps the fence, and with it the
 recovery barrier, for the worker's lifetime. A module whose
 evaluation fails settles as
 `managed_hook_handler_unavailable`, which the Harness records as
@@ -214,11 +219,13 @@ shape or handler-revision guard, for instance); the proof therefore does not
 cover any top-level effects that already ran.
 When the Harness releases an earlier owner, the Broker may refuse. A refusal
 because the owner is already absent (404 `runtime_session_not_found`) is booked
-as released and never retried. An execution the Harness fenced as
+as released, reported on the debug logger, and never retried. An execution the
+Harness fenced as
 outcome_unknown is never drained or released past, so a hold-fenced refusal
 arrives only from a Runtime that certified an abandoned evaluation as
-cancelled before the fence existed. Both pending-work producers name that one condition with the
-dedicated code `managed_runtime_owner_hold_pending`: the generic conflict
+cancelled before the fence existed. Both pending-work producers name that one
+condition with the dedicated code `managed_runtime_owner_hold_pending`: the
+Runtime Session still owns unfinished work of any kind. The generic conflict
 codes stay catch-alls an identity mismatch or an unexpected provider error
 also answers with, so only the dedicated code is read as a hold and every
 other refusal propagates as it did before. A refusal from a hold-fenced owner

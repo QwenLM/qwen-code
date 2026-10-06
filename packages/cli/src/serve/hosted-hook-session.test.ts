@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -1161,6 +1162,180 @@ it('reconciles an evaluation-timeout fence on the turn path once the Runtime rep
   await hooks.close();
 });
 
+it('polls an unreconciled fenced child once per turn, through its marker', async () => {
+  const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl');
+  const originalControl = control.getMockImplementation()!;
+  control.mockImplementation(async function (
+    this: HostedWorkspaceBroker,
+    operation,
+  ) {
+    if (operation.kind === 'hook-execute') {
+      requests.push(operation);
+      return {
+        operationId: operation.operationId,
+        state: 'settled',
+        error: { code: 'managed_hook_module_evaluation_timeout' },
+      };
+    }
+    return originalControl.call(this, operation);
+  });
+  await expect(
+    hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  const fencedId = session.authority
+    .extensionRecordsInDomain('hook_execution')
+    .find(
+      (entry) =>
+        entry.recordId.startsWith('hook-') &&
+        !entry.recordId.startsWith('hook-plan-'),
+    )!.recordId;
+  // The fence never reconciles: the marker's fan-out already polls the child,
+  // so the pass must not pay a second broker round-trip for the same record.
+  await expect(
+    hooks.fire(HookEventName.PreToolUse, 'call-2', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  const statuses = requests.filter((request) => request.kind === 'hook-status');
+  expect(statuses).toHaveLength(1);
+  expect(statuses[0]).toMatchObject({ targetOperationId: fencedId });
+});
+
+it('stops reconciling fences as soon as the firing turn aborts', async () => {
+  const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl');
+  const originalControl = control.getMockImplementation()!;
+  let fence = true;
+  control.mockImplementation(async function (
+    this: HostedWorkspaceBroker,
+    operation,
+  ) {
+    if (operation.kind === 'hook-execute' && fence) {
+      fence = false;
+      requests.push(operation);
+      return {
+        operationId: operation.operationId,
+        state: 'settled',
+        error: { code: 'managed_hook_module_evaluation_timeout' },
+      };
+    }
+    return originalControl.call(this, operation);
+  });
+  await expect(
+    hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  expect(hooks.hasPendingOperations).toBe(true);
+  // A broker that accepts the poll but never answers must not pin the turn:
+  // the abort ends the reconcile instead of waiting out each broker timeout.
+  let statusSeen!: () => void;
+  const firstStatus = new Promise<void>((resolve) => {
+    statusSeen = resolve;
+  });
+  control.mockImplementation(async function (
+    this: HostedWorkspaceBroker,
+    operation,
+  ) {
+    if (operation.kind === 'hook-status' || operation.kind === 'hook-cancel') {
+      statusSeen();
+      return new Promise<ManagedHookOperationView>(() => {});
+    }
+    return originalControl.call(this, operation);
+  });
+  const abort = new AbortController();
+  const fired = hooks.fire(
+    HookEventName.PreToolUse,
+    'call-2',
+    {},
+    abort.signal,
+  );
+  const settled = fired.then(
+    () => 'resolved',
+    (cause: unknown) => cause,
+  );
+  await firstStatus;
+  abort.abort();
+  const outcome = await Promise.race([
+    settled,
+    delay(2_000).then(() => 'pending' as const),
+  ]);
+  expect(outcome).not.toBe('pending');
+  expect(outcome).not.toBe('resolved');
+});
+
+it('never tombstones a healthy in-flight async Hook reconciling an unrelated fence', async () => {
+  catalog = { ...catalog, hooks: [{ ...catalog.hooks[0], async: true }] };
+  const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl');
+  const originalControl = control.getMockImplementation()!;
+  control.mockImplementation(async function (
+    this: HostedWorkspaceBroker,
+    operation,
+  ) {
+    if (operation.kind === 'hook-execute') {
+      requests.push(operation);
+      const running: ManagedHookOperationView = {
+        operationId: operation.operationId,
+        state: 'running',
+      };
+      replies.set(operation.operationId, running);
+      return running;
+    }
+    return originalControl.call(this, operation);
+  });
+  // An acknowledged async Hook: its occurrence marker settles while the child
+  // keeps running at the Runtime, so the pending gate does not count it. Its
+  // own perform loop keeps polling through this Session's broker.
+  await hooks.fire(HookEventName.PreToolUse, 'async-1', {}, signal());
+  expect(hooks.hasPendingOperations).toBe(false);
+  const asyncChildId = session.authority
+    .extensionRecordsInDomain('hook_execution')
+    .find(
+      (entry) =>
+        entry.recordId.startsWith('hook-') &&
+        !entry.recordId.startsWith('hook-plan-'),
+    )!.recordId;
+  const loopBroker = hooks.broker;
+  control.mockImplementation(async function (
+    this: HostedWorkspaceBroker,
+    operation,
+  ) {
+    if (operation.kind === 'hook-execute') {
+      requests.push(operation);
+      return {
+        operationId: operation.operationId,
+        state: 'settled',
+        error: { code: 'managed_hook_module_evaluation_timeout' },
+      };
+    }
+    if (
+      (operation.kind === 'hook-status' || operation.kind === 'hook-cancel') &&
+      operation.targetOperationId === asyncChildId &&
+      this !== loopBroker
+    )
+      throw new Error('broker unavailable');
+    return originalControl.call(this, operation);
+  });
+  await expect(
+    hooks.fire(HookEventName.PreToolUse, 'call-2', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  expect(hooks.hasPendingOperations).toBe(true);
+  // A reload empties this.pending — the state the tombstoning guard relied on
+  // — and the reloaded Session reconciles through a different broker, whose
+  // lookup of the healthy child fails transiently.
+  await reopenSession();
+  const reloaded = new HostedHookSession(options, session, pin);
+  await expect(
+    reloaded.fire(HookEventName.PreToolUse, 'call-3', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  // The reconcile polled only the records the gate counts, so the transient
+  // failure never reached the healthy child: its record is untouched.
+  const asyncChild = parseHookExecution(
+    session.authority.extensionRecord('hook_execution', asyncChildId)!.record,
+  );
+  expect(asyncChild.run).toMatchObject({
+    state: 'running',
+    execution: 'dispatch_started',
+  });
+  expect(asyncChild.resultRef).toBeNull();
+  expect(reloaded.hasPendingOperations).toBe(true);
+});
+
 it('fences a hook-cancel that lands during module evaluation as outcome_unknown', async () => {
   const key = session.authority.sessionHeader.sessionKey;
   const modulePath = path.join(root, 'stuck-cancel-handler.mjs');
@@ -1472,16 +1647,15 @@ it.each([
     );
     expect(Boolean(replacement.broker.runtime)).toBe(allowed);
     if (allowed) {
-      // Every absorbed refusal is reported on the daemon's default channel,
-      // naming the owner and the refusal.
-      expect(log.mock.calls.flat().join('\n')).toContain(
-        unacquired.broker.runtimeSessionId,
-      );
-      expect(log.mock.calls.flat().join('\n')).toContain(`${status} ${code}`);
-      // A hold-fenced earlier owner stays attached, so close reports recovery
-      // required rather than letting DELETE answer 204 and drop the retry
-      // state; an absent owner is booked released and closes cleanly.
       if (retried) {
+        // A hold-fenced earlier owner keeps its Runtime owner attached — the
+        // one absorbed refusal reported on the daemon's default channel,
+        // naming the owner and the refusal.
+        const lines = log.mock.calls.flat().join('\n');
+        expect(lines).toContain(unacquired.broker.runtimeSessionId);
+        expect(lines).toContain(`${status} ${code}`);
+        // The fence stays attached, so close reports recovery required rather
+        // than letting DELETE answer 204 and drop the retry state.
         await expect(replacement.close()).rejects.toBeInstanceOf(
           HostedHookRecoveryRequiredError,
         );
@@ -1494,7 +1668,12 @@ it.each([
               context.runtimeSessionId === replacement.broker.runtimeSessionId,
           ),
         ).toBe(false);
-      } else await replacement.close();
+      } else {
+        // An absent owner is routine and self-healing: booked released, and
+        // reported only on the debug logger, never the default channel.
+        expect(log).not.toHaveBeenCalled();
+        await replacement.close();
+      }
       // Cleared after close() so this observes the acquire-path retry rather
       // than the pass close() already made.
       release.mockClear();

@@ -570,11 +570,20 @@ export async function settleCancelledHookTurn(
           execution.eventName === HookEventName.InstructionsLoaded &&
           execution.hookId !== '__plan__' &&
           execution.cancelRequested;
+        // A fence the Runtime reconciled by republishing the receipt proves
+        // what not_started_proven does: the module's callback never
+        // dispatched. The abandoned arm reconciles to a cancelled record; the
+        // over-budget arm to a settled record carrying a timeout outcome.
+        const reconciledFence =
+          execution.resultRef !== null && execution.run.execution === 'settled';
         if (
           (!occurrenceIds.has(execution.occurrenceId) &&
             !cancelledInstructions) ||
-          execution.run.state !== 'cancelled' ||
-          execution.run.execution !== 'not_started_proven'
+          !(
+            (execution.run.state === 'cancelled' &&
+              execution.run.execution === 'not_started_proven') ||
+            reconciledFence
+          )
         )
           continue;
         const input = object(
@@ -584,10 +593,21 @@ export async function settleCancelledHookTurn(
             ).toString(),
           ),
         );
-        if (input?.['prompt_id'] === promptId) {
-          cancelled = true;
-          break;
+        if (input?.['prompt_id'] !== promptId) continue;
+        if (reconciledFence && execution.run.state !== 'cancelled') {
+          const result = object(
+            JSON.parse(
+              (
+                await session.managed.resources.read(execution.resultRef!)
+              ).toString(),
+            ),
+          );
+          // Only the evaluation-timeout republish lands here; a settled
+          // result of any other outcome is real work, not a fence.
+          if (result?.['outcome'] !== 'timeout') continue;
         }
+        cancelled = true;
+        break;
       }
     if (!preModel)
       cancelled = await recoverCancelledPreToolHook(
@@ -2349,7 +2369,7 @@ export function registerHostedHarnessSessionRoutes(
     void open(req, res, false);
   });
 
-  app.post('/session/:id/prompt', (req, res) => {
+  const admitPrompt = (req: Request, res: Response) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
@@ -2539,6 +2559,45 @@ export function registerHostedHarnessSessionRoutes(
         session.active = undefined;
       }
     })();
+  };
+  app.post('/session/:id/prompt', (req, res) => {
+    const session = identity(req, sessions);
+    // A Hook recovery fence is not terminal: reconcile the pending records
+    // once — a non-cancelling poll, so no fenced occurrence re-dispatches —
+    // and settle the turn the fence parked before the admission gate reads
+    // either, or a Session whose cancel landed mid-evaluation stays blocked
+    // for life. A Session blocked with nothing pending keeps the existing
+    // contract: the prompt refuses and the Hook status poll settles. hooksBusy
+    // holds a concurrent prompt at the prefix for the duration and is released
+    // straight into the settle, which re-takes it before its first await.
+    if (
+      session?.hooks &&
+      !session.mcpClosing &&
+      !session.active &&
+      !session.hooksBusy &&
+      !session.mcpBusy &&
+      !session.mcpRecovering &&
+      session.hooks.hasPendingOperations
+    ) {
+      session.hooksBusy = true;
+      void (async () => {
+        try {
+          try {
+            await session.hooks!.reconcileUnsettled();
+          } finally {
+            session.hooksBusy = false;
+          }
+          await settleCancelledHookTurn(session);
+        } catch (cause) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${req.params['id']} Hook reconciliation failed: ${String(cause)}`,
+          );
+        }
+        admitPrompt(req, res);
+      })();
+      return;
+    }
+    admitPrompt(req, res);
   });
 
   app.get('/session/:id/hooks', (req, res) => {

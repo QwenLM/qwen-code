@@ -568,7 +568,8 @@ export class ManagedToolExecutor {
   closeSessionAdmission(sessionId: string): void {
     if (this.hasActiveSession(sessionId)) {
       // The dedicated code names the one condition a Hook release may absorb
-      // as a fence: both class defaults are catch-alls other refusals share.
+      // as a fence — this Session still owns unfinished work of any kind;
+      // both class defaults stay catch-alls other refusals share.
       throw new ManagedToolConflictError(
         'Managed Runtime Session still owns unfinished work.',
         'managed_runtime_owner_hold_pending',

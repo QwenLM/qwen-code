@@ -131,6 +131,7 @@ class ProviderRuntimeTransportTest {
                 "managed_context_conflict", 409,
                 "managed_runtime_provider_operation_failed", 409,
                 "managed_runtime_provider_incompatible", 409,
+                "managed_runtime_owner_hold_pending", 409,
                 "managed_runtime_provider_too_large", 413,
                 "managed_runtime_provider_unsupported", 501).entrySet()) {
             status = failure.getValue();

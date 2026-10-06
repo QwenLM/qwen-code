@@ -33,6 +33,7 @@ import type {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { managedHookRestoreActivationId } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { ExtensionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   parseHookExecution,
@@ -198,6 +199,8 @@ function holdFencedRelease(cause: unknown): boolean {
 function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
+
+const debugLogger = createDebugLogger('HOSTED_HOOK_SESSION');
 
 // Committed record revisions are immutable objects, so each is validated
 // once however often the Session's history is scanned.
@@ -413,26 +416,29 @@ export class HostedHookSession {
         cause.code === 'runtime_session_not_found';
       const holdFenced = holdFencedRelease(cause);
       if (!absent && !holdFenced) throw cause;
-      // One of the two fenced codes is the provider worker's catch-all, and a
-      // debug logger is silent on a daemon started without --debug, so this
-      // goes to stderr: the absent branch books the owner released for good,
-      // and the fenced one keeps the Runtime owner attached.
       const refusal =
         cause instanceof HostedWorkspaceBrokerRejection
           ? `${cause.status} ${cause.code}`
           : String(cause);
-      writeStderrLineSafe(
-        `qwen serve: earlier Hook owner release refused (${
-          holdFenced
-            ? 'left attached, retried on a later turn'
-            : 'owner absent, booked released'
-        }): ${id} ${refusal}`,
-      );
       this.recoveredBrokers.delete(id);
       if (holdFenced) {
+        // The class defaults are the catch-alls an identity mismatch or any
+        // unexpected provider error also answers with, so only the dedicated
+        // hold code is absorbed as a fence. It keeps the Runtime owner
+        // attached — the one outcome worth a line on the daemon's default
+        // channel, where a debug logger is silent without --debug.
+        writeStderrLineSafe(
+          `qwen serve: earlier Hook owner release refused (left attached, retried on a later turn): ${id} ${refusal}`,
+        );
         this.fencedOwners.add(id);
         return;
       }
+      // An absent owner is the routine, self-healing outcome — every
+      // reconstructed Session re-walks its whole activation history — so it
+      // stays off the daemon's default channel.
+      debugLogger.debug(
+        `qwen serve: earlier Hook owner release refused (owner absent, booked released): ${id} ${refusal}`,
+      );
     }
     this.recoveredBrokers.delete(id);
     this.fencedOwners.delete(id);
@@ -465,7 +471,11 @@ export class HostedHookSession {
   }
 
   get hasPendingOperations(): boolean {
-    return this.executions().some((record) => {
+    return this.pendingRecords().length > 0;
+  }
+
+  private pendingRecords(): HookExecution[] {
+    return this.executions().filter((record) => {
       if (record.run.state === 'recovery_blocked') return true;
       if (record.resultRef || record.run.execution === 'not_started_proven')
         return false;
@@ -476,6 +486,29 @@ export class HostedHookSession {
       );
       return !marker || savedExecution(marker.record).resultRef === null;
     });
+  }
+
+  /**
+   * One non-cancelling status poll for exactly the records the pending gate
+   * counts — never the wider unsettled set, since a failed lookup commits and
+   * an acknowledged async Hook whose marker already carries its result must
+   * not be tombstoned by an unrelated fence's reconciliation. A child whose
+   * own occurrence marker is pending is reached through the marker's fan-out
+   * rather than polled again here. Poll only: a fenced occurrence is never
+   * re-dispatched.
+   */
+  async reconcileUnsettled(signal?: AbortSignal): Promise<void> {
+    const pending = this.pendingRecords();
+    const markers = new Set(
+      pending
+        .filter((record) => record.hookId === '__plan__')
+        .map((record) => record.hookExecutionId),
+    );
+    for (const record of pending) {
+      if (record.hookId !== '__plan__' && markers.has(record.occurrenceId))
+        continue;
+      await waitForTurn(this.status(record.hookExecutionId), signal);
+    }
   }
 
   get hasUnsettledExecutions(): boolean {
@@ -717,16 +750,10 @@ export class HostedHookSession {
       if (this.hasPendingOperations) {
         // A recovery fence is not terminal: once an abandoned module
         // evaluation definitively ends, the Runtime republishes its receipt,
-        // so give every unsettled record one status poll before refusing.
+        // so give every pending record one status poll before refusing.
         // Otherwise a live Session would reject every later turn until a
-        // DELETE-path drain reconciled it. Poll only — a fenced occurrence is
-        // never re-dispatched.
-        for (const record of this.executions())
-          if (
-            !record.resultRef &&
-            record.run.execution !== 'not_started_proven'
-          )
-            await this.status(record.hookExecutionId);
+        // DELETE-path drain reconciled it.
+        await this.reconcileUnsettled(signal);
         if (this.hasPendingOperations)
           throw new HostedHookRecoveryRequiredError();
       }
