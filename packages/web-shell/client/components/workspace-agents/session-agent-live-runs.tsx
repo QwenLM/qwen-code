@@ -357,6 +357,7 @@ function LiveRun({
       <AgentStepList
         steps={run.steps ?? []}
         label={t('collab.run.steps', { agent: run.author.name })}
+        settled={isTerminalRunStatus(run.status)}
       />
       {permission && (
         <div className={styles.approval}>

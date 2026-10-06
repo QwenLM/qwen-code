@@ -67,6 +67,11 @@
   color: var(--error-color);
 }
 
+/* A step that never finished because its run ended. */
+.stepIconStopped {
+  color: var(--muted-foreground);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .stepIconRunning {
     animation: none;

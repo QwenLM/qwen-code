@@ -239,6 +239,18 @@ describe('SessionAgentLiveRuns', () => {
     expect(onCancel).toHaveBeenCalledWith('r1');
   });
 
+  it('shows an unfinished step of a stopped run as stopped, not running', () => {
+    const { node } = render([
+      run({
+        status: 'cancelled',
+        steps: [{ id: 's1', title: 'WriteFile: x.txt', status: 'running' }],
+      }),
+    ]);
+    expect(node.querySelector('[aria-label="Stopped"]')).not.toBeNull();
+    expect(node.querySelector('[aria-label="Running"]')).toBeNull();
+    expect(node.querySelector('[data-running]')).toBeNull();
+  });
+
   it('shows no Stop on a finished run', () => {
     const { node } = render([run({ status: 'completed', outputText: 'Done' })]);
     expect(

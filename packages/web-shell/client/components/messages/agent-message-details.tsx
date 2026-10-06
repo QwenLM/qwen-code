@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Check, LoaderCircle, X } from 'lucide-react';
+import { Check, LoaderCircle, Minus, X } from 'lucide-react';
 import type {
   QwenAgentMessageMeta,
   SessionAgentStep,
@@ -36,9 +36,15 @@ export function isBlankAgentText(text: string): boolean {
 export function AgentStepList({
   steps,
   label,
+  settled = false,
 }: {
   steps: readonly SessionAgentStep[];
   label?: string;
+  /**
+   * The run has ended (completed, failed, stopped, offline). A step still
+   * marked running then never finished; show it as stopped, not spinning.
+   */
+  settled?: boolean;
 }) {
   const { t } = useI18n();
   if (steps.length === 0) return null;
@@ -46,7 +52,12 @@ export function AgentStepList({
     <ol aria-label={label ?? t('agentMessage.steps')} className={styles.steps}>
       {steps.map((step) => (
         <li key={step.id} className={styles.step}>
-          {step.status === 'running' ? (
+          {step.status === 'running' && settled ? (
+            <Minus
+              aria-label={t('agentMessage.step.stopped')}
+              className={`${styles.stepIcon} ${styles.stepIconStopped}`}
+            />
+          ) : step.status === 'running' ? (
             <LoaderCircle
               aria-label={t('agentMessage.step.running')}
               className={`${styles.stepIcon} ${styles.stepIconRunning}`}
@@ -64,7 +75,7 @@ export function AgentStepList({
           )}
           <span
             className={styles.stepText}
-            data-running={step.status === 'running' || undefined}
+            data-running={(step.status === 'running' && !settled) || undefined}
           >
             {step.title}
           </span>
@@ -118,7 +129,8 @@ export function AgentMessageDetails({ meta }: { meta: QwenAgentMessageMeta }) {
           {meta.error && <span className={styles.error}>{meta.error}</span>}
         </div>
       )}
-      <AgentStepList steps={steps} />
+      {/* A recorded reply is always a finished run. */}
+      <AgentStepList steps={steps} settled />
       <AgentTokenUsage totalTokens={meta.totalTokens} />
     </div>
   );
