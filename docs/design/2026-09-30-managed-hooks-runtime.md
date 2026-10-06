@@ -202,8 +202,9 @@ receipt with what is then provable — when the module loaded the callback
 demonstrably never dispatched, so an abandoned evaluation settles as a
 cancelled result and an over-budget one as a timeout result, while a module
 that itself failed settles as `managed_hook_handler_unavailable` — so the next
-status or drain reconciles the record and the Session stays usable and
-deletable. Only an evaluation that never ends keeps the fence, and with it the
+status poll reconciles the record, whether it comes from an explicit status
+call, from the turn path polling once before it refuses a new occurrence, or
+from drain, and the Session stays usable and deletable. Only an evaluation that never ends keeps the fence, and with it the
 recovery barrier, for the worker's lifetime. A module whose
 evaluation fails settles as
 `managed_hook_handler_unavailable`, which the Harness records as
@@ -216,9 +217,12 @@ because the owner is already absent (404 `runtime_session_not_found`) is booked
 as released and never retried. An execution the Harness fenced as
 outcome_unknown is never drained or released past, so a hold-fenced refusal
 arrives only from a Runtime that certified an abandoned evaluation as
-cancelled before the fence existed. A refusal from a hold-fenced owner (409
-`managed_runtime_identity_conflict` or
-`managed_runtime_provider_operation_failed`) is skipped for that pass, reported
+cancelled before the fence existed. Both pending-work producers name that one condition with the
+dedicated code `managed_runtime_owner_hold_pending`: the generic conflict
+codes stay catch-alls an identity mismatch or an unexpected provider error
+also answers with, so only the dedicated code is read as a hold and every
+other refusal propagates as it did before. A refusal from a hold-fenced owner
+(409 `managed_runtime_owner_hold_pending`) is skipped for that pass, reported
 on the daemon's stderr, and left unreleased, so each later turn of that Hook
 Session attempts the release again. On the acquisition path any other refusal
 propagates and blocks the replacement activation; on a later turn's retry pass

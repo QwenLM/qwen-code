@@ -1105,6 +1105,62 @@ it('reconciles an evaluation-timeout fence once the Runtime republishes a result
   await hooks.close();
 });
 
+it('reconciles an evaluation-timeout fence on the turn path once the Runtime republishes', async () => {
+  const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl');
+  const originalControl = control.getMockImplementation()!;
+  let first = true;
+  control.mockImplementation(async function (
+    this: HostedWorkspaceBroker,
+    operation,
+  ) {
+    if (operation.kind === 'hook-execute' && first) {
+      first = false;
+      requests.push(operation);
+      return {
+        operationId: operation.operationId,
+        state: 'settled',
+        error: { code: 'managed_hook_module_evaluation_timeout' },
+      };
+    }
+    return originalControl.call(this, operation);
+  });
+  await expect(
+    hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  const fencedId = session.authority
+    .extensionRecordsInDomain('hook_execution')
+    .find(
+      (entry) =>
+        entry.recordId.startsWith('hook-') &&
+        !entry.recordId.startsWith('hook-plan-'),
+    )!.recordId;
+  expect(hooks.hasPendingOperations).toBe(true);
+  // The receipt the Runtime republishes once the abandoned evaluation ends
+  // reconciles on the next turn itself: the fence clears without waiting for
+  // a DELETE-path drain, and the new occurrence dispatches.
+  replies.set(fencedId, {
+    operationId: fencedId,
+    state: 'settled',
+    result: { success: false, outcome: 'timeout', duration: 0 },
+  });
+  await hooks.fire(HookEventName.PreToolUse, 'call-2', {}, signal());
+  const dispatched = requests.filter(
+    (request) => request.kind === 'hook-execute',
+  );
+  expect(dispatched).toHaveLength(2);
+  expect(dispatched[1].operationId).not.toBe(dispatched[0].operationId);
+  expect(
+    requests.filter((request) => request.kind === 'hook-status'),
+  ).toHaveLength(1);
+  expect(hooks.hasPendingOperations).toBe(false);
+  const fenced = parseHookExecution(
+    session.authority.extensionRecord('hook_execution', fencedId)!.record,
+  );
+  expect(fenced.run).toMatchObject({ state: 'settled', execution: 'settled' });
+  await hooks.drain();
+  await hooks.close();
+});
+
 it('fences a hook-cancel that lands during module evaluation as outcome_unknown', async () => {
   const key = session.authority.sessionHeader.sessionKey;
   const modulePath = path.join(root, 'stuck-cancel-handler.mjs');
@@ -1252,7 +1308,7 @@ it('names a hold-fenced current-owner release instead of leaking the refusal', a
       if (this.runtimeSessionId === owned)
         throw new HostedWorkspaceBrokerRejection(
           409,
-          'managed_runtime_identity_conflict',
+          'managed_runtime_owner_hold_pending',
         );
     },
   );
@@ -1261,21 +1317,25 @@ it('names a hold-fenced current-owner release instead of leaking the refusal', a
   );
 });
 
-it('still leaks a current-owner release refusal that is not a hold fence', async () => {
-  await hooks.ensureReady();
-  await hooks.acquire();
-  const owned = hooks.broker.runtimeSessionId;
-  const refusal = new HostedWorkspaceBrokerRejection(
-    409,
-    'runtime_session_busy',
-  );
-  vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
-    async function (this: HostedWorkspaceBroker) {
-      if (this.runtimeSessionId === owned) throw refusal;
-    },
-  );
-  await expect(hooks.close()).rejects.toBe(refusal);
-});
+it.each([
+  'runtime_session_busy',
+  'managed_runtime_identity_conflict',
+  'managed_runtime_provider_operation_failed',
+])(
+  'still leaks a current-owner release refusal that is not a hold fence (%s)',
+  async (code) => {
+    await hooks.ensureReady();
+    await hooks.acquire();
+    const owned = hooks.broker.runtimeSessionId;
+    const refusal = new HostedWorkspaceBrokerRejection(409, code);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        if (this.runtimeSessionId === owned) throw refusal;
+      },
+    );
+    await expect(hooks.close()).rejects.toBe(refusal);
+  },
+);
 
 it('releases its broker when a tool turn acquired it after catalog restoration', async () => {
   await hooks.ensureReady();
@@ -1367,12 +1427,18 @@ it.each([
   {
     status: 409,
     code: 'managed_runtime_identity_conflict',
-    allowed: true,
-    retried: true,
+    allowed: false,
+    retried: false,
   },
   {
     status: 409,
     code: 'managed_runtime_provider_operation_failed',
+    allowed: false,
+    retried: false,
+  },
+  {
+    status: 409,
+    code: 'managed_runtime_owner_hold_pending',
     allowed: true,
     retried: true,
   },
@@ -1459,7 +1525,7 @@ it('retries a hold-fenced earlier owner on a later turn without closing', async 
         attempts += 1;
         throw new HostedWorkspaceBrokerRejection(
           409,
-          'managed_runtime_identity_conflict',
+          'managed_runtime_owner_hold_pending',
         );
       }
     },
@@ -1494,7 +1560,7 @@ it('keeps a live turn working when a fenced owner retry is refused again', async
       throw new HostedWorkspaceBrokerRejection(
         409,
         attempts === 1
-          ? 'managed_runtime_identity_conflict'
+          ? 'managed_runtime_owner_hold_pending'
           : 'runtime_session_busy',
       );
     },

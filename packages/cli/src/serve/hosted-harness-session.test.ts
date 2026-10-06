@@ -1805,7 +1805,7 @@ describe('Hosted Harness no-tool session', () => {
     release.mockImplementation(async () => {
       throw new HostedWorkspaceBrokerRejection(
         409,
-        'managed_runtime_identity_conflict',
+        'managed_runtime_owner_hold_pending',
       );
     });
     vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});

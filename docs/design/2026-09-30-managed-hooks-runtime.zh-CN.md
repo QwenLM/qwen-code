@@ -148,8 +148,9 @@ Runtime 侧结算——释放其在 16 个准入名额中占用的那一个，�
 not_started_proven——或提交确定的取消。该围闭不是终态：求值确定结束后，Runtime
 会以此时可证明的事实重发回执——模块已加载时 callback 可证明从未派发，因此因取消或
 关停而弃用的求值重发 cancelled 结果、超预算的求值重发 timeout 结果；模块本身失败时
-重发 `managed_hook_handler_unavailable`——于是下一次 status 或 drain 就能核对该记录，
-Session 保持可用、可删除。只有永不结束的求值才会在
+重发 `managed_hook_handler_unavailable`——于是下一次 status 轮询即可核对该记录——无论这次
+轮询来自显式 status 调用、来自回合路径在拒绝新 occurrence 之前的一次核对，还是来自
+drain——Session 保持可用、可删除。只有永不结束的求值才会在
 worker 生命周期内保留该围闭及其恢复屏障。求值失败的模块以
 `managed_hook_handler_unavailable` 结算，
 Harness 记为 not_started_proven——无论是在任何顶层语句执行前被拒绝、在顶层执行
@@ -158,10 +159,11 @@ Harness 记为 not_started_proven——无论是在任何顶层语句执行前�
 Harness 释放此前 owner 时 Broker 可能拒绝：因 owner 已不存在而拒绝
 （404 `runtime_session_not_found`）时记为已释放且不再重试。被 Harness 以
 outcome_unknown 围闭的执行永远不会被 drain 越过、也不会进入释放集合，因此 hold
-围闭的拒绝只会来自在围闭存在之前就把被弃用求值认证为已取消的 Runtime。被 hold
-围闭的
-owner 拒绝（409 `managed_runtime_identity_conflict` 或
-`managed_runtime_provider_operation_failed`）时本次跳过、写入 daemon 的 stderr
+围闭的拒绝只会来自在围闭存在之前就把被弃用求值认证为已取消的 Runtime。两处 pending-work 生产者都用专用编码
+`managed_runtime_owner_hold_pending` 命名这一种情况：通用的 conflict 编码仍是身份不匹配
+或任何未预期 provider 错误也会共用的兜底值，因此只有该专用编码被读作 hold，其余拒绝
+一律按原样向上传播。被 hold 围闭的
+owner 拒绝（409 `managed_runtime_owner_hold_pending`）时本次跳过、写入 daemon 的 stderr
 且不记为已释放，该 Hook Session 之后每个回合都会再次尝试释放。获取路径上的其余
 任何拒绝都会抛出并阻塞替换 activation；而后续回合的重试趟改为吸收并上报该拒绝、
 让 owner 保持围闭状态——因为那一趟运行在已获取的 Session 上，不能因一个陈旧

@@ -181,16 +181,17 @@ function executionUnavailable(response: ManagedHookOperationView): boolean {
  * the shape an operation whose module evaluation was abandoned answers with
  * when its Runtime certified the cancellation as settled; a current Runtime
  * fences such an evaluation as outcome_unknown before any release is
- * attempted. Both codes are needed: the provider worker answers a
- * pending-work refusal with either, depending on which of its checks fires
- * first.
+ * attempted. The producers name that one condition with a dedicated code:
+ * every other 409 stays a plain refusal, because the class defaults are
+ * catch-alls an identity mismatch or any unexpected provider error shares —
+ * absorbing those as fences wedged close() into a recovery-required error
+ * for a Session holding no Hook work at all.
  */
 function holdFencedRelease(cause: unknown): boolean {
   return (
     cause instanceof HostedWorkspaceBrokerRejection &&
     cause.status === 409 &&
-    (cause.code === 'managed_runtime_identity_conflict' ||
-      cause.code === 'managed_runtime_provider_operation_failed')
+    cause.code === 'managed_runtime_owner_hold_pending'
   );
 }
 
@@ -713,8 +714,22 @@ export class HostedHookSession {
         return (await this.read<{ output?: HookOutput }>(marker.resultRef))
           .output;
     } else {
-      if (this.hasPendingOperations)
-        throw new HostedHookRecoveryRequiredError();
+      if (this.hasPendingOperations) {
+        // A recovery fence is not terminal: once an abandoned module
+        // evaluation definitively ends, the Runtime republishes its receipt,
+        // so give every unsettled record one status poll before refusing.
+        // Otherwise a live Session would reject every later turn until a
+        // DELETE-path drain reconciled it. Poll only — a fenced occurrence is
+        // never re-dispatched.
+        for (const record of this.executions())
+          if (
+            !record.resultRef &&
+            record.run.execution !== 'not_started_proven'
+          )
+            await this.status(record.hookExecutionId);
+        if (this.hasPendingOperations)
+          throw new HostedHookRecoveryRequiredError();
+      }
       const { messages: suppliedMessages, ...eventFields } = fields;
       const input: HookInput = {
         ...eventFields,

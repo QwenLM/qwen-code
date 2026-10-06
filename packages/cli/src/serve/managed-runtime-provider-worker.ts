@@ -304,7 +304,10 @@ export class ManagedRuntimeProviderWorker {
       }
       if (session.release) return session.release;
       if (session.pending > 0)
-        conflict('Managed Runtime Session still owns unfinished work.');
+        conflict(
+          'Managed Runtime Session still owns unfinished work.',
+          'managed_runtime_owner_hold_pending',
+        );
       const entry = session;
       entry.release = (async () => {
         await entry.value?.runtime.releasePrepared();
