@@ -3,7 +3,7 @@
 [English](2026-10-02-managed-workspace-w2-cwd-change.md) | [简体中文](2026-10-02-managed-workspace-w2-cwd-change.zh-CN.md)
 
 状态:已在本次变更中实现。属于 [proposal #12380](https://github.com/QwenLM/qwen-code/issues/12380)(2026-10-02 交付快照中的"W2 同 Workspace 内 cwd 变更:受控目录变更准入与结算;公开/WebShell 路由仍为 `planned`")。
-调研基线:main `d5c22d336b`(2026-10-02);随后合入 #13138(W1b,V31)、#13135 + #13223(绑定 close,V32)、#13142(D8a,契约 v1.29.0,V33)、#13194(绑定 archive/delete)与 #13112(绑定会话后续 Turn)之上——PR 并入的 origin/main 已越过以上全部;V34 被 #13090 占用、V35 被会话工具画像占用、V36–V39 被会话 journal 链占用(`V36` activation、`V37` event-type index、`V38` deferral marker、`V39` sequence index),V40–V44 又被会话创建者记录与 CSI 链占用,迁移号改为 V45。
+调研基线:main `d5c22d336b`(2026-10-02);随后合入 #13138(W1b,V31)、#13135 + #13223(绑定 close,V32)、#13142(D8a,契约 v1.29.0,V33)、#13194(绑定 archive/delete)与 #13112(绑定会话后续 Turn)之上——PR 并入的 origin/main 已越过以上全部;V34 被 #13090 占用、V35 被会话工具画像占用、V36–V39 被会话 journal 链占用(`V36` activation、`V37` event-type index、`V38` deferral marker、`V39` sequence index),V40–V44 又被会话创建者记录与 CSI 链占用、V45 被任务 journal 占用,迁移号改为 V46。
 目标契约是 [Workspace v1.12 第 4 节](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.en.md),以及仓库内已评审的 OpenAPI 契约 v1.27.0——后者已固定两条 `planned` 路由及其 schema。
 
 ## 问题
@@ -28,8 +28,8 @@
 
 一个 PR,四个部分:
 
-1. **契约 v1.31.0。** 把两条路由与五个 planned schema 翻转为 `implemented`;在冲突词汇固定处补上 `session_context_busy`;在自由形态的 `PublicEvent.data` 上记录 `session.context.changed` 事件类型;版本号递增。(#13112 在此期间合入并在上游头信息中把后续 Turn 记为 v1.28,随后 #13210 以网关免鉴权签名认证占用 v1.30.0;本切片发布 v1.31.0。)
-2. **存储层。** `V45__managed_cwd_operation.sql` 为 `managed_agent_operation` 增加可空列 `target_cwd_relative VARCHAR(2048)`、`expected_context_revision BIGINT`、`result_context_revision BIGINT`(调研基线为 V30;其间 V31–V33 先后合入——W1b 恢复包(#13138)、绑定 close(#13135,经 #13223 重编号)与 agent 定义(#13142);#13090 随后占用 V34,V35\_\_managed_session_tool_profile 又占用 V35,会话 journal 链占用 V36–V39,会话创建者记录与 CSI 链又占 V40–V44,因此本切片发布 V45。V15/V29 以 Java 迁移形式存在于 `src/main/java/db/migration`)。新增 `OperationKind.CWD_CHANGE` 及其专属准入、结算与失败方法;不改动生命周期状态机与 `ACTION_RESPONSE`。
+1. **契约 v1.32.0。** 把两条路由与五个 planned schema 翻转为 `implemented`;在冲突词汇固定处补上 `session_context_busy`;在自由形态的 `PublicEvent.data` 上记录 `session.context.changed` 事件类型;版本号递增。(#13112 在此期间合入并在上游头信息中把后续 Turn 记为 v1.28,随后 #13210 以网关免鉴权签名认证占用 v1.30.0、#13265 以 H3 后台任务章节占用 v1.31.0;本切片发布 v1.32.0。)
+2. **存储层。** `V46__managed_cwd_operation.sql` 为 `managed_agent_operation` 增加可空列 `target_cwd_relative VARCHAR(2048)`、`expected_context_revision BIGINT`、`result_context_revision BIGINT`(调研基线为 V30;其间 V31–V33 先后合入——W1b 恢复包(#13138)、绑定 close(#13135,经 #13223 重编号)与 agent 定义(#13142);#13090 随后占用 V34,V35\_\_managed_session_tool_profile 又占用 V35,会话 journal 链占用 V36–V39,会话创建者记录与 CSI 链又占 V40–V44、任务 journal 占 V45,因此本切片发布 V46。V15/V29 以 Java 迁移形式存在于 `src/main/java/db/migration`)。新增 `OperationKind.CWD_CHANGE` 及其专属准入、结算与失败方法;不改动生命周期状态机与 `ACTION_RESPONSE`。
 3. **服务/协调器/路由。** 两个 API 面的准入服务、`SessionLifecycleCoordinator.deliver` 的 kind 分支、结算方法、两个路由处理器,以及按 kind 的 operation 读取(`ACTION_RESPONSE` 分支是先例)。
 4. **测试与文档。** store/coordinator/controller/contract 测试、设计文档双语版、README 说明。
 
@@ -119,8 +119,8 @@ WebShell 请求体携带 `sessionId`、`idempotencyKey`、`cwdRelative`、`expec
 
 ## 涉及文件
 
-- `…/db/migration/V45__managed_cwd_operation.sql`(新增)。
-- `…/openapi/managed-agent-public-api.openapi.json`(状态翻转、`session_context_busy`、事件说明、版本 1.31.0)。
+- `…/db/migration/V46__managed_cwd_operation.sql`(新增)。
+- `…/openapi/managed-agent-public-api.openapi.json`(状态翻转、`session_context_busy`、事件说明、版本 1.32.0)。
 - `store/StoreModels.java`(kind、新列的 record 字段)、`store/ManagedAgentStore.java`(准入/结算/失败方法、事件常量、`insertTurnCommand` 的绑定会话后续 Turn 繁忙屏障、对增量列宽容的 operation 读取)、`store/AgentStateStore.java`(接口)、`store/WorkspaceExecutionStore.java`(`verifyMount`)与 `service/WorkspaceRuntimeResolver.java`(`verifyInstallable`、共享的 `requireDirectory`)。
 - `service/SessionLifecycleService.java`(公开/WebShell 准入与读取分支)、`service/SessionLifecycleCoordinator.java`(kind 分支及其限定化的类契约)、`service/RuntimeWarmer.java`(探针接口及其抛出默认实现)、`service/EmbeddedRuntimeBroker.java`(委托 resolver 的探针 override)、`service/WorkspaceRuntimeTransport.java`(`requireDirectory` 上移至 resolver)。
 - `api/PublicAgentController.java`、`api/WebShellAgentController.java`、`api/ApiModels.java`(路由与 DTO record)。

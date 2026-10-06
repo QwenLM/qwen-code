@@ -3046,7 +3046,7 @@ public class ManagedAgentStore implements AgentStateStore {
         return result.wasNull() ? null : value;
     }
 
-    // The cwd columns arrive with V45; an operation read against an
+    // The cwd columns arrive with V46; an operation read against an
     // additive-upgrade schema that predates them must treat the columns as
     // absent instead of erroring the whole query.
     private static String additiveString(java.sql.ResultSet result,

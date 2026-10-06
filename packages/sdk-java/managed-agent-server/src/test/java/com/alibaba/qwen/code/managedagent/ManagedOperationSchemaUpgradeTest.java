@@ -16,9 +16,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 /**
  * An additive operation-table migration must not break the store against a
  * schema that predates it: the operation mapper tolerates missing cwd
- * columns (V45) so upgrade paths keep reading operations. The MariaDB
+ * columns (V46) so upgrade paths keep reading operations. The MariaDB
  * retention IT pins the same V31 but migrates before constructing its
- * store, so it never reads against the pre-V45 schema — this test is the
+ * store, so it never reads against the pre-V46 schema — this test is the
  * only place the mapper's missing-column branch runs.
  */
 class ManagedOperationSchemaUpgradeTest {
