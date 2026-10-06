@@ -813,6 +813,116 @@ describe('Managed Runtime ledger', () => {
       ]);
     });
 
+    it('sweeps a group the worker persisted after the sweep first read its ledger', async () => {
+      // The orphan worker finishes one more Shell — and durably records its
+      // group — after this sweep's read but before the sweep's SIGKILL lands.
+      // A verdict earned from the stale snapshot would unlink the only record
+      // of that group with the group still alive.
+      const workFile = path.join(root, 'ledger.json');
+      const worker = {
+        pid: 101,
+        pgid: 101,
+        incarnation: 'incarnation-1',
+        startedAt: Date.now(),
+      };
+      testInternals.writeLedgerDocument(workFile, worker, []);
+      const alive = new Set([101, 202]);
+      const signal = vi.fn((pgid: number) => {
+        if (pgid === 101) {
+          // The worker's last write, landing while the sweep proves the kill.
+          testInternals.writeLedgerDocument(workFile, worker, [
+            { pgid: 202, callId: 'call-1', startedAt: Date.now() },
+          ]);
+          alive.delete(101);
+        }
+        return 'sent' as const;
+      });
+      const table = () =>
+        new Map([
+          [
+            101,
+            {
+              pid: 101,
+              pgid: 101,
+              runningMs: 5_000,
+              args: 'node dist/cli.js managed-runtime-worker',
+            },
+          ],
+          [
+            202,
+            {
+              pid: 202,
+              pgid: 202,
+              runningMs: 5_000,
+              args: 'node our-shell.js',
+            },
+          ],
+        ]);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (alive.has(id) ? 'alive' : 'gone'),
+            signal,
+            table,
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [202] });
+      expect(signal).toHaveBeenCalledWith(101, 'SIGKILL');
+      expect(signal).toHaveBeenCalledWith(202, 'SIGKILL');
+      expect(existsSync(workFile)).toBe(true);
+      const kept = testInternals.readLedgerDocument(workFile);
+      expect(kept?.groups.map((group) => group.pgid)).toEqual([202]);
+    });
+
+    it('keeps a live worker late write out of the sweep rewrite', async () => {
+      // The worker cannot be proven stopped, so it may still be writing: the
+      // rewrite that drops this sweep's proven groups must not erase a record
+      // the worker persisted after the sweep's read.
+      const workFile = path.join(root, 'ledger.json');
+      const worker = {
+        pid: 101,
+        pgid: 101,
+        incarnation: 'incarnation-1',
+        startedAt: Date.now(),
+      };
+      testInternals.writeLedgerDocument(workFile, worker, []);
+      const signal = vi.fn((pgid: number) => {
+        if (pgid === 101) {
+          testInternals.writeLedgerDocument(workFile, worker, [
+            { pgid: 202, callId: 'call-1', startedAt: Date.now() },
+          ]);
+        }
+        return 'sent' as const;
+      });
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: () => 'alive',
+            signal,
+            table: () =>
+              new Map([
+                [
+                  101,
+                  {
+                    pid: 101,
+                    pgid: 101,
+                    runningMs: 5_000,
+                    args: 'node dist/cli.js managed-runtime-worker',
+                  },
+                ],
+              ]),
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [101] });
+      expect(existsSync(workFile)).toBe(true);
+      const kept = testInternals.readLedgerDocument(workFile);
+      expect(kept?.groups.map((group) => group.pgid)).toEqual([202]);
+    });
+
     it('resolves a group whose live member is provably younger than its record', async () => {
       // A ±120 s window would match |90 s − 150 s| and SIGKILL this group;
       // the one-sided start-time proof knows no member of the recorded
@@ -1361,6 +1471,144 @@ describe('Managed Runtime ledger', () => {
       expect(verdict).toBe('proven');
       expect(signal).toHaveBeenCalledWith(101, 'SIGKILL');
       expect(existsSync(workFile)).toBe(false);
+    });
+
+    it('judges a boot-stamped worker in its own clock domain across a backward wall step', async () => {
+      // The wall clock stepped back past the record's stamp (chrony makestep,
+      // a snapshot restore) while the boot stamp stayed exact: the record
+      // must still name its worker. Reading the wall step as recycling
+      // evidence would leave the live orphan running over a deleted ledger.
+      const workFile = path.join(root, 'ledger.json');
+      testInternals.writeLedgerDocument(
+        workFile,
+        {
+          pid: 101,
+          pgid: 101,
+          incarnation: 'incarnation-1',
+          startedAt: Date.now(),
+          uptimeMs: os.uptime() * 1000,
+        },
+        [],
+      );
+      const alive = new Set([101]);
+      const signal = vi.fn((pgid: number) => {
+        alive.delete(pgid);
+        return 'sent' as const;
+      });
+      const verdict = await sweepWorkerLedger(workFile, {
+        now: () => Date.now() - 60_000,
+        sys: {
+          platform: 'linux',
+          liveness: (id) => (alive.has(id) ? 'alive' : 'gone'),
+          signal,
+          table: () =>
+            new Map([
+              [
+                101,
+                {
+                  pid: 101,
+                  pgid: 101,
+                  runningMs: 5_000,
+                  args: 'node dist/cli.js managed-runtime-worker',
+                },
+              ],
+            ]),
+        },
+      });
+      expect(signal).toHaveBeenCalledWith(101, 'SIGKILL');
+      expect(verdict).toBe('proven');
+      expect(existsSync(workFile)).toBe(false);
+    });
+
+    it('holds a worker whose wall stamp stepped back with no boot stamp to judge by', async () => {
+      // A record from before uptimeMs existed, or macOS's wall-clock domain:
+      // a stamp in the future makes the record undatable, and undatable is
+      // not recycling evidence — the stop stays unproven, nothing signalled.
+      const workFile = path.join(root, 'ledger.json');
+      testInternals.writeLedgerDocument(
+        workFile,
+        {
+          pid: 101,
+          pgid: 101,
+          incarnation: 'incarnation-1',
+          startedAt: Date.now() + 3_600_000,
+        },
+        [],
+      );
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 101 ? 'alive' : 'gone'),
+            signal,
+            table: () =>
+              new Map([
+                [
+                  101,
+                  {
+                    pid: 101,
+                    pgid: 101,
+                    runningMs: 5_000,
+                    args: 'node dist/cli.js managed-runtime-worker',
+                  },
+                ],
+              ]),
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [101] });
+      expect(signal).not.toHaveBeenCalled();
+      expect(existsSync(workFile)).toBe(true);
+    });
+
+    it('judges a boot-stamped group in its own clock domain across a backward wall step', async () => {
+      // The same backward step must not refuse the group identity check
+      // either: the group's own live leader still dates it, so the sweep
+      // signals it rather than holding it until the wall clock re-passes.
+      const workFile = path.join(root, 'ledger.json');
+      testInternals.writeLedgerDocument(
+        workFile,
+        {
+          pid: 42424246,
+          pgid: 42424246,
+          incarnation: 'incarnation-1',
+          startedAt: Date.now(),
+        },
+        [
+          {
+            pgid: 202,
+            callId: 'call-1',
+            startedAt: Date.now(),
+            uptimeMs: os.uptime() * 1000,
+          },
+        ],
+      );
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          now: () => Date.now() - 60_000,
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+            signal,
+            table: () =>
+              new Map([
+                [
+                  202,
+                  {
+                    pid: 202,
+                    pgid: 202,
+                    runningMs: 5_000,
+                    args: 'node our-shell.js',
+                  },
+                ],
+              ]),
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [202] });
+      expect(signal).toHaveBeenCalledWith(202, 'SIGKILL');
+      expect(existsSync(workFile)).toBe(true);
     });
 
     it('proves a slow exit within the budget', async () => {

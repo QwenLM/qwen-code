@@ -226,6 +226,19 @@ export function queryProcessTable(): ReadonlyMap<number, ProcessTableRow> {
 }
 
 /**
+ * Whether the record's age is judged on the boot clock — the domain
+ * recordAgeMs then reads it in: Linux's ps `etime` is boot-derived, so a
+ * boot-stamped record and a live row share a clock the wall steps never
+ * move.
+ */
+function judgedOnBootClock(
+  record: { readonly uptimeMs?: number },
+  platform: NodeJS.Platform,
+): boolean {
+  return record.uptimeMs !== undefined && platform === 'linux';
+}
+
+/**
  * The record's age in the judge's clock domain. ps's `etime` is
  * boot-derived on Linux — it does not move with a wall-clock step (chrony
  * `makestep`, a VM snapshot restore, a container clock correction) — while
@@ -256,26 +269,37 @@ function recordAgeMs(
   return now - record.startedAt;
 }
 
+/** What the live table can prove about the pid a worker record names. */
+type WorkerIdentity = 'ours' | 'recycled' | 'unknown';
+
 /**
- * Whether `row` is the worker `record` names: the worker command and a
- * process at least as old as the record. The command carries no incarnation
- * (the boot document arrives on stdin), and only age excludes a recycled
- * id: the true worker was born first, so an impostor answering after its
- * death is always younger, never older.
+ * Whether `row` is the worker `record` names. 'ours': the worker command
+ * and a process at least as old as the record — the command carries no
+ * incarnation (the boot document arrives on stdin), and only age excludes a
+ * recycled id: the true worker was born first, so an impostor answering
+ * after its death is always younger, never older. 'recycled': provably not
+ * the record's, so the recorded worker is gone. 'unknown': the record
+ * cannot be dated against this clock at all — a wall stamp in the future
+ * with no boot stamp to judge by — which is no evidence about the pid
+ * either way.
  */
-function isLedgerWorker(
+function judgeWorkerIdentity(
   row: ProcessTableRow,
   record: ManagedRuntimeLedgerWorkerRecord,
   now: number,
   platform: NodeJS.Platform = process.platform,
-): boolean {
-  if (!row.args.includes('managed-runtime-worker')) return false;
+): WorkerIdentity {
+  if (!row.args.includes('managed-runtime-worker')) return 'recycled';
   // A record from the future — the wall clock stepped back past its stamp —
   // matches nothing: a negative age would be older than every live process.
-  if (now < record.startedAt) return false;
-  return (
-    row.runningMs >= recordAgeMs(record, now, platform) - RECORD_LEAD_SKEW_MS
-  );
+  // A boot-stamped record on Linux is immune: its domain never stepped.
+  if (now < record.startedAt && !judgedOnBootClock(record, platform)) {
+    return 'unknown';
+  }
+  return row.runningMs >=
+    recordAgeMs(record, now, platform) - RECORD_LEAD_SKEW_MS
+    ? 'ours'
+    : 'recycled';
 }
 
 /**
@@ -289,8 +313,11 @@ function groupMatchesRecord(
   now: number,
   platform: NodeJS.Platform = process.platform,
 ): boolean {
-  // Same refusal as isLedgerWorker: a future-stamped record matches nothing.
-  if (now < record.startedAt) return false;
+  // Same refusal as judgeWorkerIdentity, lapsing the same way: only a
+  // record judged on the wall clock is poisoned by a stamp in its future.
+  if (now < record.startedAt && !judgedOnBootClock(record, platform)) {
+    return false;
+  }
   const recordedAge = recordAgeMs(record, now, platform);
   return members.some(
     (member) => member.runningMs >= recordedAge - RECORD_LEAD_SKEW_MS,
@@ -776,6 +803,9 @@ export async function sweepWorkerLedger(
   const remaining = new Map<number, ManagedRuntimeLedgerGroupRecord>(
     document.groups.map((group) => [group.pgid, group]),
   );
+  // Every pgid a ledger read has shown this sweep: a record outside the set
+  // belongs to a write newer than the snapshot being swept.
+  const seen = new Set(document.groups.map((group) => group.pgid));
   const unproven: number[] = [];
 
   // One proof budget per process, spent at its own start: a slow exit must
@@ -817,7 +847,10 @@ export async function sweepWorkerLedger(
     // A table that shows the pid answering for another process proves the
     // worker gone without a signal; without a table the witness stands.
     const row = table?.get(worker.pid);
-    if (row !== undefined && !isLedgerWorker(row, worker, now(), platform)) {
+    if (
+      row !== undefined &&
+      judgeWorkerIdentity(row, worker, now(), platform) === 'recycled'
+    ) {
       workerProven = true;
     } else {
       signal(worker.pgid, 'SIGKILL');
@@ -832,18 +865,66 @@ export async function sweepWorkerLedger(
       return 'held';
     }
     const row = table?.get(worker.pid);
-    if (row && isLedgerWorker(row, worker, now(), platform)) {
+    const identity =
+      row === undefined
+        ? undefined
+        : judgeWorkerIdentity(row, worker, now(), platform);
+    if (identity === 'ours') {
       signal(worker.pgid, 'SIGKILL');
       proofWaited = true;
       workerProven = await prove(worker.pgid);
-    } else if (row !== undefined) {
+    } else if (identity === 'recycled') {
       // The pid answers for a different process: the worker is gone.
       workerProven = true;
+    }
+    // 'unknown' — a record this clock cannot date — is no evidence about
+    // the pid at all: nothing is signalled and the stop stays unproven.
+  }
+  // A proven-dead worker can no longer rewrite the ledger, so the file now
+  // holds its final truth: a group it persisted after this sweep's first
+  // read — a Shell that settled while the kill was being proven — is still
+  // this sweep's to resolve, and a proven verdict must not unlink it away.
+  // A final truth that cannot be read keeps the stop unproven, the rule the
+  // first read already follows.
+  let groups = document.groups;
+  if (workerProven) {
+    let finalRaw: string | undefined;
+    try {
+      finalRaw = readFileSync(workFile, 'utf8');
+    } catch (error) {
+      // Deleted mid-sweep: the file holds nothing more to learn.
+      if (errnoCode(error) !== 'ENOENT') {
+        throw new LedgerSweepUnprovenError(
+          workFile,
+          [],
+          `The Managed Runtime ledger ${workFile} cannot be read after its worker was proven stopped; the stop it records stays unproven.`,
+        );
+      }
+    }
+    if (finalRaw !== undefined) {
+      const finalDocument = parseLedgerDocument(finalRaw);
+      if (finalDocument === undefined) {
+        throw new LedgerSweepUnprovenError(
+          workFile,
+          [],
+          `The Managed Runtime ledger ${workFile} became unreadable during the sweep; the stop it records stays unproven.`,
+        );
+      }
+      const persisted = finalDocument.groups.filter(
+        (group) => !seen.has(group.pgid),
+      );
+      if (persisted.length > 0) {
+        groups = [...groups, ...persisted];
+        for (const group of persisted) {
+          seen.add(group.pgid);
+          remaining.set(group.pgid, group);
+        }
+      }
     }
   }
   if (
     platform !== 'win32' &&
-    document.groups.length > 0 &&
+    groups.length > 0 &&
     (table === undefined || proofWaited)
   ) {
     // The identity a group is judged with is never older than the proof
@@ -859,7 +940,7 @@ export async function sweepWorkerLedger(
     readonly group: ManagedRuntimeLedgerGroupRecord;
     readonly proven: Promise<boolean>;
   }> = [];
-  for (const group of document.groups) {
+  for (const group of groups) {
     if (options.exitWitnessed !== true && table === undefined) {
       // The no-witness rule, on every platform: what cannot be named is
       // never signalled. A live id without identity is held unproven.
@@ -910,10 +991,27 @@ export async function sweepWorkerLedger(
     }
     return 'proven';
   }
-  try {
-    writeLedgerDocument(workFile, worker, [...remaining.values()]);
-  } catch {
-    // The previous truth is at least as good as what failed to be written.
+  // A live worker can still be writing: the rewrite that drops this sweep's
+  // proven groups must keep every record it never saw, and an unreadable
+  // file is left untouched rather than overwritten with a stale snapshot.
+  const written = [...remaining.values()];
+  let rewrite = true;
+  if (!workerProven) {
+    const current = readLedgerDocument(workFile);
+    if (current === undefined) {
+      rewrite = false;
+    } else {
+      for (const group of current.groups) {
+        if (!seen.has(group.pgid)) written.push(group);
+      }
+    }
+  }
+  if (rewrite) {
+    try {
+      writeLedgerDocument(workFile, worker, written);
+    } catch {
+      // The previous truth is at least as good as what failed to be written.
+    }
   }
   throw new LedgerSweepUnprovenError(
     workFile,
