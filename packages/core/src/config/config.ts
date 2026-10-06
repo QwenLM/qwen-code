@@ -9254,7 +9254,7 @@ export class Config {
       throw new Error('Plan is not an execution approval mode');
     }
     if (
-      this.isSessionAgentSession() &&
+      this.isSessionAgentSession?.() === true &&
       executionMode !== ApprovalMode.DEFAULT
     ) {
       throw new Error(SESSION_AGENT_APPROVAL_MODE_ERROR);
@@ -9341,7 +9341,9 @@ export class Config {
       throw new Error('Derived Configs cannot change approval mode');
     }
     if (
-      this.isSessionAgentSession() &&
+      // Optional call: per-agent configs built over a partial parent (e.g.
+      // InProcessBackend's) may not carry the method.
+      this.isSessionAgentSession?.() === true &&
       mode !== ApprovalMode.DEFAULT &&
       mode !== ApprovalMode.PLAN
     ) {

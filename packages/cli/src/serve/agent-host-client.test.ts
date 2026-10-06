@@ -235,7 +235,10 @@ it('runs a v2 turn through the adapter, round-trips a permission and returns the
   };
   let input: AgentAdapterTurnInput | undefined;
   const coordinator = fakeCoordinator([
-    assignment('run-1', { nativeSessionId: 'claude-0' }),
+    assignment('run-1', {
+      nativeSessionId: 'claude-0',
+      freshPrompt: 'The whole conversation.',
+    }),
   ]);
   getAdapter.mockReturnValue({
     program: 'claude',
@@ -269,6 +272,8 @@ it('runs a v2 turn through the adapter, round-trips a permission and returns the
     });
     expect(input).toMatchObject({
       prompt: 'Look at the bug.',
+      // Sent instead of `prompt` if the program refuses the resume.
+      freshPrompt: 'The whole conversation.',
       nativeSessionId: 'claude-0',
       cwd: workspaceCwd,
     });

@@ -424,8 +424,19 @@ export type AgentAdapterEvent =
   | { type: 'session_send'; text: string };
 
 export interface AgentAdapterTurnInput {
-  /** Text sent as the user turn (delta of the chat session + trigger). */
+  /**
+   * Text sent as the user turn: the chat session since the agent's read
+   * cursor (the delta) when `nativeSessionId` is resumed, else the
+   * conversation from the start (bounded by the budget).
+   */
   prompt: string;
+  /**
+   * Set only with `nativeSessionId`: the turn built without the read cursor
+   * (the conversation from the start, bounded by the budget). Sent instead of
+   * `prompt` when the resume is refused and a fresh native session is
+   * started, so that session gets the history in the same turn.
+   */
+  freshPrompt?: string;
   /** System / developer instructions (persona). Applied on a fresh session. */
   instructions?: string;
   model?: string;
@@ -486,6 +497,8 @@ export interface HostTurnAssignment {
   agent: SessionAgentAuthor & { instructions?: string; model?: string };
   program: SessionAgentProgram;
   prompt: string;
+  /** See {@link AgentAdapterTurnInput.freshPrompt}; set only with `nativeSessionId`. */
+  freshPrompt?: string;
   nativeSessionId?: string;
 }
 

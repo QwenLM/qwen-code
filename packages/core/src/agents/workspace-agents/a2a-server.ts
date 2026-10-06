@@ -35,6 +35,7 @@ import {
 } from './external-intake.js';
 import {
   isAgentAddressable,
+  isAgentLocal,
   isValidId,
   readWorkspaceAgents,
   withAgentStoreTransaction,
@@ -55,7 +56,18 @@ export type A2AFailure =
   | { kind: 'refused' }
   | { kind: 'not_found' }
   | { kind: 'conflict'; existingTaskId: string }
-  | { kind: 'invalid'; detail: string };
+  | { kind: 'invalid'; detail: string }
+  /** An authorised request this build cannot carry out. */
+  | { kind: 'unsupported'; detail: string };
+
+/**
+ * Thread-era A2A runs a task as a thread run. Only local agents execute
+ * those: Host v1, which leased thread runs to remote Hosts, was replaced by
+ * Host v2 (session turns), so a managed-host agent's run would stay queued
+ * forever. Refused up front instead (see dispatcher.ts `selectCandidates`).
+ */
+export const A2A_REMOTE_AGENT_UNSUPPORTED =
+  'Remote agents cannot take A2A tasks in this build.';
 
 export type A2AResult<T> =
   | { ok: true; value: T }
@@ -202,6 +214,15 @@ export async function a2aSendMessage(
   }
   const auth = await authorize(projectRoot, caller, request.agentId);
   if (!auth.ok) return { ok: false, kind: 'refused' };
+  // After the grant check, so only an authorised caller learns where the
+  // agent runs.
+  if (!isAgentLocal(auth.agent)) {
+    return {
+      ok: false,
+      kind: 'unsupported',
+      detail: A2A_REMOTE_AGENT_UNSUPPORTED,
+    };
+  }
   try {
     const accepted = await acceptExternalSubmission(projectRoot, {
       callerId: caller.callerId,

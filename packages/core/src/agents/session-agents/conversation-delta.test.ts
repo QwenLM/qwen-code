@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   EARLIER_MESSAGES_OMITTED_MARKER,
+  OWN_EARLIER_MESSAGE_SPEAKER,
   buildAgentInput,
   renderSquadBriefing,
   type ConversationRecordLike,
@@ -86,7 +87,6 @@ describe('buildAgentInput', () => {
     );
     expect(input.prompt).not.toContain('TOOL OUTPUT');
     expect(input.prompt).not.toContain('hidden thought');
-    expect(input.prompt).not.toContain('my own earlier reply');
     expect(input.lastRecordId).toBe('m2');
     expect(input.omittedCount).toBe(0);
   });
@@ -101,6 +101,53 @@ describe('buildAgentInput', () => {
     expect(input.prompt).not.toContain('first question');
     expect(input.prompt).toContain('alice reply');
     expect(input.cursorLost).toBe(false);
+  });
+
+  it("leaves the agent's own messages out of a delta", () => {
+    // The resumed native session already holds them.
+    const input = buildAgentInput({
+      records: [
+        ...records,
+        {
+          uuid: 'own-send',
+          type: 'user',
+          subtype: 'agent_mention',
+          systemPayload: {
+            displayText: '@alice can you check',
+            author: { agentId: 'ag_b', name: 'bob' },
+          },
+        },
+      ],
+      readThroughRecordId: 'a1',
+      trigger,
+      budgetChars: 10_000,
+    });
+    expect(input.prompt).not.toContain('my own earlier reply');
+    expect(input.prompt).not.toContain('@alice can you check');
+    expect(input.prompt).not.toContain(OWN_EARLIER_MESSAGE_SPEAKER);
+  });
+
+  it("labels the agent's own messages as its own when rebuilding", () => {
+    // No cursor: a fresh native session has never seen what it said before.
+    const fresh = buildAgentInput({ records, trigger, budgetChars: 10_000 });
+    expect(fresh.prompt).toContain(
+      '<message from="You (earlier)">\nmy own earlier reply',
+    );
+    expect(fresh.prompt).not.toContain('bob (agent)');
+    expect(fresh.prompt).toContain(
+      'Messages from "You (earlier)" are your own earlier replies',
+    );
+
+    // A cursor that is gone is no better.
+    const lost = buildAgentInput({
+      records,
+      readThroughRecordId: 'rewound-away',
+      trigger,
+      budgetChars: 10_000,
+    });
+    expect(lost.prompt).toContain(
+      '<message from="You (earlier)">\nmy own earlier reply',
+    );
   });
 
   it('falls back to the recent tail when the cursor record is gone', () => {

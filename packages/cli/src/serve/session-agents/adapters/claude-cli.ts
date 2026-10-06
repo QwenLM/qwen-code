@@ -540,7 +540,13 @@ export function createClaudeCliAdapter(
     setImmediate(() => {
       const stdin = child.stdin;
       if (!stdin || stdin.destroyed || stdin.writableEnded) return;
-      stdin.write(buildClaudeUserMessage(input.prompt));
+      // A fresh session after a refused resume holds none of the history
+      // the delta assumes: it gets the conversation from the start.
+      stdin.write(
+        buildClaudeUserMessage(
+          resumeSessionId ? input.prompt : (input.freshPrompt ?? input.prompt),
+        ),
+      );
     });
 
     let aborted = false as boolean;

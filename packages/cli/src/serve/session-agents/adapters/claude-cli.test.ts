@@ -117,6 +117,14 @@ function turnInput(overrides: Partial<AgentAdapterTurnInput> = {}) {
 
 const isUserTurn = (line: Record<string, unknown>) => line['type'] === 'user';
 
+/** The text of the user turn written to a fake's stdin. */
+function userText(fake: FakeClaude): unknown {
+  const turn = fake.written.find(isUserTurn) as
+    | { message?: { content?: ReadonlyArray<{ text?: string }> } }
+    | undefined;
+  return turn?.message?.content?.[0]?.text;
+}
+
 function completeTurn(sessionId: string, text = 'done'): Script {
   return (line, fake) => {
     if (!isUserTurn(line)) return;
@@ -396,17 +404,44 @@ describe('claude-cli adapter', () => {
     const { spawn, spawns } = harness([rejected, completeTurn('fresh')]);
     const adapter = createClaudeCliAdapter({ spawn, env: {} });
     const result = await adapter.runTurn(
-      turnInput({ nativeSessionId: 'old', instructions: 'persona' }).input,
+      turnInput({
+        nativeSessionId: 'old',
+        instructions: 'persona',
+        prompt: 'delta',
+        freshPrompt: 'whole conversation',
+      }).input,
     );
     expect(spawns).toHaveLength(2);
     expect(spawns[0]!.args).toContain('--resume');
     expect(spawns[1]!.args).not.toContain('--resume');
     expect(spawns[1]!.args).toContain('--append-system-prompt');
+    // The resumed session holds the history, so it gets the delta; the fresh
+    // one holds none, so it gets the conversation from the start.
+    expect(userText(spawns[0]!.fake)).toBe('delta');
+    expect(userText(spawns[1]!.fake)).toBe('whole conversation');
     expect(result).toMatchObject({
       status: 'completed',
       nativeSessionId: 'fresh',
       resumeRejected: true,
     });
+  });
+
+  it('sends the prompt when there is no fresh prompt for the retry', async () => {
+    const rejected: Script = (line, fake) => {
+      if (!isUserTurn(line)) return;
+      fake.send({
+        type: 'result',
+        is_error: true,
+        result: 'No conversation found with session ID: old',
+      });
+    };
+    const { spawn, spawns } = harness([rejected, completeTurn('fresh')]);
+    const result = await createClaudeCliAdapter({ spawn, env: {} }).runTurn(
+      turnInput({ nativeSessionId: 'old', prompt: 'delta' }).input,
+    );
+    expect(spawns).toHaveLength(2);
+    expect(userText(spawns[1]!.fake)).toBe('delta');
+    expect(result).toMatchObject({ status: 'completed', resumeRejected: true });
   });
 
   it('detects "no conversation found" on stderr as a rejected resume', () => {
@@ -437,9 +472,14 @@ describe('claude-cli adapter', () => {
     };
     const { spawn, spawns } = harness([saturated, completeTurn('fresh')]);
     const result = await createClaudeCliAdapter({ spawn, env: {} }).runTurn(
-      turnInput({ nativeSessionId: 'old' }).input,
+      turnInput({
+        nativeSessionId: 'old',
+        prompt: 'delta',
+        freshPrompt: 'whole conversation',
+      }).input,
     );
     expect(spawns).toHaveLength(2);
+    expect(userText(spawns[1]!.fake)).toBe('whole conversation');
     expect(result).toMatchObject({ status: 'completed', resumeRejected: true });
   });
 

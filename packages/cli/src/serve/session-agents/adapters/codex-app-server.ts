@@ -829,6 +829,9 @@ export function createCodexAppServerAdapter(
     notify('initialized');
 
     let resumeRejected = false;
+    // A thread started here (no resume requested, or the resume refused)
+    // holds none of the history the delta assumes.
+    let startedFresh = false;
     if (resumeThreadId) {
       try {
         const result = await request(
@@ -885,6 +888,7 @@ export function createCodexAppServerAdapter(
         return failed(`codex thread/start failed: ${(error as Error).message}`);
       }
       if (!threadId) return failed('codex thread/start returned no thread id.');
+      startedFresh = true;
     }
     input.onEvent({ type: 'native_session', nativeSessionId: threadId });
 
@@ -892,7 +896,17 @@ export function createCodexAppServerAdapter(
     try {
       await request(
         'turn/start',
-        { threadId, input: [{ type: 'text', text: input.prompt }] },
+        {
+          threadId,
+          input: [
+            {
+              type: 'text',
+              text: startedFresh
+                ? (input.freshPrompt ?? input.prompt)
+                : input.prompt,
+            },
+          ],
+        },
         timeouts.handshakeMs,
       );
     } catch (error) {

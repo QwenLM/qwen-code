@@ -152,9 +152,9 @@ export const AssistantMessage = memo(function AssistantMessage({
     agentMessage.squadOutcome === 'no_action'
   ) {
     // A squad leader that decided nothing was needed: one muted line, not a
-    // message. The label lives in the collaboration dictionary, which the
-    // transcript build stubs out (`t` then echoes the key).
-    const noActionKey = 'collab.squad.noAction';
+    // message. The label is in the main dictionary so exported transcripts
+    // can show it (the collaboration dictionary is stubbed there).
+    const noActionKey = 'agentMessage.noAction';
     const noActionLabel = t(noActionKey);
     return (
       <div

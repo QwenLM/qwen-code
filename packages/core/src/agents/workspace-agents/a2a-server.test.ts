@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../../config/storage.js';
 import { issueA2AGrant } from './a2a-grants.js';
 import {
+  A2A_REMOTE_AGENT_UNSUPPORTED,
   a2aCancelTask,
   a2aGetTask,
   a2aListTasks,
@@ -73,6 +74,54 @@ describe('A2A tasks', () => {
       ok: true,
       value: { answer: 'The cache key misses on every run.' },
     });
+  });
+
+  it('refuses work for a remote agent instead of queueing it forever', async () => {
+    // Host v1 (which leased thread runs to remote Hosts) is gone, so the run
+    // would never be picked up.
+    await updateWorkspaceAgents(PROJECT_ROOT, () => [
+      {
+        id: 'ag_lead',
+        name: 'lead',
+        createdAt: 1,
+        execution: { mode: 'managed-host', hostIds: ['ho_1'] },
+      },
+    ]);
+    const { secret } = await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: 'ag_lead',
+    });
+    const caller = { callerId: 'share_1', secret };
+
+    await expect(
+      a2aSendMessage(PROJECT_ROOT, caller, {
+        agentId: 'ag_lead',
+        messageId: 'msg-1',
+        title: '',
+        body: 'Why is the build slow?',
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      kind: 'unsupported',
+      detail: A2A_REMOTE_AGENT_UNSUPPORTED,
+    });
+    // Nothing was accepted.
+    await expect(
+      a2aListTasks(PROJECT_ROOT, caller, 'ag_lead'),
+    ).resolves.toEqual({ ok: true, value: [] });
+    // A caller without a valid grant still learns nothing about the agent.
+    await expect(
+      a2aSendMessage(
+        PROJECT_ROOT,
+        { callerId: 'share_1', secret: 'wrong' },
+        {
+          agentId: 'ag_lead',
+          messageId: 'msg-2',
+          title: '',
+          body: 'Hello?',
+        },
+      ),
+    ).resolves.toEqual({ ok: false, kind: 'refused' });
   });
 
   it('answers a malformed task id as not found', async () => {

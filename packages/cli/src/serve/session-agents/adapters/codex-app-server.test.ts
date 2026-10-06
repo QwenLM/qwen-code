@@ -106,6 +106,17 @@ function turnInput(overrides: Partial<AgentAdapterTurnInput> = {}) {
   return { input, events };
 }
 
+/** The text the adapter sent with `turn/start`. */
+function turnText(fake: FakeCodex): unknown {
+  const request = fake.received.find(
+    (message) => message['method'] === 'turn/start',
+  );
+  const params = request?.['params'] as
+    | { input?: ReadonlyArray<{ text?: string }> }
+    | undefined;
+  return params?.input?.[0]?.text;
+}
+
 /** Handshake + thread setup; `onTurn` runs when turn/start arrives. */
 function codexScript(options: {
   thread?: string;
@@ -240,7 +251,7 @@ describe('codex-app-server adapter', () => {
   });
 
   it('resumes, drops replay before turn/start and foreign threads', async () => {
-    const { spawn } = harness([
+    const { spawn, spawns } = harness([
       codexScript({
         resume: (request, fake) => {
           // History replayed during resume: before the gate is armed.
@@ -270,7 +281,11 @@ describe('codex-app-server adapter', () => {
         },
       }),
     ]);
-    const { input, events } = turnInput({ nativeSessionId: 'th_old' });
+    const { input, events } = turnInput({
+      nativeSessionId: 'th_old',
+      prompt: 'delta',
+      freshPrompt: 'whole conversation',
+    });
     const result = await createCodexAppServerAdapter({
       spawn,
       env: {},
@@ -281,6 +296,8 @@ describe('codex-app-server adapter', () => {
       nativeSessionId: 'th_old',
     });
     expect(result.resumeRejected).toBeUndefined();
+    // The resumed thread holds the history: it gets only the delta.
+    expect(turnText(spawns[0]!.fake)).toBe('delta');
     const texts = events.flatMap((event) =>
       event.type === 'text_delta' ? [event.text] : [],
     );
@@ -306,8 +323,16 @@ describe('codex-app-server adapter', () => {
     const result = await createCodexAppServerAdapter({
       spawn,
       env: {},
-    }).runTurn(turnInput({ nativeSessionId: 'th_gone' }).input);
+    }).runTurn(
+      turnInput({
+        nativeSessionId: 'th_gone',
+        prompt: 'delta',
+        freshPrompt: 'whole conversation',
+      }).input,
+    );
     expect(spawns).toHaveLength(1);
+    // The fresh thread holds none of the history: it gets all of it now.
+    expect(turnText(spawns[0]!.fake)).toBe('whole conversation');
     expect(result).toMatchObject({
       status: 'completed',
       nativeSessionId: 'th_fresh',
@@ -532,8 +557,15 @@ describe('codex-app-server adapter', () => {
       env: {},
       maxLineBytes: 1_000,
       timeouts: { terminateGraceMs: 10 },
-    }).runTurn(turnInput({ nativeSessionId: 'th_big' }).input);
+    }).runTurn(
+      turnInput({
+        nativeSessionId: 'th_big',
+        prompt: 'delta',
+        freshPrompt: 'whole conversation',
+      }).input,
+    );
     expect(spawns).toHaveLength(2);
+    expect(turnText(spawns[1]!.fake)).toBe('whole conversation');
     expect(
       spawns[1]!.fake.received.map((message) => message['method']),
     ).toContain('thread/start');

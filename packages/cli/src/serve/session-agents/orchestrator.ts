@@ -90,6 +90,7 @@ import {
 } from '@qwen-code/qwen-code-core/agents/session-agents/binding-store.js';
 import {
   buildAgentInput,
+  type BuildAgentInputOptions,
   type ConversationRecordLike,
   type SquadBriefing,
 } from '@qwen-code/qwen-code-core/agents/session-agents/conversation-delta.js';
@@ -307,6 +308,12 @@ interface LiveRun {
   voterContexts: Map<string, BridgeClientRequestContext>;
   /** Newest chat record the run's prompt included (the next read cursor). */
   lastRecordId?: string;
+  /**
+   * This turn offered the adapter a from-the-start prompt for a refused
+   * resume. A fresh native session then already holds the conversation, so
+   * the cursor advances normally instead of being reset.
+   */
+  offeredFreshPrompt?: boolean;
   nativeSessionId?: string;
   totalTokens?: number;
   sendCount: number;
@@ -1258,11 +1265,18 @@ export class SessionAgentOrchestrator {
         const sameRuntime =
           binding.runtimeId === hostId &&
           canReuseNativeSession(binding, hostId, program);
-        const input = buildAgentInput({
+        // A native session lives on one runtime; resume only there.
+        const nativeSessionId = sameRuntime
+          ? binding.nativeSessionId
+          : undefined;
+        const readThroughRecordId = sameRuntime
+          ? binding.readThroughRecordId
+          : undefined;
+        const inputOptions: Omit<
+          BuildAgentInputOptions,
+          'readThroughRecordId'
+        > = {
           records,
-          readThroughRecordId: sameRuntime
-            ? binding.readThroughRecordId
-            : undefined,
           trigger: {
             agentId: agent.id,
             agentName: agent.name,
@@ -1271,12 +1285,16 @@ export class SessionAgentOrchestrator {
           budgetChars: AGENT_INPUT_CHAR_BUDGET,
           pendingMessages: this.pendingFor(live.sessionId, agent.id, records),
           ...(squad ? { squad } : {}),
-        });
+        };
+        const input = buildAgentInput({ ...inputOptions, readThroughRecordId });
         live.lastRecordId = input.lastRecordId;
-        // A native session lives on one runtime; resume only there.
-        const nativeSessionId = sameRuntime
-          ? binding.nativeSessionId
-          : undefined;
+        // A resume the Host's program refuses starts a fresh native session,
+        // which must get the conversation from the start in this same turn.
+        const freshPrompt =
+          nativeSessionId && readThroughRecordId !== undefined
+            ? buildAgentInput(inputOptions).prompt
+            : undefined;
+        live.offeredFreshPrompt = freshPrompt !== undefined;
         await this.persist(state);
         this.publish(live);
         return {
@@ -1293,6 +1311,7 @@ export class SessionAgentOrchestrator {
           agent: { ...this.authorOf(live), ...persona },
           program,
           prompt: input.prompt,
+          ...(freshPrompt !== undefined ? { freshPrompt } : {}),
           ...(nativeSessionId ? { nativeSessionId } : {}),
         };
       } catch (error) {
@@ -1813,21 +1832,6 @@ export class SessionAgentOrchestrator {
         LOCAL_SESSION_AGENT_RUNTIME_ID,
         program,
       );
-      const input = buildAgentInput({
-        records,
-        readThroughRecordId: sameNativeSession
-          ? binding.readThroughRecordId
-          : undefined,
-        trigger: {
-          agentId: agent.id,
-          agentName: agent.name,
-          recordIds: run.triggerRecordIds,
-        },
-        budgetChars: AGENT_INPUT_CHAR_BUDGET,
-        pendingMessages: this.pendingFor(state.sessionId, agent.id, records),
-        ...(squad ? { squad } : {}),
-      });
-      live.lastRecordId = input.lastRecordId;
       const resumable =
         sameNativeSession &&
         binding.runtimeId === LOCAL_SESSION_AGENT_RUNTIME_ID
@@ -1840,6 +1844,30 @@ export class SessionAgentOrchestrator {
         program === 'qwen'
           ? sessionAgentNativeSessionId(agent.id, state.sessionId)
           : resumable;
+      const readThroughRecordId = sameNativeSession
+        ? binding.readThroughRecordId
+        : undefined;
+      const inputOptions: Omit<BuildAgentInputOptions, 'readThroughRecordId'> =
+        {
+          records,
+          trigger: {
+            agentId: agent.id,
+            agentName: agent.name,
+            recordIds: run.triggerRecordIds,
+          },
+          budgetChars: AGENT_INPUT_CHAR_BUDGET,
+          pendingMessages: this.pendingFor(state.sessionId, agent.id, records),
+          ...(squad ? { squad } : {}),
+        };
+      const input = buildAgentInput({ ...inputOptions, readThroughRecordId });
+      live.lastRecordId = input.lastRecordId;
+      // A resume the program refuses starts a fresh native session, which
+      // must get the conversation from the start in this same turn.
+      const freshPrompt =
+        nativeSessionId && readThroughRecordId !== undefined
+          ? buildAgentInput(inputOptions).prompt
+          : undefined;
+      live.offeredFreshPrompt = freshPrompt !== undefined;
       state.file.bindings[agent.id] = {
         ...binding,
         agentId: agent.id,
@@ -1872,6 +1900,7 @@ export class SessionAgentOrchestrator {
       });
       const result = await adapter.runTurn({
         prompt: input.prompt,
+        ...(freshPrompt !== undefined ? { freshPrompt } : {}),
         ...persona,
         ...(nativeSessionId ? { nativeSessionId } : {}),
         cwd: this.workspaceCwd,
@@ -2394,10 +2423,11 @@ export class SessionAgentOrchestrator {
       binding.runtimeId = runtimeId;
       if (live.author.program) binding.program = live.author.program;
     }
-    if (outcome.resumeRejected) {
+    if (outcome.resumeRejected && !live.offeredFreshPrompt) {
       // A fresh native session holds none of the earlier conversation: drop
       // the cursor so the next prompt carries the history again (bounded by
-      // AGENT_INPUT_CHAR_BUDGET).
+      // AGENT_INPUT_CHAR_BUDGET). When this turn already sent the
+      // from-the-start prompt, the new session has it; advance as usual.
       delete binding.readThroughRecordId;
     } else if (outcome.status === 'completed' && live.lastRecordId) {
       // Advance the cursor only when the agent answered: a failed or

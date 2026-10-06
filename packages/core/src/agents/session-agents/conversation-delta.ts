@@ -14,8 +14,10 @@
  *
  * Included: the person's text, the main assistant's reply text, other agents'
  * messages, and @-mentions (by the person or by an agent via `session_send`).
- * Excluded: tool calls and results, thoughts, system records, subagent
- * sidechains, and this agent's own messages (its native session has them).
+ * Excluded: tool calls and results, thoughts, system records and subagent
+ * sidechains. This agent's own messages are excluded from a delta (its native
+ * session has them) but included, labelled as its own, when the input is
+ * built without a usable cursor: a fresh native session has never seen them.
  */
 
 import {
@@ -109,6 +111,9 @@ export interface AgentInput {
 }
 
 export const EARLIER_MESSAGES_OMITTED_MARKER = '[earlier messages omitted]';
+// TODO(multi-agent): model-facing text — needs eval before release
+/** The speaker label of the agent's own earlier messages in a rebuild. */
+export const OWN_EARLIER_MESSAGE_SPEAKER = 'You (earlier)';
 const DEFAULT_FALLBACK_MESSAGE_COUNT = 20;
 const TRUNCATED_MARKER = '\n[… message truncated …]\n';
 
@@ -150,6 +155,8 @@ function toMessage(
   record: ConversationRecordLike,
   agentId: string,
   assistantName: string,
+  /** Keep this agent's own messages (labelled as its own) when true. */
+  includeOwn: boolean,
 ): ConversationMessage | undefined {
   if (record.isSidechain) return undefined;
   const payload = asRecord(record.systemPayload);
@@ -157,8 +164,10 @@ function toMessage(
   let text: string;
   if (record.subtype === AGENT_MESSAGE_SUBTYPE) {
     const author = authorOf(payload);
-    if (!author || author.agentId === agentId) return undefined;
-    speaker = `${author.name} (agent)`;
+    if (!author) return undefined;
+    const own = author.agentId === agentId;
+    if (own && !includeOwn) return undefined;
+    speaker = own ? OWN_EARLIER_MESSAGE_SPEAKER : `${author.name} (agent)`;
     text =
       typeof payload?.['displayText'] === 'string'
         ? payload['displayText']
@@ -171,8 +180,13 @@ function toMessage(
     }
   } else if (record.subtype === AGENT_MENTION_SUBTYPE) {
     const author = authorOf(payload);
-    if (author?.agentId === agentId) return undefined;
-    speaker = author ? `${author.name} (agent)` : 'User';
+    const own = author?.agentId === agentId;
+    if (own && !includeOwn) return undefined;
+    speaker = own
+      ? OWN_EARLIER_MESSAGE_SPEAKER
+      : author
+        ? `${author.name} (agent)`
+        : 'User';
     text =
       typeof payload?.['displayText'] === 'string'
         ? payload['displayText']
@@ -249,6 +263,7 @@ function renderHeader(
   agentName: string,
   assistantName: string,
   cursorLost: boolean,
+  includesOwn: boolean,
 ): string {
   const lines = [
     `You are @${agentName}, an agent in a shared conversation with a person, the session's main assistant (${assistantName}) and possibly other agents.`,
@@ -259,6 +274,11 @@ function renderHeader(
   if (cursorLost) {
     lines.push(
       'The conversation was rewound or edited since your last turn, so only its most recent messages are shown.',
+    );
+  }
+  if (includesOwn) {
+    lines.push(
+      `Messages from "${OWN_EARLIER_MESSAGE_SPEAKER}" are your own earlier replies in this conversation.`,
     );
   }
   return lines.join('\n');
@@ -343,10 +363,16 @@ export function buildAgentInput(options: BuildAgentInputOptions): AgentInput {
       ? -1
       : records.findIndex((record) => record.uuid === readThroughRecordId);
   const cursorLost = readThroughRecordId !== undefined && cursorIndex === -1;
+  // Without a usable cursor this is a rebuild for a native session that may
+  // never have seen the agent's own replies (first turn, a fresh session after
+  // a refused resume, a move to another runtime or program, a lost cursor).
+  const includeOwn = cursorIndex === -1;
 
   let messages = records
     .slice(cursorIndex + 1)
-    .map((record) => toMessage(record, trigger.agentId, mainAssistantName))
+    .map((record) =>
+      toMessage(record, trigger.agentId, mainAssistantName, includeOwn),
+    )
     .filter((message): message is ConversationMessage => !!message);
   // Not found means the anchor was rewound away or the session branched. The
   // whole transcript would replay context the agent already has, so take
@@ -367,7 +393,12 @@ export function buildAgentInput(options: BuildAgentInputOptions): AgentInput {
   const briefing = squad
     ? `${renderSquadBriefing(squad, trigger.agentName)}\n\n`
     : '';
-  const header = `${briefing}${renderHeader(trigger.agentName, mainAssistantName, cursorLost)}`;
+  const header = `${briefing}${renderHeader(
+    trigger.agentName,
+    mainAssistantName,
+    cursorLost,
+    messages.some((message) => message.speaker === OWN_EARLIER_MESSAGE_SPEAKER),
+  )}`;
   const open = '<conversation>';
   const close = '</conversation>';
   const fixed = header.length + 2 + open.length + 1 + close.length + 1;

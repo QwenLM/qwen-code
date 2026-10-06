@@ -1182,6 +1182,9 @@ async function connectAgentHost(
       });
       result = await adapter.runTurn({
         prompt: assignment.prompt,
+        ...(assignment.freshPrompt !== undefined
+          ? { freshPrompt: assignment.freshPrompt }
+          : {}),
         ...(assignment.agent.instructions
           ? { instructions: assignment.agent.instructions }
           : {}),

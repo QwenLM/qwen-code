@@ -16,6 +16,12 @@ type CollabMessage =
   | ((vars?: Record<string, string | number>) => string);
 
 export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
+  'toolName.thread_post': 'ThreadPost',
+  'toolName.thread_wait': 'ThreadWait',
+  'toolName.thread_block': 'ThreadBlock',
+  'toolName.thread_review': 'ThreadReview',
+  'toolName.thread_create': 'ThreadCreate',
+  'toolName.thread_read': 'ThreadRead',
   'agents.description':
     'Manage reusable agent definitions for tasks, Agent Teams, and @-mention collaboration in chat.',
   'collab.elapsed.seconds': (v) => `${v?.count ?? 0}s`,
@@ -62,7 +68,6 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.squad.needsLeader': 'Needs a new leader',
   'collab.squad.leaderPaused': 'Leader is paused',
   'collab.squad.summary': (v) => `Leader ${v?.leader} · ${v?.count} member(s)`,
-  'collab.squad.noAction': 'no action needed',
   'collab.squad.engagement': (v) => `Squad ${v?.squad}`,
   'collab.squad.engagementMembers': (v) => `working: ${v?.names}`,
   'collab.squad.engagementLeader': (v) => `${v?.leader} is deciding`,
@@ -250,6 +255,12 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
 };
 
 export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
+  'toolName.thread_post': '发帖到线程',
+  'toolName.thread_wait': '等待协作方',
+  'toolName.thread_block': '提出阻塞问题',
+  'toolName.thread_review': '提交待评审',
+  'toolName.thread_create': '创建子线程',
+  'toolName.thread_read': '读取线程',
   'agents.description':
     '管理可复用的智能体定义，用于任务执行、Agent Team 或在对话中 @ 协作。',
   'collab.elapsed.seconds': (v) => `${v?.count ?? 0} 秒`,
@@ -295,7 +306,6 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.squad.needsLeader': '需要新的负责人',
   'collab.squad.leaderPaused': '负责人已停用',
   'collab.squad.summary': (v) => `负责人 ${v?.leader} · ${v?.count} 名成员`,
-  'collab.squad.noAction': '无需动作',
   'collab.squad.engagement': (v) => `小队 ${v?.squad}`,
   'collab.squad.engagementMembers': (v) => `进行中：${v?.names}`,
   'collab.squad.engagementLeader': (v) => `${v?.leader} 正在决定下一步`,

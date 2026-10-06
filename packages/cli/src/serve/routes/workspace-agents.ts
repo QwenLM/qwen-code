@@ -838,6 +838,10 @@ export function registerWorkspaceAgentRoutes(
           const executing = sessionRuns.find((run) =>
             EXECUTING_SESSION_RUN_STATUSES.has(run.status),
           );
+          // TODO(multi-agent): a remote agent's queued thread run never runs
+          // (no Host v1 pickup; see the TODO in dispatcher.ts
+          // `selectCandidates`). New ones are refused at A2A intake, so only
+          // runs queued before that refusal are counted here as waiting.
           const waiting =
             threads.reduce(
               (count, thread) =>

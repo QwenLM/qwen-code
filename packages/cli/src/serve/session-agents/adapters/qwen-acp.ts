@@ -249,8 +249,11 @@ export function createQwenAcpAdapter(
     timers.delete(sessionId);
   };
 
-  /** Attaches to, resumes or creates this agent's hidden session. */
-  const ensureSession = async (sessionId: string): Promise<void> => {
+  /**
+   * Attaches to, resumes or creates this agent's hidden session. True when
+   * it was created, so it holds none of the earlier conversation.
+   */
+  const ensureSession = async (sessionId: string): Promise<boolean> => {
     const live = findSession(sessionId);
     if (
       live &&
@@ -258,7 +261,7 @@ export function createQwenAcpAdapter(
       live.sourceId === agentId &&
       options.sessionSend?.isCurrent() !== false
     ) {
-      return;
+      return false;
     }
     // Opened by a person as an ordinary session (no persona, no agent
     // surface), or carrying a dead `session_send` token: close it and reload
@@ -274,9 +277,10 @@ export function createQwenAcpAdapter(
     };
     if (await sessionExists(sessionId)) {
       await bridge.resumeSession(request);
-    } else {
-      await bridge.spawnOrAttach({ ...request, sessionScope: 'thread' });
+      return false;
     }
+    await bridge.spawnOrAttach({ ...request, sessionScope: 'thread' });
+    return true;
   };
 
   return {
@@ -294,8 +298,9 @@ export function createQwenAcpAdapter(
         };
       }
       cancelIdleClose(sessionId);
+      let created: boolean;
       try {
-        await ensureSession(sessionId);
+        created = await ensureSession(sessionId);
       } catch (error) {
         scheduleIdleClose(sessionId);
         return {
@@ -425,7 +430,19 @@ export function createQwenAcpAdapter(
             sessionId,
             {
               sessionId,
-              prompt: [{ type: 'text', text: input.prompt }],
+              prompt: [
+                {
+                  type: 'text',
+                  // The id is planned, so "resume" means it is on disk. A
+                  // session created now (the transcript is gone) gets the
+                  // conversation from the start, not the delta. Not reported
+                  // as `resumeRejected`: this prompt covers the history, so
+                  // the read cursor may advance past it.
+                  text: created
+                    ? (input.freshPrompt ?? input.prompt)
+                    : input.prompt,
+                },
+              ],
             } as Parameters<QwenAcpAdapterBridge['sendPrompt']>[1],
             undefined,
             { promptId },

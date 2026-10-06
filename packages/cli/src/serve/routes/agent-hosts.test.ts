@@ -80,6 +80,9 @@ const V2_HOST = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // clearAllMocks keeps queued `mockResolvedValueOnce` values; a test that
+  // left some would hand them to the next test's first call.
+  for (const fn of Object.values(orchestrator)) fn.mockReset();
   authenticate.mockResolvedValue(V2_HOST);
   getOrchestrator.mockReturnValue(orchestrator);
   orchestrator.decisionsForHost.mockReturnValue([]);
@@ -292,7 +295,10 @@ it('wakes an idle pickup poll when a run is queued', async () => {
     .mockResolvedValueOnce(undefined)
     .mockResolvedValueOnce(undefined)
     .mockResolvedValue({ protocol: 2, ...LEASE, program: 'qwen' });
-  const response = setup().poll(20_000);
+  // supertest only sends once awaited; start it now.
+  const response = setup()
+    .poll(20_000)
+    .then((answer) => answer);
   await vi.waitFor(() =>
     expect(orchestrator.pickupForHost).toHaveBeenCalledTimes(2),
   );
@@ -317,7 +323,7 @@ it('wakes an idle pickup poll when a run is queued', async () => {
 it('stops polling when collaboration is disabled', async () => {
   const { poll, disable } = setup();
   orchestrator.pickupForHost.mockResolvedValue(undefined);
-  const response = poll();
+  const response = poll().then((answer) => answer);
   await vi.waitFor(() =>
     expect(orchestrator.pickupForHost).toHaveBeenCalledOnce(),
   );
@@ -329,7 +335,7 @@ it('stops polling when collaboration is disabled', async () => {
 it('stops an open pickup poll when the Host credential is revoked', async () => {
   const { poll } = setup();
   orchestrator.pickupForHost.mockResolvedValue(undefined);
-  const response = poll();
+  const response = poll().then((answer) => answer);
   await vi.waitFor(() =>
     expect(orchestrator.pickupForHost).toHaveBeenCalledOnce(),
   );
@@ -649,10 +655,12 @@ it('takes a second answer for a re-armed request', async () => {
 
 it('wakes a decisions poll when this Host gets a decision', async () => {
   orchestrator.decisionsForHost.mockReturnValue([]);
-  const response = setup().decisions({
-    waitMs: 20_000,
-    awaiting: [{ ...P1, seen: [] }],
-  });
+  const response = setup()
+    .decisions({
+      waitMs: 20_000,
+      awaiting: [{ ...P1, seen: [] }],
+    })
+    .then((answer) => answer);
   await vi.waitFor(() =>
     expect(orchestrator.decisionsForHost).toHaveBeenCalled(),
   );

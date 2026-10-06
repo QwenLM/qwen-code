@@ -415,6 +415,8 @@ describe('SessionAgentOrchestrator', () => {
       },
     });
     expect(assignment!.prompt).toContain('check this');
+    // Nothing to resume on this Host yet.
+    expect(assignment!.freshPrompt).toBeUndefined();
     expect(turns).toHaveLength(0);
     const lease = {
       sessionId: SESSION,
@@ -623,7 +625,7 @@ describe('SessionAgentOrchestrator', () => {
   });
 
   it('retries a failed record write until it lands', async () => {
-    const { orchestrator, bridge, turns, lastFrame } = harness();
+    const { orchestrator, bridge, turns, lastFrame, frames } = harness();
     const { runs } = await orchestrator.mention(SESSION, {
       text: '@alice hi',
       clientMessageId: 'm1',
@@ -633,15 +635,19 @@ describe('SessionAgentOrchestrator', () => {
     bridge.appendExternalRecord.mockRejectedValueOnce(new Error('boom'));
     turns[0]!.finish({ outputText: 'hello' });
 
-    await vi.waitFor(() =>
-      expect(lastFrame(runId)).toMatchObject({
-        recorded: false,
-        error: expect.stringContaining('Could not record the reply'),
-      }),
-    );
+    // The retry can land before a poll sees the failed frame, so look at
+    // every frame the run published, not only the latest.
     await vi.waitFor(() =>
       expect(lastFrame(runId)).toMatchObject({ recorded: true }),
     );
+    expect(
+      frames.some(
+        (frame) =>
+          frame.runId === runId &&
+          frame.recorded === false &&
+          (frame.error ?? '').includes('Could not record the reply'),
+      ),
+    ).toBe(true);
     expect(lastFrame(runId)).not.toHaveProperty('error');
     expect(bridge.records[1]).toMatchObject({
       subtype: 'agent_message',
@@ -795,6 +801,8 @@ describe('SessionAgentOrchestrator', () => {
       clientMessageId: 'm1',
     });
     await vi.waitFor(() => expect(turns).toHaveLength(1));
+    // Nothing to resume: the prompt already is the whole conversation.
+    expect(turns[0]!.input.freshPrompt).toBeUndefined();
     turns[0]!.finish({ outputText: 'ok', nativeSessionId: 'n1' });
     await vi.waitFor(async () =>
       expect((await fileFor()).bindings['ag_alice']).toMatchObject({
@@ -810,6 +818,13 @@ describe('SessionAgentOrchestrator', () => {
     await vi.waitFor(() => expect(turns).toHaveLength(2));
     expect(turns[1]!.input.nativeSessionId).toBe('n1');
     expect(turns[1]!.input.prompt).not.toContain('first topic');
+    // Resuming: in case the program refuses, the adapter also gets the
+    // conversation from the start, the agent's own earlier reply included.
+    expect(turns[1]!.input.freshPrompt).toContain('first topic');
+    expect(turns[1]!.input.freshPrompt).toContain('second topic');
+    expect(turns[1]!.input.freshPrompt).toContain(
+      '<message from="You (earlier)">\nok',
+    );
     turns[1]!.finish({
       outputText: 'ok again',
       nativeSessionId: 'n2',
@@ -818,7 +833,9 @@ describe('SessionAgentOrchestrator', () => {
     await vi.waitFor(async () => {
       const binding = (await fileFor()).bindings['ag_alice'];
       expect(binding?.nativeSessionId).toBe('n2');
-      expect(binding?.readThroughRecordId).toBeUndefined();
+      // The refused resume was answered from the fresh prompt, so the new
+      // session already holds the conversation: the cursor advances.
+      expect(binding?.readThroughRecordId).toBeDefined();
     });
 
     await orchestrator.mention(SESSION, {
@@ -826,9 +843,10 @@ describe('SessionAgentOrchestrator', () => {
       clientMessageId: 'm3',
     });
     await vi.waitFor(() => expect(turns).toHaveLength(3));
-    // The fresh session gets the earlier conversation again.
-    expect(turns[2]!.input.prompt).toContain('first topic');
+    // A delta again, resuming the new session.
+    expect(turns[2]!.input.prompt).not.toContain('first topic');
     expect(turns[2]!.input.nativeSessionId).toBe('n2');
+    expect(turns[2]!.input.freshPrompt).toContain('first topic');
   });
 
   it('accepts session_send with the binding token for the live run only', async () => {
