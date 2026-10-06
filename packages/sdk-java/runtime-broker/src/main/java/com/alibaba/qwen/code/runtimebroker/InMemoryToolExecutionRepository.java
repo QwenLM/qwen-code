@@ -226,6 +226,29 @@ public final class InMemoryToolExecutionRepository
     }
 
     @Override
+    public synchronized ToolExecutionRecord settlePrepared(
+            ToolExecutionRecord expected, Map<String, Object> result,
+            Instant settlementTime) {
+        if (expected == null || result == null || settlementTime == null) {
+            throw new IllegalArgumentException(
+                    "expected, result and time are required");
+        }
+        ToolExecutionRecord current = recordsById.get(
+                expected.getExecutionCallId());
+        if (current == null || !current.sameIdentity(expected)
+                || current.getVersion() != expected.getVersion()
+                || current.isTerminal()
+                || current.getState() != ToolExecutionRecord.State.PREPARED) {
+            return null;
+        }
+        ToolExecutionRecord settled = current.withResult(result,
+                current.getLastSequence(), settlementTime)
+                .withVersion(current.getVersion() + 1);
+        recordsById.put(settled.getExecutionCallId(), settled);
+        return settled;
+    }
+
+    @Override
     public synchronized ToolExecutionRecord resolveUnknown(
             ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
@@ -271,6 +294,31 @@ public final class InMemoryToolExecutionRepository
         TreeMap<String, ToolExecutionRecord> batch = new TreeMap<>();
         for (ToolExecutionRecord record : recordsById.values()) {
             if (record.belongsTo(session) && record.needsReconciliation()) {
+                String key = JdbcRepositorySupport.valueKey(record.getExecutionCallId());
+                if (key.compareTo(after) > 0) {
+                    batch.put(key, record);
+                    if (batch.size() > limit) {
+                        batch.pollLastEntry();
+                    }
+                }
+            }
+        }
+        return List.copyOf(batch.values());
+    }
+
+    @Override
+    public synchronized List<ToolExecutionRecord> findBackgroundProcesses(
+            RuntimeSessionRecord session, String afterExecutionCallId, int limit) {
+        if (session == null || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("session and limit in [1, 100] are required");
+        }
+        String after = afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        TreeMap<String, ToolExecutionRecord> batch = new TreeMap<>();
+        for (ToolExecutionRecord record : recordsById.values()) {
+            if (record.belongsTo(session) && !record.isTerminal()
+                    && "background_v3_process".equals(
+                            record.getReference().get("dispatchMode"))) {
                 String key = JdbcRepositorySupport.valueKey(record.getExecutionCallId());
                 if (key.compareTo(after) > 0) {
                     batch.put(key, record);
@@ -333,6 +381,17 @@ public final class InMemoryToolExecutionRepository
                 && record.getBindingId().equals(bindingId)
                 && record.getRuntimeGeneration() == runtimeGeneration
                 && record.getRuntimeSessionId().equals(runtimeSessionId));
+    }
+
+    @Override
+    public synchronized boolean hasActiveByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds) {
+        return recordsById.values().stream().anyMatch(record -> !record.isTerminal()
+                && record.getBindingId().equals(bindingId)
+                && record.getRuntimeGeneration() == runtimeGeneration
+                && record.getRuntimeSessionId().equals(runtimeSessionId)
+                && !excludingExecutionCallIds.contains(record.getExecutionCallId()));
     }
 
     @Override

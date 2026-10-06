@@ -83,6 +83,7 @@ import type {
 import {
   ExecutionCleanupError,
   MANAGED_RUNTIME_TOOL_NAMES,
+  ManagedRuntimeOutcomeUnknownError,
 } from '../services/execution-environment.js';
 import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
 import {
@@ -344,6 +345,10 @@ import {
 } from '../managed-runtime/managed-session-authority.js';
 import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
+import {
+  LocalManagedRuntimeOutcomes,
+  unresolvedRuntimeWorkReason,
+} from '../managed-runtime/managed-runtime-outcomes.js';
 import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
 import {
   MANAGED_SESSION_FORMAT_VERSION,
@@ -2749,6 +2754,7 @@ export class Config {
   private pendingSessionWriterLease?: SessionWriterLease;
   /** The Managed Session log a Managed session records through. */
   private managedSession?: ManagedSession;
+  private managedRuntimeOutcomes?: LocalManagedRuntimeOutcomes;
   private pendingSessionWriterRelease:
     | { lease: SessionWriterLease; promise: Promise<void> }
     | undefined;
@@ -2938,6 +2944,7 @@ export class Config {
    * built. See {@link getPromptToolSnapshot}.
    */
   private promptToolSnapshot: ReadonlySet<string> | undefined;
+  private promptAgentReachable = false;
 
   /**
    * Volatile system-prompt layer: the managed auto-memory section
@@ -5059,6 +5066,36 @@ export class Config {
         if (this.sessionWriterShutdownRequested) {
           throw new SessionWriterShutdownError();
         }
+        // A committed receipt outlives its crash: settle what it proves
+        // before the gate reads, so a settled-but-unsettled crash window does
+        // not block on a call whose outcome the log already carries.
+        const sequenceBeforeRepair =
+          this.managedSession.authority.committedSequence;
+        await this.getManagedRuntimeOutcomes()?.recoverCommittedReceipts();
+        // The repair writes records the projection read above lacks: give
+        // this open the history the log now holds.
+        if (
+          this.sessionRestoreProjectionSource &&
+          this.managedSession.authority.committedSequence !==
+            sequenceBeforeRepair
+        ) {
+          projection = await this.sessionRestoreProjectionSource();
+          this.setSessionRestoreProjection(projection);
+        }
+        // A reopened log answers for itself: Runtime dispatches that never
+        // settled block the session again, as the in-memory block already
+        // does for the live process. The outcome cannot be learned from a
+        // past worker generation, and nothing replays it.
+        const unresolved = await unresolvedRuntimeWorkReason(
+          this.managedSession.authority,
+        );
+        if (unresolved !== undefined) {
+          this.blockManagedSession(
+            new ManagedRuntimeOutcomeUnknownError(
+              `The Managed session's log shows Runtime work with an unknown outcome: ${unresolved}.`,
+            ),
+          );
+        }
         recorder.bindManagedSink(
           managedRecordWriter(this.managedSession, {
             transcriptPath: this.getTranscriptPath(),
@@ -5944,6 +5981,19 @@ export class Config {
   /** Why this Managed session is blocked, or undefined while it is not. */
   getManagedSessionBlock(): Error | undefined {
     return this.managedSessionBlock;
+  }
+
+  /**
+   * The durable outcome writer for this session's Runtime-backed tools, built
+   * once the log is open. A Managed session that records no log has none; a
+   * derived Config has none either, as its tools would need an execution
+   * scope of their own.
+   */
+  getManagedRuntimeOutcomes(): LocalManagedRuntimeOutcomes | undefined {
+    if (isDerivedConfig(this) || !this.managedSession) return undefined;
+    return (this.managedRuntimeOutcomes ??= new LocalManagedRuntimeOutcomes(
+      this.managedSession,
+    ));
   }
 
   getSessionRestoreRuntime(): SessionRuntimeResumeState | undefined {
@@ -8868,6 +8918,14 @@ export class Config {
 
   setPromptToolSnapshot(names: ReadonlySet<string> | undefined): void {
     this.promptToolSnapshot = names;
+  }
+
+  getPromptAgentReachable(): boolean {
+    return this.promptAgentReachable;
+  }
+
+  setPromptAgentReachable(reachable: boolean): void {
+    this.promptAgentReachable = reachable;
   }
 
   /**
