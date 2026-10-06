@@ -139,6 +139,20 @@ The facts below are from `main` at `5ddfacc9d4`.
    command ID (the `Idempotency-Key`). A webhook run uses the verified
    event ID. Two claims of the same `occurrenceKey` resolve to one run;
    the second claimant reads the committed run instead of creating one.
+   **A definition revision never re-arms a covered slot.** The run ledger
+   keeps a per-schedule watermark `latestAdmittedSlot` across all
+   revisions: the greatest scheduled instant (`scheduleId`, whatever
+   revision) for which an `automation_run` was committed. Claim and
+   catch-up decisions consult the watermark, never the revision key
+   alone: an occurrence whose `slot` is at or below the watermark is
+   covered, and catch-up (`latest` or bounded) proposes only slots
+   strictly above the watermark, plus the missed ones between the
+   watermark and now — whatever revision wrote the committed ones. A
+   prompt-only update that bumps the revision therefore cannot replay a
+   slot the old revision already ran, and an `r2` that re-mints `slot
+09:00` under `catch_up: latest` sees it covered rather than fired
+   again (reference section 7: a definition update affects only later
+   occurrences and never replays a committed slot).
 3. **Exactly one scanner claims.** Scanners run on Java nodes and contend a
    workspace-scoped claim under a lease with fencing, the same discipline
    the Runtime Broker applies to bindings: the lease carries a fencing

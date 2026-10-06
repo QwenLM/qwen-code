@@ -178,9 +178,19 @@ The facts below are from `main` at `5ddfacc9d4`.
 4. **The result crosses by outbox and idempotent acceptance.** The child
    commits its terminal `child_acceptance` revision, which carries the
    result reference (an Artifact, per the O-slices) and a delivery line of
-   target `session`. The relay — reading the outbox columns the Java store
-   already materializes — submits `acceptChildResult` to the parent as a
-   trusted-entry operation: the parent commits the delivery step to
+   target `session`. The two child kinds cross differently (reference
+   section 8: a foreground child returns only the original tool result, a
+   background child crosses only by the persistent notification input —
+   never both). A **foreground** child commits its terminal `child_run` /
+   `child_acceptance` revision, and the same tool call answers the parent
+   with the original result: acceptance to `accepted` and `consumed` fold
+   into that answer in the same transaction; nothing is committed as a
+   notification input and no wake is minted, so no wake-consuming Turn can
+   be mistaken for the consumption fact. A **background** or detached
+   child commits its terminal `child_acceptance` revision the same way;
+   the relay — reading the outbox columns the Java
+   store already materializes — submits `acceptChildResult` to the parent
+   as a trusted-entry operation: the parent commits the delivery step to
    `accepted` together with the notification input and its wake in one
    transaction. A replayed acceptance answers the recorded revision and
    sends nothing twice. When the Turn that consumed the notification has
@@ -223,6 +233,21 @@ The facts below are from `main` at `5ddfacc9d4`.
    `recovery_blocked`/`failed` states need no new vocabulary.
 
 ## Record bodies (H4a contract direction)
+
+**Body version and the registered Shell body.** `managed-child_run` is
+already registered on main with the H3, single-kind body: `kind:
+'shell'`, `recordId = shellId`, projection task kind `background_shell` —
+and the H3 body's own header names this exact step: H4 extends the domain
+to the other child kinds under its own body version. H4a therefore does
+not rewrite the v1 body; it defines **body version 2** as a kind-union:
+`kind: 'shell'` keeps the v1 field set verbatim (byte-identical JSON for
+every committed Shell — a migration is a rename to nothing), and `kind:
+'child_agent'` carries the new body below with `recordId = childRunId`
+and projection task kind `child_agent`. The `domain.committed` payload
+version admits `1 | 2` for this one domain only; every other domain keeps
+`version == 1` (admission matrices pinned by shared fixtures in both
+languages), and `child_acceptance`, `schedule` and the other H series
+stay at their own v1.
 
 Both bodies embed the H0b run block unchanged. The closed field sets,
 validators and transition rules are pinned by the H4a change in the shared
