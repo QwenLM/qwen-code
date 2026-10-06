@@ -209,8 +209,7 @@ function getLinters() {
       })}
     `,
         run: `
-      git ls-files | grep -v '^integration-tests/terminal-bench/' | grep -E '^([^.]+|.*\\.(sh|zsh|bash))' | xargs file --mime-type \
-        | grep "text/x-shellscript" | awk '{ print substr($1, 1, length($1)-1) }' \
+      command -v shellcheck >/dev/null 2>&1 && git ls-files | grep -v '^integration-tests/terminal-bench/' | grep -E '^([^.]+|.*\\.(sh|zsh|bash))' | xargs file --mime-type \
         | xargs shellcheck \
           --check-sourced \
           --enable=all \
@@ -223,7 +222,7 @@ function getLinters() {
       yamllint: {
         check: 'command -v yamllint',
         installer: `pip3 install --user "yamllint==${YAMLLINT_VERSION}"`,
-        run: "git ls-files | grep -E '\\.(yaml|yml)' | xargs yamllint --format github",
+        run: "command -v yamllint >/dev/null 2>&1 && git ls-files | grep -E '\\.(yaml|yml)' | xargs yamllint --format github",
       },
     };
   }
@@ -277,21 +276,42 @@ export function runESLint() {
 
 export function runActionlint() {
   console.log('\nRunning actionlint...');
-  if (!runCommand(getLinters().actionlint.run)) {
+  const actionlint = getLinters().actionlint;
+  if (!runCommand(actionlint.check, 'ignore')) {
+    console.error(
+      'actionlint is not installed or not found on PATH. Run `node scripts/lint.js --setup` or install actionlint manually.',
+    );
+    process.exit(1);
+  }
+  if (!runCommand(actionlint.run)) {
     process.exit(1);
   }
 }
 
 export function runShellcheck() {
   console.log('\nRunning shellcheck...');
-  if (!runCommand(getLinters().shellcheck.run)) {
+  const shellcheck = getLinters().shellcheck;
+  if (!runCommand(shellcheck.check, 'ignore')) {
+    console.error(
+      'shellcheck is not installed or not found on PATH. Run `node scripts/lint.js --setup` or install shellcheck manually.',
+    );
+    process.exit(1);
+  }
+  if (!runCommand(shellcheck.run)) {
     process.exit(1);
   }
 }
 
 export function runYamllint() {
   console.log('\nRunning yamllint...');
-  if (!runCommand(getLinters().yamllint.run)) {
+  const yamllint = getLinters().yamllint;
+  if (!runCommand(yamllint.check, 'ignore')) {
+    console.error(
+      'yamllint is not installed or not found on PATH. Run `node scripts/lint.js --setup` or install yamllint manually.',
+    );
+    process.exit(1);
+  }
+  if (!runCommand(yamllint.run)) {
     process.exit(1);
   }
 }

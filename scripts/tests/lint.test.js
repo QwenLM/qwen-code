@@ -264,3 +264,30 @@ describe('prettier lane', () => {
     expect(gateIsExperimental).toBe(formatIsExperimental);
   });
 });
+
+describe('linter prerequisite availability checks', () => {
+  const repoRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '..',
+    '..',
+  );
+  const lintSource = readFileSync(
+    path.join(repoRoot, 'scripts', 'lint.js'),
+    'utf8',
+  );
+
+  it('checks yamllint availability before running and guards run command', () => {
+    // BSD xargs on macOS exits 0 when yamllint is missing from PATH, which
+    // would silently pass local runs (issue #13420). Both runYamllint() and
+    // yamllint.run must guard on yamllint presence.
+    expect(lintSource).toMatch(/runCommand\(yamllint\.check,\s*'ignore'\)/);
+    expect(lintSource).toContain(
+      'command -v yamllint >/dev/null 2>&1 && git ls-files',
+    );
+  });
+
+  it('checks actionlint and shellcheck availability before running', () => {
+    expect(lintSource).toMatch(/runCommand\(actionlint\.check,\s*'ignore'\)/);
+    expect(lintSource).toMatch(/runCommand\(shellcheck\.check,\s*'ignore'\)/);
+  });
+});
