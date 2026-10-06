@@ -37,6 +37,12 @@ public class SessionLifecycleService {
     private final ManagedAgentService sessions;
     private final RequestDigests digests;
     private final SessionLifecycleCoordinator coordinator;
+    private RuntimeWarmer runtimeWarmer;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    void setRuntimeWarmer(RuntimeWarmer runtimeWarmer) {
+        this.runtimeWarmer = runtimeWarmer;
+    }
 
     public SessionLifecycleService(AgentStateStore store,
             ManagedAgentService sessions, RequestDigests digests,
@@ -80,10 +86,17 @@ public class SessionLifecycleService {
     private OperationAdmission admit(String tenantId, String actorId,
             String idempotencyKey, String sessionId, OperationKind kind) {
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
-        sessions.requireLegacyWorkspace(tenantId, actorId, sessionId);
-        OperationAdmission admission = store.beginOperation(tenantId,
-                sessionId, kind, actorDigest(actorId), idempotencyKey,
-                sessions.lifecycleDigest(sessionId, DIGEST_NAMES.get(kind)));
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        sessions.requireReadGrant(session, actorId);
+        String digest = sessions.lifecycleDigest(sessionId, DIGEST_NAMES.get(kind));
+        OperationAdmission admission;
+        if (session.workspace() != null) {
+            admission = store.beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest(actorId),
+                    idempotencyKey, digest, kind == OperationKind.CLOSE && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose());
+        } else {
+            sessions.requireLegacyWorkspace(tenantId, actorId, sessionId);
+            admission = store.beginOperation(tenantId, sessionId, kind, actorDigest(actorId), idempotencyKey, digest);
+        }
         OperationRecord operation = admission.operation();
         if (!"COMPLETED".equals(operation.state())) {
             coordinator.dispatch(tenantId, sessionId,
@@ -122,7 +135,7 @@ public class SessionLifecycleService {
                 operation.sessionId(), lower(operation.kind().name()),
                 lower(operation.state()), lower(operation.admissionStage()),
                 lower(operation.deliveryState()), operation.receiptId(),
-                replayed);
+                replayed, null, operation.failureCode());
     }
 
     public WebShellCommandOperation webShellOperation(OperationRecord operation, boolean replayed) {
@@ -133,7 +146,7 @@ public class SessionLifecycleService {
                 operation.sessionId(), lower(operation.kind().name()),
                 lower(operation.state()), lower(operation.admissionStage()),
                 lower(operation.deliveryState()), operation.receiptId(),
-                replayed);
+                replayed, null, operation.failureCode());
     }
 
     private static String lower(String value) {

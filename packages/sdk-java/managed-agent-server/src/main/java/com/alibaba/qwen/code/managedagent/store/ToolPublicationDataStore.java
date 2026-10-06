@@ -4,11 +4,15 @@ import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.r
 import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.text;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -20,14 +24,23 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import javax.sql.DataSource;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.ConnectionCallback;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /** O2b's publication catalog. Object I/O always runs outside SQL transactions. */
 public final class ToolPublicationDataStore {
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final ObjectMapper ACK_JSON = new ObjectMapper()
+            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+            .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT);
     private static final int MAX_SEGMENT = 16 * 1024 * 1024;
     private static final int MAX_PAGE = 256 * 1024;
     private static final int MAX_MANIFEST = 64 * 1024;
@@ -40,6 +53,8 @@ public final class ToolPublicationDataStore {
     private final Duration operationTimeout;
     private final Duration claimTimeout;
     private final VerificationBudget verificationBudget;
+    private final ToolPublicationRetentionStore retention;
+    private final DataSource transactionSource;
 
     public ToolPublicationDataStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
             ToolPublicationStore grants, ManagedSessionStore sessions, ToolPublicationObjectStore objects,
@@ -52,11 +67,176 @@ public final class ToolPublicationDataStore {
         this.operationTimeout = Objects.requireNonNull(operationTimeout);
         this.claimTimeout = Objects.requireNonNull(claimTimeout);
         this.verificationBudget = Objects.requireNonNull(verificationBudget);
+        this.retention = new ToolPublicationRetentionStore(jdbc, manager);
+        this.transactionSource = manager instanceof DataSourceTransactionManager nativeManager
+                ? nativeManager.getDataSource() : null;
         require(!operationTimeout.isNegative() && !operationTimeout.isZero()
                 && !claimTimeout.isNegative() && !claimTimeout.isZero()
                 && claimTimeout.compareTo(operationTimeout) < 0,
                 "Invalid publication operation deadlines");
         verificationBudget.timeout(operationTimeout, 0);
+    }
+
+    boolean usesDataSource(DataSource source) {
+        return source != null && jdbc.getDataSource() == source && transactionSource == source
+                && sessions.usesDataSource(source)
+                && grants.usesDataSource(source);
+    }
+
+    static final class VerifiedAcknowledgement {
+        private final String finished;
+        private final String outcome;
+        private final String outcomeRef;
+        private final String captureIdentity;
+        private final String catalog;
+
+        private VerifiedAcknowledgement(JsonNode finished, JsonNode outcome, JsonNode outcomeRef,
+                JsonNode captureIdentity, JsonNode catalog) {
+            this.finished = finished.toString();
+            this.outcome = outcome.toString();
+            this.outcomeRef = outcomeRef.toString();
+            this.captureIdentity = captureIdentity.toString();
+            this.catalog = catalog.toString();
+        }
+
+        JsonNode finished() { return exactAcknowledgementJson(finished.getBytes(StandardCharsets.UTF_8)); }
+        JsonNode outcome() { return exactAcknowledgementJson(outcome.getBytes(StandardCharsets.UTF_8)); }
+        JsonNode outcomeRef() { return exactAcknowledgementJson(outcomeRef.getBytes(StandardCharsets.UTF_8)); }
+        JsonNode captureIdentity() { return exactAcknowledgementJson(captureIdentity.getBytes(StandardCharsets.UTF_8)); }
+        JsonNode catalog() { return exactAcknowledgementJson(catalog.getBytes(StandardCharsets.UTF_8)); }
+    }
+
+    VerifiedAcknowledgement verifyOriginalAcknowledgementResources(ToolExecutionRecord execution) {
+        require(!TransactionSynchronizationManager.isActualTransactionActive()
+                && !TransactionSynchronizationManager.isSynchronizationActive()
+                && !TransactionSynchronizationManager.hasResource(jdbc.getDataSource())
+                && usesDataSource(jdbc.getDataSource())
+                && Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection -> connection.getAutoCommit())),
+                "Acknowledgement verification requires native stores outside a transaction");
+        require(execution != null && execution.getState() == ToolExecutionRecord.State.SETTLED
+                && "deferred_v3".equals(execution.getReference().get("dispatchMode")),
+                "Original settled execution is unavailable");
+        JsonNode original = finishedForBroker(execution);
+        require(original != null, "Original finished publication is unavailable");
+        String publicationId = text(original, "publicationId");
+        JsonNode binding = original.path("binding");
+        JsonNode key = binding.path("sessionKey");
+        JsonNode terminal = original.path("terminal");
+        JsonNode catalog = acknowledgementCatalog(key, publicationId, false);
+        byte[] terminalBytes = readResource(key, publicationId, text(terminal, "resourceId"));
+        require(terminalBytes.length == terminal.path("byteLength").longValue()
+                && ToolPublicationContract.sha256(terminalBytes).equals(text(terminal, "digest")),
+                "Original terminal reference changed");
+        ToolPublicationContract.parseToolResult("result", terminalBytes, MAX_TERMINAL);
+        JsonNode result = exactAcknowledgementJson(terminalBytes);
+        require(sameNumericJson(result, JSON.valueToTree(execution.getResult()))
+                && result.path("executionStatus").asText().equals(execution.getExecutionStatus())
+                && !"not_started".equals(text(result, "executionStatus"))
+                && "complete".equals(text(result.path("capture"), "captureStatus"))
+                && "pending".equals(text(result.path("capture"), "deliveryStatus")),
+                "Original complete Broker result conflicts");
+        ((ObjectNode) original).set("result", result);
+        validateFinished(key, publicationId, binding, result, () -> {});
+        JsonNode manifestRef = result.path("capture").path("manifest");
+        byte[] manifestBytes = referencedResource(key, publicationId, manifestRef,
+                "managed-tool-result-manifest", MAX_MANIFEST);
+        JsonNode manifest = ToolPublicationContract.parseToolResult("manifest", manifestBytes, MAX_MANIFEST);
+        ObjectNode capture = JSON.createObjectNode();
+        for (String field : List.of("tenantId", "sessionId", "turnId", "executionCallId", "callId",
+                "invocationDigest", "bindingGeneration", "captureId", "revision")) {
+            capture.set(field, manifest.path(field));
+        }
+        var publication = jdbc.queryForMap("SELECT producer_phase, admission_resource_id,"
+                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM qwen_tool_publication"
+                + " WHERE scope_key = ? AND publication_id = ?", scope(key), publicationId);
+        require("REFERENCED".equals(publication.get("producer_phase"))
+                && ((Number) publication.get("quarantined")).intValue() == 0,
+                "Original publication receipt is unavailable");
+        String admissionId = (String) publication.get("admission_resource_id");
+        byte[] bytes = readResource(key, publicationId, admissionId);
+        JsonNode outcome = exactAcknowledgementJson(bytes);
+        require(outcome.isObject() && outcome.size() == 5
+                && outcome.path("schemaVersion").isIntegralNumber() && outcome.path("schemaVersion").canConvertToLong()
+                && outcome.path("schemaVersion").longValue() == 1
+                && "committed".equals(text(outcome, "decision"))
+                && validAdmissionHistory(outcome.path("history")) && sameNumericJson(outcome.path("envelope"), result)
+                && manifestRef.equals(outcome.path("manifestRef")), "Original committed admission conflicts");
+        JsonNode outcomeRef = JSON.createObjectNode().put("resourceId", admissionId)
+                .put("kind", "managed-tool-outcome").put("schemaVersion", 1)
+                .put("byteLength", bytes.length).put("digest", ToolPublicationContract.sha256(bytes));
+        require(sameNumericJson(catalog, acknowledgementCatalog(key, publicationId, false)),
+                "Original publication resource authorities changed during verification");
+        return new VerifiedAcknowledgement(original, outcome, outcomeRef, capture, catalog);
+    }
+
+    ToolExecutionRecord lockOriginalAcknowledgementResources(VerifiedAcknowledgement verified) {
+        require(verified != null && usesDataSource(jdbc.getDataSource())
+                && TransactionSynchronizationManager.isActualTransactionActive(),
+                "Acknowledgement settlement requires the native transaction");
+        JsonNode finished = verified.finished();
+        JsonNode key = finished.path("binding").path("sessionKey");
+        String publicationId = text(finished, "publicationId");
+        return grants.lockOriginalAcknowledgementResult(key, publicationId, finished);
+    }
+
+    void lockOriginalAcknowledgementCatalog(VerifiedAcknowledgement verified) {
+        require(verified != null && usesDataSource(jdbc.getDataSource())
+                && TransactionSynchronizationManager.isActualTransactionActive(),
+                "Acknowledgement settlement requires the native transaction");
+        JsonNode finished = verified.finished();
+        JsonNode key = finished.path("binding").path("sessionKey");
+        require(sameNumericJson(verified.catalog(), acknowledgementCatalog(key, text(finished, "publicationId"), true)),
+                "Original publication resource authorities changed");
+    }
+
+    private JsonNode acknowledgementCatalog(JsonNode key, String publicationId, boolean locked) {
+        String suffix = locked ? " FOR UPDATE" : "";
+        ObjectNode catalog = JSON.createObjectNode();
+        var objects = jdbc.queryForList("SELECT scope_key, publication_id, slot_key, resource_id, resource_kind, byte_length, sha256,"
+                + " object_key, state, operation_id, inline_bytes FROM qwen_tool_publication_object"
+                + " WHERE scope_key = ? AND publication_id = ? ORDER BY slot_key LIMIT 4097" + suffix,
+                scope(key), publicationId);
+        require(objects.size() <= 4096, "Original publication catalog exceeds its bound");
+        for (var object : objects) {
+            Object bytes = object.remove("inline_bytes");
+            object.put("inlineDigest", bytes instanceof byte[] inline ? ToolPublicationContract.sha256(inline) : null);
+            require(scope(key).equals(object.get("scope_key")) && publicationId.equals(object.get("publication_id"))
+                    && "VERIFIED".equals(object.get("state")), "Original publication has unresolved objects");
+        }
+        catalog.set("objects", JSON.valueToTree(objects));
+        var seals = jdbc.queryForList("SELECT scope_key, publication_id, stream_id, segment_count, byte_length, sha256, operation_id"
+                + " FROM qwen_tool_publication_seal WHERE scope_key = ? AND publication_id = ?"
+                + " ORDER BY stream_id" + suffix, scope(key), publicationId);
+        require(seals.size() <= 2, "Original publication seal catalog conflicts");
+        for (var seal : seals) {
+            require(scope(key).equals(seal.get("scope_key")) && publicationId.equals(seal.get("publication_id")),
+                    "Original publication seal identity conflicts");
+        }
+        catalog.set("seals", JSON.valueToTree(seals));
+        return catalog;
+    }
+
+    static JsonNode exactAcknowledgementJson(byte[] bytes) {
+        try {
+            ToolPublicationContract.readJson(bytes);
+            return ACK_JSON.readTree(bytes);
+        } catch (IOException error) {
+            throw new IllegalArgumentException("Original acknowledgement JSON is unavailable");
+        }
+    }
+
+    static boolean sameNumericJson(JsonNode left, JsonNode right) {
+        return left.equals((a, b) -> a.isNumber() && b.isNumber()
+                ? a.decimalValue().compareTo(b.decimalValue()) : a.equals(b) ? 0 : 1, right);
+    }
+
+    private static boolean validAdmissionHistory(JsonNode history) {
+        return history.isObject() && history.size() == 4
+                && text(history, "messageId").matches(
+                        "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+                && !text(history, "timestamp").isBlank() && !text(history, "model").isBlank()
+                && history.path("parts").isArray()
+                && history.toString().getBytes(StandardCharsets.UTF_8).length <= 64 * 1024;
     }
 
     public record VerificationBudget(long bytesPerSecond, Duration maximumTimeout) {
@@ -106,6 +286,7 @@ public final class ToolPublicationDataStore {
 
     public JsonNode seal(JsonNode key, String publicationId, String token, String operationId,
             String streamId, int segmentCount, long byteLength, String digest) {
+        requireStagedCall(key, publicationId);
         require("stdout".equals(streamId) || "stderr".equals(streamId), "Invalid stream ID");
         require(segmentCount >= 0 && segmentCount <= 65536 && byteLength >= 0
                 && digest != null && digest.matches("[0-9a-f]{64}"), "Invalid seal");
@@ -158,13 +339,18 @@ public final class ToolPublicationDataStore {
                 return receipt;
             });
         } catch (RuntimeException error) {
-            abandonScan(scope, publicationId, operationId, claim.epoch());
+            try {
+                abandonScan(scope, publicationId, operationId, claim.epoch());
+            } catch (RuntimeException cleanup) {
+                error.addSuppressed(cleanup);
+            }
             throw error;
         }
     }
 
     public JsonNode prefix(JsonNode key, String publicationId, String token, String operationId,
             String streamId) {
+        requireStagedCall(key, publicationId);
         require("stdout".equals(streamId) || "stderr".equals(streamId), "Invalid stream ID");
         String scope = scope(key);
         String slot = "prefix:" + streamId;
@@ -197,7 +383,11 @@ public final class ToolPublicationDataStore {
                 return receipt;
             });
         } catch (RuntimeException error) {
-            abandonScan(scope, publicationId, operationId, claim.epoch());
+            try {
+                abandonScan(scope, publicationId, operationId, claim.epoch());
+            } catch (RuntimeException cleanup) {
+                error.addSuppressed(cleanup);
+            }
             throw error;
         }
     }
@@ -246,11 +436,12 @@ public final class ToolPublicationDataStore {
     }
 
     public JsonNode recoverOperation(JsonNode key, String publicationId, String token, String operationId) {
+        requireStagedCall(key, publicationId);
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid publication operation ID");
         String scope = scope(key);
         transactions.executeWithoutResult(status -> {
-            authorize(key, scope, publicationId, token);
+            var authorization = authorizeClaim(key, scope, publicationId, token);
             var publication = jdbc.queryForMap("SELECT producer_phase, finish_operation_id,"
                     + " finish_predecessor_id, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
                     + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ?",
@@ -260,6 +451,11 @@ public final class ToolPublicationDataStore {
             List<Operation> rows = operation(scope, publicationId, operationId, true);
             require(rows.size() == 1, "Publication operation is missing");
             Operation row = rows.get(0);
+            if (authorization.execution().getState()
+                    == ToolExecutionRecord.State.SETTLED) {
+                exactSucceededReplay(scope, publicationId, operationId, row.slot(), row.digest());
+                return;
+            }
             require(!row.slot().startsWith("prefix:"), "Expired prefix cannot be recovered");
             if ("SUCCEEDED".equals(row.state())) {
                 return;
@@ -434,6 +630,7 @@ public final class ToolPublicationDataStore {
 
     public JsonNode prepareAdmission(JsonNode key, String publicationId,
             String writerId, long writerGeneration, String writerToken, JsonNode outcome) {
+        requireStagedCall(key, publicationId);
         require(outcome != null && outcome.isObject()
                 && outcome.path("schemaVersion").asInt(-1) == 1,
                 "Invalid admission outcome");
@@ -447,17 +644,12 @@ public final class ToolPublicationDataStore {
         require(decision.equals(text(outcome, "decision"))
                 && envelope.equals(outcome.path("envelope"))
                 && envelope.path("capture").path("manifest").equals(outcome.path("manifestRef"))
-                && history.isObject() && history.size() == 4
-                && text(history, "messageId").matches(
-                        "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
-                && !text(history, "timestamp").isBlank()
-                && !text(history, "model").isBlank()
-                && history.path("parts").isArray()
-                && history.toString().getBytes(StandardCharsets.UTF_8).length <= 64 * 1024,
+                && validAdmissionHistory(history),
                 "Admission decision or original result conflicts");
         String digest = ToolPublicationContract.sha256(bytes);
         String scope = scope(key);
         AdmissionCandidate candidate = transactions.execute(status -> {
+            lockOriginalSettledResult(key, publicationId, original);
             lockTenant(key);
             sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
                     text(key, "sessionId"), writerId, writerGeneration, writerToken);
@@ -502,30 +694,37 @@ public final class ToolPublicationDataStore {
         });
         require(candidate != null, "Admission candidate is unavailable");
         if (candidate.objectKey() != null) {
-            objects.putIfAbsent(candidate.objectKey(), bytes);
+            retention.put(key, scope, publicationId, candidate.objectKey(), bytes, objects);
             try {
-                verify(candidate.objectKey(), bytes.length, digest);
+                verify(scope, publicationId, candidate.objectKey(), bytes.length, digest);
             } catch (IllegalArgumentException error) {
-                if (candidate.verified()) {
-                    quarantine(scope, publicationId, "admission");
-                } else {
-                    quarantineCandidate(scope, publicationId, "admission", "admission");
+                try {
+                    if (candidate.verified()) {
+                        quarantine(scope, publicationId, "admission");
+                    } else {
+                        quarantineCandidate(scope, publicationId, "admission", "admission");
+                    }
+                } catch (RuntimeException cleanup) {
+                    error.addSuppressed(cleanup);
                 }
                 throw error;
             }
         }
         if (!candidate.verified()) {
             transactions.executeWithoutResult(status -> {
+                lockOriginalSettledResult(key, publicationId, original);
                 lockTenant(key);
                 sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
                         text(key, "sessionId"), writerId, writerGeneration, writerToken);
-                var publication = jdbc.queryForMap("SELECT producer_phase, terminal_resource_id"
+                var publication = jdbc.queryForMap("SELECT producer_phase, terminal_resource_id,"
+                        + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
                         + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
                         scope, publicationId);
                 require("FINISHED".equals(publication.get("producer_phase"))
+                        && ((Number) publication.get("quarantined")).intValue() == 0
                         && original.path("terminal").path("resourceId").asText()
                         .equals(publication.get("terminal_resource_id")), "Admission publication changed");
-                Stored row = stored(scope, publicationId, "admission").get(0);
+                Stored row = stored(scope, publicationId, "admission", true).get(0);
                 require("CANDIDATE".equals(row.state()) && digest.equals(row.digest())
                         && row.length() == bytes.length, "Admission candidate changed");
                 if (candidate.objectKey() == null) {
@@ -548,6 +747,7 @@ public final class ToolPublicationDataStore {
 
     public JsonNode finish(JsonNode key, String publicationId, String token,
             String operationId, byte[] bytes) {
+        requireStagedCall(key, publicationId);
         require(bytes != null, "Missing terminal result");
         JsonNode result = ToolPublicationContract.parseToolResult("result", bytes, MAX_TERMINAL);
         require(!"not_started".equals(text(result, "executionStatus"))
@@ -572,9 +772,9 @@ public final class ToolPublicationDataStore {
             validateFinished(key, publicationId, claim.binding(), result,
                     heartbeat(key, scope, publicationId, token, operationId, claim.epoch()));
             if (claim.objectKey() != null) {
-                objects.putIfAbsent(claim.objectKey(), bytes);
+                retention.put(key, scope, publicationId, claim.objectKey(), bytes, objects);
                 try {
-                    verify(claim.objectKey(), bytes.length, digest);
+                    verify(scope, publicationId, claim.objectKey(), bytes.length, digest);
                 } catch (IllegalArgumentException error) {
                     quarantineCandidate(scope, publicationId, "terminal", operationId);
                     throw error;
@@ -583,7 +783,11 @@ public final class ToolPublicationDataStore {
             return transactions.execute(status -> installFinish(key, scope, publicationId,
                     token, operationId, claim, bytes, digest));
         } catch (RuntimeException error) {
-            abandonScan(scope, publicationId, operationId, claim.epoch());
+            try {
+                abandonScan(scope, publicationId, operationId, claim.epoch());
+            } catch (RuntimeException cleanup) {
+                error.addSuppressed(cleanup);
+            }
             throw error;
         }
     }
@@ -592,7 +796,15 @@ public final class ToolPublicationDataStore {
             String token, String operationId, int length, String digest) {
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid finish operation ID");
-        JsonNode binding = authorize(key, scope, publicationId, token);
+        var authorization = authorizeClaim(key, scope, publicationId, token);
+        JsonNode binding = authorization.binding();
+        if (authorization.execution().getState()
+                == ToolExecutionRecord.State.SETTLED) {
+            JsonNode receipt = exactSucceededReplay(scope, publicationId, operationId,
+                    "terminal", requestDigest("terminal", length, digest));
+            Stored terminal = stored(scope, publicationId, "terminal").get(0);
+            return new FinishClaim(0, null, terminal.objectKey(), terminal.resourceId(), binding, receipt);
+        }
         Map<String, Object> row = jdbc.queryForMap("SELECT producer_phase, active_operation_id,"
                 + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined,"
                 + " finish_operation_id, finish_predecessor_id, finish_digest, producer_bytes,"
@@ -684,7 +896,7 @@ public final class ToolPublicationDataStore {
             requireContract(previous.size() == 1 && "SUCCEEDED".equals(previous.get(0).state()),
                     HttpStatus.CONFLICT, "managed_tool_publication_busy", "Finish predecessor has not completed");
         }
-        Stored terminal = stored(scope, publicationId, "terminal").get(0);
+        Stored terminal = stored(scope, publicationId, "terminal", true).get(0);
         require("CANDIDATE".equals(terminal.state()) && terminal.length() == bytes.length
                 && digest.equals(terminal.digest()), "Terminal candidate changed");
         if (claim.objectKey() == null) {
@@ -805,7 +1017,11 @@ public final class ToolPublicationDataStore {
             String operationId, String slot, String requestDigest) {
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid publication operation ID");
-        authorize(key, scope, publicationId, token);
+        var authorization = authorizeClaim(key, scope, publicationId, token);
+        if (authorization.execution().getState()
+                == ToolExecutionRecord.State.SETTLED) {
+            return new ScanClaim(0, exactSucceededReplay(scope, publicationId, operationId, slot, requestDigest));
+        }
         var phase = jdbc.queryForMap("SELECT producer_phase, finish_predecessor_id,"
                 + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
                 + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ?",
@@ -892,6 +1108,7 @@ public final class ToolPublicationDataStore {
 
     private void abandonScan(String scope, String publicationId, String operationId, long epoch) {
         transactions.executeWithoutResult(status -> {
+            retention.lockRetainedPublication(scope, publicationId);
             List<Operation> rows = operation(scope, publicationId, operationId, true);
             if (rows.size() == 1 && rows.get(0).epoch() == epoch) {
                 jdbc.update("UPDATE qwen_tool_publication_operation SET claim_owner = NULL, claim_until = NULL"
@@ -934,7 +1151,7 @@ public final class ToolPublicationDataStore {
             require(row.objectKey() != null, "Publication segment is missing its object");
             MessageDigest segment = sha256();
             long segmentLength = 0;
-            try (InputStream stream = objects.open(row.objectKey())) {
+            try (InputStream stream = retention.open(scope, publicationId, row.objectKey(), objects)) {
                 byte[] buffer = new byte[64 * 1024];
                 for (int bytes; (bytes = stream.read(buffer)) != -1; ) {
                     heartbeat.run();
@@ -942,16 +1159,14 @@ public final class ToolPublicationDataStore {
                     segment.update(buffer, 0, bytes);
                     segmentLength += bytes;
                     if (segmentLength > row.length()) {
-                        quarantine(scope, publicationId, row.slot());
-                        throw new IllegalArgumentException("Publication segment length changed");
+                        throw corruptPublication(scope, publicationId, row.slot(), "Publication segment length changed");
                     }
                 }
             } catch (IOException error) {
                 throw new IllegalStateException("Publication segment read failed", error);
             }
             if (segmentLength != row.length() || !HexFormat.of().formatHex(segment.digest()).equals(row.digest())) {
-                quarantine(scope, publicationId, row.slot());
-                throw new IllegalArgumentException("Publication segment digest changed");
+                throw corruptPublication(scope, publicationId, row.slot(), "Publication segment digest changed");
             }
             length += segmentLength;
             count++;
@@ -994,8 +1209,19 @@ public final class ToolPublicationDataStore {
         }
     }
 
+    private IllegalArgumentException corruptPublication(String scope, String publicationId, String slot, String message) {
+        var error = new IllegalArgumentException(message);
+        try {
+            quarantine(scope, publicationId, slot);
+        } catch (RuntimeException cleanup) {
+            error.addSuppressed(cleanup);
+        }
+        return error;
+    }
+
     private void quarantine(String scope, String publicationId, String slot) {
         transactions.executeWithoutResult(status -> {
+            retention.lockRetainedPublication(scope, publicationId);
             jdbc.update("UPDATE qwen_tool_publication SET quarantined = TRUE"
                     + " WHERE scope_key = ? AND publication_id = ?", scope, publicationId);
             jdbc.update("UPDATE qwen_tool_publication_object SET state = 'QUARANTINED'"
@@ -1006,14 +1232,18 @@ public final class ToolPublicationDataStore {
 
     private void quarantineCandidate(String scope, String publicationId,
             String slot, String operationId) {
-        transactions.executeWithoutResult(status -> jdbc.update("UPDATE qwen_tool_publication_object"
-                + " SET state = 'QUARANTINED' WHERE scope_key = ? AND publication_id = ?"
-                + " AND slot_key = ? AND operation_id = ? AND state = 'CANDIDATE'",
-                scope, publicationId, slot, operationId));
+        transactions.executeWithoutResult(status -> {
+            retention.lockRetainedPublication(scope, publicationId);
+            jdbc.update("UPDATE qwen_tool_publication_object"
+                    + " SET state = 'QUARANTINED' WHERE scope_key = ? AND publication_id = ?"
+                    + " AND slot_key = ? AND operation_id = ? AND state = 'CANDIDATE'",
+                    scope, publicationId, slot, operationId);
+        });
     }
 
     private JsonNode publish(JsonNode key, String publicationId, String token, String operationId,
             String slot, String kind, byte[] input, String expectedDigest, int maximum) {
+        requireStagedCall(key, publicationId);
         require(input != null && input.length > 0 && input.length <= maximum, "Invalid publication size");
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid publication operation ID");
@@ -1028,9 +1258,13 @@ public final class ToolPublicationDataStore {
         if (candidate.receipt() != null) {
             if (candidate.objectKey() != null) {
                 try {
-                    verify(candidate.objectKey(), bytes.length, digest);
+                    verify(scope, publicationId, candidate.objectKey(), bytes.length, digest);
                 } catch (IllegalArgumentException error) {
-                    quarantine(scope, publicationId, slot);
+                    try {
+                        quarantine(scope, publicationId, slot);
+                    } catch (RuntimeException cleanup) {
+                        error.addSuppressed(cleanup);
+                    }
                     throw error;
                 }
             } else if (kind != null) {
@@ -1040,9 +1274,9 @@ public final class ToolPublicationDataStore {
         }
         try {
             if (candidate.objectKey() != null) {
-                objects.putIfAbsent(candidate.objectKey(), bytes);
+                retention.put(key, scope, publicationId, candidate.objectKey(), bytes, objects);
                 try {
-                    verify(candidate.objectKey(), bytes.length, digest);
+                    verify(scope, publicationId, candidate.objectKey(), bytes.length, digest);
                 } catch (IllegalArgumentException error) {
                     quarantineCandidate(scope, publicationId, slot, operationId);
                     throw error;
@@ -1051,14 +1285,28 @@ public final class ToolPublicationDataStore {
             return transactions.execute(status -> install(key, scope, publicationId, token,
                     operationId, candidate, kind, bytes, digest));
         } catch (RuntimeException error) {
-            abandonScan(scope, publicationId, operationId, candidate.epoch());
+            try {
+                abandonScan(scope, publicationId, operationId, candidate.epoch());
+            } catch (RuntimeException cleanup) {
+                error.addSuppressed(cleanup);
+            }
             throw error;
         }
     }
 
     private Candidate claim(JsonNode key, String scope, String publicationId, String token,
             String operationId, String slot, String kind, int length, String digest) {
-        JsonNode binding = authorize(key, scope, publicationId, token);
+        var authorization = authorizeClaim(key, scope, publicationId, token);
+        JsonNode binding = authorization.binding();
+        if (authorization.execution().getState()
+                == ToolExecutionRecord.State.SETTLED) {
+            JsonNode replay = exactSucceededReplay(scope, publicationId, operationId,
+                    slot, requestDigest(slot, length, digest));
+            Stored saved = stored(scope, publicationId, slot).get(0);
+            require(replay.equals(receipt(binding, slot, saved.resourceId(), kind, length, digest)),
+                    "Original publication receipt conflicts");
+            return new Candidate(saved.objectKey(), saved.resourceId(), 0, replay);
+        }
         var phase = jdbc.queryForMap("SELECT producer_phase, finish_predecessor_id,"
                 + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
                 + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ?",
@@ -1150,7 +1398,7 @@ public final class ToolPublicationDataStore {
         requireOperationClaim(rows, candidate.epoch(), now());
         requireContract(operationId.equals(active), HttpStatus.CONFLICT,
                 "managed_tool_publication_claim_lost", "Publication operation lost its claim");
-        Stored row = stored(scope, publicationId, rows.get(0).slot()).get(0);
+        Stored row = stored(scope, publicationId, rows.get(0).slot(), true).get(0);
         require("CANDIDATE".equals(row.state()) && digest.equals(row.digest())
                 && row.length() == bytes.length, "Publication candidate changed");
         if (candidate.objectKey() == null) {
@@ -1188,10 +1436,63 @@ public final class ToolPublicationDataStore {
     }
 
     private JsonNode authorize(JsonNode key, String scope, String publicationId, String token) {
-        lockTenant(key);
-        JsonNode binding = grants.producerBindingLocked(scope, publicationId, token);
+        JsonNode binding = grants.producerMutationBindingLocked(scope, publicationId, token);
         require(binding.path("sessionKey").equals(key), "Publication scope conflicts");
         return binding;
+    }
+
+    private ToolPublicationStore.ProducerBinding authorizeClaim(JsonNode key, String scope,
+            String publicationId, String token) {
+        var authorization = grants.producerClaimBindingLocked(scope, publicationId, token);
+        require(authorization.binding().path("sessionKey").equals(key), "Publication scope conflicts");
+        return authorization;
+    }
+
+    void requireStagedCall(JsonNode key, String publicationId) {
+        grants.requireStagedCall(key, publicationId);
+    }
+
+    void lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
+        grants.lockOriginalSettledResult(key, publicationId, finished);
+    }
+
+    private JsonNode exactSucceededReplay(String scope, String publicationId, String operationId,
+            String slot, String requestDigest) {
+        var publication = jdbc.queryForMap("SELECT producer_phase, finish_operation_id,"
+                + " terminal_resource_id, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ?",
+                scope, publicationId);
+        require(("FINISHED".equals(publication.get("producer_phase"))
+                || "REFERENCED".equals(publication.get("producer_phase")))
+                && ((Number) publication.get("quarantined")).intValue() == 0,
+                "Original publication is not finished");
+        List<Operation> prior = operation(scope, publicationId, operationId, true);
+        require(prior.size() == 1 && "SUCCEEDED".equals(prior.get(0).state())
+                && slot.equals(prior.get(0).slot()) && requestDigest.equals(prior.get(0).digest()),
+                "Original succeeded operation conflicts");
+        if (!slot.startsWith("prefix:") && !slot.startsWith("seal:")) {
+            List<Stored> saved = stored(scope, publicationId, slot);
+            require(saved.size() == 1 && "VERIFIED".equals(saved.get(0).state())
+                    && operationId.equals(saved.get(0).operationId())
+                    && requestDigest.equals(requestDigest(slot, saved.get(0).length(), saved.get(0).digest())),
+                    "Original verified object conflicts");
+            if ("terminal".equals(slot)) {
+                require(operationId.equals(publication.get("finish_operation_id"))
+                        && saved.get(0).resourceId().equals(publication.get("terminal_resource_id")),
+                        "Original terminal conflicts");
+            }
+        } else if (slot.startsWith("seal:")) {
+            var seals = jdbc.queryForList("SELECT operation_id FROM qwen_tool_publication_seal"
+                    + " WHERE scope_key = ? AND publication_id = ? AND stream_id = ?",
+                    scope, publicationId, slot.substring(5));
+            require(seals.size() == 1 && operationId.equals(seals.get(0).get("operation_id")),
+                    "Original seal conflicts");
+        }
+        String saved = jdbc.queryForObject("SELECT receipt_json FROM qwen_tool_publication_operation"
+                + " WHERE scope_key = ? AND publication_id = ? AND operation_id = ?",
+                String.class, scope, publicationId, operationId);
+        require(saved != null, "Original receipt is missing");
+        return ToolPublicationContract.readJson(saved.getBytes(StandardCharsets.UTF_8));
     }
 
     private void lockTenant(JsonNode key) {
@@ -1205,9 +1506,13 @@ public final class ToolPublicationDataStore {
     }
 
     private List<Stored> stored(String scope, String publicationId, String slot) {
+        return stored(scope, publicationId, slot, false);
+    }
+
+    private List<Stored> stored(String scope, String publicationId, String slot, boolean locked) {
         return jdbc.query("SELECT slot_key, resource_id, byte_length, sha256, object_key, state,"
                         + " operation_id FROM qwen_tool_publication_object WHERE scope_key = ?"
-                        + " AND publication_id = ? AND slot_key = ?",
+                        + " AND publication_id = ? AND slot_key = ?" + (locked ? " FOR UPDATE" : ""),
                 (r, n) -> new Stored(r.getString("slot_key"), r.getString("resource_id"),
                         r.getLong("byte_length"), r.getString("sha256"), r.getString("object_key"),
                         r.getString("state"), r.getString("operation_id")), scope, publicationId, slot);
@@ -1223,9 +1528,9 @@ public final class ToolPublicationDataStore {
                         r.getTimestamp("deadline")), scope, publicationId, operationId);
     }
 
-    private void verify(String objectKey, long length, String digest) {
+    private void verify(String scope, String publicationId, String objectKey, long length, String digest) {
         objects.requireUnversioned();
-        try (InputStream stream = objects.open(objectKey)) {
+        try (InputStream stream = retention.open(scope, publicationId, objectKey, objects)) {
             var hash = java.security.MessageDigest.getInstance("SHA-256");
             byte[] buffer = new byte[64 * 1024];
             long read = 0;
@@ -1241,7 +1546,27 @@ public final class ToolPublicationDataStore {
         }
     }
 
+    public ToolPublicationRetentionStore.ReadLease readLease(JsonNode key) { return retention.read(key); }
+
     public byte[] readResource(JsonNode key, String publicationId, String resourceId) {
+        try (var lease = retention.read(key)) {
+            return readResource(key, publicationId, resourceId, lease, () -> {});
+        }
+    }
+
+    byte[] readResource(JsonNode key, String publicationId, String resourceId,
+            ToolPublicationRetentionStore.ReadLease lease, Runnable guard) {
+        guard.run();
+        byte[] bytes = readResourceInternal(key, publicationId, resourceId, lease, guard);
+        lease.check();
+        guard.run();
+        return bytes;
+    }
+
+    private byte[] readResourceInternal(JsonNode key, String publicationId, String resourceId,
+            ToolPublicationRetentionStore.ReadLease lease, Runnable guard) {
+        lease.requireScope(key);
+        lease.check();
         String scope = scope(key);
         var rows = jdbc.query("SELECT o.slot_key, o.resource_kind, o.byte_length, o.sha256, o.object_key,"
                         + " o.inline_bytes, o.state FROM qwen_tool_publication_object o"
@@ -1261,7 +1586,7 @@ public final class ToolPublicationDataStore {
         if (row.objectKey() == null) {
             bytes = row.inlineBytes();
         } else {
-            try (InputStream stream = objects.open(row.objectKey())) {
+            try (InputStream stream = retention.open(row.objectKey(), objects, lease, guard)) {
                 bytes = stream.readNBytes((int) row.length() + 1);
             } catch (IOException error) {
                 throw new IllegalStateException("Publication resource read failed", error);
@@ -1269,8 +1594,7 @@ public final class ToolPublicationDataStore {
         }
         if (bytes == null || bytes.length != row.length()
                 || !ToolPublicationContract.sha256(bytes).equals(row.digest())) {
-            quarantine(scope, publicationId, row.slot());
-            throw new IllegalArgumentException("Publication resource digest changed");
+            throw corruptPublication(scope, publicationId, row.slot(), "Publication resource digest changed");
         }
         return bytes;
     }
@@ -1279,15 +1603,94 @@ public final class ToolPublicationDataStore {
             JsonNode manifestRef, JsonNode expectedIdentity, String streamId, long offset, int length) {
         sessions.restore(text(key, "tenantId"), text(key, "workspaceId"),
                 text(key, "sessionId"), writerToken);
-        return readRangeInternal(key, publicationId, manifestRef, expectedIdentity,
-                streamId, offset, length, true, () -> {});
+        try (var lease = retention.read(key)) {
+            return readRangeInternal(key, publicationId, manifestRef, expectedIdentity,
+                    streamId, offset, length, true, lease, () -> {});
+        }
     }
 
     private byte[] readRangeInternal(JsonNode key, String publicationId,
             JsonNode manifestRef, JsonNode expectedIdentity, String streamId,
             long offset, int length, boolean requireFinished, Runnable heartbeat) {
-        require(offset >= 0 && length >= 0 && length <= MAX_SEGMENT,
-                "Invalid publication range");
+        try (var lease = retention.read(key)) {
+            return readRangeInternal(key, publicationId, manifestRef, expectedIdentity,
+                    streamId, offset, length, requireFinished, lease, heartbeat);
+        }
+    }
+
+    private byte[] readRangeInternal(JsonNode key, String publicationId,
+            JsonNode manifestRef, JsonNode expectedIdentity, String streamId,
+            long offset, int length, boolean requireFinished,
+            ToolPublicationRetentionStore.ReadLease lease, Runnable heartbeat) {
+        require(offset >= 0 && length >= 0 && length <= MAX_SEGMENT, "Invalid publication range");
+        lease.requireScope(key);
+        Runnable guard = () -> {
+            lease.check();
+            heartbeat.run();
+        };
+        return verifiedStream(key, publicationId, manifestRef, expectedIdentity,
+                streamId, requireFinished, lease, guard).readRange(offset, length, guard);
+    }
+
+    VerifiedStream openReferencedStream(JsonNode key, String publicationId,
+            JsonNode outcomeRef, JsonNode manifestRef, JsonNode expectedIdentity,
+            String streamId, long revision, long sequence, ToolPublicationRetentionStore.ReadLease lease, Runnable guard) {
+        lease.requireScope(key);
+        guard.run();
+        requireReferenced(key, publicationId, outcomeRef, revision, sequence);
+        JsonNode outcome = ToolPublicationContract.readJson(referencedResource(key,
+                publicationId, outcomeRef, "managed-tool-outcome", MAX_TERMINAL, lease, guard));
+        require("committed".equals(text(outcome, "decision"))
+                && manifestRef.equals(outcome.path("manifestRef")),
+                "Publication did not commit this representation");
+        guard.run();
+        return verifiedStream(key, publicationId, manifestRef, expectedIdentity, streamId, true, lease, guard);
+    }
+
+    void requireReferenced(JsonNode key, String publicationId, JsonNode outcomeRef,
+            long revision, long sequence) {
+        require(referenced(referencedPublications(key, List.of(publicationId)).get(publicationId),
+                outcomeRef, revision, sequence), "Publication receipt is unavailable");
+    }
+
+    Map<String, Map<String, Object>> referencedPublications(JsonNode key, List<String> ids) {
+        Map<String, Map<String, Object>> result = new java.util.HashMap<>();
+        if (ids.isEmpty()) {
+            return result;
+        }
+        List<Object> arguments = new ArrayList<>();
+        arguments.add(scope(key));
+        arguments.add(text(key, "tenantId"));
+        arguments.add(text(key, "workspaceId"));
+        arguments.add(text(key, "sessionId"));
+        arguments.add(ToolPublicationRetentionStore.hash(text(key, "tenantId")));
+        arguments.add(ToolPublicationRetentionStore.hash(text(key, "sessionId")));
+        arguments.addAll(ids);
+        var rows = jdbc.queryForList("SELECT publication_id, producer_phase, admission_resource_id,"
+                + " receipt_revision, receipt_sequence, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " FROM qwen_tool_publication WHERE scope_key = ?"
+                + " AND tenant_id = ? AND workspace_id = ? AND session_id = ?"
+                + " AND NOT EXISTS (SELECT 1 FROM qwen_output_session_retirement r"
+                + " WHERE r.tenant_key = ? AND r.session_key = ?) AND publication_id IN ("
+                + String.join(",", java.util.Collections.nCopies(ids.size(), "?")) + ")", arguments.toArray());
+        for (var row : rows) {
+            result.put((String) row.get("publication_id"), row);
+        }
+        return result;
+    }
+
+    static boolean referenced(Map<String, Object> row, JsonNode outcomeRef, long revision, long sequence) {
+        return row != null && "REFERENCED".equals(row.get("producer_phase"))
+                && row.get("quarantined") instanceof Number mark && mark.intValue() == 0
+                && outcomeRef != null && outcomeRef.path("resourceId").isTextual()
+                && outcomeRef.path("resourceId").asText().equals(row.get("admission_resource_id"))
+                && row.get("receipt_revision") instanceof Number r && r.longValue() == revision
+                && row.get("receipt_sequence") instanceof Number q && q.longValue() == sequence;
+    }
+
+    private VerifiedStream verifiedStream(JsonNode key, String publicationId,
+            JsonNode manifestRef, JsonNode expectedIdentity, String streamId, boolean requireFinished, ToolPublicationRetentionStore.ReadLease lease, Runnable guard) {
+        guard.run();
         String scope = scope(key);
         var publication = jdbc.queryForMap("SELECT binding_json, producer_phase,"
                 + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM qwen_tool_publication"
@@ -1301,8 +1704,10 @@ public final class ToolPublicationDataStore {
                 "Publication is quarantined");
         JsonNode binding = ToolPublicationContract.readJson(
                 ((String) publication.get("binding_json")).getBytes(StandardCharsets.UTF_8));
+        guard.run();
         JsonNode manifest = ToolPublicationContract.parseToolResult("manifest", referencedResource(key, publicationId,
-                manifestRef, "managed-tool-result-manifest", MAX_MANIFEST), MAX_MANIFEST);
+                manifestRef, "managed-tool-result-manifest", MAX_MANIFEST, lease, guard), MAX_MANIFEST);
+        guard.run();
         require("managed-tool-result/1".equals(text(manifest, "toolResult"))
                 && "manifest".equals(text(manifest, "type"))
                 && text(key, "tenantId").equals(text(manifest, "tenantId"))
@@ -1331,25 +1736,25 @@ public final class ToolPublicationDataStore {
         require(selected != null && selected.path("byteLength").canConvertToLong(),
                 "Publication stream is missing");
         long size = selected.path("byteLength").longValue();
-        require(size >= 0 && offset <= size && length <= size - offset,
-                "Publication range exceeds stream");
-        byte[] result = new byte[length];
+        require(size >= 0, "Publication stream length is invalid");
+        var parts = new ArrayList<StreamPart>();
         JsonNode body = selected.path("body");
         if (body.has("ref")) {
             JsonNode ref = body.path("ref");
             Resource content = catalogResource(key, publicationId, text(ref, "resourceId"));
             require(refMatches(content, ref, "managed-tool-result-content")
-                    && content.length() == size, "Publication content reference conflicts");
-            copyVerified(content, scope, publicationId, offset, result, 0, length, heartbeat);
-            return result;
+                    && content.length() == size && size <= MAX_SEGMENT,
+                    "Publication content reference conflicts");
+            parts.add(new StreamPart(0, content));
+            return new VerifiedStream(scope, publicationId, size, parts, lease);
         }
         require(body.path("pages").isArray(), "Publication stream has no pages");
         long expectedOffset = 0;
         int expectedOrdinal = 0;
         for (JsonNode pageReference : body.path("pages")) {
-            heartbeat.run();
+            guard.run();
             JsonNode page = ToolPublicationContract.parseToolResult("page", referencedResource(key, publicationId,
-                    pageReference.path("ref"), "managed-tool-result-page", MAX_PAGE), MAX_PAGE);
+                    pageReference.path("ref"), "managed-tool-result-page", MAX_PAGE, lease, guard), MAX_PAGE);
             require("managed-tool-result/1".equals(text(page, "toolResult"))
                     && "page".equals(text(page, "type"))
                     && text(manifest, "captureId").equals(text(page, "captureId"))
@@ -1360,7 +1765,7 @@ public final class ToolPublicationDataStore {
             int segmentCount = 0;
             long pageLength = 0;
             for (JsonNode segment : page.path("segments")) {
-                heartbeat.run();
+                guard.run();
                 long segmentLength = segment.path("byteLength").asLong(-1);
                 require(segmentLength > 0 && segmentLength <= MAX_SEGMENT && expectedOrdinal < 65536,
                         "Publication page segment is invalid");
@@ -1370,15 +1775,9 @@ public final class ToolPublicationDataStore {
                         && rows.get(0).digest().equals(text(segment, "digest")),
                         "Publication page segment conflicts");
                 long position = expectedOffset + pageLength;
-                long overlapStart = Math.max(position, offset);
-                long overlapEnd = Math.min(position + segmentLength, offset + length);
-                if (overlapEnd > overlapStart) {
-                    Resource bytes = new Resource(rows.get(0).slot(), null, segmentLength,
-                            rows.get(0).digest(), rows.get(0).objectKey(), null, rows.get(0).state());
-                    copyVerified(bytes, scope, publicationId, overlapStart - position, result,
-                            Math.toIntExact(overlapStart - offset), Math.toIntExact(overlapEnd - overlapStart),
-                            heartbeat);
-                }
+                parts.add(new StreamPart(position, new Resource(rows.get(0).slot(), null,
+                        segmentLength, rows.get(0).digest(), rows.get(0).objectKey(), null,
+                        rows.get(0).state())));
                 pageLength += segmentLength;
                 segmentCount++;
                 expectedOrdinal++;
@@ -1388,16 +1787,121 @@ public final class ToolPublicationDataStore {
                     "Publication page reference conflicts");
             expectedOffset += pageLength;
         }
+        guard.run();
         require(expectedOffset == size, "Publication stream page length conflicts");
-        return result;
+        return new VerifiedStream(scope, publicationId, size, parts, lease);
+    }
+
+    private record StreamPart(long offset, Resource resource) {}
+
+    final class VerifiedStream {
+        private final String scope;
+        private final String publicationId;
+        private final long size;
+        private final List<StreamPart> parts;
+        private final ToolPublicationRetentionStore.ReadLease lease;
+
+        private VerifiedStream(String scope, String publicationId, long size,
+                List<StreamPart> parts, ToolPublicationRetentionStore.ReadLease lease) {
+            this.scope = scope;
+            this.publicationId = publicationId;
+            this.size = size;
+            this.parts = List.copyOf(parts);
+            this.lease = lease;
+        }
+
+        long size() { return size; }
+
+        long rangeVerificationBytes(long offset, int length) {
+            return parts.stream().filter(part -> part.offset() < offset + length
+                            && part.offset() + part.resource().length() > offset)
+                    .mapToLong(part -> part.resource().length()).sum();
+        }
+
+        InputStream open(Runnable guard) {
+            return new InputStream() {
+                private int partIndex;
+                private byte[] verified;
+                private int position;
+                private boolean closed;
+
+                @Override
+                public int read() throws IOException {
+                    byte[] one = new byte[1];
+                    return read(one, 0, 1) < 0 ? -1 : one[0] & 255;
+                }
+
+                @Override
+                public int read(byte[] target, int offset, int length) throws IOException {
+                    Objects.checkFromIndexSize(offset, length, target.length);
+                    if (closed) {
+                        throw new IOException("Artifact stream is closed");
+                    }
+                    if (length == 0) {
+                        return 0;
+                    }
+                    guard.run();
+                    while (verified == null || position == verified.length) {
+                        if (partIndex == parts.size()) {
+                            return -1;
+                        }
+                        var part = parts.get(partIndex);
+                        byte[] candidate = new byte[Math.toIntExact(part.resource().length())];
+                        copyVerified(part.resource(), scope, publicationId, 0,
+                                candidate, 0, candidate.length, lease, guard);
+                        verified = candidate;
+                        position = 0;
+                        partIndex++;
+                    }
+                    int count = Math.min(Math.min(length, 64 * 1024), verified.length - position);
+                    guard.run();
+                    System.arraycopy(verified, position, target, offset, count);
+                    position += count;
+                    return count;
+                }
+
+                @Override
+                public void close() {
+                    closed = true;
+                    verified = null;
+                }
+            };
+        }
+
+        byte[] readRange(long offset, int length, Runnable guard) {
+            require(offset >= 0 && length >= 0 && length <= MAX_SEGMENT
+                    && offset <= size && length <= size - offset, "Invalid publication range");
+            byte[] result = new byte[length];
+            for (var part : parts) {
+                long start = Math.max(offset, part.offset());
+                long end = Math.min(offset + length, part.offset() + part.resource().length());
+                if (end > start) {
+                    copyVerified(part.resource(), scope, publicationId, start - part.offset(),
+                            result, Math.toIntExact(start - offset), Math.toIntExact(end - start), lease, guard);
+                }
+            }
+            guard.run();
+            return result;
+        }
     }
 
     private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref,
             String kind, int maximum) {
+        try (var lease = retention.read(key)) {
+            return referencedResource(key, publicationId, ref, kind, maximum, lease, lease::check);
+        }
+    }
+
+    private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref,
+            String kind, int maximum, ToolPublicationRetentionStore.ReadLease lease, Runnable guard) {
+        guard.run();
         Resource resource = catalogResource(key, publicationId, text(ref, "resourceId"));
         require(refMatches(resource, ref, kind) && resource.length() <= maximum,
                 "Publication resource reference conflicts");
-        return readResource(key, publicationId, text(ref, "resourceId"));
+        byte[] bytes = readResourceInternal(key, publicationId, text(ref, "resourceId"), lease, guard);
+        lease.check();
+        guard.run();
+        return bytes;
     }
 
     private boolean refMatches(Resource resource, JsonNode ref, String kind) {
@@ -1424,15 +1928,26 @@ public final class ToolPublicationDataStore {
     }
 
     private void copyVerified(Resource resource, String scope, String publicationId,
-            long offset, byte[] target, int targetOffset, int length, Runnable heartbeat) {
+            long offset, byte[] target, int targetOffset, int length,
+            ToolPublicationRetentionStore.ReadLease lease, Runnable heartbeat) {
         require(offset >= 0 && length >= 0 && offset <= resource.length()
                 && length <= resource.length() - offset, "Publication copy range is invalid");
         MessageDigest hash = sha256();
+        lease.check();
         try (InputStream input = resource.objectKey() == null
-                ? new java.io.ByteArrayInputStream(resource.inlineBytes()) : objects.open(resource.objectKey())) {
-            byte[] buffer = new byte[64 * 1024];
+                ? new java.io.ByteArrayInputStream(resource.inlineBytes()) : objects.open(resource.objectKey(), () -> {
+                    lease.check();
+                    heartbeat.run();
+                })) {
+            byte[] buffer = new byte[1024 * 1024];
             long position = 0;
-            for (int count; (count = input.read(buffer)) != -1; ) {
+            for (;;) {
+                lease.check();
+                int count = input.readNBytes(buffer, 0, buffer.length);
+                if (count == 0) {
+                    break;
+                }
+                lease.check();
                 heartbeat.run();
                 hash.update(buffer, 0, count);
                 long start = Math.max(position, offset);
@@ -1443,27 +1958,29 @@ public final class ToolPublicationDataStore {
                 }
                 position += count;
                 if (position > resource.length()) {
-                    quarantine(scope, publicationId, resource.slot());
-                    throw new IllegalArgumentException("Publication object length changed");
+                    throw corruptPublication(scope, publicationId, resource.slot(), "Publication object length changed");
                 }
             }
+            lease.check();
             if (position != resource.length()
                     || !HexFormat.of().formatHex(hash.digest()).equals(resource.digest())) {
-                quarantine(scope, publicationId, resource.slot());
-                throw new IllegalArgumentException("Publication object digest changed");
+                throw corruptPublication(scope, publicationId, resource.slot(), "Publication object digest changed");
             }
         } catch (IOException error) {
             throw new IllegalStateException("Publication object read failed", error);
         }
     }
 
-    private static String scope(JsonNode key) {
+    static String scope(JsonNode key) {
         require(key != null && key.isObject(), "Invalid publication scope");
-        return hash(JSON.createArrayNode().add(text(key, "tenantId"))
-                .add(text(key, "workspaceId")).add(text(key, "sessionId")).toString());
+        return scope(text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"));
     }
 
-    private static String requestDigest(String slot, int length, String digest) {
+    static String scope(String tenant, String workspace, String session) {
+        return hash(JSON.createArrayNode().add(tenant).add(workspace).add(session).toString());
+    }
+
+    private static String requestDigest(String slot, long length, String digest) {
         return hash(JSON.createArrayNode().add(slot).add(length).add(digest).toString());
     }
 

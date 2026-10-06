@@ -937,7 +937,14 @@ setInterval(() => {}, 1000);
           'Hook execution cancelled (aborted)',
         );
         expect(isRunning(supervisorPid as number)).toBe(false);
-        expect(isRunning(hookPid as number)).toBe(false);
+        // The result promise settles with the runner's abort bookkeeping;
+        // the descendant's death lands one scheduling hop later. Same
+        // convergence point as the sibling case above: budget the reap
+        // instead of racing a bare boolean (#13356).
+        await waitFor(
+          () => !isRunning(hookPid as number),
+          PROCESS_REAP_TIMEOUT_MS,
+        );
       } finally {
         controller.abort();
         if (supervisorPid && isRunning(supervisorPid)) {

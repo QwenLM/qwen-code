@@ -27,7 +27,10 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -42,8 +45,18 @@ import org.springframework.stereotype.Repository;
  */
 @Repository
 public class ManagedExtensionRecordStore {
+    private static final Logger LOG = LoggerFactory.getLogger(
+            ManagedExtensionRecordStore.class);
     public static final String ERROR_REJECTED =
             "managed_session_extension_record_rejected";
+    /**
+     * The opening-command check of a first revision, verbatim the statement
+     * ManagedAgentMySqlIT explains, so the plan it probes is the plan the
+     * store gets.
+     */
+    public static final String OPENING_COMMAND_QUERY = "SELECT COUNT(*) FROM"
+            + " qwen_managed_session_extension_record WHERE"
+            + " session_scope_key = ? AND operation_hash = ?";
     private static final String EVENT_SUBTYPE = "managed_session_event_v1";
     private static final String COMMIT_SUBTYPE = "managed_session_commit_v1";
     private static final Set<String> EVENT_FIELDS = Set.of("v", "sequence",
@@ -66,17 +79,25 @@ public class ManagedExtensionRecordStore {
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
     private final JdbcTemplate jdbc;
     private final AgentStateStore sessions;
+    private final ManagedTaskEventStore taskEvents;
 
     @Autowired
     public ManagedExtensionRecordStore(JdbcTemplate jdbc,
-            AgentStateStore sessions) {
+            AgentStateStore sessions, ManagedTaskEventStore taskEvents) {
         this.jdbc = jdbc;
         this.sessions = sessions;
+        this.taskEvents = taskEvents;
     }
 
     /** A store beside no public Session table, which announces nothing. */
     ManagedExtensionRecordStore(JdbcTemplate jdbc) {
         this(jdbc, null);
+    }
+
+    /** A store that journals its own task events beside the table. */
+    public ManagedExtensionRecordStore(JdbcTemplate jdbc,
+            AgentStateStore sessions) {
+        this(jdbc, sessions, new ManagedTaskEventStore(jdbc));
     }
 
     public record TaskRow(String taskId, String kind,
@@ -105,14 +126,34 @@ public class ManagedExtensionRecordStore {
         }).toList();
     }
 
+    public Optional<JsonNode> latestHookRegistration(String tenantId, String sessionId) {
+        return jdbc.query("SELECT record_resource_id FROM qwen_managed_session_extension_record"
+                        + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+                        + " AND domain = 'hook_registration' AND settled_at IS NOT NULL"
+                        + " ORDER BY first_sequence DESC",
+                (result, row) -> result.getString("record_resource_id"),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId)
+                .stream().map(id -> {
+                    JsonNode record = readBody(readResource(tenantId, sessionId, id));
+                    ManagedHookRecords.requireRegistration(record);
+                    return record;
+                }).filter(record -> "settled".equals(record.path("run").path("state").textValue()))
+                .findFirst();
+    }
+
     /** Reads only a committed resource in this Session's scope. */
     public JsonNode readRecordResource(String tenantId, String sessionId,
+            JsonNode ref) {
+        return readBody(readCommittedResource(tenantId, sessionId, ref));
+    }
+
+    public StoredResource readCommittedResource(String tenantId, String sessionId,
             JsonNode ref) {
         ManagedExtensionRecords.durableRef(ref, "recordResource");
         StoredResource resource = readResource(tenantId, sessionId,
                 ref.get("resourceId").textValue());
         requireReference(resource, ref);
-        return readBody(resource);
+        return resource;
     }
 
     private StoredResource readResource(String tenantId, String sessionId,
@@ -140,6 +181,14 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
+     * What one journal transaction carries: the tool receipts, and the
+     * payload of its last activation.changed event (null when it has none),
+     * collected during the same pass so the commit does not parse twice.
+     */
+    record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation) {
+    }
+
+    /**
      * Applies the Stage H revisions that one journal transaction carries.
      * It runs inside the Session store's commit, after the transaction's
      * resources are stored, so {@code resources} reads each body verified.
@@ -149,14 +198,23 @@ public class ManagedExtensionRecordStore {
      * {@code eventCount} events, and its transaction must hold only those
      * events and then its commit marker, as the authority writes it.
      */
-    void apply(String tenantId, String workspaceId, String sessionId,
+    ApplyResult apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
             Function<String, StoredResource> resources) {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
+        List<JsonNode> receipts = new ArrayList<>();
+        JsonNode lastActivation = null;
         boolean applied = false;
         boolean shaped = true;
         String lastSubtype = null;
+        // Every event line must be scoped to the committing Session — the
+        // closed-key check both read paths enforce applies at write time
+        // too, so a misscoped line never enters the journal at all.
+        JsonNode sessionScope = JSON.createObjectNode()
+                .put("tenantId", tenantId)
+                .put("workspaceId", workspaceId)
+                .put("sessionId", sessionId);
         for (int index = 0; index < lines.length; index++) {
             JsonNode record = parse(lines[index]);
             if (record == null) {
@@ -172,12 +230,37 @@ public class ManagedExtensionRecordStore {
             }
             JsonNode event = record.path("managedSession");
             JsonNode payload = event.path("payload");
-            if (!"domain.committed".equals(event.path("kind").textValue())) {
+            String kind = event.path("kind").textValue();
+            String domain = "domain.committed".equals(kind)
+                    ? payload.path("domain").textValue() : null;
+            // requireEnvelope owns the domain.committed lines for known
+            // domains (its closed-shape and scope messages are pinned by
+            // name); every other enveloped event line — including an
+            // unknown-domain one — gets the closed-key check here. A bare
+            // event-subtype line with no envelope is inert — it carries no
+            // evidence anywhere — and stays tolerated.
+            boolean envelopeOwned = domain != null
+                    && ManagedExtensionProjection.RECORD_BODIES
+                            .containsKey(domain);
+            if (event.isObject() && !envelopeOwned) {
+                require(event.path("v").asInt() == 1
+                        && sessionScope.equals(event.path("sessionKey")),
+                        "Journal event scope conflicts");
+            }
+            if ("activation.changed".equals(kind)) {
+                require(index < eventCount,
+                        "Activation change has an invalid journal position");
+                lastActivation = payload;
+            }
+            if ("tool.receipt".equals(kind)) {
+                require(index < eventCount && event.path("sequence").asLong(-1) == firstSequence + index,
+                        "Tool receipt has an invalid journal position");
+                receipts.add(event);
+            }
+            if (domain == null) {
                 continue;
             }
-            String domain = payload.path("domain").textValue();
-            Body body = domain == null ? null
-                    : ManagedExtensionProjection.RECORD_BODIES.get(domain);
+            Body body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
             if (body != null) {
                 require(index < eventCount, "The Stage H record event is not"
                         + " one of the transaction's events.");
@@ -186,13 +269,14 @@ public class ManagedExtensionRecordStore {
                 applyRevision(tenantId, workspaceId, sessionId, domain, body,
                         payload.get("operationId").textValue(),
                         payload.get("recordRef"),
-                        occurredAt, resources);
+                        firstSequence + index, occurredAt, resources);
                 applied = true;
             }
         }
         require(!applied || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
+        return new ApplyResult(receipts, lastActivation);
     }
 
     public TaskPage listTasks(String tenantId, String sessionId,
@@ -281,9 +365,23 @@ public class ManagedExtensionRecordStore {
         return occurredAt;
     }
 
+    /**
+     * The resource of one committed record that an indexed Hook projection
+     * matches, if any. Admission keeps the records under one key in
+     * agreement, so comparing with one of them decides as all would.
+     */
+    private Optional<String> hookRecordResource(String where,
+            Object... arguments) {
+        return jdbc.query("SELECT record_resource_id FROM"
+                        + " qwen_managed_session_extension_record WHERE "
+                        + where + " LIMIT 1",
+                (result, row) -> result.getString("record_resource_id"),
+                arguments).stream().findFirst();
+    }
+
     private void applyRevision(String tenantId, String workspaceId,
             String sessionId, String domain, Body body, String operationId,
-            JsonNode recordRef, long occurredAt,
+            JsonNode recordRef, long sequence, long occurredAt,
             Function<String, StoredResource> resources) {
         String resourceId = recordRef.get("resourceId").textValue();
         StoredResource resource = resources.apply(resourceId);
@@ -300,11 +398,55 @@ public class ManagedExtensionRecordStore {
         } catch (InvalidRecordException error) {
             throw rejected(error.getMessage());
         }
-        if (domain.equals("mcp_configuration") || domain.equals("mcp_operation")) {
-            for (String field : List.of("catalogRef", "argsRef", "resultRef")) {
+        if (List.of("mcp_configuration", "mcp_operation", "hook_registration", "hook_execution").contains(domain)) {
+            for (String field : List.of("catalogRef", "argsRef", "resultRef", "planRef", "inputRef")) {
                 JsonNode ref = record.get(field);
                 if (ref != null && !ref.isNull()) {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
+        if (domain.equals("child_run")) {
+            for (String field : List.of("commandRef", "startReceiptRef", "outputRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
+        if (domain.equals("monitor_run")) {
+            for (String field : List.of("commandRef", "startReceiptRef", "outputRef",
+                    "lastObservationRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
+        if (domain.equals("hook_execution")) {
+            StoredResource plan = resources.apply(record.get("planRef").get("resourceId").textValue());
+            if (plan.kind().equals("managed-hook-plan")) {
+                JsonNode messagesRef = readBody(plan).get("messagesRef");
+                if (messagesRef != null && !messagesRef.isNull()) {
+                    try {
+                        ManagedExtensionRecords.durableRef(messagesRef, "plan.messagesRef");
+                        StoredResource messages = resources.apply(messagesRef.get("resourceId").textValue());
+                        requireReference(messages, messagesRef);
+                        require(List.of("managed-hook-messages", "managed-hook-message-chunks").contains(messages.kind()),
+                                "The Hook plan must reference a messages snapshot or chunk manifest.");
+                        if (messages.kind().equals("managed-hook-message-chunks")) {
+                            JsonNode parts = readBody(messages).get("parts");
+                            require(parts != null && parts.isArray(), "The Hook messages manifest must contain parts.");
+                            for (JsonNode part : parts) {
+                                ManagedExtensionRecords.durableRef(part, "messages.parts");
+                                require("managed-hook-message-part".equals(part.get("kind").textValue()),
+                                        "The Hook messages manifest must reference message parts.");
+                                requireReference(resources.apply(part.get("resourceId").textValue()), part);
+                            }
+                        }
+                    } catch (InvalidRecordException error) {
+                        throw rejected(error.getMessage());
+                    }
                 }
             }
         }
@@ -313,6 +455,16 @@ public class ManagedExtensionRecordStore {
                 domain, recordId);
         String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId,
                 sessionId);
+        ManagedHookRecords.AdmissionKeys keys =
+                ManagedHookRecords.admissionKeys(domain, record);
+        if (domain.equals("hook_registration")) {
+            hookRecordResource("session_scope_key = ? AND hook_definition_hash = ?",
+                    scopeKey, keys.definitionHash()).ifPresent(registration ->
+                    require(ManagedExtensionRecords.isDefinitionPinConsistent(
+                            readBody(resources.apply(registration)).get("run").get("definition"),
+                            record.get("run").get("definition")),
+                            "A Hook catalog revision cannot name two definition digests."));
+        }
         if (domain.equals("mcp_configuration")) {
             List<String> configurations = jdbc.query("SELECT record_resource_id FROM"
                             + " qwen_managed_session_extension_record WHERE"
@@ -332,6 +484,40 @@ public class ManagedExtensionRecordStore {
                 .stream().findFirst().orElse(null);
         String operationHash = sha256(operationId);
         if (previous == null) {
+            if (domain.equals("hook_execution")) {
+                String registrationKey = ManagedExtensionProjection.recordKey(sessionId,
+                        "hook_registration", record.get("registrationId").textValue());
+                String registrationResource = jdbc.query("SELECT record_resource_id FROM"
+                                + " qwen_managed_session_extension_record WHERE"
+                                + " session_scope_key = ? AND record_key = ?",
+                        (result, row) -> result.getString("record_resource_id"),
+                        scopeKey, registrationKey).stream().findFirst().orElse(null);
+                require(registrationResource != null,
+                        "Hook execution must bind to its settled committed registration.");
+                JsonNode registration = readBody(resources.apply(registrationResource));
+                require("settled".equals(registration.get("run").get("state").textValue())
+                        && ManagedMcpRecords.same(registration.get("run").get("definition"), record.get("run").get("definition")),
+                        "Hook execution must bind to its settled committed registration.");
+                // Indexed lookups, not a read of every earlier execution: the
+                // unique indexes also refuse a concurrent duplicate.
+                require(keys.onceKeyHash() == null || hookRecordResource(
+                                "session_scope_key = ? AND hook_once_key_hash = ?",
+                                scopeKey, keys.onceKeyHash()).isEmpty(),
+                        "Hook onceKey is already consumed in this Session.");
+                String occurrence = "Hook occurrence must keep its registration,"
+                        + " event and plan, with unique ordinals.";
+                require(hookRecordResource("session_scope_key = ?"
+                                + " AND hook_occurrence_hash = ? AND hook_ordinal = ?",
+                                scopeKey, keys.occurrenceHash(), keys.ordinal()).isEmpty(),
+                        occurrence);
+                hookRecordResource("session_scope_key = ? AND hook_occurrence_hash = ?",
+                        scopeKey, keys.occurrenceHash()).ifPresent(sibling -> {
+                            JsonNode other = readBody(resources.apply(sibling));
+                            require(List.of("registrationId", "eventName", "planRef").stream()
+                                    .allMatch(key -> ManagedMcpRecords.same(record.get(key), other.get(key))),
+                                    occurrence);
+                        });
+            }
             if (domain.equals("mcp_operation")) {
                 String configKey = ManagedExtensionProjection.recordKey(sessionId,
                         "mcp_configuration", record.get("configurationId").textValue());
@@ -355,9 +541,7 @@ public class ManagedExtensionRecordStore {
                     + domain + " record " + recordId + " must open its run.");
             // The command that opens a record becomes the operation of its
             // grants, so it opens no other record.
-            Integer opened = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                            + " qwen_managed_session_extension_record WHERE"
-                            + " session_scope_key = ? AND operation_hash = ?",
+            Integer opened = jdbc.queryForObject(OPENING_COMMAND_QUERY,
                     Integer.class, scopeKey, operationHash);
             require(opened != null && opened == 0, "Command " + operationId
                     + " already opened another Stage H record.");
@@ -373,7 +557,8 @@ public class ManagedExtensionRecordStore {
         JsonNode run = record.get("run");
         TaskProjection projection = ManagedExtensionProjection.project(
                 previous == null ? null : previous.projection(), run,
-                occurredAt);
+                occurredAt,
+                record.path("stopRequested").asBoolean(false));
         JsonNode delivery = run.get("delivery");
         String deliveryTarget = delivery.isNull() ? null
                 : delivery.get("target").textValue();
@@ -381,22 +566,38 @@ public class ManagedExtensionRecordStore {
                 : delivery.get("state").textValue();
         long revision = previous == null ? 1 : previous.revision() + 1;
         if (previous == null) {
-            jdbc.update("INSERT INTO qwen_managed_session_extension_record"
-                            + " (session_scope_key, record_key, tenant_id,"
-                            + " workspace_id, session_id, domain, record_id,"
-                            + " operation_hash, revision, record_resource_id,"
-                            + " task_kind, task_state, runtime_state,"
-                            + " definition_revision, delivery_target,"
-                            + " delivery_state, created_at, started_at,"
-                            + " settled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
-                            + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    scopeKey, recordKey, tenantId, workspaceId, sessionId,
-                    domain, recordId, operationHash, revision, resourceId,
-                    body.taskKind(),
-                    body.taskKind() == null ? null : projection.state(), projection.runtimeState(),
-                    projection.definitionRevision(), deliveryTarget,
-                    deliveryState, projection.createdAt(),
-                    projection.startedAt(), projection.settledAt());
+            try {
+                jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+                                + " (session_scope_key, record_key, tenant_id,"
+                                + " workspace_id, session_id, domain, record_id,"
+                                + " operation_hash, revision, record_resource_id,"
+                                + " task_kind, task_state, runtime_state,"
+                                + " definition_revision, delivery_target,"
+                                + " delivery_state, created_at, started_at,"
+                                + " settled_at, first_sequence, hook_once_key_hash,"
+                                + " hook_occurrence_hash, hook_ordinal,"
+                                + " hook_definition_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
+                                + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        scopeKey, recordKey, tenantId, workspaceId, sessionId,
+                        domain, recordId, operationHash, revision, resourceId,
+                        body.taskKind(),
+                        body.taskKind() == null ? null : projection.state(), projection.runtimeState(),
+                        projection.definitionRevision(), deliveryTarget,
+                        deliveryState, projection.createdAt(),
+                        projection.startedAt(), projection.settledAt(), sequence,
+                        keys.onceKeyHash(), keys.occurrenceHash(), keys.ordinal(),
+                        keys.definitionHash());
+            } catch (DuplicateKeyException error) {
+                // The checks above run under the Session's head lock, so
+                // only a writer that bypassed them reaches here; the unique
+                // indexes refuse it, and the log names which one.
+                LOG.warn("Managed Stage H record was refused by a unique index"
+                                + " tenant={} session={} domain={} record={}",
+                        tenantId, sessionId, domain, recordId, error);
+                throw rejected(domain + " record " + recordId + " repeats a"
+                        + " record or a Hook once key or occurrence ordinal"
+                        + " already committed in this Session.");
+            }
         } else {
             jdbc.update("UPDATE qwen_managed_session_extension_record SET"
                             + " revision = ?, record_resource_id = ?,"
@@ -413,9 +614,26 @@ public class ManagedExtensionRecordStore {
         }
         if (body.taskKind() != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
-            announce(tenantId, sessionId,
-                    ManagedExtensionProjection.taskId(recordKey),
-                    projection.state(), revision);
+            String taskId = ManagedExtensionProjection.taskId(recordKey);
+            announce(tenantId, sessionId, taskId, projection.state(),
+                    revision);
+            try {
+                taskEvents.appendStateChange(tenantId, sessionId, taskId,
+                        projection.state(), projection.runtimeState(),
+                        occurredAt);
+            } catch (ApiException refused) {
+                // The record row above is the authoritative state and it is
+                // already written; the event journal is a derived, bounded
+                // feed. A journal that refuses past its backlog bound — or
+                // whose retention floor is pinned behind unarchived output —
+                // degrades the feed, never the record commit, or one task's
+                // output backlog would wedge every later revision of it.
+                LOG.warn("Managed Stage H task event was refused by the journal"
+                                + " tenant={} session={} task={} revision={}"
+                                + " code={}",
+                        tenantId, sessionId, taskId, revision,
+                        refused.getCode());
+            }
         }
     }
 
@@ -478,7 +696,7 @@ public class ManagedExtensionRecordStore {
     }
 
     /** A JSON object as the authority's reader parses it, or null. */
-    static JsonNode parse(String text) {
+    public static JsonNode parse(String text) {
         try {
             JsonNode node = JSON.readTree(text);
             return node != null && node.isObject() && finite(node) ? node

@@ -5,6 +5,7 @@
  */
 
 import type { ToolConfig } from '../runtime/agent-types.js';
+import { resolvePath } from '../../utils/paths.js';
 import {
   evaluateToolInvocationGuard,
   type ToolInvocationGuard,
@@ -189,5 +190,76 @@ export function createAgentToolInvocationGuard(
       };
     }
     return { allowed: true };
+  };
+}
+
+export function createAgentHostToolInvocationGuard(
+  upstream: ToolInvocationGuard | undefined,
+  workspaceCwd: string,
+  isPathWithinWorkspace: (candidate: string) => boolean,
+): ToolInvocationGuard {
+  const readOnlyGuard = createAgentToolInvocationGuard(upstream);
+  return async (context) => {
+    const decision = await readOnlyGuard(context);
+    if (!decision.allowed) return decision;
+
+    if (
+      context.toolName === ToolNames.ZOOM_IMAGE ||
+      context.toolName === ToolNames.DISPLAY_IMAGE
+    ) {
+      return {
+        allowed: false,
+        reason: 'Agent Host media reads are outside its workspace capability.',
+      };
+    }
+
+    // Glob expansion happens after this guard and can traverse a symlink or a
+    // brace branch outside the checked base directory.
+    if (context.toolName === ToolNames.GLOB) {
+      return {
+        allowed: false,
+        reason: 'Agent Host glob reads are outside its workspace capability.',
+      };
+    }
+
+    if (
+      context.toolName === ToolNames.GREP &&
+      context.args['glob'] !== undefined
+    ) {
+      return {
+        allowed: false,
+        reason: 'Agent Host grep does not accept glob filters.',
+      };
+    }
+
+    let requestedPath: unknown;
+    switch (context.toolName) {
+      case ToolNames.READ_FILE:
+        requestedPath = context.args['file_path'];
+        break;
+      case ToolNames.GREP:
+        requestedPath = context.args['path'] ?? '.';
+        break;
+      case ToolNames.LS:
+        requestedPath = context.args['path'];
+        break;
+      default:
+        return decision;
+    }
+
+    if (typeof requestedPath !== 'string' || requestedPath.trim() === '') {
+      return {
+        allowed: false,
+        reason: 'Agent Host read path is missing.',
+      };
+    }
+    const candidate = resolvePath(context.cwd ?? workspaceCwd, requestedPath);
+    if (!isPathWithinWorkspace(candidate)) {
+      return {
+        allowed: false,
+        reason: 'Agent Host reads are limited to the assigned workspace.',
+      };
+    }
+    return decision;
   };
 }

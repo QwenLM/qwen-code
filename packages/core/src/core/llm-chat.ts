@@ -24,6 +24,7 @@ import {
   isUnattendedMode,
   type HeartbeatInfo,
 } from '../utils/retry.js';
+import { beginRetryWait } from '../utils/retry-wait.js';
 import {
   isQuotaExhaustedError,
   formatQuotaExhaustedMessage,
@@ -591,6 +592,15 @@ export interface LlmChatSendOptions {
   disableModelFallbacks?: boolean;
   /** Internal identity for the user prompt added to model history. */
   promptId?: string;
+  /**
+   * The consumer retracts already-delivered output when a retry restarts, so
+   * a cut that already delivered content replays the original request instead
+   * of asking the model to continue from it. The Hosted Harness sets this:
+   * its deltas are published durably, and a continuation answered with a
+   * fresh full answer would glue the retracted attempt's prefix onto the
+   * public transcript (#13319).
+   */
+  retractDeliveredOutputOnRetry?: boolean;
 }
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
@@ -1398,25 +1408,33 @@ function delay(
 } {
   let resolveRef: () => void;
   let timeoutId: ReturnType<typeof setTimeout>;
+  // Every settle path ends the announced retry wait synchronously — a skip or
+  // abort must not keep shielding the request until the generator resumes.
+  let endWait = () => {};
 
   const promise = new Promise<void>((resolve, reject) => {
-    resolveRef = resolve;
+    resolveRef = () => {
+      endWait();
+      resolve();
+    };
 
     if (signal?.aborted) {
       reject(signal.reason);
       return;
     }
 
-    timeoutId = setTimeout(resolve, delayMs);
+    timeoutId = setTimeout(resolveRef, delayMs);
 
     signal?.addEventListener(
       'abort',
       () => {
         clearTimeout(timeoutId);
+        endWait();
         reject(signal.reason);
       },
       { once: true },
     );
+    endWait = beginRetryWait(delayMs);
   });
 
   return {
@@ -2976,6 +2994,10 @@ export class LlmChat {
     goalContext?: GoalTurnPermit,
     options?: LlmChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    // After a Managed Runtime call ended without a known outcome, the model
+    // must not continue: it could repeat a call that already took effect.
+    const managedSessionBlock = this.config.getManagedSessionBlock?.();
+    if (managedSessionBlock) throw managedSessionBlock;
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
@@ -3344,6 +3366,7 @@ export class LlmChat {
       // Add user content to history ONCE before any attempts. Later object
       // spreads preserve the identity marked before compression.
       this.history.push(userContent);
+      this.syncReviewedSchemasForContent(userContent);
       currentUserContent = userContent;
       userContentAdded = true;
       // Record that the user content landed (see `userContentPushCount`). The
@@ -3440,6 +3463,9 @@ export class LlmChat {
     } catch (error) {
       if (userContentAdded) {
         this.history.pop();
+        if (currentUserContent) {
+          this.syncReviewedSchemasForContent(currentUserContent);
+        }
         // The push above was rolled back, so undo its count too.
         this.userContentPushCount--;
       }
@@ -3922,18 +3948,27 @@ export class LlmChat {
             // from that attempt can appear twice. Thinking models can
             // spend minutes in that phase, exactly when gateways
             // close long-lived SSE connections (#7832).
+            //
+            // A consumer that retracts delivered output on a fresh retry
+            // (the Hosted Harness) replays even after content delivery: the
+            // resend replaces the retracted output, where a continuation
+            // answered with a fresh full answer would glue it back on
+            // (#13319). Such sends never take the continuation arm below.
+            const replayAdmitsDeliveredContent =
+              options?.retractDeliveredOutputOnRetry === true;
             if (
               isReplayableStreamError &&
-              !streamYieldedContentChunk &&
-              // `streamYieldedContentChunk` is per-attempt, so on its own it
-              // cannot tell "nothing has been delivered" from "this attempt
-              // was cut while thinking, after earlier attempts already put
-              // text on screen". Only the first is replayable; replaying the
-              // second discards output the caller is watching. The
-              // accumulated buffer is what distinguishes them, and it must be
-              // consulted here because this branch is checked before the
-              // continuation one below.
-              transportContinuationText.trim().length === 0 &&
+              (replayAdmitsDeliveredContent ||
+                (!streamYieldedContentChunk &&
+                  // `streamYieldedContentChunk` is per-attempt, so on its own it
+                  // cannot tell "nothing has been delivered" from "this attempt
+                  // was cut while thinking, after earlier attempts already put
+                  // text on screen". Only the first is replayable; replaying the
+                  // second discards output the caller is watching. The
+                  // accumulated buffer is what distinguishes them, and it must be
+                  // consulted here because this branch is checked before the
+                  // continuation one below.
+                  transportContinuationText.trim().length === 0)) &&
               streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries
             ) {
               self.popPendingPartialAssistantTurn();
@@ -3963,11 +3998,12 @@ export class LlmChat {
               );
               yield { type: StreamEventType.RETRY };
               // A replay is a fresh restart, so anything a previous
-              // continuation had staged must go. The gate above now admits
-              // only an empty accumulated buffer, which leaves nothing for
-              // this to clear — it stays as an assertion of that invariant,
-              // so a future gate change cannot leak staged text into a
-              // restarted attempt.
+              // continuation had staged must go. Without
+              // `retractDeliveredOutputOnRetry` the gate above admits only an
+              // empty accumulated buffer, which leaves nothing for this to
+              // clear; with it the buffer holds the delivered text the caller
+              // is about to retract, and clearing it keeps the resend from
+              // asking the model to resume output the caller no longer has.
               resetTransportContinuation();
               suppressNextRetryEvent = true;
               await delay(delayMs, params.config?.abortSignal).promise;
@@ -4017,8 +4053,13 @@ export class LlmChat {
               attemptFinishReason !== undefined &&
               CLOSED_FINISH_REASONS.has(attemptFinishReason) &&
               streamYieldedContentChunk;
+            // A consumer retracting delivered output replays instead: a
+            // continuation tail is only correct when the provider honors the
+            // resume instruction, and a restart is indistinguishable from a
+            // perfect continuation — so append is not safe for it (#13319).
             const canContinueAfterTransportCut =
               isContinuableStreamCut &&
+              !replayAdmitsDeliveredContent &&
               !attemptClosedWithOwnOutput &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
@@ -5388,6 +5429,24 @@ export class LlmChat {
   }
 
   /**
+   * Iterates raw history newest-first and returns the first entry satisfying
+   * `predicate`, without the O(history) clone `getHistoryShallow` pays. For
+   * read-only checks on hot per-send paths — callers must not mutate the
+   * returned objects.
+   */
+  findLastHistoryEntry(
+    predicate: (entry: Content) => boolean,
+  ): Content | undefined {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const entry = this.history[i];
+      if (predicate(entry)) {
+        return entry;
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Returns concatenated text from the last model entry without cloning the
    * full history. Used by stop hooks, where only the latest assistant text is
    * needed.
@@ -5488,6 +5547,9 @@ export class LlmChat {
   clearHistory(): void {
     this.history = [];
     this.completedToolCallIds = [];
+    if (!this.isForkedChat) {
+      this.config.getToolRegistry()?.clearReviewedDeclarations?.();
+    }
     // Any pending partial-push state points into the now-empty history;
     // resetting prevents `popPendingPartialAssistantTurn` from splicing whatever
     // shows up at that index in a future send (defense-in-depth — the
@@ -5504,6 +5566,7 @@ export class LlmChat {
    */
   addHistory(content: Content): void {
     this.history.push(content);
+    this.syncReviewedSchemasForContent(content);
     // addHistory only runs between sends, so the partial-push marker
     // should already be cleared. If it is not, a new caller is
     // violating that invariant — surface it at error level so the
@@ -5519,6 +5582,19 @@ export class LlmChat {
       );
     }
     this.clearPendingPartialState();
+  }
+
+  private syncReviewedSchemasForContent(content: Content): void {
+    if (
+      !this.isForkedChat &&
+      content.parts?.some(
+        (part) => part.functionResponse?.name === ToolNames.TOOL_SEARCH,
+      )
+    ) {
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
+    }
   }
 
   /**
@@ -5661,6 +5737,9 @@ export class LlmChat {
     // body costs at most one duplicate injection on the next invoke.
     if (!this.isForkedChat) {
       clearLoadedSkillTracking(this.config.getToolRegistry(), 'setHistory');
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
     }
   }
 
@@ -5681,6 +5760,9 @@ export class LlmChat {
         this.config.getToolRegistry(),
         'truncateHistory',
       );
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
     }
     this.clearPendingPartialState();
   }
@@ -5752,6 +5834,9 @@ export class LlmChat {
         this.config.getToolRegistry(),
         'stripOrphanedUserEntries',
       );
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
     }
     this.clearPendingPartialState();
     return strippedEntries;

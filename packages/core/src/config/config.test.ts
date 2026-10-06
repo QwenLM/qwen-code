@@ -318,6 +318,7 @@ vi.mock('../hooks/index.js', () => {
   HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
+  HookSystemMock.prototype.isManaged = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
   return {
     HookSystem: HookSystemMock,
@@ -3652,6 +3653,53 @@ describe('Server Config (config.ts)', () => {
       expect(clearLoadedSkills).toHaveBeenCalledOnce();
     });
 
+    it.each([
+      {
+        title: 'clears reviewed deferred declarations at the session boundary',
+        nextSessionId: 'replacement-session',
+        survives: false,
+      },
+      {
+        title: 'keeps reviewed deferred declarations on a same-id restart',
+        nextSessionId: undefined,
+        survives: true,
+      },
+    ])('$title', async ({ nextSessionId, survives }) => {
+      const config = await initConfig({}, SKIP_ALL_INIT);
+      // The registry class is mocked in this file, so attach a stateful
+      // review-map trio: the production site calls them optionally and the
+      // assertion below observes the map, not the calls.
+      const registry = config.getToolRegistry()!;
+      const reviews = new Map<string, string>();
+      Object.assign(registry, {
+        recordReviewedDeclaration: (tool: {
+          schema: { name?: string };
+        }): void => {
+          reviews.set(tool.schema.name ?? '', 'fingerprint');
+        },
+        getReviewedDeclaration: (name: string) => reviews.get(name),
+        clearReviewedDeclarations: (): void => reviews.clear(),
+      });
+      registry.recordReviewedDeclaration({
+        schema: {
+          name: 'cron_list',
+          parametersJsonSchema: { type: 'object', properties: {} },
+        },
+      } as never);
+      expect(registry.getReviewedDeclaration('cron_list')).toBeDefined();
+
+      config.startNewSession(
+        nextSessionId ?? config.getSessionId(),
+        nextSessionId === undefined ? emptyResume() : undefined,
+      );
+
+      if (survives) {
+        expect(registry.getReviewedDeclaration('cron_list')).toBeDefined();
+      } else {
+        expect(registry.getReviewedDeclaration('cron_list')).toBeUndefined();
+      }
+    });
+
     it("drops a skill's session allow rules at the session boundary", async () => {
       // `PermissionManager` outlives the swap, so without the purge a skill's
       // grant would keep auto-approving in a session that never loaded it.
@@ -5637,6 +5685,22 @@ describe('Server Config (config.ts)', () => {
       expect(SkillManager).not.toHaveBeenCalled();
       expect(config.getSkillManager()).toBeNull();
       expect(config.getFileCheckpointingEnabled()).toBe(false);
+    });
+
+    it('installs a managed dispatcher while ambient Hook discovery is disabled', async () => {
+      const config = new Config({ ...baseParams });
+      const dispatcher = {
+        hasHooksForEvent: () => false,
+        execute: vi.fn(),
+      };
+      await config.initialize({
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        managedHookDispatcher: dispatcher,
+      });
+      expect(HookSystem).toHaveBeenCalledWith(config, dispatcher);
+      expect(config.getHookSystem()).toBeDefined();
     });
 
     it('warms tools strictly by default and leniently when lenientToolWarmup is set', async () => {
@@ -12340,6 +12404,135 @@ describe('applyWorkspaceAgentPersona', () => {
       expect(result.allowed).toBe(
         toolName === 'read_file' || toolName === 'thread_review',
       );
+    }
+  });
+
+  it('keeps agent-host sessions read-only without collaboration tools', async () => {
+    const config = new Config(baseParams);
+    config.setSessionSource('agent-host', 'host_1');
+    const guard = config.getToolInvocationGuard()!;
+
+    for (const [toolName, args, allowed] of [
+      [ToolNames.READ_FILE, { file_path: path.resolve('package.json') }, true],
+      ['mcp__trusted__write', {}, false],
+      ['unknown_tool', {}, false],
+      [ToolNames.WRITE_FILE, {}, false],
+      [ToolNames.SHELL, {}, false],
+    ] as const) {
+      const result = await guard({
+        callId: 'host-guard-check',
+        toolName,
+        args,
+        signal: new AbortController().signal,
+      });
+      expect(result.allowed).toBe(allowed);
+    }
+
+    const factory = ToolRegistry.prototype.registerFactory as unknown as Mock;
+    factory.mockClear();
+    await config.createToolRegistry(undefined, { skipDiscovery: true });
+    const registered = factory.mock.calls.map(([name]) => name as string);
+    for (const toolName of [
+      'thread_post',
+      'thread_read',
+      'thread_create',
+      'thread_wait',
+      'thread_block',
+      'thread_review',
+    ]) {
+      expect(registered).not.toContain(toolName);
+    }
+  });
+
+  it('confines agent-host reads to the canonical workspace', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'agent-host-guard-'));
+    const workspace = path.join(root, 'workspace');
+    const outside = path.join(root, 'outside');
+    await mkdir(workspace);
+    await mkdir(outside);
+    await writeFile(path.join(workspace, 'inside.txt'), 'inside');
+    await writeFile(path.join(outside, 'secret.txt'), 'secret');
+    const escape = path.join(workspace, 'escape');
+    fs.symlinkSync(
+      outside,
+      escape,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    // The file-wide node:fs mock resolves realpathSync to the identity, so the
+    // symlink is only followed when this test maps it to its real target.
+    vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) => {
+      const resolvedPath = pathToResolve.toString();
+      if (resolvedPath === escape) {
+        return outside;
+      }
+      if (resolvedPath.startsWith(escape + path.sep)) {
+        return path.join(outside, resolvedPath.slice(escape.length + 1));
+      }
+      return resolvedPath;
+    });
+
+    try {
+      const config = new Config({
+        ...baseParams,
+        targetDir: workspace,
+        cwd: workspace,
+      });
+      config.setSessionSource('agent-host', 'host_1');
+      const guard = config.getToolInvocationGuard()!;
+      const check = (toolName: string, args: Record<string, unknown>) =>
+        guard({
+          callId: 'host-path-check',
+          toolName,
+          args,
+          signal: new AbortController().signal,
+          cwd: workspace,
+        });
+
+      await expect(
+        check(ToolNames.READ_FILE, {
+          file_path: path.join(workspace, 'inside.txt'),
+        }),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        check(ToolNames.GREP, { pattern: 'inside' }),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        check(ToolNames.READ_FILE, {
+          file_path: path.join(
+            os.homedir(),
+            '.qwen',
+            'agent-hosts',
+            'host.json',
+          ),
+        }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+      await expect(
+        check(ToolNames.READ_FILE, {
+          file_path: path.join(workspace, 'escape', 'secret.txt'),
+        }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+      await expect(check(ToolNames.LS, { path: outside })).resolves.toEqual(
+        expect.objectContaining({ allowed: false }),
+      );
+      await expect(
+        check(ToolNames.GREP, { pattern: 'secret', glob: '../outside/**' }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+      await expect(
+        check(ToolNames.GLOB, {
+          pattern: '**/*',
+          path: workspace,
+        }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+      await expect(
+        check(ToolNames.ZOOM_IMAGE, {
+          file_path: path.join(workspace, 'inside.txt'),
+        }),
+      ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+    } finally {
+      vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+        pathToResolve.toString(),
+      );
+      await rm(root, { recursive: true, force: true });
     }
   });
 

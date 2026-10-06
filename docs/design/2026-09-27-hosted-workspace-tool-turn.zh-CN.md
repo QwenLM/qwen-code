@@ -6,6 +6,8 @@
 
 > 审批更新（2026-09-30）：Hosted Workspace 工具回合现在可以在 Session 的审批模式不预批准的调用之前请求审批，因此下文“不实现交互式审批”一句描述的是之前的切片。详见 [Actions](2026-09-30-managed-agent-actions.zh-CN.md)。
 
+> 文件历史更新（2026-09-30）：Write/Edit 备份结算及私有仅文件撤销已在 [Hosted Workspace 文件历史](2026-09-30-hosted-file-history.zh-CN.md)中实现，涵盖持久化、reload、冲突检测与失败边界。下文对文件备份的排除描述的是之前的切片。
+
 ## 问题与现状
 
 Hosted Harness 已有持久化的无工具文本回合。W0c-3 独立支持通过持久化 Workspace 绑定执行工具，并持有 SQL 存储所有权。目前没有代码把模型的函数调用接到这条路径。变更前，通用 TypeScript Broker provider 依赖生产 Broker 尚未实现的 control、prepare 和 start 操作。本片补齐 prepare/start，但明确不实现该 provider 的通用 control 契约。
@@ -51,7 +53,7 @@ Harness 在持久化参数资源中保留精确 payload 字节。Broker 只在�
 
 ## 失败与取消
 
-占用存储前明确返回 HTTP 409 `workspace_busy` 或 `workspace_unavailable` 的 acquire 拒绝以普通错误结束回合，Session 可重试或 reload。占用存储后的 acquire 失败统一使用 `runtime_session_acquire_failed`，包括后续权限复检失败，仍要求恢复。acquire 响应丢失也保持阻塞。
+回合工具执行中遇到明确返回 HTTP 409 `workspace_busy` 的 acquire 拒绝不再直接结束回合：这表示另一 Session 的工具回合持有挂卷，本回合等待持有者释放——以短轮询重试 acquire，仅受回合取消与截止时限约束——然后取得所有权并继续，因此同一 Workspace 上的第二个 Session 排队而不是丢失回合。`workspace_unavailable` 拒绝，以及恢复路径上的明确拒绝，仍以普通错误结束回合，Session 可重试或 reload。占用存储后的 acquire 失败统一使用 `runtime_session_acquire_failed`，包括后续权限复检失败，仍要求恢复。acquire 响应丢失也保持阻塞。
 
 派发前的准入或参数资源失败不会产生工具副作用。start 响应丢失后只查询原始执行。无法观察的结果、lease 丢失、结果提交失败或未验证取消会把 Session 阻塞在持久等待点。调用方可观察 recovery-required 状态。Harness 不发出正常 completed/cancelled 安全边界，也不允许新 prompt 忘记这些工作。
 

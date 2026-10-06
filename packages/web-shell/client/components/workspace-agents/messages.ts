@@ -31,6 +31,8 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.elapsed.minutes': (v) => `${v?.minutes ?? 0}m ${v?.seconds ?? 0}s`,
   'collab.run.queued': (v) =>
     `${v?.agent} is queued and starts when it is free`,
+  'collab.run.hostOffline': (v) =>
+    `${v?.agent} is waiting for its runtime to come back online`,
   'collab.run.queuedBehind': (v) => `${v?.agent} is queued, ${v?.count} ahead`,
   'collab.run.starting': (v) => `Starting ${v?.agent}…`,
   'collab.run.resuming': (v) => `${v?.agent} is resuming its session…`,
@@ -46,9 +48,56 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.run.stalled': (v) =>
     `${v?.agent} has shown no progress for ${v?.elapsed}. It may be stuck.`,
   'collab.run.stop': 'Stop',
+  'collab.runtime.addTitle': 'Add a runtime',
+  'collab.runtime.addDescription':
+    'Let another computer run Qwen Code agents for this workspace.',
+  'collab.runtime.replaceTitle': (v) => `Replace ${v?.name}`,
+  'collab.runtime.replaceDescription': (v) =>
+    `Replace ${v?.name} with a new host using a one-time join command.`,
+  'collab.runtime.replaceEffects':
+    'After the new host registers, the old credentials are revoked and agent bindings move to the new host. Running or cancelling tasks on the old host fail; results already being finalized are preserved.',
+  'collab.runtime.replaceRecovery': (v) =>
+    `Resuming replacement of ${v?.name} (${v?.id}). Link expiry does not cancel the pending replacement or undo migrated bindings. If the command expires, create a fresh command here and run it on the replacement machine.`,
+  'collab.runtime.refreshReplacement': 'Refresh replacement command',
+  'collab.runtime.methodCommand': 'Run one command there',
+  'collab.runtime.methodExisting': 'I have its address and token',
+  'collab.runtime.address':
+    'This computer’s address, as the other computer sees it',
+  'collab.runtime.addressHint':
+    'The other computer connects out to this address, so it only has to be reachable from there.',
+  'collab.runtime.loopbackHint':
+    'localhost only works on this computer. Use its network address (for example http://192.168.1.8:4170) so the other computer can reach it.',
+  'collab.runtime.generate': 'Create join command',
+  'collab.runtime.runThis':
+    'On the other computer, run this in the project folder:',
+  'collab.runtime.noQwen': 'Qwen Code not installed there? This works too:',
+  'collab.runtime.copy': 'Copy',
+  'collab.runtime.copied': 'Copied',
+  'collab.runtime.expires': (v) =>
+    `The link works once and expires in ${v?.minutes ?? 0} min.`,
+  'collab.runtime.httpHint':
+    'It uses plain HTTP, so only use it on a network you trust.',
+  'collab.runtime.waiting': 'Waiting for it to connect…',
+  'collab.runtime.waitingFor': (v) =>
+    `${v?.seconds ?? 0}s so far. This updates by itself when it connects.`,
+  'collab.runtime.closeKeepLink': 'Close (the link keeps working)',
+  'collab.runtime.connected': (v) => `${v?.name} is connected`,
+  'collab.runtime.replaced': (v) => `${v?.oldName} was replaced by ${v?.name}`,
+  'collab.runtime.replaceCompleted':
+    'The old credentials were revoked and agent bindings were migrated. Old active runs were settled; results already being finalized were preserved.',
+  'collab.runtime.offers': (v) => `Offers ${v?.programs}`,
+  'collab.runtime.done': 'Done',
+  'collab.runtime.createAgentOn': (v) => `Create an agent on ${v?.name}`,
+  'collab.runtime.remoteUrl': 'Its Qwen Code address',
+  'collab.runtime.remoteToken': 'Its access token',
+  'collab.runtime.remoteCwd': 'Project folder on that computer',
+  'collab.runtime.program': 'Program',
+  'collab.runtime.allowHttp':
+    'Allow plain HTTP (trusted networks only; token and tasks are unencrypted)',
+  'collab.runtime.connect': 'Connect',
   'collab.share.title': (v) => `Share ${v?.name}`,
   'collab.share.description':
-    'Anyone with the token can send this agent work over A2A. It keeps running on this computer, in this workspace, with whatever instructions and tools the agent has at the time — later changes to the agent apply to shares already issued.',
+    'Anyone with the token can send this agent work over A2A. It runs wherever it is currently assigned, in that runtime’s workspace, with its current instructions and tools. Later changes — including moving it between this computer and a joined runtime — apply to shares already issued.',
   'collab.share.copy': 'Copy',
   'collab.share.copied': 'Copied',
   'collab.share.done': 'Done',
@@ -67,10 +116,13 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.agent.share': 'Share',
   'collab.tabs.agents': 'Agents',
   'collab.tabs.tasks': 'Conversations',
+  'collab.tabs.runtime': 'Runtimes',
   'collab.tabs.agentsHint':
-    'Agents are teammates you create. @ an agent in any conversation to bring it in; it can bring in others.',
+    'Agents are teammates you create. Each runs on a runtime with one program. @ an agent in any conversation to bring it in; it can bring in others.',
   'collab.tabs.tasksHint':
     'Conversations where agents are working, grouped by what they need from you.',
+  'collab.tabs.runtimeHint':
+    'Runtimes are the computers agents run on: this one, and any that joined with a link.',
   'collab.agent.new': 'New agent',
   'collab.agent.roles': 'Role templates',
   'collab.agent.mentionIt': 'New conversation',
@@ -97,6 +149,15 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.agent.concurrency': 'Conversations at once',
   'collab.agent.concurrencyInvalid':
     'Conversations at once must be between 1 and 8.',
+  'collab.agent.runsOn': 'Runs on',
+  'collab.agent.thisComputer': 'This computer',
+  'collab.agent.cwdUnknown': 'Folder not reported yet',
+  'collab.agent.hostPersona':
+    'Remote agents use the runtime’s model and your instructions here. Local role and model overrides are unavailable.',
+  'collab.agent.runsOnHint':
+    'A joined runtime works in its own folder, shown under its name. Files here are not copied to it.',
+  'collab.agent.programLocal': 'Runs only on a joined runtime',
+  'collab.agent.programMissing': 'Not found on this runtime',
   'collab.agent.afterCreate':
     'It starts working when you mention it in a conversation.',
   'collab.thread.new': 'New conversation',
@@ -108,11 +169,22 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
     'Say what you need and who should take it. The conversation opens once it is created.',
   'collab.agent.empty':
     'No agents yet. Create one, then @ it in any conversation.',
+  'collab.runtime.localNote':
+    'This computer. Its agents run in this workspace with Qwen Code.',
+  'collab.runtime.remoteNote':
+    'Another computer that joined this workspace. Agents assigned to it run there.',
+  'collab.runtime.programs': 'Programs',
+  'collab.runtime.empty': 'No runtime yet.',
+  'collab.runtime.emptyHint':
+    'Add a runtime to let another computer run agents, then create an agent on it.',
+  'collab.runtime.badAddress': 'Enter an address like http://192.168.1.8:4170.',
   'collab.run.keepWaiting': 'Keep waiting',
   'collab.run.timedOut': (v) =>
     `${v?.agent} was stopped after 15 minutes without progress`,
   'collab.run.failed': (v) => `${v?.agent} stopped with an error`,
   'collab.run.retry': 'Retry',
+  'collab.run.programUnavailable': (v) =>
+    `${v?.agent} could not start: no runtime it may use offers its program`,
   'collab.run.steps': (v) => `Steps by ${v?.agent}`,
   'collab.step.running': 'Running',
   'collab.step.done': 'Done',
@@ -131,6 +203,8 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.runRow.working': 'Working',
   'collab.runRow.quiet': 'Waiting for new output',
   'collab.runRow.queued': 'Received, waiting to start',
+  'collab.runRow.hostOffline': (v) =>
+    `Runtime ${v?.host} is offline; the run starts when it is back`,
   'collab.runRow.unconfirmed': 'Waiting for the run to start',
   'collab.runRow.cancel': 'Cancel',
   'collab.runRow.elapsed': (v) => `Running for ${v?.elapsed}`,
@@ -170,6 +244,8 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
     'The live preview reached its length limit; the full reply is in the conversation.',
   'collab.runRow.openSession': (v) => `Open ${v?.agent}'s session`,
   'collab.runRow.stalled': 'Stopped after 15 minutes without progress',
+  'collab.runRow.programUnavailable':
+    'None of its runtimes offers the program this agent is bound to',
   'collab.preview.nobody': 'This message will not reach any agent.',
   'collab.preview.to': (v) => `Goes to ${v?.names}.`,
   'collab.preview.only': (v) =>
@@ -215,6 +291,7 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.team.history': (v) => `Past runs (${v?.count ?? 0})`,
   'collab.member.idle': 'Idle',
   'collab.member.queued': 'Queued',
+  'collab.member.offline': 'Runtime offline',
   'collab.member.starting': 'Starting',
   'collab.member.thinking': 'Thinking',
   'collab.member.responding': 'Replying',
@@ -265,7 +342,7 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
     'Nothing is assigned to it yet. Start a conversation, or @ it in any conversation.',
   'collab.form.project': 'Project',
   'collab.form.projectHint':
-    'The same projects as the sidebar. It decides where the conversation lives and which agents can join. Defaults to the current project.',
+    "The same projects as the sidebar. It decides where the conversation lives and which agents can join. Defaults to the current project; each agent's runtime decides the machine and folder it runs in.",
   'collab.form.titleLabel': 'Title',
   'collab.form.title': 'What needs doing?',
   'collab.form.bodyLabel': 'Description',
@@ -298,7 +375,7 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.config.save': 'Save',
   'collab.ceiling.title': 'What agents may do',
   'collab.ceiling.readOnly':
-    'Agents can read, delegate and summarize, but cannot change files. Instructions cannot widen tool access.',
+    'Agents can read, delegate and summarize, but cannot change files. Instructions cannot widen tool access, and external programs also keep their own permission settings.',
   'collab.ceiling.open': 'No read-only limit is on.',
   'collab.ceiling.tools': 'Show allowed tools',
   'collab.empty.lead': 'No conversations yet.',
@@ -306,6 +383,23 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.detail.doneWhen': 'Done when',
   'collab.sidebar.loadFailed': (v) =>
     `Could not load the conversations of ${v?.name}.`,
+  'collab.agentStatus.online': 'Online',
+  'collab.config.runtimes': 'Runs on',
+  'collab.config.runtimesHint':
+    'With no machine selected, Qwen Code on this computer runs it.',
+  'collab.runtime.folder': 'Working folder',
+  'collab.runtime.agents': 'Agents',
+  'collab.runtime.running': 'Running',
+  'collab.runtime.queued': 'Queued',
+  'collab.runtime.technical': 'Technical details',
+  'collab.runtime.id': (v) => `Runtime ID: ${v?.id}`,
+  'collab.runtime.hostSession': (v) => `Host session: ${v?.id}`,
+  'collab.runtime.sessions': (v) => `Sessions: ${v?.count}`,
+  'collab.runtime.lastSeen': (v) => `Last heartbeat: ${v?.time}`,
+  'collab.runtime.replace': 'Replace Host',
+  'collab.runtime.remove': 'Remove',
+  'collab.runtime.removeConfirm': (v) =>
+    `Remove “${v?.name}”? Agents assigned only to it will move to this computer, and its active runs will stop.`,
 };
 
 export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
@@ -324,6 +418,8 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.elapsed.minutes': (v) =>
     `${v?.minutes ?? 0} 分 ${v?.seconds ?? 0} 秒`,
   'collab.run.queued': (v) => `${v?.agent} 排队中，空出来就开始`,
+  'collab.run.hostOffline': (v) =>
+    `${v?.agent} 所在的 Runtime 离线，回来后自动继续`,
   'collab.run.queuedBehind': (v) =>
     `${v?.agent} 排队中，前面还有 ${v?.count} 个`,
   'collab.run.starting': (v) => `正在唤起 ${v?.agent}…`,
@@ -340,9 +436,52 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.run.stalled': (v) =>
     `${v?.agent} 已经 ${v?.elapsed} 没有进展，可能卡住了`,
   'collab.run.stop': '停止',
+  'collab.runtime.addTitle': '添加 Runtime',
+  'collab.runtime.addDescription':
+    '让另一台电脑为这个工作区运行 Qwen Code Agent。',
+  'collab.runtime.replaceTitle': (v) => `替换 ${v?.name}`,
+  'collab.runtime.replaceDescription': (v) =>
+    `使用一次性加入命令，用新主机替换 ${v?.name}。`,
+  'collab.runtime.replaceEffects':
+    '新主机注册后，旧凭据被撤销，Agent 绑定迁移到新主机。旧主机上正在运行或取消的任务会失败；已进入完成结算的结果会保留。',
+  'collab.runtime.replaceRecovery': (v) =>
+    `正在恢复对 ${v?.name}（${v?.id}）的替换。链接过期不会取消待完成的替换，也不会回滚已迁移的绑定。命令过期后，在这里生成新命令，再到替换主机上运行。`,
+  'collab.runtime.refreshReplacement': '刷新替换命令',
+  'collab.runtime.methodCommand': '在那台电脑上运行一行命令',
+  'collab.runtime.methodExisting': '我已有地址和令牌',
+  'collab.runtime.address': '这台电脑的地址（从那台电脑看过来）',
+  'collab.runtime.addressHint':
+    '那台电脑会主动连到这个地址，只要从那边能访问到就行。',
+  'collab.runtime.loopbackHint':
+    'localhost 只在这台电脑上有效。请换成它的局域网地址（例如 http://192.168.1.8:4170），另一台电脑才能连上。',
+  'collab.runtime.generate': '生成加入命令',
+  'collab.runtime.runThis': '在那台电脑的项目目录里运行：',
+  'collab.runtime.noQwen': '那台电脑没装 Qwen Code？用这条也行：',
+  'collab.runtime.copy': '复制',
+  'collab.runtime.copied': '已复制',
+  'collab.runtime.expires': (v) =>
+    `链接只能用一次，${v?.minutes ?? 0} 分钟后失效。`,
+  'collab.runtime.httpHint': '使用的是 HTTP 明文，只在可信网络里用。',
+  'collab.runtime.waiting': '正在等待连接…',
+  'collab.runtime.waitingFor': (v) =>
+    `已等待 ${v?.seconds ?? 0} 秒。连上后这里会自动更新。`,
+  'collab.runtime.closeKeepLink': '关闭（链接仍然有效）',
+  'collab.runtime.connected': (v) => `${v?.name} 已连接`,
+  'collab.runtime.replaced': (v) => `${v?.oldName} 已由 ${v?.name} 替换`,
+  'collab.runtime.replaceCompleted':
+    '旧主机凭据已撤销，Agent 绑定已迁移。旧的活动任务已结算，已进入完成结算的结果已保留。',
+  'collab.runtime.offers': (v) => `提供 ${v?.programs}`,
+  'collab.runtime.done': '完成',
+  'collab.runtime.createAgentOn': (v) => `在 ${v?.name} 上新建 Agent`,
+  'collab.runtime.remoteUrl': '它的 Qwen Code 地址',
+  'collab.runtime.remoteToken': '它的访问令牌',
+  'collab.runtime.remoteCwd': '那台电脑上的项目目录',
+  'collab.runtime.program': '执行程序',
+  'collab.runtime.allowHttp': '允许 HTTP 明文（仅可信网络，令牌和任务不加密）',
+  'collab.runtime.connect': '连接',
   'collab.share.title': (v) => `分享 ${v?.name}`,
   'collab.share.description':
-    '拿到令牌的人可以通过 A2A 给这个 Agent 派活。它仍然运行在这台电脑上、这个工作区里，使用 Agent 当时的指令和工具——之后对 Agent 的修改也会作用于已发出的分享。',
+    '拿到令牌的人可以通过 A2A 给这个 Agent 派活。任务会在 Agent 当前分配的 Runtime 及其工作区中执行，并使用当前的指令和工具。之后的修改（包括在本机与已加入的 Runtime 之间迁移）也会作用于已发出的分享。',
   'collab.share.copy': '复制',
   'collab.share.copied': '已复制',
   'collab.share.done': '完成',
@@ -361,9 +500,12 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.agent.share': '分享',
   'collab.tabs.agents': 'Agent',
   'collab.tabs.tasks': '协作对话',
+  'collab.tabs.runtime': 'Runtime',
   'collab.tabs.agentsHint':
-    'Agent 是你新建的队友。在任何对话里 @ 它就能叫它来，它也能再叫别的 Agent。',
+    'Agent 是你新建的队友，每个都跑在某个 Runtime 上、用一个程序。在任何对话里 @ 它就能叫它来，它也能再叫别的 Agent。',
   'collab.tabs.tasksHint': 'Agent 正在工作的对话，按需要你做什么来分组。',
+  'collab.tabs.runtimeHint':
+    'Runtime 是运行 Agent 的电脑：这台电脑，以及用链接加入的其他电脑。',
   'collab.agent.new': '新建 Agent',
   'collab.agent.roles': '角色模板',
   'collab.agent.mentionIt': '发起对话',
@@ -386,6 +528,15 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.agent.description': '其他 Agent 什么时候该找它（可选）',
   'collab.agent.concurrency': '同时处理的对话数',
   'collab.agent.concurrencyInvalid': '同时处理的对话数必须在 1 到 8 之间。',
+  'collab.agent.runsOn': '运行在',
+  'collab.agent.thisComputer': '这台电脑',
+  'collab.agent.cwdUnknown': '尚未上报目录',
+  'collab.agent.hostPersona':
+    '远程 Agent 使用执行环境的模型和此处填写的指令，不支持本地角色与模型覆盖。',
+  'collab.agent.runsOnHint':
+    '加入的 Runtime 在它自己的目录里工作（显示在名字下方），这里的文件不会复制过去。',
+  'collab.agent.programLocal': '只能在加入的 Runtime 上运行',
+  'collab.agent.programMissing': '这个 Runtime 上没有检测到',
   'collab.agent.afterCreate': '在对话里 @ 它，它就开始工作。',
   'collab.thread.new': '新建协作对话',
   'collab.thread.context': '来自原对话的上下文',
@@ -394,10 +545,21 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.thread.loading': '正在加载对话…',
   'collab.thread.newHint': '写下要做什么、交给谁。创建后会打开这个对话。',
   'collab.agent.empty': '还没有 Agent。新建一个，然后在任意对话里 @ 它。',
+  'collab.runtime.localNote':
+    '这台电脑。它上面的 Agent 用 Qwen Code 在这个工作区里运行。',
+  'collab.runtime.remoteNote':
+    '加入了这个工作区的另一台电脑。分配给它的 Agent 在那边运行。',
+  'collab.runtime.programs': '程序',
+  'collab.runtime.empty': '还没有 Runtime。',
+  'collab.runtime.emptyHint':
+    '添加一个 Runtime，让另一台电脑运行 Agent，再在它上面新建 Agent。',
+  'collab.runtime.badAddress': '请填写类似 http://192.168.1.8:4170 的地址。',
   'collab.run.keepWaiting': '再等等',
   'collab.run.timedOut': (v) => `${v?.agent} 15 分钟没有进展，已停止`,
   'collab.run.failed': (v) => `${v?.agent} 出错停止了`,
   'collab.run.retry': '重试',
+  'collab.run.programUnavailable': (v) =>
+    `${v?.agent} 没能启动：它能用的 Runtime 都没有它绑定的程序`,
   'collab.run.steps': (v) => `${v?.agent} 的步骤`,
   'collab.step.running': '进行中',
   'collab.step.done': '已完成',
@@ -416,6 +578,7 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.runRow.working': '执行中',
   'collab.runRow.quiet': '等待新输出',
   'collab.runRow.queued': '消息已接收，排队等待启动',
+  'collab.runRow.hostOffline': (v) => `Runtime ${v?.host} 离线，恢复后开始运行`,
   'collab.runRow.unconfirmed': '等待开始运行',
   'collab.runRow.cancel': '取消',
   'collab.runRow.elapsed': (v) => `已运行 ${v?.elapsed}`,
@@ -451,6 +614,7 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.runRow.outputCap': '实时预览已达长度上限；完整回复见对话正文。',
   'collab.runRow.openSession': (v) => `打开 ${v?.agent} 的会话`,
   'collab.runRow.stalled': '15 分钟没有进展，已停止',
+  'collab.runRow.programUnavailable': '它的 Runtime 都没有它绑定的程序',
   'collab.preview.nobody': '这条消息不会发给任何 Agent。',
   'collab.preview.to': (v) => `发给 ${v?.names}。`,
   'collab.preview.only': (v) => `只发给 ${v?.names}，其他成员不会被打断。`,
@@ -491,6 +655,7 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.team.history': (v) => `历史运行（${v?.count ?? 0}）`,
   'collab.member.idle': '空闲',
   'collab.member.queued': '排队中',
+  'collab.member.offline': 'Runtime 离线',
   'collab.member.starting': '正在唤起',
   'collab.member.thinking': '正在思考',
   'collab.member.responding': '正在回复',
@@ -540,7 +705,7 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
     '还没有分配给它的对话。点「发起对话」，或在任意对话里 @ 它。',
   'collab.form.project': '所属项目',
   'collab.form.projectHint':
-    '和侧边栏的项目一致，决定对话放在哪个项目、哪些 Agent 能参与。默认当前项目。',
+    '和侧边栏的项目一致，决定对话放在哪个项目、哪些 Agent 能参与。默认当前项目；在哪台机器、哪个目录运行由 Agent 的运行环境决定。',
   'collab.form.titleLabel': '标题',
   'collab.form.title': '需要完成什么？',
   'collab.form.bodyLabel': '描述',
@@ -570,11 +735,27 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.config.save': '保存配置',
   'collab.ceiling.title': '当前协作权限',
   'collab.ceiling.readOnly':
-    'Agent 只能读取、派单和汇总结果，不能修改文件。职责指令不能扩大工具权限。',
+    'Agent 只能读取、派单和汇总结果，不能修改文件。职责指令不能扩大工具权限；外部程序还受自身权限设置约束。',
   'collab.ceiling.open': '当前未启用只读限制。',
   'collab.ceiling.tools': '查看工具范围',
   'collab.empty.lead': '还没有协作对话。',
   'collab.empty.hint': '新建一个协作对话并指定 Agent，它就会开始工作。',
   'collab.detail.doneWhen': '验收标准',
   'collab.sidebar.loadFailed': (v) => `无法加载 ${v?.name} 的协作对话`,
+  'collab.agentStatus.online': '在线',
+  'collab.config.runtimes': '执行主机',
+  'collab.config.runtimesHint': '不选择外部主机时，由本机 Qwen Code 执行。',
+  'collab.runtime.folder': '工作目录',
+  'collab.runtime.agents': '关联 Agent',
+  'collab.runtime.running': '执行中',
+  'collab.runtime.queued': '排队中',
+  'collab.runtime.technical': '技术详情',
+  'collab.runtime.id': (v) => `主机标识：${v?.id}`,
+  'collab.runtime.hostSession': (v) => `宿主会话：${v?.id}`,
+  'collab.runtime.sessions': (v) => `会话数：${v?.count}`,
+  'collab.runtime.lastSeen': (v) => `最近心跳：${v?.time}`,
+  'collab.runtime.replace': '替换主机',
+  'collab.runtime.remove': '移除',
+  'collab.runtime.removeConfirm': (v) =>
+    `确定移除“${v?.name}”吗？只绑定到它的 Agent 会切回这台电脑，正在执行的任务会停止。`,
 };
