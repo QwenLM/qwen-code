@@ -507,6 +507,37 @@ describe('managed session record sink', () => {
     expect(await harness.sink.project()).toEqual([]);
   });
 
+  it('commits a re-delivered title record only once', async () => {
+    const harness = await createHarness();
+    const title = {
+      uuid: 'rec-title-1',
+      type: 'system',
+      subtype: 'custom_title',
+      systemPayload: { customTitle: 'Recorded title', titleSource: 'manual' },
+    } as Partial<ChatRecord>;
+    await harness.sink.write(record(title));
+    // The sink derives a record's command identity from its uuid, so the same
+    // record delivered again — a fresh object with the same uuid — presents
+    // the same command, and the authority answers the second write from its
+    // journal instead of publishing another body.
+    await harness.sink.write(record(title));
+    await harness.close();
+
+    const bodies = path.join(
+      harness.runtimeBaseDir,
+      'resources',
+      sessionId,
+      'managed-session_metadata',
+    );
+    expect((await fs.readdir(bodies)).length).toBe(1);
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({ title: 'Recorded title', source: 'manual' });
+  });
+
   it('settles the turn instead of projecting the result as a message', async () => {
     const harness = await createHarness();
     const result = record({
