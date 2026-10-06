@@ -56,6 +56,7 @@ import { safeLiteralReplace } from '../utils/textUtils.js';
 import {
   countOccurrences,
   extractEditSnippet,
+  findLineBasedMatchOffsets,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
@@ -67,6 +68,7 @@ export function applyReplacement(
   oldString: string,
   newString: string,
   isNewFile: boolean,
+  matchOffsets?: readonly number[],
 ): string {
   if (isNewFile) {
     return newString;
@@ -78,6 +80,17 @@ export function applyReplacement(
   // If oldString is empty and it's not a new file, do not modify the content.
   if (oldString === '' && !isNewFile) {
     return currentContent;
+  }
+
+  if (matchOffsets !== undefined) {
+    const pieces: string[] = [];
+    let cursor = 0;
+    for (const offset of matchOffsets) {
+      pieces.push(currentContent.slice(cursor, offset), newString);
+      cursor = offset + oldString.length;
+    }
+    pieces.push(currentContent.slice(cursor));
+    return pieces.join('');
   }
 
   // Use intelligent replacement that handles $ sequences safely
@@ -280,6 +293,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     );
     finalOldString = normalizedStrings.oldString;
     finalNewString = normalizedStrings.newString;
+    let matchOffsets: number[] | undefined;
 
     if (finalOldString === '' && !fileExists) {
       // Creating a new file
@@ -296,9 +310,18 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         currentContent,
         finalOldString,
         finalNewString,
+        normalizedStrings.lineBasedMatch,
       );
 
-      occurrences = countOccurrences(currentContent, finalOldString);
+      if (normalizedStrings.lineBasedMatch) {
+        matchOffsets = findLineBasedMatchOffsets(
+          currentContent,
+          finalOldString,
+        );
+      }
+      occurrences =
+        matchOffsets?.length ??
+        countOccurrences(currentContent, finalOldString);
       if (params.old_string === '') {
         // Error: Trying to create a file that already exists
         error = {
@@ -340,6 +363,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           finalOldString,
           finalNewString,
           isNewFile,
+          matchOffsets,
         )
       : (currentContent ?? '');
 

@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   countOccurrences,
+  findLineBasedMatchOffsets,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from './editHelper.js';
@@ -81,6 +82,7 @@ const two = 2;
     expect(result).toEqual({
       oldString: 'console.log("hi")',
       newString: 'console.log("bye")',
+      lineBasedMatch: true,
     });
   });
 
@@ -91,6 +93,7 @@ const two = 2;
       oldString: 'remove-me\n',
       newString: '',
       canonical: 'remove-me \n',
+      lineBasedMatch: true,
     },
     {
       name: 'replacing a fuzzy line before a blank line',
@@ -98,6 +101,7 @@ const two = 2;
       oldString: 'remove-me\n',
       newString: 'replacement\n',
       canonical: 'remove-me \n',
+      lineBasedMatch: true,
     },
     {
       name: 'matching a multiline string before a blank line',
@@ -105,6 +109,7 @@ const two = 2;
       oldString: 'const value = `first\nsecond`;\n',
       newString: 'const value = `replacement`;\n',
       canonical: 'const value = `first \nsecond`;\n',
+      lineBasedMatch: true,
     },
     {
       name: 'consuming only the requested multiple newlines',
@@ -112,6 +117,7 @@ const two = 2;
       oldString: 'remove-me\n\n',
       newString: '',
       canonical: 'remove-me \n\n',
+      lineBasedMatch: true,
     },
     {
       name: 'preserving a following whitespace-only line',
@@ -119,6 +125,7 @@ const two = 2;
       oldString: 'remove-me\n',
       newString: '',
       canonical: 'remove-me \n',
+      lineBasedMatch: true,
     },
     {
       name: 'matching a fuzzy line at EOF with a newline',
@@ -126,6 +133,7 @@ const two = 2;
       oldString: 'remove-me\n',
       newString: '',
       canonical: 'remove-me \n',
+      lineBasedMatch: true,
     },
     {
       name: 'preserving a literal match before a blank line',
@@ -133,6 +141,7 @@ const two = 2;
       oldString: 'remove-me\n',
       newString: '',
       canonical: 'remove-me\n',
+      lineBasedMatch: false,
     },
     {
       name: 'matching without a requested final newline',
@@ -140,6 +149,7 @@ const two = 2;
       oldString: 'remove-me  ',
       newString: '',
       canonical: 'remove-me ',
+      lineBasedMatch: true,
     },
   ])('does not extend the matched slice when $name', (testCase) => {
     expect(
@@ -151,6 +161,7 @@ const two = 2;
     ).toEqual({
       oldString: testCase.canonical,
       newString: testCase.newString,
+      ...(testCase.lineBasedMatch ? { lineBasedMatch: true } : {}),
     });
   });
 
@@ -161,7 +172,11 @@ const two = 2;
         'remove-me\n',
         'replacement\n',
       ),
-    ).toEqual({ oldString: 'remove-me ', newString: 'replacement' });
+    ).toEqual({
+      oldString: 'remove-me ',
+      newString: 'replacement',
+      lineBasedMatch: true,
+    });
   });
 
   it('keeps repeated fuzzy lines visible to occurrence counting', () => {
@@ -171,8 +186,12 @@ const two = 2;
     expect(normalized).toEqual({
       oldString: 'a \n',
       newString: 'replacement\n',
+      lineBasedMatch: true,
     });
     expect(countOccurrences(content, normalized.oldString)).toBe(2);
+    expect(findLineBasedMatchOffsets(content, normalized.oldString)).toEqual([
+      0, 4,
+    ]);
   });
 
   // Tests for issue #1618: Preserve trailing whitespace in newString
@@ -200,6 +219,7 @@ const two = 2;
       expect(result).toEqual({
         oldString: 'value = 1;\n', // Canonical from file
         newString: 'value = 2;   \n', // Preserved as LLM intended
+        lineBasedMatch: true,
       });
     });
 
@@ -251,6 +271,22 @@ const two = 2;
       expect(round2.newString).toBe('value = 2;\n');
     });
   });
+});
+
+describe('findLineBasedMatchOffsets', () => {
+  it.each([
+    [' a \na \n', 'a \n', [4]],
+    ['a extra\na \n', 'a ', [8]],
+    [' a \na ', 'a ', [4]],
+    [' a\na\na', 'a\na', [3]],
+    ['x\n\n\n', '\n\n', [2]],
+    ['abc', '', []],
+  ])(
+    'keeps whole-line canonical matches in %j',
+    (source, canonical, expected) => {
+      expect(findLineBasedMatchOffsets(source, canonical)).toEqual(expected);
+    },
+  );
 });
 
 describe('countOccurrences', () => {
