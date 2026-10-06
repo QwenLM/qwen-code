@@ -660,6 +660,11 @@ const {
       queuedPromptHoldHistory: [] as boolean[],
       queuedPrompts: [] as Array<{ id: number; text: string }>,
       transcriptHasMore: false,
+      promptSettledListeners: new Set<
+        (
+          event: import('./daemon/session/types').DaemonPromptSettledEvent,
+        ) => void
+      >(),
       queuedPromptWriteBlocked: false,
       queuedPromptDispatchError: undefined as
         | ((text: string) => string | undefined)
@@ -1109,6 +1114,38 @@ vi.mock('./hooks/useQueuedPrompts', () => ({
 vi.mock('./utils/systemInfo', () => ({
   collectSystemInfo: mockCollectSystemInfo,
 }));
+
+// The harness replaces the provider, so the prompt settlement bus is driven by
+// the tests through `testState.promptSettledListeners`.
+vi.mock('./daemon/session/DaemonSessionProvider', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('./daemon/session/DaemonSessionProvider')
+    >();
+  const React = await import('react');
+  return {
+    ...actual,
+    useDaemonPromptSettled: (
+      listener:
+        | ((
+            event: import('./daemon/session/types').DaemonPromptSettledEvent,
+          ) => void)
+        | undefined,
+    ) => {
+      const listenerRef = React.useRef(listener);
+      listenerRef.current = listener;
+      React.useEffect(() => {
+        const forward = (
+          event: import('./daemon/session/types').DaemonPromptSettledEvent,
+        ) => listenerRef.current?.(event);
+        testState.promptSettledListeners.add(forward);
+        return () => {
+          testState.promptSettledListeners.delete(forward);
+        };
+      }, []);
+    },
+  };
+});
 
 vi.mock('./components/ChatEditor', async () => {
   const React = await import('react');
@@ -11595,6 +11632,7 @@ beforeEach(() => {
   testState.queuedPromptHoldHistory = [];
   testState.queuedPrompts = [];
   testState.transcriptHasMore = false;
+  testState.promptSettledListeners.clear();
   testState.queuedPromptStreamingState = 'idle';
   testState.queuedPromptSessionHasActivePrompt = false;
   testState.chatEditorRenderCount = 0;
@@ -17620,6 +17658,7 @@ describe('App session callbacks', () => {
       timestamp: '2026-01-01T00:00:00.000Z',
       diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
     });
+    const PROMPT_ID = 'http-prompt-1';
 
     let settleSend: (result: { stopReason: string }) => void;
 
@@ -17635,7 +17674,7 @@ describe('App session callbacks', () => {
           { id: 'u1', kind: 'user', text },
         ];
         options?.onAdmissionStarted?.();
-        options?.onAdmitted?.();
+        options?.onAdmitted?.({ promptId: PROMPT_ID });
         return new Promise((resolve) => {
           settleSend = resolve;
         });
@@ -17654,6 +17693,27 @@ describe('App session callbacks', () => {
       });
       mockSessionActions.rewindSession.mockResolvedValue(undefined);
     });
+
+    // The daemon's terminal event for the turn, published after every block
+    // it produced has been applied.
+    async function settleTurn(
+      outcome: 'cancelled' | 'completed' | 'failed' = 'cancelled',
+      promptId = PROMPT_ID,
+      // `null`: a frame without an originator, as a scripted peer produces.
+      originatorClientId: string | null = mockConnection.clientId,
+    ) {
+      await act(async () => {
+        for (const listener of testState.promptSettledListeners) {
+          listener({
+            sessionId: 'session-1',
+            promptId,
+            outcome,
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        }
+      });
+      await flush();
+    }
 
     async function submitAndCancel(
       beforeCancel?: () => void,
@@ -17678,7 +17738,13 @@ describe('App session callbacks', () => {
       await flush();
     }
 
-    it('hands the prompt back to the composer and rewinds the turn', async () => {
+    function expectPlainStop(composer = '') {
+      expect(testState.prompt).toBe(composer);
+      expect(mockSessionActions.getRewindSnapshots).not.toHaveBeenCalled();
+      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+    }
+
+    it('hands the prompt back to the composer and rewinds the turn once it settles', async () => {
       const images = [{ data: 'aGVsbG8=', media_type: 'image/png' }];
       renderApp({ language: 'en' });
       await flush();
@@ -17688,6 +17754,10 @@ describe('App session callbacks', () => {
           { id: 't1', kind: 'thought', text: 'thinking' },
         ];
       }, images);
+
+      // Nothing moves until the daemon reports the turn as ended.
+      expectPlainStop();
+      await settleTurn();
 
       expect(testState.prompt).toBe('oops typo');
       expect(editorRestoreImages).toHaveBeenCalledWith(images);
@@ -17702,6 +17772,22 @@ describe('App session callbacks', () => {
       });
     });
 
+    it('keeps the answer when it only arrives after the cancel returned', async () => {
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      // The daemon had already produced the answer; its event was still on
+      // the way when the cancel and the transcript check could have run.
+      testState.blocks = [
+        ...testState.blocks.slice(0, -1),
+        { id: 'a1', kind: 'assistant', text: 'late answer' },
+        { id: 'c1', kind: 'prompt_cancelled' },
+      ];
+      await settleTurn();
+
+      expectPlainStop();
+    });
+
     it('takes back a prompt whose block only lands once it is admitted', async () => {
       mockSessionActions.sendPrompt.mockImplementation(
         async (text, options) => {
@@ -17712,7 +17798,7 @@ describe('App session callbacks', () => {
             { id: 'u1', kind: 'user', text },
           ];
           options?.onAdmissionStarted?.();
-          options?.onAdmitted?.();
+          options?.onAdmitted?.({ promptId: PROMPT_ID });
           return new Promise((resolve) => {
             settleSend = resolve;
           });
@@ -17721,6 +17807,7 @@ describe('App session callbacks', () => {
       renderApp({ language: 'en' });
       await flush();
       await submitAndCancel();
+      await settleTurn();
 
       expect(testState.prompt).toBe('oops typo');
       await vi.waitFor(() =>
@@ -17728,30 +17815,54 @@ describe('App session callbacks', () => {
       );
     });
 
-    it('hands back a prompt cancelled before it was admitted', async () => {
-      mockSessionActions.sendPrompt.mockImplementation((text) => {
-        testState.blocks = [
-          ...testState.blocks,
-          { id: 'u1', kind: 'user', text },
-        ];
-        return new Promise((resolve) => {
-          settleSend = resolve;
+    describe('a prompt cancelled before its admission returned', () => {
+      beforeEach(() => {
+        mockSessionActions.sendPrompt.mockImplementation((text) => {
+          testState.blocks = [
+            ...testState.blocks,
+            { id: 'u1', kind: 'user', text },
+          ];
+          return new Promise((resolve) => {
+            settleSend = resolve;
+          });
         });
       });
-      // The daemon never saw the prompt, so its newest turn is the one before.
-      mockSessionActions.getRewindSnapshots.mockResolvedValue({
-        snapshots: [snapshot(0)],
-      });
-      renderApp({ language: 'en' });
-      await flush();
-      await submitAndCancel();
 
-      expect(testState.prompt).toBe('oops typo');
-      await vi.waitFor(() =>
-        expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce(),
-      );
-      await flush();
-      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+      it('is taken back when a turn of this client settles cancelled', async () => {
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        // The daemon took the prompt anyway; its terminal frame names this
+        // client as the originator.
+        await settleTurn('cancelled', 'http-prompt-unseen');
+
+        expect(testState.prompt).toBe('oops typo');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+        );
+      });
+
+      it("is only stopped when another client's turn settles", async () => {
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn('cancelled', 'http-prompt-unseen', 'client-other');
+        await settleTurn('cancelled', 'http-prompt-unseen-2', null);
+
+        expectPlainStop();
+      });
+
+      it('is only stopped when the daemon never took it', async () => {
+        mockSessionActions.getRewindSnapshots.mockResolvedValue({
+          snapshots: [snapshot(0)],
+        });
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+
+        // No terminal event ever comes for it.
+        expectPlainStop();
+      });
     });
 
     it.each([
@@ -17776,10 +17887,63 @@ describe('App session callbacks', () => {
       renderApp({ language: 'en' });
       await flush();
       await submitAndCancel(arrange);
+      await settleTurn();
 
-      expect(testState.prompt).toBe(composer);
-      expect(mockSessionActions.getRewindSnapshots).not.toHaveBeenCalled();
-      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+      expectPlainStop(composer);
+    });
+
+    it.each([
+      ['finished on its own', 'completed'],
+      ['failed on its own', 'failed'],
+    ] as const)('keeps a turn that %s', async (_name, outcome) => {
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn(outcome);
+
+      expectPlainStop();
+    });
+
+    it('ignores the settlement of another prompt', async () => {
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn('cancelled', 'http-prompt-other');
+
+      expectPlainStop();
+      await settleTurn();
+      expect(testState.prompt).toBe('oops typo');
+    });
+
+    it('lets a take-back lapse when the turn takes too long to settle', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        vi.advanceTimersByTime(10_001);
+        await settleTurn();
+
+        expectPlainStop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('only stops the turn while session writes are blocked', async () => {
+      const { rerender } = renderApp({ language: 'en' });
+      await flush();
+      try {
+        await submitAndCancel(() => {
+          mockConnection.loadingTranscript = true;
+          rerender({ language: 'en' });
+        });
+        await settleTurn();
+
+        expectPlainStop();
+      } finally {
+        mockConnection.loadingTranscript = false;
+      }
     });
 
     it('only stops the turn when a follow-up is queued', async () => {
@@ -17789,9 +17953,9 @@ describe('App session callbacks', () => {
         testState.queuedPrompts = [{ id: 1, text: 'follow up' }];
         rerender({ language: 'en' });
       });
+      await settleTurn();
 
-      expect(testState.prompt).toBe('');
-      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+      expectPlainStop();
     });
 
     it('only stops a turn this client did not send', async () => {
@@ -17806,10 +17970,10 @@ describe('App session callbacks', () => {
         testState.latestChatEditorProps?.onCancel?.();
       });
       await flush();
+      await settleTurn();
 
       expect(mockSessionActions.cancel).toHaveBeenCalledOnce();
-      expect(testState.prompt).toBe('');
-      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+      expectPlainStop();
     });
 
     it('only stops the turn when another prompt already followed it', async () => {
@@ -17824,18 +17988,18 @@ describe('App session callbacks', () => {
       renderApp({ language: 'en' });
       await flush();
       await submitAndCancel();
+      await settleTurn();
 
-      expect(testState.prompt).toBe('');
-      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+      expectPlainStop();
     });
 
     it('only stops a slash command turn', async () => {
       renderApp({ language: 'en' });
       await flush();
       await submitAndCancel(undefined, undefined, '/deploy staging');
+      await settleTurn();
 
-      expect(testState.prompt).toBe('');
-      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+      expectPlainStop();
     });
 
     it('only stops the turn when a prompt from elsewhere landed before admission', async () => {
@@ -17845,7 +18009,7 @@ describe('App session callbacks', () => {
           ...testState.blocks,
           { id: 'u1', kind: 'user', text },
         ];
-        admit = () => options?.onAdmitted?.();
+        admit = () => options?.onAdmitted?.({ promptId: PROMPT_ID });
         return new Promise((resolve) => {
           settleSend = resolve;
         });
@@ -17859,18 +18023,9 @@ describe('App session callbacks', () => {
         ];
         admit();
       });
+      await settleTurn();
 
-      expect(testState.prompt).toBe('');
-      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
-    });
-
-    it('only stops a later turn once the prompt has finished its own', async () => {
-      renderApp({ language: 'en' });
-      await flush();
-      await submitAndCancel(() => settleSend({ stopReason: 'end_turn' }));
-
-      expect(testState.prompt).toBe('');
-      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+      expectPlainStop();
     });
 
     it('keeps the turn in history when older history is not loaded', async () => {
@@ -17878,6 +18033,7 @@ describe('App session callbacks', () => {
       renderApp({ language: 'en' });
       await flush();
       await submitAndCancel();
+      await settleTurn();
 
       expect(testState.prompt).toBe('oops typo');
       expect(mockSessionActions.getRewindSnapshots).not.toHaveBeenCalled();
@@ -17891,6 +18047,7 @@ describe('App session callbacks', () => {
       renderApp({ language: 'en' });
       await flush();
       await submitAndCancel();
+      await settleTurn();
 
       expect(testState.prompt).toBe('oops typo');
       await vi.waitFor(() =>
@@ -17906,8 +18063,133 @@ describe('App session callbacks', () => {
       await flush();
       await submitAndCancel();
 
-      expect(testState.prompt).toBe('');
-      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+      expectPlainStop();
+    });
+
+    describe('holding prompts back while the turn is taken back', () => {
+      const corrected = async () => {
+        await act(async () => {
+          testState.latestChatEditorProps?.onSubmit('corrected prompt');
+        });
+        await flush();
+      };
+
+      it('does not send a correction before the snapshots are read', async () => {
+        let readSnapshots: () => void = () => {};
+        mockSessionActions.getRewindSnapshots.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              readSnapshots = () =>
+                resolve({ snapshots: [snapshot(0), snapshot(1)] });
+            }),
+        );
+        const { rerender } = renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        expect(testState.prompt).toBe('oops typo');
+
+        // Refused, the draft stays: the turn it would follow is going away.
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+        expect(testState.queuedPromptWriteBlocked).toBe(true);
+
+        await act(async () => {
+          readSnapshots();
+        });
+        await flush();
+        expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce();
+        // The `session_rewound` event drops the turn.
+        testState.blocks = testState.blocks.slice(0, 2);
+        rerender({ language: 'en' });
+        await flush();
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not send a correction before the rewind reached the transcript', async () => {
+        const { rerender } = renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        await vi.waitFor(() =>
+          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+        );
+        await flush();
+
+        // The rewind call returned, its `session_rewound` has not arrived.
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+        expect(testState.queuedPromptWriteBlocked).toBe(true);
+
+        testState.blocks = testState.blocks.slice(0, 2);
+        rerender({ language: 'en' });
+        await flush();
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+
+      it('releases prompts when the daemon refuses the rewind', async () => {
+        mockSessionActions.rewindSession.mockRejectedValue(
+          new DaemonHttpError(400, {}, 'unavailable for SSH workspaces'),
+        );
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        await vi.waitFor(() =>
+          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+        );
+        await flush();
+
+        expect(testState.prompt).toBe('oops typo');
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+
+      it('keeps holding prompts for a moment when the rewind fails for an unknown reason', async () => {
+        mockSessionActions.rewindSession.mockRejectedValue(
+          new Error('Rewind session timed out'),
+        );
+        const { rerender } = renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        await vi.waitFor(() =>
+          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+        );
+        await flush();
+
+        // The daemon may still have rewound; its event gets a moment to land.
+        expect(testState.queuedPromptWriteBlocked).toBe(true);
+        testState.blocks = testState.blocks.slice(0, 2);
+        rerender({ language: 'en' });
+        await flush();
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+
+      it('releases prompts when no rewind is issued', async () => {
+        mockSessionActions.getRewindSnapshots.mockResolvedValue({
+          snapshots: [snapshot(0)],
+        });
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        await vi.waitFor(() =>
+          expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce(),
+        );
+        await flush();
+
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
     });
   });
 

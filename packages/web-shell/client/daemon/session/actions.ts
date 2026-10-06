@@ -1371,7 +1371,7 @@ export function createDaemonSessionActions({
         );
         // The prompt is admitted to the session here — signal it before we wait
         // out the (possibly long) turn, so an admission-only caller can proceed.
-        options?.onAdmitted?.();
+        options?.onAdmitted?.({ promptId: accepted.promptId });
         return await waitForAcceptedPromptCompletion(
           activePromptsRef.current,
           settledPromptsRef.current,

@@ -93,6 +93,7 @@ import type {
 
 import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
 import { cancelledTurnProducedNothing } from './utils/cancelledTurn';
+import { useDaemonPromptSettled } from './daemon/session/DaemonSessionProvider';
 import { keepWorkspaceSplitSessionIds } from './utils/standalone-session-routing';
 import { setBoundedMapEntry } from './utils/bounded-map';
 import { type SessionGitIntent } from './components/GitModePopover';
@@ -728,7 +729,7 @@ interface SendPromptOptionsWithRetry {
   onAdmissionStarted?: () => void;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
-  onAdmitted?: () => void;
+  onAdmitted?: (admission: { promptId: string }) => void;
 }
 
 interface OptimisticUserMessage {
@@ -761,7 +762,42 @@ interface InFlightPrompt {
   images?: PromptImage[];
   files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
+  /** The daemon's id for the prompt, known once it is admitted. */
+  promptId?: string;
 }
+
+/**
+ * A prompt this tab cancelled and may take back once the daemon reports the
+ * turn as ended. Nothing is decided before that: output the turn produced
+ * before the cancel landed can still be on its way when the cancel returns.
+ * The turn is recognised by the prompt's id, or — when the cancel cut the
+ * admission response short — as the next turn of this client's to settle.
+ */
+interface CancelledPromptTakeBack {
+  prompt: InFlightPrompt;
+  promptId: string | undefined;
+  clientId: string | undefined;
+  sessionId: string | undefined;
+  owner: DaemonSessionOwnerSnapshot;
+  historyComplete: boolean;
+  requestedAt: number;
+}
+
+function settlesCancelledPrompt(
+  event: { promptId: string; originatorClientId?: string },
+  takeBack: CancelledPromptTakeBack,
+): boolean {
+  if (takeBack.promptId !== undefined) {
+    return event.promptId === takeBack.promptId;
+  }
+  return (
+    takeBack.clientId !== undefined &&
+    event.originatorClientId === takeBack.clientId
+  );
+}
+
+/** Longest a cancelled turn may take to settle before its take-back lapses. */
+const CANCELLED_TURN_SETTLE_TIMEOUT_MS = 10_000;
 
 interface TranscriptTurnErrorIdentity {
   block: DaemonTranscriptBlock;
@@ -3639,30 +3675,33 @@ export function App({
     connection.sessionId,
     connection.workspaceCwd,
   );
-  const [pendingEditRewind, setPendingEditRewind] = useState<{
+  // A rewind this tab asked for whose `session_rewound` has not reached the
+  // transcript yet. Prompts wait for it: one sent in between would land after
+  // the turn the daemon is dropping, and be dropped with it.
+  const [pendingRewind, setPendingRewind] = useState<{
     sessionKey: string | undefined;
     turnIndex: number;
     owner: DaemonSessionOwnerSnapshot;
-    recover: () => void;
+    recover?: () => void;
   } | null>(null);
-  const editRewindSyncBlocked = Boolean(
-    pendingEditRewind &&
-      pendingEditRewind.sessionKey === logicalSessionKey &&
-      pendingEditRewind.owner.isCurrent() &&
-      countUserTurns(blocks) > pendingEditRewind.turnIndex,
+  const rewindSyncBlocked = Boolean(
+    pendingRewind &&
+      pendingRewind.sessionKey === logicalSessionKey &&
+      pendingRewind.owner.isCurrent() &&
+      countUserTurns(blocks) > pendingRewind.turnIndex,
   );
   useLayoutEffect(() => {
-    if (!pendingEditRewind || editRewindSyncBlocked) return;
-    setPendingEditRewind(null);
+    if (!pendingRewind || rewindSyncBlocked) return;
+    setPendingRewind(null);
     if (
-      pendingEditRewind.sessionKey === logicalSessionKey &&
-      pendingEditRewind.owner.isCurrent()
+      pendingRewind.sessionKey === logicalSessionKey &&
+      pendingRewind.owner.isCurrent()
     ) {
-      pendingEditRewind.recover();
+      pendingRewind.recover?.();
     }
-  }, [pendingEditRewind, editRewindSyncBlocked, logicalSessionKey]);
+  }, [pendingRewind, rewindSyncBlocked, logicalSessionKey]);
   const sessionWriteBlocked =
-    Boolean(connection.loadingTranscript) || editRewindSyncBlocked;
+    Boolean(connection.loadingTranscript) || rewindSyncBlocked;
   const sessionWriteBlockedRef = useRef(sessionWriteBlocked);
   const sessionWriteBlockGenerationRef = useRef(0);
   if (sessionWriteBlocked && !sessionWriteBlockedRef.current) {
@@ -11205,7 +11244,7 @@ export function App({
             connectionRef.current.sessionId ?? allocatedSessionId,
           );
         },
-        onAdmitted: () => {
+        onAdmitted: (admission) => {
           admitted = true;
           if (sessionIdAfterEnsure && promptWorkspaceCwd) {
             sessionCatalogController.promptAdmitted(
@@ -11214,6 +11253,9 @@ export function App({
             );
           }
           trackInFlightPrompt();
+          if (inFlightPrompt && admission?.promptId) {
+            inFlightPrompt.promptId = admission.promptId;
+          }
           opts?.onAdmitted?.();
         },
       };
@@ -16169,7 +16211,7 @@ export function App({
             !rewindApplied &&
             countUserTurns(store.getSnapshot().blocks) > turnIndex
           ) {
-            setPendingEditRewind({
+            setPendingRewind({
               sessionKey: logicalSessionKey,
               turnIndex,
               owner,
@@ -17789,23 +17831,23 @@ export function App({
     [sessionActions],
   );
 
+  // Runs once the daemon has settled the cancelled turn, so the transcript
+  // holds everything the turn produced.
   const takeBackCancelledPrompt = useCallback(
-    async (
-      cancelled: InFlightPrompt,
-      sessionId: string | undefined,
-      owner: DaemonSessionOwnerSnapshot,
-      historyComplete: boolean,
-    ) => {
+    async ({
+      prompt: cancelled,
+      sessionId,
+      owner,
+      historyComplete,
+    }: CancelledPromptTakeBack) => {
+      const isCurrent = () =>
+        appMountedRef.current &&
+        owner.isCurrent() &&
+        connectionRef.current.sessionId === sessionId;
       // The turn index of the cancelled prompt while it is still the newest
       // turn and nothing but thoughts and notices came after it.
       const bareTurnIndex = () => {
-        if (
-          !appMountedRef.current ||
-          !owner.isCurrent() ||
-          connectionRef.current.sessionId !== sessionId
-        ) {
-          return undefined;
-        }
+        if (!isCurrent()) return undefined;
         const blocks = store.getSnapshot().blocks;
         const prompt = getLatestUserBlock(blocks);
         return prompt &&
@@ -17818,8 +17860,16 @@ export function App({
           ? countUserTurns(blocks) - 1
           : undefined;
       };
+      const turnIndex = bareTurnIndex();
       const editor = editorRef.current;
-      if (bareTurnIndex() === undefined || !editor || editor.hasInput()) return;
+      if (
+        turnIndex === undefined ||
+        sessionWriteBlockedRef.current ||
+        !editor ||
+        editor.hasInput()
+      ) {
+        return;
+      }
       editor.setText(cancelled.text);
       if (cancelled.images?.length) editor.restoreImages(cancelled.images);
       if (cancelled.files?.length) editor.restoreFiles(cancelled.files);
@@ -17829,6 +17879,13 @@ export function App({
       // A partial transcript cannot tell which turn the prompt was, so the
       // prompt goes back to the composer but stays in history.
       if (!historyComplete) return;
+      // Hold prompts from here until the rewind has shown up in the
+      // transcript or is known not to happen.
+      const pending = { sessionKey: logicalSessionKey, turnIndex, owner };
+      setPendingRewind(pending);
+      const release = () =>
+        setPendingRewind((current) => (current === pending ? null : current));
+      let rewound = false;
       try {
         const { snapshots } = await sessionActions.getRewindSnapshots({
           silent: true,
@@ -17837,19 +17894,54 @@ export function App({
         // it reached the model has no snapshot of its own, and the newest one
         // then belongs to the turn before it.
         const newest = snapshots[snapshots.length - 1];
-        if (newest && newest.turnIndex === bareTurnIndex()) {
-          await sessionActions.rewindSession(newest.promptId, {
-            rewindFiles: false,
-            silent: true,
-          });
-        }
-      } catch {
+        if (!newest || newest.turnIndex !== bareTurnIndex()) return;
+        await sessionActions.rewindSession(newest.promptId, {
+          rewindFiles: false,
+          silent: true,
+        });
+        // `pendingRewind` releases itself once the transcript shows the rewind.
+        rewound = true;
+      } catch (error) {
         // Nobody asked for a rewind, so a failed one is not worth a toast:
-        // the prompt is back in the composer and simply stays in history.
+        // the prompt is back in the composer and simply stays in history. A
+        // daemon refusal (an SSH workspace, say) did not rewind; any other
+        // failure may still land, so give its event a moment to arrive.
+        if (!(error instanceof DaemonHttpError)) {
+          await waitForRewindApplied(
+            () => store.getSnapshot().blocks,
+            turnIndex,
+            isCurrent,
+          );
+        }
+      } finally {
+        if (!rewound) release();
       }
     },
-    [sessionActions, store],
+    [logicalSessionKey, sessionActions, store],
   );
+
+  const cancelledPromptTakeBackRef = useRef<CancelledPromptTakeBack | null>(
+    null,
+  );
+  useDaemonPromptSettled((event) => {
+    const takeBack = cancelledPromptTakeBackRef.current;
+    if (
+      !takeBack ||
+      event.sessionId !== takeBack.sessionId ||
+      !settlesCancelledPrompt(event, takeBack)
+    ) {
+      return;
+    }
+    cancelledPromptTakeBackRef.current = null;
+    // A turn that finished or failed on its own keeps its result.
+    if (
+      event.outcome !== 'cancelled' ||
+      Date.now() - takeBack.requestedAt > CANCELLED_TURN_SETTLE_TIMEOUT_MS
+    ) {
+      return;
+    }
+    void takeBackCancelledPrompt(takeBack);
+  });
 
   const transcriptHistoryComplete =
     !transcriptHistory.hasMore && !transcriptHistory.capacityReached;
@@ -17867,30 +17959,27 @@ export function App({
     // Read before cancelling: the abort settles the send, which clears the ref.
     // Queued prompts mean the user has moved on, so the turn is just stopped.
     const cancelled = hasQueuedPrompts ? null : inFlightPromptRef.current;
-    const sessionId = connectionRef.current.sessionId;
-    sessionActions.cancel().then(
-      () => {
-        if (cancelled) {
-          void takeBackCancelledPrompt(
-            cancelled,
-            sessionId,
-            owner,
-            transcriptHistoryComplete,
-          );
+    cancelledPromptTakeBackRef.current = cancelled
+      ? {
+          prompt: cancelled,
+          promptId: cancelled.promptId,
+          clientId: connectionRef.current.clientId,
+          sessionId: connectionRef.current.sessionId,
+          owner,
+          historyComplete: transcriptHistoryComplete,
+          requestedAt: Date.now(),
         }
-      },
-      (error: unknown) => {
-        if (!owner.isCurrent()) return;
-        reportError(error, 'Failed to cancel request');
-      },
-    );
+      : null;
+    sessionActions.cancel().catch((error: unknown) => {
+      if (!owner.isCurrent()) return;
+      reportError(error, 'Failed to cancel request');
+    });
   }, [
     sessionActions,
     reportError,
     pushToast,
     sessionOwnerGuard,
     t,
-    takeBackCancelledPrompt,
     transcriptHistoryComplete,
     hasQueuedPrompts,
   ]);

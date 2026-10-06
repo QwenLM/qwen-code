@@ -11812,6 +11812,85 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('carries the terminal frame originator on the settlement', async () => {
+    // The composer's take-back of a cancelled prompt recognises its own turn
+    // by this stamp when the cancel cut the admission response short, so the
+    // envelope's `originatorClientId` must survive into the settlement.
+    const terminalGate = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'session-settle-originator',
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 10,
+      })),
+      events: async function* stampedTerminal(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          terminalGate.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          id: 11,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-1',
+          originatorClientId: 'client-submitter',
+          data: { promptId: 'prompt-1', stopReason: 'cancelled' },
+        } satisfies DaemonEvent;
+        await new Promise<void>((resolve) =>
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        );
+      },
+    });
+    sdkMocks.sessions.push(session);
+    const settlements: DaemonPromptSettledEvent[] = [];
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      useDaemonPromptSettled((event) => {
+        settlements.push(event);
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+
+    let prompt: Promise<unknown> | undefined;
+    await act(async () => {
+      prompt = requireActions(actions).sendPrompt('hello');
+      await flushPromises();
+    });
+    await act(async () => {
+      terminalGate.resolve();
+      await flushPromises();
+    });
+    const pending = prompt;
+    if (!pending) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(pending).resolves.toEqual({ stopReason: 'cancelled' });
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-originator',
+        promptId: 'prompt-1',
+        originatorClientId: 'client-submitter',
+        outcome: 'cancelled',
+        stopReason: 'cancelled',
+      },
+    ]);
+  });
+
   it('withholds the live settlement while a journal repair targets the same prompt', async () => {
     // The load arms a live-journal repair for `prompt-live` and the same
     // prompt's terminal then arrives on the live stream. Publishing there
