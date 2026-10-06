@@ -319,6 +319,7 @@ function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
       policyRevision: action.policyRevision,
       expiresAt: action.expiresAt,
       options: action.options.map(({ id, label }) => ({ id, label })),
+      ...(action.inputPreview ? { inputPreview: action.inputPreview } : {}),
     },
   ];
 }
