@@ -15,6 +15,13 @@ const read = (file) =>
 const ci = parse(read('.github/workflows/ci.yml'));
 const java = parse(read('.github/workflows/sdk-java.yml'));
 const pkg = JSON.parse(read('package.json'));
+// Bounded to the named profile: an unbounded read runs to EOF and silently
+// matches a later profile's byte-identical value.
+const mavenProfile = (id) =>
+  read('packages/sdk-java/managed-agent-server/pom.xml')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .split(`<id>${id}</id>`)[1]
+    .split('</profile>')[0];
 const focused = 'test:integration:hosted:sandbox:none';
 const windowsRun = [
   `npm run ${focused} -- --reporter=default --reporter=json --outputFile.json=hosted-process-suite.json`,
@@ -155,20 +162,30 @@ describe('Hosted real-process gates', () => {
     );
     expect(run.run).toContain('clean verify checkstyle:check');
     expect(run.run).not.toContain('skip');
-    // 25 min: the measurement basis lives in the hosted-harness-mysql job
-    // comment (issue #13471). A bump to any of the six ceilings fails here
-    // and prompts updating that comment's sum, which nothing cross-checks
-    // against this array.
-    expect(run['timeout-minutes']).toBe(25);
-    const ceilings = job.steps
-      .map((step) => step['timeout-minutes'])
-      .filter((minutes) => minutes !== undefined);
-    expect(ceilings).toEqual([25, 10, 10, 10, 10, 12]);
-    // The comment's "the job cap binds first" rests on two operands; pin the
-    // cap too, and the sum's direction against it.
+    // 25 min on Verify: the measurement basis lives in the
+    // hosted-harness-mysql job comment (issue #13471). Keyed by step name --
+    // a positional list stays green when a ceiling migrates between steps or
+    // a step loses its hang guard entirely. A bump to any of the six fails
+    // here and prompts updating that comment's sum, which nothing
+    // cross-checks.
+    const ceilingsByName = Object.fromEntries(
+      job.steps
+        .filter((step) => step['timeout-minutes'] !== undefined)
+        .map((step) => [step.name, step['timeout-minutes']]),
+    );
+    expect(ceilingsByName).toEqual({
+      'Verify Hosted Java, Spring and MySQL processes': 25,
+      'Run Runtime Broker fault gates': 10,
+      'Run session owner failover E2E': 10,
+      'Run in-flight owner failover E2E': 10,
+      'Run continuation owner failover E2E': 10,
+      'Verify O4 filesystem process and capacity gates': 12,
+    });
+    // Pin the cap too -- and keep every per-step hang guard reachable inside
+    // it: a cap below the Verify ceiling would silently disarm that guard.
     expect(job['timeout-minutes']).toBe(60);
-    expect(ceilings.reduce((a, b) => a + b, 0)).toBeGreaterThan(
-      job['timeout-minutes'],
+    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(
+      Math.max(...Object.values(ceilingsByName)),
     );
     expect(run['continue-on-error']).toBeUndefined();
     const pom = read('packages/sdk-java/managed-agent-server/pom.xml').replace(
@@ -184,7 +201,8 @@ describe('Hosted real-process gates', () => {
     expect(read('packages/sdk-java/runtime-broker/pom.xml')).not.toMatch(
       selection,
     );
-    const [mariadb, hosted] = pom.split('<id>hosted-harness-mysql</id>');
+    const [mariadb] = pom.split('<id>hosted-harness-mysql</id>');
+    const hosted = mavenProfile('hosted-harness-mysql');
     expect(mariadb).toContain('<id>mysql-integration</id>');
     expect(mariadb).toContain('<exclude>**/Hosted*IT.java</exclude>');
     expect(hosted).toContain('<include>**/Hosted*IT.java</include>');
@@ -249,13 +267,7 @@ describe('Hosted real-process gates', () => {
     const run = java.jobs['hosted-harness-mysql'].steps.find(
       (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
     );
-    // Read the timeout from the hosted profile only: an unbounded read would
-    // silently match another profile's value if this one lost its own, and
-    // the assertions below would pass against the wrong profile.
-    const hostedProfile = read('packages/sdk-java/managed-agent-server/pom.xml')
-      .replace(/<!--[\s\S]*?-->/g, '')
-      .split('<id>hosted-harness-mysql</id>')[1]
-      .split('</profile>')[0];
+    const hostedProfile = mavenProfile('hosted-harness-mysql');
     const forkSeconds = Number(
       hostedProfile.match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
     );
@@ -264,10 +276,13 @@ describe('Hosted real-process gates', () => {
     expect(forkSeconds).toBeGreaterThan(0);
     // A step killed before its fork leaves no per-test failure lines, so the
     // main-CI failure analyzer can only file an undiagnosable per-commit
-    // issue (#13503). The ceiling must cover the fork plus the wrapped
-    // compile/surefire/spotbugs/checkstyle work, which measured 213-220 s
-    // from step start to failsafe:integration-test across three CI runs (run
-    // 37346072729: 17:15:29Z -> 17:19:05Z); the +300 s margin covers it.
+    // issue (#13503). The ceiling must cover the fork plus the phases
+    // around it: pre-fork work (clean/compile/surefire up to
+    // failsafe:integration-test) measured 213-220 s across three CI runs
+    // (run 37346072729: 17:15:29Z -> 17:19:05Z); post-fork verify-phase
+    // work (failsafe:verify, checkstyle:check, spotbugs:check -- the plugins
+    // bind `check` to the default verify phase, after the fork) measured
+    // ~33 s. The +300 s margin covers both.
     // This guard covers the hosted profile only; the job's two other timed
     // Maven steps violate the same invariant on pre-existing values --
     // fault-gates (600 s ceiling against a 600 s surefire fork timeout) and

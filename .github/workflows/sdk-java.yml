@@ -506,21 +506,29 @@ jobs:
     runs-on: 'ubuntu-latest'
     # The six step ceilings (25+10+10+10+10+12, pinned by
     # scripts/tests/hosted-process-ci.test.js) sum to 77 min against this
-    # 60-min job cap: each ceiling is a per-step hang guard, not a share of
-    # a budget, so on a uniformly slow pool the job cap binds first. A
-    # job-cap cancellation still runs the always() report uploads; only a
-    # hard runner kill skips them. Green jobs measure 25-34 min end to end
-    # (median ~30, Oct 2026). The Verify step runs the unit tests, SpotBugs,
-    # Checkstyle and the Hosted*IT suite in one Maven invocation; green main
-    # runs measured 8.4-11.95 min for it (Oct 2026), so the old 12-minute
-    # ceiling left as little as 5 s of headroom. Run 37346072729 hit it:
-    # Maven printed BUILD SUCCESS at 12:03 with all 19 Hosted*IT green and
-    # the failsafe reports written, and the runner killed the step 93 ms
-    # later, so the six gate steps after it were skipped. 25 minutes
-    # restores ~2.1x headroom over the slowest green Verify step and keeps
-    # the ceiling above the measured pre-fork phases (~220 s) plus the
-    # hosted profile's fork timeout, so failsafe's own hang diagnostic stays
-    # reachable.
+    # 60-min job cap. Each ceiling is a per-step hang guard, not a share of
+    # a budget -- and not a tight one: under pool contention the runner's
+    # own output/enforcement loop can stall, and the Verify step's 25-min
+    # ceiling has fired at 42-49 min of wall clock (Oct 2026). A job-cap
+    # overrun cancels the job mid-flight and concludes `cancelled`, which
+    # main-ci-failure-issue.yml does not file on -- a cap hit is a silent
+    # failure, not a degraded one. The always() uploads do not rescue it:
+    # the O4 gate upload never ran in any of the five observed cap
+    # cancellations, and the Hosted upload that did run found no failsafe
+    # reports to preserve. Green jobs measure 24-35 min end to end (median
+    # ~32, Oct 2026). The Verify step runs the unit tests, SpotBugs,
+    # Checkstyle and the Hosted*IT suite in one Maven invocation; green
+    # runs measured 9.4 min - 12 min 33 s for it once the ceiling stopped
+    # censoring the tail (Oct 2026, runs 37479786927-37494454308);
+    # pre-raise samples topped out at 11 m 55 s only because the 12-min
+    # ceiling killed anything longer, leaving as little as 5 s. Run
+    # 37346072729 hit it: Maven printed BUILD SUCCESS at 12:03 with all 19
+    # Hosted*IT green and the failsafe reports written, and the runner
+    # killed the step 93 ms later, so the six gate steps after it were
+    # skipped. 25 minutes restores ~2.0x headroom over the slowest green
+    # Verify step and keeps the ceiling above the measured pre-fork phases
+    # (~220 s) plus the hosted profile's fork timeout, so failsafe's own
+    # hang diagnostic stays reachable.
     timeout-minutes: 60
     services:
       mysql:
