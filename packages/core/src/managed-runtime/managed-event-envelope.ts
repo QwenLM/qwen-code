@@ -22,12 +22,12 @@ import {
 // materialization and cross-node wake. The design invariants pin it: only
 // committed facts fly, the transport is never Session truth and an offset is
 // never a recovery credential. So the envelope identifies the committed
-// event row by its public ordering key (sessionId + sequence), carries the
-// commit's own clock stamp and kind, and binds the body by digest only —
-// the payload body stays in the SQL record. Declared, not enabled: a
-// derivation from the committed row proves the commit path can supply every
-// field, but no runtime path consumes the envelope yet and the gate test
-// proves that.
+// event row by its tenant-scoped ordering key (tenantId + sessionId +
+// sequence), carries the event's own recorder-side timestamp and kind, and
+// binds the body by digest only — the payload body stays in the SQL record.
+// Declared, not enabled: a derivation from the committed row proves the
+// commit path can supply every field, but no runtime path consumes the
+// envelope yet and the gate test proves that.
 
 /** The envelope format version carried by `v`. */
 export const MANAGED_EVENT_ENVELOPE_FORMAT_VERSION = 1;
