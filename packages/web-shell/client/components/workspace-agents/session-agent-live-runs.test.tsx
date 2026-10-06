@@ -407,7 +407,7 @@ describe('squad engagements', () => {
     runId: 'a-1',
     squadId: 'sq_1',
     squadName: 'crew',
-    author: { agentId: 'ag_a', name: 'alice' },
+    author: { agentId: 'ag_a', name: 'alice', color: '#0a0' },
   });
   const bob = run({
     runId: 'b-1',
@@ -431,7 +431,7 @@ describe('squad engagements', () => {
         leader: 'lead',
         // alice is working again on a second ask.
         members: [
-          { name: 'alice', state: 'working' },
+          { name: 'alice', state: 'working', color: '#0a0' },
           { name: 'bob', state: 'working' },
         ],
       },
@@ -447,7 +447,7 @@ describe('squad engagements', () => {
         squadId: 'sq_1',
         squadName: 'crew',
         leader: 'lead',
-        members: [{ name: 'alice', state: 'replied' }],
+        members: [{ name: 'alice', state: 'replied', color: '#0a0' }],
       },
     ]);
     // A finished leader, or a member that did not complete, shows nothing.
@@ -459,7 +459,7 @@ describe('squad engagements', () => {
     ).toEqual([]);
   });
 
-  it('renders one bar per engagement above the runs, a chip per participant', () => {
+  it('renders one bar per engagement above the runs: the squad tag, then each participant', () => {
     const node = document.createElement('div');
     const root = createRoot(node);
     act(() =>
@@ -480,14 +480,30 @@ describe('squad engagements', () => {
     const bar = node.querySelector('[data-squad-id="sq_1"]');
     expect(bar?.getAttribute('role')).toBe('status');
     expect(bar?.getAttribute('aria-label')).toBe('Squad crew');
-    const chips = [...(bar?.querySelectorAll('[data-state]') ?? [])].map(
-      (chip) => [chip.getAttribute('data-state'), chip.textContent],
+    // The squad's tag leads the bar; no middle dots.
+    expect(bar?.firstElementChild?.getAttribute('data-squad-tag')).toBe('crew');
+    expect(bar?.textContent).not.toContain('·');
+    // Each participant: avatar initial, name, then its state: "deciding" for
+    // the leader, a labelled spinner or check for a member.
+    const entries = [...(bar?.querySelectorAll('[data-state]') ?? [])].map(
+      (entry) => [
+        entry.getAttribute('data-state'),
+        entry.textContent,
+        entry.querySelector('svg')?.getAttribute('aria-label') ?? null,
+      ],
     );
-    expect(chips).toEqual([
-      ['deciding', 'leaddeciding'],
-      ['working', 'aliceworking'],
-      ['replied', 'bobreplied'],
+    expect(entries).toEqual([
+      ['deciding', 'Lleaddeciding', null],
+      ['working', 'Aalice', 'working'],
+      ['replied', 'Bbob', 'replied'],
     ]);
+    // A member's avatar takes its agent's color, as on its replies.
+    expect(
+      bar?.querySelector('[data-state="working"] [data-tinted="true"]'),
+    ).not.toBeNull();
+    expect(
+      bar?.querySelector('[data-state="replied"] [data-tinted]'),
+    ).toBeNull();
     act(() =>
       root.render(
         <I18nProvider language="zh-CN">
@@ -500,7 +516,7 @@ describe('squad engagements', () => {
       ),
     );
     const zhBar = node.querySelector('[data-squad-id="sq_1"]');
-    expect(zhBar?.textContent).toBe('crewlead决定中');
+    expect(zhBar?.textContent).toBe('crewLlead决定中');
     expect(zhBar?.querySelectorAll('[data-state]')).toHaveLength(1);
     act(() => root.unmount());
   });

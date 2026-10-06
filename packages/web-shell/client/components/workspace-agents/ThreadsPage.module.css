@@ -177,49 +177,129 @@
   font-size: 12px;
 }
 
-/* Squads: the leader and members as wrapping chips. */
-.squadChips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 2px 0 0;
-  padding: 0;
-  list-style: none;
-}
+/* Squads */
 
-.squadChip {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 8px 2px 2px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg, 8px);
+.fieldHint {
+  color: var(--muted-foreground);
   font-size: 12px;
 }
 
-.squadChipName {
+/* The squad's tile, in the place and size of an agent card's avatar. */
+.squadTile {
+  display: inline-flex;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
   color: var(--foreground);
-  overflow-wrap: anywhere;
 }
 
-.squadChipRole {
+.squadTile svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* The roster as a chain of command: the leader, then the members hanging off
+   it on a rail. One grid, so every role starts at the same x; each row is a
+   subgrid of it. */
+.squadRoster {
+  --squad-rail-x: 9px; /* under the centre of the 20px leader avatar */
+  --squad-row-gap: 4px;
+  display: grid;
+  grid-template-columns: fit-content(16rem) minmax(0, 1fr);
+  column-gap: 16px;
+  row-gap: var(--squad-row-gap);
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+.squadRosterRow {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  min-height: 24px;
+  align-items: center;
+}
+
+.squadRosterWho {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-self: stretch;
+  align-items: center;
+  gap: 8px;
+}
+
+.squadRosterRow[data-squad-role='member'] .squadRosterWho {
+  padding-left: 22px;
+}
+
+/* The elbow: from the row above down to this row's middle, then across. */
+.squadRosterRow[data-squad-role='member'] .squadRosterWho::before {
+  position: absolute;
+  top: calc(-1 * var(--squad-row-gap));
+  left: var(--squad-rail-x);
+  width: 8px;
+  height: calc(50% + var(--squad-row-gap));
+  border-bottom: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+  content: '';
+}
+
+/* The rail carries on past a member that is not the last. */
+.squadRosterRow[data-squad-role='member']:not(:last-child)
+  .squadRosterWho::after {
+  position: absolute;
+  top: 50%;
+  bottom: 0;
+  left: var(--squad-rail-x);
+  border-left: 1px solid var(--border);
+  content: '';
+}
+
+.squadRosterName {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.squadRosterRole {
+  min-width: 0;
   color: var(--muted-foreground);
   overflow-wrap: anywhere;
 }
 
-.squadLeaderMark {
-  padding: 0 4px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--foreground) 8%, transparent);
-  color: var(--muted-foreground);
-  font-size: 10px;
+/* Members in the form: same left edge as the other labels, no indent. */
+.squadMemberPicker {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
-/* Checkbox · name · role, the role field always present so rows hold still. */
+.squadMemberLegend {
+  margin-bottom: 4px;
+  padding: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* Checkbox, avatar, name, role (once checked). A fixed height keeps the
+   rows still when a role field appears. */
 .squadMemberRow {
   display: grid;
-  grid-template-columns: auto minmax(0, 10rem) minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 10rem) minmax(0, 1fr);
+  min-height: 36px;
   align-items: center;
   gap: 8px;
 }
@@ -230,8 +310,4 @@
   font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.squadMemberRow .field:disabled {
-  opacity: 0.5;
 }

@@ -291,8 +291,11 @@ for (const theme of THEMES) {
     await dialog
       .getByLabel('Join link')
       .fill('https://coordinator.example:4170/join/ws_team');
+    // The terminal equivalent asks the running `qwen serve` to join.
     await expect(
-      dialog.getByText(/qwen serve --no-web --port 0 --join/),
+      dialog.getByText(
+        /qwen agents join 'https:\/\/coordinator\.example:4170\/join\/ws_team'/,
+      ),
     ).toBeVisible();
   });
 
@@ -418,11 +421,16 @@ async function setupSquads(
   baseURL: string,
   /** Live run frames of the scenario's session, given its id. */
   framesFor: (sessionId: string) => SessionAgentRunFrame[] = () => [],
+  /**
+   * The session's history. It is what `load` replays (`compactedReplay`):
+   * the chat renders from that. `transcriptPage` only answers the older-page
+   * and trajectory reads, so events put there never reach the chat.
+   */
   events: DaemonEvent[] = [],
 ) {
   const scenario = createWebShellDaemonScenario({
     capabilities: { features: ['session_events', 'agent_collaboration_v1'] },
-    ...(events.length > 0 ? { transcriptPage: { events } } : {}),
+    events,
   });
   const daemon = await installScenario(page, scenario, baseURL);
   // A frame of another session is dropped by the client, so the frames are
@@ -448,6 +456,7 @@ async function openSquads(page: Page, theme: VisualTheme): Promise<void> {
 
 /** A transcript update in the shape `createAgentRecordTranscriptUpdate` emits. */
 function agentRecord(
+  id: number,
   recordId: string,
   role: 'user' | 'assistant',
   text: string,
@@ -459,6 +468,7 @@ function agentRecord(
       ? `mention:${recordId}`
       : `agent:${agentMessage.runId}`;
   return {
+    id,
     v: 1,
     type: 'session_update',
     data: {
@@ -491,6 +501,7 @@ const reviewer = {
 function squadChatEvents(): DaemonEvent[] {
   return [
     agentRecord(
+      1,
       'rec-mention-1',
       'user',
       '@review-squad anything waiting for review?',
@@ -502,6 +513,7 @@ function squadChatEvents(): DaemonEvent[] {
       30,
     ),
     agentRecord(
+      2,
       'rec-lead-1',
       'assistant',
       // What replay shows for a leader's empty reply.
@@ -517,6 +529,7 @@ function squadChatEvents(): DaemonEvent[] {
       29,
     ),
     agentRecord(
+      3,
       'rec-mention-2',
       'user',
       '@review-squad check the login fix and note it in the changelog',
@@ -528,6 +541,7 @@ function squadChatEvents(): DaemonEvent[] {
       12,
     ),
     agentRecord(
+      4,
       'rec-lead-2',
       'assistant',
       '@reviewer please review the token check in `auth.ts`.\n\n@docs once it passes, add a changelog line.',
@@ -541,6 +555,7 @@ function squadChatEvents(): DaemonEvent[] {
       11,
     ),
     agentRecord(
+      5,
       'rec-reviewer-1',
       'assistant',
       'Looks good: the expired-token branch now returns 401 and has a test.',
@@ -598,13 +613,29 @@ for (const theme of THEMES) {
     const review = page
       .getByTestId('squad-card')
       .filter({ hasText: 'review-squad' });
+    // The roster as a chain of command: the leader "leads", each member hangs
+    // off it with its role in the same column.
+    await expect(review.locator('[data-squad-role="leader"]')).toHaveCount(1);
     await expect(review.locator('[data-squad-role="leader"]')).toContainText(
-      'lead',
+      /lead.*leads/,
     );
     await expect(review.locator('[data-squad-role="member"]')).toHaveText([
       /reviewer.*checks correctness/,
       /docs.*updates the changelog/,
     ]);
+    // Edit and Retire live in the card's ⋯ menu, as on agent cards.
+    await expect(
+      review.getByRole('button', { name: 'More actions for review-squad' }),
+    ).toBeVisible();
+    await expect(review.getByRole('button', { name: 'Edit' })).toHaveCount(0);
+    // A member without a role shows only its name: no role column.
+    const crew = page
+      .getByTestId('squad-card')
+      .filter({ hasText: 'release-crew' });
+    await expect(crew.locator('[data-squad-role="member"]')).toHaveCount(2);
+    await expect(
+      crew.locator('[data-squad-role="member"] > :nth-child(2)'),
+    ).toHaveCount(0);
     // An empty description leaves no placeholder line.
     await expect(
       page.getByTestId('squad-card').filter({ hasText: 'release-crew' }),
@@ -619,14 +650,19 @@ for (const theme of THEMES) {
     await page.getByRole('button', { name: 'New squad', exact: true }).click();
     const form = page.getByTestId('squad-form');
     await expect(form).toBeVisible();
-    await form.getByPlaceholder('Called as @name in chats').fill('triage');
+    await expect(form.getByText('Called as @name in chats')).toBeVisible();
+    await form.getByLabel('Name', { exact: true }).fill('triage');
+    // The hint follows the name as it is typed.
+    await expect(form.getByText('Called as @triage in chats')).toBeVisible();
     await form.locator('select').selectOption('ag_lead');
-    // The leader is not offered as its own member; roles wait for a check.
+    // The leader is not offered as its own member; a role field appears only
+    // once its member is checked.
     await expect(form.getByRole('checkbox')).toHaveCount(3);
     await expect(form.getByLabel('lead', { exact: true })).toHaveCount(0);
+    await expect(form.getByLabel('docs Role (optional)')).toHaveCount(0);
     await form.getByLabel('reviewer', { exact: true }).check();
-    await expect(form.getByLabel('reviewer Role (optional)')).toBeEnabled();
-    await expect(form.getByLabel('docs Role (optional)')).toBeDisabled();
+    await expect(form.getByLabel('reviewer Role (optional)')).toBeVisible();
+    await expect(form.getByLabel('docs Role (optional)')).toHaveCount(0);
     await clearFocus(page);
     await captureScreenshot(page, `collab-new-squad-${theme}`);
   });
@@ -639,29 +675,40 @@ for (const theme of THEMES) {
       squadChatEvents(),
     );
     await gotoSession(page, scenario, daemon, theme);
+    // Capture what rendered before the detailed checks, so a failing run
+    // still uploads the screen it failed on.
+    await expect(page.getByText('anything waiting for review?')).toBeVisible();
+    await clearFocus(page);
+    await captureScreenshot(page, `collab-squad-chat-${theme}`);
+
+    // The earlier ask: the squad's tag, then a plain sentence.
     const noAction = page.locator('[data-squad-outcome="no_action"]');
-    await expect(noAction).toHaveText('lead · review-squad · no action needed');
+    await expect(noAction).toHaveCount(1);
+    await expect(
+      noAction.locator('[data-squad-tag="review-squad"]'),
+    ).toBeVisible();
+    await expect(noAction).toContainText('lead had nothing to do');
+    await expect(noAction).not.toContainText('·');
     // A member's reply carries the squad it answered for.
     await expect(
       page.getByText('Looks good: the expired-token branch'),
     ).toBeVisible();
-    // The leader's dispatch and the member's reply; the no_action line
-    // words it in one string.
-    await expect(page.getByText('· review-squad', { exact: true })).toHaveCount(
-      2,
+    // One tag vocabulary: the no-action line, the leader's dispatch, the
+    // member's reply and the live engagement bar.
+    await expect(page.locator('[data-squad-tag="review-squad"]')).toHaveCount(
+      4,
     );
     const bar = page.getByTestId('squad-engagements');
     await expect(bar.getByRole('status')).toHaveAttribute(
       'aria-label',
       'Squad review-squad',
     );
-    await expect(bar.locator('[data-state="working"]')).toHaveText(
-      'docsworking',
-    );
+    await expect(bar.locator('[data-squad-tag="review-squad"]')).toBeVisible();
+    const docs = bar.locator('[data-state="working"]');
+    await expect(docs).toContainText('docs');
+    await expect(docs.getByRole('img', { name: 'working' })).toBeVisible();
     await expect(
       page.locator('[data-run-id="run-docs-1"]').getByText('12,480 tokens'),
     ).toBeVisible();
-    await clearFocus(page);
-    await captureScreenshot(page, `collab-squad-chat-${theme}`);
   });
 }

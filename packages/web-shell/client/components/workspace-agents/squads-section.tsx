@@ -5,7 +5,7 @@
  */
 
 import { useId, useState, type FormEvent } from 'react';
-import { UsersIcon } from 'lucide-react';
+import { MoreHorizontalIcon, UsersIcon } from 'lucide-react';
 import type { SessionSquadView } from '@qwen-code/sdk/daemon';
 
 import { useI18n } from '../../i18n';
@@ -13,6 +13,13 @@ import { AuthorAvatar } from '../messages/AuthorAvatar';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardDescription, CardTitle } from '../ui/card';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
 import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from '../ui/empty';
 import type { WorkspaceAgentSummaryView } from './ThreadsPage';
 import type { SquadInput } from './threads-api';
@@ -35,7 +42,7 @@ export interface SquadsSectionProps {
 /** Agents that can lead or join: not retired (a paused one may still join). */
 function selectableAgents(
   agents: readonly WorkspaceAgentSummaryView[],
-): WorkspaceAgentSummaryView[] {
+): ReadonlyArray<WorkspaceAgentSummaryView> {
   return agents.filter((agent) => !agent.retiredAt);
 }
 
@@ -55,6 +62,8 @@ function SquadForm({
   const { t } = useI18n();
   const candidates = selectableAgents(agents);
   const idPrefix = useId();
+  // Controlled, for the live "Called as @name" hint under it.
+  const [name, setName] = useState(squad?.name ?? '');
   // A leader that can no longer lead must be replaced before saving.
   const [leaderAgentId, setLeaderAgentId] = useState(
     squad && !squad.leaderIssue ? squad.leaderAgentId : '',
@@ -76,12 +85,12 @@ function SquadForm({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const text = (name: string): string | null => {
-      const value = String(data.get(name) ?? '').trim();
+    const text = (field: string): string | null => {
+      const value = String(data.get(field) ?? '').trim();
       return value === '' ? null : value;
     };
     onSubmit({
-      name: String(data.get('name') ?? '').trim(),
+      name: name.trim(),
       description: text('description'),
       instructions: text('instructions'),
       leaderAgentId,
@@ -95,40 +104,34 @@ function SquadForm({
         })),
     });
   };
+  const hintId = `${idPrefix}-name-hint`;
+  const calledAs = name.trim();
+  // Who before how: name, leader, members, then the leader's instructions
+  // and the description.
   return (
     <form
       className={styles.agentConfig}
       onSubmit={submit}
       data-testid="squad-form"
     >
-      <label className={styles.configLabel}>
-        {t('collab.squad.name')}
+      <div className={styles.configLabel}>
+        <label htmlFor={`${idPrefix}-name`}>{t('collab.squad.name')}</label>
         <input
+          id={`${idPrefix}-name`}
           className={styles.field}
           name="name"
           required
           maxLength={48}
-          placeholder={t('collab.squad.namePlaceholder')}
-          defaultValue={squad?.name ?? ''}
+          aria-describedby={hintId}
+          value={name}
+          onChange={(event) => setName(event.target.value)}
         />
-      </label>
-      <label className={styles.configLabel}>
-        {t('collab.squad.description')}
-        <input
-          className={styles.field}
-          name="description"
-          defaultValue={squad?.description ?? ''}
-        />
-      </label>
-      <label className={styles.configLabel}>
-        {t('collab.squad.instructions')}
-        <textarea
-          className={styles.field}
-          name="instructions"
-          rows={3}
-          defaultValue={squad?.instructions ?? ''}
-        />
-      </label>
+        <span id={hintId} className={styles.fieldHint}>
+          {calledAs
+            ? t('collab.squad.calledAs', { name: calledAs })
+            : t('collab.squad.nameHint')}
+        </span>
+      </div>
       <label className={styles.configLabel}>
         {t('collab.squad.leader')}
         <select
@@ -157,12 +160,14 @@ function SquadForm({
             ))}
         </select>
       </label>
-      <fieldset className={styles.configLabel}>
-        <legend>{t('collab.squad.members')}</legend>
+      <fieldset className={styles.squadMemberPicker}>
+        <legend className={styles.squadMemberLegend}>
+          {t('collab.squad.members')}
+        </legend>
         {memberCandidates.map((agent) => {
           const checked = members.has(agent.id);
-          // Checkbox · name · role, the role always there (disabled until
-          // checked) so rows keep their place.
+          // Checkbox, avatar, name, and a role field once checked; the row
+          // keeps its height either way, so checking one moves nothing.
           return (
             <div key={agent.id} className={styles.squadMemberRow}>
               <input
@@ -176,29 +181,48 @@ function SquadForm({
                   setMembers(next);
                 }}
               />
+              <AuthorAvatar name={agent.name} color={agent.color} />
               <label
                 htmlFor={`${idPrefix}-member-${agent.id}`}
                 className={styles.squadMemberName}
               >
                 {agent.name}
               </label>
-              <input
-                className={styles.field}
-                aria-label={`${agent.name} ${t('collab.squad.role')}`}
-                placeholder={t('collab.squad.role')}
-                maxLength={200}
-                disabled={!checked}
-                value={members.get(agent.id) ?? ''}
-                onChange={(event) => {
-                  const next = new Map(members);
-                  next.set(agent.id, event.target.value);
-                  setMembers(next);
-                }}
-              />
+              {checked ? (
+                <input
+                  className={styles.field}
+                  aria-label={`${agent.name} ${t('collab.squad.role')}`}
+                  placeholder={t('collab.squad.role')}
+                  maxLength={200}
+                  value={members.get(agent.id) ?? ''}
+                  onChange={(event) => {
+                    const next = new Map(members);
+                    next.set(agent.id, event.target.value);
+                    setMembers(next);
+                  }}
+                />
+              ) : null}
             </div>
           );
         })}
       </fieldset>
+      <label className={styles.configLabel}>
+        {t('collab.squad.instructions')}
+        <textarea
+          className={styles.field}
+          name="instructions"
+          rows={3}
+          defaultValue={squad?.instructions ?? ''}
+        />
+      </label>
+      <label className={styles.configLabel}>
+        {t('collab.squad.description')}
+        <input
+          className={styles.field}
+          name="description"
+          defaultValue={squad?.description ?? ''}
+        />
+      </label>
       <div className={styles.formActions}>
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
           {t('collab.form.cancel')}
@@ -230,8 +254,12 @@ export function SquadsEmpty() {
   );
 }
 
-/** One agent of a squad: its avatar, name and, when set, its role. */
-function SquadChip({
+/**
+ * One row of a squad's roster: avatar, name and, in a second column every row
+ * shares, its role ("leads" for the leader). Members hang off the leader on a
+ * rail drawn in CSS.
+ */
+function SquadRosterRow({
   name,
   color,
   role,
@@ -243,19 +271,18 @@ function SquadChip({
   leader?: boolean;
 }) {
   const { t } = useI18n();
+  const shownRole = leader ? t('collab.squad.leads') : role;
   return (
     <li
-      className={styles.squadChip}
+      className={styles.squadRosterRow}
       data-squad-role={leader ? 'leader' : 'member'}
     >
-      <AuthorAvatar name={name} color={color} />
-      <span className={styles.squadChipName}>{name}</span>
-      {leader ? (
-        <span className={styles.squadLeaderMark}>
-          {t('collab.squad.leader')}
-        </span>
-      ) : role ? (
-        <span className={styles.squadChipRole}>{role}</span>
+      <span className={styles.squadRosterWho}>
+        <AuthorAvatar name={name} color={color} />
+        <span className={styles.squadRosterName}>{name}</span>
+      </span>
+      {shownRole ? (
+        <span className={styles.squadRosterRole}>{shownRole}</span>
       ) : null}
     </li>
   );
@@ -310,7 +337,9 @@ export function SquadsSection({
           data-testid="squad-card"
         >
           <div className={styles.agentRow}>
-            <UsersIcon aria-hidden="true" className="mt-1 size-5 shrink-0" />
+            <span className={styles.squadTile} aria-hidden="true">
+              <UsersIcon />
+            </span>
             <div className={styles.agentMain}>
               <div className={styles.agentTitleLine}>
                 <CardTitle className="min-w-0 truncate">{squad.name}</CardTitle>
@@ -331,16 +360,16 @@ export function SquadsSection({
                   {squad.description}
                 </CardDescription>
               ) : null}
-              <ul className={styles.squadChips}>
+              <ul className={styles.squadRoster}>
                 {squad.leaderName ? (
-                  <SquadChip
+                  <SquadRosterRow
                     name={squad.leaderName}
                     color={colorOf(squad.leaderAgentId)}
                     leader
                   />
                 ) : null}
                 {squad.members.map((member) => (
-                  <SquadChip
+                  <SquadRosterRow
                     key={member.agentId}
                     name={member.name}
                     color={colorOf(member.agentId)}
@@ -360,30 +389,43 @@ export function SquadsSection({
                   {t('collab.agent.mentionIt')}
                 </Button>
               ) : null}
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={pending}
-                onClick={() => setEditing(squad.id)}
-              >
-                {t('collab.squad.edit')}
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={pending}
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      t('collab.squad.retireConfirm', { name: squad.name }),
-                    )
-                  ) {
-                    onRetire(squad.id);
-                  }
-                }}
-              >
-                {t('collab.squad.retire')}
-              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label={t('collab.agent.more', { name: squad.name })}
+                  >
+                    <MoreHorizontalIcon aria-hidden="true" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="min-w-40">
+                  <DropdownMenuItem
+                    disabled={pending}
+                    onSelect={() => setEditing(squad.id)}
+                  >
+                    {t('collab.squad.edit')}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    variant="destructive"
+                    disabled={pending}
+                    onSelect={() => {
+                      if (
+                        window.confirm(
+                          t('collab.squad.retireConfirm', {
+                            name: squad.name,
+                          }),
+                        )
+                      ) {
+                        onRetire(squad.id);
+                      }
+                    }}
+                  >
+                    {t('collab.squad.retire')}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </div>
           {editing === squad.id ? (

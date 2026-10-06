@@ -66,7 +66,8 @@
   font-size: 12px;
 }
 
-/* One bar per squad engagement under way: the squad and its participants. */
+/* One bar per squad engagement under way: the squad's tag, then each
+   participant as avatar, name and state. */
 .squadBars {
   display: flex;
   flex-direction: column;
@@ -77,70 +78,53 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
+  gap: 6px 14px;
+  padding: 6px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg, 8px);
   color: var(--muted-foreground);
   font-size: 12px;
 }
 
-.squadIcon {
-  width: 14px;
-  height: 14px;
-}
-
-.squadName {
-  color: var(--foreground);
-  font-weight: 600;
-}
-
 /* One participant: the leader deciding, or a member working / replied. */
-.squadChip {
+.squadEntry {
   display: inline-flex;
+  min-width: 0;
   align-items: center;
-  gap: 4px;
-  padding: 1px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--foreground);
+  gap: 6px;
   white-space: nowrap;
 }
 
-.squadChipState {
+.squadEntryName {
+  color: var(--foreground);
+}
+
+.squadEntryState {
   color: var(--muted-foreground);
 }
 
-.squadChipIcon {
+.squadEntryIcon {
   width: 12px;
   height: 12px;
   flex-shrink: 0;
 }
 
-.squadChipSpin {
+.squadEntrySpin {
   color: var(--muted-foreground);
-  animation: squad-chip-spin 1s linear infinite;
+  animation: squad-entry-spin 1s linear infinite;
 }
 
-.squadChipDone {
+.squadEntryDone {
   color: var(--success-color);
 }
 
-.squadDot {
-  width: 6px;
-  height: 6px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: var(--muted-foreground);
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .squadChipSpin {
+  .squadEntrySpin {
     animation: none;
   }
 }
 
-@keyframes squad-chip-spin {
+@keyframes squad-entry-spin {
   to {
     transform: rotate(360deg);
   }

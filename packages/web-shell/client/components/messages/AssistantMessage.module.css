@@ -25,16 +25,9 @@
   white-space: nowrap;
 }
 
-/* "leader · squad": the squad a leader replied for. */
-.authorSquad {
-  flex-shrink: 0;
-  color: var(--muted-foreground);
-  font-size: 13px;
-}
-
-/* A squad leader's "no action needed": a muted line, not a message. Spaced
-   like a message so it does not read as the next one's header; the icon sits
-   in the avatar's column so the text lines up with the author names. */
+/* A squad leader's "had nothing to do": a muted line, not a message. Spaced
+   like a message so it does not read as the next one's header, and starting
+   at the message column's edge, where the avatars sit. */
 .squadNoAction {
   display: flex;
   align-items: center;
@@ -43,18 +36,6 @@
   margin: 4px 0 12px;
   color: var(--muted-foreground);
   font-size: 12px;
-}
-
-.squadNoActionIcon {
-  display: inline-flex;
-  width: 20px;
-  flex: 0 0 auto;
-  justify-content: center;
-}
-
-.squadNoActionIcon svg {
-  width: 14px;
-  height: 14px;
 }
 
 .squadNoActionText {

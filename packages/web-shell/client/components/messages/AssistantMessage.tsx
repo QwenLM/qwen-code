@@ -7,12 +7,7 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from 'react';
-import {
-  LightbulbIcon,
-  ThumbsDownIcon,
-  ThumbsUpIcon,
-  UsersIcon,
-} from 'lucide-react';
+import { LightbulbIcon, ThumbsDownIcon, ThumbsUpIcon } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { TurnSources } from '../sources/TurnSources';
 import {
@@ -38,6 +33,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import type { DaemonMessageAuthor } from '../../adapters/messageTypes';
 import { AuthorAvatar } from './AuthorAvatar';
+import { SquadTag } from './squad-tag';
 import { AgentMessageDetails, isBlankAgentText } from './agent-message-details';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -175,27 +171,22 @@ export const AssistantMessage = memo(function AssistantMessage({
         (agentMessage.status ?? 'completed') === 'completed'))
   ) {
     // A squad leader that decided nothing was needed: one muted line, not a
-    // message. The label is in the main dictionary so exported transcripts
-    // can show it (the collaboration dictionary is stubbed there).
+    // message: the squad's tag, then a plain sentence. The sentence is in the
+    // main dictionary so exported transcripts can show it (the collaboration
+    // dictionary is stubbed there).
     const noActionKey = 'agentMessage.noAction';
-    const noActionLabel = t(noActionKey);
+    const noActionLabel = t(noActionKey, {
+      name: author?.name ?? agentMessage.author?.name ?? '',
+    }).trim();
     return (
       <div
         className={styles.squadNoAction}
         data-squad-outcome="no_action"
         role="note"
       >
-        <span className={styles.squadNoActionIcon} aria-hidden="true">
-          <UsersIcon />
-        </span>
+        {squadName && <SquadTag name={squadName} />}
         <span className={styles.squadNoActionText}>
-          {[
-            author?.name ?? agentMessage.author?.name,
-            squadName,
-            noActionLabel === noActionKey ? '—' : noActionLabel,
-          ]
-            .filter(Boolean)
-            .join(' · ')}
+          {noActionLabel === noActionKey ? '—' : noActionLabel}
         </span>
       </div>
     );
@@ -206,9 +197,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         <div className={styles.author}>
           <AuthorAvatar name={author.name} color={author.color} />
           <span className={styles.authorName}>{author.name}</span>
-          {squadLabel && (
-            <span className={styles.authorSquad}>· {squadLabel}</span>
-          )}
+          {squadLabel && <SquadTag name={squadLabel} />}
         </div>
       )}
       {content && !blankAgentReply && (

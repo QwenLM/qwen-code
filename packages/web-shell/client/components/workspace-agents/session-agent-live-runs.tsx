@@ -10,7 +10,6 @@ import {
   LoaderCircleIcon,
   RefreshCwIcon,
   SquareIcon,
-  UsersIcon,
 } from 'lucide-react';
 import type {
   SessionAgentPermissionPrompt,
@@ -18,6 +17,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { Markdown } from '../messages/Markdown';
 import { AuthorAvatar } from '../messages/AuthorAvatar';
+import { SquadTag } from '../messages/squad-tag';
 import { UserMessage } from '../messages/UserMessage';
 import { parseTitle, ToolApproval } from '../messages/ToolApproval';
 import {
@@ -403,6 +403,8 @@ function LiveRun({
 /** A delegated member in a squad engagement. */
 export interface SquadMemberView {
   name: string;
+  /** The agent's color, tinting its avatar as on its replies. */
+  color?: string;
   /** `replied`: its run completed and its reply is on the way to the leader. */
   state: 'working' | 'replied';
 }
@@ -413,6 +415,7 @@ export interface SquadEngagementView {
   squadName: string;
   /** The leader, while its squad-mode run is queued or running. */
   leader?: string;
+  leaderColor?: string;
   /** Delegated members, in arrival order. */
   members: SquadMemberView[];
 }
@@ -440,8 +443,10 @@ export function squadEngagements(
       byId.set(run.squadId, view);
     }
     if (!view.squadName && name) view.squadName = name;
+    const color = run.author.color;
     if (leads) {
       view.leader = run.author.name;
+      if (color) view.leaderColor = color;
       continue;
     }
     const state = replied ? 'replied' : 'working';
@@ -449,15 +454,21 @@ export function squadEngagements(
       (candidate) => candidate.name === run.author.name,
     );
     // A member asked again is working again.
-    if (!member) view.members.push({ name: run.author.name, state });
-    else if (state === 'working') member.state = 'working';
+    if (!member) {
+      view.members.push({
+        name: run.author.name,
+        state,
+        ...(color ? { color } : {}),
+      });
+    } else if (state === 'working') member.state = 'working';
   }
   return [...byId.values()].filter((view) => view.squadName);
 }
 
 /**
- * A small bar per active squad engagement: the squad's name, then a chip per
- * participant (the leader deciding, each member working or replied).
+ * A small bar per active squad engagement: the squad's tag, then one entry per
+ * participant (avatar, name, state): the leader "deciding", a member working
+ * (spinner) or replied (check).
  */
 export function SquadEngagementBar({
   runs,
@@ -479,13 +490,15 @@ export function SquadEngagementBar({
           })}
           data-squad-id={engagement.squadId}
         >
-          <UsersIcon aria-hidden="true" className={styles.squadIcon} />
-          <span className={styles.squadName}>{engagement.squadName}</span>
+          <SquadTag name={engagement.squadName} />
           {engagement.leader && (
-            <span className={styles.squadChip} data-state="deciding">
-              <span className={styles.squadDot} aria-hidden="true" />
-              {engagement.leader}
-              <span className={styles.squadChipState}>
+            <span className={styles.squadEntry} data-state="deciding">
+              <AuthorAvatar
+                name={engagement.leader}
+                color={engagement.leaderColor}
+              />
+              <span className={styles.squadEntryName}>{engagement.leader}</span>
+              <span className={styles.squadEntryState}>
                 {t('collab.squad.leaderDeciding')}
               </span>
             </span>
@@ -493,26 +506,24 @@ export function SquadEngagementBar({
           {engagement.members.map((member) => (
             <span
               key={member.name}
-              className={styles.squadChip}
+              className={styles.squadEntry}
               data-state={member.state}
             >
+              <AuthorAvatar name={member.name} color={member.color} />
+              <span className={styles.squadEntryName}>{member.name}</span>
               {member.state === 'working' ? (
                 <LoaderCircleIcon
-                  aria-hidden="true"
-                  className={`${styles.squadChipIcon} ${styles.squadChipSpin}`}
+                  role="img"
+                  aria-label={t('collab.squad.memberWorking')}
+                  className={`${styles.squadEntryIcon} ${styles.squadEntrySpin}`}
                 />
               ) : (
                 <CheckIcon
-                  aria-hidden="true"
-                  className={`${styles.squadChipIcon} ${styles.squadChipDone}`}
+                  role="img"
+                  aria-label={t('collab.squad.memberReplied')}
+                  className={`${styles.squadEntryIcon} ${styles.squadEntryDone}`}
                 />
               )}
-              {member.name}
-              <span className={styles.squadChipState}>
-                {member.state === 'working'
-                  ? t('collab.squad.memberWorking')
-                  : t('collab.squad.memberReplied')}
-              </span>
             </span>
           ))}
         </div>

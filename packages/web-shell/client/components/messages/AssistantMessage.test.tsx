@@ -889,7 +889,7 @@ describe('AssistantMessage agent replies', () => {
 });
 
 describe('AssistantMessage squad replies', () => {
-  it('labels a leader reply "leader · squad"', () => {
+  it('tags a leader reply with the squad it leads', () => {
     const container = render(
       <AssistantMessage
         content="@alice please take it"
@@ -902,7 +902,12 @@ describe('AssistantMessage squad replies', () => {
         }}
       />,
     );
-    expect(container.textContent).toContain('lead· crew');
+    const tag = container.querySelector('[data-squad-tag]');
+    expect(tag?.getAttribute('data-squad-tag')).toBe('crew');
+    expect(tag?.textContent).toBe('crew');
+    // The tag sits on the author line, after the name; no middle dot.
+    expect(tag?.previousElementSibling?.textContent).toBe('lead');
+    expect(container.textContent).not.toContain('·');
     expect(container.textContent).toContain('@alice please take it');
   });
 
@@ -923,7 +928,8 @@ describe('AssistantMessage squad replies', () => {
         }}
       />,
     );
-    expect(container.textContent).toContain('alice· crew');
+    const tag = container.querySelector('[data-squad-tag="crew"]');
+    expect(tag?.previousElementSibling?.textContent).toBe('alice');
     expect(container.textContent).toContain('Fixed in auth.ts.');
   });
 
@@ -946,7 +952,7 @@ describe('AssistantMessage squad replies', () => {
       />,
     );
     expect(container.querySelector('[data-squad-outcome]')).toBeNull();
-    expect(container.textContent).toContain('alice· crew');
+    expect(container.querySelector('[data-squad-tag="crew"]')).not.toBeNull();
   });
 
   it('renders a no_action reply as one muted line', () => {
@@ -965,13 +971,16 @@ describe('AssistantMessage squad replies', () => {
       />,
     );
     const line = container.querySelector('[data-squad-outcome="no_action"]');
-    expect(line?.textContent).toBe('lead · crew · no action needed');
+    expect(line?.getAttribute('role')).toBe('note');
     // Not a message: no avatar row, no footer.
     expect(container.querySelector('button')).toBeNull();
     expect(container.childElementCount).toBe(1);
-    // A muted squad icon, then the text: no avatar.
-    expect(line?.querySelector('svg')).not.toBeNull();
+    // The squad's tag, then a plain sentence: no avatar, no middle dots.
     expect(line?.childElementCount).toBe(2);
+    const [tag, sentence] = [...(line?.children ?? [])];
+    expect(tag?.getAttribute('data-squad-tag')).toBe('crew');
+    expect(tag?.querySelector('svg')).not.toBeNull();
+    expect(sentence?.textContent).toBe('lead had nothing to do');
   });
 
   it('renders a leader reply of only invisible characters as no_action', () => {
@@ -990,9 +999,9 @@ describe('AssistantMessage squad replies', () => {
         showFooterActions
       />,
     );
-    expect(
-      container.querySelector('[data-squad-outcome="no_action"]')?.textContent,
-    ).toBe('lead · crew · no action needed');
+    const line = container.querySelector('[data-squad-outcome="no_action"]');
+    expect(line?.querySelector('[data-squad-tag="crew"]')).not.toBeNull();
+    expect(line?.textContent).toBe('crewlead had nothing to do');
   });
 
   it('shows no blank bubble for an agent reply of only invisible characters', () => {
@@ -1032,7 +1041,9 @@ describe('AssistantMessage squad replies', () => {
       />,
       'zh-CN',
     );
-    expect(container.textContent).toBe('lead · 无需动作');
+    // No squad name on the record: the sentence alone, without a tag.
+    expect(container.textContent).toBe('lead 这次无需动作');
+    expect(container.querySelector('[data-squad-tag]')).toBeNull();
     expect(container.textContent).not.toContain('collab.');
   });
 });
