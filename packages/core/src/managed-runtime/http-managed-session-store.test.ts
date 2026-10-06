@@ -654,6 +654,8 @@ describe('HTTP Managed Session store', () => {
     'lifecycle-403',
     'lifecycle-409',
     'uncertain-lifecycle-403',
+    'ordinary-lifecycle-409',
+    'uncertain-ordinary-lifecycle-409',
   ])(
     'preserves activation transaction identity and failure fencing after %s',
     async (failure) => {
@@ -668,7 +670,13 @@ describe('HTTP Managed Session store', () => {
         failure === 'lost-commit-response' ||
         failure === 'lost-response-body';
       const refused =
-        failure === 'lifecycle-403' || failure === 'lifecycle-409';
+        failure === 'lifecycle-403' ||
+        failure === 'lifecycle-409' ||
+        failure === 'ordinary-lifecycle-409';
+      const ordinaryLifecycle = failure.includes('ordinary-lifecycle-409');
+      const uncertainLifecycle =
+        failure === 'uncertain-lifecycle-403' ||
+        failure === 'uncertain-ordinary-lifecycle-409';
       let armed = false;
       let replay: unknown;
       const stores = createHttpManagedSessionStores({
@@ -684,20 +692,27 @@ describe('HTTP Managed Session store', () => {
             >;
             if (body['operation'] === 'installActivation') {
               requests.push(String(init?.body));
-              if (refused || failure === 'uncertain-lifecycle-403')
+              if (ordinaryLifecycle)
+                expect(
+                  new Headers(init?.headers).has(
+                    'X-Qwen-Lifecycle-Operation-Id',
+                  ),
+                ).toBe(false);
+              if (refused || uncertainLifecycle)
                 return jsonResponse(
                   {
                     error: {
                       message: 'Lifecycle authorization revoked',
-                      code:
-                        failure === 'lifecycle-409'
+                      code: ordinaryLifecycle
+                        ? 'workspace_lifecycle_admission_closed'
+                        : failure === 'lifecycle-409'
                           ? 'workspace_lifecycle_authorization_revoked'
                           : 'workspace_access_denied',
                     },
                   },
-                  failure === 'uncertain-lifecycle-403' && requests.length === 1
+                  uncertainLifecycle && requests.length === 1
                     ? 503
-                    : failure === 'lifecycle-409'
+                    : ordinaryLifecycle || failure === 'lifecycle-409'
                       ? 409
                       : 403,
                 );
@@ -765,7 +780,7 @@ describe('HTTP Managed Session store', () => {
         create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
       });
       try {
-        if (refused || failure === 'uncertain-lifecycle-403')
+        if ((refused || uncertainLifecycle) && !ordinaryLifecycle)
           stores.setLifecycleAuthority({
             operationId: 'lifecycle',
             claimGeneration: 1,
@@ -817,6 +832,11 @@ describe('HTTP Managed Session store', () => {
           });
           expect(session.authority.writesStopped).toBe(false);
           armed = false;
+          if (ordinaryLifecycle)
+            stores.setLifecycleAuthority({
+              operationId: 'lifecycle',
+              claimGeneration: 1,
+            });
           await expect(
             controller.runHookOperation(
               {
@@ -832,11 +852,7 @@ describe('HTTP Managed Session store', () => {
           await expect(operation).rejects.toThrow('writes stopped');
           expect(run).not.toHaveBeenCalled();
           expect(requests).toHaveLength(
-            failure === 'exhausted-503'
-              ? 3
-              : failure === 'uncertain-lifecycle-403'
-                ? 2
-                : 1,
+            failure === 'exhausted-503' ? 3 : uncertainLifecycle ? 2 : 1,
           );
           expect(session.authority.writesStopped).toBe(true);
           await expect(controller.runTurn('next-turn', run)).rejects.toThrow(

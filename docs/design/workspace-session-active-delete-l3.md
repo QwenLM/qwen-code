@@ -73,7 +73,15 @@ existing lock hierarchy to prevent authorization/admission races.
 The placement guard precedes retention, Session and journal locks. Checking only
 the journal head or a missing fence row cannot exclude concurrent fence
 insertion; writer mutations and ordinary execution authorization must share
-admission's lock order. The pre-L3 Store already obtains the publication tenant
+admission's lock order. A tool-result receipt takes the placement guard before
+its original-result, publication tenant and journal locks, including receipt
+replay; its nested journal commit must not acquire placement in reverse order.
+An ordinary journal transaction definitively refused with
+`workspace_lifecycle_admission_closed` before any uncertain commit response
+does not stop the cached Session's writes; current lifecycle authority is still
+required for subsequent settlement. An uncertain earlier response retains the
+write-failure fence.
+The pre-L3 Store already obtains the publication tenant
 lock through its Session lock helper. L3 adds the placement guard and ordinary
 authorization request, so its incremental contention and request cost require
 measurement. Drain lookups and mutations use the existing hashed primary key,

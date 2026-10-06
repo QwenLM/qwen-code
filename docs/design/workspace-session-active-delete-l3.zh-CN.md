@@ -59,7 +59,12 @@ acquire、工具执行、输入和其他控制 mutation。仅当前 operation �
 
 placement guard 先于 retention、Session 和 journal 锁。仅检查 journal head
 或尚不存在的围栏行不能排除并发插入围栏；writer 变更和普通执行授权必须共用
-准入的锁顺序。L3 之前的 Store 已经通过 Session 锁 helper 获取 publication
+准入的锁顺序。工具结果 receipt 在原结果、publication 租户和 journal 锁之前
+获取 placement guard，receipt 重放也遵循此顺序，避免嵌套 journal commit
+反向获取 placement 锁。普通 journal 事务在尚无不确定提交响应前收到明确的
+`workspace_lifecycle_admission_closed` 回滚拒绝时，不会使缓存 Session 永久停写；
+后续结算仍须有效的当前 lifecycle authority。若此前已有不确定响应，仍保留
+写失败围栏。L3 之前的 Store 已经通过 Session 锁 helper 获取 publication
 租户锁；新增的是 placement guard 和普通授权请求，其增量竞争和请求开销需要
 测量。围栏查询和变更使用既有哈希主键，同时保留原身份检查，避免锁定读取扫描
 其他租户的围栏；键编码与 Broker 共用，不新增索引。

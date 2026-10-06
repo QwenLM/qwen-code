@@ -836,12 +836,14 @@ class ManagedSessionStoreHttpClient {
       } catch (error) {
         if (
           attempt === 0 &&
-          this.lifecycleAuthority &&
           error instanceof ManagedSessionStoreHttpError &&
-          (error.status === 403 ||
-            (error.status === 409 &&
-              (error.remoteCode.startsWith('workspace_lifecycle_') ||
-                error.remoteCode === 'workspace_unavailable')))
+          ((error.status === 409 &&
+            error.remoteCode === 'workspace_lifecycle_admission_closed') ||
+            (this.lifecycleAuthority &&
+              (error.status === 403 ||
+                (error.status === 409 &&
+                  (error.remoteCode.startsWith('workspace_lifecycle_') ||
+                    error.remoteCode === 'workspace_unavailable')))))
         )
           throw new ManagedSessionCommitRejectedError(error);
         const uncertain =
