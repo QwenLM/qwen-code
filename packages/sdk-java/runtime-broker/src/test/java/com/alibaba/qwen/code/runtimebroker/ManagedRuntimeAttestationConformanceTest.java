@@ -89,7 +89,7 @@ class ManagedRuntimeAttestationConformanceTest {
         JsonNode suite = read(TOOL_FIXTURES);
         assertEquals(1, suite.required("contractVersion").intValue());
         JsonNode routes = suite.required("routes");
-        assertEquals(3, routes.size());
+        assertEquals(4, routes.size());
         Set<String> keys = new HashSet<>();
         for (JsonNode route : routes) {
             String key = route.required("key").textValue();
@@ -105,7 +105,7 @@ class ManagedRuntimeAttestationConformanceTest {
             assertEquals("no-store",
                     route.required("cacheControl").textValue());
         }
-        assertEquals(Set.of("execute", "status", "cancel"), keys);
+        assertEquals(Set.of("execute", "status", "cancel", "acknowledge"), keys);
         JsonNode identity = suite.required("identity");
         assertEquals(Set.of("token", "leaseId", "epoch"),
                 fieldNames(identity));
@@ -114,7 +114,7 @@ class ManagedRuntimeAttestationConformanceTest {
     @Test
     void consumesEveryToolOutcomeClassification() throws IOException {
         JsonNode suites = read(TOOL_FIXTURES).required("suites");
-        assertEquals(3, suites.size());
+        assertEquals(4, suites.size());
         Set<String> classifications = new HashSet<>();
         Set<String> routes = new HashSet<>();
         Set<String> states = new HashSet<>();
@@ -143,9 +143,9 @@ class ManagedRuntimeAttestationConformanceTest {
                 }
             }
         }
-        assertEquals(Set.of("execute", "status", "cancel"), routes);
+        assertEquals(Set.of("execute", "status", "cancel", "acknowledge"), routes);
         assertEquals(Set.of("prepared", "executing", "cancel_requested",
-                "settled", "unknown"), states);
+                "settled", "acknowledged", "unknown"), states);
         assertEquals(Set.of("not_started", "success", "error", "cancelled"),
                 executionStatuses);
         assertEquals(Set.of("ok", "credentials", "protocol", "identity",
@@ -170,7 +170,7 @@ class ManagedRuntimeAttestationConformanceTest {
                 case "status" -> assertEquals(
                         Set.of("protocolVersion", "reference",
                                 "afterSequence"), fieldNames(body));
-                case "cancel" -> assertEquals(
+                case "cancel", "acknowledge" -> assertEquals(
                         Set.of("protocolVersion", "reference"),
                         fieldNames(body));
                 default -> throw new AssertionError("unknown route " + route);
@@ -202,7 +202,8 @@ class ManagedRuntimeAttestationConformanceTest {
 
         JsonNode definitions = read(TOOL_SCHEMA).required("$defs");
         for (String name : new String[] {"executeRequestBody",
-                "statusRequestBody", "cancelRequestBody"}) {
+                "statusRequestBody", "cancelRequestBody",
+                "acknowledgeRequestBody"}) {
             assertFalse(definitions.required(name)
                     .required("additionalProperties").booleanValue(), name);
         }

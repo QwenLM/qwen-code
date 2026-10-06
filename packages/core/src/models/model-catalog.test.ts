@@ -15,6 +15,7 @@ import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
   hasExplicitOutputLimit,
+  normalize,
   tokenLimit,
 } from '../core/tokenLimits.js';
 import { computeThresholds } from '../services/chatCompressionService.js';
@@ -30,6 +31,7 @@ import {
   MODEL_CATALOG_URL_ENV,
   MODELS_DEV_URL,
   parseModelCatalog,
+  versionSpellingAlias,
 } from './model-catalog.js';
 
 const FAR_FUTURE = '9999-01-01T00:00:00.000Z';
@@ -122,21 +124,23 @@ describe('model catalog', () => {
     expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
   });
 
-  it.each([undefined, 0, 2])(
-    'ignores a newer cache from another projection (%s)',
-    (projection) => {
-      writeJson(getModelCatalogCachePath(), {
-        source: MODELS_DEV_URL,
-        fetchedAt: FAR_FUTURE,
-        projection,
-        models: { 'deepseek-v4-flash': { modalities: { image: true } } },
-      });
+  it.each([
+    undefined,
+    0,
+    MODEL_CATALOG_PROJECTION_VERSION - 1,
+    MODEL_CATALOG_PROJECTION_VERSION + 1,
+  ])('ignores a newer cache from another projection (%s)', (projection) => {
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
+      fetchedAt: FAR_FUTURE,
+      projection,
+      models: { 'deepseek-v4-flash': { modalities: { image: true } } },
+    });
 
-      expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
-      expect(lookupModelCatalog('deepseek-v4-flash')).toBeUndefined();
-      expect(lookupModelCatalog(bundledId)).toEqual(bundledEntry);
-    },
-  );
+    expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
+    expect(lookupModelCatalog('deepseek-v4-flash')).toBeUndefined();
+    expect(lookupModelCatalog(bundledId)).toEqual(bundledEntry);
+  });
 
   it('ignores a cache older than the bundled snapshot', () => {
     writeJson(getModelCatalogCachePath(), {
@@ -519,5 +523,129 @@ describe('model catalog', () => {
     // maintainer happened to generate from (scripts/generate-model-catalog.ts
     // stamps MODELS_DEV_URL for local-path inputs).
     expect(bundled.source).toBe(MODELS_DEV_URL);
+  });
+
+  it('stamps the committed snapshot with the current projection version', () => {
+    // Nothing at runtime reads this stamp: loadModelCatalog compares only the
+    // *cache*'s projection and picks between cache and bundle on fetchedAt, and
+    // the ETag reuse in model-catalog-refresh.ts reads only the cache file. So
+    // a snapshot committed at an older projection is served as-is, with no
+    // runtime signal — this test is the only thing pinning the file's version.
+    expect(bundled.projection).toBe(MODEL_CATALOG_PROJECTION_VERSION);
+  });
+
+  it('serves both spellings of a dotted version from the committed snapshot', () => {
+    // #13209: models.dev publishes one spelling per provider (alibaba lists
+    // `qwen2-5-72b-instruct`), and normalize() folds the dotted minor to
+    // dashes for Claude only, so the dotted qwen spelling looked up a key the
+    // projection never wrote and fell through to the `/^qwen/` family rows.
+    expect(lookupModelCatalog(normalize('qwen2.5-72b-instruct'))).toEqual(
+      lookupModelCatalog('qwen2-5-72b-instruct'),
+    );
+    expect(tokenLimit('qwen2.5-72b-instruct')).toBe(131_072);
+    // The vision twin lost `{image:true}` the same way and degraded to the
+    // text-only `/^qwen/` modality row.
+    expect(lookupModelCatalog(normalize('qwen2.5-vl-72b-instruct'))).toEqual({
+      context: 131_072,
+      output: 8_192,
+      modalities: { image: true },
+    });
+  });
+
+  it('adjusts both spellings of a version, not just the one it names', () => {
+    // The projection commits one entry per model under each spelling of its
+    // version, but the context corrections and the DashScope pdf carve-out are
+    // each written against a single id. Applied by exact key they reached only
+    // that spelling and left its twin serving models.dev's unadjusted numbers,
+    // so `glm-4-7` got the 204,800 round-up the correction exists to overwrite
+    // and `qwen3-8-max` got the pdf the carve-out exists to withhold.
+    const raw = bundled.models as Record<string, unknown>;
+    for (const key of Object.keys(bundled.models)) {
+      const alias = versionSpellingAlias(key);
+      if (!alias || !(alias in bundled.models)) {
+        continue;
+      }
+      // The projection also commits a spelling it did not alias when the raw
+      // feed carries both as separate models (`never aliases over a key the
+      // projection committed itself`), and those two keep their own numbers on
+      // purpose. Only pairs that already agree in the snapshot are aliases this
+      // adjustment invariant owns; the explicit rows below pin the rest.
+      if (JSON.stringify(raw[key]) !== JSON.stringify(raw[alias])) {
+        continue;
+      }
+      expect({ key, alias: lookupModelCatalog(alias) }).toEqual({
+        key,
+        alias: lookupModelCatalog(key),
+      });
+    }
+    expect(lookupModelCatalog('glm-4-7')?.context).toBe(202_752);
+    expect(lookupModelCatalog('minimax-m2-5')?.context).toBe(196_608);
+    expect(lookupModelCatalog('minimax-m2-5-highspeed')?.context).toBe(196_608);
+    expect(lookupModelCatalog('qwen3-8-max')?.modalities?.pdf).toBeUndefined();
+  });
+
+  it('keeps a curated output pin authoritative for both spellings', () => {
+    // OUTPUT_PATTERNS is written against one spelling, so the twin the
+    // projection commits fell through to models.dev's unadjusted `output` and
+    // outranked the repo's own cap: `glm-4-7` sized every request at 64,000
+    // output tokens against the 16,384 `/^glm-4\.7/` pins `glm-4.7` to.
+    expect(tokenLimit('glm-4-7', 'output')).toBe(16_384);
+    expect(defaultOutputCeiling('glm-4-7')).toBe(16_384);
+    expect(tokenLimit('glm-4-7-flashx', 'output')).toBe(
+      tokenLimit('glm-4.7-flashx', 'output'),
+    );
+    expect(tokenLimit('minimax-m2-5', 'output')).toBe(
+      tokenLimit('minimax-m2.5', 'output'),
+    );
+    expect(tokenLimit('kimi-k2-5', 'output')).toBe(
+      tokenLimit('kimi-k2.5', 'output'),
+    );
+    // The twin is a fallback, not an override: `qwen3-8-max` keeps the `/^qwen/`
+    // family row at 32,768 even though `qwen3.8-max` matches the more specific
+    // `/^qwen3\.\d/` row at 65,536.
+    expect(tokenLimit('qwen3-8-max', 'output')).toBe(32_768);
+  });
+
+  it('keeps the ids whose row requires the dot off the alias machinery', () => {
+    // A blanket dot->dash fold in normalize() would move `qwen3.5-max` off
+    // `/^qwen3\.\d/` (1M input, 64K output) and `glm-5.3-flash` off
+    // modalityDefaults' `/^glm-5\.3-flash/`. The alias is committed per key
+    // instead, so normalize() must stay untouched.
+    expect(normalize('qwen3.5-max')).toBe('qwen3.5-max');
+    expect(normalize('glm-5.3-flash')).toBe('glm-5.3-flash');
+    expect(tokenLimit('qwen3.5-max')).toBe(1_000_000);
+    expect(tokenLimit('qwen3.5-max', 'output')).toBe(65_536);
+    expect(lookupModelCatalog('glm-5.3-flash')?.modalities?.image).toBe(true);
+  });
+
+  it('keeps a release date off the alias machinery', () => {
+    // models.dev publishes dated ids whose last dash-then-digits boundary is
+    // the release date, not a minor version. Respelling it commits a spelling
+    // no vendor publishes, so a date fails closed under both of its shapes:
+    // the compact `MMDD` run is too long to be a minor version, and a full
+    // `-YYYY-MM-DD` tail is refused before the run length is consulted. Pinned
+    // on the committed grok ids rather than a synthetic one, and on both
+    // spellings: the guard must not fall through to the id's other boundary
+    // and respell that instead.
+    expect(
+      versionSpellingAlias('grok-4.20-0309-non-reasoning'),
+    ).toBeUndefined();
+    expect(
+      versionSpellingAlias('grok-4.20.0309-non-reasoning'),
+    ).toBeUndefined();
+    expect(versionSpellingAlias('kimi-k2-0905')).toBeUndefined();
+    // The day of a full date is one or two digits, so the run-length test
+    // alone reads it as a minor version. Three committed gpt-4o ids carry one.
+    expect(versionSpellingAlias('gpt-4o-2024-11-20')).toBeUndefined();
+    expect(versionSpellingAlias('gpt-4.1-2025-04-14')).toBeUndefined();
+    // The guard stays narrow enough to keep respelling real minor versions,
+    // including a leading-zero one (`0` is a date digit but not a date run).
+    expect(versionSpellingAlias('qwen2-5-72b-instruct')).toBe(
+      'qwen2.5-72b-instruct',
+    );
+    expect(versionSpellingAlias('glm-5.3-flash')).toBe('glm-5-3-flash');
+    expect(versionSpellingAlias('doubao-seed-2-0-code')).toBe(
+      'doubao-seed-2.0-code',
+    );
   });
 });

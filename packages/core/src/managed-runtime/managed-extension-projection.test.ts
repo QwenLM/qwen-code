@@ -40,6 +40,7 @@ interface Revision {
   readonly run: unknown;
   readonly view: ManagedTaskProjection;
   readonly deliveryPending: boolean;
+  readonly stopRequested?: boolean;
 }
 
 interface FixtureSuite {
@@ -78,6 +79,9 @@ interface FixtureSuite {
   }>;
   readonly brokerExecutionCases: ReadonlyArray<{
     readonly id: string;
+    readonly state: string;
+    readonly executionStatus: string | null;
+    readonly dispatchGeneration: number;
     readonly execution: string;
     readonly inspection: ManagedRuntimeExecutionView;
     readonly harnessExecution: string;
@@ -222,7 +226,14 @@ describe('managed-extension-projection/1 fixtures', () => {
 
   it.each(fixtures.viewCases)('projects one revision: $id', (each) => {
     const run = parseExtensionRun(each.run);
-    expect(projectManagedTask(null, run, each.occurredAt)).toEqual(each.view);
+    expect(
+      projectManagedTask(
+        null,
+        run,
+        each.occurredAt,
+        each.stopRequested ?? false,
+      ),
+    ).toEqual(each.view);
     expect(isExtensionDeliveryPending(run)).toBe(each.deliveryPending);
   });
 
@@ -292,11 +303,14 @@ describe('managed-extension-projection/1 fixtures', () => {
     },
   );
 
-  it('reads the Broker as Java does except where the wire hides a claim', () => {
+  // The wire folds a claimed but unsent dispatch into `executing` and
+  // carries no dispatch generation, so the record reading of Java diverges
+  // from the wire reading in exactly these two cases.
+  it('reads the Broker as Java does except where the wire hides a claim or a generation', () => {
     expect(
       fixtures.brokerExecutionCases
         .filter((each) => each.harnessExecution !== each.execution)
         .map((each) => each.id),
-    ).toEqual(['dispatching']);
+    ).toEqual(['dispatching', 'settled-cancelled-unclaimed']);
   });
 });

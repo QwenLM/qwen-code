@@ -13,6 +13,9 @@ import {
   transpileModule,
 } from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { QWEN_SERVER_TOKEN_ENV } from '../../packages/cli/src/serve/channel-worker-env.js';
+import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from '../../packages/cli/src/serve/hosted-harness-contract.js';
+import { validateHostedHarnessProfile } from '../../packages/cli/src/serve/hosted-harness-profile.js';
 
 const read = (file) =>
   readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
@@ -27,6 +30,13 @@ const namedScripts = (text) => [
     ),
   ),
 ];
+
+// Fenced shell blocks of a markdown text, bodies only; language-less fences
+// are invisible to this scan.
+const fencedShellBlocks = (text) =>
+  [
+    ...text.matchAll(/```[ \t]*(?:bash|sh|shell|console|zsh)\n([\s\S]*?)```/g),
+  ].map((match) => match[1]);
 
 describe('managed-agent-server e2e runner', () => {
   it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
@@ -238,5 +248,216 @@ describe('managed-agent-server e2e runner', () => {
     ]);
     expect(namedScripts('see `scripts/nope.ts`')).toEqual(['scripts/nope.ts']);
     expect(namedScripts('packages/foo/scripts/nope.ts')).toEqual([]);
+  });
+
+  it('pins the fenced hosted-harness launch block in the server README to a startable form', () => {
+    // The oracle is the profile validator itself, not a copy of its rules:
+    // the documented launch must supply everything
+    // validateHostedHarnessProfile rejects for missing, or the launch fails
+    // at startup while this pin stays green. The block is matched exactly —
+    // a grammar that parses the fence into argv/env fails open on every
+    // shell spelling it does not model. The CLI-side credential names come
+    // from the production constants so renaming one reddens this pin instead
+    // of stranding the README's spelling.
+    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const fencedBlocks = fencedShellBlocks(readme);
+    const command =
+      'qwen serve --profile hosted-harness --port 4171 --hostname 127.0.0.1 --no-web';
+    const launchBlocks = fencedBlocks.filter((block) =>
+      block.includes(command),
+    );
+    expect(
+      launchBlocks,
+      'the README must fence exactly one hosted-harness launch block',
+    ).toHaveLength(1);
+    expect(launchBlocks[0]).toBe(
+      [
+        `${QWEN_SERVER_TOKEN_ENV}="$QWEN_MANAGED_AGENT_HARNESS_TOKEN" \\`,
+        `${HOSTED_HARNESS_CAPABILITY_DIGEST_ENV}="$QWEN_MANAGED_AGENT_CAPABILITY_DIGEST" \\`,
+        command,
+      ].join('\n') + '\n',
+    );
+    // A `$VAR` reference defers to a name the reader was told to export in
+    // the Prerequisites section; a renamed or dropped export there expands
+    // to empty in the reader's shell and the launch dies at startup, so
+    // every name the launch block references must be assigned inside that
+    // section — an assignment in a fence anywhere else in the README never
+    // reaches the reader's shell.
+    const prereqStart = readme.indexOf('## Prerequisites');
+    const prereqEnd = readme.indexOf('## Public Session lifecycle');
+    expect(prereqStart).toBeGreaterThan(-1);
+    expect(prereqEnd).toBeGreaterThan(prereqStart);
+    const assigned = new Set();
+    for (const fenced of fencedShellBlocks(
+      readme.slice(prereqStart, prereqEnd),
+    )) {
+      for (const match of fenced.matchAll(
+        /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=/gm,
+      )) {
+        assigned.add(match[1]);
+      }
+    }
+    for (const match of launchBlocks[0].matchAll(
+      /\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g,
+    )) {
+      expect(
+        assigned.has(match[1]),
+        `the launch block references $${match[1]}, which the Prerequisites section does not assign`,
+      ).toBe(true);
+    }
+    // The validator's input is parsed from the pinned block so the fixture
+    // cannot drift from the documented launch: an edit that drops --no-web
+    // or widens --hostname must redden this oracle, not only the exact-text
+    // pin above. mode stays the constant serve.ts hardcodes — the launch
+    // carries no flag for it — and the deferred `$VAR` credentials stand in
+    // as conforming values so the validator judges the launch's shape rather
+    // than the placeholder spelling.
+    expect(() =>
+      validateHostedHarnessProfile({
+        profile: 'hosted-harness',
+        hostname: /--hostname\s+(\S+)/.exec(launchBlocks[0])[1],
+        port: Number(/--port\s+(\d+)/.exec(launchBlocks[0])[1]),
+        mode: 'http-bridge',
+        token: 'documented-value',
+        serveWebShell: !launchBlocks[0].includes('--no-web'),
+        hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      }),
+    ).not.toThrow();
+  });
+
+  it('pairs the 4171 base-url export with a startup-order note in the dual-path entry', () => {
+    // The base URL is read once at JVM startup, so the section that moves
+    // Spring to 4171 must say the value applies before (or via a restart
+    // of) `mvn spring-boot:run`, or the reader's running server stays on
+    // the 4170 value exported in Prerequisites.
+    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const start = readme.indexOf(
+      '## Full WebShell dual-path development entry',
+    );
+    const end = readme.indexOf('## Embedded Runtime Broker');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const slice = readme.slice(start, end);
+    // The export must point at the port the documented launch binds, not at
+    // a second copy of the number: a launch-block port bump mirrored into
+    // the launch pin above would otherwise leave this assertion green while
+    // Spring keeps calling the old port and every Managed Turn fails.
+    const launchBlocks = fencedShellBlocks(readme).filter((fenced) =>
+      fenced.includes('qwen serve --profile hosted-harness'),
+    );
+    expect(
+      launchBlocks,
+      'the README must fence exactly one hosted-harness launch block',
+    ).toHaveLength(1);
+    const port = /--port\s+(\d+)/.exec(launchBlocks[0])[1];
+    expect(
+      slice,
+      'the Spring base URL must point at the port the launch block binds',
+    ).toContain(
+      `QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:${port}'`,
+    );
+    // The caveat sentence is hard-wrapped in the README, so match across the
+    // line break; the fallback is the restart clause, not the bare word
+    // `restart` that any unrelated sentence in the slice could supply.
+    expect(slice.replace(/\s+/g, ' ')).toMatch(
+      /read once at JVM startup|restart it with the override/i,
+    );
+    // The by-hand recipe re-anchors Spring to the Prerequisites environment,
+    // which never names the Session Store, and application.yml defaults the
+    // store off — a reader who follows that path wires Spring without a
+    // store descriptor and the Harness answers every attach with
+    // 400 invalid_managed_session_store, so the slice must name the switch.
+    expect(slice).toContain('QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED');
+    // The store switch is read once at JVM startup exactly like the base
+    // URL: exported below the restart cue it never reaches the reader's
+    // JVM, and every attach fails with 400 invalid_managed_session_store
+    // while the recipe reads complete — so the exports must land before the
+    // single restart. The cue is hard-wrapped, so compare on the collapsed
+    // slice; a missing cue fails closed through the -1.
+    const flat = slice.replace(/\s+/g, ' ');
+    expect(
+      flat.indexOf('QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED'),
+      'the Session Store exports must precede the Spring restart cue',
+    ).toBeLessThan(flat.indexOf('restart it with the override'));
+  });
+
+  it('keeps the review-corrections merge gates behind the CI-gated Hosted proofs', () => {
+    // The hosted-harness-mysql CI job runs HostedWorkspaceToolTurnIT (a real
+    // file-tool Turn through the packaged worker) and the three
+    // owner-failover E2E modes against the production HTTP durable-store
+    // adapter, all fail-closed via the failsafe includes and
+    // check-failsafe-reports.js. While both oracles stand, the
+    // review-corrections gates must not re-assert those capabilities as
+    // unproven — the foundation-boundary banner names that document the
+    // current authority, so the false claim reaches integrators in either
+    // language.
+    const toolTurnIt =
+      'packages/sdk-java/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java';
+    expect(
+      existsSync(new URL(`../../${toolTurnIt}`, import.meta.url)) &&
+        read('.github/workflows/sdk-java.yml').includes(
+          'test:e2e:managed-session-failover',
+        ),
+      'the Hosted tool-turn IT and the failover E2E lane must both exist for this oracle to mean anything',
+    ).toBe(true);
+    for (const [file, heading, claim] of [
+      [
+        'docs/design/2026-09-25-managed-agent-review-corrections.md',
+        '## Remaining integration gates',
+        /what remains unproven is[^.]*\./gi,
+      ],
+      [
+        'docs/design/2026-09-25-managed-agent-review-corrections.zh-CN.md',
+        '## 剩余集成门禁',
+        /仍未证明[^。]*。/g,
+      ],
+    ]) {
+      const doc = read(file);
+      expect(doc, `${file} must keep its merge-gates section`).toContain(
+        heading,
+      );
+      const gates = doc.slice(doc.indexOf(heading));
+      for (const [sentence] of gates.matchAll(claim)) {
+        expect(
+          sentence,
+          `${file} lists CI-gated Hosted capabilities as unproven`,
+        ).not.toMatch(
+          /tool turns|durable-store adapter|worker bundle|工具 Turn/i,
+        );
+      }
+    }
+  });
+
+  it('pins the attach-time generation fence in the Harness attachment contract', () => {
+    // The attachment paragraph publishes which identities an attach does NOT
+    // compare. The Harness keys its in-memory Session by sessionId alone and
+    // compares no tenant on attach, so the paragraph must say exactly that —
+    // an integrator who reads a tenant-keyed coalescing claim leaves tenant
+    // scoping out of their own gateway on the recovery redrive, which is not
+    // fenced. The Harness writer generation is the one identity that IS
+    // enforced — the contract middleware answers a stale boot id with 409
+    // hosted_harness_generation_mismatch and the attach handler rejects a
+    // store descriptor whose writerId differs before any coalescing — so the
+    // paragraph must name that rejection: an integrator reading "not
+    // rejected" for the generation omits the 409 path and every attach fails
+    // after a Harness restart with no documented way out. Each fence pin
+    // below matches a polarity phrase, not the bare name: the name alone
+    // stays green when the paragraph says the generation is not rejected or
+    // the store fence is shipped behavior.
+    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const anchor = readme.indexOf('The Java connector caches an attachment');
+    expect(anchor).toBeGreaterThan(-1);
+    const end = readme.indexOf('\n\n', anchor);
+    expect(end).toBeGreaterThan(anchor);
+    const paragraph = readme.slice(anchor, end).replace(/\s+/g, ' ');
+    expect(paragraph).toContain(
+      'keys its in-memory Session by `sessionId` alone',
+    );
+    expect(paragraph).toContain(
+      'fails closed with `409 hosted_harness_generation_mismatch`',
+    );
+    expect(paragraph).toContain(
+      '`managed_session_store_conflict` fence is target design',
+    );
   });
 });
