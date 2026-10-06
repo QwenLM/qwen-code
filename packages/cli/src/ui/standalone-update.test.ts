@@ -818,6 +818,9 @@ describe('standalone-update', () => {
     it('extracts the release zip without spawning PowerShell', async () => {
       serveZip(
         await zip({
+          // Release zips (`zip -qr`) carry explicit directory entries; archiver
+          // writes a name ending in '/' as one, at mode 0o40755.
+          'qwen-code/': '',
           'qwen-code/manifest.json': releaseManifest,
           'qwen-code/node/node.exe': '',
         }),
@@ -845,6 +848,9 @@ describe('standalone-update', () => {
         ),
       );
 
+      // yauzl rejects the '../evil' name before extractZipArchive's own bound
+      // check runs, so the message does not show which layer caught it. The
+      // existsSync check is the end-to-end witness that nothing escaped.
       await expect(
         performStandaloneUpdate(standaloneDir, '1.2.3'),
       ).rejects.toThrow('../evil');
