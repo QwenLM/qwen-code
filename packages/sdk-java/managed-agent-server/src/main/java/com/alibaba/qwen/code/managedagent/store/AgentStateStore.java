@@ -123,6 +123,47 @@ public interface AgentStateStore {
         throw new UnsupportedOperationException("Lifecycle reconciliation is unavailable");
     }
 
+    /**
+     * Admits a controlled same-Workspace cwd change (W2) on a bound Session,
+     * or returns the operation the same actor already admitted under the
+     * key. The target directory is already normalized and the request digest
+     * already covers it; admission checks the creation actor, the current
+     * grant, the Registry facts, the expected context revision and the busy
+     * barriers in the pinned order of the W2 design.
+     */
+    OperationAdmission beginCwdChangeOperation(String tenantId,
+            String sessionId, String actorId, String actorDigest,
+            String idempotencyKey, String requestDigest,
+            String targetCwdRelative, long expectedContextRevision);
+
+    /**
+     * Settles a claimed cwd change in one transaction: re-verifies the
+     * Session facts, updates the binding directory and context revision,
+     * marks the operation completed or failed, and appends
+     * {@code session.context.changed} on success.
+     *
+     * @return the outcome; a contested claim returns {@code null}
+     */
+    CwdChangeOutcome completeCwdChangeOperation(String tenantId,
+            String sessionId, String operationId, String owner,
+            long claimGeneration);
+
+    /**
+     * Marks a claimed cwd change terminally failed with its public failure
+     * code.
+     *
+     * @return false when the claim is no longer current — the write was
+     *         skipped and the caller must not report a terminal refusal
+     */
+    boolean failCwdChangeOperation(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            String failureCode);
+
+    /** The result of a settled cwd change. */
+    record CwdChangeOutcome(boolean completed, String failureCode,
+            Long resultContextRevision) {
+    }
+
     Optional<OperationRecord> findOperation(String tenantId,
             String sessionId, String operationId);
 
