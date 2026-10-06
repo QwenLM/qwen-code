@@ -17,7 +17,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-// Candidate witness for the BindingRenewal half of #13388: the packaged
+// Witness for the BindingRenewal half of #13388: the packaged
 // stack measured in #13365 pinned its carriers at
 // BindingRenewal.persistResourceHandle, which holds the renewal guard
 // across bindingRepository.compareAndSet (a row-locked UPDATE on MySQL).
