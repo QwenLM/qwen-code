@@ -45,6 +45,8 @@ import {
   HostedWorkspaceToolTurn,
   HostedToolRecoveryRequiredError,
   HOSTED_WORKSPACE_FILE_TOOLS,
+  HOSTED_WORKSPACE_SHELL_TOOLS,
+  HOSTED_INPUT_PREVIEW_TOOLS,
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -2927,9 +2929,20 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
   );
   const requestId = await requested();
   const action = session.authority.action(requestId)!;
+  const options = JSON.parse(
+    (await session.resources.read(action.optionsRef!)).toString(),
+  );
+  expect(options).toMatchObject({
+    v: 2,
+    functionCallId: 'call-1',
+    toolName: 'run_shell_command',
+  });
   expect(
-    JSON.parse((await session.resources.read(action.optionsRef!)).toString()),
-  ).toMatchObject({ functionCallId: 'call-1', toolName: 'run_shell_command' });
+    JSON.parse(
+      JSON.parse((await session.resources.read(options.inputRef)).toString())
+        .payloadJson,
+    ).input,
+  ).toMatchObject({ command: 'rm -rf build' });
   expect(broker.registerPublisher).toHaveBeenCalledOnce();
   await resolveHostedAction(session, waiters, requestId, answer('deny'));
   const responses = await running;
@@ -2941,6 +2954,21 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
     undefined,
     'The Session owner denied this tool call, so it was not run.',
   ]);
+});
+
+it('admits exactly the declared native tools to the version 2 input preview', () => {
+  // The Java reader admits a closed set. A name missing on either side degrades
+  // to "Tool arguments are unavailable for this approval." with no error, so the
+  // set is pinned here and each name must still be a declared native tool.
+  expect(HOSTED_INPUT_PREVIEW_TOOLS).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+    'run_shell_command',
+  ]);
+  const declared = HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name);
+  for (const name of HOSTED_INPUT_PREVIEW_TOOLS)
+    expect(declared).toContain(name);
 });
 
 it('writes nothing once the Turn blocks during an answer', async () => {

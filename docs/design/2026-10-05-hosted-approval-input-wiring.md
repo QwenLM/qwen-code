@@ -33,7 +33,7 @@ Extend the existing focused tests for these paths. Java, generated API types, sh
 
 ## Compatibility and limits
 
-Deploy the Java reader before the new Harness writer: old Java rejects version 2 transactions. There is no new negotiation or deployment switch. Historical version 1 Actions remain usable, old previews remain optional, and public Shell remains disabled. The reader's 8192-byte UTF-8 limit and existing Session read/creator-answer permissions are unchanged. This does not add secret redaction, MCP previews, restart recovery or Shell takeover.
+Deploy the Java reader before the new Harness writer: old Java rejects version 2 transactions. There is no new negotiation or deployment switch. A CLI inspector from before this commit cannot verify a snapshot written after it: the captured input is committed in the Action transaction and re-listed by the await-action checkpoint's closure, so it carries two referenced revisions, and an inspector without the options→input edge reaches it only through the checkpoint and fails the revision-set check. `managed-csi-checkpoint-evidence` then exits 1 with `Managed Session Store: snapshot resource reference revisions conflict.` for a Session that raised a native approval, although nothing is corrupt. Readers of this build are fine; a rollback or a mixed fleet during a rolling deploy is not, as for the journal change recorded in `2026-09-30-hosted-turn-failover-e2e.md`. Historical version 1 Actions remain usable, old previews remain optional, and public Shell remains disabled. The reader's 8192-byte UTF-8 limit and existing Session read/creator-answer permissions are unchanged. This does not add secret redaction, MCP previews, restart recovery or Shell takeover.
 
 ## Validation and acceptance
 

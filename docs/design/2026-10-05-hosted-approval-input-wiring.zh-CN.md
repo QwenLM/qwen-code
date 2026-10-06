@@ -33,7 +33,7 @@
 
 ## 兼容性与限制
 
-先部署 Java 读取端，再部署新 Harness 写入端；旧 Java 会拒绝版本 2 事务。不新增协商或部署开关。历史版本 1 Action 仍可用，预览字段仍可选，公开 Shell 保持关闭。读取端的 8192 字节 UTF-8 上限，以及已有 Session 读取与创建者作答权限保持不变。不增加秘密脱敏、MCP 预览、重启恢复或 Shell 接管。
+先部署 Java 读取端，再部署新 Harness 写入端；旧 Java 会拒绝版本 2 事务。不新增协商或部署开关。早于本次提交的 CLI 检查器无法校验之后写入的快照：已捕获的输入在 Action 事务中提交，并被 await-action checkpoint 的闭包再次列出，因此带有两个被引用 revision；没有 options→input 边的检查器只能通过 checkpoint 到达它，进而在 revision 集合校验上失败。此时 `managed-csi-checkpoint-evidence` 会在曾发起原生审批的 Session 上以 `Managed Session Store: snapshot resource reference revisions conflict.` 退出码 1，尽管数据并没有损坏。本构建的读取端没有问题；回滚或滚动发布期间的混合机群不行，与 `2026-09-30-hosted-turn-failover-e2e.md` 记录的 journal 变更同类。历史版本 1 Action 仍可用，预览字段仍可选，公开 Shell 保持关闭。读取端的 8192 字节 UTF-8 上限，以及已有 Session 读取与创建者作答权限保持不变。不增加秘密脱敏、MCP 预览、重启恢复或 Shell 接管。
 
 ## 验证与验收
 

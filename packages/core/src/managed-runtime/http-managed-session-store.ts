@@ -1617,15 +1617,9 @@ function nestedResourceRefs(
     const parsed = tryParseHarnessCheckpointV1(bytes);
     return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
   }
-  if (ref.kind === 'managed-action-options') {
-    const record = parseManagedSessionRecordJson(
-      bytes.toString('utf8'),
-      MANAGED_SESSION_LIMITS.maxEventBytes,
-    );
-    return collectRefs([record]);
-  }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-action-options' ||
     ref.kind === 'managed-hook-plan' ||
     ref.kind === 'managed-hook-message-chunks'
   ) {

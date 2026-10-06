@@ -879,6 +879,68 @@ describe('HTTP Managed Session store', () => {
       expect(
         resources.some(({ resourceId }) => resourceId === unrelated.resourceId),
       ).toBe(false);
+
+      // The read-only snapshot inspector walks the same options -> input edge.
+      // Without it the committed input is enumerated but never referenced, so
+      // restoring a Session that raised a native approval would fail closed.
+      const snapshotResources = new Map<
+        string,
+        {
+          ref: ManagedSessionDurableRef;
+          bytesBase64: string;
+          referencedRevisions: number[];
+        }
+      >();
+      for (const [index, commit] of server.commits.entries()) {
+        for (const raw of commit['resources'] as ManagedSessionDurableRef[]) {
+          const ref = {
+            resourceId: raw.resourceId,
+            kind: raw.kind,
+            schemaVersion: raw.schemaVersion,
+            byteLength: raw.byteLength,
+            digest: raw.digest,
+          };
+          const resource = snapshotResources.get(ref.resourceId) ?? {
+            ref,
+            bytesBase64: (await session.resources.read(ref)).toString('base64'),
+            referencedRevisions: [],
+          };
+          resource.referencedRevisions.push(index + 1);
+          snapshotResources.set(ref.resourceId, resource);
+        }
+      }
+      const transactions = server.commits.map((commit, index) => ({
+        ...commit,
+        journalRevision: index + 1,
+        recordEncoding: 'identity',
+        byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+          .length,
+      }));
+      const snapshot = readOnlyManagedSessionSnapshot({
+        format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+        sessionKey: SESSION_KEY,
+        head: {
+          state: 'ACTIVE',
+          storageVersion: 1,
+          writerGeneration: 1,
+          journalRevision: transactions.length,
+          committedSequence: session.authority.committedSequence,
+          lastCommitDigest: session.authority.commitProof.committedPrefixHash,
+          activationEpoch: session.activation.epoch,
+          latestCheckpointResourceId: null,
+          compactedThroughRevision: 0,
+          recoveryStatus: 'READY',
+          recoveryDetailCode: null,
+        },
+        transactions,
+        resources: [...snapshotResources.values()],
+      });
+      await expect(snapshot.resources.read(inputRef)).resolves.toEqual(
+        Buffer.from('{"input":"approved"}'),
+      );
+      await expect(snapshot.resources.read(unrelated)).rejects.toThrow(
+        'Managed Session Store: snapshot resource is missing.',
+      );
     } finally {
       await session.close();
     }
