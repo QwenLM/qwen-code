@@ -3809,13 +3809,18 @@ export function registerHostedHarnessSessionRoutes(
       // the Workspace stays pinned after every later route is gone.
       await releaseLeaseNow(session);
       // A registered observation loop outlives its turn: only the Session
-      // close settles it. Stop every live loop here — its stop_requested
-      // settle write belongs ahead of the publisher close and the log
-      // close, or the record strands on running_attached forever.
+      // close ends it. Stop every live loop here, ahead of the publisher
+      // close and the log close, so its settle write can still reach the
+      // journal. A Session whose own settlement already failed (blocked)
+      // never proved to the Runtime that anything stopped: claiming
+      // `stop_requested` there would display an unconfirmed task as
+      // settled, so the record parks on the runtime_lost line instead —
+      // the loop ends, and the record keeps an honest rebuild path.
+      const stopSettle = session.blocked ? 'runtime_lost' : 'stop_requested';
       for (const loop of session.shell?.monitorLoops?.values() ?? [])
-        await loop.stop();
+        await loop.stop(stopSettle);
       for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
-        await loop.stop();
+        await loop.stop(stopSettle);
       // The broker release drained the Session's background Shells and
       // their exits settled through this publisher; it closes last.
       await session.shell?.publisher?.close();

@@ -238,12 +238,27 @@ export class HostedMonitorLoop {
     return tracked;
   }
 
-  /** The stop call: terminate the physical watch, then settle the record. */
-  async stop(): Promise<void> {
+  /**
+   * The stop call: end the loop's own time-keeping, terminate the physical
+   * watch, then settle the record at the outcome the caller may claim. A
+   * caller that cannot prove the Runtime stopped the watch — its release
+   * was refused, so the physical side was never told at all — must not
+   * mint a `stop_requested` settlement; it parks the record on the
+   * runtime_lost line where a later open rebuilds it (read-only) or keeps
+   * it accurately blocked instead of reporting a stopped task that never
+   * stopped.
+   */
+  async stop(
+    settle: 'stop_requested' | 'runtime_lost' = 'stop_requested',
+  ): Promise<void> {
     if (this.ended) return;
     this.ended = true;
     this.disarm();
     await this.handle?.terminate();
+    if (settle === 'runtime_lost') {
+      await this.monitors.blockedRuntimeLost(this.monitorId);
+      return;
+    }
     await this.monitors.settleStopRequested(this.monitorId);
   }
 
