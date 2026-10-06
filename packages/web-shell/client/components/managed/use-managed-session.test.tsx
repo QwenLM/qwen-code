@@ -833,6 +833,118 @@ describe('useManagedSession', () => {
     }
   });
 
+  it('expires a terminal stream verdict when a keep-alive answers an idle reconnect past the proof-of-life point', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal; onAlive?: () => void },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          yield event(1);
+          throw Object.assign(new Error('session gone'), { status: 404 });
+        }
+        // A live but idle Session: the reconnect delivers no frame at
+        // all, only heartbeat comments, which the client reports through
+        // onAlive. The keep-alive lands past the +3s proof-of-life point.
+        await new Promise((resolve) => setTimeout(resolve, 4_000));
+        request.onAlive?.();
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // Attempt 2 opens at t=3000; its proof-of-life point passes at
+      // t=6000 with nothing delivered yet, so the verdict still stands…
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_100);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // …and the keep-alive landing at t=7000 is the attempt answering:
+      // it lands the expiry the proof-of-life point was holding.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.stoppedLeg).toBeUndefined();
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('expires a transient stream failure when a keep-alive answers an idle reconnect past the proof-of-life point', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal; onAlive?: () => void },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1)
+          throw Object.assign(new Error('upstream unavailable'), {
+            status: 502,
+          });
+        yield* [];
+        // A live but idle Session: the reconnect delivers no frame at
+        // all, only heartbeat comments, which the client reports through
+        // onAlive. The keep-alive lands past the +3s proof-of-life point.
+        await new Promise((resolve) => setTimeout(resolve, 4_000));
+        request.onAlive?.();
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.error).toBe('upstream unavailable');
+      // Attempt 2 opens at t=3000; its proof-of-life point passes at
+      // t=6000 with nothing delivered yet, so the record still stands…
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_100);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.error).toBe('upstream unavailable');
+      // …and the keep-alive landing at t=7000 is the attempt answering:
+      // it lands the expiry the proof-of-life point was holding.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(latest?.error).toBeUndefined();
+      expect(latest?.stoppedReason).toBeUndefined();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the stall warning through an idle connection that never advances', async () => {
     vi.useFakeTimers();
     const restoreBackoff = deterministicBackoff();

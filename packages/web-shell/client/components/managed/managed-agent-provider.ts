@@ -193,6 +193,12 @@ export interface ManagedAgentProvider {
        * depend on stream activity.
        */
       onEstablished?(): void;
+      /**
+       * Called for each complete heartbeat or comment frame the stream
+       * delivers. Heartbeats never decode into events, so on an idle
+       * Session this is the only sign of life an established stream gives.
+       */
+      onAlive?(): void;
     },
   ): AsyncIterable<ManagedAgentSessionEvent>;
 }

@@ -135,6 +135,48 @@ describe('JavaManagedAgentClient', () => {
     expect(onOpenFailure).not.toHaveBeenCalled();
   });
 
+  it('reports each complete heartbeat to onAlive, and not a trailing fragment', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const encoder = new TextEncoder();
+    const chunks = [
+      ': keepalive\r\n\r\n',
+      'id: 7\r\nevent: item.output_text.delta\r\ndata: {"sequence":7,"eventId":"evt_7","sessionId":"session-1","turnId":"turn-1","type":"item.output_text.delta","createdAt":7,"data":{"text":"hi"},"terminal":false}\r\n\r\n',
+      ': keepalive\r\n\r\n',
+      // A leftover partial frame at end of stream is a mid-frame
+      // disconnect, never a complete heartbeat: it is not reported.
+      ': keepal',
+    ];
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        chunks.forEach((chunk) => controller.enqueue(encoder.encode(chunk)));
+        controller.close();
+      },
+    });
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(body, { status: 200 }));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const onAlive = vi.fn();
+
+    const events = [];
+    for await (const event of client.streamEvents(
+      { sessionId: 'session-1', afterSequence: 6 },
+      undefined,
+      undefined,
+      onAlive,
+    )) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      expect.objectContaining({ sequence: 7, data: { text: 'hi' } }),
+    ]);
+    expect(onAlive).toHaveBeenCalledTimes(2);
+  });
+
   it('decodes the resync frame that ends an expired stream', async () => {
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example',

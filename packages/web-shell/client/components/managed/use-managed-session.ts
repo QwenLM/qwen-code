@@ -349,6 +349,7 @@ export function useManagedSession(
         let gap = false;
         let delayMs = 0;
         let delivered = false;
+        let proofOfLifePassed = false;
         // Captured when the proof-of-life timer below fires: the expiry it
         // accompanies stands only if the attempt goes on to answer
         // error-free, so a throw restores the verdict.
@@ -359,9 +360,11 @@ export function useManagedSession(
         // certifies the stream leg itself — provided the attempt actually
         // answered. An open-but-silent connection is no answer, so the
         // expiry is gated on a delivered frame (a replay counts: delivered
-        // is set before the replay guard). A failed attempt is no answer
-        // either: the catch below restores a verdict this removed.
+        // is set before the replay guard) or a heartbeat (onAlive below).
+        // A failed attempt is no answer either: the catch below restores a
+        // verdict this removed.
         const proofOfLife = setTimeout(() => {
+          proofOfLifePassed = true;
           // Capture from the mirror synchronously: the state update runs
           // at React's flush, which an attempt failing right after the
           // expiry would beat to the catch.
@@ -372,6 +375,13 @@ export function useManagedSession(
           for await (const event of provider.subscribeEvents(sessionId, {
             ...opts,
             lastEventId,
+            // A heartbeat is the attempt answering when an idle Session
+            // delivers no frame: it certifies the stream the same way, so
+            // it lands the expiry the proof-of-life point was holding.
+            onAlive: () => {
+              delivered = true;
+              if (proofOfLifePassed) expireAnswered('stream');
+            },
           })) {
             if (abort.signal.aborted) return;
             delivered = true;
