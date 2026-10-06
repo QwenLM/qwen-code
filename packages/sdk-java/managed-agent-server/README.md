@@ -223,7 +223,9 @@ sibling answers `409 session_mutation_superseded` and the newer public SQL title
 The Harness title was already written before this check; ordering overlapping
 Harness writes remains a follow-up tracked in #13269. A
 same-key request sent after the later rename is the newest request and still
-applies.
+applies, including when a concurrent sibling retires its receipt again. Each
+new attempt records the Session's current journal sequence on its command row;
+existing receipts use their original requested event until they are retried.
 Retries do not re-append the original `requested` event. If the command store
 is unavailable during cleanup, the original API failure is preserved and the
 same key can resume its receipt when storage returns. Only an in-flight

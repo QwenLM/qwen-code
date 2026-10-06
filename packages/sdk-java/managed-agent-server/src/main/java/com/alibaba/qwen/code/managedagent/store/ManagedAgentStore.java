@@ -556,9 +556,11 @@ public class ManagedAgentStore implements AgentStateStore {
                 requireNoOpenOperation(tenantId, sessionId);
                 validateMutationStatus(session, kind);
                 jdbc.update("UPDATE managed_agent_command SET command_status ="
-                                + " 'PENDING', updated_at = ? WHERE tenant_id = ?"
+                                + " 'PENDING', mutation_attempt_sequence = ?,"
+                                + " updated_at = ? WHERE tenant_id = ?"
                                 + " AND operation = ? AND idempotency_key = ?",
-                        clock.millis(), tenantId, operation, idempotencyKey);
+                        session.lastSequence(), clock.millis(), tenantId,
+                        operation, idempotencyKey);
                 return new SessionMutationCommand(sessionId, "PENDING", true);
             }
             return new SessionMutationCommand(sessionId, command.status(),
@@ -569,6 +571,10 @@ public class ManagedAgentStore implements AgentStateStore {
         long now = clock.millis();
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, null, "PENDING", session.status(), now);
+        jdbc.update("UPDATE managed_agent_command SET mutation_attempt_sequence"
+                        + " = ? WHERE tenant_id = ? AND operation = ?"
+                        + " AND idempotency_key = ?",
+                session.lastSequence(), tenantId, operation, idempotencyKey);
         // Older retired commands may have left their requested event behind.
         String requestedSource = mutationSource(operation, idempotencyKey,
                 "requested");
@@ -2767,26 +2773,30 @@ public class ManagedAgentStore implements AgentStateStore {
                 + "." + phase;
     }
 
-    // Mutation commands on one Session begin one at a time, so a completion
-    // sequenced after this command's requested event belongs to a command
-    // that began after this one stopped being PENDING. Sequence ids order
-    // that strictly, where millisecond timestamps can tie.
+    // The Session lock orders each new attempt against committed events.
+    // Legacy receipts fall back to their original requested event; a
+    // re-drive refreshes the boundary without appending another event.
     private boolean supersededByLaterMutation(String tenantId,
             String sessionId, String operation, String idempotencyKey,
             SessionMutationKind kind) {
-        List<Long> requested = jdbc.queryForList("SELECT sequence_id FROM"
-                        + " managed_agent_event WHERE tenant_id = ? AND"
-                        + " session_id = ? AND source_key = ?",
-                Long.class, tenantId, sessionId,
-                mutationSource(operation, idempotencyKey, "requested"));
-        if (requested.isEmpty()) {
+        List<Long> attempts = jdbc.queryForList("SELECT COALESCE("
+                        + " c.mutation_attempt_sequence, e.sequence_id) FROM"
+                        + " managed_agent_command c LEFT JOIN managed_agent_event e"
+                        + " ON e.tenant_id = c.tenant_id AND"
+                        + " e.session_id = c.session_id AND e.source_key = ?"
+                        + " WHERE c.tenant_id = ? AND c.session_id = ? AND"
+                        + " c.operation = ? AND c.idempotency_key = ?",
+                Long.class, mutationSource(operation, idempotencyKey,
+                        "requested"), tenantId, sessionId, operation,
+                idempotencyKey);
+        if (attempts.isEmpty() || attempts.getFirst() == null) {
             return false;
         }
         Integer later = jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " managed_agent_event WHERE tenant_id = ? AND"
                         + " session_id = ? AND sequence_id > ? AND"
                         + " event_type = ? AND source_key LIKE 'control:%'",
-                Integer.class, tenantId, sessionId, requested.getFirst(),
+                Integer.class, tenantId, sessionId, attempts.getFirst(),
                 mutationEvent(kind, "completed"));
         return later != null && later > 0;
     }

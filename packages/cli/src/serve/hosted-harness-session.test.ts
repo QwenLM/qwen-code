@@ -8715,6 +8715,83 @@ describe('Hosted Harness Runtime turn takeover', () => {
     }
   }, 30_000);
 
+  it.each(['resolved', 'rejected'])(
+    'keeps teardown fenced until overlapping passive loads finish (%s)',
+    async (secondOutcome) => {
+      const { server, clientId } = await parkToolTurn(true);
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+        state: 'prepared',
+      });
+      const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+      release.mockClear();
+      let finishFirst!: () => void;
+      let finishSecond!: () => void;
+      let rejectSecond!: (cause: Error) => void;
+      const firstGate = new Promise<void>((resolve) => {
+        finishFirst = resolve;
+      });
+      const secondGate = new Promise<void>((resolve, reject) => {
+        finishSecond = resolve;
+        rejectSecond = reject;
+      });
+      acquireSpy
+        .mockImplementationOnce(() => firstGate as never)
+        .mockImplementationOnce(() => secondGate as never);
+      const passiveLoad = () =>
+        headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+          .send({
+            managedSessionStore: store(),
+            toolProfile: FILE_PROFILE,
+            passiveManagedRuntimeRecovery: true,
+          })
+          .then((response) => response);
+      let firstLoad: Promise<supertest.Response> | undefined;
+      let secondLoad: Promise<supertest.Response> | undefined;
+      try {
+        firstLoad = passiveLoad();
+        secondLoad = passiveLoad();
+        await vi.waitFor(() => expect(acquireSpy).toHaveBeenCalledTimes(2), {
+          timeout: 10_000,
+        });
+        finishFirst();
+        const first = await firstLoad;
+        expect(first.status).toBe(200);
+        expect(first.body.clientId).toBe(clientId);
+        const prematureClose = await headers(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        );
+        expect(prematureClose.status).toBe(409);
+        expect(prematureClose.body.code).toBe('hosted_turn_active');
+        expect(release).not.toHaveBeenCalled();
+        if (secondOutcome === 'rejected') {
+          rejectSecond(new Error('store hiccup'));
+        } else {
+          finishSecond();
+        }
+        const second = await secondLoad;
+        expect(second.status).toBe(secondOutcome === 'resolved' ? 200 : 409);
+        const closed = await headers(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        );
+        expect(closed.status).toBe(204);
+        expect(release).toHaveBeenCalledOnce();
+        expect(
+          (release.mock.contexts[0] as HostedWorkspaceBroker).runtimeSessionId,
+        ).toBe(PROMPT_ID);
+        const repeatedClose = await headers(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        );
+        expect(repeatedClose.status).toBe(404);
+        expect(release).toHaveBeenCalledOnce();
+      } finally {
+        finishFirst();
+        finishSecond();
+        await Promise.all([firstLoad, secondLoad]);
+      }
+    },
+    30_000,
+  );
+
   it('refuses a teardown that lands after a resident passive load published its adoption', async () => {
     const { server } = await parkToolTurn(true);
     const release = vi.mocked(HostedWorkspaceBroker.prototype.release);

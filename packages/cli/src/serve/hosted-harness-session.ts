@@ -195,7 +195,7 @@ interface HostedSession {
   hooksBusy?: boolean;
   mcpBusy?: boolean;
   mcpClosing?: boolean;
-  mcpRecovering?: boolean;
+  mcpRecovering: number;
   approval?: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
   monitorWake?: HostedMonitorWakeScheduler;
@@ -1763,7 +1763,7 @@ export function registerHostedHarnessSessionRoutes(
           // can still reach, so the recovery holds close()'s own fence: a
           // concurrent teardown would otherwise release a lease that is still
           // mid-adoption and persist the record RELEASED.
-          resident.mcpRecovering = true;
+          resident.mcpRecovering += 1;
           const recovered = await recoverHostedRuntimeTurn({
             session: resident.managed,
             sessionId,
@@ -1775,7 +1775,7 @@ export function registerHostedHarnessSessionRoutes(
               resident.runtimeLeaseHeld = runtimeSessionId;
             },
           }).finally(() => {
-            resident.mcpRecovering = false;
+            resident.mcpRecovering -= 1;
           });
           recovery = recovered?.report;
           if (
@@ -1959,6 +1959,7 @@ export function registerHostedHarnessSessionRoutes(
         streams: new Set(),
         admissions: new Map(),
         blocked: false,
+        mcpRecovering: 0,
         waiters: new HostedApprovalWaiters(),
         ...(toolProfile ? { toolProfile } : {}),
         ...(isHostedWorkspaceShellProfile(toolProfile) &&
@@ -2042,7 +2043,7 @@ export function registerHostedHarnessSessionRoutes(
         const wakeBusy = () =>
           session.active !== undefined ||
           session.mcpBusy === true ||
-          session.mcpRecovering === true ||
+          session.mcpRecovering > 0 ||
           session.hooksBusy === true ||
           session.mcpClosing === true;
         const wakeBlocked = () =>
@@ -2991,7 +2992,7 @@ export function registerHostedHarnessSessionRoutes(
     if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
     if (session.mcpClosing || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
-    session.mcpRecovering = true;
+    session.mcpRecovering += 1;
     void session.mcp
       .cancel(req.params['operationId'])
       .then(
@@ -2999,7 +3000,7 @@ export function registerHostedHarnessSessionRoutes(
         () => error(res, 503, 'hosted_mcp_cancel_failed'),
       )
       .finally(() => {
-        session.mcpRecovering = false;
+        session.mcpRecovering -= 1;
       });
   });
 
@@ -3009,7 +3010,7 @@ export function registerHostedHarnessSessionRoutes(
     if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
     if (session.mcpClosing || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
-    session.mcpRecovering = true;
+    session.mcpRecovering += 1;
     void session.mcp
       .status(req.params['operationId'])
       .then(
@@ -3017,7 +3018,7 @@ export function registerHostedHarnessSessionRoutes(
         () => error(res, 503, 'hosted_mcp_status_failed'),
       )
       .finally(() => {
-        session.mcpRecovering = false;
+        session.mcpRecovering -= 1;
       });
   });
 
