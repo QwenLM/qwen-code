@@ -546,9 +546,10 @@ describe('trimModelsDevCatalog', () => {
     // entry reaching the alias pass can carry `modalities` and nothing else.
     // That shape is live in the shipped snapshot — `qwen3.7-plus` and its twin
     // `qwen3-7-plus` are both `{image,video}`-only — and skipping it would drop
-    // the twin from the next regeneration, leaving it with the `/^qwen/` regex
-    // limits and no catalog entry to supply modalities: the loss #13209 exists
-    // to remove.
+    // the twin from the next regeneration, leaving it with no catalog entry to
+    // supply modalities. The twin's limits come from the `/^qwen/` regex rows
+    // either way, since the entry the alias writes is the limit-less one pinned
+    // here — this removes the modality half of the loss #13209 exists to remove.
     const models = trimModelsDevCatalog(
       {
         alibaba: {
