@@ -1,8 +1,10 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -13,6 +15,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationResul
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataAccessResourceFailureException;
 
 class MessageMaterializerTest {
     private static final MaterializationTarget POISON =
@@ -67,6 +70,56 @@ class MessageMaterializerTest {
         materializer.materialize();
         verify(store, times(9)).materializeNextBatch("tenant", "poison",
                 200);
+    }
+
+    @Test
+    void aFailingDeferralDegradesOnlyItsOwnTarget() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        MaterializationTarget healthy =
+                new MaterializationTarget("tenant", "healthy");
+        when(store.findMaterializationTargets(32))
+                .thenReturn(List.of(POISON, healthy));
+        when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
+                .thenThrow(new IllegalStateException("gap"));
+        doThrow(new DataAccessResourceFailureException("lock wait"))
+                .when(store)
+                .deferMaterializationTarget(anyString(), anyString());
+        MessageMaterializer materializer = new MessageMaterializer(store);
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(MessageMaterializer.class);
+        ch.qos.logback.core.read.ListAppender<
+                ch.qos.logback.classic.spi.ILoggingEvent> logged =
+                        new ch.qos.logback.core.read.ListAppender<>();
+        logged.start();
+        logger.addAppender(logged);
+        try {
+            // Pass one poisons the target; pass two exercises the streaked
+            // pre-attempt deferral and the catch-path deferral, both
+            // throwing. Catching the escape keeps the verdict on the
+            // assertions below rather than on which call threw.
+            try {
+                materializer.materialize();
+                materializer.materialize();
+            } catch (RuntimeException escaped) {
+                // An unguarded deferral lets the store fault escape the pass.
+            }
+        } finally {
+            logger.detachAppender(logged);
+        }
+
+        // A store fault while deferring must not abort the pass: the healthy
+        // target is still attempted on every pass, and the WARN still names
+        // the poisoned session.
+        verify(store, times(2)).materializeNextBatch("tenant", "healthy",
+                200);
+        assertThat(logged.list).anySatisfy(event -> {
+            assertThat(event.getLevel())
+                    .isEqualTo(ch.qos.logback.classic.Level.WARN);
+            assertThat(event.getFormattedMessage())
+                    .contains("Failed to materialize Managed Agent session")
+                    .contains("poison");
+        });
     }
 
     @Test

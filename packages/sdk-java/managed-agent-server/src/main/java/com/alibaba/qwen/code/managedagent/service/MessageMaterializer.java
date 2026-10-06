@@ -36,8 +36,7 @@ public class MessageMaterializer {
             String key = target.tenantId() + ":" + target.sessionId();
             int streak = failures.getOrDefault(key, 0);
             if (streak > 0) {
-                store.deferMaterializationTarget(target.tenantId(),
-                        target.sessionId());
+                deferQuietly(target);
                 boolean due = streak < MAX_BACKOFF_STREAK
                         ? (streak & (streak - 1)) == 0
                         : streak % MAX_BACKOFF_STREAK == 0;
@@ -51,12 +50,23 @@ public class MessageMaterializer {
                         target.sessionId(), EVENT_LIMIT);
                 failures.remove(key);
             } catch (RuntimeException error) {
-                failures.put(key, streak + 1);
-                store.deferMaterializationTarget(target.tenantId(),
-                        target.sessionId());
                 LOG.warn("Failed to materialize Managed Agent session {}",
                         target.sessionId(), error);
+                failures.put(key, streak + 1);
+                deferQuietly(target);
             }
+        }
+    }
+
+    // A store fault while rotating a target must degrade that one target,
+    // not abort the pass for every other selected session.
+    private void deferQuietly(MaterializationTarget target) {
+        try {
+            store.deferMaterializationTarget(target.tenantId(),
+                    target.sessionId());
+        } catch (RuntimeException deferError) {
+            LOG.warn("Failed to defer Managed Agent session {}",
+                    target.sessionId(), deferError);
         }
     }
 }

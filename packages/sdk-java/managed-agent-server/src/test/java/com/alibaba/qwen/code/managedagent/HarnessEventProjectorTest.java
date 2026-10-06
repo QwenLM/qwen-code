@@ -4,10 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
+import com.alibaba.qwen.code.managedagent.store.EventIdentity;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
-import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 class HarnessEventProjectorTest {
@@ -66,12 +65,15 @@ class HarnessEventProjectorTest {
                         "sessionUpdate", "tool_call", "toolCallId",
                         "call-1")), "prompt", Map.of()), "turn-1");
 
-        // EventIdentity's version-1 rule names the Item for the stored event
-        // and the published tool result; a divergent tag here splits the
-        // call into an orphan in_progress Item and a separate result Item.
-        assertThat(event.data().get("itemId")).isEqualTo("item_tool_"
-                + UUID.nameUUIDFromBytes("turn-1:call-1"
-                        .getBytes(StandardCharsets.UTF_8)));
+        // EventIdentity's version-1 rule names the Item for the stored
+        // event and the published tool result; a projector-side divergence
+        // splits the call into an orphan in_progress Item and a separate
+        // result Item, so assert against the authority, not a re-derived
+        // literal.
+        assertThat(event.data().get("itemId"))
+                .isEqualTo(EventIdentity.of("item.tool_call.updated",
+                        "turn-1", 5L, Map.of("callId", "call-1"), null)
+                        .itemId());
     }
 
     @Test

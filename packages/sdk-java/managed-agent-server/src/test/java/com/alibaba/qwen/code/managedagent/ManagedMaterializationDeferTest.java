@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -57,5 +58,58 @@ class ManagedMaterializationDeferTest {
                 "tenant", "session", "message_projection");
         assertThat(row.get("updated_at")).isEqualTo(123456789L);
         assertThat(row.get("covered_sequence")).isEqualTo(9L);
+    }
+
+    /**
+     * The deferral's purpose: rotate a poisoned target behind fresher rows
+     * so it drops out of the selection window. Pins the composition with
+     * {@code findMaterializationTargets}' {@code ORDER BY p.updated_at ASC}
+     * — flipping it to DESC inverts the deferral and starves the sessions
+     * outside the window.
+     */
+    @Test
+    void deferralRotatesTheTargetBehindFresherRows() {
+        JdbcDataSource dataSource = new JdbcDataSource();
+        dataSource.setURL("jdbc:h2:mem:materialization-rotate-"
+                + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        for (int i = 0; i < 3; i++) {
+            String session = "session-" + i;
+            jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                            + " session_id, agent_id, status, created_at,"
+                            + " updated_at, last_sequence) VALUES (?, ?, ?,"
+                            + " ?, ?, ?, ?)",
+                    "tenant", session, "qwen-code", "ACTIVE", 1L, 1L, 9L);
+            // updated_at 1000/2000/3000, all below the fixed clock:
+            // session-0 is the stalest row and heads the selection window.
+            jdbc.update("INSERT INTO managed_agent_consumer_progress"
+                            + " (tenant_id, session_id, consumer_name,"
+                            + " covered_sequence, updated_at) VALUES"
+                            + " (?, ?, ?, ?, ?)",
+                    "tenant", session, "message_projection", 1L,
+                    1000L * (i + 1));
+        }
+        ManagedAgentStore store = new ManagedAgentStore(jdbc,
+                new ObjectMapper(),
+                Clock.fixed(Instant.ofEpochMilli(123456789L),
+                        ZoneOffset.UTC),
+                ignored -> {
+                }, new ManagedWorkspaceRegistry(jdbc),
+                new ManagedAgentProperties());
+
+        assertThat(store.findMaterializationTargets(2))
+                .containsExactly(
+                        new MaterializationTarget("tenant", "session-0"),
+                        new MaterializationTarget("tenant", "session-1"));
+
+        store.deferMaterializationTarget("tenant", "session-0");
+
+        assertThat(store.findMaterializationTargets(2))
+                .containsExactly(
+                        new MaterializationTarget("tenant", "session-1"),
+                        new MaterializationTarget("tenant", "session-2"));
     }
 }

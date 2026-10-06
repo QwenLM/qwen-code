@@ -67,11 +67,21 @@ public final class EventIdentity {
         if (callId == null) {
             callId = string(data.get("callId"));
         }
-        String identity = callId == null
-                ? turnId + ":sequence:" + sequence
-                : turnId + ":" + callId;
+        return callId == null
+                ? "item_tool_" + UUID.nameUUIDFromBytes(
+                        (turnId + ":sequence:" + sequence)
+                                .getBytes(StandardCharsets.UTF_8))
+                : toolCallItemId(turnId, callId);
+    }
+
+    /**
+     * The Item a tool call with this callId belongs to. The Harness event
+     * projector names the stored tool_call event's Item with this same rule,
+     * so the published tool result lands on the same Item.
+     */
+    public static String toolCallItemId(String turnId, String callId) {
         return "item_tool_" + UUID.nameUUIDFromBytes(
-                identity.getBytes(StandardCharsets.UTF_8));
+                (turnId + ":" + callId).getBytes(StandardCharsets.UTF_8));
     }
 
     // A text delta continues the Part of the delta right before it when both

@@ -1481,6 +1481,30 @@ class HarnessCoordinatorTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("lease");
 
+        // A sub-millisecond renew is positive, so only validating the
+        // truncated millis rejects it; the scheduler would otherwise receive
+        // period 0 and die on the worker thread holding the claimed turn.
+        ManagedAgentProperties subMillis = new ManagedAgentProperties();
+        subMillis.getDispatch()
+                .setLeaseRenewInterval(Duration.ofNanos(999_999));
+        assertThatThrownBy(() -> new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(), subMillis))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lease");
+
+        // With the default 60 s duration a negative renew passes the
+        // renew >= duration comparison, so only the renew-side bound rejects
+        // it.
+        ManagedAgentProperties negativeRenew = new ManagedAgentProperties();
+        negativeRenew.getDispatch()
+                .setLeaseRenewInterval(Duration.ofSeconds(-1));
+        assertThatThrownBy(() -> new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(), negativeRenew))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lease");
+
         // The defaults (60 s lease / 20 s renew) keep passing.
         new HarnessCoordinator(store, harness, new HarnessEventProjector(),
                 mock(RuntimeWarmer.class), directExecutor(),
