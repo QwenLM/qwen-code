@@ -967,12 +967,13 @@ const REWIND_OUTCOME_RETRY_MAX_MS = 2_000;
 
 /**
  * Whether a rewind the tab stopped waiting for missed the daemon. The daemon
- * cannot take back a rewind it has dispatched, so only it can tell: it lists
- * a turn's snapshot while the turn is in history and never reuses a snapshot
- * id. The target still listed on two readings — the first can be served from
- * the same read of the agent's pipe as a stalled rewind, before that rewind
- * truncates — means no rewind happened. Keeps asking while the daemon cannot
- * be reached. Resolves `false` once the daemon shows the rewind landed (the
+ * cannot take back a rewind it has admitted, so only it can tell: it lists
+ * a turn's snapshot while the turn is in history, never reuses a snapshot
+ * id, and answers the listing only after every rewind admitted before it
+ * has run. The target still listed on two readings — the first can be
+ * answered while the daemon is still reading the rewind's own request —
+ * means no rewind happened. Keeps asking while the daemon cannot be
+ * reached. Resolves `false` once the daemon shows the rewind landed (the
  * transcript then lifts the hold) or `stillHeld` says the hold is gone.
  */
 async function rewindMissed(

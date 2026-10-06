@@ -2876,6 +2876,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /**
    * List rewindable snapshots for a session with per-turn diff stats.
+   * Answered only after every rewind admitted before the call has run, so
+   * the listing never describes a turn the bridge has already agreed to
+   * drop.
    */
   getRewindSnapshots(
     sessionId: string,
