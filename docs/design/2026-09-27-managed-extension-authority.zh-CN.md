@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-extension-authority.md) | [简体中文](2026-09-27-managed-extension-authority.zh-CN.md)
 
-状态：已在本次变更中实现；目前尚无 Stage H domain 开放提交。更新：2026-10-04（[#13300](https://github.com/QwenLM/qwen-code/issues/13300) 的 H0c 后续把决策 10 与 H0b 记录契约对齐，在提交时校验每一条事件行，并把 `task.updated` 移入任务事件 outbox）。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H0c 切片，属于 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。它建立在 H0a 的任务契约（[设计](2026-09-27-managed-agent-task-contract.zh-CN.md)）和 H0b 的记录契约（[设计](2026-09-27-managed-extension-record-contract.zh-CN.md)）之上。下文的“参考设计”指该提案[扩展运行时设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md)的第 1、3、11、13 节，以及其 [Session 存储设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-session-storage.md)第 3 节和[私有控制协议](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-control-protocol.md)中的 `OperationGrant`，均以 #12827 固定的提交为准。
+状态：已在本次变更中实现；目前尚无 Stage H domain 开放提交。更新：2026-10-04（[#13300](https://github.com/QwenLM/qwen-code/issues/13300) 的 H0c 后续把决策 10 与 H0b 记录契约对齐，在提交时校验每一条事件行，并把 `task.updated` 宣告移出 Session 事件流：任务视图的每一次变化由任务事件路由所服务的按任务事件日志记录）。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H0c 切片，属于 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。它建立在 H0a 的任务契约（[设计](2026-09-27-managed-agent-task-contract.zh-CN.md)）和 H0b 的记录契约（[设计](2026-09-27-managed-extension-record-contract.zh-CN.md)）之上。下文的“参考设计”指该提案[扩展运行时设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md)的第 1、3、11、13 节，以及其 [Session 存储设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-session-storage.md)第 3 节和[私有控制协议](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-control-protocol.md)中的 `OperationGrant`，均以 #12827 固定的提交为准。
 
 ## 问题
 
@@ -99,25 +99,25 @@ authority 打开时，会按同样的规则重放日志中的每条 Stage H 修�
 
 ## Java Session 存储
 
-Flyway `V18` 新增 `qwen_managed_session_extension_record`：每条记录一行，以 Session 范围键和记录键为主键，保存记录身份、开启它的命令的哈希、最新修订及其资源、任务投影与交付状态线。一个索引服务任务列表，另一个服务开启命令的检查。Flyway `V40` 新增 `managed_agent_task_event`，即任务事件 outbox：每次宣告的视图变化一行，以 Session 与其递增序号为主键，来源键唯一。`ManagedExtensionRecordStore` 在 `ManagedSessionStore.commit` 中写入它们，时机在事务的资源存入之后，并处于同一个 SQL 事务内：
+Flyway `V18` 新增 `qwen_managed_session_extension_record`：每条记录一行，以 Session 范围键和记录键为主键，保存记录身份、开启它的命令的哈希、最新修订及其资源、任务投影与交付状态线。一个索引服务任务列表，另一个服务开启命令的检查。本次变更不新增迁移：宣告写入已提供服务的任务事件路由所读取的按任务事件日志（`qwen_managed_session_task_journal`，由本堆叠 H3 自己的迁移创建），原先另建独立任务事件 outbox 表的方案被放弃，而不是与服务中的日志并存。`ManagedExtensionRecordStore` 在 `ManagedSessionStore.commit` 中写入它们，时机在事务的资源存入之后，并处于同一个 SQL 事务内：
 
 1. 以与 authority 读取器同样严格的方式解析事务的每一行记录：不允许重复键或尾随内容，嵌套不超过 64 层（由共享的存储契约固定），数字必须有限。超过本行种类字节上限的行同样被拒绝，正如 authority 读取器在下次打开时会拒绝它：事件行上限为共享契约固定的 `maxEventBytes`，提交标记行上限为 `maxCommitMarkerBytes`。
-2. 检查每一条事件行，而不仅是携带记录的那一条，所做的检查是 authority 对任何类型的行都会执行的那些：事件封闭，允许可选的 subject；版本为 1；序号与它在事务事件中的位置相符，因此它既不会占据提交标记所在的行，也不会属于 genesis；事件 ID 良构，且不落在有正文的 domain 保留的 `<domain>:<n>` 命名空间内——该命名空间由 authority 的写入方留给它自己的 Stage H 事件（若存下这样一行，它会与该 domain 下一条 Stage H 记录的 ID 冲突，那条记录将永远无法提交）；键封闭且属于本 Session；时间有效；事件类型取自封闭的事件类型表（镜像于 `ManagedExtensionRecords.EVENT_KINDS`）。日志不认识的 subtype 行只在 Managed header 之前容忍，与 authority 的扫描器一致。每一条 `domain.committed` 的 payload 都被检查，无论该 domain 在这里是否有正文：payload 封闭，domain 取自 v1 索引，版本为 1，其引用指向该 domain 的版本 1 记录。对有正文 domain 的事件——每个事务至多一条——事件不允许携带 subject（authority 从不为它设置 subject），且事务只能依次包含它的事件和提交标记。然后从校验过的资源读取正文，检查它与引用一致，并用 `ManagedExtensionRecords` 检查正文。其他事件类型各自的 payload schema 与 subject 规则、以及提交标记的摘要，这里不再重新推导：它们仍属于 authority 的契约，由其客户端在每次提交前检查；因此只有绕过 authority 的写方，才可能存下一行在下次打开时被拒绝的记录。
+2. 检查每一条事件行，而不仅是携带记录的那一条，所做的检查是 authority 对任何类型的行都会执行的那些：事件封闭，允许可选的 subject，payload 以及存在时的 subject 必须是 JSON 对象；版本为 1；序号与它在事务事件中的位置相符，因此它既不会占据提交标记所在的行，也不会属于 genesis；事件 ID 良构：无正文的行不得落在有正文 domain 保留的 `<domain>:<n>` 命名空间内，而 Stage H 行必须落在它自己 domain 的命名空间内（持有其他 domain 的保留 ID 会与该 domain 下一条 Stage H 记录的 ID 冲突，那条记录将永远无法提交）；键封闭且属于本 Session；时间有效；事件类型取自封闭的事件类型表（镜像于 `ManagedExtensionRecords.EVENT_KINDS`）。日志不认识的 subtype 行只在 Managed header 之前容忍，与 authority 的扫描器一致。每一条 `domain.committed` 的 payload 都被检查，无论该 domain 在这里是否有正文：payload 封闭，domain 取自 v1 索引，版本为 1，其引用指向该 domain 的版本 1 记录。对有正文 domain 的事件——每个事务至多一条——事件不允许携带 subject（authority 从不为它设置 subject），且事务只能依次包含它的事件和提交标记。然后从校验过的资源读取正文，检查它与引用一致，并用 `ManagedExtensionRecords` 检查正文。其他事件类型各自的 payload schema 与 subject 规则、提交标记的序号主体与摘要、扫描器按整份日志维护的状态（重复的 Managed header、属于其他 Session 的 header、出现在 header 之前的行），以及某个已存 ID 可能与之冲突的按 domain 事件计数，这里不再重新推导：它们仍属于 authority 的契约，由其客户端在每次提交前检查；因此只有绕过 authority 的写方，才可能存下一行在下次打开时被拒绝的记录。
 3. 对照存储中的最新修订检查首修订规则或后继规则，并借助每行保存的开启命令哈希，检查开启记录的命令没有开启过另一条记录。然后用 `ManagedExtensionProjection` 投影任务视图，插入或更新该行。
-4. 当视图发生变化，且该 Session 有公开资源、未被删除也不在删除中时，把这次变化——任务 ID 与状态——在同一个事务里写入任务事件 outbox `managed_agent_task_event`，因此被拒绝的修订不宣告任何内容。宣告不进入 Session 事件流，因为消息投影读取的正是该事件流的序号：一条落在两段流式文本增量之间的宣告会在冻结的投影规则下把增量所在的消息 Part 拆开（#13300 的 R3-3），因此宣告绝不进入该事件流，改由计划中的任务事件路由排空 outbox。重放的事务不宣告，因为它在记录存储运行之前就已返回；outbox 行的来源键把宣告固定到它的记录修订上，唯一索引拒绝第二次写入。存储先锁住 Session 所在的行再读取状态，因此能看到在 Session 存储事务进行期间已提交的删除；进入删除的 Session 不再宣告，但其任务仍然可读。
+4. 视图发生变化时，把这次变化——任务 ID、新的状态与运行时状态——在同一个事务里追加到任务事件路由所服务的按任务事件日志，因此被拒绝的修订不宣告任何内容。宣告不进入 Session 事件流，因为消息投影读取的正是该事件流的序号：一条落在两段流式文本增量之间的宣告会在冻结的投影规则下把增量所在的消息 Part 拆开（#13300 的 R3-3），因此宣告绝不进入该事件流。重放的事务不宣告，因为它在记录存储运行之前就已返回。日志因超过积压上限而拒绝时，只让这条信息流降级，绝不让提供数据的记录提交失败。追加前对 Session 所在行做加锁读，因此能看到在 Session 存储事务进行期间已提交的删除，并在 Session 被删除或删除中时跳过追加：进入删除的 Session 不再追加任务事件，但其任务仍然可读。
 
 被这些规则拒绝的修订返回 `409 managed_session_extension_record_rejected`。正文资源缺失、属于其他 Session 或校验失败时，沿用存储原有的回应（`409 managed_session_resource_missing`、`404 managed_session_not_found`、`500 managed_session_resource_corrupt`）。无论哪种情况，整个提交都会回滚。重放的事务在上述步骤之前就已返回。现在，无论事务是否携带 Stage H 记录，每一行记录都必须是 authority 读取器能够接受的 JSON 对象，否则返回 `400 invalid_managed_session_store_request`。authority 写出的行一直满足这一点。这些行是持久的读模型：重启后的服务读到相同的列表，而导出它们的日志仍是真相来源。
 
 ## 公开契约
 
-OpenAPI 版本升为 `1.19.0`，排在持久 Session 生命周期（#12881）的 `1.18.0` 之后。#13300 的 H0c 后续把宣告移入任务事件 outbox 记为 `1.30.0`，排在 AgentDefinition 路由的 `1.29.0` 之后。
+OpenAPI 版本升为 `1.19.0`，排在持久 Session 生命周期（#12881）的 `1.18.0` 之后。#13300 的 H0c 后续把宣告移出 Session 事件流记为 `1.32.0`，排在免网关签名方案的 `1.30.0` 与已提供任务事件路由的 `1.31.0` 之后。
 
 - `listSessionTasks`、`getSessionTask`、`queryWebShellTasks` 与 `getWebShellTask` 改为 `partial` 并已映射，它们返回的任务 schema 与枚举也一样。
 - 提供 `SessionCapabilities.tasks`，并与其他已提供的标志一样列为必填。`WebShellSession.capabilities` 改为命名 schema `WebShellSessionCapabilities`，其中 `tasks` 已提供且必填，其余标志仍为 `planned`。
 - 任务时间戳注明为 epoch 毫秒。
-- 列表路由说明：任务视图的每一次变化都会向任务事件 outbox 追加一行带任务 ID 与状态的 `task.updated`，由计划中的任务事件路由提供；无需改动 schema。
+- 列表路由说明：任务视图的每一次变化都会连同其记录修订提交到任务事件路由所服务的按任务事件日志；进入删除的 Session 不再追加任务事件，但其任务仍然可读；无需改动 schema。
 - 列表游标错误为 `400 invalid_cursor`，limit 不在 1 到 100 之间为 `400 invalid_limit`，任务不存在为 `404 task_not_found`。
-- `output_cursor` 与 `outputCursor` 随它所指向的任务事件路由保持 `planned`。`TaskActionCapability` 的取值会进入生成类型，尽管 H0c 的任务不宣告其中任何一个，因为枚举值无法带上标记，这一点 H0a 已就 `task_cancel` 说明过。
+- `output_cursor` 与 `outputCursor` 在本切片随它所指向的任务事件路由保持 `planned`，并在路由提供服务后的 `1.31.0` 随之放开。`TaskActionCapability` 的取值会进入生成类型，尽管 H0c 的任务不宣告其中任何一个，因为枚举值无法带上标记，这一点 H0a 已就 `task_cancel` 说明过。
 
 生成的 WebShell 类型新增两条任务路由、任务 schema 与能力对象。
 
@@ -142,7 +142,7 @@ OpenAPI 版本升为 `1.19.0`，排在持久 Session 生命周期（#12881）的
 - `packages/core/src/managed-runtime/managed-session-authority.ts` 与新增的 `managed-session-authority.extension.test.ts`。
 - `packages/core/src/managed-runtime/http-managed-session-store.ts` 及其测试，以及 `managed-session-store-contract.test.ts`。
 - 上述两个 fixture 文件（新增），以及 `managed-session-store-v1.fixtures.json` 中的 `maxJsonDepth`、按行种类的字节上限与事件类型表。
-- `packages/sdk-java/managed-agent-server` 中：`ManagedExtensionProjection`、`ManagedExtensionRecordStore`、`ManagedTaskService`、`V18__managed_extension_record.sql` 与 `V40__managed_task_event.sql`（新增）；`ManagedExtensionRecords`、`ManagedSessionStore`、`ManagedSessionStoreModels`、`AgentStateStore`、`ManagedAgentStore`、`ManagedAgentService`、`ApiModels` 与两个控制器；OpenAPI 规范；`ManagedAgentApiContractTest`、`ManagedAgentMySqlIT`、`ManagedSessionStoreIntegrationTest`、`ManagedSessionStoreContractFixtureTest` 与 `PlannedTaskContractTest`；以及 `ManagedExtensionProjectionContractTest`、`ManagedExtensionRecordStoreTest`、`ManagedActionsTest` 与 `ToolPublicationStoreTest`，外加测试辅助类 `ExtensionRecordJournal`（新增）与 `ActionJournal`。
+- `packages/sdk-java/managed-agent-server` 中：`ManagedExtensionProjection`、`ManagedExtensionRecordStore`、`ManagedTaskService` 与 `V18__managed_extension_record.sql`（新增）；`ManagedExtensionRecords`、`ManagedSessionStore`、`ManagedSessionStoreModels`、`AgentStateStore`、`ManagedAgentStore`、`ManagedAgentService`、`ApiModels` 与两个控制器；OpenAPI 规范；`ManagedAgentApiContractTest`、`ManagedAgentMySqlIT`、`ManagedSessionStoreIntegrationTest`、`ManagedSessionStoreContractFixtureTest` 与 `PlannedTaskContractTest`；以及 `ManagedExtensionProjectionContractTest`、`ManagedExtensionRecordStoreTest`、`ManagedActionsTest` 与 `ToolPublicationStoreTest`，外加测试辅助类 `ExtensionRecordJournal`（新增）与 `ActionJournal`。
 - `packages/sdk-java/runtime-broker` 中：`RuntimeBrokerHttpServer.wireState` 改为包内可见，并由新增的 `ManagedExtensionExecutionContractTest` 固定。
 - `packages/web-shell/client/components/managed/generated/managed-agent-api.ts`（重新生成）。
 - 本设计的两种语言版本，以及 H0a 与 H0b 设计的状态行。
@@ -175,8 +175,8 @@ OpenAPI 版本升为 `1.19.0`，排在持久 Session 生命周期（#12881）的
 
 ## 后续工作
 
-| 切片  | 范围                                                                                                                                                                                                               |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| H1–H2 | MCP 与 Hooks 的正文和阶段；决定哪些提交需要出示 grant，并在提交时校验。                                                                                                                                            |
-| H3    | 开放 `monitor_run` 与后台 Shell；任务事件与输出，由 `managed_agent_task_event` outbox 提供；`draining`；限制重建开销；让旧读取器远离相关 Session；在接入执行映射时决定如何区分已认领但未发送的取消与已发送的取消。 |
-| H4–H5 | 子任务与 Channel 的正文；排空 outbox 的派发器；任务取消。                                                                                                                                                          |
+| 切片  | 范围                                                                                                                                                                                                                     |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| H1–H2 | MCP 与 Hooks 的正文和阶段；决定哪些提交需要出示 grant，并在提交时校验。                                                                                                                                                  |
+| H3    | 开放 `monitor_run` 与后台 Shell；任务事件与输出（由按任务事件日志 `qwen_managed_session_task_journal` 提供）；限制重建开销；让旧读取器远离相关 Session；在接入执行映射时决定如何区分已认领但未发送的取消与已发送的取消。 |
+| H4–H5 | 子任务与 Channel 的正文；任务取消；接入子任务正文之前，先解决 `child_run` 上从未被认领的 `cancelled` 结算——已取消的子运行要求执行状态为 `settled`，而执行线从 `intent` 到不了 `settled`。                                |
