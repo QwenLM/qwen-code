@@ -155,3 +155,75 @@ describe('SDK Java Flyway migration version guard', () => {
     }
   });
 });
+
+// #13506: the pool-routed legs inherited only the bare ownership restore
+// while ci.yml grew the rest of its pre-checkout hygiene across
+// recorded incidents — the safe.directory trust after #12648 and the
+// stale-.qwen sweep after the 33146730771 checkout poisoning. A leftover
+// review/autofix residue on a shared ECS host failed this workflow's
+// Checkout step on main. Pin every pool job to restore → sweep → checkout
+// and pin both step bodies byte-identical to the ci.yml copies so the two
+// files cannot drift apart (ci.yml's own copies are pinned the same way in
+// scripts/tests/review-worktree-cleanup-workflow.test.js).
+describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
+  const parsed = parse(workflow);
+  const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
+  const ciSteps = Object.values(ci.jobs).flatMap((job) => job.steps ?? []);
+  const ciSweep = ciSteps.find(
+    (s) => s.name === 'Clean stale .qwen before checkout',
+  )?.run;
+  const ciRestore = ciSteps.find(
+    (s) => s.name === 'Restore workspace ownership',
+  )?.run;
+  const poolJobs = ['test', 'flyway-migrations', 'daemon-e2e'];
+
+  it.each(poolJobs)(
+    'restores ownership, sweeps stale .qwen, then checks out in the %s job',
+    (name) => {
+      const steps = parsed.jobs[name].steps;
+      const names = steps.map((s) => s.name);
+      const restoreIdx = names.indexOf('Restore workspace ownership');
+      const sweepIdx = names.indexOf('Clean stale .qwen before checkout');
+      const checkoutIdx = steps.findIndex((s) =>
+        String(s.uses ?? '').includes('actions/checkout'),
+      );
+      expect(restoreIdx, name).toBeGreaterThanOrEqual(0);
+      expect(sweepIdx, name).toBeGreaterThan(restoreIdx);
+      expect(sweepIdx, name).toBeLessThan(checkoutIdx);
+      // The matrix legs on fresh hosted VMs never take this branch, and
+      // Windows would run it under pwsh — the recipe is bash.
+      expect(steps[sweepIdx].if).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
+    },
+  );
+
+  it.each(poolJobs)(
+    'keeps the %s restore and sweep bodies byte-identical to ci.yml',
+    (name) => {
+      const steps = parsed.jobs[name].steps;
+      const restore = steps.find(
+        (s) => s.name === 'Restore workspace ownership',
+      )?.run;
+      const sweep = steps.find(
+        (s) => s.name === 'Clean stale .qwen before checkout',
+      )?.run;
+      expect(ciRestore).toBeDefined();
+      expect(ciSweep).toBeDefined();
+      expect(restore, name).toBe(ciRestore);
+      expect(sweep, name).toBe(ciSweep);
+    },
+  );
+
+  it.each(poolJobs)(
+    'trusts the workspace as a git safe.directory in the %s job',
+    (name) => {
+      const restore = parsed.jobs[name].steps.find(
+        (s) => s.name === 'Restore workspace ownership',
+      )?.run;
+      expect(restore).toContain(
+        'git config --global --add safe.directory "$GITHUB_WORKSPACE"',
+      );
+    },
+  );
+});
