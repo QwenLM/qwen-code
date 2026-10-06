@@ -658,6 +658,13 @@ const {
       messages: [] as unknown[],
       streamingTailMessages: undefined as unknown[] | undefined,
       queuedPromptHoldHistory: [] as boolean[],
+      queuedPrompts: [] as Array<{ id: number; text: string }>,
+      transcriptHasMore: false,
+      promptSettledListeners: new Set<
+        (
+          event: import('./daemon/session/types').DaemonPromptSettledEvent,
+        ) => void
+      >(),
       queuedPromptWriteBlocked: false,
       queuedPromptDispatchError: undefined as
         | ((text: string) => string | undefined)
@@ -968,7 +975,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
     useStreamingState: () => testState.streamingState,
     useTranscriptBlocks: () => testState.blocks,
     useTranscriptHistory: () => ({
-      hasMore: false,
+      hasMore: testState.transcriptHasMore,
       loading: false,
       capacityReached: false,
       paginationError: false,
@@ -1093,7 +1100,7 @@ vi.mock('./hooks/useQueuedPrompts', () => ({
     testState.queuedPromptSessionHasActivePrompt =
       args.sessionHasActivePrompt === true;
     return {
-      queuedPrompts: [],
+      queuedPrompts: testState.queuedPrompts,
       queuedTexts,
       enqueuePrompt: rawEnqueuePrompt,
       removeQueuedPrompt: vi.fn(),
@@ -1107,6 +1114,38 @@ vi.mock('./hooks/useQueuedPrompts', () => ({
 vi.mock('./utils/systemInfo', () => ({
   collectSystemInfo: mockCollectSystemInfo,
 }));
+
+// The harness replaces the provider, so the prompt settlement bus is driven by
+// the tests through `testState.promptSettledListeners`.
+vi.mock('./daemon/session/DaemonSessionProvider', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('./daemon/session/DaemonSessionProvider')
+    >();
+  const React = await import('react');
+  return {
+    ...actual,
+    useDaemonPromptSettled: (
+      listener:
+        | ((
+            event: import('./daemon/session/types').DaemonPromptSettledEvent,
+          ) => void)
+        | undefined,
+    ) => {
+      const listenerRef = React.useRef(listener);
+      listenerRef.current = listener;
+      React.useEffect(() => {
+        const forward = (
+          event: import('./daemon/session/types').DaemonPromptSettledEvent,
+        ) => listenerRef.current?.(event);
+        testState.promptSettledListeners.add(forward);
+        return () => {
+          testState.promptSettledListeners.delete(forward);
+        };
+      }, []);
+    },
+  };
+});
 
 vi.mock('./components/ChatEditor', async () => {
   const React = await import('react');
@@ -11591,6 +11630,9 @@ beforeEach(() => {
   testState.messages = [];
   testState.streamingTailMessages = undefined;
   testState.queuedPromptHoldHistory = [];
+  testState.queuedPrompts = [];
+  testState.transcriptHasMore = false;
+  testState.promptSettledListeners.clear();
   testState.queuedPromptStreamingState = 'idle';
   testState.queuedPromptSessionHasActivePrompt = false;
   testState.chatEditorRenderCount = 0;
@@ -17607,6 +17649,700 @@ describe('App session callbacks', () => {
       'recover connection',
       expect.objectContaining({ images: undefined }),
     );
+  });
+
+  describe('cancelling a prompt before it produced anything', () => {
+    const snapshot = (turnIndex: number) => ({
+      promptId: `prompt-${turnIndex}`,
+      turnIndex,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
+    });
+    const PROMPT_ID = 'http-prompt-1';
+
+    let settleSend: (result: { stopReason: string }) => void;
+
+    beforeEach(() => {
+      testState.blocks = [
+        { id: 'u0', kind: 'user', text: 'first' },
+        { id: 'a0', kind: 'assistant', text: 'answer' },
+      ];
+      settleSend = () => {};
+      mockSessionActions.sendPrompt.mockImplementation((text, options) => {
+        testState.blocks = [
+          ...testState.blocks,
+          { id: 'u1', kind: 'user', text },
+        ];
+        options?.onAdmissionStarted?.();
+        options?.onAdmitted?.({ promptId: PROMPT_ID });
+        return new Promise((resolve) => {
+          settleSend = resolve;
+        });
+      });
+      // The real cancel aborts the in-flight send before the daemon answers.
+      mockSessionActions.cancel.mockImplementation(async () => {
+        settleSend({ stopReason: 'cancelled' });
+        await Promise.resolve();
+        testState.blocks = [
+          ...testState.blocks,
+          { id: 'c1', kind: 'prompt_cancelled' },
+        ];
+      });
+      mockSessionActions.getRewindSnapshots.mockResolvedValue({
+        snapshots: [snapshot(0), snapshot(1)],
+      });
+      mockSessionActions.rewindSession.mockResolvedValue(undefined);
+    });
+
+    // The daemon's terminal event for the turn, published after every block
+    // it produced has been applied.
+    async function settleTurn(
+      outcome: 'cancelled' | 'completed' | 'failed' = 'cancelled',
+      promptId = PROMPT_ID,
+      // `null`: a frame without an originator, as a scripted peer produces.
+      originatorClientId: string | null = mockConnection.clientId,
+    ) {
+      await act(async () => {
+        for (const listener of testState.promptSettledListeners) {
+          listener({
+            sessionId: 'session-1',
+            promptId,
+            outcome,
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        }
+      });
+      await flush();
+    }
+
+    async function submitAndCancel(
+      beforeCancel?: () => void,
+      images?: Array<{ data: string; media_type: string }>,
+      text = 'oops typo',
+    ) {
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit(text, images);
+      });
+      await vi.waitFor(() =>
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+      );
+      testState.prompt = '';
+      beforeCancel?.();
+      await flush();
+      await act(async () => {
+        testState.latestChatEditorProps?.onCancel?.();
+      });
+      await vi.waitFor(() =>
+        expect(mockSessionActions.cancel).toHaveBeenCalledOnce(),
+      );
+      await flush();
+    }
+
+    function expectPlainStop(composer = '') {
+      expect(testState.prompt).toBe(composer);
+      expect(mockSessionActions.getRewindSnapshots).not.toHaveBeenCalled();
+      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+    }
+
+    it('hands the prompt back to the composer and rewinds the turn once it settles', async () => {
+      const images = [{ data: 'aGVsbG8=', media_type: 'image/png' }];
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel(() => {
+        testState.blocks = [
+          ...testState.blocks,
+          { id: 't1', kind: 'thought', text: 'thinking' },
+        ];
+      }, images);
+
+      // Nothing moves until the daemon reports the turn as ended.
+      expectPlainStop();
+      await settleTurn();
+
+      expect(testState.prompt).toBe('oops typo');
+      expect(editorRestoreImages).toHaveBeenCalledWith(images);
+      await vi.waitFor(() =>
+        expect(mockSessionActions.rewindSession).toHaveBeenCalledWith(
+          'prompt-1',
+          { rewindFiles: false, silent: true },
+        ),
+      );
+      expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledWith({
+        silent: true,
+      });
+    });
+
+    it('keeps the answer when it only arrives after the cancel returned', async () => {
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      // The daemon had already produced the answer; its event was still on
+      // the way when the cancel and the transcript check could have run.
+      testState.blocks = [
+        ...testState.blocks.slice(0, -1),
+        { id: 'a1', kind: 'assistant', text: 'late answer' },
+        { id: 'c1', kind: 'prompt_cancelled' },
+      ];
+      await settleTurn();
+
+      expectPlainStop();
+    });
+
+    it('takes back a prompt whose block only lands once it is admitted', async () => {
+      mockSessionActions.sendPrompt.mockImplementation(
+        async (text, options) => {
+          // Attachments upload first; the transcript block follows admission.
+          await Promise.resolve();
+          testState.blocks = [
+            ...testState.blocks,
+            { id: 'u1', kind: 'user', text },
+          ];
+          options?.onAdmissionStarted?.();
+          options?.onAdmitted?.({ promptId: PROMPT_ID });
+          return new Promise((resolve) => {
+            settleSend = resolve;
+          });
+        },
+      );
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn();
+
+      expect(testState.prompt).toBe('oops typo');
+      await vi.waitFor(() =>
+        expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+      );
+    });
+
+    describe('a prompt cancelled before its admission returned', () => {
+      beforeEach(() => {
+        mockSessionActions.sendPrompt.mockImplementation((text) => {
+          testState.blocks = [
+            ...testState.blocks,
+            { id: 'u1', kind: 'user', text },
+          ];
+          return new Promise((resolve) => {
+            settleSend = resolve;
+          });
+        });
+      });
+
+      it('is taken back when a turn of this client settles cancelled', async () => {
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        // The daemon took the prompt anyway; its terminal frame names this
+        // client as the originator.
+        await settleTurn('cancelled', 'http-prompt-unseen');
+
+        expect(testState.prompt).toBe('oops typo');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+        );
+      });
+
+      it("is only stopped when another client's turn settles", async () => {
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn('cancelled', 'http-prompt-unseen', 'client-other');
+        await settleTurn('cancelled', 'http-prompt-unseen-2', null);
+
+        expectPlainStop();
+      });
+
+      it('is only stopped when the daemon never took it', async () => {
+        mockSessionActions.getRewindSnapshots.mockResolvedValue({
+          snapshots: [snapshot(0)],
+        });
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+
+        // No terminal event ever comes for it.
+        expectPlainStop();
+      });
+    });
+
+    it.each([
+      [
+        'the answer had started',
+        () => {
+          testState.blocks = [
+            ...testState.blocks,
+            { id: 'a1', kind: 'assistant', text: 'partial' },
+          ];
+        },
+        '',
+      ],
+      [
+        'a new draft is in the composer',
+        () => {
+          testState.prompt = 'new draft';
+        },
+        'new draft',
+      ],
+    ])('only stops the turn when %s', async (_name, arrange, composer) => {
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel(arrange);
+      await settleTurn();
+
+      expectPlainStop(composer);
+    });
+
+    it.each([
+      ['finished on its own', 'completed'],
+      ['failed on its own', 'failed'],
+    ] as const)('keeps a turn that %s', async (_name, outcome) => {
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn(outcome);
+
+      expectPlainStop();
+    });
+
+    it('ignores the settlement of another prompt', async () => {
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn('cancelled', 'http-prompt-other');
+
+      expectPlainStop();
+      await settleTurn();
+      expect(testState.prompt).toBe('oops typo');
+    });
+
+    it('lets a take-back lapse when the turn takes too long to settle', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        vi.advanceTimersByTime(10_001);
+        await settleTurn();
+
+        expectPlainStop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('only stops the turn while session writes are blocked', async () => {
+      const { rerender } = renderApp({ language: 'en' });
+      await flush();
+      try {
+        await submitAndCancel(() => {
+          mockConnection.loadingTranscript = true;
+          rerender({ language: 'en' });
+        });
+        await settleTurn();
+
+        expectPlainStop();
+      } finally {
+        mockConnection.loadingTranscript = false;
+      }
+    });
+
+    it('only stops the turn when a follow-up is queued', async () => {
+      const { rerender } = renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel(() => {
+        testState.queuedPrompts = [{ id: 1, text: 'follow up' }];
+        rerender({ language: 'en' });
+      });
+      await settleTurn();
+
+      expectPlainStop();
+    });
+
+    it('only stops a turn this client did not send', async () => {
+      testState.blocks = [
+        ...testState.blocks,
+        { id: 'u1', kind: 'user', text: 'from another client' },
+      ];
+      testState.prompt = '';
+      renderApp({ language: 'en' });
+      await flush();
+      await act(async () => {
+        testState.latestChatEditorProps?.onCancel?.();
+      });
+      await flush();
+      await settleTurn();
+
+      expect(mockSessionActions.cancel).toHaveBeenCalledOnce();
+      expectPlainStop();
+    });
+
+    it('only stops the turn when another prompt already followed it', async () => {
+      mockSessionActions.cancel.mockImplementation(async () => {
+        settleSend({ stopReason: 'cancelled' });
+        testState.blocks = [
+          ...testState.blocks,
+          { id: 'c1', kind: 'prompt_cancelled' },
+          { id: 'u2', kind: 'user', text: 'from another client' },
+        ];
+      });
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn();
+
+      expectPlainStop();
+    });
+
+    it('only stops a slash command turn', async () => {
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel(undefined, undefined, '/deploy staging');
+      await settleTurn();
+
+      expectPlainStop();
+    });
+
+    it('only stops the turn when a prompt from elsewhere landed before admission', async () => {
+      let admit: () => void = () => {};
+      mockSessionActions.sendPrompt.mockImplementation((text, options) => {
+        testState.blocks = [
+          ...testState.blocks,
+          { id: 'u1', kind: 'user', text },
+        ];
+        admit = () => options?.onAdmitted?.({ promptId: PROMPT_ID });
+        return new Promise((resolve) => {
+          settleSend = resolve;
+        });
+      });
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel(() => {
+        testState.blocks = [
+          ...testState.blocks,
+          { id: 'u2', kind: 'user', text: 'from another client' },
+        ];
+        admit();
+      });
+      await settleTurn();
+
+      expectPlainStop();
+    });
+
+    it('keeps the turn in history when older history is not loaded', async () => {
+      testState.transcriptHasMore = true;
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn();
+
+      expect(testState.prompt).toBe('oops typo');
+      expect(mockSessionActions.getRewindSnapshots).not.toHaveBeenCalled();
+      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+    });
+
+    it('keeps the turn in history when the newest snapshot is an earlier turn', async () => {
+      mockSessionActions.getRewindSnapshots.mockResolvedValue({
+        snapshots: [snapshot(0)],
+      });
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn();
+
+      expect(testState.prompt).toBe('oops typo');
+      await vi.waitFor(() =>
+        expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce(),
+      );
+      await flush();
+      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+    });
+
+    it('leaves everything alone when the cancel itself fails', async () => {
+      mockSessionActions.cancel.mockRejectedValue(new Error('not generating'));
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+
+      expectPlainStop();
+    });
+
+    describe('holding prompts back while the turn is taken back', () => {
+      const corrected = async () => {
+        await act(async () => {
+          testState.latestChatEditorProps?.onSubmit('corrected prompt');
+        });
+        await flush();
+      };
+
+      it('does not send a correction before the snapshots are read', async () => {
+        let readSnapshots: () => void = () => {};
+        mockSessionActions.getRewindSnapshots.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              readSnapshots = () =>
+                resolve({ snapshots: [snapshot(0), snapshot(1)] });
+            }),
+        );
+        const { rerender } = renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        expect(testState.prompt).toBe('oops typo');
+
+        // Refused, the draft stays: the turn it would follow is going away.
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+        expect(testState.queuedPromptWriteBlocked).toBe(true);
+
+        await act(async () => {
+          readSnapshots();
+        });
+        await flush();
+        expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce();
+        // The `session_rewound` event drops the turn.
+        testState.blocks = testState.blocks.slice(0, 2);
+        rerender({ language: 'en' });
+        await flush();
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not send a correction before the rewind reached the transcript', async () => {
+        const { rerender } = renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        await vi.waitFor(() =>
+          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+        );
+        await flush();
+
+        // The rewind call returned, its `session_rewound` has not arrived.
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+        expect(testState.queuedPromptWriteBlocked).toBe(true);
+
+        testState.blocks = testState.blocks.slice(0, 2);
+        rerender({ language: 'en' });
+        await flush();
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+
+      it('releases prompts when the daemon refuses the rewind', async () => {
+        mockSessionActions.rewindSession.mockRejectedValue(
+          new DaemonHttpError(400, {}, 'unavailable for SSH workspaces'),
+        );
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        await vi.waitFor(() =>
+          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+        );
+        await flush();
+
+        expect(testState.prompt).toBe('oops typo');
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+
+      describe('when the rewind fails for an unknown reason', () => {
+        // The daemon's listing before and after it applied the rewind.
+        const listedBefore = { snapshots: [snapshot(0), snapshot(1)] };
+        const listedAfter = { snapshots: [snapshot(0)] };
+
+        const failRewind = async () => {
+          mockSessionActions.rewindSession.mockRejectedValue(
+            new TypeError('fetch failed'),
+          );
+          const rendered = renderApp({ language: 'en' });
+          await flush();
+          await submitAndCancel();
+          await settleTurn();
+          await vi.waitFor(() =>
+            expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+          );
+          await flush();
+          return rendered;
+        };
+
+        it('holds prompts until the event arrives when the daemon no longer lists the turn', async () => {
+          mockSessionActions.getRewindSnapshots
+            .mockResolvedValueOnce(listedBefore)
+            .mockResolvedValue(listedAfter);
+          vi.useFakeTimers({ toFake: ['Date'] });
+          try {
+            const { rerender } = await failRewind();
+            await vi.waitFor(() =>
+              expect(
+                mockSessionActions.getRewindSnapshots,
+              ).toHaveBeenCalledTimes(2),
+            );
+            await flush();
+
+            // The daemon did rewind; no amount of waiting makes the correction
+            // safe to send before its event has dropped the turn.
+            expect(testState.queuedPromptWriteBlocked).toBe(true);
+            vi.setSystemTime(Date.now() + 2_100);
+            await corrected();
+            expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+            expect(testState.queuedPromptWriteBlocked).toBe(true);
+            expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+              2,
+            );
+
+            testState.blocks = testState.blocks.slice(0, 2);
+            rerender({ language: 'en' });
+            await flush();
+            expect(testState.queuedPromptWriteBlocked).toBe(false);
+            await corrected();
+            expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('releases prompts once the daemon has twice listed the turn as still there', async () => {
+          mockSessionActions.getRewindSnapshots.mockResolvedValue(listedBefore);
+          await failRewind();
+
+          // One reading can predate a rewind still queued at the daemon.
+          await vi.waitFor(() =>
+            expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+              2,
+            ),
+          );
+          await flush();
+          expect(testState.queuedPromptWriteBlocked).toBe(true);
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+
+          await act(async () => {
+            await vi.waitFor(
+              () =>
+                expect(
+                  mockSessionActions.getRewindSnapshots,
+                ).toHaveBeenCalledTimes(3),
+              { timeout: 2_000 },
+            );
+            await flush();
+          });
+          expect(testState.queuedPromptWriteBlocked).toBe(false);
+          expect(testState.prompt).toBe('oops typo');
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+          expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+            3,
+          );
+        });
+
+        it('keeps asking while the daemon cannot be reached', async () => {
+          mockSessionActions.getRewindSnapshots
+            .mockResolvedValueOnce(listedBefore)
+            .mockRejectedValueOnce(new TypeError('fetch failed'))
+            .mockResolvedValue(listedAfter);
+          const { rerender } = await failRewind();
+
+          await vi.waitFor(
+            () =>
+              expect(
+                mockSessionActions.getRewindSnapshots,
+              ).toHaveBeenCalledTimes(3),
+            { timeout: 2_000 },
+          );
+          await flush();
+          expect(testState.queuedPromptWriteBlocked).toBe(true);
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+
+          testState.blocks = testState.blocks.slice(0, 2);
+          rerender({ language: 'en' });
+          await flush();
+          expect(testState.queuedPromptWriteBlocked).toBe(false);
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+        });
+
+        it('stops asking once the transcript shows the rewind', async () => {
+          let answerSnapshots: () => void = () => {};
+          mockSessionActions.getRewindSnapshots
+            .mockResolvedValueOnce(listedBefore)
+            .mockImplementation(
+              () =>
+                new Promise((resolve) => {
+                  answerSnapshots = () => resolve(listedBefore);
+                }),
+            );
+          const { rerender } = await failRewind();
+          await vi.waitFor(() =>
+            expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+              2,
+            ),
+          );
+
+          // The event lands while the daemon is still being asked.
+          testState.blocks = testState.blocks.slice(0, 2);
+          rerender({ language: 'en' });
+          await flush();
+          expect(testState.queuedPromptWriteBlocked).toBe(false);
+          await act(async () => {
+            answerSnapshots();
+          });
+          await flush();
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+          // Long enough for a recheck to have been due.
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+            2,
+          );
+        });
+      });
+
+      it('releases prompts when the snapshots cannot be read', async () => {
+        mockSessionActions.getRewindSnapshots.mockRejectedValue(
+          new TypeError('fetch failed'),
+        );
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        await vi.waitFor(() =>
+          expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce(),
+        );
+        await flush();
+
+        // No rewind was issued, so none can land.
+        expect(testState.prompt).toBe('oops typo');
+        expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+        expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce();
+      });
+
+      it('releases prompts when no rewind is issued', async () => {
+        mockSessionActions.getRewindSnapshots.mockResolvedValue({
+          snapshots: [snapshot(0)],
+        });
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        await vi.waitFor(() =>
+          expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce(),
+        );
+        await flush();
+
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+    });
   });
 
   describe('inline user message edits', () => {

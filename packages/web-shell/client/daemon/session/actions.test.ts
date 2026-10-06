@@ -1052,6 +1052,28 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it.each([
+    ['reports', undefined, 2],
+    ['does not report', true, 0],
+  ] as const)(
+    '%s failed rewind calls when silent is %s',
+    async (_name, silent, notices) => {
+      const addNotice = vi.fn((notice) => notice);
+      const session = createMockSession('session-a');
+      session.getRewindSnapshots.mockRejectedValueOnce(new Error('no list'));
+      session.rewind.mockRejectedValueOnce(new Error('busy'));
+      const { actions } = createActionsHarness({ addNotice, session });
+
+      await expect(actions.getRewindSnapshots({ silent })).rejects.toThrow(
+        'no list',
+      );
+      await expect(
+        actions.rewindSession('prompt-1', { rewindFiles: false, silent }),
+      ).rejects.toThrow('busy');
+      expect(addNotice).toHaveBeenCalledTimes(notices);
+    },
+  );
+
   it('does not report a context usage error while the session is disconnected', async () => {
     const addNotice = vi.fn();
     const { actions } = createActionsHarness({ addNotice });
@@ -6489,6 +6511,8 @@ function createMockSession(
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     stats: vi.fn(),
     contextUsage: vi.fn(),
+    getRewindSnapshots: vi.fn(),
+    rewind: vi.fn(),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
     workflowTasks: vi.fn(async () => ({
       v: 1 as const,

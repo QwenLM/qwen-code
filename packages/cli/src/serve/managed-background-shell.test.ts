@@ -230,6 +230,7 @@ function rig(
     publisher as unknown as ManagedShellCapturePublisher,
     undefined,
     undefined,
+    undefined,
     options.withSupervisor === false
       ? undefined
       : (supervisor as unknown as ManagedChildRunSupervisor),
