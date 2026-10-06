@@ -321,6 +321,17 @@ its readings (R9):
   cancelled through its checkpoint admission, a plain-settled park needs
   none, and the stream the coordination already runs lands the settle
   either way (R9-P1-2).
+- The cancellation signal pays identically on EVERY load shape (R9-2):
+  a takeover load forced onto a Session ALREADY attached in this daemon
+  used to fall into the passive kernel — which never advances a durable
+  wait passively, so a park whose approval ended after the attach was
+  thrown back as an unknown phase. The attached branch now runs the
+  same separation the first load does (signal + no-tool arm + owed-work
+  gate + durable cross-read) and settles through
+  `settleCancelledHarnessTurn` into the journal the already-running
+  stream reads. Round 10's real-stack repro — attach plain with the
+  approval requested, resolve the decision after the attach, then load
+  with the cancel signal — is its witness shape.
 
 Thrown errors stay transient, exactly as today. The load route answers
 declines with new 409 code `hosted_turn_recovery_declined` plus a `reason`

@@ -271,6 +271,14 @@ continuation——expired/cancelled 保持瞬态（路由的可重试 409），
   出不了进程；load 若报告一个恢复的 Runtime 驻留，就经其
   checkpoint 入场把它取消，纯结算的驻留不需要入场——两种情况
   都由协调已经在跑的那条流落定结算（R9-P1-2）。
+- 取消旗标在每一种 load 形状下偿付同一语义（R9-2）：被强打到
+  本 daemon 内已附着 Session 的接管 load，过去会落进 passive
+  内核——内核在 passive 下永不推进 durable 等待，于是挂接之后才
+  结束的审批驻留被当成未知相位抛回。挂接分支现在跑与首次 load
+  相同的一套分离（旗标 + 无工具臂 + 欠账闸 + durable 交叉读），
+  经 `settleCancelledHarnessTurn` 写入已在跑的那条流会读到的
+  journal。第十轮真实栈复现——审批 requested 时先 plain attach、
+  挂接后写入决定、再带取消旗 load——就是它的见证形状。
 
 抛出的错误保持瞬时，与今天完全一致。load 路由对 decline 回答新的
 409 code `hosted_turn_recovery_declined` 并带 `reason` 字段；在接管

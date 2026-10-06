@@ -1837,6 +1837,43 @@ export function registerHostedHarnessSessionRoutes(
             error(res, 409, 'hosted_session_already_attached');
             return;
           }
+          // The cancellation signal pays identically on an attached
+          // re-answer (R9-2): the settle separation lived only on the
+          // first-load branch, so a cancellation takeover forced onto an
+          // attached Session fell into the passive kernel — which never
+          // advances a durable wait passively, and threw the park back as
+          // an unknown phase once the wait had ended since the attach.
+          // The no-tool arm settles unconditionally here too, and the
+          // owed-work gate reads the work exactly as on the first load.
+          if (
+            body?.['cancellationTakeover'] === true &&
+            (attached.toolProfile === undefined ||
+              !brokerOptions ||
+              (await parkNeedsNoRuntimeSettlement(attached, attached.managed)))
+          ) {
+            try {
+              await settleCancelledHarnessTurn(
+                attached.managed,
+                attached,
+                sessionId,
+                parked,
+              );
+              writeStderrLineSafe(
+                `qwen serve: Hosted Session ${sessionId} settles the cancelled park on the redriven load: prompt=${parked}`,
+              );
+              // The journal owes nothing more: the re-answer carries the
+              // refreshed watermark the already-running stream settles
+              // from.
+              res.status(200).json(attachmentReply(attached));
+              return;
+            } catch (cause) {
+              writeStderrLineSafe(
+                `qwen serve: Hosted Session ${sessionId} redrive refused (takeover_unavailable): profile=${attached.toolProfile ?? 'none'} broker=${brokerOptions ? 'ready' : 'none'} settle=${String(cause)}`,
+              );
+              error(res, 409, 'hosted_turn_recovery_required');
+              return;
+            }
+          }
           if (attached.toolProfile === undefined || !brokerOptions) {
             if (!passive) {
               recoveryDeclined(res, 'model_start');

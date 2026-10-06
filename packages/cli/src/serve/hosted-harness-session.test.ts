@@ -9599,6 +9599,73 @@ describe('Hosted Harness Runtime turn takeover', () => {
     },
   );
 
+  it.each(['cancelled', 'decided'])(
+    'settles the redriven cancellation takeover whose approval ended since the attach (state=%s)',
+    async (durableState) => {
+      // R9-2 (round-10 probe): the first takeover attaches plain because
+      // the durable record says requested; the decision lands AFTER the
+      // attach through the live resolve route, so the checkpoint copy
+      // stays the stale requested/await_action one. The attached branch
+      // never consulted the cancellation signal, and the passive kernel
+      // threw the park back as an unknown phase — three real redrives
+      // wedged exactly there. The settle pays identically on this branch.
+      await parkToolTurn();
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'harnessRunAuthorization',
+      ).mockResolvedValue({
+        status: 'runnable',
+        checkpoint: {
+          identity: {
+            turnId: PROMPT_ID,
+            promptId: PROMPT_ID,
+            checkpointId: 'checkpoint-await-action',
+          },
+          attempt: {},
+          continuation: { phase: 'await_action' },
+          approval: { state: 'requested', requestId: 'request-1' },
+          output: {},
+          followUp: {},
+          runtime: {},
+          tools: { items: [] },
+        },
+      } as never);
+      const action = vi
+        .spyOn(LocalManagedSessionAuthority.prototype, 'action')
+        .mockReturnValue({ state: 'requested' } as never);
+      const { server, loaded } = await loadReplacement(true);
+      expect(loaded.status).toBe(200);
+      expect(loaded.body.recoveryRequired).toBeUndefined();
+      // The wait the USER owns ends after the attach: the record decides,
+      // the copy the dead owner left still says requested.
+      action.mockReturnValue({ state: durableState } as never);
+      const log = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => {});
+      const taken = await replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: storeFor(BOOT_ID_2),
+        passiveManagedRuntimeRecovery: true,
+        cancellationTakeover: true,
+      });
+      expect(taken.status).toBe(200);
+      expect(
+        log.mock.calls
+          .map(([line]) => line)
+          .some((line) =>
+            line.includes('settles the cancelled park on the redriven load'),
+          ),
+      ).toBe(true);
+      // The cancelled terminal is durable: the plain cancel route reads
+      // settled-at-tail (204, nothing left to abort).
+      const cancelled = await replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/cancel`),
+      ).set('X-Qwen-Client-Id', taken.body.clientId as string);
+      expect(cancelled.status).toBe(204);
+    },
+  );
+
   it('keeps the held Runtime lease when a redriven load fails transiently', async () => {
     await parkToolTurn();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
