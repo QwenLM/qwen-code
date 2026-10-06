@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -53,7 +54,7 @@ class WorkspaceMigrationMySqlIT {
 
     @Test
     void upgradesCurrentMainWithoutChangingAppliedMigrations() {
-        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("45").load().migrate();
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("46").load().migrate();
         var applied = jdbc.queryForList("SELECT * FROM flyway_schema_history ORDER BY installed_rank");
         int lastRank = jdbc.queryForObject("SELECT MAX(installed_rank) FROM flyway_schema_history", Integer.class);
         Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
@@ -61,14 +62,14 @@ class WorkspaceMigrationMySqlIT {
                 + " WHERE installed_rank <= ? ORDER BY installed_rank", lastRank)).isEqualTo(applied);
         assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history"
                 + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
-                String.class, lastRank)).containsExactly("46", "47", "48");
+                String.class, lastRank)).containsExactly("47", "48", "49");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Integer.class)).isZero();
     }
 
     @Test
     void upgradesBinaryScopeWithoutRewritingOperationEvidence() {
-        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("47").load().migrate();
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("48").load().migrate();
         for (String tenant : new String[] {"Tenant", "tenant"}) {
             jdbc.update("INSERT INTO managed_workspace_migration (operation_id, tenant_id, storage_id, request_digest,"
                     + " request_json, state, history_identity_json, target_registration_id)"
@@ -99,6 +100,16 @@ class WorkspaceMigrationMySqlIT {
     @Test
     @Timeout(30)
     void creationWaitingForMigrationSeesCommittedFenceAndPreservesReplay() throws Exception {
+        admissionWaitingForMigrationSeesCommittedFenceAndPreservesReplay(false);
+    }
+
+    @Test
+    @Timeout(30)
+    void cwdWaitingForMigrationSeesCommittedFenceAndPreservesReplay() throws Exception {
+        admissionWaitingForMigrationSeesCommittedFenceAndPreservesReplay(true);
+    }
+
+    private void admissionWaitingForMigrationSeesCommittedFenceAndPreservesReplay(boolean cwd) throws Exception {
         Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
         for (String tenant : List.of("migrating", "unrelated")) {
             jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
@@ -116,6 +127,15 @@ class WorkspaceMigrationMySqlIT {
         var store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> { },
                 new ManagedWorkspaceRegistry(jdbc), properties);
         var original = create(store, transaction, "migrating", "original");
+        var other = cwd ? create(store, transaction, "unrelated", "other") : null;
+        var originalCwd = cwd ? changeCwd(store, transaction, "migrating", original.sessionId(), "original", 1) : null;
+        if (cwd) {
+            var claim = transaction.execute(status -> store.claimOperation("migrating", original.sessionId(),
+                    originalCwd.operation().operationId(), "owner", Duration.ofSeconds(60)).orElseThrow());
+            assertThat(transaction.execute(status -> store.completeCwdChangeOperation("migrating", original.sessionId(),
+                    claim.operationId(), "owner", claim.claimGeneration())).completed()).isTrue();
+        }
+        var binding = store.findSession("migrating", original.sessionId()).orElseThrow().workspace();
         var attemptingLock = new CountDownLatch(1);
         var waitingJdbc = new JdbcTemplate(data) {
             @Override
@@ -131,12 +151,16 @@ class WorkspaceMigrationMySqlIT {
         try (var migration = data.getConnection(); var pool = Executors.newFixedThreadPool(2)) {
             migration.setAutoCommit(false);
             JdbcRuntimeBindingRepository.lockPlacementDomain(migration, "migrating");
-            var creation = pool.submit(() -> create(waitingStore, transaction, "migrating", "racing"));
+            var creation = pool.submit(() -> cwd
+                    ? changeCwd(waitingStore, transaction, "migrating", original.sessionId(), "racing", 2)
+                    : create(waitingStore, transaction, "migrating", "racing"));
             try {
                 assertThat(attemptingLock.await(5, TimeUnit.SECONDS)).isTrue();
                 assertThatThrownBy(() -> creation.get(100, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
-                assertThat(pool.submit(() -> create(store, transaction, "unrelated", "other"))
-                        .get(5, TimeUnit.SECONDS).sessionId()).isNotBlank();
+                assertThat(pool.submit(() -> cwd
+                        ? changeCwd(store, transaction, "unrelated", other.sessionId(), "other", 1)
+                        : create(store, transaction, "unrelated", "other"))
+                        .get(5, TimeUnit.SECONDS)).isNotNull();
                 assertThat(creation.isDone()).isFalse();
                 try (var fence = migration.prepareStatement("INSERT INTO qwen_runtime_storage_fence"
                         + " (tenant_key, storage_key, tenant_id, storage_id, operation_id)"
@@ -167,6 +191,22 @@ class WorkspaceMigrationMySqlIT {
         var replay = create(store, transaction, "migrating", "original");
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.sessionId()).isEqualTo(original.sessionId());
+        assertThat(store.findSession("migrating", original.sessionId()).orElseThrow().workspace()).isEqualTo(binding);
+        if (cwd) {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = 'migrating'",
+                    Integer.class)).isEqualTo(1);
+            var cwdReplay = changeCwd(store, transaction, "migrating", original.sessionId(), "original", 1);
+            assertThat(cwdReplay.replayed()).isTrue();
+            assertThat(cwdReplay.operation().operationId()).isEqualTo(originalCwd.operation().operationId());
+            assertThat(cwdReplay.operation().state()).isEqualTo("COMPLETED");
+            assertThat(cwdReplay.operation().resultContextRevision()).isEqualTo(2);
+        }
+    }
+
+    private StoreModels.OperationAdmission changeCwd(ManagedAgentStore store, TransactionTemplate transaction,
+            String tenant, String sessionId, String key, long revision) {
+        return transaction.execute(status -> store.beginCwdChangeOperation(tenant, sessionId, "actor", "actor-digest",
+                key, "cwd-digest", ".", revision));
     }
 
     private StoreModels.Admission create(ManagedAgentStore store, TransactionTemplate transaction, String tenant, String key) {

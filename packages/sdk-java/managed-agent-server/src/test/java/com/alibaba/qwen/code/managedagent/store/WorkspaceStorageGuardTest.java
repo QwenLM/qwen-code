@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -75,6 +76,44 @@ class WorkspaceStorageGuardTest {
         assertUnavailable(() -> guard().verify(binding));
         assertThat(guard().inspect("tenant", "storage")).contains("identity=mismatch");
         assertUnavailable(() -> guard().register("tenant", "storage", operation));
+    }
+
+    @Test
+    void probeEnforcesMigrationFenceEvenWhileMountIsReady() throws Exception {
+        Path other = Files.createDirectory(temp.resolve("other")).toRealPath();
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new WorkspaceMount("tenant", "storage", root.toString()),
+                new WorkspaceMount("tenant", "other", other.toString())));
+        guard().register("tenant", "storage", UUID.randomUUID().toString());
+        guard().register("tenant", "other", UUID.randomUUID().toString());
+        guard().verifyProbe(binding);
+        var registrations = jdbc.queryForList("SELECT * FROM managed_workspace_execution_lease ORDER BY storage_key");
+        jdbc.update("INSERT INTO qwen_runtime_storage_fence VALUES (?, ?, 'tenant', 'storage', ?)",
+                JdbcRuntimeBindingRepository.storageFenceKey("tenant"), JdbcRuntimeBindingRepository.storageFenceKey("storage"),
+                UUID.randomUUID().toString());
+        assertUnavailable(() -> guard().verify(binding));
+        assertUnavailable(() -> guard().verifyProbe(binding));
+        guard().verifyProbe(new ContextBinding("tenant", "other-workspace", 1, "other", ".", "config", 1));
+        assertThat(jdbc.queryForList("SELECT * FROM managed_workspace_execution_lease ORDER BY storage_key"))
+                .isEqualTo(registrations);
+    }
+
+    @Test
+    void probeRejectsCompletedMigrationWithMismatchedHistoryWithoutMutating() {
+        guard().register("tenant", "storage", UUID.randomUUID().toString());
+        guard().verifyProbe(binding);
+        jdbc.update("INSERT INTO managed_workspace_migration (operation_id, tenant_id, storage_id, request_digest,"
+                + " request_json, state, history_identity_json, target_registration_id)"
+                + " VALUES (?, 'tenant', 'storage', 'digest', '{}', 'COMPLETED', ?, ?)",
+                UUID.randomUUID().toString(), "{\"root\":\"" + temp.resolve("missing-history")
+                        + "\",\"hostId\":\"test-host\",\"device\":\"test-device\",\"inode\":\"missing\",\"birthTime\":\"missing\"}",
+                UUID.randomUUID().toString());
+        var registration = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        var migration = jdbc.queryForMap("SELECT * FROM managed_workspace_migration");
+        assertUnavailable(() -> guard().verify(binding));
+        assertUnavailable(() -> guard().verifyProbe(binding));
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(registration);
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_migration")).isEqualTo(migration);
     }
 
     @Test

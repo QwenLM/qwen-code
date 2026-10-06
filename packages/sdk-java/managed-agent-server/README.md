@@ -433,7 +433,8 @@ grants and the Workspace registry's `ACTIVE` state), and the creator may cancel
 the Session's running Turns and rename the Session. Workspace close follows
 its separate close capability and lifecycle admission. Archive, delete and
 unarchive follow their separate retention capabilities after reliable Workspace
-close. Cwd operations and broad Workspace capability advertisement remain gated. Shell and in-flight recovery are separate slices.
+close. Controlled cwd changes ship below (W2); broad Workspace capability
+advertisement remains gated. Shell and in-flight recovery are separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
 
@@ -488,6 +489,46 @@ model-generated commands) should configure a binding key even on loopback.
 
 Design: [English](../../../docs/design/managed-agent-broker-auth.md)
 | [简体中文](../../../docs/design/managed-agent-broker-auth.zh-CN.md).
+
+### Controlled cwd change (W2)
+
+Under the same `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED` opt-in, the creator
+of a bound Session moves its relative directory within the same Workspace:
+
+```bash
+curl -sS -X POST \
+  http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/cwd \
+  -H 'Content-Type: application/json' \
+  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'Idempotency-Key: cwd-1' \
+  -d '{"cwd_relative":"services/api","expected_context_revision":1}'
+```
+
+`202` admits a durable `cwd_change` operation; it does not activate the
+directory. The change is same-Workspace only and creator-only, requires an idle
+Session (`409 session_context_busy` while a Turn or another operation is open)
+and a matching `expected_context_revision` (`409 context_revision_conflict`
+otherwise); a retry with the same key returns the original operation even after
+it completes. A background worker verifies the target against the deployment
+mounts and commits one transaction that bumps `cwd_relative` and
+`context_revision`, marks the operation completed and appends
+`session.context.changed`; poll the operation through the existing query route
+or await the event. A target the mount cannot verify fails the operation with
+`failure_code` and leaves the Session's binding untouched; refused changes
+never retry, while a mount fault the probe cannot reach (a stale export)
+retries internally up to an 8-attempt budget and then fails the same type,
+releasing the Session back to turns and lifecycle operations. Legacy Sessions answer `400 unsupported_feature`, an unreadable
+actor `404 session_not_found` and a readable non-creator `403
+session_operation_forbidden`, matching the sibling lifecycle refusals; a
+probe refusal the turn layer would share also uses `409
+workspace_unavailable`. The WebShell adapter offers the same flow as
+`/api/agent/web-shell/v1/sessions/cwd/change` plus `/operations/query`.
+Subsequent turns acquire a fresh Runtime Session and install the new context
+before tools run, so an unverifiable change can never redirect tool execution.
+
+Design:
+[English](../../../docs/design/2026-10-02-managed-workspace-w2-cwd-change.md) |
+[简体中文](../../../docs/design/2026-10-02-managed-workspace-w2-cwd-change.zh-CN.md).
 
 ### Broker deployment
 
@@ -870,7 +911,7 @@ runner.
 
 See the [English design](../../../docs/design/workspace-storage-migration.md) and [Chinese design](../../../docs/design/workspace-storage-migration.zh-CN.md). Run only after every service is upgraded, admission/dispatch is disabled, accepted work is settled, Harness writers are stopped, and automatic restart is disabled. The source remains accessible on the same trusted Linux host. Export the original canonical absolute `QWEN_HOME` in the private maintenance and registration commands as well as the Broker/Harness environment, with no symlink components. `fileHistoryRoot` must equal the canonical `$QWEN_HOME/file-history` directory. Preserve that home and its independent history volume; do not move it with the Workspace.
 
-W1c adds Flyway V46–V48 after main's V45 managed Session task-journal migration, preserving all published migration bytes and applied history. Databases using earlier unpublished W1c migration numbers require fresh disposable fixtures; do not repair production Flyway history to reuse them.
+W1c adds Flyway V47–V49 after main's V46 managed cwd-operation migration, preserving all published migration bytes and applied history. Databases using earlier unpublished W1c migration numbers require fresh disposable fixtures; do not repair production Flyway history to reuse them.
 
 The private artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-migration.jar`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full request file contains `version` (the JSON integer `1`), `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Fence admission is storage-scoped for bound Sessions; unbound legacy Sessions are outside that ownership. Metadata transactions share the tenant placement lock, so other storages of the same tenant may wait until those transactions finish; file scans and physical retirement hold no such lock. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
 
