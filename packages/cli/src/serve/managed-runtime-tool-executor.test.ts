@@ -5,7 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
+import fs, { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -1421,5 +1421,73 @@ describe('original CSI worker synchronous ACK confirmation', () => {
     ).toThrow(ManagedCsiAckRequestError);
     expect(setter).not.toHaveBeenCalled();
     expect(executor.statusV3(fixture.request.reference)).toEqual(before);
+  });
+});
+
+describe('ManagedToolExecutor acknowledgement', () => {
+  const roots = new Set<string>();
+  afterEach(() => {
+    for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
+    roots.clear();
+  });
+
+  function workspace(): string {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-mtr-executor-'));
+    roots.add(root);
+    fs.writeFileSync(path.join(root, 'a.txt'), 'contents');
+    return root;
+  }
+
+  const sessionReference = {
+    sessionId: 'session-a',
+    promptId: 'prompt-1',
+    callId: 'call-1',
+    argsDigest: createHash('sha256').update('args').digest('hex'),
+  };
+
+  it('lets a session close after its settled call is acknowledged', async () => {
+    const executor = ManagedToolExecutor.forWorkspace(
+      workspace(),
+      'runtime-01',
+    );
+    const result = await executor.execute(sessionReference, 'read_file', {
+      file_path: 'a.txt',
+    });
+    expect(result.executionStatus).toBe('success');
+
+    expect(executor.acknowledge(sessionReference)?.state).toBe('acknowledged');
+    // The acknowledged entry no longer holds the session's work open.
+    expect(executor.hasActiveSession('session-a')).toBe(false);
+    expect(() => executor.closeSessionAdmission('session-a')).not.toThrow();
+  });
+
+  it('reports a drained worker quiescent once its settled call is acknowledged', async () => {
+    const executor = ManagedToolExecutor.forWorkspace(
+      workspace(),
+      'runtime-01',
+    );
+    const result = await executor.execute(sessionReference, 'read_file', {
+      file_path: 'a.txt',
+    });
+    expect(result.executionStatus).toBe('success');
+    executor.sealAdmission(retirementId);
+
+    expect(executor.acknowledge(sessionReference)?.state).toBe('acknowledged');
+    expect(executor.getDrainObservation(retirementId)).toEqual({
+      state: 'DRAINING',
+      workState: 'QUIESCENT',
+      pendingStarts: 0,
+      pendingInvocations: 0,
+      blockers: [],
+    });
+  });
+
+  it('answers unknown for a reference the Runtime never saw', () => {
+    const executor = ManagedToolExecutor.forWorkspace(
+      workspace(),
+      'runtime-01',
+    );
+    expect(executor.acknowledge(sessionReference)).toBeNull();
+    expect(executor.status(sessionReference)).toBeNull();
   });
 });

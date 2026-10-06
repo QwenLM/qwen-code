@@ -15,11 +15,10 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Checks the Stage H task schemas with valid and invalid instances. The API
- * contract test validates only what the mapped task list and detail return,
- * so the invalid instances, the planned task events and the cancel operation
- * have no other gate. Every instance is written in the public shape and also
- * checked, renamed to camelCase, against the WebShell mirror, whose
- * conditionals are copied.
+ * contract test validates only what the mapped task routes return, so the
+ * invalid instances and the planned cancel operation have no other gate.
+ * Every instance is written in the public shape and also checked, renamed
+ * to camelCase, against the WebShell mirror, whose conditionals are copied.
  */
 class PlannedTaskContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
@@ -47,6 +46,8 @@ class PlannedTaskContractTest {
         accept("cancelled before start", task("cancelled", null, 3L));
         accept("recovery_blocked may cancel",
                 task("recovery_blocked", 2L, null, "cancel"));
+        accept("recovery_blocked before it started",
+                task("recovery_blocked", null, null));
 
         reject("terminal without settled_at", task("failed", 2L, null));
         reject("terminal still cancellable",
@@ -119,6 +120,10 @@ class PlannedTaskContractTest {
                 false);
         check("PublicTaskEvent", "empty output", event("output")
                 .put("text", ""), false);
+        check("PublicTaskEvent", "output at the chunk bound",
+                event("output").put("text", "x".repeat(16384)), true);
+        check("PublicTaskEvent", "output over the chunk bound",
+                event("output").put("text", "x".repeat(16385)), false);
         for (String field : List.of("cursor", "schema_version",
                 "projection_version")) {
             ObjectNode partial = event("output").put("text", "x");
@@ -141,6 +146,23 @@ class PlannedTaskContractTest {
                 false);
         tasks.put("next_cursor", "cursor-1");
         check("PublicTaskList", "more tasks with a cursor", tasks, true);
+        tasks.put("has_more", false);
+        check("PublicTaskList", "no more tasks with a cursor", tasks, true);
+        tasks.putNull("next_cursor");
+        check("PublicTaskList", "last task page keeps a null cursor", tasks,
+                true);
+        tasks.remove("next_cursor");
+        check("PublicTaskList", "last task page without a cursor", tasks,
+                true);
+        tasks.put("has_more", true);
+        check("PublicTaskList", "more tasks without any cursor", tasks,
+                false);
+        // Make the instance valid again before the unknown field lands,
+        // or the check answers the cursor rule, not the schema rule.
+        tasks.put("next_cursor", "cursor-1");
+        tasks.put("unknown_field", "x");
+        check("PublicTaskList", "task list with an unknown field", tasks,
+                false);
 
         ObjectNode events = JSON.createObjectNode().put("object", "list")
                 .put("has_more", false);
@@ -150,6 +172,25 @@ class PlannedTaskContractTest {
         events.put("next_cursor", "cursor-1");
         check("PublicTaskEventList", "last page keeps its position", events,
                 true);
+        events.remove("next_cursor");
+        check("PublicTaskEventList", "full page without a cursor", events,
+                false);
+        events.put("next_cursor", "cursor-1");
+        events.put("has_more", true);
+        check("PublicTaskEventList", "more events keep the next cursor",
+                events, true);
+        events.remove("next_cursor");
+        check("PublicTaskEventList", "more events without any cursor",
+                events, false);
+        // Make the instance valid again before the unknown field lands,
+        // or the check answers the cursor rule, not the schema rule.
+        events.put("next_cursor", "cursor-1");
+        events.put("unknown_field", "x");
+        check("PublicTaskEventList", "event list with an unknown field",
+                events, false);
+        events.remove("unknown_field");
+        events.put("has_more", false);
+        events.put("next_cursor", "cursor-1");
         events.putArray("data");
         check("PublicTaskEventList", "empty page keeps its position", events,
                 true);
@@ -244,10 +285,13 @@ class PlannedTaskContractTest {
     @Test
     void plannedTaskRoutesDeclareTheTenantFilterForbidden() {
         // The API contract test checks this declaration in a Spring context;
-        // this gate also checks it without starting one.
-        for (String operationId : List.of("listSessionTaskEvents",
-                "queryWebShellTaskEvents", "cancelSessionTask",
+        // this gate also checks it without starting one. H3 serves the
+        // events routes; cancel stays planned.
+        for (String operationId : List.of("cancelSessionTask",
                 "cancelWebShellTask")) {
+            assertThat(CONTRACT.operation(operationId).status())
+                    .as("%s stays planned", operationId)
+                    .isEqualTo("planned");
             assertThat(CONTRACT.responsePointer(
                     CONTRACT.operation(operationId), 403))
                     .as("%s declares the tenant filter refusal", operationId)
@@ -263,6 +307,10 @@ class PlannedTaskContractTest {
         cancel.remove("idempotencyKey");
         checkPublic("WebShellTaskCancelRequest", "cancel without a key",
                 cancel, false);
+        cancel.put("idempotencyKey", "key-1");
+        cancel.put("unknown_field", "x");
+        checkPublic("WebShellTaskCancelRequest", "cancel with an unknown"
+                + " field", cancel, false);
         ObjectNode events = JSON.createObjectNode().put("sessionId", SESSION)
                 .put("taskId", "task-1").put("after", "cursor-1")
                 .put("limit", 100);
@@ -270,6 +318,10 @@ class PlannedTaskContractTest {
         events.put("limit", 101);
         checkPublic("WebShellTaskEventQueryRequest", "events over the limit",
                 events, false);
+        events.put("limit", 100);
+        events.put("unknown_field", "x");
+        checkPublic("WebShellTaskEventQueryRequest", "events with an unknown"
+                + " field", events, false);
         assertThat(failures).isEmpty();
     }
 
