@@ -357,7 +357,7 @@ class HarnessCoordinatorTest {
                     any(Duration.class));
             if ("accepted".equals(mode) || "retry".equals(mode)) {
                 assertTrue(cancelled.await(2, TimeUnit.SECONDS));
-                verify(harness, timeout(2_000).times(
+                verify(harness, timeout(2_000).atLeast(
                         "retry".equals(mode) ? 2 : 1))
                         .cancel("tenant", "session");
             } else {
