@@ -226,6 +226,11 @@ describe('truncateAndSaveToFile', () => {
     });
     const result = await save(content);
     expect(result.content).toContain('Structured sample');
+    expect(result.content).toContain(
+      'The output below is a structured JSON sample; omitted values remain in the full output file.',
+    );
+    expect(result.content).not.toContain('beginning and end');
+    expect(result.content).not.toContain('... [CONTENT TRUNCATED] ...');
     expect(result.content).toContain('"rows": 5000');
     expect(result.content).toContain(
       `Total characters: ${content.length}; total lines: 1`,

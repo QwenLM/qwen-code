@@ -7,6 +7,10 @@
 > transition and privacy model"). Mitigation implemented in #4880; retention
 > diagnostics added in the accompanying `/doctor memory` change.
 
+## Current budget contract
+
+The thresholds below describe the original design. [Pressure-aware tool output](pressure-aware-tool-output.md) supersedes those values: ordinary defaults are 80,000 characters / 2,000 lines, and MCP inherits both global limits instead of a separate 500k-character cap. Newline-heavy MCP results can reach the line cap before the character cap. Explicit settings remain authoritative; full-output recovery and the privacy model still apply.
+
 ## 1. Problem
 
 In long sessions, OOM risk comes from oversized tool outputs being retained in

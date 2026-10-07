@@ -2,6 +2,10 @@
 
 [English](shell-output-budget-single-entry.md) | [简体中文](shell-output-budget-single-entry.zh-CN.md)
 
+## 当前预算约定
+
+下文全局门限描述原设计。[随上下文压力调整工具输出](pressure-aware-tool-output.zh-CN.md) 已将默认值更新为 80,000 字符 / 2,000 行；MCP 同时继承全局字符与行数限制，不再单独使用 500k 字符上限。显式配置继续有效。Shell 保留声明的 30,000 字符 producer 策略，本文的一次决策及恢复行为仍然有效。
+
 ## 问题
 
 Shell 输出在到达模型之前要穿过两条相互独立的大小策略，而在默认配置下二者并不一致。

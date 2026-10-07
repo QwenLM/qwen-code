@@ -207,15 +207,22 @@ export async function truncateAndSaveToFile(
   // Sanitize fileName to prevent path traversal.
   const safeFileName = `${path.basename(fileName)}.output`;
   const outputFile = path.join(projectTempDir, safeFileName);
+  const jsonPreview = structuredPreview(
+    content,
+    Math.min(PREVIEW_SIZE_CHARS, previewChars),
+  );
+  const previewDescription = jsonPreview
+    ? 'The output below is a structured JSON sample; omitted values remain in the full output file.'
+    : "The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.";
   const wrappedMessage = `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
 The full output has been saved to: ${outputFile}
 Total characters: ${content.length}; total lines: ${lines.length}.
 ${FULL_OUTPUT_DIGEST_LABEL}${crypto.createHash('sha256').update(content).digest('hex')}
 Page in with ${ReadFileTool.Name} using the absolute file_path above, offset (zero-based line) and limit (line count).
-The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
+${previewDescription}
 
 Truncated part of the output:
-${structuredPreview(content, Math.min(PREVIEW_SIZE_CHARS, previewChars)) ?? truncatedContent}`;
+${jsonPreview ?? truncatedContent}`;
 
   // Token-aware fallback: if the wrapped (truncated + instructions) output is
   // not actually smaller than the original, truncating wastes effort and

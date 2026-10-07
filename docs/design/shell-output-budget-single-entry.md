@@ -2,6 +2,10 @@
 
 [English](shell-output-budget-single-entry.md) | [简体中文](shell-output-budget-single-entry.zh-CN.md)
 
+## Current budget contract
+
+The global thresholds below describe the original design. [Pressure-aware tool output](pressure-aware-tool-output.md) supersedes them with 80,000-character / 2,000-line defaults; MCP inherits both global limits instead of a separate 500k-character cap. Explicit settings remain authoritative. Shell retains its declared 30,000-character producer policy, and the one-decision and recovery behavior described here remains in force.
+
 ## Problem
 
 Shell output crosses two independent size policies before it reaches the model,
