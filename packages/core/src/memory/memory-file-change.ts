@@ -288,11 +288,16 @@ export async function withTeamMemorySync<T>(
   teamMemorySyncSequence++;
   try {
     await Promise.all(predecessors.map((sync) => sync.settled));
-    const startReportSequence = reportSequence;
+    const startReportSequence = ++reportSequence;
     return await sync((filePath, content) => {
       const document = describeMemoryFileChange(filePath, projectRoot);
       if (document?.scope !== 'team') return;
-      const reported = { content, sequence: ++reportSequence };
+      const reported = {
+        content,
+        // The import predates explicit writes made while its content read is
+        // pending; callback completion must not supersede those writes.
+        sequence: startReportSequence,
+      };
       for (const bucket of outsideWindowEmits) {
         if (
           (bucket.get(document.filePath)?.sequence ?? 0) <= startReportSequence
@@ -797,29 +802,31 @@ async function runMemoryChangeWindow<T>(
       const after = await readMemoryDocuments(projectRoot).catch(
         () => undefined,
       );
-      if (!after?.complete) {
-        for (const pending of window.pending) {
-          const changes = pending.changes.flatMap((change) => {
-            const kept = change.paths
-              .map((filePath, i) =>
-                (outside.get(filePath)?.sequence ?? 0) > pending.sequence
-                  ? -1
-                  : i,
-              )
-              .filter((i) => i >= 0);
-            return kept.length === 0
-              ? []
-              : [
-                  {
-                    ...change,
-                    paths: kept.map((i) => change.paths[i]!),
-                    relativePaths: kept.map((i) => change.relativePaths[i]!),
-                  },
-                ];
-          });
-          await emit(pending.projectRoot, changes, pending.deliveryId);
-        }
-      } else {
+      for (const pending of window.pending) {
+        const changes = pending.changes.flatMap((change) => {
+          const kept = change.paths
+            .map((filePath, i) =>
+              (outside.get(filePath)?.sequence ?? 0) > pending.sequence ||
+              (after?.complete &&
+                (!outside.has(filePath) ||
+                  outside.get(filePath)!.content !== undefined))
+                ? -1
+                : i,
+            )
+            .filter((i) => i >= 0);
+          return kept.length === 0
+            ? []
+            : [
+                {
+                  ...change,
+                  paths: kept.map((i) => change.paths[i]!),
+                  relativePaths: kept.map((i) => change.relativePaths[i]!),
+                },
+              ];
+        });
+        await emit(pending.projectRoot, changes, pending.deliveryId);
+      }
+      if (after?.complete) {
         const created: string[] = [];
         const updated: string[] = [];
         const deleted: string[] = [];
