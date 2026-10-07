@@ -12,6 +12,8 @@ const UNAVAILABLE = 'Managed CSI root directory is unavailable.';
 export class ManagedCsiRootDirectory {
   readonly rootDevice: string;
   readonly rootInode: string;
+  private fenced = false;
+  private readonly operations = new Set<Promise<void>>();
   private closing: Promise<void> | undefined;
 
   private constructor(
@@ -51,14 +53,38 @@ export class ManagedCsiRootDirectory {
     }
   }
 
-  async verify(): Promise<void> {
-    if (this.closing) throw new Error(UNAVAILABLE);
+  verify(): Promise<void> {
+    return this.withVerifiedDirectory(async () => {});
+  }
+
+  async withVerifiedDirectory<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.fenced) throw new Error(UNAVAILABLE);
+    let complete!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    this.operations.add(pending);
+    try {
+      await this.inspect();
+      try {
+        return await operation();
+      } finally {
+        await this.inspect();
+      }
+    } finally {
+      this.operations.delete(pending);
+      complete();
+    }
+  }
+
+  private async inspect(): Promise<void> {
+    if (this.fenced) throw new Error(UNAVAILABLE);
     try {
       const before = await namedDirectory(this.root);
       const descriptor = await this.handle.stat({ bigint: true });
       const after = await namedDirectory(this.root);
       if (
-        this.closing ||
+        this.fenced ||
         !sameDirectory(before, descriptor) ||
         !sameDirectory(after, descriptor) ||
         descriptor.dev.toString() !== this.rootDevice ||
@@ -66,13 +92,18 @@ export class ManagedCsiRootDirectory {
       )
         throw new Error(UNAVAILABLE);
     } catch (error) {
-      await this.close();
+      // Closing joins this operation too; awaiting it here would self-wait.
+      void this.close().catch(() => {});
       throw error;
     }
   }
 
   close(): Promise<void> {
-    this.closing ??= this.handle.close();
+    this.fenced = true;
+    this.closing ??= (async () => {
+      await Promise.all(this.operations);
+      await this.handle.close();
+    })();
     return this.closing;
   }
 }

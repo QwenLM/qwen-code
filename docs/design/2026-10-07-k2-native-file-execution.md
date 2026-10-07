@@ -3,8 +3,9 @@
 [English](2026-10-07-k2-native-file-execution.md) | [简体中文](2026-10-07-k2-native-file-execution.zh-CN.md)
 
 Status: connected-composition design with the initial checkpoint gate locally
-implemented and independently verified on owned MySQL, 2026-10-07. Implementation baseline:
-`b0738214c5d09f00ac74b14f3d517f8a6e3fd4b4` in
+implemented and independently verified on owned MySQL, updated 2026-10-08.
+Implementation baseline:
+`8e116d2071a8dcc136d6061160a70a66699e4e3a` in
 [Draft PR #13526](https://github.com/QwenLM/qwen-code/pull/13526). Original SQL
 execution continuation is implemented there; the normal file chain below is not.
 This extends the [K2 completion design](2026-10-06-kubernetes-k2-retirement-handoff.md)
@@ -153,6 +154,23 @@ fails. This is the root-lifetime foundation used by the existing observer;
 ordinary file tools, backup preparation and inventory are not yet routed
 through it. POSIX directory-fixture tests do not qualify Linux CSI/NVMe
 execution, physical writer termination or NodeUnpublish.
+
+The current component adds a joined operation lifetime to the existing owner
+before lending that root to file I/O. It registers an operation before its first
+await, verifies the original root before and after the complete callback, and
+fences new operations immediately on close or failed identity inspection. One
+retained close promise waits for all admitted callbacks before closing the
+original fd once. A failed inspection
+initiates close without awaiting its own operation; otherwise it would wait on
+itself. Callbacks must also not await their owner's close. A callback error still
+runs the final identity inspection and releases its operation; the error alone
+is not evidence that the mount was replaced. Use the same lifetime around the
+real mount observer's second mountinfo read and receipt comparison, and join
+observations that began before the root fd was acquired. Close cannot return
+while one of those observations is still running. This component establishes
+owned observation lifetime only; fd-bound child paths, tool/history callbacks,
+helper joins and their retirement counters still require actual wiring and
+qualification before private worker admission.
 
 Copy raw preimage bytes from an opened ordinary-file descriptor into a unique
 leaf with `O_CREAT | O_EXCL | O_NOFOLLOW`. Use the same descriptors for

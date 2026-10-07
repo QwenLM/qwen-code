@@ -3,9 +3,9 @@
 [English](2026-10-07-k2-native-file-execution.md) | [简体中文](2026-10-07-k2-native-file-execution.zh-CN.md)
 
 状态：完整文件组合设计；初始 checkpoint 门禁已在本地实现，并在自有 MySQL 上独立验证，
-2026-10-07。实现基线为
+更新于 2026-10-08。实现基线为
 [Draft PR #13526](https://github.com/QwenLM/qwen-code/pull/13526) 中的
-`b0738214c5d09f00ac74b14f3d517f8a6e3fd4b4`。该提交已实现原执行的 SQL
+`8e116d2071a8dcc136d6061160a70a66699e4e3a`。该提交已实现原执行的 SQL
 continuation；以下正常文件链尚未实现。本文补充
 [K2 补全设计](2026-10-06-kubernetes-k2-retirement-handoff.zh-CN.md)，不声明完整
 A2、聚合退役或新增云上验收完成。
@@ -127,6 +127,18 @@ Write/Edit 必须要求已绑定并 prepared 的 history；不能使用 legacy e
 这是已接入现有观察器的根目录生命周期基础；普通文件工具、备份准备和库存尚未通过它
 执行。POSIX 目录 fixture 测试不构成 Linux CSI/NVMe 执行、物理 writer 终止或
 NodeUnpublish 资格。
+
+本组件在将该根目录借给文件 I/O 之前，已为现有 owner 增加可 join 的 operation
+lifetime。
+每个操作在第一次 await 前登记，并在完整 callback 前后验证原根目录。close 或身份
+检查失败时立即封锁新操作；保留唯一 close promise，等待全部已准入 callback 结束后，
+仅关闭一次原 fd。身份检查失败时启动 close，但不能等待自身操作，否则会自等死锁。
+callback 也不能 await 自己 owner 的 close。callback 抛错仍执行最终身份检查并释放
+操作；该错误本身不证明挂载已替换。真实挂载观察器的第二次 mountinfo 读取和 receipt
+比较使用同一 lifetime，同时 join 在取得根 fd 之前就已开始的观察。仍有这些观察在运行
+时，close 不能返回。本组件只建立自有观察寿命；fd-bound 子路径、工具/history
+callback、helper join 及其 retirement counter 仍需真实接线和资格验证，之后才能准入
+私有 worker。
 
 从已打开普通文件 descriptor 复制 raw preimage bytes，以
 `O_CREAT | O_EXCL | O_NOFOLLOW` 创建唯一 leaf。同一 descriptor 完成

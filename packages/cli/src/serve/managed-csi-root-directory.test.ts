@@ -13,6 +13,14 @@ import { ManagedCsiRootDirectory } from './managed-csi-root-directory.js';
 
 afterEach(() => vi.restoreAllMocks());
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
 async function fixture() {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-csi-fd-'));
   const parent = await fs.realpath(temporary);
@@ -172,5 +180,164 @@ describe.runIf(process.platform !== 'win32')('CSI root directory fd', () => {
     await expect(directory.verify()).rejects.toThrow('inspection failed');
     lstat.mockRestore();
     await expect(directory.verify()).rejects.toThrow('unavailable');
+  });
+
+  it('joins verification already waiting on named metadata before closing the real fd', async () => {
+    const owned = await fixture();
+    const nativeOpen = fs.open;
+    let handle!: FileHandle;
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      handle = await nativeOpen(...args);
+      return handle;
+    });
+    const directory = await owned.open();
+    const entered = deferred();
+    const release = deferred();
+    const nativeLstat = fs.lstat;
+    vi.spyOn(fs, 'lstat').mockImplementationOnce(async (...args) => {
+      const stats = await nativeLstat(...args);
+      entered.resolve();
+      await release.promise;
+      return stats;
+    });
+    const verifying = directory.verify().catch((error: unknown) => error);
+    try {
+      await entered.promise;
+      let closed = false;
+      const closing = directory.close().then(() => {
+        closed = true;
+      });
+      await new Promise(setImmediate);
+      expect(closed).toBe(false);
+      expect((await handle.stat()).isDirectory()).toBe(true);
+      await expect(directory.verify()).rejects.toThrow('unavailable');
+      release.resolve();
+      await expect(verifying).resolves.toMatchObject({
+        message: expect.stringContaining('unavailable'),
+      });
+      await closing;
+      await expect(handle.stat()).rejects.toMatchObject({ code: 'EBADF' });
+    } finally {
+      release.resolve();
+      await verifying;
+    }
+  });
+
+  it('joins every full callback and immediately fences new callbacks on close', async () => {
+    const owned = await fixture();
+    const nativeOpen = fs.open;
+    let handle!: FileHandle;
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      handle = await nativeOpen(...args);
+      return handle;
+    });
+    const directory = await owned.open();
+    const close = vi.spyOn(handle, 'close');
+    const gates = [deferred(), deferred()];
+    const entered = gates.map(() => deferred());
+    const operations = gates.map((gate, index) =>
+      expect(
+        directory.withVerifiedDirectory(async () => {
+          entered[index].resolve();
+          await gate.promise;
+        }),
+      ).rejects.toThrow('unavailable'),
+    );
+    try {
+      await Promise.all(entered.map((gate) => gate.promise));
+      const closing = directory.close();
+      expect(directory.close()).toBe(closing);
+      const late = vi.fn(async () => {});
+      await expect(directory.withVerifiedDirectory(late)).rejects.toThrow(
+        'unavailable',
+      );
+      expect(late).not.toHaveBeenCalled();
+      gates[0].resolve();
+      await operations[0];
+      expect(close).not.toHaveBeenCalled();
+      expect((await handle.stat()).isDirectory()).toBe(true);
+      gates[1].resolve();
+      await operations[1];
+      await closing;
+      expect(close).toHaveBeenCalledTimes(1);
+      await expect(handle.stat()).rejects.toMatchObject({ code: 'EBADF' });
+    } finally {
+      gates.forEach((gate) => gate.resolve());
+      await Promise.all(operations);
+    }
+  });
+
+  it('fences a replacement without self-waiting or closing an admitted callback early', async () => {
+    const owned = await fixture();
+    const nativeOpen = fs.open;
+    let handle!: FileHandle;
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      handle = await nativeOpen(...args);
+      return handle;
+    });
+    const directory = await owned.open();
+    const entered = deferred();
+    const release = deferred();
+    const operation = directory
+      .withVerifiedDirectory(async () => {
+        entered.resolve();
+        await release.promise;
+      })
+      .catch((error: unknown) => error);
+    try {
+      await entered.promise;
+      const original = path.join(owned.parent, 'original');
+      await fs.rename(owned.root, original);
+      await fs.mkdir(owned.root);
+      await expect(directory.verify()).rejects.toThrow('unavailable');
+      expect((await handle.stat()).isDirectory()).toBe(true);
+      await fs.rmdir(owned.root);
+      await fs.rename(original, owned.root);
+      await expect(directory.verify()).rejects.toThrow('unavailable');
+      release.resolve();
+      await expect(operation).resolves.toMatchObject({
+        message: expect.stringContaining('unavailable'),
+      });
+      await directory.close();
+      await expect(handle.stat()).rejects.toMatchObject({ code: 'EBADF' });
+    } finally {
+      release.resolve();
+      await operation;
+    }
+  });
+
+  it('checks identity after a failing callback and retains a usable original owner', async () => {
+    const owned = await fixture();
+    const directory = await owned.open();
+    await expect(
+      directory.withVerifiedDirectory(async () => {
+        throw new Error('callback failed');
+      }),
+    ).rejects.toThrow('callback failed');
+    await expect(directory.verify()).resolves.toBeUndefined();
+    await expect(
+      directory.withVerifiedDirectory(async () => 'original'),
+    ).resolves.toBe('original');
+    await expect(
+      directory.withVerifiedDirectory(async () => {
+        await fs.rename(owned.root, path.join(owned.parent, 'original'));
+        await fs.mkdir(owned.root);
+        throw new Error('callback failed');
+      }),
+    ).rejects.toThrow('unavailable');
+    await expect(directory.verify()).rejects.toThrow('unavailable');
+  });
+
+  it('joins a callback-issued close after the callback returns', async () => {
+    const owned = await fixture();
+    const directory = await owned.open();
+    let closing!: Promise<void>;
+    await expect(
+      directory.withVerifiedDirectory(async () => {
+        closing = directory.close();
+      }),
+    ).rejects.toThrow('unavailable');
+    await closing;
+    expect(directory.close()).toBe(closing);
   });
 });

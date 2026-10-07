@@ -80,6 +80,7 @@ export class ManagedCsiMount extends ManagedContextMount {
   readonly #serial: string;
   #pinned: string | undefined;
   #closed = false;
+  readonly #observations = new Set<Promise<void>>();
   #directory: Promise<ManagedCsiRootDirectory> | undefined;
   #closing: Promise<void> | undefined;
 
@@ -104,6 +105,11 @@ export class ManagedCsiMount extends ManagedContextMount {
       this.#closed = true;
       throw new Error(UNAVAILABLE);
     }
+    let complete!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    this.#observations.add(pending);
     try {
       const before = parseManagedCsiMount(
         await readBounded('/proc/self/mountinfo', MOUNTINFO_LIMIT),
@@ -122,48 +128,53 @@ export class ManagedCsiMount extends ManagedContextMount {
         linuxDeviceNumber(before.device),
       );
       const directory = await this.#directory;
-      await directory.verify();
-      const after = parseManagedCsiMount(
-        await readBounded('/proc/self/mountinfo', MOUNTINFO_LIMIT),
-        this.#mountRoot,
-      );
-      await directory.verify();
-      const identity = JSON.stringify([
-        before.mountId,
-        before.device,
-        before.source,
-        directory.rootDevice,
-        directory.rootInode,
-      ]);
-      if (
-        this.#closed ||
-        directory.rootDevice !== linuxDeviceNumber(before.device) ||
-        JSON.stringify(before) !== JSON.stringify(after) ||
-        (this.#pinned !== undefined && this.#pinned !== identity)
-      ) {
-        throw new Error(UNAVAILABLE);
-      }
-      this.#pinned = identity;
-      return Object.freeze({
-        ...before,
-        diskSerial: this.#serial,
-        rootDevice: directory.rootDevice,
-        rootInode: directory.rootInode,
+      return await directory.withVerifiedDirectory(async () => {
+        const after = parseManagedCsiMount(
+          await readBounded('/proc/self/mountinfo', MOUNTINFO_LIMIT),
+          this.#mountRoot,
+        );
+        const identity = JSON.stringify([
+          before.mountId,
+          before.device,
+          before.source,
+          directory.rootDevice,
+          directory.rootInode,
+        ]);
+        if (
+          this.#closed ||
+          directory.rootDevice !== linuxDeviceNumber(before.device) ||
+          JSON.stringify(before) !== JSON.stringify(after) ||
+          (this.#pinned !== undefined && this.#pinned !== identity)
+        ) {
+          throw new Error(UNAVAILABLE);
+        }
+        this.#pinned = identity;
+        return Object.freeze({
+          ...before,
+          diskSerial: this.#serial,
+          rootDevice: directory.rootDevice,
+          rootInode: directory.rootInode,
+        });
       });
     } catch {
-      await this.close();
+      // Join happens after this observation leaves its own pending set.
+      void this.close().catch(() => {});
       throw new Error(UNAVAILABLE);
+    } finally {
+      this.#observations.delete(pending);
+      complete();
     }
   }
 
   close(): Promise<void> {
     this.#closed = true;
-    this.#closing ??= this.#directory
-      ? this.#directory.then(
-          (directory) => directory.close(),
-          () => {},
-        )
-      : Promise.resolve();
+    this.#closing ??= (async () => {
+      await Promise.all(this.#observations);
+      await this.#directory?.then(
+        (directory) => directory.close(),
+        () => {},
+      );
+    })();
     return this.#closing;
   }
 
