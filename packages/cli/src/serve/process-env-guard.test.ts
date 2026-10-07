@@ -167,10 +167,23 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/managed-context-worker.ts',
     {
       reason:
-        'Managed Runtime startup selects its deployment-owned MCP and Hook manifests from the process environment; definitions are then scoped by tenant and workspace.',
+        'Managed Runtime startup selects its deployment-owned MCP and Hook manifests and the delegated cgroup root for process isolation from the process environment; definitions are then scoped by tenant and workspace.',
       accesses: {
+        'key:QWEN_MANAGED_HOOK_CGROUP_ROOT': 1,
         'key:QWEN_MANAGED_HOOK_CONFIG': 1,
         'key:QWEN_MANAGED_MCP_CONFIG': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-csi-worker.ts',
+    {
+      reason:
+        'The Kubernetes Downward API supplies the current Pod identity to the single-Pod CSI worker process; attestation, drain and ACK routes capture it at registration rather than from workspace environment overlays.',
+      accesses: {
+        'key:QWEN_NODE_NAME': 3,
+        'key:QWEN_POD_NAMESPACE': 3,
+        'key:QWEN_POD_UID': 3,
       },
     },
   ],
@@ -208,6 +221,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       reason:
         "A Managed session's host starts its Runtime worker from its own CLI entry and process environment, as a Legacy host's commands inherit it.",
       accesses: { 'key:QWEN_CLI_ENTRY': 1, whole: 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-tool-executor.ts',
+    {
+      reason:
+        'The background Shell environment copies a fixed allowlist of inherited shell variables (PATH, HOME, locale, TMPDIR, USER, SHELL) from the Runtime worker process, matching what a Legacy host hands its commands; secrets are never copied by name.',
+      accesses: { 'computed:key': 1 },
     },
   ],
   [

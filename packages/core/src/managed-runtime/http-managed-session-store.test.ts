@@ -20,6 +20,7 @@ import {
   ManagedSessionStoreHttpError,
   ManagedSessionStoreTransportError,
   createHttpManagedSessionStores,
+  readOnlyManagedSessionSnapshot,
 } from './http-managed-session-store.js';
 import type { McpConfiguration } from './managed-mcp-record.js';
 import type { HookExecution, HookRegistration } from './managed-hook-record.js';
@@ -800,6 +801,151 @@ describe('HTTP Managed Session store', () => {
     await restored.close();
   });
 
+  it('commits Action input before a checkpoint without uploading unrelated staged input', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-action-input-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{}'),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{}'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+    });
+    try {
+      const inputRef = await session.resources.publish(
+        'managed-tool-input',
+        Buffer.from('{"input":"approved"}'),
+      );
+      const unrelated = await session.resources.publish(
+        'managed-tool-input',
+        Buffer.from('{"input":"unrelated"}'),
+      );
+      const optionsRef = await session.resources.publish(
+        'managed-action-options',
+        Buffer.from(JSON.stringify({ v: 2, inputRef })),
+      );
+      await session.authority.requestToolAction(
+        {
+          operation: 'requestToolAction',
+          commandId: 'approval-first',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        {
+          requestId: 'approval-first',
+          kind: 'permission',
+          inputRevision: 1,
+          optionsRef,
+        },
+        { class: 'harness', activation: session.activation },
+      );
+      expect(session.authority.latestCheckpoint).toBeUndefined();
+      const resources = server.commits.at(-1)!['resources'] as Array<{
+        resourceId: string;
+        bytesBase64?: string;
+      }>;
+      expect(resources.map(({ resourceId }) => resourceId).sort()).toEqual(
+        [optionsRef.resourceId, inputRef.resourceId].sort(),
+      );
+      expect(
+        resources.find(({ resourceId }) => resourceId === inputRef.resourceId)
+          ?.bytesBase64,
+      ).toBe(Buffer.from('{"input":"approved"}').toString('base64'));
+      expect(
+        resources.some(({ resourceId }) => resourceId === unrelated.resourceId),
+      ).toBe(false);
+
+      // The read-only snapshot inspector walks the same options -> input edge.
+      // Without it the committed input is enumerated but never referenced, so
+      // restoring a Session that raised a native approval would fail closed.
+      const snapshotResources = new Map<
+        string,
+        {
+          ref: ManagedSessionDurableRef;
+          bytesBase64: string;
+          referencedRevisions: number[];
+        }
+      >();
+      for (const [index, commit] of server.commits.entries()) {
+        for (const raw of commit['resources'] as ManagedSessionDurableRef[]) {
+          const ref = {
+            resourceId: raw.resourceId,
+            kind: raw.kind,
+            schemaVersion: raw.schemaVersion,
+            byteLength: raw.byteLength,
+            digest: raw.digest,
+          };
+          const resource = snapshotResources.get(ref.resourceId) ?? {
+            ref,
+            bytesBase64: (await session.resources.read(ref)).toString('base64'),
+            referencedRevisions: [],
+          };
+          resource.referencedRevisions.push(index + 1);
+          snapshotResources.set(ref.resourceId, resource);
+        }
+      }
+      const transactions = server.commits.map((commit, index) => ({
+        ...commit,
+        journalRevision: index + 1,
+        recordEncoding: 'identity',
+        byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+          .length,
+      }));
+      const snapshot = readOnlyManagedSessionSnapshot({
+        format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+        sessionKey: SESSION_KEY,
+        head: {
+          state: 'ACTIVE',
+          storageVersion: 1,
+          writerGeneration: 1,
+          journalRevision: transactions.length,
+          committedSequence: session.authority.committedSequence,
+          lastCommitDigest: session.authority.commitProof.committedPrefixHash,
+          activationEpoch: session.activation.epoch,
+          latestCheckpointResourceId: null,
+          compactedThroughRevision: 0,
+          recoveryStatus: 'READY',
+          recoveryDetailCode: null,
+        },
+        transactions,
+        resources: [...snapshotResources.values()],
+      });
+      await expect(snapshot.resources.read(inputRef)).resolves.toEqual(
+        Buffer.from('{"input":"approved"}'),
+      );
+      await expect(snapshot.resources.read(unrelated)).rejects.toThrow(
+        'Managed Session Store: snapshot resource is missing.',
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
   it('commits only checkpoint resources and their dependencies for a cold owner', async () => {
     const server = new FakeManagedSessionStore();
     const runtimeBaseDir = await mkdtemp(
@@ -886,6 +1032,99 @@ describe('HTTP Managed Session store', () => {
     expect(
       committedResources.map(({ resourceId }) => resourceId).sort(),
     ).toEqual([checkpointRef.resourceId, historyRef.resourceId].sort());
+    await first.authority.appendExecutionEvent(
+      {
+        operation: 'referenceOldCheckpoint',
+        commandId: 'old-root',
+        sessionKey: SESSION_KEY,
+        contentDigest: 'd'.repeat(64),
+      },
+      (sequence) => ({
+        v: 1,
+        sequence,
+        eventId: 'old-root',
+        sessionKey: SESSION_KEY,
+        kind: 'turn.settled',
+        occurredAt: Date.now(),
+        subject: {
+          type: 'activation',
+          scopeId: first.activation.activationId,
+          ...first.activation,
+        },
+        payload: {
+          turnId: 'old-root',
+          outcome: 'completed',
+          stopReason: 'end_turn',
+          resultRef: checkpointRef,
+          usageRef: null,
+          pendingOwnersRef: null,
+        },
+      }),
+      { class: 'harness', activation: first.activation },
+    );
+    expect(server.commits.at(-1)!['resources']).toEqual([
+      {
+        ...checkpointRef,
+      },
+    ]);
+    const snapshotResources = new Map<
+      string,
+      {
+        ref: ManagedSessionDurableRef;
+        bytesBase64: string;
+        referencedRevisions: number[];
+      }
+    >();
+    for (const [index, commit] of server.commits.entries()) {
+      for (const raw of commit['resources'] as ManagedSessionDurableRef[]) {
+        const ref = {
+          resourceId: raw.resourceId,
+          kind: raw.kind,
+          schemaVersion: raw.schemaVersion,
+          byteLength: raw.byteLength,
+          digest: raw.digest,
+        };
+        const resource = snapshotResources.get(ref.resourceId) ?? {
+          ref,
+          bytesBase64: (await first.resources.read(ref)).toString('base64'),
+          referencedRevisions: [],
+        };
+        resource.referencedRevisions.push(index + 1);
+        snapshotResources.set(ref.resourceId, resource);
+      }
+    }
+    const transactions = server.commits.map((commit, index) => ({
+      ...commit,
+      journalRevision: index + 1,
+      recordEncoding: 'identity',
+      byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+        .length,
+    }));
+    const fetchCount = server.fetch.mock.calls.length;
+    const snapshot = readOnlyManagedSessionSnapshot({
+      format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+      sessionKey: SESSION_KEY,
+      head: {
+        state: 'ACTIVE',
+        storageVersion: 1,
+        writerGeneration: 1,
+        journalRevision: transactions.length,
+        committedSequence: first.authority.committedSequence,
+        lastCommitDigest: first.authority.commitProof.committedPrefixHash,
+        activationEpoch: first.activation.epoch,
+        latestCheckpointResourceId: checkpointRef.resourceId,
+        compactedThroughRevision: 0,
+        recoveryStatus: 'READY',
+        recoveryDetailCode: null,
+      },
+      transactions,
+      resources: [...snapshotResources.values()],
+    });
+    expect((await snapshot.journal.read()).committed).toBe(
+      first.authority.committedSequence,
+    );
+    expect(await snapshot.resources.read(historyRef)).toEqual(historyBytes);
+    expect(server.fetch.mock.calls.length).toBe(fetchCount);
     await first.close();
 
     const secondStores = createHttpManagedSessionStores({
@@ -1778,6 +2017,77 @@ describe('HTTP Managed Session store', () => {
       expect(uploaded.map((ref) => ref.resourceId)).not.toContain(
         orphanRef.resourceId,
       );
+      const snapshotResources = new Map<
+        string,
+        {
+          ref: ManagedSessionDurableRef;
+          bytesBase64: string;
+          referencedRevisions: number[];
+        }
+      >();
+      for (const [revision, commit] of server.commits.entries()) {
+        for (const raw of commit['resources'] as ManagedSessionDurableRef[]) {
+          const { resourceId, kind, schemaVersion, byteLength, digest } = raw;
+          const ref = { resourceId, kind, schemaVersion, byteLength, digest };
+          const resource = snapshotResources.get(resourceId) ?? {
+            ref,
+            bytesBase64: (await first.resources.read(ref)).toString('base64'),
+            referencedRevisions: [],
+          };
+          resource.referencedRevisions.push(revision + 1);
+          snapshotResources.set(resourceId, resource);
+        }
+      }
+      const transactions = server.commits.map((commit, revision) => ({
+        ...commit,
+        journalRevision: revision + 1,
+        recordEncoding: 'identity',
+        byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+          .length,
+      }));
+      const snapshotInput = {
+        format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+        sessionKey: SESSION_KEY,
+        head: {
+          state: 'ACTIVE',
+          storageVersion: 1,
+          writerGeneration: 1,
+          journalRevision: transactions.length,
+          committedSequence: first.authority.committedSequence,
+          lastCommitDigest: first.authority.commitProof.committedPrefixHash,
+          activationEpoch: first.activation.epoch,
+          latestCheckpointResourceId: null,
+          compactedThroughRevision: 0,
+          recoveryStatus: 'READY',
+          recoveryDetailCode: null,
+        },
+        transactions,
+        resources: [...snapshotResources.values()],
+      };
+      const snapshot = readOnlyManagedSessionSnapshot(snapshotInput);
+      expect((await snapshot.journal.read()).committed).toBe(
+        first.authority.committedSequence,
+      );
+      expect(await snapshot.resources.read(messagesRef)).toEqual(
+        await first.resources.read(messagesRef),
+      );
+      for (const part of parts)
+        expect(await snapshot.resources.read(part)).toEqual(
+          await first.resources.read(part),
+        );
+      expect(() =>
+        readOnlyManagedSessionSnapshot({
+          ...snapshotInput,
+          resources: [
+            ...snapshotInput.resources,
+            {
+              ref: orphanRef,
+              bytesBase64: Buffer.from('{}').toString('base64'),
+              referencedRevisions: [transactions.length],
+            },
+          ],
+        }),
+      ).toThrow('snapshot resource enumeration conflicts.');
     }
     const views = first.authority.taskViews();
     expect(views).toHaveLength(1);

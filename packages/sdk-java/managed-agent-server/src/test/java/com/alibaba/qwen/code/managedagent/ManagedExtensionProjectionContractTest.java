@@ -34,11 +34,35 @@ class ManagedExtensionProjectionContractTest {
     void pinsTheBodiesStatesAndOutbox() throws IOException {
         JsonNode fixtures = fixtures();
         assertEquals(1, fixtures.required("contractVersion").intValue());
-        Map<String, String> bodies = new TreeMap<>();
-        ManagedExtensionProjection.RECORD_BODIES.forEach(
-                (domain, body) -> bodies.put(domain, body.taskKind()));
+        Map<String, Object> bodies = new TreeMap<>();
+        ManagedExtensionProjection.RECORD_BODIES.forEach((domain, body) -> {
+            // child_run's task kind follows the body's own kind; every
+            // other body is a constant or projects no task at all.
+            if (domain.equals("child_run")) {
+                bodies.put(domain, JSON.createObjectNode()
+                        .put("shell", body.taskKindOf().apply(
+                                JSON.createObjectNode().put("kind", "shell")))
+                        .put("child_agent", body.taskKindOf().apply(
+                                JSON.createObjectNode()
+                                        .put("kind", "child_agent"))));
+            } else {
+                // Probe with a record-shaped node carrying the identity
+                // fields a mapping could regress into reading — the real
+                // names of the managed records, not an invented one.
+                String kind = body.taskKindOf().apply(JSON.createObjectNode()
+                        .put("configurationId", "probe")
+                        .put("registrationId", "probe")
+                        .put("occurrenceId", "probe")
+                        .put("serverId", "probe"));
+                bodies.put(domain, kind == null
+                        ? com.fasterxml.jackson.databind.node.NullNode
+                                .getInstance()
+                        : com.fasterxml.jackson.databind.node.TextNode
+                                .valueOf(kind));
+            }
+        });
         assertEquals(JSON.convertValue(fixtures.required("recordBodies"),
-                TreeMap.class), bodies);
+                TreeMap.class), JSON.convertValue(bodies, TreeMap.class));
         assertEquals(JSON.convertValue(fixtures.required("taskStates"),
                 List.class), ManagedExtensionProjection.TASK_STATES);
         List<String> runtimeStates = new ArrayList<>(
@@ -114,7 +138,8 @@ class ManagedExtensionProjectionContractTest {
             ManagedExtensionRecords.requireRun(run);
             assertEquals(view(fixture.required("view")),
                     ManagedExtensionProjection.project(null, run,
-                            fixture.required("occurredAt").longValue()),
+                            fixture.required("occurredAt").longValue(),
+                            fixture.path("stopRequested").asBoolean(false)),
                     id(fixture));
             assertEquals(fixture.required("deliveryPending").booleanValue(),
                     ManagedExtensionProjection.isDeliveryPending(run),
@@ -160,7 +185,8 @@ class ManagedExtensionProjectionContractTest {
                         : ManagedExtensionRecords.isRunSuccessor(previousRun,
                                 run), id(fixture));
                 previous = ManagedExtensionProjection.project(previous, run,
-                        revision.required("occurredAt").longValue());
+                        revision.required("occurredAt").longValue(),
+                        revision.path("stopRequested").asBoolean(false));
                 assertEquals(view(revision.required("view")), previous,
                         id(fixture));
                 assertEquals(revision.required("deliveryPending")
@@ -180,7 +206,9 @@ class ManagedExtensionProjectionContractTest {
                     ManagedExtensionProjection.executionOf(
                             ToolExecutionRecord.State.valueOf(
                                     text(fixture, "state")),
-                            status.isNull() ? null : status.textValue()),
+                            status.isNull() ? null : status.textValue(),
+                            fixture.required("dispatchGeneration")
+                                    .longValue()),
                     id(fixture));
         }
         Set<String> covered = new HashSet<>();

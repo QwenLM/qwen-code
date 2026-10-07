@@ -276,6 +276,12 @@ export interface DaemonPromptSettledEvent {
   sessionId: string;
   promptId: string;
   outcome: DaemonPromptSettlementOutcome;
+  /**
+   * The client that submitted the prompt, from the terminal frame's
+   * envelope. Lets a submitter recognise its own turn when the admission
+   * response never reached it.
+   */
+  originatorClientId?: string;
   /** Daemon terminal reason. Present for completed and cancelled turns. */
   stopReason?: string;
   error?: {
@@ -418,9 +424,10 @@ export interface SendPromptOptions {
    * runs to completion. Lets a caller act on "the prompt reached the session"
    * without waiting for the whole turn — e.g. the scheduled-tasks "run now",
    * which records the run at admission so a long/stalled turn or a closed tab
-   * can't lose the record.
+   * can't lose the record. Carries the daemon's id for the prompt, the key
+   * its terminal `turn_complete` / `turn_error` settles under.
    */
-  onAdmitted?: () => void;
+  onAdmitted?: (admission: { promptId: string }) => void;
 }
 
 export interface SubmitPromptOptions extends SendPromptOptions {
@@ -611,10 +618,19 @@ export interface DaemonSessionActions {
     prompt: string,
     opts?: { signal?: AbortSignal },
   ): AsyncGenerator<DaemonSessionGenerationEvent>;
-  getRewindSnapshots(): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
+  getRewindSnapshots(opts?: {
+    /** Rethrow failures raw instead of recording a notice; for best-effort
+     * callers that fall back on their own. */
+    silent?: boolean;
+  }): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
   rewindSession(
     promptId: string,
-    opts?: { rewindFiles?: boolean },
+    opts?: {
+      rewindFiles?: boolean;
+      /** Rethrow failures raw instead of recording a notice; for best-effort
+       * callers that fall back on their own. */
+      silent?: boolean;
+    },
   ): Promise<DaemonRewindResult>;
   btwSession(
     question: string,

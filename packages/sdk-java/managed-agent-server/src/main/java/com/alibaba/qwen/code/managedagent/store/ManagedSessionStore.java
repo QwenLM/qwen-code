@@ -130,6 +130,10 @@ public class ManagedSessionStore {
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()));
     }
 
+    boolean usesDataSource(javax.sql.DataSource source) {
+        return source != null && jdbc.getDataSource() == source;
+    }
+
     @Autowired(required = false)
     public void setPublicationObjects(ToolPublicationObjectStore publicationObjects) {
         this.publicationObjects = publicationObjects;
@@ -1345,7 +1349,7 @@ public class ManagedSessionStore {
                 if (lineLength == 0) {
                     throw invalid("recordBytesBase64 contains a blank line.");
                 }
-                if (lineLength > 1024 * 1024) {
+                if (lineLength > ManagedSessionStoreModels.MAX_EVENT_BYTES) {
                     throw payloadTooLarge("A Managed Session record exceeds"
                             + " its byte limit.");
                 }

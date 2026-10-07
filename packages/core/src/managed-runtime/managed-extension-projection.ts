@@ -35,6 +35,17 @@ import {
   parseHookRegistration,
   parseHookExecution,
 } from './managed-hook-record.js';
+import {
+  isChildRunStart,
+  isChildRunSuccessor,
+  parseChildRun,
+  type AnyChildRun,
+} from './managed-child-run-record.js';
+import {
+  isChildAcceptanceStart,
+  isChildAcceptanceSuccessor,
+  parseChildAcceptance,
+} from './managed-child-acceptance-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -75,9 +86,12 @@ export type ManagedTaskRuntimeState =
 /**
  * A Stage H record body the authority can commit. `parse` returns the
  * identity that keys the record's revision chain and the run it embeds.
+ * `taskKindOf` gives the task kind of one parsed record — a constant for
+ * every body so far except `child_run`, whose kind follows the body's own
+ * `kind` field — and null for a body that projects no task.
  */
 export interface ManagedExtensionRecordBody {
-  readonly taskKind: ManagedTaskKind | null;
+  readonly taskKindOf: (record: unknown) => ManagedTaskKind | null;
   /** The parsed body is closed and frozen; the authority stores exactly it. */
   parse(value: unknown): {
     readonly record: unknown;
@@ -99,7 +113,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
   Partial<Record<ManagedSessionDomain, ManagedExtensionRecordBody>>
 > = Object.freeze({
   mcp_configuration: Object.freeze({
-    taskKind: null,
+    taskKindOf: () => null,
     parse: (value: unknown) => {
       const record = parseMcpConfiguration(value);
       return { record, recordId: record.configurationId, run: record.run };
@@ -108,7 +122,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isMcpConfigurationSuccessor,
   }),
   mcp_operation: Object.freeze({
-    taskKind: null,
+    taskKindOf: () => null,
     parse: (value: unknown) => {
       const record = parseMcpOperation(value);
       return { record, recordId: record.operationId, run: record.run };
@@ -117,7 +131,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isMcpOperationSuccessor,
   }),
   hook_registration: Object.freeze({
-    taskKind: null,
+    taskKindOf: () => null,
     parse: (value: unknown) => {
       const record = parseHookRegistration(value);
       return { record, recordId: record.registrationId, run: record.run };
@@ -126,7 +140,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isHookRegistrationSuccessor,
   }),
   hook_execution: Object.freeze({
-    taskKind: null,
+    taskKindOf: () => null,
     parse: (value: unknown) => {
       const record = parseHookExecution(value);
       return { record, recordId: record.hookExecutionId, run: record.run };
@@ -135,13 +149,38 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isHookExecutionSuccessor,
   }),
   monitor_run: Object.freeze({
-    taskKind: 'monitor',
+    taskKindOf: () => 'monitor',
     parse: (value: unknown) => {
       const monitor = parseMonitorRun(value);
       return { record: monitor, recordId: monitor.monitorId, run: monitor.run };
     },
     isStart: isMonitorRunStart,
     isSuccessor: isMonitorRunSuccessor,
+  }),
+  child_run: Object.freeze({
+    taskKindOf: (record: unknown) =>
+      (record as AnyChildRun).kind === 'shell'
+        ? 'background_shell'
+        : 'child_agent',
+    parse: (value: unknown) => {
+      const record = parseChildRun(value);
+      return {
+        record,
+        recordId: record.kind === 'shell' ? record.shellId : record.childRunId,
+        run: record.run,
+      };
+    },
+    isStart: isChildRunStart,
+    isSuccessor: isChildRunSuccessor,
+  }),
+  child_acceptance: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseChildAcceptance(value);
+      return { record, recordId: record.childRunId, run: record.run };
+    },
+    isStart: isChildAcceptanceStart,
+    isSuccessor: isChildAcceptanceSuccessor,
   }),
 });
 
@@ -225,13 +264,18 @@ function taskState(run: ExtensionRun): ManagedTaskState {
   }
 }
 
-function runtimeState(run: ExtensionRun): ManagedTaskRuntimeState | null {
+function runtimeState(
+  run: ExtensionRun,
+  stopRequested: boolean,
+): ManagedTaskRuntimeState | null {
   if (isTerminalRunState(run.state) || run.execution === null) return null;
   if (run.runtime === null) return 'unbound';
-  if (run.execution === 'running_attached') return 'ready';
+  if (run.execution === 'running_attached') {
+    return stopRequested ? 'draining' : 'ready';
+  }
   if (run.reason === 'runtime_lost') return 'lost';
   if (run.execution === 'intent' || run.execution === 'dispatch_started') {
-    return 'provisioning';
+    return stopRequested ? 'draining' : 'provisioning';
   }
   return null;
 }
@@ -241,12 +285,17 @@ function runtimeState(run: ExtensionRun): ManagedTaskRuntimeState | null {
  * view before it (null for the first revision), the revision's run and the
  * time its `domain.committed` event occurred. The times come from the
  * journal, so a rebuild yields the same view; a writer's clock may run
- * behind the one before it, so a time never precedes an earlier one.
+ * behind the one before it, so a time never precedes an earlier one. A
+ * stop-requested record whose run is attached (`running_attached`) or
+ * still provisioning (`intent`/`dispatch_started`) projects its Runtime as
+ * `draining`; a lost, terminal or unbound row keeps its own Runtime state
+ * (H3's `child_run`; every earlier record passes false).
  */
 export function projectManagedTask(
   previous: ManagedTaskProjection | null,
   run: ExtensionRun,
   occurredAt: number,
+  stopRequested = false,
 ): ManagedTaskProjection {
   const createdAt = previous?.createdAt ?? occurredAt;
   const startedAt =
@@ -259,7 +308,7 @@ export function projectManagedTask(
       : null);
   return Object.freeze({
     state: taskState(run),
-    runtimeState: runtimeState(run),
+    runtimeState: runtimeState(run, stopRequested),
     definitionRevision: run.definition?.definitionRevision ?? null,
     createdAt,
     startedAt,

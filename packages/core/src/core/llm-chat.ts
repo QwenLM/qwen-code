@@ -5429,6 +5429,24 @@ export class LlmChat {
   }
 
   /**
+   * Iterates raw history newest-first and returns the first entry satisfying
+   * `predicate`, without the O(history) clone `getHistoryShallow` pays. For
+   * read-only checks on hot per-send paths — callers must not mutate the
+   * returned objects.
+   */
+  findLastHistoryEntry(
+    predicate: (entry: Content) => boolean,
+  ): Content | undefined {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const entry = this.history[i];
+      if (predicate(entry)) {
+        return entry;
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Returns concatenated text from the last model entry without cloning the
    * full history. Used by stop hooks, where only the latest assistant text is
    * needed.
