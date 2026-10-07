@@ -156,6 +156,54 @@ describe('SDK Java Flyway migration version guard', () => {
   });
 });
 
+// #13623: three main runs lost their GitHub-hosted lanes to runner-queue
+// starvation — every failed job recorded zero steps and no assigned runner
+// while the pool legs passed. The MariaDB lane is pool-safe (per-job service
+// container, no host installs), so its trusted runs route to the ECS pool the
+// way the flyway guard's do; untrusted fork PRs stay hosted.
+describe('SDK Java MariaDB lane on the ECS pool', () => {
+  it('routes trusted mysql-integration runs to the pool', () => {
+    const block = job('mysql-integration');
+    for (const fragment of [
+      "github.repository == ''QwenLM/qwen-code''",
+      "vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true''",
+      "github.event_name != ''pull_request''",
+      'github.event.pull_request.head.repo.full_name == github.repository',
+      'contains(fromJSON(\'\'["OWNER","MEMBER","COLLABORATOR"]\'\'), github.event.pull_request.author_association)',
+      'fromJSON(\'\'["self-hosted", "linux", "x64", "ecs-qwen"]\'\')',
+      "fromJSON(''[\"ubuntu-latest\"]'')",
+    ]) {
+      expect(block).toContain(fragment);
+    }
+  });
+
+  it('keeps the MariaDB service on a random host port', () => {
+    // A fixed 3306:3306 mapping collides between jobs sharing one pool host;
+    // the steps read the mapped port from job.services.mariadb.ports.
+    const parsed = parse(workflow);
+    expect(parsed.jobs['mysql-integration'].services.mariadb.ports).toEqual([
+      '3306/tcp',
+    ]);
+    const block = job('mysql-integration');
+    expect(block).not.toContain('3306:3306');
+    expect(block).not.toContain('127.0.0.1:3306');
+    expect(
+      block.match(
+        /MYSQL_PORT: "\$\{\{ job\.services\.mariadb\.ports\['3306'\] \}\}"/g,
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('holds the per-host sdk-java lock around every Maven run', () => {
+    const block = job('mysql-integration');
+    expect(block.match(/flock --wait 1200 9/g)).toHaveLength(3);
+    expect(block).toContain(
+      'if: "${{ runner.environment == \'self-hosted\' }}"',
+    );
+    expect(block).toContain("- name: 'Set up Maven (self-hosted)'");
+  });
+});
+
 // #13506: the pool-routed legs inherited only the bare ownership restore
 // while ci.yml grew the rest of its pre-checkout hygiene across
 // recorded incidents — the safe.directory trust after #12648 and the
@@ -175,7 +223,12 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
   const ciRestore = ciSteps.find(
     (s) => s.name === 'Restore workspace ownership',
   )?.run;
-  const poolJobs = ['test', 'flyway-migrations', 'daemon-e2e'];
+  const poolJobs = [
+    'test',
+    'flyway-migrations',
+    'mysql-integration',
+    'daemon-e2e',
+  ];
 
   it.each(poolJobs)(
     'restores ownership, sweeps stale .qwen, then checks out in the %s job',
