@@ -31,6 +31,9 @@ public final class SessionResourceCollectionCollector {
             + " OR (kind = 'managed-tool-result-manifest' AND byte_length BETWEEN 1 AND "
             + ManagedSessionStore.toolResultLimit("managed-tool-result-manifest") + "))"
             + " AND object_key IS NULL AND object_version_id IS NULL AND encryption_key_id IS NULL"
+            // The byte_length column is metadata that outlives the bytes: a row another writer
+            // already freed has nothing left to collect and must not be counted a second time.
+            + " AND inline_bytes IS NOT NULL"
             + " AND resource_id > ? AND NOT EXISTS (SELECT 1 FROM qwen_managed_session_resource_ref r"
             + " WHERE r.session_scope_key = qwen_managed_session_resource.session_scope_key"
             + " AND r.resource_id = qwen_managed_session_resource.resource_id)"

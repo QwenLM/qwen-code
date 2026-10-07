@@ -333,6 +333,28 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     }
 
     @Test
+    void alreadyFreedRowsAreNotCountedAgain() {
+        initSession();
+        head(session);
+        publish("eligible", CONTENT, new byte[500]);
+        publish("freed", CONTENT, new byte[1000]);
+        // The shape a byte-freeing writer leaves behind: bytes nulled, state and byte_length kept.
+        jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = NULL"
+                + " WHERE session_scope_key = ? AND resource_id = 'freed'", resScope);
+        retire();
+        assertThat(collector(true, Duration.ZERO).runOnce()).isTrue();
+        var ledger = ledger();
+        assertThat(((Number) ledger.get("collected_bytes")).longValue()).isEqualTo(500);
+        assertThat(ledger.get("collected_at")).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT state FROM qwen_managed_session_resource"
+                + " WHERE session_scope_key = ? AND resource_id = 'eligible'", String.class, resScope))
+                .isEqualTo("COLLECTED");
+        assertThat(jdbc.queryForObject("SELECT state FROM qwen_managed_session_resource"
+                + " WHERE session_scope_key = ? AND resource_id = 'freed'", String.class, resScope))
+                .isEqualTo("PUBLISHED");
+    }
+
+    @Test
     void rowCountPageBoundariesAndResumeAcrossOwners() {
         initSession();
         head(session);

@@ -46,12 +46,15 @@ Rows eligible for collection, per row:
 
 - `qwen_managed_session_resource` with `state = 'PUBLISHED'`,
   `storage_kind = 'MYSQL_INLINE'`, `schema_version = 1`, NULL
-  `object_key`/`object_version_id`/`encryption_key_id`, and `kind` in the
-  three `managed-tool-result-*` kinds above with `byte_length` inside the
-  fail-closed per-kind bounds `toolResultLimit` already enforces (content ≤
-  1 MiB, page ≤ 256 KiB, manifest ≤ 64 KiB). A row violating any of these
-  layout invariants can only arise from corruption, which the fail-closed
-  read instruments protect as evidence; the pass never byte-drops it;
+  `object_key`/`object_version_id`/`encryption_key_id`, `inline_bytes` still
+  present, and `kind` in the three `managed-tool-result-*` kinds above with
+  `byte_length` inside the fail-closed per-kind bounds `toolResultLimit`
+  already enforces (content ≤ 1 MiB, page ≤ 256 KiB, manifest ≤ 64 KiB). A
+  row violating any of these layout invariants can only arise from
+  corruption, which the fail-closed read instruments protect as evidence; the
+  pass never byte-drops it. The presence clause guards the accounting rather
+  than the byte drop: `byte_length` is metadata that outlives the bytes, so a
+  row another writer already freed must not be counted a second time;
 - its Session has a retirement tombstone whose `recovery_protected` is false
   and whose `retired_at + deletion-grace` has elapsed;
 - no unexpired `qwen_output_read_lease` exists for the Session;

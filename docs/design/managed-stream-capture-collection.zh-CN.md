@@ -37,12 +37,13 @@ draining 与事件过期期间都保持钉住。Session 的永久删除会写入
 
 - `qwen_managed_session_resource` 行满足 `state = 'PUBLISHED'`、
   `storage_kind = 'MYSQL_INLINE'`、`schema_version = 1`、
-  `object_key`/`object_version_id`/`encryption_key_id` 全为 NULL，且 `kind`
-  为上述三个 `managed-tool-result-*` 种类之一，同时 `byte_length` 落在
-  `toolResultLimit` 已经 fail-closed 执行的逐 kind 上界内
-  （content ≤ 1 MiB，page ≤ 256 KiB，manifest ≤ 64 KiB）。违反这些布
-  局不变量的行只可能来自损坏，由 fail-closed 读方保护为证据；本通道绝不丢
-  弃它的字节；
+  `object_key`/`object_version_id`/`encryption_key_id` 全为 NULL、
+  `inline_bytes` 仍然存在，且 `kind` 为上述三个 `managed-tool-result-*`
+  种类之一，同时 `byte_length` 落在 `toolResultLimit` 已经 fail-closed
+  执行的逐 kind 上界内（content ≤ 1 MiB，page ≤ 256 KiB，manifest ≤ 64 KiB）。
+  违反这些布局不变量的行只可能来自损坏，由 fail-closed 读方保护为证据；本通
+  道绝不丢弃它的字节。存在性谓词守护的是记账而非字节清除：`byte_length` 是
+  比字节更长命的元数据，因此已被其它写者释放过的行不得被重复计数；
 - 其 Session 存在退役墓碑，`recovery_protected` 为 false，且
   `retired_at + deletion-grace` 已经过去；
 - 该 Session 不存在未到期的 `qwen_output_read_lease`；
