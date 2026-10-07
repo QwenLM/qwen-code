@@ -157,6 +157,16 @@ export interface HostedShellTurnOptions {
   monitorWakeKick?: () => void;
 }
 
+/**
+ * The attached Session's fetched Workspace project instructions. `read`
+ * returns undefined until the first fetch attempt completes; '' means the
+ * Workspace has none. Written at most once per attached Session.
+ */
+export interface HostedWorkspaceContextSlot {
+  read(): string | undefined;
+  write(context: string): void;
+}
+
 function shellHistoryId(executionCallId: string): string {
   const bytes = createHash('sha1')
     .update('qwen-hosted-shell-history/1:')
@@ -412,8 +422,13 @@ export class HostedWorkspaceToolTurn {
   private unanswered = false;
   private promptHookRunner?: HostedPromptHookRunner;
   private readonly hookPermission = new Map<string, 'allow' | 'deny'>();
+  private readonly mcp?: HostedMcpSession;
+  private readonly hooks?: HostedHookSession;
+  private readonly profile?: string;
+  private readonly context?: HostedWorkspaceContextSlot;
   private readonly childRuns?: HostedChildRunSession;
   private readonly monitors?: HostedMonitorSession;
+  private readonly backgroundLane?: HostedShellTurnOptions;
   private readonly childAgents?: HostedChildAgentSession;
   private readonly childDepth: number;
   private readonly childConsumption: (childRunId: string) => void;
@@ -439,23 +454,36 @@ export class HostedWorkspaceToolTurn {
       | HostedShellTurnOptions,
     shell?: HostedShellTurnOptions,
     private readonly approval?: HostedApprovalTurnOptions,
-    private readonly mcp?: HostedMcpSession,
-    private readonly profile?: string,
-    private readonly hooks?: HostedHookSession,
-    childRuns?: HostedChildRunSession,
-    monitors?: HostedMonitorSession,
-    private readonly backgroundLane?: HostedShellTurnOptions,
-    childAgents?: {
-      readonly funnel: HostedChildAgentSession;
-      readonly depth: number;
-      readonly queueConsumption: (childRunId: string) => void;
+    // The trailing optional dependencies travel as one named bag: at five
+    // positional slots a dropped or mis-ordered argument still typechecks
+    // (R1-2/R1-3 were exactly that), while a missing object field is named
+    // at every call site.
+    extras?: {
+      mcp?: HostedMcpSession;
+      hooks?: HostedHookSession;
+      profile?: string;
+      context?: HostedWorkspaceContextSlot;
+      childRuns?: HostedChildRunSession;
+      monitors?: HostedMonitorSession;
+      backgroundLane?: HostedShellTurnOptions;
+      childAgents?: {
+        readonly funnel: HostedChildAgentSession;
+        readonly depth: number;
+        readonly queueConsumption: (childRunId: string) => void;
+      };
     },
   ) {
-    this.childRuns = childRuns;
-    this.monitors = monitors;
-    this.childAgents = childAgents?.funnel;
-    this.childDepth = childAgents?.depth ?? 0;
-    this.childConsumption = childAgents?.queueConsumption ?? (() => undefined);
+    this.mcp = extras?.mcp;
+    this.hooks = extras?.hooks;
+    this.profile = extras?.profile;
+    this.context = extras?.context;
+    this.childRuns = extras?.childRuns;
+    this.monitors = extras?.monitors;
+    this.backgroundLane = extras?.backgroundLane;
+    this.childAgents = extras?.childAgents?.funnel;
+    this.childDepth = extras?.childAgents?.depth ?? 0;
+    this.childConsumption =
+      extras?.childAgents?.queueConsumption ?? (() => undefined);
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
         ? publicationOrShell
@@ -465,14 +493,14 @@ export class HostedWorkspaceToolTurn {
         ? publicationOrShell
         : shell;
     this.broker =
-      mcp?.broker ??
-      hooks?.broker ??
+      this.mcp?.broker ??
+      this.hooks?.broker ??
       new HostedWorkspaceBroker(
         options,
         session.authority.sessionHeader.sessionKey,
         promptId,
       );
-    this.warmed = mcp ? mcp.ensureReady() : this.broker.warm();
+    this.warmed = this.mcp ? this.mcp.ensureReady() : this.broker.warm();
     // Warmup runs alongside inference; a text-only answer need not wait for it.
     void this.warmed.catch(() => undefined);
   }
@@ -522,7 +550,7 @@ export class HostedWorkspaceToolTurn {
     return this.advertised;
   }
 
-  async resumeCommittedResults(): Promise<void> {
+  async resumeCommittedResults(signal?: AbortSignal): Promise<void> {
     if (this.acquired) return;
     await this.warmed;
     const saved = await readHostedFileHistory(this.session);
@@ -603,13 +631,18 @@ export class HostedWorkspaceToolTurn {
         if (original === this.broker) {
           this.acquired = true;
           this.uncertain = false;
+          // The acquire() path this bypasses is the context slot's writer: a
+          // takeover-built Session holds no text yet, so read once here under
+          // the same latch. A read failure never blocks the turn.
+          if (this.context?.read() === undefined && signal)
+            await this.fetchWorkspaceContext(signal);
           return;
         }
       } catch (cause) {
         throw new HostedToolRecoveryRequiredError(cause);
       }
     }
-    await this.acquire(true);
+    await this.acquire(true, signal);
     this.uncertain = false;
   }
 
@@ -633,8 +666,14 @@ export class HostedWorkspaceToolTurn {
           // turn-execution path queues (it passes the turn's AbortSignal, so
           // cancellation and the prompt deadline still apply); recovery
           // acquisitions and the workspace_unavailable refusal keep the
-          // fast, classified refusal.
-          if (signal === undefined || !isBusyWorkspaceAcquisition(cause))
+          // fast, classified refusal. Recovery carries a signal too — it
+          // bounds the Workspace context read — so `recovering`, not the
+          // signal's presence, is what selects the queue.
+          if (
+            recovering ||
+            signal === undefined ||
+            !isBusyWorkspaceAcquisition(cause)
+          )
             throw cause;
           if (!queued) {
             queued = true;
@@ -681,6 +720,15 @@ export class HostedWorkspaceToolTurn {
             cause.reason ?? cause.message,
           );
         }
+        // The Workspace is reachable exactly here, before the first dispatch:
+        // read its project instructions once, so this turn's later requests
+        // and every later turn start with them. A read failure never blocks
+        // the tool turn it rode in on. The latch alone gates the read: a
+        // recovered attachment whose slot is still undefined (a takeover
+        // builds a fresh one) reads here too, while an attachment already
+        // holding text never re-reads.
+        if (this.context?.read() === undefined && signal)
+          await this.fetchWorkspaceContext(signal);
       }
     } catch (cause) {
       if (
@@ -692,6 +740,39 @@ export class HostedWorkspaceToolTurn {
         throw cause;
       }
       throw new HostedToolRecoveryRequiredError(cause);
+    }
+  }
+
+  /**
+   * Reads the Workspace's project instruction files through the acquired
+   * Runtime and offers them to the Session's context slot. The read is a
+   * Runtime control, not a tool execution: it reserves nothing in the
+   * execution ledger, so a failure leaves nothing to cancel or recover.
+   * Best-effort: any failure leaves the slot untouched and is logged, never
+   * thrown into the turn.
+   */
+  private async fetchWorkspaceContext(signal: AbortSignal): Promise<void> {
+    const slot = this.context;
+    if (!slot) return;
+    try {
+      const files = await waitForTurn(this.broker.workspaceContext(), signal);
+      // `''` means "the Workspace has none", so an aborted turn must not
+      // latch it: the slot stays undefined and a later turn retries.
+      if (signal.aborted) return;
+      slot.write(
+        files
+          .map(({ name, text }) => ({ name, text: text.trim() }))
+          .filter(({ text }) => text)
+          .map(
+            ({ name, text }) =>
+              `--- Context from: ${name} ---\n${text}\n--- End of Context from: ${name} ---`,
+          )
+          .join('\n\n'),
+      );
+    } catch (cause) {
+      writeStderrLineSafe(
+        'qwen serve: Hosted Workspace context read failed: ' + String(cause),
+      );
     }
   }
 
@@ -1303,6 +1384,10 @@ export class HostedWorkspaceToolTurn {
     if (!this.acquired) {
       // Acquisition may have taken effect even when its reply is lost.
       await this.acquire(false, signal);
+    }
+    if (signal.aborted) {
+      this.uncertain = false;
+      signal.throwIfAborted();
     }
     const shellBindings = new Map<
       string,

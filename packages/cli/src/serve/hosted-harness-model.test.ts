@@ -20,7 +20,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 
-const state = vi.hoisted(() => ({ config: undefined as unknown }));
+const state = vi.hoisted(() => ({
+  config: undefined as unknown as {
+    [key: string]: unknown;
+    setUserMemory: ReturnType<typeof vi.fn>;
+    getLlmClient(): {
+      [key: string]: unknown;
+      sendMessageStream(...args: never[]): AsyncGenerator<unknown, void>;
+    };
+  },
+}));
 vi.mock('../config/settings.js', () => ({
   loadSettings: () => ({ merged: {} }),
 }));
@@ -49,6 +58,8 @@ function config(
   const setTools = vi.fn(async () => undefined);
   const shutdown = vi.fn(async () => undefined);
   const setHistory = vi.fn();
+  const setUserMemory = vi.fn();
+  const refreshSystemInstruction = vi.fn(async () => undefined);
   const initialize = vi
     .fn<(options?: ConfigInitializeOptions) => Promise<void>>()
     .mockResolvedValue(undefined);
@@ -81,11 +92,13 @@ function config(
     }),
     getLlmClient: () => ({
       setTools,
+      refreshSystemInstruction,
       getChat: () => ({ setHistory, setTools: vi.fn() }),
       getHistory,
       sendMessageStream,
     }),
     getModel: () => 'test-model',
+    setUserMemory,
     getTurnBudget: () => budget,
     shutdown,
   };
@@ -94,6 +107,8 @@ function config(
     setTools,
     shutdown,
     setHistory,
+    setUserMemory,
+    refreshSystemInstruction,
     initialize,
     refreshAuth,
     sendMessageStream,
@@ -207,6 +222,120 @@ describe('Hosted Harness model boundary', () => {
     await expect(runHostedHarnessTextTurn(input)).resolves.toMatchObject({
       text: 'answer',
     });
+  });
+
+  it('injects the Workspace context fetched before the turn', async () => {
+    const order: string[] = [];
+    const hooks = config([
+      { type: LlmEventType.Content, value: 'answer' },
+      { type: LlmEventType.Finished },
+    ]);
+    // initialize() runs a safe-mode memory refresh that clears user memory,
+    // so the injection must come after it.
+    hooks.initialize.mockImplementation(async () => {
+      order.push('initialize');
+    });
+    hooks.setUserMemory.mockImplementation(() => {
+      order.push('inject');
+    });
+    hooks.refreshSystemInstruction.mockImplementation(async () => {
+      order.push('refresh');
+    });
+    const client = state.config.getLlmClient();
+    const stream = client.sendMessageStream.bind(client);
+    state.config.getLlmClient = () => ({
+      ...client,
+      async *sendMessageStream() {
+        order.push('request');
+        yield* stream();
+      },
+    });
+    await expect(
+      runHostedHarnessTextTurn({
+        ...input,
+        workspaceContext: { read: () => 'project rules' },
+      }),
+    ).resolves.toMatchObject({ text: 'answer' });
+    expect(hooks.setUserMemory).toHaveBeenCalledWith('project rules');
+    // setUserMemory only writes the field; without the refresh the cached
+    // system instruction still carries the pre-injection prompt.
+    expect(order).toEqual(['initialize', 'inject', 'refresh', 'request']);
+  });
+
+  it('picks up the Workspace context a tool batch fetched, on the next request', async () => {
+    const order: string[] = [];
+    let context: string | undefined;
+    const rounds = [
+      [
+        {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'call-1',
+            name: 'read_file',
+            args: { file_path: 'QWEN.md' },
+            isClientInitiated: false,
+            prompt_id: input.promptId,
+          },
+        },
+        { type: LlmEventType.Finished },
+      ],
+      [
+        { type: LlmEventType.Content, value: 'done' },
+        { type: LlmEventType.Finished },
+      ],
+    ];
+    const hooks = config([]);
+    hooks.setUserMemory.mockImplementation(() => {
+      order.push('inject');
+    });
+    let requests = 0;
+    state.config.getLlmClient = () => ({
+      setTools: vi.fn(async () => undefined),
+      refreshSystemInstruction: vi.fn(async () => {
+        order.push('refresh');
+      }),
+      getChat: () => ({ setHistory: vi.fn(), setTools: vi.fn() }),
+      getHistory: () => [
+        {
+          role: 'model',
+          parts:
+            requests <= 1
+              ? [{ functionCall: { name: 'read_file' } }]
+              : [{ text: 'done' }],
+        },
+      ],
+      async *sendMessageStream() {
+        requests++;
+        order.push('request');
+        for (const event of rounds.shift() ?? []) yield event;
+      },
+    });
+    const toolTurn = {
+      declarations: vi.fn(async () => []),
+      consumeResults: vi.fn(async () => undefined),
+      execute: vi.fn(async () => {
+        context = 'project rules';
+        return [
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'read_file',
+              response: { output: 'rules' },
+            },
+          },
+        ];
+      }),
+    };
+    await expect(
+      runHostedHarnessTextTurn({
+        ...input,
+        toolTurn: toolTurn as never,
+        workspaceContext: { read: () => context },
+      }),
+    ).resolves.toMatchObject({ text: 'done', model: 'test-model' });
+    expect(toolTurn.execute).toHaveBeenCalledOnce();
+    expect(hooks.setUserMemory).toHaveBeenCalledWith('project rules');
+    expect(order).toEqual(['request', 'inject', 'refresh', 'request']);
   });
 
   it('does not reapply a completed SessionStart on later turns', async () => {
@@ -991,6 +1120,7 @@ describe('Hosted Harness resume and retraction', () => {
         },
       }),
       getModel: () => 'test-model',
+      setUserMemory: vi.fn(),
       shutdown: vi.fn(async () => undefined),
     };
     return { requests, types };

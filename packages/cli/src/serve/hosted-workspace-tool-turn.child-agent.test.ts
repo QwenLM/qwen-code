@@ -116,16 +116,13 @@ function createTurn(depth = 0): HostedWorkspaceToolTurn {
       assertWritable: async () => undefined,
     },
     undefined,
-    undefined,
-    'hosted-workspace-shell/1',
-    undefined,
-    undefined,
-    undefined,
-    undefined,
     {
-      funnel: children,
-      depth,
-      queueConsumption: (childRunId) => consumption.push(childRunId),
+      profile: 'hosted-workspace-shell/1',
+      childAgents: {
+        funnel: children,
+        depth,
+        queueConsumption: (childRunId) => consumption.push(childRunId),
+      },
     },
   );
 }
