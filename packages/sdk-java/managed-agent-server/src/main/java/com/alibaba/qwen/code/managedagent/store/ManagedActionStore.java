@@ -387,8 +387,10 @@ public class ManagedActionStore {
                         "The idempotency key was reused with different content.");
             }
             if ("FAILED".equals(existing.state())
-                    && "action_response_delivery_failed"
-                            .equals(existing.failureCode())) {
+                    && ("action_response_delivery_failed"
+                                    .equals(existing.failureCode())
+                            || "action_response_decision_expired"
+                                    .equals(existing.failureCode()))) {
                 // The delivery failed past its budget while the Action is
                 // still waiting: the caller's retry re-admits the same
                 // response under the same key, digest and row — a second
@@ -405,7 +407,10 @@ public class ManagedActionStore {
                 // expiry applies too: a fresh admission would refuse it
                 // 409 action_expired, and a resurrected PENDING row for an
                 // expired Action could never complete — it would only wedge
-                // lifecycle admission, which counts any open operation.
+                // lifecycle admission, which counts any open operation. A
+                // decision-expired row can never satisfy that expiry guard
+                // again — its Action's deadline has already passed — so for
+                // it only the digest-match heal below applies.
                 Response failedResponse = response(tenantId, sessionId,
                         existing.operationId());
                 Optional<Action> action = failedResponse.actionId() == null
@@ -461,8 +466,9 @@ public class ManagedActionStore {
                                     + " updated_at = ?, completed_at = ?"
                                     + " WHERE tenant_id = ? AND session_id ="
                                     + " ? AND operation_id = ? AND state ="
-                                    + " 'FAILED' AND error_code ="
-                                    + " 'action_response_delivery_failed'",
+                                    + " 'FAILED' AND error_code IN"
+                                    + " ('action_response_delivery_failed',"
+                                    + " 'action_response_decision_expired')",
                             "rcpt_" + UUID.randomUUID().toString()
                                     .replace("-", ""),
                             action.get().decisionReceiptId(),

@@ -179,7 +179,9 @@ export class EmbeddedHarnessScheduler {
       if (this.store.haltedError) this.halt(this.store.haltedError);
       throw error;
     }
-    this.noteStoreOutcome();
+    // A duplicate enqueue performs no store I/O, so it must not reset the
+    // consecutive transient-failure streak.
+    if (result.created) this.noteStoreOutcome();
     if (this.started) {
       void this.requestPump().catch(() => undefined);
     }
@@ -555,6 +557,9 @@ export class EmbeddedHarnessScheduler {
       return;
     }
     this.transientStoreFailures++;
+    // A dispose or halt raced the failure: the streak still counts, but the
+    // escalation must not record a bogus store halt on a dead worker.
+    if (this.disposed || this.fatalError) return;
     if (this.transientStoreFailures >= MAX_TRANSIENT_STORE_FAILURES) {
       this.halt(
         new Error(

@@ -181,7 +181,9 @@ class ManagedSessionOperationStoreTest {
                 second.claimGeneration(), 0, true);
         OperationRecord waited = operation(store, sessionId, operationId);
         assertThat(waited.attemptCount()).isEqualTo(2);
-        assertThat(waited.budgetExemptAttempt()).isEqualTo(2);
+        // The exempt attempt counts itself only: the earlier charged attempt
+        // is not refunded.
+        assertThat(waited.budgetExemptAttempt()).isEqualTo(1);
 
         OperationRecord third = store.claimOperation(TENANT, sessionId,
                 operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
@@ -194,20 +196,20 @@ class ManagedSessionOperationStoreTest {
         assertThat(blocked.failureCode())
                 .isEqualTo("session_close_writer_live");
         assertThat(blocked.attemptCount()).isEqualTo(3);
-        assertThat(blocked.budgetExemptAttempt()).isEqualTo(3);
+        assertThat(blocked.budgetExemptAttempt()).isEqualTo(2);
         // The blocked CLOSE is re-driven, so the wait stays unbounded.
         assertThat(targets(store)).containsExactly(operationId);
 
         OperationRecord fourth = store.claimOperation(TENANT, sessionId,
                 operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
-        assertThat(fourth.budgetExemptAttempt()).isEqualTo(3);
+        assertThat(fourth.budgetExemptAttempt()).isEqualTo(2);
         store.blockLifecycleOperation(TENANT, sessionId, operationId,
                 "worker", fourth.claimGeneration(),
                 "workspace_close_identity_unverified", 0);
         OperationRecord brokerBlocked = operation(store, sessionId,
                 operationId);
         assertThat(brokerBlocked.attemptCount()).isEqualTo(4);
-        assertThat(brokerBlocked.budgetExemptAttempt()).isEqualTo(3);
+        assertThat(brokerBlocked.budgetExemptAttempt()).isEqualTo(2);
         assertThat(brokerBlocked.failureCode())
                 .isEqualTo("workspace_close_identity_unverified");
 

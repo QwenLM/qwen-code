@@ -98,8 +98,8 @@ public final class StoreModels {
      * Session status when it was admitted; only an operation admitted on an
      * active Session closes the Harness. The cwd fields and
      * {@code failureCode} are set only for the kinds that populate
-     * them. {@code budgetExemptAttempt} is the attempt count through
-     * which attempts never consumed the terminal retry budget:
+     * them. {@code budgetExemptAttempt} counts the attempts that never
+     * consumed the terminal retry budget:
      * failures that waited on an external condition (a live journal
      * writer, or Java's stale view of a restarted Harness) and, for
      * an action response, every attempt once the Harness has

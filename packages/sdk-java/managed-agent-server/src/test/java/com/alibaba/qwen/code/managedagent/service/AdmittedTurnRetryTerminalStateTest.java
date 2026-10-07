@@ -147,6 +147,28 @@ class AdmittedTurnRetryTerminalStateTest {
         }
     }
 
+    // A lease-bounded 409 on the takeover attach is the wait the exemption
+    // exists to protect: the predecessor still holds its journal writer
+    // lease, so the conflict is bounded by that lease and must retry past
+    // the post-admission budget instead of terminally failing (and
+    // cancelling) a Turn whose execution may still be live (review R2-6).
+    @ParameterizedTest(name = "retryCount = {0}")
+    @ValueSource(ints = {10, 42})
+    void aLeaseBoundedWriterConflictStillRetriesPastThePostAdmissionBudget(
+            int retryCount) {
+        DaemonHttpException conflict = mock(DaemonHttpException.class);
+        when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode())
+                .thenReturn("managed_session_writer_conflict");
+        AgentStateStore store = dispatchTransientFailure(retryCount,
+                new ManagedAgentProperties(), conflict).store();
+
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
     // The budget counts consecutive failures without journaled progress: a
     // Turn at the budget whose delivery admitted and journaled new events
     // since the last failure reschedules instead of terminating — the fenced

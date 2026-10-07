@@ -32,6 +32,19 @@ public class ActionResponseCoordinator {
     private final ManagedAgentProperties.Dispatch dispatch;
     private final String owner = UUID.randomUUID().toString();
     private final Set<String> active = ConcurrentHashMap.newKeySet();
+    private final java.util.concurrent.ScheduledExecutorService renewals =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+                    task -> {
+                        Thread thread = new Thread(task,
+                                "action-response-renewal");
+                        thread.setDaemon(true);
+                        return thread;
+                    });
+
+    @jakarta.annotation.PreDestroy
+    void stopRenewals() {
+        renewals.shutdownNow();
+    }
 
     public ActionResponseCoordinator(
             AgentStateStore sessions,
@@ -76,6 +89,26 @@ public class ActionResponseCoordinator {
         if (op == null) {
             return;
         }
+        // resolveAction can outlast the claim's lease — a cold takeover load
+        // is allowed far longer than a steady-state call — so the lease is
+        // renewed for the attempt's whole duration. Without it the attempt's
+        // fenced writes (the answered watermark among them) silently land
+        // nowhere once lease_until passes. A failed renewal is safe to
+        // ignore: every write below stays fenced on the claim, so a lost
+        // lease no-ops the write and the reclaim re-drives the attempt.
+        long renewalPeriod = Math.max(1,
+                dispatch.getLeaseDuration().toMillis() / 3);
+        var renewal = renewals.scheduleWithFixedDelay(() -> {
+            try {
+                sessions.renewLifecycleOperation(tenant, session, operation,
+                        owner, op.claimGeneration(), dispatch.getLeaseDuration());
+            } catch (RuntimeException error) {
+                LOG.warn("Action response lease renewal failed tenant={}"
+                                + " session={} operation={} failure={}",
+                        tenant, session, operation, error.getMessage());
+            }
+        }, renewalPeriod, renewalPeriod,
+                java.util.concurrent.TimeUnit.MILLISECONDS);
         // The budget terminal records "the Harness never answered", so only
         // a genuinely undelivered answer may reach it. Track the answer
         // itself rather than the exception type: a 200 from resolveAction
@@ -212,6 +245,8 @@ public class ActionResponseCoordinator {
                     "Action response will retry operation={} failure={}",
                     operation,
                     error.toString());
+        } finally {
+            renewal.cancel(false);
         }
     }
 

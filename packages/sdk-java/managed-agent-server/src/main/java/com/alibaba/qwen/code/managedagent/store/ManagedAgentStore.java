@@ -1278,12 +1278,14 @@ public class ManagedAgentStore implements AgentStateStore {
             String owner, long generation, String failureCode, long availableAt,
             boolean budgetExempt) {
         long now = lifecycleDatabaseTime();
-        // The exempt assignment must precede the attempt_count increment:
-        // MySQL evaluates single-table UPDATE assignments left to right.
+        // The exempt count increments from itself, never from
+        // attempt_count: a wait refunds no already-charged attempt, so
+        // attempt_count - budget_exempt_attempt stays the count of attempts
+        // that could have made progress regardless of interleaving order.
         jdbc.update("UPDATE managed_agent_operation SET state = 'RECOVERY_BLOCKED', delivery_state = 'BLOCKED',"
                 + " error_code = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, updated_at = ?,"
                 + (budgetExempt
-                        ? " budget_exempt_attempt = attempt_count + 1,"
+                        ? " budget_exempt_attempt = budget_exempt_attempt + 1,"
                         : "")
                 + " attempt_count = attempt_count + 1"
                 + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND delivery_state = 'LEASED'"
@@ -1309,12 +1311,14 @@ public class ManagedAgentStore implements AgentStateStore {
         long delay = Math.max(0, availableAt - clock.millis());
         long now = lifecycleDatabaseTime();
         availableAt = Math.addExact(now, delay);
-        // The exempt assignment must precede the attempt_count increment:
-        // MySQL evaluates single-table UPDATE assignments left to right.
+        // The exempt count increments from itself, never from
+        // attempt_count: a wait refunds no already-charged attempt, so
+        // attempt_count - budget_exempt_attempt stays the count of attempts
+        // that could have made progress regardless of interleaving order.
         jdbc.update("UPDATE managed_agent_operation SET delivery_state ="
                         + " 'PENDING', lease_owner = NULL, lease_until = NULL,"
                         + (budgetExempt
-                                ? " budget_exempt_attempt = attempt_count + 1,"
+                                ? " budget_exempt_attempt = budget_exempt_attempt + 1,"
                                 : "")
                         + " attempt_count = attempt_count + 1,"
                         + " available_at = ?, updated_at = ? WHERE"

@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.daemon.DaemonProtocolException;
+import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -171,8 +173,8 @@ public class SessionLifecycleCoordinator {
             // A capability digest mismatch lands here too: nothing may be
             // completed honestly (completing unconfirmed would flip the
             // session while skipping the drain and record a clean row),
-            // so the reason-loud retry below is deliberately the end of
-            // the line until an operator realigns the versions.
+            // and the mismatch is permanent, so its attempts consume the
+            // budget and the terminal record keeps the mismatch code.
             long delay = HarnessCoordinator.retryDelay(retryInitialDelay,
                     retryMaxDelay, claimed.attemptCount());
             Throwable cause = error;
@@ -184,7 +186,11 @@ public class SessionLifecycleCoordinator {
             // every attempt and through the terminal record.
             String blocked = null;
             String failureCode = "session_lifecycle_delivery_failed";
-            if (cause instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException brokerError) {
+            if (cause instanceof HostedHarnessCapabilityMismatchException mismatch) {
+                failureCode = mismatch.getCode();
+            } else if (cause instanceof DaemonProtocolException) {
+                failureCode = "hosted_harness_protocol_error";
+            } else if (cause instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException brokerError) {
                 failureCode = brokerError.getCode();
                 if ("workspace_close_execution_unsettled".equals(brokerError.getCode())) {
                     blocked = brokerError.getCode();
@@ -348,9 +354,16 @@ public class SessionLifecycleCoordinator {
         }
     }
 
-    // A permanent refusal (a non-retryable broker conflict) is a verdict a
-    // writer stop cannot change, so it never keys the writer wait.
+    // A permanent refusal is a verdict a writer stop cannot change, so it
+    // never keys the writer wait: a non-retryable broker conflict, and the
+    // daemon's own negotiation refusals — a capability digest mismatch and a
+    // protocol error recur on every attempt until an operator realigns the
+    // versions, and both are thrown before the Harness is asked to stop.
     private static boolean retryable(Throwable cause) {
+        if (cause instanceof HostedHarnessCapabilityMismatchException
+                || cause instanceof DaemonProtocolException) {
+            return false;
+        }
         return !(cause instanceof RuntimeBrokerException brokerError)
                 || brokerError.isRetryable();
     }

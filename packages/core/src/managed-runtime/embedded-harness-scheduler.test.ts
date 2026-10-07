@@ -899,6 +899,48 @@ describe('EmbeddedHarnessScheduler', () => {
     );
   });
 
+  // A duplicate enqueue performs no store I/O (the descriptor is already
+  // known), so re-submitting an activation between failing claim attempts
+  // must not reset the consecutive-failure streak.
+  it('halts the worker even when duplicates are re-submitted between failing claims', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const store = await FileManagedActivationStore.open(filePath);
+    const item = activation('a1');
+    const claimSpy = vi.spyOn(store, 'claim');
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 60_000,
+      hasMemoryHeadroom: () => true,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(item);
+    // Every claim's journal write fails transiently; the repair keeps
+    // succeeding, so the store itself never halts.
+    fsFault.failAppends = 10;
+    await scheduler.start();
+    await waitUntil(() => claimSpy.mock.calls.length === 1);
+    expect(scheduler.haltedError).toBeUndefined();
+
+    // Re-submit the already-known activation between rechecks.
+    for (let i = 0; i < 20 && scheduler.haltedError === undefined; i++) {
+      await vi.advanceTimersByTimeAsync(500);
+      if (scheduler.haltedError !== undefined) break;
+      const duplicate = await scheduler.submit(item);
+      expect(duplicate.created).toBe(false);
+      await vi.advanceTimersByTimeAsync(500);
+    }
+
+    expect(scheduler.haltedError?.message).toContain(
+      'consecutive transient store failures',
+    );
+    expect(store.get(item)?.status).toBe('queued');
+  });
+
   // The per-activation bound: renewals that keep failing across re-runs
   // spend the activation's transient-failure budget; once spent, the
   // scheduler records the terminal outcome itself instead of re-queuing the
@@ -1151,6 +1193,47 @@ describe('EmbeddedHarnessScheduler', () => {
     // Past the recheck interval, nothing fired: no wake was armed.
     await new Promise<void>((resolve) => setTimeout(resolve, 1_100));
     expect(scheduler.haltedError).toBeUndefined();
+  });
+
+  // A disposal racing in-flight releases whose writes then all fail
+  // transiently must not leave a bogus store-failure halt on the dead
+  // worker: the streak still counts, the escalation does not fire.
+  it('does not halt when disposal races a streak of transient release failures', async () => {
+    const store = await FileManagedActivationStore.open(filePath);
+    const releasesEntered: string[] = [];
+    const allowRelease = deferred();
+    const originalRelease = store.release.bind(store);
+    vi.spyOn(store, 'release').mockImplementation(async (lease, outcome) => {
+      releasesEntered.push(lease.activationId);
+      await allowRelease.promise;
+      return originalRelease(lease, outcome);
+    });
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 10,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 60_000,
+      hasMemoryHeadroom: () => true,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    const items = Array.from({ length: 10 }, (_, i) => activation(`a${i}`));
+    for (const item of items) await scheduler.submit(item);
+    await scheduler.start();
+    // All ten runs are inside their release call when the worker is
+    // disposed; every journal append then fails transiently.
+    await waitUntil(() => releasesEntered.length === 10);
+    fsFault.failAppends = 10;
+    scheduler.dispose();
+    allowRelease.resolve();
+    await waitUntil(() => scheduler.activeSlotCount === 0);
+
+    expect(scheduler.haltedError).toBeUndefined();
+    await expect(scheduler.submit(activation('a10'))).rejects.toThrow(
+      'is disposed',
+    );
   });
 
   it('does not launch a handler after disposal races with a durable claim', async () => {

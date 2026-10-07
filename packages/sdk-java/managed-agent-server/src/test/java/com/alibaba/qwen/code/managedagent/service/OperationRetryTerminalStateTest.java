@@ -6,6 +6,8 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -14,6 +16,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.DaemonProtocolException;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -432,6 +435,149 @@ class OperationRetryTerminalStateTest {
                     anyString(), anyString(), anyLong(), anyLong());
             // The refused close never reached the Harness.
             verify(harness, never()).closeSession(anyString(), anyString());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // The daemon's own permanent negotiation refusals are not writer waits
+    // either: both are thrown before the Harness was asked to stop, so the
+    // writer lease stays live on every attempt and a writer-keyed gate would
+    // wait forever. The budget terminates them with their own codes (review
+    // R1-30).
+    @Test
+    void aCapabilityMismatchTerminatesWhileAWriterIsLive() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = lifecycleOperation(10);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.closeWorkspace("tenant", "session"))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        when(harness.isAvailable()).thenReturn(true);
+        HostedHarnessCapabilityMismatchException mismatch =
+                mock(HostedHarnessCapabilityMismatchException.class);
+        when(mismatch.getCode()).thenReturn("managed_capability_mismatch");
+        when(harness.closeSession("tenant", "session")).thenThrow(mismatch);
+        // The Harness was never asked to stop, so it keeps the writer.
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(true);
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(store).failOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("managed_capability_mismatch"));
+            verify(store, never()).blockLifecycleOperation(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyString(), anyLong(), anyBoolean());
+            verify(store, never()).retryOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyLong(),
+                    anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // The protocol refusal takes the same arm with the sibling coordinator's
+    // code for it.
+    @Test
+    void aProtocolErrorTerminatesWhileAWriterIsLive() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = lifecycleOperation(10);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.closeWorkspace("tenant", "session"))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.closeSession("tenant", "session"))
+                .thenThrow(mock(DaemonProtocolException.class));
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(true);
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(store).failOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("hosted_harness_protocol_error"));
+            verify(store, never()).blockLifecycleOperation(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyString(), anyLong(), anyBoolean());
+            verify(store, never()).retryOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyLong(),
+                    anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // Below the budget a permanent refusal still retries plainly: the
+    // attempts consume the budget — they are never budget-exempt writer
+    // waits.
+    @Test
+    void aCapabilityMismatchConsumesTheBudgetBelowTheLimit() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = lifecycleOperation(9);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(harness.isAvailable()).thenReturn(true);
+        HostedHarnessCapabilityMismatchException mismatch =
+                mock(HostedHarnessCapabilityMismatchException.class);
+        when(mismatch.getCode()).thenReturn("managed_capability_mismatch");
+        when(harness.closeSession("tenant", "session")).thenThrow(mismatch);
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(true);
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(store).retryOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L), anyLong());
+            verify(store, never()).blockLifecycleOperation(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyString(), anyLong(), anyBoolean());
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
         } finally {
             coordinator.stopRenewals();
         }
@@ -1178,6 +1324,52 @@ class OperationRetryTerminalStateTest {
         }
     }
 
+    // The exempt count is a count, not a high-water mark: ten exempt waits
+    // refund none of the ten charged attempts, so the row whose attempts are
+    // half waits still has its terminal budget spent (review R2-1).
+    @Test
+    void exemptWaitsRefundNoAlreadyChargedAttempt() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        // Ten charged failures and ten exempt waits: the charged count alone
+        // reaches the budget.
+        OperationRecord claimed = lifecycleOperation(20, 10);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.closeSession("tenant", "session"))
+                .thenThrow(new IllegalStateException("harness unreachable"));
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(false);
+        when(runtimeWarmer.drain("session"))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(store).failOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("session_lifecycle_delivery_failed"));
+            verify(store, never()).retryOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyLong());
+            verify(store, never()).blockLifecycleOperation(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyString(), anyLong(), anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
     @ParameterizedTest(name = "attemptCount = {0}, completes = {1}")
     @CsvSource({"3, true", "2, false"})
     void actionResponseHonoursTheConfiguredBudget(int attemptCount,
@@ -1313,6 +1505,54 @@ class OperationRetryTerminalStateTest {
         verify(actions, never()).complete(any(), anyString(),
                 eq("action_response_delivery_failed"), any(), anyBoolean(),
                 anyLong());
+    }
+
+    // resolveAction can outlast the claim's lease — a cold takeover load is
+    // allowed far longer than a steady-state call — so the attempt renews
+    // the lease on the dispatch cadence for the call's whole duration, and
+    // the answered watermark write still lands afterwards (review R2-5).
+    @Test
+    void theOperationLeaseIsRenewedAcrossASlowResolveAction()
+            throws Exception {
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        OperationRecord claimed = actionOperation(1);
+        JsonNode body = actionBody();
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setLeaseDuration(Duration.ofMillis(30));
+        when(sessions.claimOperation(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(actions.response("tenant", "session", "op-action")).thenReturn(
+                new ManagedActionStore.Response("action-1", body, null,
+                        null));
+        when(actions.find("tenant", "session", "action-1")).thenReturn(
+                Optional.of(new ManagedActionStore.Action("action-1",
+                        "requested", body, null, null)));
+        // The Harness answers 200 after outlasting the 30ms lease.
+        doAnswer(invocation -> {
+            Thread.sleep(150);
+            return null;
+        }).when(harness).resolveAction("tenant", "session", "action-1", body);
+
+        ActionResponseCoordinator coordinator = new ActionResponseCoordinator(
+                sessions, actions, harness,
+                CoordinatorTestSupport.directExecutor(),
+                Clock.systemUTC(), properties);
+        try {
+            coordinator.dispatch("tenant", "session", "op-action");
+
+            verify(sessions, atLeastOnce()).renewLifecycleOperation(
+                    eq("tenant"), eq("session"), eq("op-action"), anyString(),
+                    eq(3L), eq(Duration.ofMillis(30)));
+            // The answer is still recorded budget-exempt afterwards.
+            verify(sessions).retryOperation(eq("tenant"), eq("session"),
+                    eq("op-action"), anyString(), eq(3L), anyLong(),
+                    eq(true));
+        } finally {
+            coordinator.stopRenewals();
+        }
     }
 
     private static JsonNode actionBody() throws Exception {

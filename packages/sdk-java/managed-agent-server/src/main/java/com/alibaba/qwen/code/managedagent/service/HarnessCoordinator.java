@@ -48,7 +48,7 @@ import org.springframework.stereotype.Component;
 public class HarnessCoordinator {
     // The one 409 whose wait provably ends on its own: a fenced
     // predecessor's writer lease lapses, so retrying past the budget's
-    // pre-admission window is exactly the wait D9a meant. The exemption is
+    // window is exactly the wait D9a meant. The exemption is
     // keyed on the lease's own wire code, never on a catch-all code:
     // `hosted_turn_recovery_required` covers arbitrary takeover failures
     // including refusals no retry can change, so exempting IT wedged a
@@ -1030,14 +1030,14 @@ public class HarnessCoordinator {
 
     private boolean transientFailure(TurnRecord turn,
             boolean submissionAttempted, RuntimeException error,
-            boolean exemptFromPreAdmissionBudget) {
+            boolean exemptFromRetryBudget) {
         // The budget counts consecutive failures without journaled progress:
         // the fenced cursor updates reset the counter, so the claim-time
         // record is stale for a delivery that admitted or journaled since.
         TurnRecord current = store.findTurn(turn.tenantId(),
                 turn.sessionId(), turn.turnId()).orElse(turn);
         if (!submissionAttempted
-                && !exemptFromPreAdmissionBudget
+                && !exemptFromRetryBudget
                 && current.retryCount() >= maxPreAdmissionRetries) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
@@ -1071,7 +1071,12 @@ public class HarnessCoordinator {
                     "Hosted Harness remained unavailable before Turn"
                             + " admission.");
         }
+        // The lease-bounded exemption exempts the post-admission budget too:
+        // the wait it names ends on the predecessor's own lease, so charging
+        // it against this Turn would terminally fail a wait that is still
+        // resolving on its own.
         if (submissionAttempted
+                && !exemptFromRetryBudget
                 && current.retryCount() >= maxPostAdmissionRetries) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
