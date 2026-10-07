@@ -966,6 +966,20 @@ describe('Managed Runtime provider worker', () => {
     },
   );
 
+  it('reads Workspace context for an already-claimed provider Session', async () => {
+    // The production ordering: the Harness reads from inside acquire(), after
+    // the acquire control claimed this Session. Refusing that state answered
+    // 409 managed_runtime_identity_conflict, which the best-effort catch
+    // swallowed — every Hosted turn ran without instructions and looked
+    // healthy.
+    fs.writeFileSync(path.join(workspace, 'QWEN.md'), 'project rules');
+    await acquire();
+
+    expect(await control({ kind: 'workspace-context' })).toEqual({
+      files: [{ name: 'QWEN.md', text: 'project rules' }],
+    });
+  });
+
   it('keeps shell calls inside the Session workspace', async () => {
     await begin();
     // The kernel follows a link before the `..` after it.

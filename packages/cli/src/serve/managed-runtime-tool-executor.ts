@@ -569,7 +569,14 @@ export class ManagedToolExecutor {
   private async readWorkspaceContextAdmitted(
     sessionId: string,
   ): Promise<{ files: ManagedWorkspaceContextFile[] }> {
-    this.assertLegacySession(sessionId);
+    // Not `assertLegacySession`: this control reserves nothing in the
+    // execution ledger, and the Harness issues it from inside `acquire()`, so
+    // the Session is already claimed by the time it arrives. Only a released
+    // Session refuses.
+    if (this.closedSessions.has(sessionId))
+      throw new ManagedToolUnavailableError(
+        'Workspace context is unavailable.',
+      );
     const tools = await this.toolsFor({
       sessionId,
       promptId: sessionId,
