@@ -13,6 +13,8 @@ import {
   renderAvailableSkillsBlock,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
+import { isDangerousAllowRule } from '../permissions/dangerousRules.js';
+import { parseRule } from '../permissions/rule-parser.js';
 import { parseSkillContent } from './skill-load.js';
 
 // Bundled skills are loaded from disk at runtime by SkillManager. A typo in
@@ -109,5 +111,58 @@ describe('bundled SKILL.md files', () => {
         true,
       );
     }
+  });
+});
+
+// `/pr` is user-triggered and pre-approves read-only commands only. Rule
+// matching is prefix-based with no exclusion syntax, so any mutating command
+// (git push, gh pr create, ...) must stay behind normal confirmation.
+describe('bundled pr skill permissions', () => {
+  const file = path.join(bundledDir, 'pr', 'SKILL.md');
+  const cfg = parseSkillContent(fs.readFileSync(file, 'utf8'), file);
+  const allowedTools = cfg.allowedTools ?? [];
+
+  it('is user-invocable only', () => {
+    expect(cfg.disableModelInvocation).toBe(true);
+  });
+
+  it('allows exactly the expected read-only rules', () => {
+    expect([...allowedTools].sort()).toEqual(
+      [
+        'Bash(gh auth status)',
+        'Bash(gh pr list)',
+        'Bash(gh pr view)',
+        'Bash(gh repo view)',
+        'Bash(git config --get)',
+        'Write(/.qwen/tmp/**)',
+        'glob',
+        'grep_search',
+        'read_file',
+      ].sort(),
+    );
+  });
+
+  it.each(['run_shell_command', 'Bash', 'Shell'])(
+    'does not grant bare %s',
+    (bare) => {
+      expect(allowedTools).not.toContain(bare);
+    },
+  );
+
+  it.each([
+    'git push',
+    'gh pr create',
+    'gh pr edit',
+    'git switch',
+    'git checkout',
+    'git commit',
+  ])('does not pre-approve %s', (command) => {
+    for (const rule of allowedTools) {
+      expect(rule).not.toContain(command);
+    }
+  });
+
+  it.each(allowedTools)('%s is not a dangerous allow rule', (rule) => {
+    expect(isDangerousAllowRule(parseRule(rule))).toBe(false);
   });
 });

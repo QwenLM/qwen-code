@@ -158,6 +158,7 @@ These commands invoke bundled skills that provide specialized workflows.
 | `/goal-draft` | Turn a fuzzy intention into a verifiable `/goal` objective    | `/goal-draft make the auth tests pass`                                    |
 | `/simplify`   | Review recent changes and apply safe cleanup edits directly   | `/simplify`, `/simplify focus on duplication`                             |
 | `/qc-helper`  | Answer questions about Qwen Code usage and configuration      | `/qc-helper how do I configure MCP?`                                      |
+| `/pr`         | Draft, push and open or update the PR for the current branch  | `/pr`, `/pr create`, `/pr create --draft --base release`                  |
 
 See [Code Review](./code-review.md) for full `/review` documentation.
 
