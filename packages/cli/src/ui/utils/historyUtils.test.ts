@@ -313,6 +313,19 @@ describe('stripLeadingSystemReminders', () => {
     expect(stripLeadingSystemReminders(pasted)).toBe(pasted);
   });
 
+  it('keeps user text whose leading tag pair is not injector-shaped', () => {
+    // A close tag not followed by the injectors' blank-line separator is
+    // prose mentioning the tags, not an injected envelope: swallowing it
+    // would partly hide the prompt.
+    const pasted =
+      '<system-reminder> please fix the parser that handles </system-reminder> tags';
+    expect(stripLeadingSystemReminders(pasted)).toBe(pasted);
+    expect(splitLeadingSystemReminders(pasted)).toEqual({
+      reminders: '',
+      rest: pasted,
+    });
+  });
+
   it('keeps an unterminated envelope', () => {
     const unterminated = '<system-reminder>never closed\nreview this';
     expect(stripLeadingSystemReminders(unterminated)).toBe(unterminated);
@@ -442,6 +455,18 @@ describe('prependMissingSystemReminders', () => {
       'review this',
     );
   });
+
+  it('prepends a duplicated armed block only once', () => {
+    // A pile can carry two byte-identical copies — a stale armed one ahead
+    // of the injector's re-fired one; the block still prepends once.
+    const envelope = '<system-reminder>\nnotice\n</system-reminder>';
+    expect(
+      prependMissingSystemReminders(
+        `${envelope}\n\n${envelope}\n\n`,
+        'review this',
+      ),
+    ).toBe(`${envelope}\n\nreview this`);
+  });
 });
 
 describe('omitSystemReminderBlocks', () => {
@@ -506,6 +531,20 @@ describe('omitSystemReminderBlocks', () => {
       ),
     ).toBe('  indented prompt');
   });
+
+  it('returns an envelope-only text unchanged rather than empty', () => {
+    // The twin of the leading split's envelope-only guard: when the listed
+    // blocks cover the whole text, the text is the display content — a pop
+    // of such an entry must restore it, not an empty composer.
+    const only = '<system-reminder>\nnote\n</system-reminder>';
+    expect(omitSystemReminderBlocks(only, only)).toBe(only);
+    const stacked =
+      '<system-reminder>one</system-reminder>\n\n<system-reminder>two</system-reminder>';
+    const stackedRun =
+      '<system-reminder>one</system-reminder>\n\n' +
+      '<system-reminder>two</system-reminder>\n\n';
+    expect(omitSystemReminderBlocks(stacked, stackedRun)).toBe(stacked);
+  });
 });
 
 describe('splitInjectedLeadingReminders', () => {
@@ -543,5 +582,18 @@ describe('splitInjectedLeadingReminders', () => {
         `${injected}rest without the user run`,
       ),
     ).toBe(undefined);
+  });
+
+  it('returns undefined when the endsWith alignment lands mid-block', () => {
+    // A model block whose body quotes an open tag ends with the user's
+    // run: the slice ahead of it is a bare open-tag fragment, not whole
+    // envelope blocks, and proves nothing about injection.
+    const projectionRun = '<system-reminder>x</system-reminder>\n\n';
+    expect(
+      splitInjectedLeadingReminders(
+        `${projectionRun}rest`,
+        `<system-reminder>note <system-reminder>x</system-reminder>\n\nbody`,
+      ),
+    ).toBeUndefined();
   });
 });

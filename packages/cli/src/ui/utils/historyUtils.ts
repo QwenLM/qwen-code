@@ -154,6 +154,46 @@ export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
 }
 
 /**
+ * One `<system-reminder>` envelope block scanned off the front of a text:
+ * the whole block (open tag through close tag), the whitespace separator
+ * between it and what follows, and the remaining text.
+ */
+export interface LeadingEnvelopeBlock {
+  block: string;
+  separator: string;
+  rest: string;
+}
+
+/**
+ * Scans one leading `<system-reminder>` envelope block, or returns null
+ * when `text` does not open with one. A close tag counts as ending an
+ * envelope only when it is followed by a blank line or the end of the
+ * text — the separator the injectors join envelopes with — so user text
+ * that merely mentions the tags (`<system-reminder> fix the
+ * </system-reminder> parser`) is never mistaken for an injected envelope
+ * and partly swallowed.
+ */
+export function scanLeadingEnvelopeBlock(
+  text: string,
+): LeadingEnvelopeBlock | null {
+  if (!text.startsWith(SYSTEM_REMINDER_OPEN)) return null;
+  const close = text.indexOf(
+    SYSTEM_REMINDER_CLOSE,
+    SYSTEM_REMINDER_OPEN.length,
+  );
+  if (close === -1) return null;
+  const blockEnd = close + SYSTEM_REMINDER_CLOSE.length;
+  const after = text.slice(blockEnd);
+  if (after !== '' && !after.startsWith('\n\n')) return null;
+  const rest = after.replace(/^\s+/, '');
+  return {
+    block: text.slice(0, blockEnd),
+    separator: after.slice(0, after.length - rest.length),
+    rest,
+  };
+}
+
+/**
  * Removes the one-shot `<system-reminder>` envelopes the submit path prepends
  * to the model text (recovered background agents, worktree restore, workflow
  * steering — see AppContainer's `handleFinalSubmit`). They are model context,
@@ -163,10 +203,12 @@ export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
  *
  * Leading-only on purpose: an envelope the user pasted into the middle of
  * their own message stays visible, so a prompt is never partly hidden. An
- * unterminated envelope stops the scan and is left in place rather than
- * swallowed. And when stripping would leave nothing — a prompt that IS only
- * envelope(s), e.g. one the user pasted wholesale — the original text is
- * returned unchanged, so no caller can strip a message out of existence.
+ * unterminated envelope — or a tag pair whose close is not followed by the
+ * injectors' blank-line separator — stops the scan and is left in place
+ * rather than swallowed. And when stripping would leave nothing — a prompt
+ * that IS only envelope(s), e.g. one the user pasted wholesale — the
+ * original text is returned unchanged, so no caller can strip a message out
+ * of existence.
  */
 export function stripLeadingSystemReminders(text: string): string {
   return splitLeadingSystemReminders(text).rest;
@@ -183,13 +225,12 @@ export function splitLeadingSystemReminders(text: string): {
   rest: string;
 } {
   let rest = text;
-  while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
-    const close = rest.indexOf(
-      SYSTEM_REMINDER_CLOSE,
-      SYSTEM_REMINDER_OPEN.length,
-    );
-    if (close === -1) break;
-    rest = rest.slice(close + SYSTEM_REMINDER_CLOSE.length).replace(/^\s+/, '');
+  for (
+    let scanned = scanLeadingEnvelopeBlock(rest);
+    scanned !== null;
+    scanned = scanLeadingEnvelopeBlock(scanned.rest)
+  ) {
+    rest = scanned.rest;
   }
   if (rest === '' || rest === text) return { reminders: '', rest: text };
   return { reminders: text.slice(0, text.length - rest.length), rest };
@@ -218,30 +259,25 @@ export function prependMissingSystemReminders(
   text: string,
 ): string {
   const present = new Set<string>();
-  let scan = text;
-  while (scan.startsWith(SYSTEM_REMINDER_OPEN)) {
-    const close = scan.indexOf(
-      SYSTEM_REMINDER_CLOSE,
-      SYSTEM_REMINDER_OPEN.length,
-    );
-    if (close === -1) break;
-    const blockEnd = close + SYSTEM_REMINDER_CLOSE.length;
-    present.add(scan.slice(0, blockEnd));
-    scan = scan.slice(blockEnd).replace(/^\s+/, '');
+  for (
+    let scanned = scanLeadingEnvelopeBlock(text);
+    scanned !== null;
+    scanned = scanLeadingEnvelopeBlock(scanned.rest)
+  ) {
+    present.add(scanned.block);
   }
   let missing = '';
-  let rest = envelopes;
-  while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
-    const close = rest.indexOf(
-      SYSTEM_REMINDER_CLOSE,
-      SYSTEM_REMINDER_OPEN.length,
-    );
-    if (close === -1) break;
-    const blockEnd = close + SYSTEM_REMINDER_CLOSE.length;
-    const block = rest.slice(0, blockEnd);
-    rest = rest.slice(blockEnd).replace(/^\s+/, '');
-    if (!present.has(block)) {
-      missing += `${block}\n\n`;
+  for (
+    let scanned = scanLeadingEnvelopeBlock(envelopes);
+    scanned !== null;
+    scanned = scanLeadingEnvelopeBlock(scanned.rest)
+  ) {
+    if (!present.has(scanned.block)) {
+      missing += `${scanned.block}\n\n`;
+      // Dedupe against the output too: an `envelopes` pile carrying two
+      // byte-identical blocks (a stale armed copy ahead of a re-fired one)
+      // must prepend the block once, not stack both.
+      present.add(scanned.block);
     }
   }
   return missing + text;
@@ -261,32 +297,29 @@ export function prependMissingSystemReminders(
  * gate's byte-identity for any separator but a plain `\n\n`, and a greedy
  * `\s+` run would eat display content past what was armed. When the text
  * does not carry the recorded separator after the block, only the block is
- * removed.
+ * removed. When the listed blocks cover the whole text the original is
+ * returned unchanged — the twin of the leading split's envelope-only
+ * guard, so no caller can strip a message out of existence.
  */
 export function omitSystemReminderBlocks(
   text: string,
   reminders: string,
 ): string {
   let result = text;
-  let rest = reminders;
-  while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
-    const close = rest.indexOf(
-      SYSTEM_REMINDER_CLOSE,
-      SYSTEM_REMINDER_OPEN.length,
-    );
-    if (close === -1) break;
-    const blockEnd = close + SYSTEM_REMINDER_CLOSE.length;
-    const block = rest.slice(0, blockEnd);
-    const afterBlock = rest.slice(blockEnd);
-    const trimmed = afterBlock.replace(/^\s+/, '');
-    const separator = afterBlock.slice(0, afterBlock.length - trimmed.length);
-    rest = trimmed;
-    const at = result.indexOf(block);
+  for (
+    let scanned = scanLeadingEnvelopeBlock(reminders);
+    scanned !== null;
+    scanned = scanLeadingEnvelopeBlock(scanned.rest)
+  ) {
+    const at = result.indexOf(scanned.block);
     if (at === -1) continue;
-    const after = result.slice(at + block.length);
-    const consumed = after.startsWith(separator) ? separator.length : 0;
+    const after = result.slice(at + scanned.block.length);
+    const consumed = after.startsWith(scanned.separator)
+      ? scanned.separator.length
+      : 0;
     result = result.slice(0, at) + after.slice(consumed);
   }
+  if (result === '') return text;
   return result;
 }
 
@@ -329,7 +362,16 @@ export function splitInjectedLeadingReminders(
   if (projectionRun === '') return undefined;
   const modelRun = splitLeadingSystemReminders(modelText).reminders;
   if (!modelRun.endsWith(projectionRun)) return undefined;
-  return modelRun.slice(0, modelRun.length - projectionRun.length);
+  const injected = modelRun.slice(0, modelRun.length - projectionRun.length);
+  // The endsWith check alone can align the projection run on a non-block
+  // boundary — a model block whose body quotes an open tag ends with the
+  // user's run — leaving a "prefix" that is a bare open-tag fragment.
+  // A prefix that is not itself whole envelope blocks proves nothing
+  // about injection; report the runs as not lining up instead.
+  if (injected !== '' && !isOnlyLeadingSystemReminders(injected)) {
+    return undefined;
+  }
+  return injected;
 }
 
 /**
@@ -344,13 +386,12 @@ export function splitInjectedLeadingReminders(
 export function isOnlyLeadingSystemReminders(text: string): boolean {
   if (text === '') return false;
   let rest = text;
-  while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
-    const close = rest.indexOf(
-      SYSTEM_REMINDER_CLOSE,
-      SYSTEM_REMINDER_OPEN.length,
-    );
-    if (close === -1) return false;
-    rest = rest.slice(close + SYSTEM_REMINDER_CLOSE.length).replace(/^\s+/, '');
+  for (
+    let scanned = scanLeadingEnvelopeBlock(rest);
+    scanned !== null;
+    scanned = scanLeadingEnvelopeBlock(scanned.rest)
+  ) {
+    rest = scanned.rest;
   }
   return rest === '';
 }

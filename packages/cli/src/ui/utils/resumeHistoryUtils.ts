@@ -442,7 +442,6 @@ function convertToHistoryItems(
             payload.userText ||
             (projection.displayText ?? extractTextFromParts(projection.parts));
           const text =
-            !payload.userText &&
             projection.displayText &&
             hasUserAuthoredLeadingReminders(
               projection.displayText,

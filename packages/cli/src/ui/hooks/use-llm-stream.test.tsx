@@ -219,6 +219,7 @@ vi.mock('./slashCommandProcessor.js', () => ({
 // --- Tests for useLlmStream Hook ---
 describe('useLlmStream', () => {
   let mockAddItem: Mock;
+  let mockUpdateItem: Mock;
   let mockConfig: Config;
   let mockOnDebugMessage: Mock;
   let mockHandleSlashCommand: Mock;
@@ -251,6 +252,7 @@ describe('useLlmStream', () => {
     // (used by lastTurnUserItemRef's identity check).
     let nextItemId = 1000;
     mockAddItem = vi.fn(() => nextItemId++);
+    mockUpdateItem = vi.fn();
     // Define the mock for getLlmClient
     const mockGetLlmClient = vi.fn().mockImplementation(() => {
       // MockedLlmClientClass is defined in the module scope by the previous change.
@@ -466,6 +468,7 @@ describe('useLlmStream', () => {
           undefined, // terminalWidthRef
           undefined, // midTurnRestoreRef
           goalQueueRef,
+          mockUpdateItem as unknown as UseHistoryManagerReturn['updateItem'],
         );
       },
       {
@@ -1195,6 +1198,60 @@ describe('useLlmStream', () => {
     expect(onGoalClaimDeferred).toHaveBeenCalledTimes(1);
     expect(onUndispatchedAbort).toHaveBeenCalledTimes(1);
     expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('demotes the user row stamp when preprocessing bails before dispatch', async () => {
+    // The row is inserted — and stamped sentToModel so a dispatched
+    // '?'-leading prompt is not misread lexically — BEFORE @-command
+    // preprocessing runs. A bail there means the API never saw the prompt;
+    // the stamp must be demoted or isRealUserTurn counts a phantom turn.
+    handleAtCommandSpy.mockResolvedValue({
+      shouldProceed: false,
+      processedQuery: null,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'read @/tmp/missing.png',
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: 'read @/tmp/missing.png' },
+      );
+    });
+
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+    const userRow = mockAddItem.mock.calls
+      .map(([item]) => item as { type: string; sentToModel?: boolean })
+      .find((item) => item.type === MessageType.USER);
+    expect(userRow?.sentToModel).toBe(true);
+    expect(mockUpdateItem).toHaveBeenCalledWith(expect.any(Number), {
+      sentToModel: false,
+    });
+  });
+
+  it('keeps the user row stamp when the turn is dispatched', async () => {
+    handleAtCommandSpy.mockResolvedValue({
+      shouldProceed: true,
+      processedQuery: [{ text: 'read @/tmp/missing.png' }],
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'read @/tmp/missing.png',
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: 'read @/tmp/missing.png' },
+      );
+    });
+
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    expect(mockUpdateItem).not.toHaveBeenCalled();
   });
 
   it('shows the expanded paste text, not the collapsed placeholder, as the visible prompt', async () => {

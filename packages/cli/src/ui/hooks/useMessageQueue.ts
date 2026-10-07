@@ -6,17 +6,16 @@
 
 import { randomUUID } from 'node:crypto';
 import { useCallback, useRef, useState } from 'react';
-import {
-  SYSTEM_REMINDER_CLOSE,
-  SYSTEM_REMINDER_OPEN,
-} from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import type {
   GoalContinuationTurn,
   GoalTurnHost,
   GoalTurnPermit,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from '../utils/commandUtils.js';
-import { isOnlyLeadingSystemReminders } from '../utils/historyUtils.js';
+import {
+  isOnlyLeadingSystemReminders,
+  scanLeadingEnvelopeBlock,
+} from '../utils/historyUtils.js';
 import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 
 export interface QueuedGoalTurn extends GoalContinuationTurn {
@@ -197,20 +196,16 @@ function aggregateUserMessages(
         // position inside its own member, so each block's own offset is
         // located in the member text and only a strictly-earlier twin
         // fails safe.
-        let rest = message.reminders;
-        while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
-          const close = rest.indexOf(
-            SYSTEM_REMINDER_CLOSE,
-            SYSTEM_REMINDER_OPEN.length,
-          );
-          if (close === -1) break;
-          const block = rest.slice(0, close + SYSTEM_REMINDER_CLOSE.length);
-          const own = message.text.indexOf(block);
-          if (own === -1 || text.indexOf(block) !== start + own) {
+        for (
+          let scanned = scanLeadingEnvelopeBlock(message.reminders);
+          scanned !== null;
+          scanned = scanLeadingEnvelopeBlock(scanned.rest)
+        ) {
+          const own = message.text.indexOf(scanned.block);
+          if (own === -1 || text.indexOf(scanned.block) !== start + own) {
             projections[index] = message.text;
             return '';
           }
-          rest = rest.slice(block.length).replace(/^\s+/, '');
         }
         return message.reminders;
       }
@@ -222,22 +217,16 @@ function aggregateUserMessages(
       );
       if (!isOnlyLeadingSystemReminders(prefix)) return '';
       let blockOffset = start;
-      let rest = prefix;
-      while (rest.startsWith(SYSTEM_REMINDER_OPEN)) {
-        const close = rest.indexOf(
-          SYSTEM_REMINDER_CLOSE,
-          SYSTEM_REMINDER_OPEN.length,
-        );
-        if (close === -1) return '';
-        const blockEnd = close + SYSTEM_REMINDER_CLOSE.length;
-        if (text.indexOf(rest.slice(0, blockEnd)) !== blockOffset) {
+      for (
+        let scanned = scanLeadingEnvelopeBlock(prefix);
+        scanned !== null;
+        scanned = scanLeadingEnvelopeBlock(scanned.rest)
+      ) {
+        if (text.indexOf(scanned.block) !== blockOffset) {
           projections[index] = message.text;
           return '';
         }
-        const afterBlock = rest.slice(blockEnd);
-        const trimmed = afterBlock.replace(/^\s+/, '');
-        blockOffset += blockEnd + (afterBlock.length - trimmed.length);
-        rest = trimmed;
+        blockOffset += scanned.block.length + scanned.separator.length;
       }
       return prefix;
     })

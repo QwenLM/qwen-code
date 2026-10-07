@@ -515,6 +515,91 @@ describe('resumeHistoryUtils', () => {
       );
     });
 
+    it('keeps a user-authored leading envelope an at-command userText carries', () => {
+      // The user pasted the leading block: the paired record's displayText
+      // carries the same run and the model-facing parts do too, so the
+      // record cannot prove the run was injected. Carrying an @-reference
+      // must not strip what the plain-user branch keeps verbatim.
+      const envelope =
+        '<system-reminder>\nuser pasted note\n</system-reminder>';
+      const conversation = {
+        messages: [
+          {
+            type: 'system',
+            subtype: 'at_command',
+            systemPayload: {
+              userText: `${envelope}\n\nmy @file prompt`,
+              filesRead: ['/tmp/file.ts'],
+              status: 'success',
+            },
+          },
+          {
+            type: 'user',
+            message: {
+              parts: [{ text: `${envelope}\n\nexpanded model prompt` }],
+            },
+            systemPayload: {
+              displayText: `${envelope}\n\nmy @file prompt`,
+              hookContext: 'ctx',
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        1_000,
+      );
+      const userItem = items.find((i) => i.type === 'user') as {
+        text: string;
+        sentToModel?: boolean;
+        modelText?: string;
+      };
+      expect(userItem.text).toBe(`${envelope}\n\nmy @file prompt`);
+      expect(userItem.modelText).toBeUndefined();
+    });
+
+    it('strips an injected envelope from at-command userText when the parts lack the run', () => {
+      // The mirror: the paired record's displayText carries a leading run
+      // its model-facing parts do NOT — the witness fails and the strip
+      // still applies.
+      const envelope =
+        '<system-reminder>\nuser pasted note\n</system-reminder>';
+      const conversation = {
+        messages: [
+          {
+            type: 'system',
+            subtype: 'at_command',
+            systemPayload: {
+              userText: `${envelope}\n\nmy @file prompt`,
+              filesRead: ['/tmp/file.ts'],
+              status: 'success',
+            },
+          },
+          {
+            type: 'user',
+            message: { parts: [{ text: 'expanded model prompt' }] },
+            systemPayload: {
+              displayText: `${envelope}\n\nmy @file prompt`,
+              hookContext: 'ctx',
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        1_000,
+      );
+      const userItem = items.find((i) => i.type === 'user') as {
+        text: string;
+        sentToModel?: boolean;
+        modelText?: string;
+      };
+      expect(userItem.text).toBe('my @file prompt');
+      expect(userItem.modelText).toBe(`${envelope}\n\nmy @file prompt`);
+    });
+
     it('strips the envelope from a lone at-command record', () => {
       const conversation = {
         messages: [

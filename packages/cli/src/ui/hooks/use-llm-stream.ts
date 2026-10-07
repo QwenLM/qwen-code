@@ -630,6 +630,7 @@ export const useLlmStream = (
     submissionInFlightRef?: React.RefObject<boolean>;
     onSubmissionSettled?: () => void;
   } | null>,
+  updateItem?: UseHistoryManagerReturn['updateItem'],
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -1849,16 +1850,22 @@ export const useLlmStream = (
         // avoid a duplicate `> …` line. Preprocessing (@/slash/shell)
         // still runs for Cron. (Teammate envelopes returned earlier
         // and never reach this point.)
+        // The id is hoisted so the preprocessing bails below can demote
+        // the row's sentToModel stamp: the stamp exists so a dispatched
+        // '?'-leading prompt is not misread by the lexical fallback, but a
+        // turn bailing here never reached the model and must not count as
+        // one in the rewind accounting.
+        let insertedUserItemId: number | undefined;
         if (submitType !== SendMessageType.Cron) {
-          const insertedId = addItem(
+          insertedUserItemId = addItem(
             {
               type: MessageType.USER,
               text: userVisibleQuery,
-              // Every prompt reaching this point is sent to the model — the
-              // slash/shell/cron paths returned above — so stamp the
-              // provenance instead of leaving isRealUserTurn to the lexical
-              // fallback, which misclassifies a '?'-leading prompt once the
-              // envelope strip removed its '<system-reminder>' first char.
+              // Stamped at insertion so a dispatched '?'-leading prompt is
+              // not misread by the lexical fallback (the envelope strip
+              // removed its '<system-reminder>' first char); the
+              // preprocessing bails below demote the stamp when the turn
+              // never reaches the model.
               sentToModel: true,
               // Keep the model-bound text on the item when it differs: the
               // rewind restore re-arms the consumed one-shot envelope from
@@ -1888,7 +1895,7 @@ export const useLlmStream = (
           // original so an unedited resubmit can replay it.
           if (!preserveTurnOwnership) {
             lastTurnUserItemRef.current = {
-              id: insertedId,
+              id: insertedUserItemId,
               text: userVisibleQuery,
               modelText: trimmedQuery,
               ...(adoptedReminders === undefined
@@ -1923,6 +1930,9 @@ export const useLlmStream = (
           });
 
           if (!atCommandResult.shouldProceed) {
+            if (insertedUserItemId !== undefined) {
+              updateItem?.(insertedUserItemId, { sentToModel: false });
+            }
             return { queryToSend: null, shouldProceed: false };
           }
           localQueryToSendToLlm = atCommandResult.processedQuery;
@@ -1934,6 +1944,9 @@ export const useLlmStream = (
           abortSignal,
         );
         if (!bridgeResult.shouldProceed) {
+          if (insertedUserItemId !== undefined) {
+            updateItem?.(insertedUserItemId, { sentToModel: false });
+          }
           return { queryToSend: null, shouldProceed: false };
         }
         localQueryToSendToLlm = bridgeResult.parts;
@@ -1953,6 +1966,7 @@ export const useLlmStream = (
     [
       config,
       addItem,
+      updateItem,
       onDebugMessage,
       handleShellCommand,
       handleSlashCommand,

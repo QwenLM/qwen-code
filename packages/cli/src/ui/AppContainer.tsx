@@ -2563,6 +2563,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
     goalQueueRef,
+    historyManager.updateItem,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;

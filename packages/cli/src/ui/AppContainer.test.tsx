@@ -3579,6 +3579,49 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('restores an envelope-only queue pop verbatim instead of reporting nothing popped', () => {
+      // A popped entry whose producer projection is empty carries the
+      // whole envelope run as the decomposition. The restore must hand the
+      // composer the text itself: an empty result reads as "nothing
+      // popped" to the caller (InputPrompt bails on a falsy pop) and the
+      // already-removed entries would be silently discarded.
+      const envelopeOnly =
+        '<system-reminder>\nuser pasted note\n</system-reminder>';
+      const mockQueueMessage = vi.fn();
+      mockedUseTextBuffer.mockImplementation(() => ({
+        text: '',
+        setText: vi.fn(),
+      }));
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [envelopeOnly],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(envelopeOnly),
+        popAllMessages: vi.fn().mockReturnValue({
+          kind: 'user',
+          modelText: envelopeOnly,
+          submittedPrompt: '',
+          reminders: envelopeOnly,
+          turnKey: 'message-queue:test',
+        }),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const poppedText = capturedUIActions.popAllQueuedMessages();
+      expect(poppedText).toBe(envelopeOnly);
+    });
+
     it('treats a restored prompt stash as provenance unavailable', () => {
       // A stash written by an older build can carry the model-facing text
       // with its injected envelope; the composer gets the user-visible
