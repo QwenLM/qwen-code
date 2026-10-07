@@ -72,6 +72,10 @@ import {
 } from './managed-hook-record.js';
 import { parseChildRun } from './managed-child-run-record.js';
 import {
+  parseChannelDelivery,
+  parseChannelRoute,
+} from './managed-channel-record.js';
+import {
   parseChildAcceptance,
   type ChildAcceptance,
 } from './managed-child-acceptance-record.js';
@@ -2092,6 +2096,17 @@ export class LocalManagedSessionAuthority {
         monitor.startReceiptRef,
         monitor.outputRef,
         monitor.lastObservationRef,
+      ];
+    } else if (domain === 'channel_route') {
+      refs = [parseChannelRoute(record).policyRef];
+    } else if (domain === 'channel_delivery') {
+      const delivery = parseChannelDelivery(record);
+      refs = [
+        delivery.contentRef,
+        ...delivery.segments.flatMap((segment) => [
+          segment.contentRef,
+          segment.receipt?.proofRef ?? null,
+        ]),
       ];
     }
     // Every read settles before a failure is reported, so none outlives
