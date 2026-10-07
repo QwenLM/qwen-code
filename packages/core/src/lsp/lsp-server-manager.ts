@@ -1171,12 +1171,12 @@ export class LspServerManager {
       workspaceFolders: [workspaceFolder],
       capabilities: {
         textDocument: {
-          completion: { dynamicRegistration: true },
-          hover: { dynamicRegistration: true },
-          definition: { dynamicRegistration: true },
-          references: { dynamicRegistration: true },
-          documentSymbol: { dynamicRegistration: true },
-          codeAction: { dynamicRegistration: true },
+          completion: { dynamicRegistration: false },
+          hover: { dynamicRegistration: false },
+          definition: { dynamicRegistration: false },
+          references: { dynamicRegistration: false },
+          documentSymbol: { dynamicRegistration: false },
+          codeAction: { dynamicRegistration: false },
         },
         workspace: {
           workspaceFolders: true,
