@@ -858,7 +858,7 @@ class ManagedAgentMySqlIT {
 
     @Test
     @Order(9)
-    void journalsNothingWhenTheDeletionCommitsMidCommit() throws Exception {
+    void serializesDeletionBehindTheRecordCommit() throws Exception {
         DriverManagerDataSource dataSource = dataSource();
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
@@ -886,8 +886,8 @@ class ManagedAgentMySqlIT {
         assertThat(count(jdbc, "qwen_managed_session_task_journal", tenant,
                 session)).isEqualTo(1);
         // A second connection holds the record row, so the next commit
-        // blocks at its UPDATE: after its first consistent read took the
-        // snapshot, and before the deletion guard runs.
+        // blocks at its UPDATE while retaining the placement guard that
+        // deletion admission also needs.
         try (java.sql.Connection holder = dataSource.getConnection()) {
             holder.setAutoCommit(false);
             try (var lock = holder.prepareStatement("SELECT record_key FROM"
@@ -921,19 +921,36 @@ class ManagedAgentMySqlIT {
                 assertThat(System.nanoTime()).isLessThan(deadline);
                 Thread.sleep(50);
             }
-            // The deletion begins and commits while the record commit waits
-            // behind its snapshot.
-            agents.beginOperation(tenant, session, OperationKind.DELETE,
-                    "sha256:" + "e".repeat(64), "delete-mid", "digest-mid");
+            CompletableFuture<Object> deletion = CompletableFuture.supplyAsync(
+                    () -> inTransaction(transactions,
+                            () -> agents.beginOperation(tenant, session,
+                                    OperationKind.DELETE,
+                                    "sha256:" + "e".repeat(64), "delete-mid",
+                                    "digest-mid")));
+            String admissionBlocked = "SELECT COUNT(*) FROM"
+                    + " information_schema.PROCESSLIST WHERE DB = DATABASE()"
+                    + " AND COMMAND = 'Query' AND TIME >= 1 AND INFO LIKE"
+                    + " 'INSERT INTO qwen_runtime_placement_guard%'";
+            while (jdbc.queryForObject(admissionBlocked, Integer.class) == 0) {
+                assertThat(deletion).as("deletion admission must wait for"
+                        + " the record commit's placement guard").isNotDone();
+                assertThat(commit).isNotDone();
+                assertThat(System.nanoTime()).isLessThan(deadline);
+                Thread.sleep(50);
+            }
+            assertThat(deletion).isNotDone();
             holder.commit();
             commit.get(30, TimeUnit.SECONDS);
+            deletion.get(30, TimeUnit.SECONDS);
         }
         assertThat(jdbc.queryForObject("SELECT revision FROM"
                         + " qwen_managed_session_extension_record WHERE"
                         + " tenant_id = ? AND session_id = ?", Long.class,
                 tenant, session)).isEqualTo(2L);
         assertThat(count(jdbc, "qwen_managed_session_task_journal", tenant,
-                session)).isEqualTo(1);
+                session)).isEqualTo(2);
+        assertThat(agents.requireSession(tenant, session).status())
+                .isEqualTo("DELETING");
     }
 
     @Test
