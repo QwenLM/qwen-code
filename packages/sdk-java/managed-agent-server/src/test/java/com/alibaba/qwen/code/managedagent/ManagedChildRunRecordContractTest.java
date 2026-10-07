@@ -41,8 +41,7 @@ class ManagedChildRunRecordContractTest {
                 jsonList(fixtures.required("childAgentKeys")));
         assertEquals(List.of("childRunId", "completion", "depth", "inputRef",
                 "kind", "ownerScopeId", "predecessorChildRunId",
-                "resultVersion", "rootSessionId", "workingDirectory",
-                "workspaceMode"),
+                "rootSessionId", "workingDirectory", "workspaceMode"),
                 jsonList(fixtures.required("childAgentFixedKeys")));
         JsonNode agentReasons = fixtures.required("childAgentStopReasons");
         for (String state : List.of("settled", "failed", "cancelled")) {

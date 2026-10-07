@@ -46,13 +46,13 @@ class ManagedExtensionProjectionContractTest {
                                 JSON.createObjectNode()
                                         .put("kind", "child_agent"))));
             } else {
-                // Probe with a record-shaped node carrying the fields a
-                // mapping could regress into reading, not an empty one —
-                // an empty node answers null to any reader.
+                // Probe with a record-shaped node carrying the identity
+                // fields a mapping could regress into reading — the real
+                // names of the managed records, not an invented one.
                 String kind = body.taskKindOf().apply(JSON.createObjectNode()
                         .put("configurationId", "probe")
                         .put("registrationId", "probe")
-                        .put("executionId", "probe")
+                        .put("occurrenceId", "probe")
                         .put("serverId", "probe"));
                 bodies.put(domain, kind == null
                         ? com.fasterxml.jackson.databind.node.NullNode

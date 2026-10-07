@@ -135,6 +135,10 @@ public final class ManagedExtensionRecords {
     private static final Pattern DIGEST = Pattern.compile("[0-9a-f]{64}");
     private static final Pattern PHASE = Pattern.compile(
             "[a-z][a-z0-9_]{0," + (MAX_PHASE_LENGTH - 1) + "}");
+    // Prefix semantics matching TypeScript's `/^[A-Za-z]/.test` — the
+    // matcher runs lookingAt, never matches, so Java line terminators
+    // cannot slip a drive spec past the shared contract.
+    private static final Pattern DRIVE_SPEC = Pattern.compile("[A-Za-z]:");
     /** Run states after which no observation, output or run change may land. */
     static final List<String> TERMINAL = List.of("settled", "failed",
             "cancelled");
@@ -164,12 +168,18 @@ public final class ManagedExtensionRecords {
             "childSessionId", "predecessorChildRunId", "resultVersion",
             "resultRef", "terminalReceiptRef", "stopReason", "stopRequested",
             "run");
+    // The fields that no revision of a child agent may change.
+    // `resultVersion` is not here on purpose: the parser forces it to 1,
+    // so no two revisions can ever differ on it, and a fixed-key entry
+    // for it could never refuse.
     private static final List<String> CHILD_AGENT_FIXED = List.of("kind",
             "childRunId", "ownerScopeId", "rootSessionId", "depth",
             "completion", "inputRef", "workspaceMode", "workingDirectory",
-            "predecessorChildRunId", "resultVersion");
+            "predecessorChildRunId");
     private static final List<String> CHILD_WORKSPACE_MODES = List.of(
             "shared", "snapshot", "worktree");
+    private static final String CHILD_WORKSPACE_MODES_TEXT =
+            String.join(", ", CHILD_WORKSPACE_MODES);
     private static final long CHILD_MAX_DEPTH = 8;
     private static final List<String> CHILD_UNSTARTED_EXECUTIONS = List.of(
             "intent", "dispatch_started", "not_started_proven");
@@ -853,7 +863,7 @@ public final class ManagedExtensionRecords {
                 && CHILD_WORKSPACE_MODES.contains(
                         child.get("workspaceMode").textValue()),
                 "Child run workspaceMode must be one of "
-                        + String.join(", ", CHILD_WORKSPACE_MODES));
+                        + CHILD_WORKSPACE_MODES_TEXT);
         requireWorkingDirectory(child.get("workingDirectory"));
         JsonNode session = child.get("childSessionId");
         if (!session.isNull()) {
@@ -928,7 +938,7 @@ public final class ManagedExtensionRecords {
         require(stopReason == null
                 || CHILD_AGENT_STOP_REASONS.getOrDefault(state, List.of())
                         .contains(stopReason),
-                "Child run stopReason " + stopReason
+                () -> "Child run stopReason " + stopReason
                         + " does not fit the " + state + " state");
         JsonNode stopRequested = child.get("stopRequested");
         require(stopRequested.isBoolean(),
@@ -982,7 +992,7 @@ public final class ManagedExtensionRecords {
         require(".".equals(value)
                 || !value.startsWith("/") && !value.endsWith("/")
                         && !value.contains("\\")
-                        && !value.matches("^[A-Za-z]:.*")
+                        && !DRIVE_SPEC.matcher(value).lookingAt()
                         && Stream.of(value.split("/", -1))
                                 .noneMatch(segment -> segment.isEmpty()
                                         || segment.equals(".")

@@ -123,9 +123,6 @@ export interface ChildAgentRun {
  */
 export type AnyChildRun = ChildRun | ChildAgentRun;
 
-/** The `kind` vocabulary any consumer of the union may switch on. */
-export type ChildRunKind = AnyChildRun['kind'];
-
 const SHELL_KEYS = [
   'commandRef',
   'exitCode',
@@ -165,7 +162,9 @@ const CHILD_AGENT_KEYS = [
   'workspaceMode',
   'workingDirectory',
 ] as const;
-/** The fields that no revision of a child agent may change. */
+// The fields that no revision of a child agent may change. `resultVersion`
+// is not here on purpose: the parser forces it to 1, so no two revisions
+// can ever differ on it, and a fixed-key entry for it could never refuse.
 const CHILD_AGENT_FIXED_KEYS = [
   'childRunId',
   'completion',
@@ -174,7 +173,6 @@ const CHILD_AGENT_FIXED_KEYS = [
   'kind',
   'ownerScopeId',
   'predecessorChildRunId',
-  'resultVersion',
   'rootSessionId',
   'workspaceMode',
   'workingDirectory',
