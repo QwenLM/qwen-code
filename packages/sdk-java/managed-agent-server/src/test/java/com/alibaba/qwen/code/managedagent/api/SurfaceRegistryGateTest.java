@@ -97,8 +97,16 @@ class SurfaceRegistryGateTest {
                     return;
                 }
                 for (String pattern : info.getPatternValues()) {
-                    for (RequestMethod method
-                            : info.getMethodsCondition().getMethods()) {
+                    Set<RequestMethod> methods =
+                            info.getMethodsCondition().getMethods();
+                    if (methods.isEmpty()) {
+                        // An untyped @RequestMapping mounts every HTTP
+                        // method; without the sentinel the handler lands in
+                        // neither set and the bijection passes silently.
+                        routes.add("* " + pattern);
+                        continue;
+                    }
+                    for (RequestMethod method : methods) {
                         routes.add(method.name() + " " + pattern);
                     }
                 }

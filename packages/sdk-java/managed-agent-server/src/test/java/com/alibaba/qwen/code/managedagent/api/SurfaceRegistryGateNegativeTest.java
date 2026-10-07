@@ -13,6 +13,7 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -43,11 +44,19 @@ class SurfaceRegistryGateNegativeTest {
     void anUnregisteredMountedRouteFailsTheGateNamingTheRoute() {
         Set<String> mounted = SurfaceRegistryGateTest.moduleRoutes(context);
         Map<String, String> drift = SurfaceRegistryGateTest.drift(mounted);
-        assertThat(drift).hasSize(1);
-        assertThat(drift.keySet().iterator().next())
-                .contains("GET /v1/agents/__surface_gate_probe__")
-                .contains("mounted by a controller")
-                .contains("missing from SurfaceRegistry");
+        assertThat(drift).hasSize(2);
+        assertThat(drift.keySet())
+                .anySatisfy(route -> assertThat(route)
+                        .contains("GET /v1/agents/__surface_gate_probe__")
+                        .contains("mounted by a controller")
+                        .contains("missing from SurfaceRegistry"))
+                .anySatisfy(route -> assertThat(route)
+                        // A method-level @RequestMapping with no method
+                        // attribute mounts every HTTP method and must not
+                        // pass the scan silently.
+                        .contains("* /v1/agents/__surface_gate_probe_any__")
+                        .contains("mounted by a controller")
+                        .contains("missing from SurfaceRegistry"));
     }
 
     @Test
@@ -70,6 +79,11 @@ class SurfaceRegistryGateNegativeTest {
         @GetMapping("/v1/agents/__surface_gate_probe__")
         public String probe() {
             return "probe";
+        }
+
+        @RequestMapping("/v1/agents/__surface_gate_probe_any__")
+        public String probeAny() {
+            return "probe-any";
         }
     }
 }
