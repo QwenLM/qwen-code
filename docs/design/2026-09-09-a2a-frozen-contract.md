@@ -28,7 +28,7 @@ Optional, with **none included in the first version**: `sendMessageStream` / `re
 
 ## 3. Entity Mapping (the Central Decision)
 
-**An A2A `Task` maps to one agent run in a chat session; the A2A `contextId` is that chat session's id.** (The thread model this section used to describe was removed by the session multi-agent redesign, `docs/plans/2026-10-05-session-multi-agent-redesign.md`.)
+**An A2A `Task` maps to one agent run in a chat session; the A2A `contextId` is that chat session's id.** (The thread model this section used to describe was removed; see [the session multi-agent design](2026-10-05-session-multi-agent.md) §6.)
 
 - A message without `contextId` makes the daemon create an ordinary chat session for the caller (listed in WebShell as `A2A · <callerId>`, `sourceType: 'default'`, `sourceId: 'a2a:<callerId>'`) and post the message there as `@<granted agent> <text>`. The run that post starts is the task; the task id is the run id.
 - A message with a `contextId` the caller was given for the same agent is posted into that session, so the agent's native session continues and it remembers the earlier turns. Any other `contextId` is refused as unknown. A message carrying `taskId` is refused: a task is one turn, and further input is a new message in the same context.

@@ -28,7 +28,7 @@
 
 ## 3. 单位映射（本文最要紧的一条决定）
 
-**A2A `Task` = 聊天会话里的一次 Agent 运行（run）；A2A `contextId` = 该聊天会话的 id。**（本节原先描述的 thread 模型已随会话多 Agent 重做删除，见 `docs/plans/2026-10-05-session-multi-agent-redesign.md`。）
+**A2A `Task` = 聊天会话里的一次 Agent 运行（run）；A2A `contextId` = 该聊天会话的 id。**（本节原先描述的 thread 模型已随会话多 Agent 重做删除，见 [会话多 Agent 设计](2026-10-05-session-multi-agent.zh-CN.md) §6。）
 
 - 不带 `contextId` 的消息：daemon 为调用方新建一个普通聊天会话（在 WebShell 中显示为 `A2A · <callerId>`，`sourceType: 'default'`，`sourceId: 'a2a:<callerId>'`），并以 `@<获授权 Agent> <正文>` 的形式发到该会话。这条消息触发的 run 就是任务，任务 id 即 run id。
 - 带有调用方为同一 Agent 拿到的 `contextId` 的消息：发到同一个会话，Agent 的原生会话随之延续，记得之前的轮次。其他 `contextId` 一律按未知拒绝。携带 `taskId` 的消息会被拒绝：一个任务就是一轮，后续输入应作为同一 context 下的新消息。

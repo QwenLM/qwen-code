@@ -4,7 +4,7 @@
 
 ## 状态与范围
 
-已在 PR #13467 实现，受 `experimental.agentCollaboration` 开关控制（默认关闭）。
+已在 PR #13467 实现，删除 thread 与 A2A 改为基于会话在 PR #13583；受 `experimental.agentCollaboration` 开关控制（默认关闭）。
 
 - 代码注释中的 `session-multi-agent design §N` 指本文的章节。
 - 产品决定于 2026-10-05 确认，见 §8。

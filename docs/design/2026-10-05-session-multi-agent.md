@@ -4,7 +4,7 @@
 
 ## Status and scope
 
-- **Status:** implemented in PR #13467, behind `experimental.agentCollaboration` (default off).
+- **Status:** implemented in PR #13467, with the thread removal and A2A on sessions in PR #13583; behind `experimental.agentCollaboration` (default off).
 - **Section numbers:** code comments cite sections of this document as `session-multi-agent design §N`.
 - **Decisions:** the product decisions are dated 2026-10-05 and listed in §8.
 - **Squads:** the squad decisions are dated 2026-10-06 and listed in §11.
