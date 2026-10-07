@@ -272,16 +272,19 @@ public final class JdbcRuntimeBindingRepository
         JdbcToolExecutionRepository.requireCandidate(candidate);
         ToolExecutionRecord existing = executions.findByIdempotencyKey(
                 candidate.getIdempotencyKey());
-        if (existing != null) {
+        RuntimeBindingRecord original = findById(candidate.getBindingId());
+        if (original == null) {
+            throw new IllegalArgumentException("Binding is unavailable");
+        }
+        boolean csi = JdbcCsiFilesRetirementGuard.isProfile(original.getRequest().getScope());
+        if (existing != null && !csi) {
             return existing;
         }
         try {
-            RuntimeBindingRecord original = findById(candidate.getBindingId());
-            if (original == null) {
-                throw new IllegalArgumentException("Binding is unavailable");
-            }
             return JdbcRepositorySupport.transaction(dataSource, connection -> {
                 lockPlacementDomain(connection, original.getRequest().getScope().getTenantId());
+                var csiOriginal = JdbcCsiActivationAdmission.lockForExecution(connection, original);
+                JdbcCsiActivationAdmission.requireExecution(csiOriginal, candidate);
                 RuntimeBindingRecord binding = selectById(connection,
                         candidate.getBindingId(), true);
                 if (binding != null) {
@@ -292,15 +295,18 @@ public final class JdbcRuntimeBindingRepository
                         connection, binding.getRequest().getScope(),
                         candidate.getRuntimeSessionId(), true), candidate);
                 ToolExecutionRecord receipt = JdbcToolExecutionRepository.selectByIdempotencyKey(
-                        connection, candidate.getIdempotencyKey());
+                        connection, candidate.getIdempotencyKey(), csiOriginal != null);
                 if (receipt != null) {
+                    if (csiOriginal != null && !receipt.sameIdentity(candidate)) {
+                        throw new IllegalArgumentException("Execution identity differs");
+                    }
                     return receipt;
                 }
                 JdbcToolExecutionRepository.insertExecution(connection, candidate);
                 return candidate;
             });
         } catch (IllegalStateException failure) {
-            if (JdbcRepositorySupport.isConstraintViolation(failure)) {
+            if (!csi && JdbcRepositorySupport.isConstraintViolation(failure)) {
                 ToolExecutionRecord winner = executions.findByIdempotencyKey(
                         candidate.getIdempotencyKey());
                 if (winner != null) {
@@ -405,7 +411,10 @@ public final class JdbcRuntimeBindingRepository
                 || expected.isCancelRequested()) {
             throw new IllegalArgumentException("Dispatch admission requires an uncancelled claim");
         }
+        RuntimeBindingRecord hint = findById(expected.getBindingId());
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            var original = JdbcCsiActivationAdmission.lockForExecution(connection, hint);
+            JdbcCsiActivationAdmission.requireExecution(original, expected);
             RuntimeBindingRecord binding = selectById(connection, expected.getBindingId(), true, 10);
             RuntimeAdmission.requireReady(binding, expected.getRuntimeGeneration());
             RuntimeAdmission.requireSession(jdbcSessions.findByIdForUpdate(

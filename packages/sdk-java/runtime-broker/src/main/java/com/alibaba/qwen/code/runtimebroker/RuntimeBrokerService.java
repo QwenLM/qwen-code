@@ -416,6 +416,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         return requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
+                    if (JdbcCsiFilesRetirementGuard.isProfile(context.session().getScope())) {
+                        throw new RuntimeBrokerException(501, "csi_control_not_qualified",
+                                "Generic CSI runtime controls are not qualified.", false);
+                    }
                     if (ManagedMcpProtocol.isOperation(immutable)) {
                         ManagedMcpProtocol.validateSession(context.session(), immutable);
                     }

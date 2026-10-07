@@ -2,8 +2,10 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
+import com.alibaba.qwen.code.runtimebroker.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.BlockRecoveryRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
@@ -21,6 +23,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Stored
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.TransactionPage;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.ByteBuffer;
 import java.io.IOException;
 import java.io.InputStream;
@@ -52,6 +55,7 @@ import org.springframework.transaction.annotation.Transactional;
 @Repository
 public class ManagedSessionStore {
     private static final int STORAGE_VERSION = 1;
+    private static final ObjectMapper CSI_JSON = new ObjectMapper();
     private static final int MAX_ID_BYTES = 512;
     private static final int MAX_TEXT_BYTES = 4096;
     private static final Pattern DIGEST = Pattern.compile("^[0-9a-f]{64}$");
@@ -413,6 +417,13 @@ public class ManagedSessionStore {
                         request.commandId()));
         if (existing != null) {
             requireTransactionWorkspace(existing, request.workspaceId());
+            if (csiOriginal != null) {
+                jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                    JdbcCsiActivationAdmission.requireReplay(connection, csiOriginal,
+                            head.journalRevision(), head.committedSequence(), head.lastCommitDigest(), head.writerId());
+                    return null;
+                });
+            }
             return replay(existing, request, validated.recordDigest(),
                     writerToken);
         }
@@ -425,11 +436,25 @@ public class ManagedSessionStore {
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         commitResources(scopeKey, tenantId, sessionId, request, revision,
                 now, validated.resources());
-        var applied = extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
-                request.firstSequence(), request.eventCount(),
-                validated.recordBytes(), resourceId -> storedResource(
-                        scopeKey, tenantId, request.workspaceId(), sessionId,
-                        resourceId));
+        java.util.function.Function<String, StoredResource> resourceReader = resourceId -> storedResource(
+                scopeKey, tenantId, request.workspaceId(), sessionId, resourceId);
+        var applied = csiOriginal == null
+                ? extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
+                        request.firstSequence(), request.eventCount(), validated.recordBytes(), resourceReader)
+                : extensionRecords.applyNativeCsi(tenantId, request.workspaceId(), sessionId,
+                        request.firstSequence(), request.eventCount(), validated.recordBytes(), resourceReader);
+        if (csiOriginal != null) {
+            if (applied.activations().size() != (request.eventCount() == 0 ? 0 : 1)) {
+                throw new RuntimeBrokerException(409, "csi_original_activation_unavailable",
+                        "The original CSI native activation proof is unavailable.", false);
+            }
+            jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                JdbcCsiActivationAdmission.acceptCommit(connection, csiOriginal, CSI_JSON.valueToTree(request),
+                        applied.records(), head.journalRevision(), head.committedSequence(),
+                        head.lastCommitDigest(), head.writerId(), now.toInstant().toEpochMilli());
+                return null;
+            });
+        }
         var receiptEvents = applied.receipts();
         if (actions != null) {
             actions.apply(

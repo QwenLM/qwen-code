@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
 import com.alibaba.qwen.code.runtimebroker.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.ManagedHookProtocol;
@@ -305,6 +306,10 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> operation) {
+        if (JdbcCsiFilesRetirementGuard.isProfile(session.getScope())) {
+            throw new RuntimeBrokerException(501, "csi_control_not_qualified",
+                    "Generic CSI runtime controls are not qualified.", false);
+        }
         if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)
                 || ManagedShellProtocol.isOperation(operation)) {
             if (!managed(session)) {

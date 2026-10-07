@@ -4,7 +4,8 @@
 
 状态：补全设计、本地 K2-A1 原型与进行中的 K2-A2 实现，更新于 2026-10-07。
 原生边界观测器已实现；私有 CREATE/request 固定点已在本地实现并验证。
-原 binding/Session/writer guard 正在本地实现。
+原 binding/Session/writer guard 与首次原生 SQL activation 固定点已在本地实现，
+并接入部分 execution 准入与 dispatch consumer。
 完整 A2 准入关闭与 K2-B 到 K2-D 仍待完成；本文不声明完整 K2 或新增云上验收完成。
 实现基线为 main
 `4bffa678bced8b14c25c85e3ba4226b7b752414d`，已包含以
@@ -182,8 +183,79 @@ warm-up 则发生在持久 Session 打开之后。初始 provision request 不�
 同一父级准入锁下证明此前没有已授权 execution，包括历史 terminal 记录。此 profile
 拒绝任何后续 replacement activation。
 
-在调用方原连接中按 placement domain → 排序的 request slot → binding history →
-持久 Session/retention/head 顺序解析精确 CREATE request。检查歧义和孤立权威，
+本地实现批次消费真实原生 producer 的字节。首个 install 的 epoch 为 1，原 writer
+generation 为 1，`workerId` 等于作为 `writerId` 的 Hosted boot UUID。默认 activation
+subject 的 `scopeId`、`activationId` 与 epoch 对应一致。引用的
+`managed-activation-install` body 包含 `version`、`activationId`、`epoch`、
+`workerId` 与 `leaseDurationMs`；默认 producer 不在该 body 中写 subject。Event、
+原生 commit marker、request metadata 和引用资源的原始字节必须一致。原生 event 与
+marker 摘要使用 producer 的递归排序 key JSON 算法，不能用另一种资源序列化替代。
+该 profile 的窄 proof reader 拒绝未知或重复字段、尾随 JSON 及不支持的数值形式。
+Runtime Broker 已依赖 Jackson；共享严格 proof reader 不需要新依赖，也不反向依赖
+Managed Agent。
+
+原生 genesis 使用 `managed-definition` 与 `managed-root` 资源，原始 body 分别严格为
+`{engine: 'managed', sessionId, toolProfile: 'csi-files-retirement/1'}` 与 `{cwd}`。
+必须对应 Hosted creator 和原 CREATE Session scope。导入历史及额外 MCP、Hook、shell
+或 approval 配置不具备资格。初始窄 SQL reader 只接受 genesis、install 及同一身份
+renew transaction；私有 profile 的通用 journal event 继续拒绝，直到其 canonical
+摘要与 continuation 路径分别完成资格验证。
+
+在既有原生 record parse 中保留完整有序 activation-event 列表。首个 install 和
+renewal 各只有一个 event；多个 activation event、缺少 event 的 activation
+operation、replacement/installing/revoked activation 及 Hook/turn subject 均拒绝。
+Genesis 可以早于固定点。pin 为空但 journal 已有 activation 历史时，不能通过安装
+replacement 修复。Renewal 保持原 activation、install reference 与 worker，并推进
+原生 renewal sequence。Terminal release 需要后续窄 retirement-close 操作；本批
+不授权通用 release、seal 或 finalization。
+
+在 V49 及独立 JDBC 的 fresh/upgrade schema 中增加可空
+`first_activation_journal_revision`，不回填 legacy，也不增加调用方可设置的 binding
+字段。在原 SQL 连接上，首个接受在既有 binding/version 条件下将 NULL 固定为精确
+SQL journal revision，并将 `record_version` 增加一次。Resources、journal、head 与
+pin 一起提交或回滚。相同已提交 command 的精确 replay 只读。显式普通 binding 更新
+保留该列；固定点之前取得旧版本的 CAS 不能覆盖新版本。初始 provision 及其 READY
+完成仍不要求尚未产生的 activation 固定点。
+
+同一迁移从既有私有 profile 或非空 request pin 派生 `csi_guard`，并增加唯一
+`(tenant_id, session_id, csi_guard)` 索引。先通过精确 current locking read 查询 TRUE，
+再锁定完整持久 Session；MySQL/MariaDB 必须使用该索引。负向查询不能持有普通
+Session 行锁，因为旧 extension commit 在更新 extension 后才检查删除状态。
+无条件提前锁 Session 已实际造成 monitor/DELETE 等待环；covering OR predicate
+在预热 repeatable-read 下仍锁住普通行，已否决。生成值没有独立权威或调用方 setter，
+不能与来源字段漂移。缺失私有 binding 或非空 pin 矛盾仍拒绝。
+
+后续 execution 准入与 dispatch consumer 必须读取固定点所指的原 journal
+transaction 和引用的 install body，再证明当前原 activation 仍有效。仅有非空列或
+派生 head cache 不足。原连接锁顺序为 placement domain → retention tenant →
+排序的 slot/binding history → 持久 Session/head → Runtime Session → 有序 execution
+history。首个接受前扫描全状态 execution 历史，包含 terminal 授权及孤立/不匹配
+关联；按每页 100、上限 4096 有界读取，超界拒绝。直接 JDBC writer 必须加入相同
+父级 fence，或在变更前明确拒绝私有 profile。仅保护 service 方法不构成完整 A2
+关闭。使用真实父级锁等待验证 read-committed 与预热 repeatable-read。首个固定点
+与部分 consumer 已在本 Draft 实现，全部 writer 关闭仍待完成。
+
+Journal history 还限制为 64 MiB，每笔 transaction 为 8 MiB，每个 event line 为
+1 MiB，每个 marker line 为 64 KiB；SQL proof statement 十秒超时。这些是拒绝边界，
+不是完整的总体操作 deadline。Execution admission、claim 与 authorization 入口可以
+消费仍有效的原 proof，但未具备资格的直接 create/CAS、dispatch renewal、取消、结算
+与 reconciliation 变更会明确拒绝此 profile。这不构成正常文件工作完成或其余
+recovery/loss writer 的资格验证。Broker service 与 Workspace transport 也均拒绝
+通用 runtime control，包含缓存 context 的 raw-file-history prepare/rewind；旧
+workspace capability 判别不能授权此私有 profile。Claim 还必须先锁定并检查当前
+原 Runtime Session 为 READY，再锁定或改变 execution；此前已准入的 PREPARED
+记录在 Session 失败后不足以授权 claim。原生时间遵循 UTC 毫秒上限
+8,640,000,000,000,000，ID 遵循原生的 512 字节 UTF-8/NFC/control 规则。显式
+Java 原生 producer SQL gate 要求已构建的 Node 模块；H2 结果只证明事务行为，不能
+作为 MySQL 锁或云上验收。
+
+Managed Agent HTTP adapter 保留 Broker 拒绝的 status、code 与 retryability。
+原生 activation 冲突必须返回其语义 409，不能变成通用 500；真实 Spring 事务
+在 controller advice 处理拒绝前回滚。未知失败保留既有 internal error envelope，
+已经开始的 stream 不重写。
+
+在调用方原连接中按 placement domain → retention tenant → 排序的 request slot →
+binding history → 持久 Session/head 顺序解析精确 CREATE request。检查歧义和孤立权威，
 不能选择首个 Session 匹配，也不能假定当前 active binding 就是原 binding。即使
 binding 缺失，也须读取持久 Session profile。MySQL read-committed 和 repeatable-read
 下，准入敏感成员检查均使用 current locking read；先前的 consistent read 或

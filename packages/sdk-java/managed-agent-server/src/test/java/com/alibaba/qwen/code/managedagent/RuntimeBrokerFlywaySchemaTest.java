@@ -72,7 +72,7 @@ class RuntimeBrokerFlywaySchemaTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"11", "13"})
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"11", "13", "48"})
     void migrationsPreserveRowsWrittenByOldBinaries(String version) throws SQLException {
         DataSource source = migrate(dataSource(), MigrationVersion.fromVersion(version));
         RuntimeProvisionRequest request = JdbcRepositoryContract.writeLegacyRows(source, "upgrade");
@@ -84,6 +84,11 @@ class RuntimeBrokerFlywaySchemaTest {
         assertThat(binding.getVersion()).isEqualTo(3);
         assertThat(binding.getLossEvidence()).isNull();
         assertThat(binding.getStopEvidence()).isNull();
+        try (var connection = source.getConnection(); var statement = connection.createStatement();
+                var row = statement.executeQuery("SELECT first_activation_journal_revision FROM qwen_runtime_binding")) {
+            assertThat(row.next()).isTrue();
+            assertThat(row.getObject(1)).isNull();
+        }
         RuntimeSessionRecord session = new JdbcRuntimeSessionRepository(source)
                 .findById(request.getScope(), "upgrade-session");
         assertThat(session.getBindingId()).isEqualTo("upgrade-binding");
@@ -98,6 +103,23 @@ class RuntimeBrokerFlywaySchemaTest {
             if (execution.isSettled()) {
                 assertThat(execution.getResult()).containsEntry("executionStatus", "success");
             }
+        }
+    }
+
+    @Test
+    void standaloneUpgradeAddsNullablePinWithoutBackfillingLegacyAuthority() throws SQLException {
+        DataSource source = dataSource();
+        JdbcRuntimeBrokerSchema.initialize(source);
+        JdbcRepositoryContract.writeLegacyRows(source, "standalone-upgrade");
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE qwen_runtime_binding DROP COLUMN first_activation_journal_revision");
+        }
+        JdbcRuntimeBrokerSchema.initialize(source);
+        try (var connection = source.getConnection(); var statement = connection.createStatement();
+                var row = statement.executeQuery("SELECT record_version, first_activation_journal_revision FROM qwen_runtime_binding")) {
+            assertThat(row.next()).isTrue();
+            assertThat(row.getLong(1)).isEqualTo(3);
+            assertThat(row.getObject(2)).isNull();
         }
     }
 

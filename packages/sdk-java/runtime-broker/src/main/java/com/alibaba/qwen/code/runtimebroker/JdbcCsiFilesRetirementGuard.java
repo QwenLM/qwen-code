@@ -14,7 +14,8 @@ public final class JdbcCsiFilesRetirementGuard {
     }
 
     public record Original(RuntimeProvisionRequest request, String bindingId,
-            long generation, RuntimeBindingRecord.State state, boolean draining) {
+            long generation, RuntimeBindingRecord.State state, boolean draining,
+            long version, Long firstActivationJournalRevision) {
         public void requireAdmission() {
             if (state != RuntimeBindingRecord.State.READY || draining) {
                 throw closed();
@@ -154,7 +155,8 @@ public final class JdbcCsiFilesRetirementGuard {
                     Original original = new Original(request(rows), rows.getString("binding_id"),
                             rows.getLong("runtime_generation"),
                             RuntimeBindingRecord.State.valueOf(rows.getString("binding_state")),
-                            rows.getBoolean("drain_requested"));
+                            rows.getBoolean("drain_requested"), rows.getLong("record_version"),
+                            rows.getObject("first_activation_journal_revision", Long.class));
                     if (bindings.size() < 2 || isProfile(original.request().getScope())
                             && bindings.stream().noneMatch(binding -> isProfile(binding.original().request().getScope()))) {
                         bindings.add(new Binding(original, rows.getString("request_key"), rows.getString("scope_key")));
@@ -224,6 +226,20 @@ public final class JdbcCsiFilesRetirementGuard {
     }
 
     private static Pin readPin(Connection connection, String tenantId, String sessionId) throws SQLException {
+        String product = connection.getMetaData().getDatabaseProductName();
+        String index = "MySQL".equals(product) || "MariaDB".equals(product)
+                ? " FORCE INDEX (managed_session_csi_guard_idx)" : "";
+        try (PreparedStatement statement = statement(connection,
+                "SELECT csi_guard FROM managed_agent_session" + index
+                        + " WHERE tenant_id = ? AND session_id = ? AND csi_guard = TRUE FOR UPDATE")) {
+            statement.setString(1, tenantId);
+            statement.setString(2, sessionId);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    return null;
+                }
+            }
+        }
         try (PreparedStatement statement = statement(connection,
                 "SELECT tenant_id, session_id, agent_id, tool_profile, runtime_request_key, workspace_id,"
                         + " workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"

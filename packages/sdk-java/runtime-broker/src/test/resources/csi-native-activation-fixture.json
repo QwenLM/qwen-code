@@ -1,0 +1,166 @@
+{
+  "format": "genuine-hosted-native-reader-fixture/1",
+  "provenance": {
+    "nativeFixtureSha256": "f7ab601b0a376ca65afffcaaf3479d149536357184c09b5de18fe107eb0fc1ab",
+    "producer": "real built LocalManagedSessionAuthority + actual HTTP adapter/default fetch",
+    "genesisInput": "Hosted emitter base shape with proposed private csi-files-retirement/1 composition",
+    "acceptance": "Owned HTTP response collector only. Zero Java/SQL/private execution claim. Not public selector support."
+  },
+  "expected": {
+    "sessionKey": {
+      "tenantId": "owned-hosted-shape-0a820632",
+      "workspaceId": "owned-hosted-shape-workspace",
+      "sessionId": "ee22eab5-1c09-4b35-a228-a0403b1519d5"
+    },
+    "cwd": "/remote-owned-hosted-shape",
+    "createdBy": "hosted-harness",
+    "version": "hosted-harness/1",
+    "writerId": "cd9e3233-c2c9-4057-b33a-1c16d7ca703e",
+    "workerId": "cd9e3233-c2c9-4057-b33a-1c16d7ca703e",
+    "activationId": "32f01235-e529-4a5c-8f50-17e9998a0f50",
+    "epoch": 1,
+    "installDurationMs": 60000,
+    "renewDurationMs": 90000,
+    "expiresMinusOccurredPlusDurationMs": [
+      -1,
+      -1
+    ]
+  },
+  "requests": [
+    {
+      "workspaceId": "owned-hosted-shape-workspace",
+      "writerId": "cd9e3233-c2c9-4057-b33a-1c16d7ca703e",
+      "writerGeneration": 1,
+      "expectedJournalRevision": 0,
+      "expectedCommittedSequence": 0,
+      "transactionId": "session.create:ee22eab5-1c09-4b35-a228-a0403b1519d5",
+      "operation": "session.create",
+      "commandId": "session.create:ee22eab5-1c09-4b35-a228-a0403b1519d5",
+      "contentDigest": "11d4d5757205f22bece6b269d5e8764500ecb3a72a0849ecd2d5c8b8a5704ea0",
+      "firstSequence": 0,
+      "lastSequence": 0,
+      "eventCount": 0,
+      "eventsDigest": null,
+      "previousCommitDigest": null,
+      "commitDigest": null,
+      "activationEpoch": 0,
+      "latestCheckpointResourceId": null,
+      "recordCount": 2,
+      "recordBytesBase64": "eyJ1dWlkIjoiOTFiMDE1ZTUtODUzMC00OGViLTllMjktMjE5Nzg2Yzc2MjJiIiwicGFyZW50VXVpZCI6bnVsbCwic2Vzc2lvbklkIjoiZWUyMmVhYjUtMWMwOS00YjM1LWEyMjgtYTA0MDNiMTUxOWQ1IiwidGltZXN0YW1wIjoiMjAyNi0xMC0wN1QwNTozNzoyMS45MDZaIiwidHlwZSI6InN5c3RlbSIsInN1YnR5cGUiOiJzZXNzaW9uX2V4ZWN1dGlvbl9lbmdpbmUiLCJjd2QiOiIvcmVtb3RlLW93bmVkLWhvc3RlZC1zaGFwZSIsInZlcnNpb24iOiJob3N0ZWQtaGFybmVzcy8xIiwic3lzdGVtUGF5bG9hZCI6eyJ2ZXJzaW9uIjoxLCJlbmdpbmUiOiJtYW5hZ2VkIn19CnsidXVpZCI6IjU5ZjI5MmQyLWYxYWYtNGQxYy1hYmRkLTdmNDhhMTMxMjE3OCIsInBhcmVudFV1aWQiOiI5MWIwMTVlNS04NTMwLTQ4ZWItOWUyOS0yMTk3ODZjNzYyMmIiLCJzZXNzaW9uSWQiOiJlZTIyZWFiNS0xYzA5LTRiMzUtYTIyOC1hMDQwM2IxNTE5ZDUiLCJ0aW1lc3RhbXAiOiIyMDI2LTEwLTA3VDA1OjM3OjIxLjkwN1oiLCJ0eXBlIjoic3lzdGVtIiwic3VidHlwZSI6Im1hbmFnZWRfc2Vzc2lvbl9oZWFkZXJfdjEiLCJjd2QiOiIvcmVtb3RlLW93bmVkLWhvc3RlZC1zaGFwZSIsInZlcnNpb24iOiJob3N0ZWQtaGFybmVzcy8xIiwibWFuYWdlZFNlc3Npb24iOnsiZm9ybWF0VmVyc2lvbiI6MSwibWluaW11bVJlYWRlciI6Im1hbmFnZWQtc2Vzc2lvbi8xIiwic2Vzc2lvbktleSI6eyJ0ZW5hbnRJZCI6Im93bmVkLWhvc3RlZC1zaGFwZS0wYTgyMDYzMiIsIndvcmtzcGFjZUlkIjoib3duZWQtaG9zdGVkLXNoYXBlLXdvcmtzcGFjZSIsInNlc3Npb25JZCI6ImVlMjJlYWI1LTFjMDktNGIzNS1hMjI4LWEwNDAzYjE1MTlkNSJ9LCJlbmdpbmUiOiJtYW5hZ2VkIiwiZGVmaW5pdGlvblJlZiI6eyJyZXNvdXJjZUlkIjoiN2RkYzY5OWMtNDI3OC00MzBkLWIyNDktNzIwZDg2NTIyM2UxIiwia2luZCI6Im1hbmFnZWQtZGVmaW5pdGlvbiIsInNjaGVtYVZlcnNpb24iOjEsImJ5dGVMZW5ndGgiOjExMCwiZGlnZXN0IjoiMzhiZjgxZjJlYzI2ODY5OTMyNzBmYjNmZmU0OWMwYWUwZWE0NTE1MjkyOWNmZmNhNTJlNjhmZDU1NzZkZjIxOSJ9LCJyb290U25hcHNob3RSZWYiOnsicmVzb3VyY2VJZCI6ImE2MWZkZjZlLWNhNjctNDg1ZS1hODRhLTA5ZjBiNDkwMTg5YyIsImtpbmQiOiJtYW5hZ2VkLXJvb3QiLCJzY2hlbWFWZXJzaW9uIjoxLCJieXRlTGVuZ3RoIjozNiwiZGlnZXN0IjoiMWE4MWM2ZTZlMGQzOTZjYWM0ZGZmODJmNjExNWMxYTdjMTg0YTU5ZmJiMDY3ZTgxYzFiMGM5MzhiODdjZTdkYSJ9LCJjcmVhdGVkQnkiOiJob3N0ZWQtaGFybmVzcyJ9fQo=",
+      "recordDigest": "11d4d5757205f22bece6b269d5e8764500ecb3a72a0849ecd2d5c8b8a5704ea0",
+      "resources": [
+        {
+          "resourceId": "7ddc699c-4278-430d-b249-720d865223e1",
+          "kind": "managed-definition",
+          "schemaVersion": 1,
+          "byteLength": 110,
+          "digest": "38bf81f2ec2686993270fb3ffe49c0ae0ea45152929cffca52e68fd5576df219",
+          "bytesBase64": "eyJlbmdpbmUiOiJtYW5hZ2VkIiwic2Vzc2lvbklkIjoiZWUyMmVhYjUtMWMwOS00YjM1LWEyMjgtYTA0MDNiMTUxOWQ1IiwidG9vbFByb2ZpbGUiOiJjc2ktZmlsZXMtcmV0aXJlbWVudC8xIn0="
+        },
+        {
+          "resourceId": "a61fdf6e-ca67-485e-a84a-09f0b490189c",
+          "kind": "managed-root",
+          "schemaVersion": 1,
+          "byteLength": 36,
+          "digest": "1a81c6e6e0d396cac4dff82f6115c1a7c184a59fbb067e81c1b0c938b87ce7da",
+          "bytesBase64": "eyJjd2QiOiIvcmVtb3RlLW93bmVkLWhvc3RlZC1zaGFwZSJ9"
+        }
+      ]
+    },
+    {
+      "workspaceId": "owned-hosted-shape-workspace",
+      "writerId": "cd9e3233-c2c9-4057-b33a-1c16d7ca703e",
+      "writerGeneration": 1,
+      "expectedJournalRevision": 1,
+      "expectedCommittedSequence": 0,
+      "transactionId": "848b1af9-deef-470d-a1a8-5de853ca2eea",
+      "operation": "installActivation",
+      "commandId": "32f01235-e529-4a5c-8f50-17e9998a0f50:active",
+      "contentDigest": "38bf81f2ec2686993270fb3ffe49c0ae0ea45152929cffca52e68fd5576df219",
+      "firstSequence": 1,
+      "lastSequence": 1,
+      "eventCount": 1,
+      "eventsDigest": "22e2d05d70d20615fc5d45c1d86a35d88d3d836b375f9feb11a5bc1d715d1bc4",
+      "previousCommitDigest": null,
+      "commitDigest": "225ab603cc3fb2e4d4f29590a4e408a61575e5d274b71b504d6a76c1b41f4ea8",
+      "activationEpoch": 1,
+      "latestCheckpointResourceId": null,
+      "recordCount": 2,
+      "recordBytesBase64": "eyJ1dWlkIjoiNmQ4OGFiMzctYzg3Mi00Y2ZhLTllZTItYTExMTM1NGZlYmY0IiwicGFyZW50VXVpZCI6IjU5ZjI5MmQyLWYxYWYtNGQxYy1hYmRkLTdmNDhhMTMxMjE3OCIsInNlc3Npb25JZCI6ImVlMjJlYWI1LTFjMDktNGIzNS1hMjI4LWEwNDAzYjE1MTlkNSIsInRpbWVzdGFtcCI6IjIwMjYtMTAtMDdUMDU6Mzc6MjEuOTEwWiIsInR5cGUiOiJzeXN0ZW0iLCJzdWJ0eXBlIjoibWFuYWdlZF9zZXNzaW9uX2V2ZW50X3YxIiwiY3dkIjoiL3JlbW90ZS1vd25lZC1ob3N0ZWQtc2hhcGUiLCJ2ZXJzaW9uIjoiaG9zdGVkLWhhcm5lc3MvMSIsIm1hbmFnZWRTZXNzaW9uIjp7InYiOjEsInNlcXVlbmNlIjoxLCJldmVudElkIjoiYWN0aXZhdGlvbjozMmYwMTIzNS1lNTI5LTRhNWMtOGY1MC0xN2U5OTk4YTBmNTA6YWN0aXZlIiwic2Vzc2lvbktleSI6eyJ0ZW5hbnRJZCI6Im93bmVkLWhvc3RlZC1zaGFwZS0wYTgyMDYzMiIsIndvcmtzcGFjZUlkIjoib3duZWQtaG9zdGVkLXNoYXBlLXdvcmtzcGFjZSIsInNlc3Npb25JZCI6ImVlMjJlYWI1LTFjMDktNGIzNS1hMjI4LWEwNDAzYjE1MTlkNSJ9LCJraW5kIjoiYWN0aXZhdGlvbi5jaGFuZ2VkIiwib2NjdXJyZWRBdCI6MTc5MTM1MTQ0MTkwOSwicGF5bG9hZCI6eyJhY3RpdmF0aW9uSWQiOiIzMmYwMTIzNS1lNTI5LTRhNWMtOGY1MC0xN2U5OTk4YTBmNTAiLCJlcG9jaCI6MSwid29ya2VySWQiOiJjZDllMzIzMy1jMmM5LTQwNTctYjMzYS0xYzE2ZDdjYTcwM2UiLCJzdWJqZWN0Ijp7InR5cGUiOiJhY3RpdmF0aW9uIiwic2NvcGVJZCI6IjMyZjAxMjM1LWU1MjktNGE1Yy04ZjUwLTE3ZTk5OThhMGY1MCIsImFjdGl2YXRpb25JZCI6IjMyZjAxMjM1LWU1MjktNGE1Yy04ZjUwLTE3ZTk5OThhMGY1MCIsImVwb2NoIjoxfSwicGhhc2UiOiJhY3RpdmUiLCJsZWFzZUR1cmF0aW9uTXMiOjYwMDAwLCJleHBpcmVzQXQiOjE3OTEzNTE1MDE5MDgsImluc3RhbGxSZWYiOnsicmVzb3VyY2VJZCI6ImM0MzgxM2MxLWRjOWQtNDMzNS1iZDA3LTRmYTY3NmU1YTg3YyIsImtpbmQiOiJtYW5hZ2VkLWFjdGl2YXRpb24taW5zdGFsbCIsInNjaGVtYVZlcnNpb24iOjEsImJ5dGVMZW5ndGgiOjE1MSwiZGlnZXN0IjoiYzhlYThiYzA1NjVmYTRlZmE5NTNkMGYxNjM4NTZlNDYwNzNmZmJkOGMxYjFlZTRkMGVmNzU1OTQyMDFkMGY4OSJ9LCJib3VuZGFyeVJlZiI6bnVsbH19fQp7InV1aWQiOiJiYzA1ZWI1ZS1kZmUwLTQ5NGItYThhYS0xZDQwMjkxNzNkYTIiLCJwYXJlbnRVdWlkIjoiNmQ4OGFiMzctYzg3Mi00Y2ZhLTllZTItYTExMTM1NGZlYmY0Iiwic2Vzc2lvbklkIjoiZWUyMmVhYjUtMWMwOS00YjM1LWEyMjgtYTA0MDNiMTUxOWQ1IiwidGltZXN0YW1wIjoiMjAyNi0xMC0wN1QwNTozNzoyMS45MTFaIiwidHlwZSI6InN5c3RlbSIsInN1YnR5cGUiOiJtYW5hZ2VkX3Nlc3Npb25fY29tbWl0X3YxIiwiY3dkIjoiL3JlbW90ZS1vd25lZC1ob3N0ZWQtc2hhcGUiLCJ2ZXJzaW9uIjoiaG9zdGVkLWhhcm5lc3MvMSIsIm1hbmFnZWRTZXNzaW9uIjp7InRyYW5zYWN0aW9uSWQiOiI4NDhiMWFmOS1kZWVmLTQ3MGQtYTFhOC01ZGU4NTNjYTJlZWEiLCJjb21tYW5kSWQiOiIzMmYwMTIzNS1lNTI5LTRhNWMtOGY1MC0xN2U5OTk4YTBmNTA6YWN0aXZlIiwib3BlcmF0aW9uIjoiaW5zdGFsbEFjdGl2YXRpb24iLCJjb250ZW50RGlnZXN0IjoiMzhiZjgxZjJlYzI2ODY5OTMyNzBmYjNmZmU0OWMwYWUwZWE0NTE1MjkyOWNmZmNhNTJlNjhmZDU1NzZkZjIxOSIsImZpcnN0U2VxdWVuY2UiOjEsImxhc3RTZXF1ZW5jZSI6MSwiZXZlbnRDb3VudCI6MSwiZXZlbnRzRGlnZXN0IjoiMjJlMmQwNWQ3MGQyMDYxNWZjNWQ0NWMxZDg2YTM1ZDg4ZDNkODM2YjM3NWY5ZmViMTFhNWJjMWQ3MTVkMWJjNCIsInByZXZpb3VzQ29tbWl0RGlnZXN0IjpudWxsfX0K",
+      "recordDigest": "951a3a3cae11c4da25a3dfc91999d9f88b423e5e9729cd70fa010a603538a382",
+      "resources": [
+        {
+          "resourceId": "c43813c1-dc9d-4335-bd07-4fa676e5a87c",
+          "kind": "managed-activation-install",
+          "schemaVersion": 1,
+          "byteLength": 151,
+          "digest": "c8ea8bc0565fa4efa953d0f163856e46073ffbd8c1b1ee4d0ef75594201d0f89",
+          "bytesBase64": "eyJ2ZXJzaW9uIjoxLCJhY3RpdmF0aW9uSWQiOiIzMmYwMTIzNS1lNTI5LTRhNWMtOGY1MC0xN2U5OTk4YTBmNTAiLCJlcG9jaCI6MSwid29ya2VySWQiOiJjZDllMzIzMy1jMmM5LTQwNTctYjMzYS0xYzE2ZDdjYTcwM2UiLCJsZWFzZUR1cmF0aW9uTXMiOjYwMDAwfQ=="
+        }
+      ]
+    },
+    {
+      "workspaceId": "owned-hosted-shape-workspace",
+      "writerId": "cd9e3233-c2c9-4057-b33a-1c16d7ca703e",
+      "writerGeneration": 1,
+      "expectedJournalRevision": 2,
+      "expectedCommittedSequence": 1,
+      "transactionId": "8b1c5529-10c1-43bf-ade2-2caa65c9971c",
+      "operation": "renewActivation",
+      "commandId": "32f01235-e529-4a5c-8f50-17e9998a0f50:active:renewal:1",
+      "contentDigest": "38bf81f2ec2686993270fb3ffe49c0ae0ea45152929cffca52e68fd5576df219",
+      "firstSequence": 2,
+      "lastSequence": 2,
+      "eventCount": 1,
+      "eventsDigest": "30043f28d34ab7e856b2739cdcdc127f9f311e880af166cb39ccaafecdb78532",
+      "previousCommitDigest": "225ab603cc3fb2e4d4f29590a4e408a61575e5d274b71b504d6a76c1b41f4ea8",
+      "commitDigest": "5ede4dffec785a54cbf29c524b75308bc385bd7b9d63943cc8688d4d429fbe32",
+      "activationEpoch": 1,
+      "latestCheckpointResourceId": null,
+      "recordCount": 2,
+      "recordBytesBase64": "eyJ1dWlkIjoiYTY3MjgzYWQtYzA4YS00MzVlLTgyY2ItNzJmOTkxNzliNDcwIiwicGFyZW50VXVpZCI6ImJjMDVlYjVlLWRmZTAtNDk0Yi1hOGFhLTFkNDAyOTE3M2RhMiIsInNlc3Npb25JZCI6ImVlMjJlYWI1LTFjMDktNGIzNS1hMjI4LWEwNDAzYjE1MTlkNSIsInRpbWVzdGFtcCI6IjIwMjYtMTAtMDdUMDU6Mzc6MjEuOTE0WiIsInR5cGUiOiJzeXN0ZW0iLCJzdWJ0eXBlIjoibWFuYWdlZF9zZXNzaW9uX2V2ZW50X3YxIiwiY3dkIjoiL3JlbW90ZS1vd25lZC1ob3N0ZWQtc2hhcGUiLCJ2ZXJzaW9uIjoiaG9zdGVkLWhhcm5lc3MvMSIsIm1hbmFnZWRTZXNzaW9uIjp7InYiOjEsInNlcXVlbmNlIjoyLCJldmVudElkIjoiYWN0aXZhdGlvbjozMmYwMTIzNS1lNTI5LTRhNWMtOGY1MC0xN2U5OTk4YTBmNTA6YWN0aXZlOnJlbmV3YWw6MSIsInNlc3Npb25LZXkiOnsidGVuYW50SWQiOiJvd25lZC1ob3N0ZWQtc2hhcGUtMGE4MjA2MzIiLCJ3b3Jrc3BhY2VJZCI6Im93bmVkLWhvc3RlZC1zaGFwZS13b3Jrc3BhY2UiLCJzZXNzaW9uSWQiOiJlZTIyZWFiNS0xYzA5LTRiMzUtYTIyOC1hMDQwM2IxNTE5ZDUifSwia2luZCI6ImFjdGl2YXRpb24uY2hhbmdlZCIsIm9jY3VycmVkQXQiOjE3OTEzNTE0NDE5MTMsInBheWxvYWQiOnsiYWN0aXZhdGlvbklkIjoiMzJmMDEyMzUtZTUyOS00YTVjLThmNTAtMTdlOTk5OGEwZjUwIiwiZXBvY2giOjEsIndvcmtlcklkIjoiY2Q5ZTMyMzMtYzJjOS00MDU3LWIzM2EtMWMxNmQ3Y2E3MDNlIiwic3ViamVjdCI6eyJ0eXBlIjoiYWN0aXZhdGlvbiIsInNjb3BlSWQiOiIzMmYwMTIzNS1lNTI5LTRhNWMtOGY1MC0xN2U5OTk4YTBmNTAiLCJhY3RpdmF0aW9uSWQiOiIzMmYwMTIzNS1lNTI5LTRhNWMtOGY1MC0xN2U5OTk4YTBmNTAiLCJlcG9jaCI6MX0sInBoYXNlIjoiYWN0aXZlIiwibGVhc2VEdXJhdGlvbk1zIjo5MDAwMCwiZXhwaXJlc0F0IjoxNzkxMzUxNTMxOTEyLCJpbnN0YWxsUmVmIjp7InJlc291cmNlSWQiOiJjNDM4MTNjMS1kYzlkLTQzMzUtYmQwNy00ZmE2NzZlNWE4N2MiLCJraW5kIjoibWFuYWdlZC1hY3RpdmF0aW9uLWluc3RhbGwiLCJzY2hlbWFWZXJzaW9uIjoxLCJieXRlTGVuZ3RoIjoxNTEsImRpZ2VzdCI6ImM4ZWE4YmMwNTY1ZmE0ZWZhOTUzZDBmMTYzODU2ZTQ2MDczZmZiZDhjMWIxZWU0ZDBlZjc1NTk0MjAxZDBmODkifSwiYm91bmRhcnlSZWYiOm51bGwsInJlbmV3YWxTZXEiOjF9fX0KeyJ1dWlkIjoiMjQ3NWM0MjMtYmVhMC00NmNkLWE1NDktYjBmZWVmMTk2NGM5IiwicGFyZW50VXVpZCI6ImE2NzI4M2FkLWMwOGEtNDM1ZS04MmNiLTcyZjk5MTc5YjQ3MCIsInNlc3Npb25JZCI6ImVlMjJlYWI1LTFjMDktNGIzNS1hMjI4LWEwNDAzYjE1MTlkNSIsInRpbWVzdGFtcCI6IjIwMjYtMTAtMDdUMDU6Mzc6MjEuOTE1WiIsInR5cGUiOiJzeXN0ZW0iLCJzdWJ0eXBlIjoibWFuYWdlZF9zZXNzaW9uX2NvbW1pdF92MSIsImN3ZCI6Ii9yZW1vdGUtb3duZWQtaG9zdGVkLXNoYXBlIiwidmVyc2lvbiI6Imhvc3RlZC1oYXJuZXNzLzEiLCJtYW5hZ2VkU2Vzc2lvbiI6eyJ0cmFuc2FjdGlvbklkIjoiOGIxYzU1MjktMTBjMS00M2JmLWFkZTItMmNhYTY1Yzk5NzFjIiwiY29tbWFuZElkIjoiMzJmMDEyMzUtZTUyOS00YTVjLThmNTAtMTdlOTk5OGEwZjUwOmFjdGl2ZTpyZW5ld2FsOjEiLCJvcGVyYXRpb24iOiJyZW5ld0FjdGl2YXRpb24iLCJjb250ZW50RGlnZXN0IjoiMzhiZjgxZjJlYzI2ODY5OTMyNzBmYjNmZmU0OWMwYWUwZWE0NTE1MjkyOWNmZmNhNTJlNjhmZDU1NzZkZjIxOSIsImZpcnN0U2VxdWVuY2UiOjIsImxhc3RTZXF1ZW5jZSI6MiwiZXZlbnRDb3VudCI6MSwiZXZlbnRzRGlnZXN0IjoiMzAwNDNmMjhkMzRhYjdlODU2YjI3MzljZGNkYzEyN2Y5ZjMxMWU4ODBhZjE2NmNiMzljY2FhZmVjZGI3ODUzMiIsInByZXZpb3VzQ29tbWl0RGlnZXN0IjoiMjI1YWI2MDNjYzNmYjJlNGQ0ZjI5NTkwYTRlNDA4YTYxNTc1ZTVkMjc0YjcxYjUwNGQ2YTc2YzFiNDFmNGVhOCJ9fQo=",
+      "recordDigest": "cb1edd116098eaaf8903e043bd1ba8dc517caa4b7c0125698cc374be6b4bc97b",
+      "resources": [
+        {
+          "resourceId": "c43813c1-dc9d-4335-bd07-4fa676e5a87c",
+          "kind": "managed-activation-install",
+          "schemaVersion": 1,
+          "byteLength": 151,
+          "digest": "c8ea8bc0565fa4efa953d0f163856e46073ffbd8c1b1ee4d0ef75594201d0f89"
+        }
+      ]
+    }
+  ],
+  "originalResources": [
+    {
+      "ref": {
+        "resourceId": "7ddc699c-4278-430d-b249-720d865223e1",
+        "kind": "managed-definition",
+        "schemaVersion": 1,
+        "byteLength": 110,
+        "digest": "38bf81f2ec2686993270fb3ffe49c0ae0ea45152929cffca52e68fd5576df219"
+      },
+      "bytesBase64": "eyJlbmdpbmUiOiJtYW5hZ2VkIiwic2Vzc2lvbklkIjoiZWUyMmVhYjUtMWMwOS00YjM1LWEyMjgtYTA0MDNiMTUxOWQ1IiwidG9vbFByb2ZpbGUiOiJjc2ktZmlsZXMtcmV0aXJlbWVudC8xIn0="
+    },
+    {
+      "ref": {
+        "resourceId": "a61fdf6e-ca67-485e-a84a-09f0b490189c",
+        "kind": "managed-root",
+        "schemaVersion": 1,
+        "byteLength": 36,
+        "digest": "1a81c6e6e0d396cac4dff82f6115c1a7c184a59fbb067e81c1b0c938b87ce7da"
+      },
+      "bytesBase64": "eyJjd2QiOiIvcmVtb3RlLW93bmVkLWhvc3RlZC1zaGFwZSJ9"
+    },
+    {
+      "ref": {
+        "resourceId": "c43813c1-dc9d-4335-bd07-4fa676e5a87c",
+        "kind": "managed-activation-install",
+        "schemaVersion": 1,
+        "byteLength": 151,
+        "digest": "c8ea8bc0565fa4efa953d0f163856e46073ffbd8c1b1ee4d0ef75594201d0f89"
+      },
+      "bytesBase64": "eyJ2ZXJzaW9uIjoxLCJhY3RpdmF0aW9uSWQiOiIzMmYwMTIzNS1lNTI5LTRhNWMtOGY1MC0xN2U5OTk4YTBmNTAiLCJlcG9jaCI6MSwid29ya2VySWQiOiJjZDllMzIzMy1jMmM5LTQwNTctYjMzYS0xYzE2ZDdjYTcwM2UiLCJsZWFzZUR1cmF0aW9uTXMiOjYwMDAwfQ=="
+    }
+  ]
+}

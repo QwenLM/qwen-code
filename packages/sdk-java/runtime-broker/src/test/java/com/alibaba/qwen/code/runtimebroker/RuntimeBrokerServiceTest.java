@@ -1996,6 +1996,23 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void privateCsiSessionNeverForwardsGenericRuntimeControl() {
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                CsiFilesRetirementProfile.CAPABILITY_DIGEST, "session");
+        try (Fixture fixture = new Fixture(scope)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            for (Map<String, Object> operation : List.<Map<String, Object>>of(Map.of("kind", "manifest"),
+                    Map.of("kind", "history"), Map.of("kind", "raw-file-history", "action", "prepare",
+                            "promptId", "file-turn", "paths", List.of("file.txt")),
+                    Map.of("kind", "raw-file-history", "action", "rewind", "promptId", "file-turn"))) {
+                assertEquals("csi_control_not_qualified", failure(fixture.service.control("harness", "runtime",
+                        operation)).getCode());
+            }
+            assertNull(fixture.transport.lastControl);
+        }
+    }
+
+    @Test
     void mcpControlsStayWithTheAcquiredSessionAndNeverProvisionForLookup() {
         try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
             RuntimeSessionRecord session = join(fixture.service.acquire("harness", "runtime", "bootstrap"));

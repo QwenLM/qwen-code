@@ -5,7 +5,8 @@
 Status: completion design with a local K2-A1 prototype and K2-A2 implementation
 in progress, updated 2026-10-07. The native boundary observer is implemented;
 private CREATE/request pinning is locally implemented and verified. The original
-binding/Session/writer guard is being implemented locally. Complete A2 admission
+binding/Session/writer guards and first native SQL activation pin are locally
+implemented, with selected execution admission and dispatch consumers. Complete A2 admission
 closure and K2-B through K2-D remain pending; no complete K2 or new cluster
 acceptance is claimed.
 Implementation baseline: main `4bffa678bced8b14c25c85e3ba4226b7b752414d`, after
@@ -228,9 +229,100 @@ precede this pin, but execution authorization cannot. Under the same parent
 admission lock, prove no earlier execution was authorized, including historical
 terminal records. Reject any later replacement activation for this profile.
 
+This local implementation slice consumes bytes from the actual native producer. A
+first install has epoch 1, the original writer generation 1, and `workerId`
+equal to the Hosted boot UUID used as `writerId`. Its default activation subject
+has matching `scopeId`, `activationId` and epoch. The referenced
+`managed-activation-install` body contains `version`, `activationId`, `epoch`,
+`workerId` and `leaseDurationMs`; the default producer does not put a subject in
+that body. The event, native commit marker, request metadata and referenced raw
+resource bytes must agree. Native event and marker digests use the producer's
+recursive sorted-key JSON algorithm, not a different resource serialization.
+Unknown or duplicate fields, trailing JSON and unsupported numeric forms are
+refused by this profile's narrow proof reader. Runtime Broker already depends
+on Jackson; a shared strict proof reader needs no new dependency or reverse
+dependency on Managed Agent.
+
+The native genesis uses `managed-definition` and `managed-root` resources,
+with raw bodies exactly `{engine: 'managed', sessionId, toolProfile:
+'csi-files-retirement/1'}` and `{cwd}`. Require the Hosted creator and original
+CREATE Session scope. Imported histories or extra MCP, Hook, shell or approval
+configuration do not qualify. The initial narrow SQL reader only admits
+genesis, install and same-identity renew transactions; generic private-profile
+journal events remain refused until their canonical digest and continuation
+paths are separately qualified.
+
+Retain the complete ordered activation-event list from the existing native
+record parse. First install and renewal each contain exactly one event;
+multiple activation events, an activation operation without its event,
+replacement/installing/revoked activations and Hook/turn subjects are refused.
+Genesis may precede the pin. A pin-null journal with earlier activation history
+cannot be repaired by installing a replacement. Renewal retains the original
+activation, install reference and worker, and advances the native renewal
+sequence. Terminal release needs the later narrow retirement-close operation;
+this slice does not grant generic release, seal or finalization.
+
+Install V49 and the standalone JDBC fresh/upgrade schema with a nullable
+`first_activation_journal_revision`, without legacy backfill or a caller-settable
+binding field. On the same original SQL connection, first acceptance changes
+NULL to the exact SQL journal revision and increments `record_version` once,
+under the existing binding/version condition. Resources, journal, head and pin
+commit or roll back together. An identical committed command replay is
+read-only. Explicit ordinary binding updates preserve the column; a stale CAS
+from before the pin cannot overwrite the new version. Initial provisioning and
+its READY completion still do not require a future activation pin.
+
+The same migration derives `csi_guard` from the existing private profile or a
+non-NULL request pin, with a unique `(tenant_id, session_id, csi_guard)` index.
+Probe TRUE with an exact current locking read before locking the full persisted
+Session; MySQL/MariaDB must use that index. A negative probe must not hold the
+ordinary Session row, because legacy extension commits check deletion after
+their extension update. An unconditional early Session lock introduced a real
+monitor/DELETE wait cycle. A covering OR predicate also locked an ordinary row
+under warmed repeatable-read and was rejected. The generated value has no
+independent authority or caller setter; it cannot drift from its source fields.
+Missing private bindings and contradictory non-NULL pins still refuse.
+
+The later execution admission and dispatch consumer must read the pin's original
+journal transaction and referenced install body, then prove a currently live
+original activation. A non-NULL column or derived head cache alone is
+insufficient. Use placement domain → retention tenant → sorted slots/binding
+history → persisted Session/head → Runtime Session → ordered execution history
+on the original connection. Before first acceptance, scan all-state execution
+history, including terminal authorization and orphan/mismatched associations;
+use bounded pages of 100 with a 4096-entry ceiling, refusing overflow. Direct
+JDBC writers must join this parent fence or explicitly refuse the private
+profile before mutation. A protected service method alone is not complete A2
+closure. Qualify both read-committed and warmed repeatable-read with actual
+parent-lock waits. The first pin and selected consumers are implemented in this
+Draft; complete writer closure remains pending.
+
+Also bound journal history to 64 MiB, each transaction to 8 MiB, each event line
+to 1 MiB and each marker line to 64 KiB; SQL proof statements time out after ten
+seconds. These are refusal bounds, not a complete overall operation deadline.
+The execution admission, claim and authorization seams can consume the live
+original proof, but unqualified direct create/CAS, dispatch renewal, cancellation,
+settlement and reconciliation mutations explicitly refuse this profile. This
+does not qualify normal file-work completion or the remaining recovery/loss
+writers. Generic runtime control also refuses at both Broker service and
+Workspace transport, including raw-file-history prepare/rewind for a cached
+context; the legacy workspace capability discriminator cannot authorize this
+private profile. Claim also locks and requires the current original Runtime
+Session READY before locking or changing its execution; a previously admitted
+PREPARED record is insufficient after Session failure. Native times use the native UTC millisecond ceiling
+8,640,000,000,000,000, and identifiers use its 512-byte UTF-8/NFC/control rules.
+The explicit Java native-producer SQL gate requires built Node modules;
+H2 results establish transaction behavior, not MySQL lock or cloud acceptance.
+
+The Managed Agent HTTP adapter preserves Broker refusal status, code and
+retryability. A native activation conflict must return its semantic 409 rather
+than a generic 500; the real Spring transaction rolls back before controller
+advice handles that refusal. Unexpected failures retain their existing internal
+error envelope, and an already-started stream is not rewritten.
+
 Resolve the exact CREATE request on the caller's original connection in the
-order placement domain → sorted request slots → binding history → durable
-Session/retention/head. Check ambiguity and orphan authorities rather than
+order placement domain → retention tenant → sorted request slots → binding
+history → durable Session/head. Check ambiguity and orphan authorities rather than
 choosing the first Session match or assuming the current active binding is the
 original one. Read the persisted Session profile even when no binding exists.
 Use current locking reads for admission-sensitive membership under both MySQL

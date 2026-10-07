@@ -23,6 +23,8 @@ junit.xml
 # so formatting and `pnpm install` fight over the file. .yamllint.yml
 # already ignores it for the same reason.
 pnpm-lock.yaml
+# Exact evidence fixture; the native proof test asserts its byte digest.
+packages/sdk-java/runtime-broker/src/test/resources/csi-native-activation-fixture.json
 Thumbs.db
 packages/vscode-ide-companion/schemas/settings.schema.json
 packages/cli/src/services/insight/templates/insightTemplate.ts

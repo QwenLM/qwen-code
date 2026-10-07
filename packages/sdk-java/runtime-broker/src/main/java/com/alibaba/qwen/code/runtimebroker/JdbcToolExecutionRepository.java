@@ -82,6 +82,10 @@ public final class JdbcToolExecutionRepository
     @Override
     public ToolExecutionRecord findOrCreate(ToolExecutionRecord candidate) {
         requireCandidate(candidate);
+        JdbcRepositorySupport.read(dataSource, connection -> {
+            JdbcCsiActivationAdmission.refuseUnqualifiedWriter(connection, candidate.getBindingId());
+            return null;
+        });
         ToolExecutionRecord existing = findByIdempotencyKey(
                 candidate.getIdempotencyKey());
         if (existing != null) {
@@ -90,6 +94,7 @@ public final class JdbcToolExecutionRepository
         try {
             return JdbcRepositorySupport.transaction(dataSource,
                     connection -> {
+                        JdbcCsiActivationAdmission.refuseUnqualifiedWriter(connection, candidate.getBindingId());
                         insertExecution(connection, candidate);
                         return candidate;
                     });
@@ -131,9 +136,14 @@ public final class JdbcToolExecutionRepository
 
     static ToolExecutionRecord selectByIdempotencyKey(Connection connection,
             String key) throws SQLException {
+        return selectByIdempotencyKey(connection, key, false);
+    }
+
+    static ToolExecutionRecord selectByIdempotencyKey(Connection connection,
+            String key, boolean lock) throws SQLException {
         String sql = "SELECT " + EXECUTION_COLUMNS
                 + " FROM qwen_tool_execution "
-                + "WHERE idempotency_key_hash = ?";
+                + "WHERE idempotency_key_hash = ?" + (lock ? " FOR UPDATE" : "");
         try (PreparedStatement statement = connection.prepareStatement(
                 sql)) {
             statement.setString(1, JdbcRepositorySupport.valueKey(key));
@@ -169,8 +179,10 @@ public final class JdbcToolExecutionRepository
             ToolExecutionRecord replacement, String owner,
             long dispatchGeneration) {
         requireReplacement(expected, replacement);
-        return JdbcRepositorySupport.transaction(dataSource, connection ->
-                compareAndSet(connection, expected, replacement, owner, dispatchGeneration));
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            JdbcCsiActivationAdmission.refuseUnqualifiedWriter(connection, expected.getBindingId());
+            return compareAndSet(connection, expected, replacement, owner, dispatchGeneration);
+        });
     }
 
     static ToolExecutionRecord compareAndSet(Connection connection, ToolExecutionRecord expected,
@@ -240,8 +252,20 @@ public final class JdbcToolExecutionRepository
         Duration duration = JdbcRepositorySupport.requireDuration(
                 leaseDuration);
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            ToolExecutionRecord hint = selectByExecutionId(connection, id, false);
+            if (hint == null) {
+                return null;
+            }
+            var original = JdbcCsiActivationAdmission.lockForExecution(connection, hint.getBindingId());
+            JdbcCsiActivationAdmission.requireExecution(original, hint);
+            RuntimeSessionRecord runtime = original == null ? null : JdbcRuntimeSessionRepository.selectSession(
+                    connection, original.request().getScope(), hint.getRuntimeSessionId(), true);
             ToolExecutionRecord current = selectByExecutionId(connection, id,
                     true);
+            JdbcCsiActivationAdmission.requireExecution(original, current);
+            if (original != null) {
+                RuntimeAdmission.requireSession(runtime, current);
+            }
             if (current == null || current.isTerminal()
                     || current.getState()
                             == ToolExecutionRecord.State.UNKNOWN) {
@@ -283,6 +307,7 @@ public final class JdbcToolExecutionRepository
         Duration duration = JdbcRepositorySupport.requireDuration(
                 leaseDuration);
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            refuseDirectWriter(connection, id);
             ToolExecutionRecord current = selectByExecutionId(connection, id,
                     true);
             if (current == null || current.isTerminal()
@@ -312,6 +337,7 @@ public final class JdbcToolExecutionRepository
         String id = BrokerValues.requireId(executionCallId,
                 "executionCallId");
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            refuseDirectWriter(connection, id);
             ToolExecutionRecord current = selectByExecutionId(connection, id,
                     true);
             if (current == null || current.isTerminal()
@@ -347,6 +373,7 @@ public final class JdbcToolExecutionRepository
                     "expected, result and time are required");
         }
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            JdbcCsiActivationAdmission.refuseUnqualifiedWriter(connection, expected.getBindingId());
             ToolExecutionRecord current = selectByExecutionId(connection,
                     expected.getExecutionCallId(), true);
             if (current == null || !current.sameIdentity(expected)
@@ -382,6 +409,7 @@ public final class JdbcToolExecutionRepository
             throw new IllegalArgumentException("expected is required");
         }
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            JdbcCsiActivationAdmission.refuseUnqualifiedWriter(connection, expected.getBindingId());
             ToolExecutionRecord current = selectByExecutionId(connection,
                     expected.getExecutionCallId(), true);
             if (current == null || !current.sameIdentity(expected)
@@ -396,6 +424,13 @@ public final class JdbcToolExecutionRepository
             updateExecution(connection, resolved);
             return resolved;
         });
+    }
+
+    private static void refuseDirectWriter(Connection connection, String executionCallId) throws SQLException {
+        ToolExecutionRecord hint = selectByExecutionId(connection, executionCallId, false);
+        if (hint != null) {
+            JdbcCsiActivationAdmission.refuseUnqualifiedWriter(connection, hint.getBindingId());
+        }
     }
 
     @Override

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.aliyun.oss.OSSException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.util.LinkedHashMap;
@@ -8,6 +9,7 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -30,6 +32,15 @@ public class ApiExceptionHandler {
             HttpServletRequest request, HttpServletResponse response) {
         return response(request, response, error.getStatus(), error.getCode(),
                 error.getMessage(), error.getDetails());
+    }
+
+    @ExceptionHandler(RuntimeBrokerException.class)
+    public ResponseEntity<Map<String, Object>> broker(RuntimeBrokerException error,
+            HttpServletRequest request, HttpServletResponse response) {
+        Map<String, Object> details = new LinkedHashMap<>(error.getDetails());
+        details.put("retryable", error.isRetryable());
+        return response(request, response, HttpStatusCode.valueOf(error.getStatusCode()),
+                error.getCode(), error.getMessage(), details);
     }
 
     @ExceptionHandler(AsyncRequestNotUsableException.class)
@@ -99,13 +110,13 @@ public class ApiExceptionHandler {
 
     private static ResponseEntity<Map<String, Object>> response(
             HttpServletRequest request, HttpServletResponse response,
-            HttpStatus status, String code, String message) {
+            HttpStatusCode status, String code, String message) {
         return response(request, response, status, code, message, Map.of());
     }
 
     private static ResponseEntity<Map<String, Object>> response(
             HttpServletRequest request, HttpServletResponse response,
-            HttpStatus status, String code, String message,
+            HttpStatusCode status, String code, String message,
             Map<String, Object> details) {
         // An SSE stream that already started cannot switch to an envelope.
         if (response.isCommitted()) {

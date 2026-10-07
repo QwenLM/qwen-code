@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
     operation_lease_until DATETIME(6),
     operation_generation BIGINT NOT NULL,
     record_version BIGINT NOT NULL,
+    first_activation_journal_revision BIGINT,
     last_health_at DATETIME(6),
     last_reconciled_at DATETIME(6),
     last_active_at DATETIME(6) NOT NULL,
