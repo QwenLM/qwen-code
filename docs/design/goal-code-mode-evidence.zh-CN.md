@@ -14,7 +14,7 @@ Goal 验证器原先把每个外层 `exec` 结果都作为 `external_fact`。Jav
 
 ## 记录
 
-共享 Goal 来源分类函数根据调用身份，把直接或 bridge 包装的 `exec` 结果，以及结果会复述另一次运行中模型撰写声明的聚合包装工具（`agent`、`advisor`、`workflow`、`thread_read`），标记为 `execution_output`，不分析输出文字。成员资格由这条判定标准决定。其余 thread 工具仍是普通工具结果：`thread_block` 的固定回复正是阻塞提案所引用的用户授权。在负责人就所关联 issue 的约束 #1 作出裁决之前，刻意不纳入更多委派入口，因为每移出一个名称都会收窄 infeasible 阻塞条款。Headless、TUI 和 ACP 等现有记录消费者都使用这条共享路径。
+共享 Goal 来源分类函数根据调用身份，把直接或 bridge 包装的 `exec` 结果，以及结果会复述另一次运行中模型撰写声明的聚合包装工具（`agent`、`advisor`、`workflow`、`thread_read`），标记为 `execution_output`，不分析输出文字。成员资格由这条判定标准决定。其余 thread 工具仍是普通工具结果：`thread_block` 的固定回复正是阻塞提案所引用的用户授权。在负责人就 [#13360](https://github.com/QwenLM/qwen-code/issues/13360) 的约束 #1 作出裁决之前，刻意不纳入更多委派入口，因为每移出一个名称都会收窄 infeasible 阻塞条款。Headless、TUI 和 ACP 等现有记录消费者都使用这条共享路径。
 
 核心调度器保留已完成统一处理的内部结果。聚合宿主未提供记录器时，只有携带父调用 Goal permit 的 `code_mode` 请求，才可以使用同一 Config 的记录器；不会选择其他 Config 或主运行时。显式记录器的现有归属保持一致。该 Config 关闭记录时，不会生成回退记录。
 

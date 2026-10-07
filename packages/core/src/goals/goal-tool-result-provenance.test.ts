@@ -200,11 +200,12 @@ describe('goalToolResultProvenance', () => {
     ToolNames.THREAD_REVIEW,
     ToolNames.THREAD_CREATE,
   ])('keeps %s an ordinary external fact', (name) => {
-    // Only thread_read repeats another run's model-authored text; the rest of
-    // the family are a person's side of the conversation. thread_block's fixed
-    // reply is the user-authority evidence a blocked proposal cites, so
-    // stamping the whole family would leave the `infeasible` and `external`
-    // blockers with no external_fact to point at.
+    // thread_read restates another participant's recorded text (agent- or
+    // human-authored); these five return a fixed or store-generated
+    // acknowledgement of this agent's own action. thread_block's fixed reply is
+    // the user-authority evidence a blocked proposal cites, so stamping the
+    // whole family would leave the `infeasible` and `external` blockers with no
+    // external_fact to point at.
     expect(goalToolResultProvenance({ name, goalContext: permit })).toEqual({
       goalContext: permit,
     });
