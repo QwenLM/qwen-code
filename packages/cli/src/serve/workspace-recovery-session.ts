@@ -31,6 +31,10 @@ import {
   type ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
+  MANAGED_MESSAGE_PART_KIND,
+  readManagedMessageBody,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
+import {
   MANAGED_TOOL_RESULT_KINDS,
   isToolResultEnvelopeOf,
   isToolResultPageAt,
@@ -177,6 +181,8 @@ const RESOURCE_KINDS = new Set([
   'managed-action-options',
   'managed-action-decision',
   'managed-message',
+  'managed-message-part',
+  'managed-message-chunks',
   'managed-turn-result',
   'managed-compaction-summary',
   'managed-checkpoint',
@@ -927,7 +933,7 @@ export async function verifyRecoverySession(
               : null;
       if (recordRef) {
         const record = readerRecord(
-          json(await read(durableRef(recordRef))),
+          json(await readManagedMessageBody(read, durableRef(recordRef))),
           source.sessionId,
         );
         if (event.kind === 'message.committed')
@@ -993,7 +999,12 @@ export async function verifyRecoverySession(
       const history = json(bytes);
       requireValue(Array.isArray(history), 'invalid API history');
       await enqueueRefs(history, io);
-    } else if (ref.kind !== MANAGED_TOOL_RESULT_KINDS.content)
+    } else if (
+      // A message part is a raw byte slice of its document, not JSON, and
+      // references nothing.
+      ref.kind !== MANAGED_TOOL_RESULT_KINDS.content &&
+      ref.kind !== MANAGED_MESSAGE_PART_KIND
+    )
       await enqueueRefs(json(bytes), io);
     await io.completeReference(ref);
   }
