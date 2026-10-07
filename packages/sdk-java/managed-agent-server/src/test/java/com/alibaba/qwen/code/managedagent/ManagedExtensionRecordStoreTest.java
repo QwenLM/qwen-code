@@ -566,6 +566,7 @@ class ManagedExtensionRecordStoreTest {
         return body;
     }
 
+    @Test
     void verifiesTheChannelResourceClosure() throws Exception {
         JsonNode templates = ManagedChannelRecordContractTest.fixtures()
                 .required("templates");
