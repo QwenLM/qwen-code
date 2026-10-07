@@ -874,18 +874,17 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
-    void teardownReleaseStillResolvesTheScopeWhenBootstrapIsFenced() {
+    void teardownReleaseStillResolvesTheScopeWhenAdmissionIsFenced() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
-            // A lifecycle-closed Harness Session fences bootstrap routes,
-            // but the durable release and the unknown-outcome reconciliation
-            // share persistedSession and must still resolve the placement,
-            // or they die on the fence with a non-retryable 409 forever.
+            // The admission fence gates warm, but the durable release and
+            // the unknown-outcome reconciliation share persistedSession and
+            // must keep resolving the closed Session's placement, or they
+            // die on the fence with a non-retryable 409 forever.
             RuntimeBrokerException closed = new RuntimeBrokerException(409,
                     "runtime_broker_session_closed",
                     "Harness Session is closed.", false);
-            fixture.resolver.result = CompletableFuture.failedFuture(closed);
-            fixture.resolver.teardownResult =
-                    CompletableFuture.completedFuture(WORKSPACE_SCOPE);
+            fixture.resolver.admissionResult =
+                    CompletableFuture.failedFuture(closed);
             RuntimeSessionRecord created = fixture.sessionRepository
                     .findOrCreate(new RuntimeSessionRecord(
                             new RuntimeSession("harness", "runtime",
@@ -5380,7 +5379,7 @@ class RuntimeBrokerServiceTest {
             implements HarnessSessionResolver {
         final AtomicReference<String> lastHarness = new AtomicReference<>();
         volatile CompletionStage<RuntimeScope> result;
-        volatile CompletionStage<RuntimeScope> teardownResult;
+        volatile CompletionStage<RuntimeScope> admissionResult;
 
         FakeResolver(RuntimeScope scope) {
             result = CompletableFuture.completedFuture(scope);
@@ -5394,10 +5393,10 @@ class RuntimeBrokerServiceTest {
         }
 
         @Override
-        public CompletionStage<RuntimeScope> resolveForTeardown(
+        public CompletionStage<RuntimeScope> resolveAdmission(
                 String harnessSessionId) {
-            CompletionStage<RuntimeScope> teardown = teardownResult;
-            return teardown == null ? resolve(harnessSessionId) : teardown;
+            CompletionStage<RuntimeScope> admission = admissionResult;
+            return admission == null ? resolve(harnessSessionId) : admission;
         }
     }
 
