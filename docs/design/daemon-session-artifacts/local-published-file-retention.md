@@ -47,22 +47,25 @@ descriptors stay restorable and still use the content route.
 ## Decision
 
 On write, any `published + file://` artifact that is not a snapshot descriptor
-is forced to `ephemeral` with `retentionExplicit: true`, even when the caller
-asks for `restorable`. The live page remains in the current session list.
+is forced to `ephemeral`, even when the caller asks for `restorable`. The store
+does not set `retentionExplicit` for that force — the flag stays caller intent.
+The live page remains in the current session list.
 
-On restore and marker restore, drop only Artifact-shaped local pages:
+On restore and marker restore, drop local pages by locator and identity:
 
 - `storage: published`
 - `kind: html`
-- `source: tool`
-- `toolName: artifact`
 - file URL that is not a snapshot descriptor
 - record `id` equal to the identity recomputed from the record itself
-  (`storage` / `workspacePath` / `managedId` / `url`); a record whose `id` does
+  (`workspacePath` / `managedId` / `url`); a record whose `id` does
   not match is not dropped and still fails restore
+- a locator that `getWebPreviewSnapshotId()` would accept after only
+  restoring producer fields is not dropped; it still fails restore
 
 Do not prefix that drop with `skipped `. Log
-`action=legacy_local_published_dropped` on stderr. Rollback uses
+`action=legacy_local_published_dropped` on stderr only after the restore
+commits. A restore that rolls back logs
+`action=legacy_local_published_drop_rolled_back` instead. Rollback uses
 `snapshot.artifacts.length - expectedExpiredDrops > 0 && restoredCount === 0`.
 Forged client `file://` records still fail restore.
 
@@ -80,18 +83,22 @@ descriptors are unchanged.
 ## Risks
 
 On rewind the live page stays visible — the rewind caller restores with
-`preserveLiveEphemeral`, and the page is now ephemeral — but the snapshot
-recorded after the rewind no longer contains it. That is the durable metadata
-state after the drop; no user-facing warning is emitted. Operators can still
-see the stderr action.
+`preserveLiveEphemeral`, and the page is now ephemeral — unless the rewound
+journal tombstones the page's id, in which case it is dropped and no warning
+is emitted. When the page is dropped, the snapshot recorded after the rewind
+no longer contains it. That is the durable metadata state after the drop; no
+user-facing warning is emitted. Operators can still see the stderr action.
 
 ## Validation
 
 - Unit tests in `packages/acp-bridge` cover write-time coerce on the omitted-
   `retention` producer batch, persistence skip, quiet restore drop, mixed
   workspace/snapshot restore, marker drop, rewind with
-  `preserveLiveEphemeral`, tombstone clear on re-publish, forged-id and
-  mixed-journal rollback, merged-result coerce, the original forged-file
+  `preserveLiveEphemeral`, tombstone clear on re-publish and on
+  workspace-to-published upgrade, forged-id and mixed-journal rollback,
+  merged-result coerce, upgraded `write_file` journal drop, no unpin or
+  journal of a local file page, later https re-publish staying restorable,
+  rollback without a committed drop line, the original forged-file
   rollback, and a rebuilt journal shaped like issue #12389.
 - `cd packages/acp-bridge && npx vitest run src/sessionArtifacts.test.ts`
 

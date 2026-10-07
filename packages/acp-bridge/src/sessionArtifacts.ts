@@ -431,9 +431,7 @@ export class SessionArtifactStore {
               insertSeq: ++this.insertSeq,
             };
             this.artifacts.set(stored.id, stored);
-            this.tombstonedIds.delete(stored.id);
-            this.tombstonedClientIds.delete(stored.id);
-            this.markerArtifacts.delete(stored.id);
+            this.clearResurrectionMarkers(stored.id);
             changes.push({
               action: 'created',
               artifactId: stored.id,
@@ -481,6 +479,7 @@ export class SessionArtifactStore {
               });
             }
             this.artifacts.set(updated.artifact.id, updated.artifact);
+            this.clearResurrectionMarkers(updated.artifact.id);
             changes.push({
               action: 'updated',
               artifactId: updated.artifact.id,
@@ -761,6 +760,7 @@ export class SessionArtifactStore {
         : [];
       let restoredCount = 0;
       let expectedExpiredDrops = 0;
+      const droppedLegacyIds: string[] = [];
       this.artifacts.clear();
       this.tombstonedIds.clear();
       this.tombstonedClientIds.clear();
@@ -789,6 +789,7 @@ export class SessionArtifactStore {
             artifact,
             warnings,
             options.workspaceAccess === 'metadata-only',
+            droppedLegacyIds,
           );
           if (markerArtifact)
             this.markerArtifacts.set(artifact.id, markerArtifact);
@@ -797,6 +798,7 @@ export class SessionArtifactStore {
       for (const artifact of snapshot?.artifacts ?? []) {
         if (this.dropLegacyLocalPublished(artifact)) {
           expectedExpiredDrops++;
+          droppedLegacyIds.push(artifact.id);
           continue;
         }
         try {
@@ -897,6 +899,7 @@ export class SessionArtifactStore {
           ...baselineWarnings,
           `${RESTORE_FAILED_WARNING_PREFIX}; kept existing live artifacts`,
         ];
+        this.logLegacyLocalPublishedDrops(droppedLegacyIds, true);
         this.setLastRestoreWarnings(rollbackWarnings);
         return rollbackWarnings;
       }
@@ -911,9 +914,11 @@ export class SessionArtifactStore {
             ? `${RESTORE_FAILED_WARNING_PREFIX}; kept existing live artifacts`
             : `${RESTORE_PARTIAL_FAILED_WARNING_PREFIX}; kept existing live artifacts`,
         ];
+        this.logLegacyLocalPublishedDrops(droppedLegacyIds, true);
         this.setLastRestoreWarnings(rollbackWarnings);
         return rollbackWarnings;
       }
+      this.logLegacyLocalPublishedDrops(droppedLegacyIds, false);
       for (const artifact of preservedLiveEphemeralArtifacts) {
         if (
           this.artifacts.has(artifact.id) ||
@@ -993,29 +998,42 @@ export class SessionArtifactStore {
     });
   }
 
+  private clearResurrectionMarkers(id: string): void {
+    this.tombstonedIds.delete(id);
+    this.tombstonedClientIds.delete(id);
+    this.markerArtifacts.delete(id);
+  }
+
   private dropLegacyLocalPublished(
     artifact: PersistedSessionArtifact,
   ): boolean {
-    if (
-      !isExpectedExpiredLocalPublishedArtifact(artifact) ||
-      !artifactIdMatchesIdentity(this.sessionId, artifact)
-    ) {
-      return false;
+    return isExpectedExpiredLocalPublishedArtifact(this.sessionId, artifact);
+  }
+
+  private logLegacyLocalPublishedDrops(
+    artifactIds: readonly string[],
+    rolledBack: boolean,
+  ): void {
+    const action = rolledBack
+      ? 'legacy_local_published_drop_rolled_back'
+      : 'legacy_local_published_dropped';
+    for (const artifactId of artifactIds) {
+      writeStderrLine(
+        `[artifacts] session=${this.sessionId} ` +
+          `action=${action} ` +
+          `artifactId=${artifactId}`,
+      );
     }
-    writeStderrLine(
-      `[artifacts] session=${this.sessionId} ` +
-        'action=legacy_local_published_dropped ' +
-        `artifactId=${artifact.id}`,
-    );
-    return true;
   }
 
   private async normalizeRestoredMarkerArtifact(
     artifact: PersistedSessionArtifact,
     warnings: string[],
     metadataOnly = false,
+    droppedLegacyIds?: string[],
   ): Promise<PersistedSessionArtifact | undefined> {
     if (this.dropLegacyLocalPublished(artifact)) {
+      droppedLegacyIds?.push(artifact.id);
       return undefined;
     }
     try {
@@ -1269,7 +1287,11 @@ export class SessionArtifactStore {
     sequence: number,
   ): SessionArtifactSnapshotRecordPayload {
     const artifacts = Array.from(this.artifacts.values())
-      .filter((artifact) => artifact.retention !== 'ephemeral')
+      .filter(
+        (artifact) =>
+          artifact.retention !== 'ephemeral' &&
+          !isNonSnapshotPublishedFileUrl(artifact),
+      )
       .sort((a, b) => a.insertSeq - b.insertSeq)
       .map((artifact) => toPersistedArtifact(artifact, recordedAt));
     const stickyEphemeralIds = Array.from(this.stickyEphemeralIds).filter(
@@ -1303,11 +1325,15 @@ export class SessionArtifactStore {
       seen.add(id);
       const live = this.artifacts.get(id);
       if (live) {
-        artifacts.push(toPersistedArtifact(toPublicArtifact(live), recordedAt));
+        if (!isNonSnapshotPublishedFileUrl(live)) {
+          artifacts.push(
+            toPersistedArtifact(toPublicArtifact(live), recordedAt),
+          );
+        }
         continue;
       }
       const markerArtifact = this.markerArtifacts.get(id);
-      if (markerArtifact) {
+      if (markerArtifact && !isNonSnapshotPublishedFileUrl(markerArtifact)) {
         artifacts.push(markerArtifact);
       }
     }
@@ -1743,7 +1769,6 @@ export class SessionArtifactStore {
     );
     const now = new Date().toISOString();
     const identityKey = buildIdentityKey({
-      storage,
       workspacePath,
       managedId,
       url,
@@ -1762,7 +1787,7 @@ export class SessionArtifactStore {
       })
     ) {
       retention = 'ephemeral';
-      retentionExplicit = true;
+      retentionExplicit = false;
     }
 
     return {
@@ -2211,6 +2236,7 @@ function mergeBatchArtifact(
       lastStatAt: undefined,
     };
     delete merged.workspacePath;
+    coerceNonSnapshotPublishedFile(merged);
     return merged;
   }
   const refreshDisplay =
@@ -2218,7 +2244,7 @@ function mergeBatchArtifact(
     next.storage === 'workspace' &&
     shouldRefreshWorkspaceDisplay(next, existing);
   const metadata = mergeMetadata(existing, next);
-  return {
+  const merged: NormalizedArtifact = {
     ...existing,
     title: refreshDisplay ? next.title : existing.title,
     description: refreshDisplay
@@ -2239,6 +2265,8 @@ function mergeBatchArtifact(
     retention: mergeRetention(existing, next),
     lastStatAt: next.lastStatAt ?? existing.lastStatAt,
   };
+  coerceNonSnapshotPublishedFile(merged);
+  return merged;
 }
 
 function mergeArtifact(
@@ -2338,10 +2366,7 @@ function mergeArtifact(
     next.metadata = stripExpandedFromDirectoryMarker(next.metadata);
   }
 
-  if (isNonSnapshotPublishedFileUrl(next)) {
-    next.retention = 'ephemeral';
-    next.retentionExplicit = true;
-  }
+  coerceNonSnapshotPublishedFile(next);
 
   const changed = !publicArtifactsEqual(
     toPublicArtifact(existing),
@@ -2817,14 +2842,42 @@ function artifactIdMatchesIdentity(
   );
 }
 
+function coerceNonSnapshotPublishedFile<
+  T extends {
+    retention: DaemonSessionArtifactRetention;
+    retentionExplicit?: boolean;
+    durableTombstoneRequired?: boolean;
+    persistedAt?: string;
+  },
+>(artifact: T): void {
+  if (!isNonSnapshotPublishedFileUrl(artifact)) return;
+  artifact.retention = 'ephemeral';
+  artifact.retentionExplicit = false;
+  artifact.durableTombstoneRequired = undefined;
+  artifact.persistedAt = undefined;
+}
+
+function isWebPreviewSnapshotLocator(
+  artifact: Partial<PersistedSessionArtifact>,
+): boolean {
+  return (
+    getWebPreviewSnapshotId({
+      ...artifact,
+      source: 'tool',
+      toolName: 'artifact',
+    }) !== undefined
+  );
+}
+
 function isExpectedExpiredLocalPublishedArtifact(
+  sessionId: string,
   artifact: Partial<PersistedSessionArtifact>,
 ): boolean {
   return (
     isNonSnapshotPublishedFileUrl(artifact) &&
+    !isWebPreviewSnapshotLocator(artifact) &&
     artifact.kind === 'html' &&
-    artifact.source === 'tool' &&
-    artifact.toolName?.toLowerCase() === 'artifact'
+    artifactIdMatchesIdentity(sessionId, artifact)
   );
 }
 
@@ -3080,7 +3133,6 @@ function validateLocator(
 }
 
 function buildIdentityKey(input: {
-  storage: DaemonSessionArtifactStorage;
   workspacePath?: string;
   managedId?: string;
   url?: string;

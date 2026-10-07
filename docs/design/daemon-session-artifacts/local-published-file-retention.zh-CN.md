@@ -44,21 +44,22 @@ journal。恢复并不信任该定位符，加载时出现
 ## 决策
 
 写入时，任何不是快照描述符的 `published + file://` artifact 都强制
-`ephemeral`，并设置 `retentionExplicit: true`，即使调用方请求 `restorable`。
-当前页仍出现在本会话列表中。
+`ephemeral`，即使调用方请求 `restorable`。这次强制不设置
+`retentionExplicit`，该标志只表示调用方意图。当前页仍出现在本会话列表中。
 
-恢复和 marker 恢复时，只丢弃 Artifact 形态的本地页：
+恢复和 marker 恢复时，按定位符和 identity 丢弃本地页：
 
 - `storage: published`
 - `kind: html`
-- `source: tool`
-- `toolName: artifact`
 - 不是快照描述符的 file URL
-- 记录的 `id` 必须等于由该记录自身重算的 identity（`storage` /
-  `workspacePath` / `managedId` / `url`）；id 不一致的记录不丢弃，仍会恢复失败
+- 记录的 `id` 必须等于由该记录自身重算的 identity（`workspacePath` /
+  `managedId` / `url`）；id 不一致的记录不丢弃，仍会恢复失败
+- 只补回 producer 字段后就能通过 `getWebPreviewSnapshotId()` 的定位符不丢弃，
+  仍会恢复失败
 
-丢弃时不要加 `skipped ` 前缀。在 stderr 记录
-`action=legacy_local_published_dropped`。回滚条件为
+丢弃时不要加 `skipped ` 前缀。只有 restore 真正提交后，才在 stderr 记录
+`action=legacy_local_published_dropped`。若同一次 restore 回滚，改为记录
+`action=legacy_local_published_drop_rolled_back`。回滚条件为
 `snapshot.artifacts.length - expectedExpiredDrops > 0 && restoredCount === 0`。
 伪造的 client `file://` 记录仍会恢复失败。
 
@@ -74,17 +75,20 @@ HTTP/HTTPS published 定位符和快照描述符不变。
 ## 风险
 
 回放（rewind）时 live 页面仍然可见 —— rewind 调用方使用 `preserveLiveEphemeral`
-进行 restore，而该页面现在是 ephemeral —— 但回放之后记录的 snapshot 不再包含它。
-这就是丢弃后的 durable metadata 状态；不会产生面向用户的 warning。运维仍然可以
-通过 stderr action 看到。
+进行 restore，而该页面现在是 ephemeral —— 除非被回放到的 journal 把该页 id
+列入 tombstone，此时页面会被丢掉且不发 warning。页面被丢掉时，回放之后记录的
+snapshot 不再包含它。这就是丢弃后的 durable metadata 状态；不会产生面向用户的
+warning。运维仍然可以通过 stderr action 看到。
 
 ## 验证
 
 - `packages/acp-bridge` 单测覆盖生产形态（省略 `retention` 的批量写入）强制、
   跳过持久化、安静恢复丢弃、workspace/快照混合恢复、marker 丢弃、
-  `preserveLiveEphemeral` rewind、重新发布时清除 tombstone、伪造 id 与混合
-  journal 回滚、合并后再强制 ephemeral、原有伪造文件回滚，以及 issue #12389
-  形态的 journal 回放。
+  `preserveLiveEphemeral` rewind、重新发布以及 workspace 升 published 时清除
+  tombstone、伪造 id 与混合 journal 回滚、合并后再强制 ephemeral、升级后的
+  `write_file` journal 丢弃、本地文件页不触发 unpin / 不入 journal、随后
+  https 再发布仍为 restorable、回滚时不写已提交 drop 日志、原有伪造文件回滚，
+  以及 issue #12389 形态的 journal 回放。
 - `cd packages/acp-bridge && npx vitest run src/sessionArtifacts.test.ts`
 
 ## 验收标准
