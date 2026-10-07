@@ -34,8 +34,9 @@ import org.springframework.stereotype.Component;
  * or certifying a settle that never happened. The budget counts
  * only attempts that could have made progress; two conditions keep
  * waiting instead, and their attempts stay budget-exempt: a live
- * journal writer (the close can still succeed once it stops; past
- * the budget the wait is published as recovery_blocked with the
+ * journal writer while the failure is still retryable (the close
+ * can still succeed once the writer stops; past the budget the
+ * wait is published as recovery_blocked with the
  * session_close_writer_live code), and a generation error from
  * Java's stale view of a restarted Harness (the close can still
  * succeed once this replica refreshes). A cwd change is settled
@@ -188,17 +189,22 @@ public class SessionLifecycleCoordinator {
             // Two settle outcomes wait on a condition only time, an
             // operator, or a restart can change, so the budget must not
             // terminate them and their attempts must not consume it: a live
-            // journal writer (the close can still succeed once it stops),
-            // and a generation error from Java's stale view of a restarted
+            // journal writer while the failure is still retryable (the
+            // close can still succeed once the writer stops — a permanent
+            // refusal thrown before the Harness was asked to stop would
+            // otherwise wait on its own writer lease forever), and a
+            // generation error from Java's stale view of a restarted
             // Harness (the close can still succeed once this replica
-            // refreshes). Both reschedule through the budget-exempt baseline.
+            // refreshes). Both reschedule through the budget-exempt
+            // baseline.
             // A cwd change never reaches settle(): the close-specific
             // waits (live writer, stale boot) and the terminal budget arm
             // are not its semantics — its rethrown probe refusal takes the
             // plain reschedule below, bounded by CWD_CHANGE_ATTEMPT_BUDGET
             // inside settleCwdChange.
             boolean cwdChange = claimed.kind() == OperationKind.CWD_CHANGE;
-            boolean writerLive = !cwdChange && writerStillLive(claimed);
+            boolean writerLive = !cwdChange && retryable(cause)
+                    && writerStillLive(claimed);
             boolean staleBoot =
                     cause instanceof HostedHarnessGenerationException;
             // The budget bounds every settle outcome that could have made
@@ -315,6 +321,13 @@ public class SessionLifecycleCoordinator {
         } finally {
             renewal.cancel(false);
         }
+    }
+
+    // A permanent refusal (a non-retryable broker conflict) is a verdict a
+    // writer stop cannot change, so it never keys the writer wait.
+    private static boolean retryable(Throwable cause) {
+        return !(cause instanceof RuntimeBrokerException brokerError)
+                || brokerError.isRetryable();
     }
 
     // A live journal writer blocks every delivered shape — settle()'s writer

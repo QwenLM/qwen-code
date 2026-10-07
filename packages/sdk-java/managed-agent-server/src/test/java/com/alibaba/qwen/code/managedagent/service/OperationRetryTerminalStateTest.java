@@ -23,6 +23,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -295,13 +296,16 @@ class OperationRetryTerminalStateTest {
                 .thenReturn(Optional.of(claimed));
         // A bound Session whose warmer cannot verify the original worker's
         // stop: settle() throws workspace_close_identity_unverified, which
-        // every attempt classifies as blocked.
+        // every attempt classifies as blocked. The refusal fires before the
+        // Harness is asked to stop, so the Harness keeps the writer lease —
+        // and a permanent refusal must terminate even while that writer is
+        // live (review R1-30).
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(sessionStore.hasLiveWriter("tenant", "session"))
-                .thenReturn(false);
+                .thenReturn(true);
 
         SessionLifecycleCoordinator coordinator =
                 new SessionLifecycleCoordinator(store, sessionStore, harness,
@@ -322,6 +326,60 @@ class OperationRetryTerminalStateTest {
                     anyString(), anyString(), anyLong(), anyLong());
             // A bound Session is never drained through the unbound path.
             verify(runtimeWarmer, never()).drain(anyString());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // A permanent settle refusal raised while the Harness still holds the
+    // Session's writer lease is not a writer wait: the refusal fires before
+    // the Harness is asked to stop, so the writer stays live on every
+    // attempt and a journal-only gate would re-block the operation forever.
+    // The budget terminates it with the refusal's code (review R1-30).
+    @Test
+    void aPermanentSettleRefusalTerminatesWhileAWriterIsLive() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = lifecycleOperation(10);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        doThrow(new RuntimeBrokerException(409,
+                "workspace_close_identity_unverified",
+                "Original worker needs recovery", false))
+                .when(runtimeWarmer).requestWorkspaceClose("tenant",
+                        "session");
+        // The Harness was never asked to stop, so it keeps the writer.
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(true);
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(store).failOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("workspace_close_identity_unverified"));
+            verify(store, never()).completeOperation(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyBoolean());
+            verify(store, never()).blockLifecycleOperation(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyString(), anyLong());
+            verify(store, never()).retryOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyLong());
+            // The refused close never reached the Harness.
+            verify(harness, never()).closeSession(anyString(), anyString());
         } finally {
             coordinator.stopRenewals();
         }
