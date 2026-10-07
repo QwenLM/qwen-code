@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterAll, beforeAll, describe, it, expect } from 'vitest';
+import { invalidateModelCatalog } from '../models/model-catalog.js';
 import {
   defaultModalities,
   isQwenFamilyWireModel,
@@ -49,6 +53,38 @@ type Case = [label: string, check: Check, model?: string];
  * the label. */
 const casesFor = (prefix: string, rows: Case[]) =>
   it.each(rows)(`${prefix} %s`, (label, check, model) => check(model ?? label));
+
+// Run against the real bundled catalog (the production default). QWEN_HOME is
+// pinned to an empty dir so a host's refreshed cache cannot replace the
+// bundle, and deleting the kill-switch opts back out of the test-setup's
+// regex-only default.
+let tempDir: string;
+let previousHome: string | undefined;
+let previousSwitch: string | undefined;
+
+beforeAll(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'modality-defaults-'));
+  previousHome = process.env['QWEN_HOME'];
+  previousSwitch = process.env['QWEN_CODE_MODELS_DEV'];
+  process.env['QWEN_HOME'] = path.join(tempDir, '.qwen');
+  delete process.env['QWEN_CODE_MODELS_DEV'];
+  invalidateModelCatalog();
+});
+
+afterAll(() => {
+  if (previousHome === undefined) {
+    delete process.env['QWEN_HOME'];
+  } else {
+    process.env['QWEN_HOME'] = previousHome;
+  }
+  if (previousSwitch === undefined) {
+    delete process.env['QWEN_CODE_MODELS_DEV'];
+  } else {
+    process.env['QWEN_CODE_MODELS_DEV'] = previousSwitch;
+  }
+  invalidateModelCatalog();
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
 
 describe('defaultModalities', () => {
   it('does not infer modalities for an unrecognized batch route', () => {
@@ -105,6 +141,9 @@ describe('defaultModalities', () => {
       ['qwen3.8-flash', IMAGE_VIDEO],
       ['qwen3.8-plus', IMAGE_VIDEO],
       ['qwen3.6-35b variants', ONLY_IMAGE_VIDEO, 'qwen3.6-35b-a3b-nvfp4'],
+      // The bundled catalog adds video; its pdf stays endpoint-gated by the
+      // lookupModelCatalog correction.
+      ['qwen3.8-max', IMAGE_VIDEO],
     ]);
 
     casesFor('returns text-only for', [
@@ -114,7 +153,6 @@ describe('defaultModalities', () => {
     ]);
 
     casesFor('returns image for', [
-      ['qwen3.8-max', has({ image: true, video: undefined })],
       [
         'qwen3.8-max-preview (provider-prefixed)',
         IMAGE,
@@ -186,8 +224,12 @@ describe('defaultModalities', () => {
   describe('ByteDance Doubao', () => {
     casesFor('returns image for', [
       [
+        // #4876 wanted image support here; since #13209 the dotted spelling
+        // also reaches the catalog entry volcengine publishes for
+        // `doubao-seed-2-0-pro`, so it carries that entry's video too instead
+        // of the family row's image-only answer.
         'doubao-seed-2.0-pro (issue #4876)',
-        has({ image: true, video: undefined, audio: undefined }),
+        IMAGE_VIDEO,
         'doubao-seed-2.0-pro',
       ],
       ['doubao-seed-1.6', IMAGE],

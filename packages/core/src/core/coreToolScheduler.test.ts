@@ -1377,6 +1377,12 @@ describe('CoreToolScheduler', () => {
     },
   );
 
+  const URL_REQUIRED_PARAMS = {
+    type: 'object',
+    properties: { url: { type: 'string' } },
+    required: ['url'],
+  };
+
   /** tool_call bridge + hidden deferred MockTool (mcp__github__create_issue). */
   function bridgeWithDeferred(
     deferredOptions: Partial<ConstructorParameters<typeof MockTool>[0]> = {},
@@ -1472,12 +1478,12 @@ describe('CoreToolScheduler', () => {
   function expectBridgeRefusal(completed: ToolCall): void {
     expectStatus(completed, 'error');
     expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(completed.response.executionStatus).toBe('not_started');
     expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
-    expect(
-      String(functionResponseOf(completed)?.response?.['error']).startsWith(
-        DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
-      ),
-    ).toBe(true);
+    const error = String(functionResponseOf(completed)?.response?.['error']);
+    expect(error.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX)).toBe(true);
+    expect(error.indexOf(DEFERRED_TOOL_CALL_REFUSAL_PREFIX, 1)).toBe(-1);
+    expect(completed.response.contentLength).toBe(error.length);
   }
 
   it('routes tool_call through the underlying tool while preserving the model-facing response name', async () => {
@@ -1511,7 +1517,11 @@ describe('CoreToolScheduler', () => {
 
     expect(execute).toHaveBeenCalledOnce();
     expect(isToolEnabled).toHaveBeenCalledWith(ToolNames.TOOL_CALL);
-    expect(isToolEnabled).toHaveBeenCalledWith(deferred.name);
+    expect(isToolEnabled).toHaveBeenCalledWith(
+      deferred.name,
+      undefined,
+      undefined,
+    );
     expect(messageBus.request.mock.calls[0][0]).toEqual(
       expect.objectContaining({
         eventName: 'PreToolUse',
@@ -1632,12 +1642,66 @@ describe('CoreToolScheduler', () => {
 
     expect(execute).not.toHaveBeenCalled();
     expectStatus(completed, 'error');
-    expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
     expect(completed.response.error?.message).toContain(
       "is not permitted by this agent's tool policy",
     );
-    expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
+    expectBridgeRefusal(completed);
   });
+
+  it.each(['permission manager', 'legacy permissions', 'target validation'])(
+    'marks a bridge rejection before execution by %s',
+    async (denial) => {
+      const execute = vi.fn();
+      const { scheduler, onAllToolCallsComplete } = bridgeWithDeferred(
+        {
+          name: ToolNames.AGENT,
+          execute,
+          params: {
+            type: 'object',
+            properties: { description: { type: 'string' } },
+            required: ['description'],
+          },
+        },
+        {
+          permissionManager:
+            denial === 'permission manager'
+              ? {
+                  isToolEnabled: async (name) => name !== ToolNames.AGENT,
+                  findMatchingDenyRule: () => 'permissions.deny: agent',
+                }
+              : undefined,
+          getPermissionsDeny: () =>
+            denial === 'legacy permissions' ? [ToolNames.AGENT] : undefined,
+        },
+      );
+      await scheduleBridgeCall(
+        scheduler,
+        'bridge-target-denied',
+        ToolNames.AGENT,
+        denial === 'target validation' ? {} : { description: 'inspect' },
+      );
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+
+      expectStatus(completed, 'error');
+      expect(execute).not.toHaveBeenCalled();
+      expect(completed.response.executionStatus).toBe('not_started');
+      expect(completed.response.errorType).toBe(
+        denial === 'target validation'
+          ? ToolErrorType.INVALID_TOOL_PARAMS
+          : ToolErrorType.EXECUTION_DENIED,
+      );
+      const rawError = completed.response.error?.message;
+      expect(rawError).toBeTruthy();
+      expect(rawError).not.toContain(DEFERRED_TOOL_CALL_REFUSAL_PREFIX);
+      expect(functionResponseOf(completed)?.response?.['error']).toBe(
+        `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${rawError}`,
+      );
+      expect(completed.response.resultDisplay).toBe(rawError);
+      expect(completed.response.contentLength).toBe(
+        DEFERRED_TOOL_CALL_REFUSAL_PREFIX.length + rawError!.length,
+      );
+    },
+  );
 
   it('applies the retry-loop directive to repeated invalid tool_call envelopes', async () => {
     const { scheduler, onAllToolCallsComplete } =
@@ -1672,6 +1736,80 @@ describe('CoreToolScheduler', () => {
     expect(third.response.errorType).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
     expect(third.response.error?.message).toContain('RETRY LOOP DETECTED');
     expect(functionResponseOf(third)?.name).toBe(ToolNames.TOOL_CALL);
+  });
+
+  it('names the target when a bridged call fails its own validation (#12889)', async () => {
+    const { completed, deferred } = await runBridgeCall('bridge-invalid-args', {
+      params: URL_REQUIRED_PARAMS,
+    });
+
+    expectStatus(completed, 'error');
+    expect(completed.response.errorType).toBe(
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+    expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
+    const message = completed.response.error?.message ?? '';
+    expect(message).toContain(`Deferred tool "${deferred.name}"`);
+    expect(message).toContain("must have required property 'url'");
+    expect(message).toContain(ToolNames.TOOL_SEARCH);
+  });
+
+  it("leaves a direct call's validation error unlabelled", async () => {
+    const direct = new MockTool({
+      name: 'needs_url',
+      params: URL_REQUIRED_PARAMS,
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName: toolMap(direct) });
+
+    await scheduler.schedule(
+      toolRequest('direct-invalid-args', direct.name, {}, 'prompt-direct'),
+      new AbortController().signal,
+    );
+
+    const completed = firstBatch(onAllToolCallsComplete)[0];
+    expectStatus(completed, 'error');
+    const message = completed.response.error?.message ?? '';
+    expect(message).toContain("must have required property 'url'");
+    expect(message).not.toContain('Deferred tool');
+  });
+
+  it('shares validation retries across bridged and direct calls', async () => {
+    const { deferred, scheduler, onAllToolCallsComplete } = bridgeWithDeferred({
+      params: URL_REQUIRED_PARAMS,
+    });
+
+    for (const [index, name] of [
+      ToolNames.TOOL_CALL,
+      deferred.name,
+      ToolNames.TOOL_CALL,
+    ].entries()) {
+      onAllToolCallsComplete.mockClear();
+      await scheduler.schedule(
+        toolRequest(
+          `mixed-validation-${index}`,
+          name,
+          name === ToolNames.TOOL_CALL
+            ? { name: deferred.name, arguments: {} }
+            : {},
+          'prompt-mixed-validation',
+        ),
+        new AbortController().signal,
+      );
+
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+      expectStatus(completed, 'error');
+      expect(completed.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+      expect(functionResponseOf(completed)?.name).toBe(name);
+      const message = completed.response.error?.message ?? '';
+      expect(message).toContain("must have required property 'url'");
+      expect(message.includes('Deferred tool')).toBe(
+        name === ToolNames.TOOL_CALL,
+      );
+      expect(message.includes('RETRY LOOP DETECTED')).toBe(index === 2);
+    }
   });
 
   it('prunes the bridge-keyed retry counter across a successful bridged execution', async () => {
@@ -1846,8 +1984,81 @@ describe('CoreToolScheduler', () => {
       modelFacingName: ToolNames.TOOL_CALL,
       modelFacingArgs: { name: deferred.name, arguments: {} },
     });
+    expect(completed.response.executionStatus).toBe('cancelled');
     expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
+    expect(functionResponseOf(completed)?.response?.['error']).not.toContain(
+      DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+    );
   });
+
+  it('marks a bridge cancelled at confirmation as not started', async () => {
+    const execute = vi.fn();
+    const { deferred, scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      bridgeWithDeferred(
+        {
+          execute,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+        },
+        { approvalMode: ApprovalMode.DEFAULT },
+      );
+    const scheduled = scheduleBridgeCall(
+      scheduler,
+      'bridge-confirmation-cancel',
+      deferred.name,
+    );
+    const waiting = await waitForApproval(onToolCallsUpdate);
+    await waiting.confirmationDetails.onConfirm(ToolConfirmationOutcome.Cancel);
+    await scheduled;
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completed = firstBatch(onAllToolCallsComplete)[0];
+
+    expectStatus(completed, 'cancelled');
+    expect(execute).not.toHaveBeenCalled();
+    expect(completed.response.executionStatus).toBe('not_started');
+    const error = String(functionResponseOf(completed)?.response?.['error']);
+    expect(error.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX)).toBe(true);
+    expect(completed.response.contentLength).toBe(error.length);
+  });
+
+  it.each(['failure', 'post-hook cancellation'])(
+    'keeps a bridge that executed before %s distinguishable from a refusal',
+    async (outcome) => {
+      const controller = new AbortController();
+      const execute = vi.fn(async () => {
+        if (outcome === 'failure')
+          throw new Error('delegated execution failed');
+        return textResult('delegated execution finished');
+      });
+      const { completed } = await runBridgeCall(
+        'bridge-executed',
+        { execute },
+        {
+          disableHooks: false,
+          messageBus: hookBus(async (request) => {
+            if (
+              outcome === 'post-hook cancellation' &&
+              request.eventName === 'PostToolUse'
+            ) {
+              controller.abort();
+            }
+            return hookResponse('post-hook', { decision: 'allow' });
+          }),
+        },
+        controller.signal,
+      );
+
+      expect(execute).toHaveBeenCalledOnce();
+      expectStatus(completed, outcome === 'failure' ? 'error' : 'cancelled');
+      expect(completed.response.executionStatus).toBe(
+        outcome === 'failure' ? 'error' : 'success',
+      );
+      const error = String(functionResponseOf(completed)?.response?.['error']);
+      expect(error).not.toContain(DEFERRED_TOOL_CALL_REFUSAL_PREFIX);
+      expect(error).not.toContain(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX);
+      expect(completed.response.contentLength).toBe(error.length);
+    },
+  );
 
   it('keeps the queued tool owner after another agent drains the scheduler', async () => {
     const owner = {
@@ -5155,6 +5366,40 @@ describe('CoreToolScheduler', () => {
     expect(runSideQueryMock).not.toHaveBeenCalled();
   });
 
+  it('records Goal-only discovery as bookkeeping', async () => {
+    const goalContext = { goalId: 'g-1', revision: 2, turnId: 't-1' };
+    const output =
+      '<functions>\n<function>{"name":"update_goal"}</function>\n</functions>';
+    const recordToolResult = vi.fn();
+    await runReadBatch(
+      { [ToolNames.TOOL_SEARCH]: textResult(output) },
+      [
+        {
+          ...valueRequest(
+            ToolNames.TOOL_SEARCH,
+            'select:update_goal',
+            'prompt-goal-discovery',
+          ),
+          goalContext,
+        },
+      ],
+      {
+        chatRecordingService: {
+          recordToolResult,
+        } as unknown as ChatRecordingService,
+      },
+    );
+
+    expect(recordToolResult).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        callId: 'call-tool_search',
+        status: 'success',
+      }),
+      { goalContext, provenance: 'goal_runtime' },
+    );
+  });
+
   it('includes failed tool responses in PostToolBatch payloads', async () => {
     const messageBus = allowAllHookBus();
     const recordToolResult = vi.fn();
@@ -7181,6 +7426,10 @@ describe('CoreToolScheduler truncated output protection', () => {
     expect(errorMessage).toContain(
       'rejected to prevent writing truncated content',
     );
+    // The telemetry arm of the cause-versus-diagnosis distinction (#12970):
+    // a genuine max_tokens cut must keep reporting OUTPUT_TRUNCATED, never
+    // collapse into the malformed-generation INVALID_TOOL_PARAMS.
+    expect(call.response.errorType).toBe(ToolErrorType.OUTPUT_TRUNCATED);
     return errorMessage;
   }
 
@@ -7193,6 +7442,110 @@ describe('CoreToolScheduler truncated output protection', () => {
         true,
       ),
     );
+  });
+
+  // The token-limit diagnosis being withdrawn must not withdraw the data-loss
+  // guard with it: incomplete arguments mean incomplete file content either
+  // way (QwenLM/qwen-code#12970).
+  it('rejects Kind.Edit calls whose arguments were incomplete without a max_tokens cut', async () => {
+    const declarativeTool = new TestApprovalTool({
+      getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+    } as unknown as Config);
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(declarativeTool);
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: TestApprovalTool.Name,
+          args: { id: 'test-malformed' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-malformed',
+          hadIncompleteArguments: true,
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+
+    if (completedCall.status === 'error') {
+      const errorMessage = completedCall.response.error?.message ?? '';
+      // Still rejected, and for the real reason.
+      expect(errorMessage).toContain(
+        'rejected to prevent writing incomplete content',
+      );
+      expect(errorMessage).toContain('malformed generation');
+      expect(errorMessage).not.toContain('was truncated due to max_tokens');
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+    }
+  });
+
+  // The non-Edit half of #12970 — and the wording the issue actually asks
+  // for: a non-Edit tool whose schema validation fails lands past the Edit
+  // guard, so its guidance must name malformed generation rather than a
+  // max_tokens cut the response's own usage disproved. The witness tool must
+  // not be Kind.Edit: Edit calls are rejected before validation and can never
+  // reach the paramGuidance branch.
+  it('attaches malformed-generation guidance to validation errors of incomplete non-Edit calls', async () => {
+    const readTool = new MockTool({
+      name: 'mockReadWithRequiredParam',
+      kind: Kind.Read,
+      params: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(readTool);
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'mockReadWithRequiredParam',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-malformed-nonedit',
+          hadIncompleteArguments: true,
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+
+    if (completedCall.status === 'error') {
+      const errorMessage = completedCall.response.error?.message ?? '';
+      // Reached validation (not the pre-validation Edit rejection)...
+      expect(errorMessage).toContain("required property 'path'");
+      // ...and the attached guidance matches the actual cause.
+      expect(errorMessage).toContain('malformed generation');
+      expect(errorMessage).not.toContain('truncated due to max_tokens limit');
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+    }
   });
 
   it('should allow Kind.Edit tool calls when wasOutputTruncated is false', async () => {
@@ -7260,6 +7613,70 @@ describe('CoreToolScheduler truncated output protection', () => {
     expect(messages[0]).not.toContain('RETRY LOOP DETECTED');
     expect(messages[1]).not.toContain('RETRY LOOP DETECTED');
     expect(messages[2]).toContain('RETRY LOOP DETECTED');
+  });
+
+  // The Edit guard rejects before buildInvocation, so schema validation never
+  // runs on these calls: at the retry-loop threshold the directive must match
+  // the actual cause (repeated incomplete writes), not the validation-failure
+  // wording that would send the model re-examining a schema it never violated.
+  it('should inject the incomplete-args retry loop directive after repeated incomplete write_file rejections', async () => {
+    const writeFileConfig = {
+      getProjectRoot: () => '/tmp',
+      getTargetDir: () => '/tmp',
+      getFileSystemService: () => ({
+        readTextFile: vi.fn(),
+        writeTextFile: vi.fn(),
+      }),
+      getDefaultFileEncoding: () => undefined,
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+    const writeFileTool = new WriteFileTool(writeFileConfig);
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(writeFileTool);
+
+    const messages: string[] = [];
+
+    for (let i = 1; i <= 3; i++) {
+      await scheduler.schedule(
+        [
+          {
+            callId: `incomplete-write-file-${i}`,
+            name: WriteFileTool.Name,
+            args: { file_path: '/tmp/test.txt', content: 'partial' },
+            isClientInitiated: false,
+            prompt_id: `prompt-id-write-file-incomplete-${i}`,
+            hadIncompleteArguments: true,
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalledTimes(i);
+      });
+
+      const completedCalls = onAllToolCallsComplete.mock.calls.at(-1)?.[0] as
+        | ToolCall[]
+        | undefined;
+      const completedCall = completedCalls?.[0];
+      expect(completedCall?.status).toBe('error');
+      if (completedCall?.status === 'error') {
+        messages.push(completedCall.response.error?.message ?? '');
+      }
+    }
+
+    expect(messages[0]).toContain(
+      'rejected to prevent writing incomplete content',
+    );
+    expect(messages[0]).not.toContain('RETRY LOOP DETECTED');
+    expect(messages[1]).not.toContain('RETRY LOOP DETECTED');
+    // At the threshold, the directive must be the incomplete-args one: the
+    // validation wording would misdiagnose the cause, and the truncation
+    // wording would re-introduce the max_tokens blame #12970 removed.
+    expect(messages[2]).toContain('RETRY LOOP DETECTED');
+    expect(messages[2]).toContain('same incomplete file write');
+    expect(messages[2]).not.toContain('failed validation');
+    expect(messages[2]).not.toContain('truncated');
   });
 });
 
@@ -12127,6 +12544,46 @@ describe('Fire hook functions integration', () => {
           ['shell', Kind.Execute, { command: 'git status' }, true],
           ['shell', Kind.Execute, { command: 'rm -rf build' }, false],
         );
+      });
+
+      it('treats Bash as safe for Code Mode regardless of the command', () => {
+        expect(
+          isToolCallConcurrencySafe(
+            ToolNames.SHELL,
+            Kind.Execute,
+            { command: 'rm -rf build' },
+            'code_mode',
+          ),
+        ).toBe(true);
+        expect(
+          isToolCallConcurrencySafe(ToolNames.SHELL, Kind.Execute, {
+            command: 'rm -rf build',
+          }),
+        ).toBe(false);
+        expect(
+          isToolCallConcurrencySafe(
+            ToolNames.SHELL,
+            undefined,
+            { command: 'rm -rf build' },
+            'code_mode',
+          ),
+        ).toBe(false);
+        expect(
+          isToolCallConcurrencySafe(
+            ToolNames.MONITOR,
+            Kind.Execute,
+            {},
+            'code_mode',
+          ),
+        ).toBe(false);
+        expect(
+          isToolCallConcurrencySafe(
+            ToolNames.IMAGE_GEN,
+            Kind.Execute,
+            {},
+            'code_mode',
+          ),
+        ).toBe(false);
       });
 
       it('treats a shell call with a non-string command as unsafe (fail-closed)', () => {

@@ -811,6 +811,8 @@ export type {
   DaemonExtensionEntry,
   DaemonExtensionUpdateState,
   DaemonWorkspaceExtensionsStatus,
+  DaemonExtensionSummary,
+  DaemonWorkspaceExtensionSummaries,
   ExtensionInstallRequest,
   ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,

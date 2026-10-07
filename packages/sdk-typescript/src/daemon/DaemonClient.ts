@@ -236,6 +236,8 @@ import type {
   ForkSessionRequest,
   DaemonSessionHooksStatus,
   DaemonWorkspaceExtensionsStatus,
+  DaemonWorkspaceExtensionSummaries,
+  DaemonExtensionEntry,
   ExtensionMutationResponse,
   ExtensionInstallRequest,
   ExtensionArchiveInstallRequest,
@@ -1896,6 +1898,22 @@ export class DaemonClient {
     );
   }
 
+  async workspaceExtensionSummaries(): Promise<DaemonWorkspaceExtensionSummaries> {
+    return await this.jsonRequest<DaemonWorkspaceExtensionSummaries>(
+      '/workspace/extensions/summary',
+      'GET /workspace/extensions/summary',
+      { mode: 'rest' },
+    );
+  }
+
+  async workspaceExtensionDetails(name: string): Promise<DaemonExtensionEntry> {
+    return await this.jsonRequest<DaemonExtensionEntry>(
+      `/workspace/extensions/${urlEncode(name)}/details`,
+      'GET /workspace/extensions/:name/details',
+      { mode: 'rest' },
+    );
+  }
+
   async installExtension(
     params: ExtensionInstallRequest,
     clientId?: string,
@@ -2584,10 +2602,18 @@ export class DaemonClient {
    * companion helper `walkWorkspaceForMemory` keeps a guarded
    * upward-walk loop body for a future hierarchical mode but breaks
    * after iteration 1 in this release.
+   *
+   * `includeContent` also returns each file's text. It is the only way
+   * to read the global file, which sits outside the bound workspace and
+   * so is refused by `readWorkspaceFile`. Daemons that predate it ignore
+   * the flag and return metadata only.
    */
-  async workspaceMemory(): Promise<DaemonWorkspaceMemoryStatus> {
+  async workspaceMemory(options?: {
+    includeContent?: boolean;
+  }): Promise<DaemonWorkspaceMemoryStatus> {
+    const query = options?.includeContent ? '?content=true' : '';
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/memory`,
+      `${this.baseUrl}/workspace/memory${query}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) {
@@ -5508,6 +5534,21 @@ export class DaemonClient {
       '/workspace/trust/request',
       'POST /workspace/trust/request',
       { method: 'POST', body: request, clientId },
+    );
+  }
+
+  /**
+   * Record the primary workspace as trusted in the daemon host's
+   * trusted-folders file. Requires operator authority over the daemon (the
+   * loopback primary listener or a real bearer credential).
+   */
+  async grantWorkspaceTrust(opts?: {
+    clientId?: string;
+  }): Promise<DaemonWorkspaceTrustStatus> {
+    return await this.jsonRequest<DaemonWorkspaceTrustStatus>(
+      '/workspace/trust/grant',
+      'POST /workspace/trust/grant',
+      { method: 'POST', clientId: opts?.clientId },
     );
   }
 
@@ -8497,6 +8538,21 @@ export class WorkspaceDaemonClient {
       'POST /workspaces/:workspace/trust/request',
       request,
       clientId,
+    );
+  }
+
+  /**
+   * Record this workspace as trusted in the daemon host's trusted-folders
+   * file. Requires operator authority over the daemon.
+   */
+  grantWorkspaceTrust(opts?: {
+    clientId?: string;
+  }): Promise<DaemonWorkspaceTrustStatus> {
+    return this.post(
+      '/trust/grant',
+      'POST /workspaces/:workspace/trust/grant',
+      {},
+      opts?.clientId,
     );
   }
 

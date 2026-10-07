@@ -25,7 +25,7 @@ Issue：[#12827](https://github.com/QwenLM/qwen-code/issues/12827)，属于 [#12
   `Idempotency-Key`，返回 `202` 加命令 operation。
 - 记录任务错误码。
 - 为 MCP catalog、hook catalog、自动化和 channel 资源命名，让后续切片只补结构，不另起路径。
-- 保持 D1 的验收条件：不映射任何 `planned` 路由，生成的 WebShell 类型不变。
+- 保持 D1 的验收条件：不映射任何 `planned` 路由，生成的 WebShell 类型不变。此后 H0c（#12855）已映射四条读取路由并相应改变了生成的类型；事件与取消仍为 `planned`。
 
 ## 3. 非目标
 
@@ -46,7 +46,7 @@ Issue：[#12827](https://github.com/QwenLM/qwen-code/issues/12827)，属于 [#12
 （`PublicCommandOperation`、`WebShellCommandOperation`、`SessionCapabilities` 和
 `WebShellSession.capabilities`）的每个属性也带。新 schema 内部的属性和两个新参数不需要单独标记：
 只有 planned 的 operation 会引用它们。生成器会去掉这些内容；服务端若映射其中任何路由，
-Java 契约测试就会失败。版本升为 `1.16.0`：新增了路由，而 W0d（#12797）和 D2（#12822）已经分别使用了 `1.14.0` 和 `1.15.0`。
+Java 契约测试就会失败。版本升为 `1.16.0`：新增了路由，而 W0d（#12797）和 D2（#12822）已经分别使用了 `1.14.0` 和 `1.15.0`。此后 H0c（#12855）已把四条读取操作及其返回的十个任务 schema 翻为 `partial`，新增已提供的 `WebShellSessionCapabilities` schema，并让 `capabilities.tasks` 变为已提供且必填；事件、取消与命令中的 `task_id`/`taskId` 字段仍为 `planned`。因此下文各段应读作 H0c 之前的状态，而非当前状态。
 
 枚举值无法携带这个标记，而取消复用了命令 operation（见第 4.4 节）。因此新增的 `task_cancel`
 命令类型在公共规范中已经可见，因为 `partial` 的归档与删除路由声明以 `PublicCommandOperation`
@@ -211,8 +211,7 @@ operation）时，创建不同 operation。它们的物理停止请求可以合�
 
 取消请求在请求体中携带 `idempotencyKey`，与 `WebShellActionRespondRequest` 和
 `WebShellLifecycleRequest` 相同。`SessionCapabilities.tasks` 和
-`WebShellSession.capabilities.tasks`（都为 `planned`，默认 `false`）让客户端得知 Session
-是否提供任务路由。与 Action 家族一样，公共列表命名为 `…List`，WebShell 分页命名为 `…Page`。
+`WebShellSession.capabilities.tasks` 加入时为 `planned`、默认 `false`；H0c 已让二者变为已提供且必填，因此客户端总能读到 Session 是否提供任务路由。与 Action 家族一样，公共列表命名为 `…List`，WebShell 分页命名为 `…Page`。
 
 ### 4.6 为后续切片命名的资源
 
@@ -235,24 +234,24 @@ operation）时，创建不同 operation。它们的物理停止请求可以合�
 `CursorExpired` 响应。错误码包括 API 契约已冻结的那些、幂等路由已在返回的 `invalid_idempotency_key`、
 租户过滤器的 `invalid_tenant` 与 `actor_scope_mismatch`，以及三个新增的任务错误码：
 
-| 状态  | 错误码                     | 何时返回                                                                    |
-| ----- | -------------------------- | --------------------------------------------------------------------------- |
-| `400` | `invalid_tenant`           | 缺少 `X-Qwen-Tenant-Id` 或格式错误（租户过滤器）。                          |
-| `400` | `invalid_cursor`           | 任务列表游标格式错误。                                                      |
-| `400` | `invalid_event_cursor`     | `after` 格式错误或属于另一个任务。                                          |
-| `400` | `invalid_limit`            | `limit` 不在 1～100 之间。                                                  |
-| `400` | `invalid_request`          | 缺少 `Idempotency-Key`。                                                    |
-| `400` | `invalid_idempotency_key`  | `Idempotency-Key` 格式错误，与其他幂等路由相同。                            |
-| `400` | `unsupported_feature`      | 该 Session 不提供任务（`capabilities.tasks` 为 `false`）。                  |
-| `403` | `task_forbidden`           | 调用方可以读取该任务，但无权取消它。新增。                                  |
-| `403` | `actor_scope_mismatch`     | 已认证的 actor 属于其他租户或其 ID 非法（租户过滤器）。                     |
-| `404` | `session_not_found`        | Session 不存在或不在调用方范围内。                                          |
-| `404` | `task_not_found`           | 任务不存在或不在调用方范围内。新增。                                        |
-| `409` | `cursor_expired`           | `after` 严格早于持久保留下限，保留集为空也一样。                            |
-| `409` | `task_action_unavailable`  | 使用新键时 `action_capabilities` 不含 `cancel`，包括已结算的任务。新增。    |
-| `409` | `session_not_active`       | 新取消请求指向非 active 的 Session。                                        |
-| `409` | `session_operation_active` | 新取消请求到达时 Session 上有另一个未完成的 operation，与生命周期路由相同。 |
-| `409` | `idempotency_conflict`     | 同一个键用于不同的请求。                                                    |
+| 状态  | 错误码                     | 何时返回                                                                                                                                                   |
+| ----- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400` | `invalid_tenant`           | 缺少 `X-Qwen-Tenant-Id` 或格式错误（租户过滤器）。                                                                                                         |
+| `400` | `invalid_cursor`           | 任务列表游标格式错误。                                                                                                                                     |
+| `400` | `invalid_event_cursor`     | `after` 格式错误或属于另一个任务。                                                                                                                         |
+| `400` | `invalid_limit`            | `limit` 不在 1～100 之间。                                                                                                                                 |
+| `400` | `invalid_request`          | 缺少 `Idempotency-Key`。                                                                                                                                   |
+| `400` | `invalid_idempotency_key`  | `Idempotency-Key` 格式错误，与其他幂等路由相同。                                                                                                           |
+| `400` | `unsupported_feature`      | 该 Session 不提供任务（`capabilities.tasks` 为 `false`）。只有仍为 `planned` 的事件与取消路由会返回它；已提供的读取路由永不会返回，因为该标志恒为 `true`。 |
+| `403` | `task_forbidden`           | 调用方可以读取该任务，但无权取消它。新增。                                                                                                                 |
+| `403` | `actor_scope_mismatch`     | 已认证的 actor 属于其他租户或其 ID 非法（租户过滤器）。                                                                                                    |
+| `404` | `session_not_found`        | Session 不存在或不在调用方范围内。                                                                                                                         |
+| `404` | `task_not_found`           | 任务不存在或不在调用方范围内。新增。                                                                                                                       |
+| `409` | `cursor_expired`           | `after` 严格早于持久保留下限，保留集为空也一样。                                                                                                           |
+| `409` | `task_action_unavailable`  | 使用新键时 `action_capabilities` 不含 `cancel`，包括已结算的任务。新增。                                                                                   |
+| `409` | `session_not_active`       | 新取消请求指向非 active 的 Session。                                                                                                                       |
+| `409` | `session_operation_active` | 新取消请求到达时 Session 上有另一个未完成的 operation，与生命周期路由相同。                                                                                |
+| `409` | `idempotency_conflict`     | 同一个键用于不同的请求。                                                                                                                                   |
 
 按 API 契约第 10 节，无权读取任务的调用方收到 `404`，而不是 `403`。只读路由唯一会返回的 `403` 是租户过滤器的
 `actor_scope_mismatch`，针对来自其他租户或 ID 非法的已认证 actor。过滤器覆盖每条 `/v1/agents/` 与 WebShell 路由；任务只读路由从
@@ -306,6 +305,7 @@ WebShell 的取消请求和事件查询请求也在校验之列。从 `1.21.0` �
 - `ManagedAgentApiContractTest`（5 个测试）、`PlannedTaskContractTest`（5 个测试，103 次校验：
   50 次公共形状、49 次 WebShell 镜像、4 次 WebShell 请求；`1.21.0` 增加了第六个测试，见第 5 节）和
   `ManagedSessionStoreContractFixtureTest`（3 个测试）通过，没有新增 gap 行。
+  自 H0c 起分工有所不同：`ManagedAgentApiContractTest` 验证四条已提供的读取路由，事件与取消仍由 `PlannedTaskContractTest` 承担。
 - 变异都会使对应门禁失败：
   - 在同一个接口面上删除任务、任务事件、任务列表的条件约束、`task_cancel` 规则以及输出最小长度后，
     `PlannedTaskContractTest` 在该接口面的 22 个实例上失败，公共 schema 和 WebShell 镜像都是如此。
@@ -325,7 +325,10 @@ WebShell 的取消请求和事件查询请求也在校验之列。从 `1.21.0` �
 - **H0c。** 实现任务投影，把这些路由标为 `partial`，并定义宣告任务变化的 Session 事件。
   只标记路由还不够：`PublicCommandOperation.task_id`、`WebShellCommandOperation.taskId`
   和两个 `capabilities.tasks` 标志都是独立的 `planned` 属性，承载其中一个标志的
-  `WebShellSession.capabilities` 对象本身也是 planned，在它们也被标记之前不会进入生成的类型。
+  `WebShellSession.capabilities` 对象本身也是 planned。此后两个 `capabilities.tasks`
+  标志已随 H0c（#12855）变为已提供且必填，该对象则已提供但非必填；本变更把该对象加入
+  `WebShellSession.required`，与早已要求它的公开 `Session` 对齐，生成的 WebShell 类型
+  由此不再带 `?`。`task_id` 与 `taskId` 按 H0c 决策 9 随取消保持 `planned`。
 - **输出恢复。** H3 定义输出分段，并随之定义 `cursor_expired` 之后调用方如何无重叠地衔接任务的
   Artifact 与保留的事件。
 - **Artifact 归属。** `PublicArtifact` 没有任务引用，artifact 列表也没有按任务过滤，

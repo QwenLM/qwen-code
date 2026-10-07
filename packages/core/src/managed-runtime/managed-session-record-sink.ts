@@ -44,6 +44,7 @@ const CARRIED_SYSTEM_SUBTYPES = new Set([
 const CARRIED_MESSAGE_SUBTYPES = new Set([
   'goal_runtime',
   'mid_turn_user_message',
+  'code_mode_tool_result',
 ]);
 
 function isNonEmptyString(value: unknown): boolean {

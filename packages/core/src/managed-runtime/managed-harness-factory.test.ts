@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Storage } from '../config/storage.js';
 import {
@@ -954,6 +955,63 @@ describe('managed harness factory', () => {
     await session.close();
   });
 
+  it('settles an after-tool Hook stop without claiming consumption, survives cold reopen and allows the next turn', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    expect(await handle.settleHookStoppedRuntimeContinuation()).toBeNull();
+    await handle.commitAwaitRuntimeBatch([await runtimeCommit(session)], {
+      turnId: 'turn-1',
+      promptId: 'prompt-1',
+    });
+    expect(await handle.settleHookStoppedRuntimeContinuation()).toBeNull();
+    const bytes = Buffer.from(
+      '{"outcome":"completed","output":"original physical receipt"}',
+    );
+    const outcomeRef = await session.resources.publish(
+      'managed-tool-outcome',
+      bytes,
+    );
+    const ready = await handle.resolveAwaitRuntime('ex-1', outcomeRef);
+    expect(await handle.settleConsumedRuntimeContinuation()).toBeNull();
+    const stopped = await handle.settleHookStoppedRuntimeContinuation();
+    expect(stopped?.continuation.phase).toBe('turn_settled');
+    expect(stopped?.tools).toEqual(ready?.tools);
+    expect(stopped?.tools?.items[0]).toMatchObject({
+      state: 'settled',
+      consumed: false,
+      outcomeRef,
+    });
+    expect(stopped?.runtime).toEqual(ready?.runtime);
+    expect(await session.resources.read(outcomeRef)).toEqual(bytes);
+    expect(await handle.settleHookStoppedRuntimeContinuation()).toBeNull();
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+    const restored = await open(workspace);
+    try {
+      const successor = createManagedHarnessHandle(restored);
+      const restoredCheckpoint = await successor.ensureRunnable();
+      expect(restoredCheckpoint.continuation.phase).toBe('turn_settled');
+      expect(restoredCheckpoint.tools).toEqual(ready?.tools);
+      expect(await restored.resources.read(outcomeRef)).toEqual(bytes);
+      await successor.commitDurableWait(waitCommit(await waitRefs(restored)), {
+        turnId: 'turn-2',
+        promptId: 'prompt-2',
+      });
+      const next = parseHarnessCheckpointV1(
+        (await restored.authority.readCheckpointState())!,
+      );
+      expect(next.identity).toMatchObject({
+        turnId: 'turn-2',
+        promptId: 'prompt-2',
+      });
+      expect(next.continuation.phase).toBe('await_action');
+    } finally {
+      await restored.close();
+    }
+  });
+
   it('keeps await_runtime across a cold reopen until results are settled', async () => {
     const workspace = await createWorkspace();
     const session = await open(workspace);
@@ -1345,3 +1403,50 @@ async function runtimeCommit(
     ),
   };
 }
+
+describe('ensureCheckpoint', () => {
+  it('starts an empty log at before_model, and calls it idempotently', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    try {
+      const harness = createManagedHarnessHandle(session);
+      const checkpoint = await harness.ensureCheckpoint();
+      expect(checkpoint.continuation.phase).toBe('before_model');
+      const again = await harness.ensureCheckpoint();
+      expect(again.identity.checkpointId).toBe(
+        checkpoint.identity.checkpointId,
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('answers blocked with the authorization\u0027s own message on a checkpoint it cannot parse', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    try {
+      const garbage = Buffer.from('{"v":2,"opaque":true}', 'utf8');
+      await session.authority.commitCheckpoint(
+        {
+          operation: 'commitCheckpoint',
+          commandId: 'opaque-checkpoint-1',
+          sessionKey: session.authority.sessionHeader.sessionKey,
+          contentDigest: createHash('sha256').update(garbage).digest('hex'),
+        },
+        { state: garbage, boundary: null },
+        { class: 'harness', activation: session.activation },
+      );
+      const harness = createManagedHarnessHandle(session);
+      const failure = harness.ensureCheckpoint();
+      await expect(failure).rejects.toBeInstanceOf(ManagedHarnessBlockedError);
+      // The parser diagnostic is kept, not rewritten to a bare reason.
+      const cause = await failure.catch((error: unknown) => error);
+      expect(cause).toBeInstanceOf(ManagedHarnessBlockedError);
+      expect((cause as ManagedHarnessBlockedError).message).not.toContain(
+        'missing_checkpoint',
+      );
+    } finally {
+      await session.close();
+    }
+  });
+});

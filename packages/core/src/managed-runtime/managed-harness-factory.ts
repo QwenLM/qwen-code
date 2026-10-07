@@ -9,6 +9,7 @@ import {
   createAwaitActionHarnessCheckpoint,
   createAwaitRuntimeHarnessCheckpoint,
   createConsumedRuntimeResultsHarnessCheckpoint,
+  createHookStoppedRuntimeHarnessCheckpoint,
   createInitialHarnessCheckpoint,
   createModelOutputCommittedHarnessCheckpoint,
   createResultsReadyHarnessCheckpoint,
@@ -158,6 +159,15 @@ export interface ManagedHarnessHandle {
    */
   run<T>(agent: () => Promise<T>): Promise<T>;
   /**
+   * Commits the initial `before_model` checkpoint when the session has none,
+   * and leaves any existing checkpoint alone. Local hosts whose earlier
+   * slices recorded without checkpoints start their Runtime evidence here:
+   * nothing in such a log names Runtime work, so the checkpoint covers the
+   * committed log as-is. A restored hosted session with content but no
+   * checkpoint stays blocked — it must never call this.
+   */
+  ensureCheckpoint(): Promise<HarnessCheckpointV1>;
+  /**
    * Observes an already-committed turn-complete or durable-wait checkpoint.
    * Does not wait for an in-flight turn, and does not invent a boundary.
    */
@@ -210,9 +220,10 @@ export interface ManagedHarnessHandle {
     outcomeRef: ManagedSessionDurableRef,
   ): Promise<HarnessCheckpointV1 | null>;
   /**
-   * Marks unconsumed settled Runtime receipts as consumed after they are
-   * present on the next model request. No-op when the handle is not at
-   * `results_ready`.
+   * Marks unconsumed settled Runtime receipts as consumed once the host has
+   * recorded them durably ready for the model — on the Hosted turn, present
+   * on the next model request; on the local host, committed before the next
+   * model round starts. No-op when the handle is not at `results_ready`.
    */
   consumeRuntimeResults(): Promise<HarnessCheckpointV1 | null>;
   /**
@@ -220,6 +231,11 @@ export interface ManagedHarnessHandle {
    * finishes. No-op until every settled receipt is consumed.
    */
   settleConsumedRuntimeContinuation(): Promise<HarnessCheckpointV1 | null>;
+  /**
+   * Trusted Harness calls this only after an original after-tool Hook stop
+   * has settled. Close that continuation without claiming model consumption.
+   */
+  settleHookStoppedRuntimeContinuation(): Promise<HarnessCheckpointV1 | null>;
 }
 
 /**
@@ -249,6 +265,36 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
 
   ensureRunnable(): Promise<HarnessCheckpointV1> {
     return this.mutateCheckpoint(() => this.ensureRunnableUnlocked());
+  }
+
+  async ensureCheckpoint(): Promise<HarnessCheckpointV1> {
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      let authorization = await this.authority.harnessRunAuthorization();
+      // A log without any checkpoint starts here, whether it is empty or
+      // only carries records from slices that wrote none: blocked with no
+      // checkpoint means content from a slice that recorded before this one,
+      // and nothing else reaches the branch.
+      if (
+        authorization.status === 'initial' ||
+        (authorization.status === 'blocked' &&
+          authorization.reason === 'missing_checkpoint')
+      ) {
+        await this.commitInitialBeforeModel();
+        authorization = await this.authority.harnessRunAuthorization();
+      }
+      if (authorization.status === 'blocked') {
+        throw new ManagedHarnessBlockedError(authorization);
+      }
+      if (authorization.status !== 'runnable') {
+        throw new ManagedHarnessBlockedError({
+          status: 'blocked',
+          reason: 'missing_checkpoint',
+        });
+      }
+      return authorization.checkpoint;
+    });
   }
 
   private async ensureRunnableUnlocked(): Promise<HarnessCheckpointV1> {
@@ -787,6 +833,34 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       });
       await this.commitHarnessCheckpoint(
         `harness:turn_settled:${this.activation.activationId}:${identity.coveredSequence}`,
+        checkpoint,
+        null,
+      );
+      return checkpoint;
+    });
+  }
+
+  async settleHookStoppedRuntimeContinuation(): Promise<HarnessCheckpointV1 | null> {
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const previous = (await this.requireRunnableAuthorization()).checkpoint;
+      const items = previous.tools?.items ?? [];
+      if (
+        previous.continuation.phase !== 'results_ready' ||
+        items.length === 0 ||
+        items.some((item) => item.state !== 'settled') ||
+        items.every((item) => item.consumed)
+      ) {
+        return null;
+      }
+      const identity = this.nextCheckpointIdentity();
+      const checkpoint = createHookStoppedRuntimeHarnessCheckpoint({
+        previous,
+        ...identity,
+      });
+      await this.commitHarnessCheckpoint(
+        `harness:hook_stopped:${this.activation.activationId}:${identity.coveredSequence}`,
         checkpoint,
         null,
       );
