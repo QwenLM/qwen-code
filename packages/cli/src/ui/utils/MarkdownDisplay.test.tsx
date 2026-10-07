@@ -13,6 +13,7 @@ import { renderMermaidVisual } from './mermaidVisualRenderer.js';
 import { RenderModeProvider } from '../contexts/RenderModeContext.js';
 import { getScreenBuffer } from '../selection/screen-buffer.js';
 import { getSelectedText } from '../selection/selection-text.js';
+import { fitPendingSlice } from './pending-rendered-height.js';
 
 function copiedFrame(stdout: NodeJS.WriteStream): string {
   const frame = getScreenBuffer(stdout)!.frame!;
@@ -504,6 +505,151 @@ Test
         const output = stripAnsi(lastFrame() ?? '');
         expect(output).toContain('│ a     │      b │');
         expect(output.includes(':---:')).toBe(!isPending);
+      },
+    );
+
+    it.each([false, true])(
+      'preserves the bare-separator compatibility boundary (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| Item | Status |',
+          '| --- | --- |',
+          '--- | ---',
+          '| build | passed |',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        const output = stripAnsi(lastFrame() ?? '');
+        if (isPending) {
+          // The final isolated pipe row is still held as a forming header.
+          expect(output).toBe('');
+        } else {
+          expect(output).toContain('│ Item  │ Status │');
+          expect(output).toContain('│ build │ passed │');
+          expect(output).not.toContain('--- | ---');
+        }
+      },
+    );
+
+    it.each([false, true])(
+      'ignores repeated bare separators without resetting alignment (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| First | Second |',
+          '| :--- | ---: |',
+          '---: | :---',
+          ':---: | ---: | ---',
+          '| a | b |',
+          '--- | ---',
+          '| :---: | ---: |',
+          '| --- | --- |',
+          '| c | d |',
+          'Done.',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        const output = stripAnsi(lastFrame() ?? '');
+        expect(output).toContain('│ a     │      b │');
+        expect(output).toContain('│ :---: │   ---: │');
+        expect(output).toContain('│ ---   │    --- │');
+        expect(output).toContain('│ c     │      d │');
+        expect(output).not.toContain('---: | :---');
+        expect(output).toContain('Done.');
+      },
+    );
+
+    it.each([false, true])(
+      'does not flash an empty table after repeated bare separators (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| First | Second |',
+          '| :--- | ---: |',
+          '--- | ---',
+          '---: | :---:',
+          'Done.',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        expect(stripAnsi(lastFrame() ?? '')).toBe('Done.');
+      },
+    );
+
+    it.each([false, true])(
+      'parses alignment from an initial bare delimiter (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| First | Second |',
+          ':--- | ---:',
+          '---: | :---:',
+          '| a | b |',
+          'Done.',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        expect(stripAnsi(lastFrame() ?? '')).toContain('│ a     │      b │');
+      },
+    );
+
+    it.each([false, true])(
+      'does not accept ordinary body text without outer pipes (isPending=%s)',
+      (isPending) => {
+        const text = [
+          '| First | Second |',
+          '| :--- | ---: |',
+          '| a | b |',
+          'ordinary | body',
+          '| c | d |',
+          'Done.',
+        ].join(eol);
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay {...baseProps} text={text} isPending={isPending} />,
+        );
+        const output = stripAnsi(lastFrame() ?? '');
+        expect(output).toContain('│ a     │      b │');
+        expect(output).toContain('ordinary | body');
+        expect(output).toContain('| c | d |');
+        expect(output).not.toMatch(/│\s*c\s*│\s*d\s*│/);
+      },
+    );
+
+    it.each([80, 20])(
+      'agrees with height accounting after bare separators at width %s',
+      (contentWidth) => {
+        const lines = [
+          'prefix',
+          '| A | B |',
+          '| --- | --- |',
+          '--- | ---',
+          ':--- | ---:',
+          '| --- | --- |',
+          '| a | b |',
+          '--- | ---',
+          '| c | d |',
+          'Done.',
+        ];
+        const { lastFrame } = renderWithProviders(
+          <MarkdownDisplay
+            {...baseProps}
+            text={lines.join(eol)}
+            contentWidth={contentWidth}
+          />,
+        );
+        const output = stripAnsi(lastFrame() ?? '');
+        expect(output).toMatch(/(?:│\s*a\s*│\s*b\s*│|A: a)/);
+        const renderedRows = output.split('\n').length;
+        expect(
+          fitPendingSlice(lines, contentWidth, renderedRows, 1000),
+        ).toEqual({
+          keptLines: lines.length,
+          clipped: false,
+        });
+        expect(
+          fitPendingSlice(lines, contentWidth, renderedRows - 1, 1000),
+        ).toEqual({ keptLines: lines.length - 1, clipped: true });
       },
     );
 

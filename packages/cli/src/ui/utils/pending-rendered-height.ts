@@ -36,6 +36,11 @@ export const TABLE_ROW_RE = /^\s*\|(.+)\|\s*$/;
 /** A markdown table separator: `| --- | :--: |` etc. */
 export const TABLE_SEPARATOR_RE =
   /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
+
+export function isNonRowTableSeparator(line: string): boolean {
+  return !TABLE_ROW_RE.test(line) && TABLE_SEPARATOR_RE.test(line);
+}
+
 /** A fenced code block delimiter. Group 1 is the fence (``` or ~~~ run). */
 export const CODE_FENCE_RE = /^ *(`{3,}|~{3,}) *([^`]*)$/;
 
@@ -200,8 +205,16 @@ export function fitPendingSlice(
     }
     if (isTableStart(allLines, i)) {
       let j = i + 2;
-      while (j < allLines.length && TABLE_ROW_RE.test(allLines[j]!)) j++;
-      const dataRows = j - (i + 2);
+      const bodyRowIndices: number[] = [];
+      while (j < allLines.length) {
+        if (TABLE_ROW_RE.test(allLines[j]!)) {
+          bodyRowIndices.push(j);
+        } else if (!isNonRowTableSeparator(allLines[j]!)) {
+          break;
+        }
+        j++;
+      }
+      const dataRows = bodyRowIndices.length;
       // TableRenderer renders EITHER the horizontal format (each row as tall as
       // its tallest wrapped cell, + chrome) OR the vertical key-value format
       // (colCount label:value lines per row + a separator between rows +
@@ -253,9 +266,9 @@ export function fitPendingSlice(
       }
       contentRows += maxRowLines;
       // Data rows: sum every row's wrapped height, but anchor the vertical
-      // trigger to the header + FIRST data row only (r === i + 2) so appending
+      // trigger to the header + FIRST actual data row only so appending
       // rows never flips the format mid-stream.
-      for (let r = i + 2; r < j; r++) {
+      for (const [rowIndex, r] of bodyRowIndices.entries()) {
         const cells = splitMarkdownTableRow(
           TABLE_ROW_RE.exec(allLines[r]!)![1]!,
         );
@@ -270,7 +283,7 @@ export function fitPendingSlice(
           );
         }
         contentRows += rowMax;
-        if (r === i + 2) {
+        if (rowIndex === 0) {
           maxRowLines = Math.max(maxRowLines, rowMax);
         }
       }

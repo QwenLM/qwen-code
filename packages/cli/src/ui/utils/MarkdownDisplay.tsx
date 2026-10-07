@@ -19,6 +19,7 @@ import { useRenderMode } from '../contexts/RenderModeContext.js';
 import { parseCodeFenceInfo } from './markdownUtilities.js';
 import {
   fitPendingSlice,
+  isNonRowTableSeparator,
   splitMarkdownTableRow,
   TABLE_ROW_RE,
   TABLE_SEPARATOR_RE,
@@ -528,6 +529,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     } else if (inTable && index === tableSeparatorIndex) {
       // Parse alignment from separator line
       tableAligns = parseTableAligns(line);
+    } else if (inTable && isNonRowTableSeparator(line)) {
+      // Ignore legacy bare separators without resetting the initial alignment.
     } else if (
       isPending &&
       inTable &&
