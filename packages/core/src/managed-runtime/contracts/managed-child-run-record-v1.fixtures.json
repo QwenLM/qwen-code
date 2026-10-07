@@ -1650,6 +1650,22 @@
     {
       "template": "child_agent",
       "domain": "child_run",
+      "id": "agent-dispatched-without-runtime",
+      "patch": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "dispatchId": "dispatch-1",
+          "runtime": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "dispatch needs a Runtime binding"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
       "id": "agent-dispatched-without-definition",
       "patch": {
         "run": {

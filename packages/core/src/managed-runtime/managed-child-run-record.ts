@@ -527,6 +527,12 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
   if (childSessionId !== null && run.runtime === null) {
     fail('Child run childSessionId needs the Runtime binding that hosts it.');
   }
+  // A dispatch that never started (not_started_proven) may carry no
+  // binding; the dispatch itself may never lack one — the shared successor
+  // rules forbid adding it later, and the chain would never reach attach.
+  if (run.execution === 'dispatch_started' && run.runtime === null) {
+    fail('Child run dispatch needs a Runtime binding.');
+  }
   const predecessorChildRunId = nullable(body.predecessorChildRunId, (each) =>
     id(each, 'predecessorChildRunId'),
   );

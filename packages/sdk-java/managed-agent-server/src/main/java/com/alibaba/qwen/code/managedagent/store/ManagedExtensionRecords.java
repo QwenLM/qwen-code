@@ -876,6 +876,13 @@ public final class ManagedExtensionRecords {
         require(session.isNull() || !run.get("runtime").isNull(),
                 "Child run childSessionId needs the Runtime binding that"
                         + " hosts it");
+        // A dispatch that never started (not_started_proven) may carry no
+        // binding; the dispatch itself may never lack one — the shared
+        // successor rules forbid adding it later, and the chain would
+        // never reach attach.
+        require(!"dispatch_started".equals(execution)
+                || !run.get("runtime").isNull(),
+                "Child run dispatch needs a Runtime binding");
         JsonNode predecessor = child.get("predecessorChildRunId");
         if (!predecessor.isNull()) {
             id(predecessor, "predecessorChildRunId");
