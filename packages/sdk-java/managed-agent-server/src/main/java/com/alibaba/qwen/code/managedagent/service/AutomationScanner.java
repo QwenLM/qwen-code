@@ -82,7 +82,7 @@ public class AutomationScanner {
         this.owner = owner;
     }
 
-    @Scheduled(fixedDelayString =
+    @Scheduled(scheduler = "managedAutomationScheduler", fixedDelayString =
             "${qwen.managed-agent.automation.scan-delay:10s}")
     public void scan() {
         if (!settings.isEnabled()) {
@@ -332,6 +332,14 @@ public class AutomationScanner {
                 row.sessionId()))) {
             return REASON_SESSION_NOT_ACTIVE;
         }
+        // A public Turn waiting on the Session is retried by the dispatcher
+        // with backoff, while the wake pump starts a queued automation input
+        // the moment the Session idles: under any overlap policy a new fire
+        // would overtake the Turn, and a recurring definition could starve
+        // it indefinitely. The waiting Turn goes first.
+        if (store.hasOpenTurn(row.tenantId(), row.sessionId())) {
+            return REASON_OVERLAP;
+        }
         int active = store.countActive(row.tenantId(), row.scheduleId());
         return switch (row.overlap()) {
             case "queue_one" -> active < 2 ? null : REASON_OVERLAP;
@@ -407,12 +415,24 @@ public class AutomationScanner {
                 return false;
             }
             if ("automation_retired".equals(code)
-                    || "automation_not_found".equals(code)) {
+                    || "automation_not_found".equals(code)
+                    || "hosted_session_not_found".equals(code)) {
                 store.settleOccurrence(row.tenantId(), row.scheduleId(),
                         occurrence.occurrenceKey(),
                         AutomationLedgerStore.OUTCOME_SKIPPED,
                         REASON_DEFINITION_RETIRED, owner, fence, now);
                 store.retire(row.tenantId(), row.scheduleId(), now);
+                return false;
+            }
+            if (error.getStatusCode() >= 400 && error.getStatusCode() < 500) {
+                // A definitive refusal (mode gate closed, conflict, a body
+                // the route rejects): settle the decision instead of
+                // re-driving it into `unknown` — the answer was obtained.
+                store.settleOccurrence(row.tenantId(), row.scheduleId(),
+                        occurrence.occurrenceKey(),
+                        AutomationLedgerStore.OUTCOME_SKIPPED,
+                        code == null ? "automation_refused" : code, owner,
+                        fence, now);
                 return false;
             }
             throw error;

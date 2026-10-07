@@ -45,6 +45,7 @@ import {
   MANAGED_SESSION_LIMITS,
   MANAGED_SESSION_MINIMUM_READER,
   ManagedSessionRecordError,
+  ManagedSessionWritesStoppedError,
   assertManagedSessionDigest,
   assertManagedSessionDomainEnabled,
   assertManagedSessionScheduleSessionModeEnabled,
@@ -2382,9 +2383,7 @@ export class LocalManagedSessionAuthority {
 
   private assertCommandWritable(command: ManagedSessionCommand): void {
     if (this.writeFailure !== undefined) {
-      throw new ManagedSessionRecordError(
-        `session log writes stopped after an earlier failure: ${this.writeFailure.message}`,
-      );
+      throw new ManagedSessionWritesStoppedError(this.writeFailure);
     }
     if (!managedSessionKeysEqual(command.sessionKey, this.sessionKey)) {
       throw new ManagedSessionConflictError(

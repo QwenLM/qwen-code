@@ -404,6 +404,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             // the Workspace checks submit and continueManagedRuntime run
             // apply to every relay.
             requireReadyForNewWork(tenantId, sessionId);
+            if (!attachments.containsKey(new AttachmentKey(tenantId, sessionId))
+                    && sessions.requireSession(tenantId, sessionId)
+                            .harnessBootId() != null) {
+                // A Session a prior control-plane process attached: a plain
+                // load answers hosted_session_already_attached until the
+                // Harness evicts it, so re-attach through the takeover load
+                // a Turn uses (HarnessCoordinator.runClaimed).
+                recoverManagedRuntime(tenantId, sessionId, false);
+            }
             return client().runAutomationOperation(
                     attachment(tenantId, sessionId, true), body);
         } catch (HostedHarnessGenerationException error) {

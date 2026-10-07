@@ -455,6 +455,55 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @Test
+    void automationOperationReattachesAPreviouslyAttachedSessionThroughTakeover() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        SessionRecord session = mock(SessionRecord.class);
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        when(execution.verifiedRecoveryEnabled()).thenReturn(true);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        when(session.tenantId()).thenReturn("tenant-a");
+        when(session.sessionId()).thenReturn(SESSION_ID);
+        // Attached before by a process this one never saw.
+        when(session.harnessBootId()).thenReturn(BOOT_ID);
+        when(session.workspace()).thenReturn(new ContextBinding("tenant-a", "workspace", 1,
+                "storage", ".", "config", 1));
+        when(session.toolProfile()).thenReturn("hosted-workspace-files/1");
+        when(client.loadSession(any(LoadHarnessSession.class))).thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
+        when(client.runAutomationOperation(any(), any())).thenReturn(Map.of(
+                "state", "settled", "replayed", true));
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        Map<String, Object> fire = Map.of("operationId",
+                "66666666-6666-4666-8666-666666666666", "kind", "fire_run",
+                "scheduleId", "asch_0123456789abcdef0123456789abcdef",
+                "definitionRevision", 1L, "occurrenceKey",
+                "schedule:2026-06-01T10:00:00Z", "trigger", "scheduled",
+                "firedAt", 1L);
+        connector.runAutomationOperation("tenant-a", SESSION_ID, fire);
+
+        // The dead boot's plain load would answer
+        // hosted_session_already_attached: the relay went through the
+        // takeover load a Turn would take, once, and then the operation.
+        ArgumentCaptor<LoadHarnessSession> loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client, times(1)).loadSession(loads.capture());
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(
+                loads.getValue(), "toJson"))
+                .containsEntry("driveRuntimeRecovery", true);
+        verify(client).runAutomationOperation(any(), any());
+    }
+
+    @Test
     void resolvesActionsThroughAuthorizedColdAndCachedWorkspaceAttachments() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);

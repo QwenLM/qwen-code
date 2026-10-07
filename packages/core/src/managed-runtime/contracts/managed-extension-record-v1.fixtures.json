@@ -8168,7 +8168,7 @@
     },
     {
       "id": "failed-with-unknown-outcome",
-      "valid": false,
+      "valid": true,
       "run": {
         "state": "failed",
         "reason": null,

@@ -22,6 +22,17 @@ public class ManagedArtifactConfiguration {
     }
 
     /**
+     * The automation scanner relays each fire to the Hosted Harness over
+     * blocking HTTP (up to the Harness request timeout per call), so it must
+     * not share the one-thread default pool with the message materializer
+     * and the dispatch and lifecycle recovery ticks.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler managedAutomationScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("managed-automation-").build();
+    }
+
+    /**
      * The recovery tick runs blocking JDBC, so it must never share the
      * one-thread default pool. Gated exactly like the Broker bean that carries
      * the tick: a deployment with the Broker off must not pay for an idle

@@ -2898,7 +2898,7 @@
       "post": {
         "tags": ["Public Resources"],
         "operationId": "createAgentAutomation",
-        "description": "Creates a definition under its target Session, which the caller must have created: the prompt is published as a Session resource and definition revision 1 commits in the Session journal before the answer. The same Idempotency-Key with the same body replays the original definition; a different body answers 409 idempotency_conflict. Only the persistent target mode is admitted (409 automation_mode_disabled otherwise); an unknown timezone answers 400 automation_timezone_unknown; a Session holds at most 32 live definitions (409 automation_count_limit). 409 automation_unavailable when the deployment has not enabled automation.",
+        "description": "Creates a definition under its target Session, which the caller must have created: the prompt is published as a Session resource and definition revision 1 commits in the Session journal before the answer. The same Idempotency-Key with the same body replays the original definition; a different body answers 409 idempotency_conflict. Only the persistent target mode is admitted (409 automation_mode_disabled otherwise); a missing session_id or required field, a prompt over 64 KiB, or an invalid cron answers 400 invalid_automation; an unknown timezone answers 400 automation_timezone_unknown; a Session holds at most 32 live definitions (409 automation_count_limit). 409 automation_unavailable when the deployment has not enabled automation.",
         "x-qwen-implementation-status": "partial",
         "parameters": [
           {
@@ -2910,7 +2910,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AutomationDefinitionRequest"
+                "$ref": "#/components/schemas/AutomationDefinitionCreateRequest"
               }
             }
           }
@@ -2948,6 +2948,9 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -2995,7 +2998,7 @@
       "post": {
         "tags": ["Public Resources"],
         "operationId": "updateAgentAutomation",
-        "description": "Appends the next definition revision from the fields given; omitted fields keep their committed values and session_id and session_mode cannot change. Content whose digest equals the current revision appends nothing and answers it. The same Idempotency-Key and body replay the recorded answer. A retired definition answers 409 automation_retired.",
+        "description": "Appends the next definition revision from the fields given; omitted fields keep their committed values and session_id and session_mode cannot change. Content whose digest equals the current revision appends nothing and answers it. The same Idempotency-Key and body replay the recorded answer. A retired definition answers 409 automation_retired. A disallowed session_id change, an oversized prompt, or an invalid cron answers 400 invalid_automation.",
         "x-qwen-implementation-status": "partial",
         "parameters": [
           {
@@ -3045,6 +3048,9 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       },
@@ -3088,6 +3094,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -3108,7 +3117,7 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "listAgentAutomationRuns",
-        "description": "Occurrences of the definition, newest first (created_at descending, then id descending): fired occurrences with their run's task state, skipped and missed occurrences with their reason, and a firing occurrence whose answer is not recorded yet. 404 automation_not_found when the definition is absent or outside the caller's scope. 400 invalid_cursor on a malformed cursor, 400 invalid_limit when limit is outside 1 to 100.",
+        "description": "Occurrences of the definition, newest first (created_at descending, then occurrence_key descending): fired occurrences with their run's task state, skipped occurrences with their reason (missed occurrences carry none), and a firing occurrence whose answer is not recorded yet. 404 automation_not_found when the definition is absent or outside the caller's scope. 400 invalid_cursor on a malformed cursor, 400 invalid_limit when limit is outside 1 to 100.",
         "x-qwen-implementation-status": "partial",
         "parameters": [
           {
@@ -3146,7 +3155,7 @@
       "post": {
         "tags": ["Public Resources"],
         "operationId": "runAgentAutomation",
-        "description": "Fires a manual run now: the Idempotency-Key is the occurrence (manual:<key>), so a retry answers the same run and never fires twice; the run id is derived from the definition and the occurrence. The overlap policy applies to a manual run as it does to a scheduled one, and a dropped run answers 409 automation_run_skipped with the reason. A disabled definition still runs manually; a retired one answers 409 automation_retired.",
+        "description": "Fires a manual run now: the Idempotency-Key is the occurrence (manual:<key>), so a retry answers the same run and never fires twice; the run id is derived from the definition and the occurrence. The overlap policy applies to a manual run as it does to a scheduled one, and a dropped run answers 409 automation_run_skipped with the reason. A disabled definition still runs manually; a retired one answers 409 automation_retired. While a scanner tick holds the definition's lease the answer is 409 automation_busy (retryable).",
         "x-qwen-implementation-status": "partial",
         "parameters": [
           {
@@ -3183,6 +3192,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -9370,6 +9382,16 @@
         "description": "firing is a claimed occurrence whose Harness answer is not recorded yet and is re-driven with bounded backoff; fired committed a run; skipped and missed never did; unknown is a claim whose answer stayed unobtainable past the retry bound and is never re-driven.",
         "x-qwen-implementation-status": "partial"
       },
+      "AutomationDefinitionCreateRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AutomationDefinitionRequest"
+          },
+          {
+            "required": ["session_id", "goal", "cron", "timezone", "prompt"]
+          }
+        ]
+      },
       "AutomationDefinitionRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -9383,7 +9405,8 @@
           "goal": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 4096
+            "maxLength": 4096,
+            "description": "At most 4096 UTF-8 bytes (measured as bytes, not code points; control characters are refused)."
           },
           "cron": {
             "type": "string",
@@ -9400,7 +9423,8 @@
           "prompt": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 65536
+            "maxLength": 65536,
+            "description": "At most 65536 UTF-8 bytes (measured as bytes); the final wrapped execution input must also fit the Session store's 65536-byte inline resource bound, so the effective prompt budget is tighter once escaping and framing are counted."
           },
           "session_mode": {
             "$ref": "#/components/schemas/AutomationSessionMode"
@@ -9415,12 +9439,48 @@
             "type": ["integer", "null"],
             "format": "int64",
             "minimum": 1,
-            "description": "Set exactly for bounded catch-up."
+            "description": "Set exactly for bounded catch-up: bounded requires one, any other policy clears it."
           },
           "enabled": {
             "type": "boolean"
           }
         },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "catch_up": {
+                  "const": "bounded"
+                }
+              },
+              "required": ["catch_up"]
+            },
+            "then": {
+              "properties": {
+                "catch_up_limit": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "catch_up": {
+                  "enum": ["none", "latest"]
+                }
+              },
+              "required": ["catch_up"]
+            },
+            "then": {
+              "properties": {
+                "catch_up_limit": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ],
         "x-qwen-implementation-status": "partial"
       },
       "PublicAutomation": {
@@ -9509,6 +9569,43 @@
             "description": "Unix epoch milliseconds."
           }
         },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "catch_up": {
+                  "const": "bounded"
+                }
+              },
+              "required": ["catch_up"]
+            },
+            "then": {
+              "required": ["catch_up_limit"],
+              "properties": {
+                "catch_up_limit": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "catch_up": {
+                  "enum": ["none", "latest"]
+                }
+              },
+              "required": ["catch_up"]
+            },
+            "then": {
+              "properties": {
+                "catch_up_limit": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ],
         "x-qwen-implementation-status": "partial"
       },
       "PublicAutomationList": {
@@ -9619,8 +9716,13 @@
             "minimum": 1
           },
           "state": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskState"
+              }
+            ],
             "type": ["string", "null"],
-            "description": "The run's task state once the run committed: pending, running, degraded, completed, failed, cancelled or recovery_blocked."
+            "description": "The run's task state once the run committed; null until its record is visible."
           },
           "created_at": {
             "type": "integer",

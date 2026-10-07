@@ -24,6 +24,7 @@ import {
   automationInputId,
   automationRunClaimBody,
   automationRunDispatchBody,
+  automationRunFailedUnknownBody,
   automationRunId,
   automationRunIdOfInput,
   automationRunSettleBody,
@@ -521,6 +522,30 @@ export class HostedAutomationSession {
    */
   settleRun(turnId: string): Promise<AutomationRun | undefined> {
     return this.serial(() => this.settleRunUnserialized(turnId));
+  }
+
+  /**
+   * The turn an automation input was dispatched into stopped in a way the
+   * journal proves neither way (the Harness crashed inside it and its
+   * wake classifies as recovery): the run ends `failed` with an
+   * `outcome_unknown` execution. Calling twice settles nothing more.
+   */
+  settleRunFailedUnknown(turnId: string): Promise<AutomationRun | undefined> {
+    return this.serial(async () => {
+      const runId = automationRunIdOfInput(turnId);
+      if (runId === undefined) return undefined;
+      const run = this.run(runId);
+      if (
+        run === undefined ||
+        isTerminalRunState(run.run.state) ||
+        run.run.execution !== 'dispatch_started'
+      ) {
+        return undefined;
+      }
+      const settled = automationRunFailedUnknownBody(run);
+      await this.commitRun(settled, this.revisionOf(runId) + 1, 'settleRun');
+      return settled;
+    });
   }
 
   private async settleRunUnserialized(

@@ -414,13 +414,20 @@ public final class ManagedExtensionRecords {
         require(!"reserved".equals(state)
                 || execution == null && delivery.isNull(),
                 "run has nothing dispatched while reserved");
-        require(!"outcome_unknown".equals(execution)
-                && !"corrupt".equals(execution)
-                || "recovery_blocked".equals(state),
+        // The one failure that needs no proof: the run stopped inside its
+        // turn, so `failed` names the turn and `outcome_unknown` names what
+        // could not be known, and the pair stays visible (F3).
+        require(!("outcome_unknown".equals(execution)
+                        || "corrupt".equals(execution))
+                || "recovery_blocked".equals(state)
+                || "outcome_unknown".equals(execution)
+                        && "failed".equals(state),
                 "run stays recovery_blocked while its execution is unproven");
         require(!TERMINAL.contains(state) || execution == null
                 || "settled".equals(execution)
-                || "not_started_proven".equals(execution),
+                || "not_started_proven".equals(execution)
+                || "failed".equals(state)
+                        && "outcome_unknown".equals(execution),
                 "run ends only with an execution proven to have ended");
         require(!"settled".equals(state)
                 || !"not_started_proven".equals(execution),

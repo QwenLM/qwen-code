@@ -60,10 +60,14 @@ export interface HostedMonitorWakeDeps {
    * when the owner took a turn synchronously between the pump's state
    * check and this call — the pump retries; anything else must consume
    * the input (the pump verifies the settle before taking the next one).
+   * 'recovery' says the turn stopped in a way the journal cannot prove
+   * either way — its trackers settle it for cause, never re-run it.
    * The busy claim must be checked and taken synchronously at the top of
    * the call so a prompt route admission cannot interleave.
    */
-  runTurn(turn: HostedMonitorWakeTurn): Promise<'settled' | 'busy'>;
+  runTurn(
+    turn: HostedMonitorWakeTurn,
+  ): Promise<'settled' | 'busy' | 'recovery'>;
   /** A failure the pump itself cannot recover: the owner decides. */
   failed(cause: unknown): void;
 }
@@ -184,13 +188,18 @@ export async function settlePendingMonitorInputs(params: {
   // default page and leave the Session's owed inputs unsettled — which is
   // exactly the wedge this close-path settle exists to prevent.
   const authority = params.authority;
-  const attempted = await params.sink.project();
-  const pending = pendingSessionInputs(
+  const queued = pendingSessionInputs(
     authority.eventsInSequenceRange(1, authority.committedSequence),
-  ).filter(
-    (input) =>
-      sources.includes(input.source) &&
-      !wakeHasPriorAttempt(attempted, input.turnId),
+  ).filter((input) => sources.includes(input.source));
+  // A close over no such input pays no transcript projection at all: every
+  // close path induced by an attached Session would otherwise page the
+  // whole committed prefix.
+  if (queued.length === 0) {
+    return 0;
+  }
+  const attempted = await params.sink.project();
+  const pending = queued.filter(
+    (input) => !wakeHasPriorAttempt(attempted, input.turnId),
   );
   for (const input of pending) {
     const settle: ChatRecord = {

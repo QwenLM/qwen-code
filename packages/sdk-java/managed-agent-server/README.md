@@ -359,15 +359,15 @@ land. Design:
 
 All settings below use the `qwen.managed-agent.automation` prefix:
 
-| Setting              | Default | Meaning                                                                                                                             |
-| -------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`            | `false` | Run the scanner and admit the mutation routes (`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`); the read routes answer either way.         |
-| `scan-delay`         | `10s`   | Fixed delay between scanner ticks.                                                                                                  |
-| `lease`              | `60s`   | How long one scanner holds a definition; a stalled scanner yields it afterwards, and the fence it held no longer writes.            |
-| `late-tolerance`     | `5m`    | A slot older than this when the scanner sees it is late and follows the definition's catch-up policy (`none`, `latest`, `bounded`). |
-| `lookback`           | `24h`   | Slots older than this are neither fired nor recorded; it bounds every catch-up by age.                                              |
-| `max-slots-per-tick` | `1000`  | Slots enumerated per definition per tick; a wider window is cut at its oldest end and logged.                                       |
-| `concurrency`        | `4`     | Non-terminal runs an `allow` definition may hold at once; beyond it an occurrence is recorded `skipped` with reason `count_limit`.  |
+| Setting              | Default | Meaning                                                                                                                                                                                            |
+| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`            | `false` | Run the scanner and admit the mutation routes (`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`); the read routes answer either way.                                                                        |
+| `scan-delay`         | `10s`   | Fixed delay between scanner ticks.                                                                                                                                                                 |
+| `lease`              | `60s`   | How long one scanner holds a definition; a stalled scanner yields it afterwards, and the fence it held no longer writes.                                                                           |
+| `late-tolerance`     | `5m`    | A slot older than this when the scanner sees it is late and follows the definition's catch-up policy (`none`, `latest`, `bounded`).                                                                |
+| `lookback`           | `24h`   | Slots older than this are neither fired nor recorded; it bounds every catch-up by age.                                                                                                             |
+| `max-slots-per-tick` | `1000`  | Slots **returned** per definition per tick: the walk itself follows the lookback window (its minutes are enumerated regardless), and the result set's surplus is cut at the oldest end and logged. |
+| `concurrency`        | `4`     | Non-terminal runs an `allow` definition may hold at once; beyond it an occurrence is recorded `skipped` with reason `count_limit`.                                                                 |
 
 ## Full WebShell dual-path development entry
 

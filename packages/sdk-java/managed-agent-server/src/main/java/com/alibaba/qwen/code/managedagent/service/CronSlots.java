@@ -115,7 +115,11 @@ public final class CronSlots {
     }
 
     private static long parseLong(String text, String atom) {
-        if (text.isEmpty() || !text.chars().allMatch(Character::isDigit)
+        // The contract grammar takes ASCII digits only: Character.isDigit
+        // admits (and Long.parseLong resolves) ARABIC-INDIC and other
+        // UNICODE digits the paired validators refuse.
+        if (text.isEmpty() || !text.chars()
+                .allMatch(ch -> ch >= '0' && ch <= '9')
                 || text.length() > 10) {
             throw new IllegalArgumentException("cron atom " + atom + " is malformed.");
         }

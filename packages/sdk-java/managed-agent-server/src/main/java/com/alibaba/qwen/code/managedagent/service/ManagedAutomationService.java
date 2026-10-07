@@ -151,7 +151,10 @@ public class ManagedAutomationService {
         requireScheduleId(automationId);
         Map<String, Object> definition = definition(request, false);
         String requestDigest = digests.digest(Map.of("operation", "update",
-                "automationId", automationId, "definition", definition));
+                "automationId", automationId,
+                "sessionId", request.sessionId() == null ? ""
+                        : request.sessionId(),
+                "definition", definition));
         Optional<Result<PublicAutomation>> replay = replay(tenantId, actorId,
                 idempotencyKey, requestDigest, PublicAutomation.class);
         if (replay.isPresent()) {
@@ -267,6 +270,18 @@ public class ManagedAutomationService {
                     // with backoff; the same key answers it once known.
                     scanner.defer(held, occurrence, owner, fence, error, now);
                     throw unobtained(error);
+                }
+                // A definitive route refusal settles the decision as
+                // skipped under the claim: the first attempt is told so.
+                if (AutomationLedgerStore.OUTCOME_SKIPPED.equals(
+                        ledger.findOccurrence(tenantId, automationId,
+                                occurrenceKey).orElse(occurrence).outcome())) {
+                    String reason = ledger.findOccurrence(tenantId,
+                            automationId, occurrenceKey).orElse(occurrence)
+                            .reason();
+                    throw new ApiException(HttpStatus.CONFLICT,
+                            "automation_run_skipped",
+                            "The manual run was skipped: " + reason + ".");
                 }
             }
         } finally {

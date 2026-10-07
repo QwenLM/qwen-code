@@ -26,6 +26,14 @@ class CronSlotsTest {
             .ofPattern("uuuu-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
 
     @Test
+    void refusesUnicodeDigitsTheContractWay() {
+        // The contract grammar takes ASCII digits only: ARABIC-INDIC and
+        // other UNICODE digits that Character.isDigit admits are refused.
+        assertThatThrownBy(() -> CronSlots.compile("٣ * * * *"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void replaysEverySharedSlotCase() throws IOException {
         JsonNode fixtures = fixtures();
         assertThat(fixtures.required("contract").asText())

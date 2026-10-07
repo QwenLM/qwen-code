@@ -8,7 +8,8 @@
     "America/New_York",
     "Europe/Paris",
     "Australia/Lord_Howe",
-    "America/Santiago"
+    "America/Santiago",
+    "Pacific/Apia"
   ],
   "rules": [
     "Slots are whole UTC minutes in (after, until]; after is exclusive and until inclusive.",
@@ -353,6 +354,54 @@
         "2026-09-06T04:00:00Z",
         "2026-09-07T03:30:00Z"
       ],
+      "truncated": false
+    },
+    {
+      "id": "apia-dateline-shift-daily-noon",
+      "cron": "0 12 * * *",
+      "timezone": "Pacific/Apia",
+      "after": "2011-12-27T00:00:00Z",
+      "until": "2012-01-03T00:00:00Z",
+      "limit": 1000,
+      "note": "local 2011-12-30 never occurs (the 2011-12-29 -> 2011-12-31 date-line jump); the 12:00 of the skipped day fires at 2011-12-30T10:00Z, the first valid instant after it",
+      "slots": [
+        "2011-12-27T22:00:00Z",
+        "2011-12-28T22:00:00Z",
+        "2011-12-29T22:00:00Z",
+        "2011-12-30T10:00:00Z",
+        "2011-12-30T22:00:00Z",
+        "2011-12-31T22:00:00Z",
+        "2012-01-01T22:00:00Z",
+        "2012-01-02T22:00:00Z"
+      ],
+      "truncated": false
+    },
+    {
+      "id": "apia-dateline-gap-dedup",
+      "cron": "30 12 * * *",
+      "timezone": "Pacific/Apia",
+      "after": "2011-12-28T00:00:00Z",
+      "until": "2012-01-01T00:00:00Z",
+      "limit": 1000,
+      "note": "every 12:30 of the skipped 2011-12-30 collapses into the same 2011-12-30T10:00Z first instant, and exactly one slot is kept",
+      "slots": [
+        "2011-12-28T22:30:00Z",
+        "2011-12-29T22:30:00Z",
+        "2011-12-30T10:00:00Z",
+        "2011-12-30T22:30:00Z",
+        "2011-12-31T22:30:00Z"
+      ],
+      "truncated": false
+    },
+    {
+      "id": "apia-dateline-gap-only-skipped",
+      "cron": "0 0 30 12 *",
+      "timezone": "Pacific/Apia",
+      "after": "2011-12-28T00:00:00Z",
+      "until": "2012-01-02T00:00:00Z",
+      "limit": 1000,
+      "note": "only a minute inside the whole skipped day matches: one slot at the first instant after it",
+      "slots": ["2011-12-30T10:00:00Z"],
       "truncated": false
     }
   ],

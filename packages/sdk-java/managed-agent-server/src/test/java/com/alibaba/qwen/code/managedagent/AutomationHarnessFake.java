@@ -34,6 +34,8 @@ public final class AutomationHarnessFake {
             new LinkedHashMap<>();
     /** A test seam: thrown once by the next fire_run, then cleared. */
     public volatile RuntimeException failNextFire;
+    /** A test seam: the next fire_run commits its run, then loses its answer. */
+    public volatile RuntimeException failAfterNextFireCommit;
     /**
      * A test seam: the next define_schedule commits (its operation, too)
      * and then has its answer lost once.
@@ -151,6 +153,20 @@ public final class AutomationHarnessFake {
                     failNextFire = null;
                     throw failure;
                 }
+                String occurrenceKey = String.valueOf(body.get("occurrenceKey"));
+                String runId = AutomationLedgerStore.automationRunId(scheduleId,
+                        occurrenceKey);
+                // The order the funnel keeps: a committed run answers
+                // first — whatever the definition did since.
+                Map<String, Object> existing = runs.get(sessionId + "|"
+                        + runId);
+                if (existing != null) {
+                    result.put("run", new LinkedHashMap<>(existing));
+                    result.put("inputId", AutomationLedgerStore
+                            .automationInputId(runId));
+                    result.put("replayed", true);
+                    break;
+                }
                 Map<String, Object> schedule = schedules.get(key);
                 if (schedule == null) {
                     throw refusal(404, "automation_not_found");
@@ -163,10 +179,6 @@ public final class AutomationHarnessFake {
                 if (offered != (Long) schedule.get("definitionRevision")) {
                     throw refusal(409, "automation_revision_stale");
                 }
-                String occurrenceKey = String.valueOf(body.get("occurrenceKey"));
-                String runId = AutomationLedgerStore.automationRunId(scheduleId,
-                        occurrenceKey);
-                boolean replayed = runs.containsKey(sessionId + "|" + runId);
                 Map<String, Object> run = runs.computeIfAbsent(
                         sessionId + "|" + runId, ignored -> {
                             Map<String, Object> created = new LinkedHashMap<>();
@@ -178,10 +190,15 @@ public final class AutomationHarnessFake {
                             created.put("execution", "dispatch_started");
                             return created;
                         });
+                RuntimeException lost = failAfterNextFireCommit;
+                if (lost != null) {
+                    failAfterNextFireCommit = null;
+                    throw lost;
+                }
                 result.put("run", new LinkedHashMap<>(run));
                 result.put("inputId", AutomationLedgerStore
                         .automationInputId(runId));
-                result.put("replayed", replayed);
+                result.put("replayed", false);
             }
             default -> throw refusal(400, "invalid_automation_operation");
         }

@@ -9,7 +9,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import type {
+  ChatRecord,
+  TurnResultRecordPayload,
+} from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
@@ -23,6 +26,7 @@ import {
   automationInputId,
   automationRunClaimBody,
   automationRunId,
+  decodeAutomationInputEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { settlePendingMonitorInputs } from './hosted-monitor-wake.js';
@@ -174,13 +178,19 @@ function turnRecord(
       role: type === 'user' ? 'user' : 'model',
       parts: [{ text: 'x' }],
     },
-  } as unknown as ChatRecord;
+  };
 }
 
 function turnResult(
   turnId: string,
   state: 'completed' | 'error' | 'cancelled',
 ): ChatRecord {
+  const systemPayload: TurnResultRecordPayload = {
+    promptId: turnId,
+    state,
+    stopReason: state === 'completed' ? 'end_turn' : state,
+    endedAt: Date.now(),
+  };
   return {
     uuid: randomUUID(),
     parentUuid: null,
@@ -190,13 +200,8 @@ function turnResult(
     cwd: '/workspace',
     version: 'hosted-harness/1',
     subtype: 'turn_result',
-    systemPayload: {
-      promptId: turnId,
-      state,
-      stopReason: state === 'completed' ? 'end_turn' : state,
-      endedAt: Date.now(),
-    },
-  } as unknown as ChatRecord;
+    systemPayload,
+  };
 }
 
 describe('hosted automation definitions', () => {
@@ -652,6 +657,33 @@ describe('hosted automation definitions', () => {
       expect(honest.schedule.goal).toBe('Pinned goal');
     });
   });
+
+  it('answers a retried mutation with the record revision, not the domain counter', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (automations, authority) => {
+      const createA = randomUUID();
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: createA,
+        definition,
+      });
+      // A second definition moves the per-domain counter away from the
+      // first record's own revision.
+      await automations.define({
+        scheduleId: `asch_${'e'.repeat(32)}`,
+        operationId: randomUUID(),
+        definition,
+      });
+      expect(authority.domainRecord('schedule')?.revision).toBe(2);
+      const retried = await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: createA,
+        definition,
+      });
+      expect(retried.replayed).toBe(true);
+      expect(retried.revision).toBe(1);
+    });
+  });
 });
 
 describe('hosted automation runs', () => {
@@ -684,16 +716,20 @@ describe('hosted automation runs', () => {
       const [pending] = pendingSessionInputs(events);
       expect(pending?.source).toBe(AUTOMATION_INPUT_SOURCE);
       expect(pending?.turnId).toBe(fired.inputId);
-      const envelope = JSON.parse(
-        (
-          await harness.store.read(
-            assertManagedSessionDurableRef(
-              pending!.contentRef,
-              'automation input contentRef',
-            ),
-          )
-        ).toString('utf8'),
-      ) as { text: string; occurrenceKey: string; trigger: string };
+      // The committed envelope decodes under its own contract, so the
+      // journal's input is one any conforming reader can take.
+      const envelope = decodeAutomationInputEnvelope(
+        await harness.store.read(
+          assertManagedSessionDurableRef(
+            pending!.contentRef,
+            'automation input contentRef',
+          ),
+        ),
+      );
+      expect(envelope.automationRunId).toBe(fired.run.automationRunId);
+      expect(envelope.scheduleId).toBe(SCHEDULE_ID);
+      expect(envelope.definitionRevision).toBe(1);
+      expect(envelope.firedAt).toBe(fireParams().firedAt);
       expect(envelope.occurrenceKey).toBe(SLOT_KEY);
       expect(envelope.trigger).toBe('scheduled');
       expect(envelope.text).toContain('Scheduled automation: Nightly build');
@@ -820,6 +856,41 @@ describe('hosted automation runs', () => {
         }),
       ).rejects.toThrow(AutomationRetiredError);
       expect(automations.runs()).toHaveLength(1);
+    });
+  });
+
+  it('fails a run whose turn stopped unproven, once, with execution unknown', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (automations, authority) => {
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
+        definition,
+      });
+      const fired = await automations.fire(fireParams());
+      const before = authority.committedSequence;
+      const failed = await automations.settleRunFailedUnknown(fired.inputId);
+      expect(failed?.run.state).toBe('failed');
+      expect(failed?.run.execution).toBe('outcome_unknown');
+      expect(failed?.automationRunId).toBe(fired.run.automationRunId);
+      expect(
+        authority
+          .eventsInSequenceRange(before + 1, authority.committedSequence)
+          .map((event) => event.kind),
+      ).toEqual(['domain.committed']);
+      // Terminal and idempotent: calling again, reconciling, or reading the
+      // turn result commits nothing more.
+      expect(
+        await automations.settleRunFailedUnknown(fired.inputId),
+      ).toBeUndefined();
+      expect(await automations.settleRun(fired.inputId)).toBeUndefined();
+      expect(await automations.reconcileRuns()).toEqual([]);
+      expect(authority.committedSequence).toBe(before + 1);
+      // The slot frees at once: the definition fires its next occurrence.
+      const next = await automations.fire(
+        fireParams(1, 'schedule:2026-03-08T07:01:00Z'),
+      );
+      expect(next.run.run.state).toBe('running');
     });
   });
 

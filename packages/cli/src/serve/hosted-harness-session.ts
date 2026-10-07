@@ -58,7 +58,9 @@ import type {
   ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
+  ManagedSessionModeGateError,
   ManagedSessionRecordError,
+  ManagedSessionWritesStoppedError,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -2376,7 +2378,7 @@ export function registerHostedHarnessSessionRoutes(
               }
             };
             return async (turn) => {
-              let outcome: 'settled' | 'busy';
+              let outcome: 'settled' | 'busy' | 'recovery';
               try {
                 outcome = await runWakeTurn(turn);
               } catch (cause) {
@@ -2386,11 +2388,25 @@ export function registerHostedHarnessSessionRoutes(
                   await settleAutomation(turn.turnId);
                 throw cause;
               }
-              if (
-                outcome === 'settled' &&
-                turn.source === AUTOMATION_INPUT_SOURCE
-              )
-                await settleAutomation(turn.turnId);
+              if (turn.source === AUTOMATION_INPUT_SOURCE) {
+                if (outcome === 'recovery') {
+                  // The turn stopped in a way the journal proves neither
+                  // way (a Harness crash inside it, or a prior attempt the
+                  // pump must not re-drive): the run fails, its execution
+                  // outcome unknown — or its definition never fires again.
+                  try {
+                    await session.automations?.settleRunFailedUnknown(
+                      turn.turnId,
+                    );
+                  } catch (cause) {
+                    writeStderrLineSafe(
+                      `qwen serve: Hosted automation run of turn ${turn.turnId} could not be settled failed/unknown: ${String(cause)}`,
+                    );
+                  }
+                } else if (outcome === 'settled') {
+                  await settleAutomation(turn.turnId);
+                }
+              }
               return outcome;
             };
           })(),
@@ -4639,22 +4655,21 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 404, 'automation_not_found', message);
       if (cause instanceof AutomationQuotaError)
         return error(res, 409, 'automation_count_limit', message);
-      if (message.includes('is not enabled for submission'))
+      if (cause instanceof ManagedSessionModeGateError)
         return error(res, 409, 'automation_mode_disabled', message);
-      if (
-        cause instanceof ManagedSessionRecordError &&
-        !(cause instanceof ManagedSessionConflictError)
-      )
-        return error(res, 400, 'invalid_automation_operation', message);
-      if (
-        message.includes('cannot follow') ||
-        message.includes('already') ||
-        message.includes('must bind') ||
-        message.includes('must be derived') ||
-        message.includes('must be this Session')
-      ) {
-        return error(res, 409, 'automation_operation_conflict', message);
+      // Typed classification, no message substrings: a dead writer is not a
+      // client address error, every other conflict class is a conflict, and
+      // a plain record error is the request's shape.
+      if (cause instanceof ManagedSessionWritesStoppedError) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted automation operation ${String(kind)} of session ${req.params['id']} found the journal dead: ${message}`,
+        );
+        return error(res, 503, 'automation_operation_failed', message);
       }
+      if (cause instanceof ManagedSessionConflictError)
+        return error(res, 409, 'automation_operation_conflict', message);
+      if (cause instanceof ManagedSessionRecordError)
+        return error(res, 400, 'invalid_automation_operation', message);
       writeStderrLineSafe(
         `qwen serve: Hosted automation operation ${String(kind)} of session ${req.params['id']} failed: ${message}`,
       );

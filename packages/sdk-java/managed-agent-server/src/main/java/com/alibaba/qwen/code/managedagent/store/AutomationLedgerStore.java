@@ -513,6 +513,15 @@ public class AutomationLedgerStore {
         return count == null ? 0 : count;
     }
 
+    /** Whether a public Turn of the Session has not ended yet. */
+    public boolean hasOpenTurn(String tenantId, String sessionId) {
+        return !jdbc.queryForList("SELECT 1 FROM managed_agent_turn"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')"
+                        + " LIMIT 1", Integer.class, tenantId, sessionId)
+                .isEmpty();
+    }
+
     /** One occurrence with its run's task state, when one committed. */
     public Optional<OccurrenceView> findOccurrenceView(String tenantId,
             String scheduleId, String occurrenceKey) {

@@ -432,6 +432,24 @@ export function automationRunDispatchBody(
   });
 }
 
+/**
+ * The terminal revision of a run the Harness stopped inside its turn:
+ * whether any execution happened is unknowable from the journal, so the
+ * execution ends `outcome_unknown` rather than guessed either way.
+ */
+export function automationRunFailedUnknownBody(
+  previous: AutomationRun,
+): AutomationRun {
+  return Object.freeze({
+    ...previous,
+    run: Object.freeze({
+      ...previous.run,
+      state: 'failed' as const,
+      execution: 'outcome_unknown' as const,
+    }),
+  });
+}
+
 export type AutomationRunOutcome = 'settled' | 'failed' | 'cancelled';
 
 /**

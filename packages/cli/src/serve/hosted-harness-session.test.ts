@@ -878,7 +878,9 @@ describe('Hosted Harness no-tool session', () => {
     expect(settled[0]!.payload['outcome']).toBe('completed');
   });
 
-  async function prewriteAutomationSession(): Promise<string> {
+  async function prewriteAutomationSession(
+    toolProfile?: string,
+  ): Promise<string> {
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -908,7 +910,11 @@ describe('Hosted Harness no-tool session', () => {
         definitionRef: await resources.publish(
           'managed-definition',
           Buffer.from(
-            JSON.stringify({ engine: 'managed', sessionId: SESSION_ID }),
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              ...(toolProfile === undefined ? {} : { toolProfile }),
+            }),
           ),
         ),
         rootSnapshotRef: await resources.publish(
@@ -919,6 +925,194 @@ describe('Hosted Harness no-tool session', () => {
       },
     });
     try {
+      const automations = new HostedAutomationSession(
+        {
+          authority: managed.authority,
+          resources: managed.resources,
+          sink: managed.sink,
+        },
+        key,
+      );
+      await automations.define({
+        scheduleId: AUTOMATION_ID,
+        operationId: randomUUID(),
+        definition: automationDefinition,
+      });
+      const fired = await automations.fire({
+        scheduleId: AUTOMATION_ID,
+        definitionRevision: 1,
+        occurrenceKey: AUTOMATION_SLOT,
+        trigger: 'scheduled',
+        firedAt: Date.parse('2026-03-08T07:00:05Z'),
+      });
+      return fired.inputId;
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  }
+
+  // A prewrite whose automation turn ran and ended with the writer's crash:
+  // the journal carries the committed input, the transcript carries the
+  // turn attempt, and the hook pin keeps a bare load from refusing the
+  // crash the way a parked prompt would refuse it without one.
+  async function prewriteAutomationCrashedTurnSession(): Promise<string> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const journalStore = new LocalJsonlManagedSessionJournalStore({
+      runtimeBaseDir: state.root,
+      sessionId: SESSION_ID,
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+    });
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore,
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+              hookCatalog: hookPin,
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    try {
+      const automations = new HostedAutomationSession(
+        {
+          authority: managed.authority,
+          resources: managed.resources,
+          sink: managed.sink,
+        },
+        key,
+      );
+      await automations.define({
+        scheduleId: AUTOMATION_ID,
+        operationId: randomUUID(),
+        definition: automationDefinition,
+      });
+      const fired = await automations.fire({
+        scheduleId: AUTOMATION_ID,
+        definitionRevision: 1,
+        occurrenceKey: AUTOMATION_SLOT,
+        trigger: 'scheduled',
+        firedAt: Date.parse('2026-03-08T07:00:05Z'),
+      });
+      // The attempt the writer itself sealed: the turn ran here and died.
+      await managed.sink.write({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: state.root,
+        version: 'hosted-harness/1',
+        daemonPromptId: fired.inputId,
+        message: { role: 'user', parts: [{ text: 'queued' }] },
+      } as never);
+      return fired.inputId;
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  }
+
+  // A prewrite whose journal carries one parked harness prompt beside the
+  // queued automation input: the parked prompt keeps the wake pump blocked
+  // on load (recovery verdict), like prewriteMonitorSession's do.
+  async function prewriteAutomationParkedSession(): Promise<string> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const journalStore = new LocalJsonlManagedSessionJournalStore({
+      runtimeBaseDir: state.root,
+      sessionId: SESSION_ID,
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+    });
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore,
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+              hookCatalog: hookPin,
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    try {
+      // The parked prompt: an input that never ran a turn, so the Session
+      // opens recovery-blocked and its wake pump does not start.
+      await managed.authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: 'prompt-1',
+          sessionKey: key,
+          contentDigest: 'a'.repeat(64),
+        },
+        {
+          inputId: 'prompt-1',
+          turnId: 'prompt-1',
+          source: 'hosted-harness',
+          contentRef: await managed.resources.publish(
+            'managed-input',
+            Buffer.from('[{"type":"text","text":"hi"}]', 'utf8'),
+          ),
+          admissionRef: await managed.resources.publish(
+            'managed-admission',
+            Buffer.from('{}', 'utf8'),
+          ),
+          deadline: null,
+          wakeReason: 'input',
+        },
+      );
       const automations = new HostedAutomationSession(
         {
           authority: managed.authority,
@@ -1009,6 +1203,181 @@ describe('Hosted Harness no-tool session', () => {
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
     ).toBe(204);
+  });
+
+  it('loads an automation-carrying journal through the Workspace restore verifier', async () => {
+    const automationTurn = await prewriteAutomationSession(
+      'hosted-workspace-files/1',
+    );
+    expect(automationTurn).toContain('arun_');
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    // The verifier's domain list now reads the schedule and run records,
+    // their prompt and input resources — or the session never reopens.
+    expect(loaded.status).toBe(200);
+    expect(loaded.body.recoveryRequired).toBeUndefined();
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    const replayed = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+    ).send({ operationId: randomUUID(), ...fireBody() });
+    expect(replayed.status).toBe(202);
+    expect(replayed.body.replayed).toBe(true);
+    expect(replayed.body.run.state).toBe('running');
+    await vi.waitFor(
+      async () => {
+        const settled = await authorize(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...fireBody() });
+        expect(settled.status).toBe(202);
+        expect(settled.body.run.state).toBe('settled');
+      },
+      { timeout: 10_000, interval: 50 },
+    );
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
+
+  it('settles an automation run as failed/unknown when its turn went recovery-blocked', async () => {
+    await prewriteAutomationCrashedTurnSession();
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    await vi.waitFor(
+      async () => {
+        const replayed = await authorize(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...fireBody() });
+        expect(replayed.status).toBe(202);
+        expect(replayed.body.run.state).toBe('failed');
+        expect(replayed.body.run.execution).toBe('outcome_unknown');
+      },
+      { timeout: 10_000, interval: 50 },
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
+  it('settles a pending automation input model-free on the close path', async () => {
+    const turnId = await prewriteAutomationParkedSession();
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    expect(loaded.body.recoveryRequired).toBe(true);
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+    // Only DELETE's own settle may speak for an input that never ran: the
+    // parked prompt kept the wake pump blocked, and the close path settled
+    // it model-free, cancelling the run with its execution proven never to
+    // have started.
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+    );
+    const settled = journal.events.filter(
+      (event) =>
+        event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+    );
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.payload).toMatchObject({
+      outcome: 'cancelled',
+      stopReason: 'session_closing',
+    });
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: resources,
+    });
+    try {
+      const automations = new HostedAutomationSession(
+        {
+          authority: managed.authority,
+          resources: managed.resources,
+          sink: managed.sink,
+        },
+        {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      );
+      const run = automations
+        .runs()
+        .find((each) => each.occurrenceKey === AUTOMATION_SLOT);
+      expect(run?.run.state).toBe('cancelled');
+      expect(run?.run.execution).toBe('not_started_proven');
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  });
+
+  it('settles a failed automation run from its turn error through the wake runner catch', async () => {
+    await prewriteAutomationSession();
+    const server = await app();
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    state.model.mockImplementationOnce(() => {
+      throw new Error('model exploded');
+    });
+    await vi.waitFor(
+      async () => {
+        const replayed = await authorize(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...fireBody() });
+        expect(replayed.status).toBe(202);
+        expect(replayed.body.run.state).toBe('failed');
+        expect(replayed.body.run.execution).toBe('settled');
+      },
+      { timeout: 10_000, interval: 50 },
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
   const MONITOR_BINDING = { runtimeBindingId: 'binding-1', generation: '1' };

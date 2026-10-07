@@ -138,11 +138,13 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
 /**
  * The Schedule target modes a Session may actually commit today (H6b).
  * `schedule` and `automation_run` are enabled as domains, but a definition
- * names the mode its runs execute in, and the authority admits a first
- * definition revision only for a mode listed here; runs bind to a committed
- * definition, so they are gated with it. `per_run` joins when the H4 child
- * Session pipeline carries it. The Java store validates both bodies since
- * H6a and deploys before any writer, keeping the server-first order.
+ * names the mode its runs execute in, and the authority admits a definition
+ * revision only for a mode listed here — every revision, not only the
+ * first, because the mode is not a fixed key of the chain; runs bind to a
+ * committed definition, so they are gated with it. `per_run` joins when
+ * the H4 child Session pipeline carries it. The Java store validates both
+ * bodies since H6a and deploys before any writer, keeping the server-first
+ * order.
  */
 export const MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES = Object.freeze([
   'persistent',
@@ -161,9 +163,7 @@ export function assertManagedSessionScheduleSessionModeEnabled(
       MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES as readonly string[]
     ).includes(sessionMode)
   ) {
-    throw new ManagedSessionRecordError(
-      `schedule session mode ${sessionMode} is not enabled for submission.`,
-    );
+    throw new ManagedSessionModeGateError(sessionMode);
   }
 }
 
@@ -298,6 +298,33 @@ export class ManagedSessionRecordError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ManagedSessionRecordError';
+  }
+}
+
+/**
+ * The writer died on an earlier append: nothing new will ever commit, so
+ * callers must not read this as a retriable or a shape conflict.
+ */
+export class ManagedSessionWritesStoppedError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_writes_stopped';
+
+  constructor(cause: Error) {
+    super(
+      `session log writes stopped after an earlier failure: ${cause.message}`,
+    );
+    this.name = 'ManagedSessionWritesStoppedError';
+  }
+}
+
+/** A target mode the mode gate has not enabled for submission. */
+export class ManagedSessionModeGateError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_mode_disabled';
+
+  constructor(sessionMode: string) {
+    super(
+      `schedule session mode ${sessionMode} is not enabled for submission.`,
+    );
+    this.name = 'ManagedSessionModeGateError';
   }
 }
 

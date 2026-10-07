@@ -35,6 +35,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -80,6 +81,9 @@ class AutomationScannerTest {
     @Autowired
     private JdbcTemplate jdbc;
 
+    @Autowired
+    private ApplicationContext applicationContext;
+
     private String tenant;
     private String sessionId;
     private AutomationHarnessFake fake;
@@ -91,6 +95,15 @@ class AutomationScannerTest {
 
     @BeforeEach
     void setUp() {
+        // The scanner's work queries span every tenant by design, and this
+        // class shares one H2: earlier methods' armed rows must never be
+        // the current method's fake's fires.
+        for (String table : List.of("qwen_managed_automation_occurrence",
+                "qwen_managed_automation_schedule",
+                "qwen_managed_automation_command")) {
+            jdbc.update("DELETE FROM " + table
+                    + " WHERE tenant_id LIKE 'tenant-automation-%'");
+        }
         tenant = "tenant-automation-" + UUID.randomUUID();
         jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
@@ -1098,6 +1111,198 @@ class AutomationScannerTest {
                 .isEqualTo(AutomationLedgerStore.OUTCOME_FIRING);
         assertThat(ledger.findSchedule(tenant, id).orElseThrow().leaseOwner())
                 .isNull();
+    }
+
+    @Test
+    void theScannerRunsOnADedicatedScheduler() throws Exception {
+        assertThat(applicationContext.containsBean("managedAutomationScheduler"))
+                .isTrue();
+        assertThat(applicationContext.getBean("managedAutomationScheduler"))
+                .isNotSameAs(applicationContext.getBean("taskScheduler"));
+        var scheduled = AutomationScanner.class.getMethod("scan")
+                .getAnnotation(org.springframework.scheduling.annotation.Scheduled.class);
+        assertThat(scheduled.scheduler())
+                .isEqualTo("managedAutomationScheduler");
+    }
+
+    @Test
+    void anOpenPublicTurnSuppressesFiresUntilItEnds() {
+        PublicAutomation automation = define("* * * * *", "allow", "none",
+                null, true);
+        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id,"
+                        + " turn_id, prompt_id, input_json, payload_digest,"
+                        + " status, created_at, updated_at, completed_at)"
+                        + " VALUES (?, ?, 'turn-open', 'prompt-open', '[]',"
+                        + " 'digest', 'RUNNING', 1000, 1000, NULL)",
+                tenant, sessionId);
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        assertThat(fake.fires()).isZero();
+        assertThat(outcomes(automation.id()))
+                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_SKIPPED);
+        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+                tenant, automation.id(), "schedule:2026-06-01T10:01:00Z")
+                .orElseThrow();
+        assertThat(skipped.reason())
+                .isEqualTo(AutomationScanner.REASON_OVERLAP);
+        // The public Turn ends: the next slot fires again.
+        jdbc.update("UPDATE managed_agent_turn SET status = 'COMPLETED',"
+                        + " completed_at = 2000 WHERE tenant_id = ?"
+                        + " AND turn_id = 'turn-open'",
+                tenant);
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(fake.firedOccurrences())
+                .containsExactly("schedule:2026-06-01T10:02:00Z");
+    }
+
+    @Test
+    void aDefinitiveRefusalSettlesTheOccurrenceSkippedNotUnknown() {
+        PublicAutomation automation = define("* * * * *", "allow", "none",
+                null, true);
+        fake.failNextFire = AutomationHarnessFake.refusal(409,
+                "automation_mode_disabled");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        AutomationLedgerStore.OccurrenceRow row = ledger.findOccurrence(
+                tenant, automation.id(), "schedule:2026-06-01T10:01:00Z")
+                .orElseThrow();
+        assertThat(row.outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(row.reason()).isEqualTo("automation_mode_disabled");
+        assertThat(row.attempts()).isZero();
+        // The obtained 4xx is not re-driven; the next slot fires normally.
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(fake.firedOccurrences()).containsExactly(
+                "schedule:2026-06-01T10:01:00Z",
+                "schedule:2026-06-01T10:02:00Z");
+    }
+
+    @Test
+    void aManualRunsDefinitiveRefusalAnswers409AndItsRetryTheDecision() {
+        PublicAutomation automation = define("0 2 * * *", "allow", "none",
+                null, true);
+        fake.failNextFire = AutomationHarnessFake.refusal(409,
+                "automation_mode_disabled");
+        assertThatThrownBy(
+                () -> service.run(tenant, ACTOR, automation.id(), "manual-def"))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("automation_run_skipped");
+                    assertThat(error.getMessage())
+                            .contains("automation_mode_disabled");
+                });
+        // The same key is answered the recorded decision, without a second
+        // fire — the refusal was obtained, not lost.
+        var asked = service.run(tenant, ACTOR, automation.id(), "manual-def");
+        assertThat(asked.replayed()).isTrue();
+        assertThat(asked.body().outcome()).isEqualTo("skipped");
+        assertThat(asked.body().reason()).isEqualTo("automation_mode_disabled");
+        assertThat(fake.fires()).isEqualTo(1);
+    }
+
+    @Test
+    void anUpdatesKeyUsedWithAnotherSessionIdConflicts() {
+        PublicAutomation automation = define("0 2 * * *", "skip", "none",
+                null, true);
+        String key = "usid-" + UUID.randomUUID();
+        AutomationDefinitionRequest first = new AutomationDefinitionRequest(
+                sessionId, null, "30 3 * * *", null, null, null, null, null,
+                null, null);
+        var revised = service.update(tenant, ACTOR, automation.id(), key,
+                first);
+        assertThat(revised.body().definitionRevision()).isEqualTo(2);
+        // The same replay lands when the body names the same Session.
+        assertThat(service.update(tenant, ACTOR, automation.id(), key, first)
+                .replayed()).isTrue();
+        // The same key used with another session_id is not that body.
+        AutomationDefinitionRequest moved = new AutomationDefinitionRequest(
+                "other-session", null, "30 3 * * *", null, null, null, null,
+                null, null, null);
+        assertThatThrownBy(
+                () -> service.update(tenant, ACTOR, automation.id(), key,
+                        moved))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("idempotency_conflict");
+                });
+    }
+
+    @Test
+    void aUnicodeDigitCronIsRefusedTheContractWay() {
+        AutomationDefinitionRequest unicode = new AutomationDefinitionRequest(
+                sessionId, "Goal", "٣ * * * *", "UTC", "Run it.", null,
+                null, null, null, null);
+        assertThatThrownBy(() -> service.create(tenant, ACTOR,
+                "key-" + UUID.randomUUID(), unicode))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(error.getCode())
+                            .isEqualTo("invalid_automation");
+                });
+        assertThat(fake.operations).isEmpty();
+    }
+
+    @Test
+    void enablementStaysExplicitAtEveryGate() {
+        // The scanner's own gate: disabled, a tick does nothing at all.
+        define("* * * * *", "allow", "none", null, true);
+        String automationId = ledger.listReadableSchedules(tenant, ACTOR, null,
+                1).rows().getFirst().scheduleId();
+        settings.setEnabled(false);
+        clock.set(T0 + MINUTE + 1_000);
+        scanner.scan();
+        assertThat(fake.fires()).isZero();
+        assertThat(ledger.findSchedule(tenant, automationId).orElseThrow()
+                .watermarkSlot()).isNull();
+        // The mutation gate refuses writes while disabled.
+        AutomationDefinitionRequest body = new AutomationDefinitionRequest(
+                sessionId, "Goal", "0 2 * * *", "UTC", "Run it.", null, null,
+                null, null, null);
+        assertThatThrownBy(() -> service.create(tenant, ACTOR,
+                "key-" + UUID.randomUUID(), body))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("automation_unavailable");
+                });
+        settings.setEnabled(true);
+        // And the Session store arm is its own gate.
+        var offStore = new ManagedAutomationService(ledger, agentStore,
+                workspaces, connector, scanner, digests, mapper, settings,
+                false, clock::get);
+        assertThatThrownBy(() -> offStore.create(tenant, ACTOR,
+                "key-" + UUID.randomUUID(), body))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("automation_unavailable");
+                });
+    }
+
+    @Test
+    void aFireReDrivenAfterTheDefinitionRetiredAnswersTheCommittedRun() {
+        PublicAutomation automation = define("* * * * *", "allow", "none",
+                null, true);
+        fake.failAfterNextFireCommit = new DaemonException("connection lost");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        // The claim committed at the Harness, its answer lost; the
+        // definition retires meanwhile: the re-drive meets the committed
+        // run, replayed, never a retired refusal.
+        service.retire(tenant, ACTOR, automation.id(),
+                "key-" + UUID.randomUUID());
+        clock.addAndGet(11_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        AutomationLedgerStore.OccurrenceRow row = ledger.findOccurrence(
+                tenant, automation.id(), "schedule:2026-06-01T10:01:00Z")
+                .orElseThrow();
+        assertThat(row.outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(fake.fires()).isEqualTo(2);
     }
 
     /** The connector the control plane sees: only the automation verb answers. */
