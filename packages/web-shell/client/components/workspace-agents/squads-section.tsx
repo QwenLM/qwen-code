@@ -32,8 +32,8 @@ export interface SquadsSectionProps {
   /** The New squad form is open (its button is in the page header). */
   creating: boolean;
   onCreatingChange: (creating: boolean) => void;
-  onCreate: (input: SquadInput) => void;
-  onUpdate: (squadId: string, input: SquadInput) => void;
+  onCreate: (input: SquadInput) => Promise<boolean>;
+  onUpdate: (squadId: string, input: SquadInput) => Promise<boolean>;
   onRetire: (squadId: string) => void;
   /** Puts `@name ` into the chat composer; absent hides the button. */
   onMention?: (name: string) => void;
@@ -56,7 +56,7 @@ function SquadForm({
   squad?: SessionSquadView;
   agents: readonly WorkspaceAgentSummaryView[];
   pending?: boolean;
-  onSubmit: (input: SquadInput) => void;
+  onSubmit: (input: SquadInput) => Promise<void>;
   onCancel: () => void;
 }) {
   const { t } = useI18n();
@@ -89,7 +89,7 @@ function SquadForm({
       const value = String(data.get(field) ?? '').trim();
       return value === '' ? null : value;
     };
-    onSubmit({
+    void onSubmit({
       name: name.trim(),
       description: text('description'),
       instructions: text('instructions'),
@@ -317,9 +317,8 @@ export function SquadsSection({
             agents={agents}
             pending={pending}
             onCancel={() => onCreatingChange(false)}
-            onSubmit={(input) => {
-              onCreate(input);
-              onCreatingChange(false);
+            onSubmit={async (input) => {
+              if (await onCreate(input)) onCreatingChange(false);
             }}
           />
         </Card>
@@ -434,9 +433,8 @@ export function SquadsSection({
               agents={agents}
               pending={pending}
               onCancel={() => setEditing(undefined)}
-              onSubmit={(input) => {
-                onUpdate(squad.id, input);
-                setEditing(undefined);
+              onSubmit={async (input) => {
+                if (await onUpdate(squad.id, input)) setEditing(undefined);
               }}
             />
           ) : null}

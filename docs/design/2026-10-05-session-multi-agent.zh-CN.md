@@ -145,7 +145,7 @@ Agent 发起的权限请求，会在会话里那条 Agent 消息上显示为审�
 
 - **会话 Agent 存储**：每个会话一个绑定文件，另有一份"哪些会话有活跃 run"的索引。
 - **`session_send` 工具**：Qwen 内置；Claude 和 Codex 以 stdio MCP 服务的形式注入。
-- **Persona**：会话 Agent 可用全部工具，写操作走审批（§8-1）。定义里的 `disallowedTools` 仍然生效。
+- **Persona**：Qwen 会话 Agent 执行定义中的工具限制，写操作走审批（§8-1）。原生 Claude/Codex 无法执行 Qwen 的工具允许列表或禁止列表，因此关联了工具受限定义的 Agent 会在启动回合前被拒绝；这类定义应使用 Qwen。省略或留空 `tools`，以及没有禁止列表的 `tools: ['*']`，沿用原生 runtime 的工具。
 
 ### 4.2 acp-bridge 与 ACP 子进程
 

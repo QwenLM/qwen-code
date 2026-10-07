@@ -134,7 +134,7 @@ Live state is not in the transcript. After a reload, the web shell fetches the c
 - **Model-facing envelope:** the envelope wraps agent messages for the model. It marks the source, escapes tags, states the authority boundary, and truncates. This text needs an eval before release (§10).
 - **Session-agent store:** a per-session binding file, plus an index of the sessions that have live runs.
 - **`session_send` tool:** built in for Qwen. Claude and Codex get it as a stdio MCP server.
-- **Personas:** a session agent has every tool, behind approval (§8-1), and its definition's `disallowedTools` is still enforced.
+- **Personas:** Qwen session agents enforce the definition's tool restrictions, behind approval (§8-1). Native Claude/Codex runtimes cannot enforce Qwen tool allowlists or denylists, so a linked definition with tool restrictions is refused before starting a turn; use Qwen for that definition. Omitted or empty `tools`, and `tools: ['*']` without a denylist, inherit the native runtime's tools.
 
 ### 4.2 acp-bridge and the ACP child
 

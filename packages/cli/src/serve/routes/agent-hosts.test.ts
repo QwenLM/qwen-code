@@ -550,13 +550,12 @@ it('clips over-long display text instead of refusing the event', () => {
       options: [{ optionId: 'a', name: 'n'.repeat(500), kind: 'allow_once' }],
     },
   });
-  expect(event).toMatchObject({ type: 'permission_request' });
-  const prompt = (event as { prompt: Record<string, unknown> }).prompt;
-  expect(prompt['title']).toHaveLength(1_200);
-  expect(prompt['inputPreview']).toHaveLength(16_384);
-  expect((prompt['options'] as Array<{ name: string }>)[0]!.name).toHaveLength(
-    256,
-  );
+  if (event?.type !== 'permission_request') {
+    throw new Error('Expected a permission request event');
+  }
+  expect(event.prompt.title).toHaveLength(1_200);
+  expect(event.prompt.inputPreview).toHaveLength(16_384);
+  expect(event.prompt.options[0]!.name).toHaveLength(256);
   expect(
     readHostEvent({
       type: 'step',

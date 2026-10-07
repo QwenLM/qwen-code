@@ -42,6 +42,7 @@ import {
   SessionAgentError,
   SessionAgentOrchestrator,
   UNREPORTED_TURN_TOKENS,
+  resolveTurnPersona,
   type SessionAgentBridge,
   type SessionAgentOrchestratorOptions,
   type SessionAgentRecordWriter,
@@ -205,7 +206,74 @@ async function fileFor(sessionId = SESSION) {
   return readSessionAgents(projectRoot, sessionId);
 }
 
+describe('native role tool restrictions', () => {
+  it.each(['claude', 'codex'] as const)(
+    'refuses restrictive definitions for %s',
+    async (program) => {
+      for (const policy of [
+        { tools: ['read_file'] },
+        { tools: [], disallowedTools: ['write_file', 'mcp__private'] },
+      ]) {
+        await expect(
+          resolveTurnPersona(carol, program, async () => ({
+            systemPrompt: 'Review only.',
+            ...policy,
+          })),
+        ).rejects.toThrow(
+          `restricts tools, which the ${program} runtime cannot enforce`,
+        );
+      }
+    },
+  );
+
+  it('preserves unrestricted native personas and Qwen role policies', async () => {
+    for (const tools of [undefined, [], ['*']]) {
+      await expect(
+        resolveTurnPersona(carol, 'codex', async () => ({
+          systemPrompt: 'Review only.',
+          tools,
+        })),
+      ).resolves.toEqual({ instructions: 'Review only.\n\nBe terse.' });
+    }
+    await expect(
+      resolveTurnPersona(carol, 'qwen', async () => ({
+        systemPrompt: 'Review only.',
+        tools: ['read_file'],
+        disallowedTools: ['write_file'],
+      })),
+    ).resolves.toEqual({ instructions: 'Review only.\n\nBe terse.' });
+  });
+});
+
 describe('SessionAgentOrchestrator', () => {
+  it.each(['claude', 'codex'] as const)(
+    'records a restricted %s role refusal without invoking its adapter',
+    async (provider) => {
+      const { orchestrator, turns, lastFrame } = harness({
+        roster: [
+          {
+            ...alice,
+            agentType: 'reviewer',
+            execution: { mode: 'local', provider },
+          },
+        ],
+        extra: { loadDefinition: async () => ({ tools: ['read_file'] }) },
+      });
+      const { runs } = await orchestrator.mention(SESSION, {
+        text: '@alice please review',
+        clientMessageId: 'restricted-role',
+      });
+      await vi.waitFor(() =>
+        expect(lastFrame(runs[0]!.runId)).toMatchObject({
+          status: 'failed',
+          recorded: true,
+          error: expect.stringContaining('restricts tools'),
+        }),
+      );
+      expect(turns).toHaveLength(0);
+    },
+  );
+
   it('runs a mentioned agent and records its reply', async () => {
     const { orchestrator, bridge, turns, lastFrame } = harness();
     const result = await orchestrator.mention(SESSION, {

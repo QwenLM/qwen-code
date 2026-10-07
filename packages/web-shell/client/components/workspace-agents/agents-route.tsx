@@ -264,9 +264,9 @@ export function AgentsRoute({
               squads: {
                 squads,
                 onCreate: (input: SquadInput) =>
-                  void mutate(() => createSquad(input)),
+                  mutate(() => createSquad(input)),
                 onUpdate: (id: string, input: SquadInput) =>
-                  void mutate(() => updateSquad(id, input)),
+                  mutate(() => updateSquad(id, input)),
                 onRetire: (id: string) => void mutate(() => retireSquad(id)),
               },
             }

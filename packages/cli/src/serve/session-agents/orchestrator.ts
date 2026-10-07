@@ -243,6 +243,8 @@ type RecordRequest = Parameters<
 export interface SessionAgentDefinition {
   systemPrompt?: string;
   model?: string;
+  tools?: string[];
+  disallowedTools?: string[];
   /** Set when the definition names an external executor (refused). */
   executor?: unknown;
 }
@@ -718,6 +720,15 @@ export async function resolveTurnPersona(
     if (loaded.executor !== undefined) {
       throw new Error(
         `Agent definition "${agent.agentType}" declares an external executor, which a workspace Agent cannot use. Set execution.mode to "managed-host" on the Agent instead, or use a definition without an executor block.`,
+      );
+    }
+    if (
+      program !== 'qwen' &&
+      ((loaded.tools?.length && !loaded.tools.includes('*')) ||
+        loaded.disallowedTools?.length)
+    ) {
+      throw new Error(
+        `Agent definition "${agent.agentType}" restricts tools, which the ${program} runtime cannot enforce. Use the Qwen runtime for this definition, or choose a definition without tool restrictions.`,
       );
     }
     definitionPrompt = loaded.systemPrompt?.trim() || undefined;
