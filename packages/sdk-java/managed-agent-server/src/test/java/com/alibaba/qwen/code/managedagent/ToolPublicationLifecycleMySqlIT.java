@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
@@ -103,7 +104,7 @@ class ToolPublicationLifecycleMySqlIT {
                     .put("historyRevision", sequence).putNull("resultRef");
             payload.set("toolOutcomeRef", root);
             payload.putArray("resources");
-            String records = journal.event(sequence, "tool.receipt", payload) + "{}\n";
+            String records = journal.event(sequence, "tool.receipt", payload) + COMMIT_MARKER;
             var request = new CommitTransactionRequest("workspace-1", "writer-1", 1, journal.revision,
                     journal.sequence, "receipt", "recordToolResult", "execution-1", root.path("digest").asText(),
                     sequence, sequence, 1, digest(records), journal.commitDigest, digest(records), 1, null, 2,
