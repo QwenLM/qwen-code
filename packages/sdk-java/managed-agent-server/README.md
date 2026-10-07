@@ -859,7 +859,8 @@ datasource password are passed valueless so Docker forwards them from the
 shell environment — the `=` spelling would leave either secret in the
 command's argv for the container's whole lifetime. A valueless `-e`
 forwards the variable of the same name, so export
-`SPRING_DATASOURCE_PASSWORD` before the run. The datasource must also be
+`QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY` and `SPRING_DATASOURCE_PASSWORD` before
+the run. The datasource must also be
 named: the Prerequisites' `127.0.0.1` default is the container itself from
 inside, so the image cannot boot against it:
 

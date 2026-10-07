@@ -1095,6 +1095,23 @@ describe('managed-agent-server e2e runner', () => {
         ).toMatch(
           /-e SPRING_DATASOURCE_URL='?jdbc:mysql:\/\/(?!127\.0\.0\.1|localhost)/,
         );
+        // Docker drops a valueless -e whose variable is unset without a
+        // warning, so the recipe prose must have the operator export BOTH
+        // valueless variables: an instruction naming only the password
+        // boots the container with an empty signing key, and the JVM dies
+        // at BrokerSecurity's minimum-key guard with the published port
+        // refused. The Dockerfile's comment defers to the README's
+        // container section rather than repeating the precondition, so
+        // the pin is README-only.
+        if (document === readme) {
+          const preceding = document.slice(0, before === -1 ? 0 : before);
+          expect(
+            preceding,
+            'the prose ahead of a documented server wildcard bind must have the operator export both valueless variables',
+          ).toMatch(
+            /export[\s\S]{0,160}?QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY[\s\S]{0,160}?SPRING_DATASOURCE_PASSWORD/,
+          );
+        }
       }
     }
   });
