@@ -609,6 +609,14 @@ class ManagedSessionStoreIntegrationTest {
                         .value("BLOCKED_EXECUTION"))
                 .andExpect(jsonPath("$.recoveryDetailCode")
                         .value("x".repeat(128)));
+        // The receipt echoes the request; the durable row must carry the
+        // full 128 characters, not a truncation of them.
+        assertThat(jdbc.queryForObject(
+                "SELECT recovery_detail_code FROM"
+                        + " qwen_managed_session_journal_head WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                String.class, TENANT, session))
+                .isEqualTo("x".repeat(128));
     }
 
     @Test

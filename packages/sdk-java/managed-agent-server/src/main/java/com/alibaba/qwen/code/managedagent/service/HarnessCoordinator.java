@@ -639,7 +639,7 @@ public class HarnessCoordinator {
         if (!submissionAttempted && isHarnessDisabled(error)) {
             return deferOutage(turn, "hosted_harness_unavailable",
                     "Hosted Harness remained unavailable before Turn"
-                            + " admission.");
+                            + " admission.", error);
         }
         if (!submissionAttempted
                 && turn.retryCount() >= maxPreAdmissionRetries) {
@@ -675,10 +675,16 @@ public class HarnessCoordinator {
     // Turn back up once the Harness returns before the budget runs out.
     private boolean deferOutage(TurnRecord turn, String exhaustionCode,
             String exhaustionMessage) {
+        return deferOutage(turn, exhaustionCode, exhaustionMessage, null);
+    }
+
+    private boolean deferOutage(TurnRecord turn, String exhaustionCode,
+            String exhaustionMessage, RuntimeException cause) {
         if (turn.retryCount() >= maxPreAdmissionRetries) {
             LOG.error("Managed Turn coordination exhausted outage deferrals"
-                            + " tenant={} session={} turn={}",
-                    turn.tenantId(), turn.sessionId(), turn.turnId());
+                            + " tenant={} session={} turn={} failure={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(),
+                    cause == null ? "none" : failureLabel(cause), cause);
             return fail(turn, exhaustionCode, exhaustionMessage);
         }
         long delay = retryDelay(retryInitialDelay, retryMaxDelay,

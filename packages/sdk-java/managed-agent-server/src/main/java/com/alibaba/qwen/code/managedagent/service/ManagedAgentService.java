@@ -115,7 +115,8 @@ public class ManagedAgentService {
     }
 
     private boolean hasArtifacts(SessionRecord session) {
-        return session.workspace() != null && !"DELETING".equals(session.status())
+        return session.workspace() != null && session.deletedAt() == null
+                && !"DELETING".equals(session.status())
                 && artifactReadsEnabled.getAsBoolean();
     }
 
@@ -238,9 +239,17 @@ public class ManagedAgentService {
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "input", input));
+        SessionRecord session = store.requireSession(tenantId, sessionId);
         // The actor gate stays above the replay: an idempotency key answers
         // its recorded outcome only to an actor authorized for the Session.
-        requireSubmitter(tenantId, actorId, sessionId);
+        // The availability half waits below it, so the recorded submit still
+        // answers while Workspace files are off — as the create replay does.
+        // An admissible Session already proved the actor's authorization, so
+        // the extra reads run only when the full gate would refuse.
+        boolean admissible = maySubmitWorkspaceTurn(session, actorId);
+        if (!admissible) {
+            requireReplayActor(session, actorId);
+        }
         // Replay before the harness gate, so a recorded submit still answers
         // during a Harness outage. See createSession.
         Admission replay = replay(tenantId, SUBMIT, idempotencyKey,
@@ -248,6 +257,9 @@ public class ManagedAgentService {
         if (replay != null) {
             dispatch(tenantId, replay);
             return response(replay);
+        }
+        if (!admissible) {
+            requireLegacyWorkspace(session, actorId);
         }
         requireHarness();
         String payloadDigest = SubmitHarnessTurn.computePayloadDigest(input);
@@ -855,7 +867,13 @@ public class ManagedAgentService {
     }
 
     private void dispatch(String tenantId, Admission admission) {
-        if (admission.turnId() != null) {
+        // A replay answers while the Harness is down, but the replay itself
+        // must not spend the Turn's pre-admission budget: re-dispatching
+        // here would let a client's own retries defer the Turn into a
+        // terminal hosted_harness_unavailable. Only the availability-gated
+        // recovery sweep re-offers the parked Turn once the Harness
+        // returns.
+        if (admission.turnId() != null && harness.isAvailable()) {
             coordinator.dispatch(tenantId, admission.sessionId(),
                     admission.turnId());
         }

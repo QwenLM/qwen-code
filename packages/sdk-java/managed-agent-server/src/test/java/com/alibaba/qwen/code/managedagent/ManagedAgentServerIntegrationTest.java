@@ -1772,26 +1772,47 @@ class ManagedAgentServerIntegrationTest {
                 {"idempotencyKey":"unavailable-turn","sessionId":"%s",
                  "input":[{"type":"text","text":"hold"}]}
                 """.formatted(sessionId);
-        String turnId = objectMapper.readTree(mvc.perform(post(
-                        "/api/agent/web-shell/v1/turns/submit")
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(submit))
-                .andExpect(status().isAccepted()).andReturn()
-                .getResponse().getContentAsString())
-                .get("turnId").asText();
-
+        // Record the submit directly with the outage already in effect, so
+        // the Turn is parked unadmitted and no dispatch can race the
+        // replays.
         harness.setAvailable(false);
         try {
-            // A replay of an already-recorded command admits nothing new,
-            // so it must not be gated on the Harness being reachable.
-            mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
-                            .header(TenantContextFilter.HEADER, tenant)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .content(submit))
-                    .andExpect(status().isAccepted())
-                    .andExpect(jsonPath("$.replayed").value(true))
-                    .andExpect(jsonPath("$.turnId").value(turnId));
+            List<Map<String, Object>> input =
+                    List.of(Map.of("type", "text", "text", "hold"));
+            Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                    "unavailable-turn",
+                    new RequestDigests().digest(Map.of("sessionId", sessionId,
+                            "input", input)),
+                    sessionId, input, "payload");
+            String turnId = turn.turnId();
+            // More replays than the pre-admission retry budget: every one
+            // must answer the recorded 202, and none may re-dispatch — each
+            // replay-driven deferral would spend a retry and terminally fail
+            // the Turn while its client kept reading 202s.
+            int replays = applicationContext.getBean(
+                    ManagedAgentProperties.class).getDispatch()
+                    .getMaxPreAdmissionRetries() + 1;
+            for (int attempt = 0; attempt < replays; attempt++) {
+                mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(submit))
+                        .andExpect(status().isAccepted())
+                        .andExpect(jsonPath("$.replayed").value(true))
+                        .andExpect(jsonPath("$.turnId").value(turnId));
+            }
+            await().during(Duration.ofMillis(500))
+                    .atMost(Duration.ofSeconds(10))
+                    .untilAsserted(() -> {
+                        Map<String, Object> row = jdbc.queryForMap(
+                                "SELECT status, retry_count FROM"
+                                        + " managed_agent_turn WHERE"
+                                        + " tenant_id = ? AND turn_id = ?",
+                                tenant, turnId);
+                        assertThat(row.get("status")).isEqualTo("ACCEPTED");
+                        assertThat(((Number) row.get("retry_count"))
+                                .intValue()).isZero();
+                    });
             // A genuinely new submission still fails fast while down.
             mvc.perform(post("/api/agent/web-shell/v1/turns/submit")
                             .header(TenantContextFilter.HEADER, tenant)
@@ -1807,6 +1828,12 @@ class ManagedAgentServerIntegrationTest {
         } finally {
             harness.setAvailable(true);
         }
+
+        // The availability-gated sweep re-offers the parked Turn once the
+        // Harness returns.
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(harness.hasHeldTurn()).isTrue());
+        harness.releaseHeldTurns();
     }
 
     @Test
@@ -1893,17 +1920,26 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(header().exists("Allow"))
                 .andExpect(jsonPath("$.error.code")
                         .value("method_not_allowed"));
-        // Routes here declare no `consumes`, so Spring never raises
-        // HttpMediaTypeNotSupportedException: the text/plain body reaches
-        // the handler and is refused as a client error with the envelope's
-        // 400 invalid_request. The dedicated 415 handler still guards any
-        // route that adds a constraint.
+        // Without the required Idempotency-Key header the request fails
+        // binding before the body is read: the parameter advice answers 400
+        // invalid_request.
         mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, "tenant-415")
                         .contentType(MediaType.TEXT_PLAIN)
                         .content("not json"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        // With the header present, dispatch reaches the body read and the
+        // text/plain payload raises HttpMediaTypeNotSupportedException: the
+        // dedicated handler answers 415, never the 500 catch-all.
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, "tenant-415")
+                        .header("Idempotency-Key", "media-415")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("not json"))
+                .andExpect(status().isUnsupportedMediaType())
+                .andExpect(jsonPath("$.error.code")
+                        .value("unsupported_media_type"));
     }
 
     @Test
@@ -2007,6 +2043,28 @@ class ManagedAgentServerIntegrationTest {
                                 + "\"metadata\":{\"title\":\"bad\\ntitle\"}}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_title"));
+        // Blank is the rename policy's own arm: the specific invalid_title
+        // code, never the catch-all a null title would fall into.
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"\"}"), tenant, "title-blank")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_title"));
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"   \"}"), tenant,
+                "title-blank-spaces")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_title"));
+        // On create a blank title normalizes to absent, never stored.
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "title-create-blank")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":[],"
+                                + "\"metadata\":{\"title\":\"\"}}"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.metadata.title").doesNotExist());
     }
 
     @Test

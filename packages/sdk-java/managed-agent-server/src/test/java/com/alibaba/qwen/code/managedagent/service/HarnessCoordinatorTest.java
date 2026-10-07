@@ -9,6 +9,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.after;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -24,6 +25,10 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import org.slf4j.LoggerFactory;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
@@ -293,6 +298,31 @@ class HarnessCoordinatorTest {
                 anyString(), eq("hosted_harness_rejected"), anyString());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
                 anyString(), anyString(), anyLong());
+    }
+
+    // The outage-exhaustion log replaces the branch log it suppresses, so
+    // it must carry that branch's failure label and its throwable — the only
+    // error the path emits.
+    @Test
+    void logsTheFailureLabelWhenTheOutageBudgetRunsOut() {
+        ch.qos.logback.classic.Logger coordinatorLog =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(
+                        HarnessCoordinator.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        coordinatorLog.addAppender(logged);
+        try {
+            dispatchWithCreateOrLoadFailure(
+                    new HarnessDisabledException("disabled"), false, 5);
+        } finally {
+            coordinatorLog.detachAppender(logged);
+        }
+        assertThat(logged.list).anySatisfy(event -> {
+            assertThat(event.getLevel()).isEqualTo(Level.ERROR);
+            assertThat(event.getFormattedMessage())
+                    .contains("failure=HarnessDisabledException");
+            assertThat(event.getThrowableProxy()).isNotNull();
+        });
     }
 
     // A 5xx from the Harness or a proxy is transient, so a Turn whose
