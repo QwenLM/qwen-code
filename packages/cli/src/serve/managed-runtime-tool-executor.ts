@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import type { RetainedFileHistoryStorage } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
 import { promises as fs } from 'node:fs';
 import { lstat, readlink, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
@@ -202,6 +203,7 @@ export class ManagedToolUnavailableError extends Error {
 
 /** The admitted tools, keyed by name, over one configuration. */
 export interface ManagedToolSet {
+  readonly retainedFileHistory?: RetainedFileHistoryStorage;
   /**
    * The session the tools run as. A shell they start sees it as
    * QWEN_CODE_SESSION_ID, with that session's project directory.
@@ -517,6 +519,7 @@ export class ManagedToolExecutor {
             ownerSessionId,
             tools.directory,
             operation.state,
+            tools.retainedFileHistory,
           );
           await history.ready();
           if (!this.isAdmissionOpen)

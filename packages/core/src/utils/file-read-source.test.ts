@@ -14,7 +14,11 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readFileHandleBytes } from './file-read-source.js';
+import { createHash } from 'node:crypto';
+import {
+  readFileHandleBytes,
+  digestFileReadSource,
+} from './file-read-source.js';
 import { detectFileEncoding, detectFileType } from './fileUtils.js';
 import {
   readTextContentRangeFromHandle,
@@ -61,6 +65,67 @@ describe('borrowed file bytes and complete text', () => {
       content: 'original\r\nsecond\r\nthird',
       next: 'o',
     });
+  });
+
+  it('hashes the captured raw extent through short positional reads and leaves the borrower open', async () => {
+    const stats = await handle.stat();
+    const actualRead = handle.read.bind(handle);
+    const read = vi
+      .spyOn(handle, 'read')
+      .mockImplementation((async (
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: number,
+      ) =>
+        actualRead(
+          buffer,
+          offset,
+          Math.min(length, 2),
+          position,
+        )) as typeof handle.read);
+    try {
+      expect(
+        await digestFileReadSource({
+          kind: 'descriptor',
+          fileHandle: handle,
+          stats,
+        }),
+      ).toBe(
+        createHash('sha256')
+          .update('original\r\nsecond\r\nthird')
+          .digest('hex'),
+      );
+      const next = Buffer.alloc(1);
+      await handle.read(next, 0, 1, null);
+      expect(next.toString()).toBe('o');
+    } finally {
+      read.mockRestore();
+    }
+    expect((await handle.stat()).size).toBe(stats.size);
+  });
+
+  it('rejects truncation and read failures during raw hashing instead of returning a shorter digest', async () => {
+    const source = {
+      kind: 'descriptor' as const,
+      fileHandle: handle,
+      stats: await handle.stat(),
+    };
+    await handle.truncate(1);
+    await expect(digestFileReadSource(source)).rejects.toThrow(
+      'changed while hashing',
+    );
+    const read = vi
+      .spyOn(handle, 'read')
+      .mockRejectedValue(new Error('hash read failed'));
+    try {
+      await expect(digestFileReadSource(source)).rejects.toThrow(
+        'hash read failed',
+      );
+    } finally {
+      read.mockRestore();
+    }
+    expect((await handle.stat()).size).toBe(1);
   });
 
   it('stops at captured extent after growth and never closes the borrower', async () => {

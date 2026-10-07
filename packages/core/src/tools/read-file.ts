@@ -130,6 +130,8 @@ class ReadFileToolInvocation extends BaseToolInvocation<
    * so that external file reads require user confirmation.
    */
   override getDefaultPermission(): Promise<PermissionDecision> {
+    if (this.config.getFileSystemService().textFileIo)
+      return Promise.resolve('ask');
     return Promise.resolve(
       getFileReadDefaultPermission(this.config, this.params.file_path),
     );
@@ -191,7 +193,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // file_unchanged placeholder would skip that prepend, silently
     // dropping the staleness warning for the rest of the session.
     // These files are small; re-emit them on every read.
-    const isAutoMem = isAnyAutoMemPath(absPath, projectRoot);
+    const isAutoMem =
+      !this.config.getFileSystemService().textFileIo &&
+      isAnyAutoMemPath(absPath, projectRoot);
     // The cache can be disabled at the Config level (escape hatch for
     // sessions where the "model has already seen the prior tool result"
     // assumption breaks down — e.g. after context compaction or
@@ -747,6 +751,8 @@ export class ReadFileTool extends BaseDeclarativeTool<
         return `Pages range exceeds maximum of ${maxPages} pages per request.`;
       }
     }
+
+    if (this.config.getFileSystemService().textFileIo) return null;
 
     const fileService = this.config.getFileService();
     if (fileService.shouldQwenIgnoreFile(params.file_path)) {
