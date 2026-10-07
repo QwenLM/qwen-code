@@ -38,7 +38,8 @@ model to run — steer a running turn while the user is not watching.
 
 - Interrupting an in-flight model request (no cancellation mid-stream).
 - Sender-controlled urgency: `"now"` is a request; the receiver's settings,
-  queue state, and Goal ownership decide.
+  queue state, and Goal ownership decide whether it is delivered. Among peers
+  already queued it does decide order, as the barrier rule below states.
 - A receipt distinguishing a granted steer from a deferred one: `delivered`
   keeps meaning "queued for the model", and the wire must not leak receiver
   policy to the sender.
