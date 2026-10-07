@@ -3732,10 +3732,12 @@ export function registerHostedHarnessSessionRoutes(
     const { promptId, checkpointId, activationId } = request;
     // A blocked Turn never writes a terminal record, so a replay must meet
     // the refusal rather than re-answer an admission that will never settle.
-    if (session.blocked) {
-      releaseRecoveredRuntime(session);
+    // The adopted lease stays held, exactly like the cancel route's blocked
+    // refusal: the next takeover re-acquires the still-READY identity
+    // idempotently, while a release would persist RELEASED and wedge every
+    // retry on runtime_session_not_acquirable.
+    if (session.blocked)
       return error(res, 409, 'hosted_turn_recovery_required');
-    }
     // A continuation whose reply was lost is replayed by the coordinator: it
     // must get the watermark it was admitted at, running or settled, or the
     // coordinator would stream from after the Turn's own events.
@@ -4017,8 +4019,11 @@ export function registerHostedHarnessSessionRoutes(
         }
       } finally {
         // Clear availability before the unbounded publisher drain, per the
-        // discipline in executeHostedTurn.
-        releaseRecoveredRuntime(session);
+        // discipline in executeHostedTurn. A recovery-blocked exit keeps the
+        // adopted lease held: the parked Turn still owns it, and a release
+        // would persist RELEASED, wedging the later takeover's same-identity
+        // re-acquire on runtime_session_not_acquirable.
+        if (!session.blocked) releaseRecoveredRuntime(session);
         session.active = undefined;
         void toolTurn?.close().catch((cause: unknown) => {
           session.blocked = true;

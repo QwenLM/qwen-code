@@ -85,6 +85,7 @@ import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { LocalShellStreamCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-stream-capture.js';
 import { monitorWakeNeedsRecovery } from './hosted-monitor-wake-turn.js';
+import { HostedMonitorWakeScheduler } from './hosted-monitor-wake.js';
 
 const wakeDeps = vi.hoisted(() => ({
   last: undefined as unknown,
@@ -10265,12 +10266,16 @@ describe('Hosted Harness Runtime turn takeover', () => {
       });
       wakeDeps.last = undefined;
       state.model.mockClear();
+      // Count the pump's kicks so a retry refused while the marker is armed
+      // is witnessed, not assumed from a hardcoded sleep.
+      const kick = vi.spyOn(HostedMonitorWakeScheduler.prototype, 'kick');
       const { server, loaded } = await loadReplacement(
         true,
         'hosted-workspace-shell/1',
       );
       expect(loaded.status).toBe(200);
       const clientId = loaded.body.clientId as string;
+      const kicksAtLoad = kick.mock.calls.length;
       const armed = await replacementHeaders(
         supertest(server).get(`/session/${SESSION_ID}/status`),
       ).set('X-Qwen-Client-Id', clientId);
@@ -10280,10 +10285,8 @@ describe('Hosted Harness Runtime turn takeover', () => {
       // the parked checkpoint the recovery report just advertised.
       const deps = wakeDeps.last as { busy?: () => boolean } | undefined;
       expect(deps?.busy?.()).toBe(true);
-      // Past one retry interval the notification must still be parked: no
-      // model Turn ran while the recovered Turn is undriven.
-      await new Promise((resolve) => setTimeout(resolve, 700));
-      expect(state.model).not.toHaveBeenCalled();
+      // The park has something to park: the notification's input is
+      // journaled where the pump reads it.
       const journal = await LocalJsonlManagedSessionJournalStore.read(
         path.join(state.root, `${SESSION_ID}.jsonl`),
         {
@@ -10294,6 +10297,28 @@ describe('Hosted Harness Runtime turn takeover', () => {
       );
       expect(
         journal.events.some(
+          (event) =>
+            event.kind === 'input.accepted' &&
+            event.payload['turnId'] === notificationTurnId,
+        ),
+      ).toBe(true);
+      // At least one pump retry fires and is refused while the marker is
+      // armed: no model Turn ran and the notification stays unsettled.
+      await vi.waitFor(
+        () => expect(kick.mock.calls.length).toBeGreaterThan(kicksAtLoad),
+        { timeout: 10_000 },
+      );
+      expect(state.model).not.toHaveBeenCalled();
+      const parkedJournal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      );
+      expect(
+        parkedJournal.events.some(
           (event) =>
             event.kind === 'turn.settled' &&
             event.payload['turnId'] === notificationTurnId,
@@ -10326,7 +10351,31 @@ describe('Hosted Harness Runtime turn takeover', () => {
         },
         { timeout: 10_000 },
       );
-      expect(deps?.busy?.()).toBe(false);
+      // The discharged marker must let the pump deliver the parked
+      // notification: its model turn runs and its input settles.
+      await vi.waitFor(() => expect(state.model).toHaveBeenCalled(), {
+        timeout: 10_000,
+      });
+      await vi.waitFor(
+        async () => {
+          const delivered = await LocalJsonlManagedSessionJournalStore.read(
+            path.join(state.root, `${SESSION_ID}.jsonl`),
+            {
+              tenantId: 'tenant',
+              workspaceId: 'workspace',
+              sessionId: SESSION_ID,
+            },
+          );
+          expect(
+            delivered.events.some(
+              (event) =>
+                event.kind === 'turn.settled' &&
+                event.payload['turnId'] === notificationTurnId,
+            ),
+          ).toBe(true);
+        },
+        { timeout: 10_000 },
+      );
       await replacementHeaders(
         supertest(server).delete(`/session/${SESSION_ID}`),
       );
@@ -10844,7 +10893,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the lease owed when the cancel meets a blocked session', async () => {
+  it('keeps the lease held when the cancel meets a blocked session', async () => {
     await parkToolTurn();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
       executionStatus: 'success',
@@ -10852,7 +10901,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     } as never);
     const release = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'release')
-      .mockRejectedValueOnce(new Error('handback refused'))
       .mockResolvedValue();
     const { server, loaded } = await loadReplacement();
     expect(loaded.status).toBe(200);
@@ -10887,9 +10935,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
       },
       { timeout: 10_000 },
     );
-    // The continuation's teardown handback refused, so the recovered lease
-    // is still owed when the blocked refusal runs.
-    expect(release).toHaveBeenCalledTimes(1);
+    // The recovery-blocked exit keeps the adopted lease held: no handback is
+    // attempted there, since a successful release would persist RELEASED and
+    // the next takeover's same-identity re-acquire would conflict forever.
+    expect(release).not.toHaveBeenCalled();
     const cancelled = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
     )
@@ -10901,13 +10950,15 @@ describe('Hosted Harness Runtime turn takeover', () => {
       });
     expect(cancelled.status).toBe(409);
     expect(cancelled.body.code).toBe('hosted_turn_recovery_required');
-    // The blocked refusal must not hand back an owed lease: the workspace
+    // The blocked refusal does not hand the lease back either: the workspace
     // outlives this refusal, and a RELEASED identity can never be
     // re-acquired by the retirement-time retry.
-    expect(release).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    // The close owns the adopted lease's single handback.
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
-    );
+    ).expect(204);
+    expect(release).toHaveBeenCalledTimes(1);
   });
 
   it('answers a settled cancellation even when the final handback fails', async () => {
@@ -11584,9 +11635,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
       },
       { timeout: 10_000 },
     );
-    // …and the retirement it skipped stays owed: close retires it for the
-    // durable marker, so the cold load is still admitted instead of
-    // refusing every later restore forever.
+    // …and the retirement it skipped stays owed: the admitted prompt's
+    // admission drive retires the durable marker ahead of the new Turn (the
+    // close-path discharger is the sibling test's witness), so the cold
+    // load is still admitted instead of refusing every later restore
+    // forever.
     await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/detach`),
     )
@@ -11635,10 +11688,13 @@ describe('Hosted Harness Runtime turn takeover', () => {
     // The terminal write commits durably and only its acknowledgement is
     // lost: the Turn IS settled, so no attached-to-unsettled retry could
     // ever re-drive — the armed marker would wedge the Session forever.
+    // The fault is gated so only the recovered Turn's record loses its
+    // acknowledgement; the fresh prompt below must settle cleanly.
+    let failFinalSettlement = true;
     const originalWrite = ManagedSessionRecordSink.prototype.write;
     vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
       async function (this: ManagedSessionRecordSink, recordToWrite) {
-        if (recordToWrite.subtype === 'turn_result') {
+        if (recordToWrite.subtype === 'turn_result' && failFinalSettlement) {
           await originalWrite.call(this, recordToWrite);
           throw new Error('acknowledgement lost');
         }
@@ -11671,7 +11727,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
         }),
       ]),
     );
-    // A fresh prompt is admitted over the cleanly cancelled Turn.
+    // A fresh prompt is admitted over the cleanly cancelled Turn, with the
+    // acknowledgement fault disarmed so the phase witnesses a clean settle.
+    failFinalSettlement = false;
     const freshPrompt = [{ type: 'text', text: 'next turn' }];
     const prompted = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/prompt`),
@@ -11684,6 +11742,8 @@ describe('Hosted Harness Runtime turn takeover', () => {
       });
     expect(prompted.status).toBe(202);
     // Let the admitted Turn finish before the teardown removes its root.
+    // hasActivePrompt cannot see a refused settle, so the clean-settle
+    // claim is witnessed on the recoveryBlocked latch it would set.
     await vi.waitFor(
       async () => {
         const settled = await replacementHeaders(
@@ -11693,6 +11753,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
       },
       { timeout: 10_000 },
     );
+    const settled = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/status`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(settled.body.recoveryBlocked).toBe(false);
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
@@ -12359,6 +12423,128 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(release).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps a re-adopted lease when an earlier handback rejects late', async () => {
+    await parkToolTurn();
+    let stopConfirmed = false;
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+      async () => ({ state: stopConfirmed ? 'settled' : 'prepared' }),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockImplementation(
+      async () => {
+        stopConfirmed = true;
+      },
+    );
+    let rejectFirstRelease!: (cause: unknown) => void;
+    const firstRelease = new Promise<void>((_resolve, reject) => {
+      rejectFirstRelease = reject;
+    });
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockImplementationOnce(() => firstRelease)
+      .mockResolvedValue();
+    const { server, loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { checkpointId: string; activationId: string };
+    // A continue naming a stale recovery identity is refused and hands the
+    // adopted lease back — that handback is still in flight…
+    const mismatched = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: 'checkpoint-stale',
+        activationId: 'activation-stale',
+      });
+    expect(mismatched.status).toBe(409);
+    expect(mismatched.body.code).toBe('hosted_recovery_identity_mismatch');
+    expect(release).toHaveBeenCalledTimes(1);
+    // …when the redriven load re-answers the recovery and re-adopts the same
+    // Runtime identity, bumping the lease epoch…
+    const redriven = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(redriven.status).toBe(200);
+    // …and only then does the stale handback reject. Its failure must NOT
+    // arm the owed flag against the fresh adoption, or the next settled
+    // prompt would hand back a lease the fresh adoption still holds.
+    rejectFirstRelease(
+      new HostedWorkspaceBrokerRejection(
+        503,
+        'runtime_reconciliation_required',
+      ),
+    );
+    // Flush the rejected continuation before the cancel reads the flags.
+    await new Promise((resolve) => setImmediate(resolve));
+    // The cancellation settles the Turn durably, but its marker retirement
+    // fails once: the post-settle failure path answers 503 and hands
+    // nothing back, so the fresh adoption's lease is still held when the
+    // next prompt runs.
+    let failHistoryCommit = true;
+    const originalCommit =
+      LocalManagedSessionAuthority.prototype.commitDomainRecord;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'commitDomainRecord',
+    ).mockImplementation(async function (
+      this: LocalManagedSessionAuthority,
+      record,
+      ...rest
+    ) {
+      if (failHistoryCommit && record.operation === 'commitFileHistory') {
+        failHistoryCommit = false;
+        throw new Error('history write rejected');
+      }
+      return originalCommit.call(this, record, ...rest);
+    });
+    const cancelled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(cancelled.status).toBe(503);
+    expect(cancelled.body.code).toBe('managed_runtime_cancel_failed');
+    const freshPrompt = [{ type: 'text', text: 'next turn' }];
+    const prompted = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt: freshPrompt,
+        promptId: '88888888-8888-4888-8888-888888888888',
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(freshPrompt)).digest('hex')}`,
+      });
+    expect(prompted.status).toBe(202);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    // The settled prompt is a terminal route: it must NOT have handed the
+    // fresh adoption's lease back — the stale failure armed nothing.
+    expect(release).toHaveBeenCalledTimes(1);
+    // The close owns the fresh adoption's one handback…
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    ).expect(204);
+    expect(release).toHaveBeenCalledTimes(2);
+  });
+
   it('settles the cancellation and owes the lease when its release is refused', async () => {
     await parkToolTurn();
     let stopConfirmed = false;
@@ -12933,6 +13119,8 @@ describe('Hosted Harness Runtime turn takeover', () => {
     acquireSpy.mockRejectedValueOnce(
       new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
     );
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    release.mockClear();
     const send = () =>
       replacementHeaders(
         supertest(server).post(
@@ -12975,6 +13163,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const replayed = await send();
     expect(replayed.status).toBe(409);
     expect(replayed.body.code).toBe('hosted_turn_recovery_required');
+    // Neither the recovery-blocked drive nor the replay's refusal hands the
+    // adopted lease back: a release persists RELEASED, and the same-identity
+    // re-acquire the takeover below depends on would conflict with
+    // runtime_session_not_acquirable forever.
+    expect(release).not.toHaveBeenCalled();
     // …and a fresh incarnation can take the same Turn over: the recovery
     // report is still offered, so the drive can be retried there.
     await replacementHeaders(
@@ -12987,6 +13180,148 @@ describe('Hosted Harness Runtime turn takeover', () => {
     ).toBeDefined();
     await replacementHeaders(
       supertest(restarted).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('retires the pending marker when the compensating settle runs after a drive failure', async () => {
+    // The parked write_file Turn carries a durable file-history marker; the
+    // continuation never reaches its resume, so the compensating settle
+    // owns the retirement.
+    await parkToolTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'written' }],
+    } as never);
+    const { server, loaded } = await loadReplacement();
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { checkpointId: string; activationId: string };
+    // The drive's first projection read fails before any resume runs, so
+    // the marker is still pending when the compensating settle lands.
+    vi.spyOn(
+      ManagedSessionRecordSink.prototype,
+      'project',
+    ).mockRejectedValueOnce(new Error('projection lost'));
+    const continued = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(continued.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    // The durable record, not a spy: the marker the parked Turn left is
+    // retired before the Session goes quiet.
+    const history = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/files/history`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(history.body.history.pendingTurn).toBeNull();
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('owes the compensating retirement when its write fails, and a settled prompt retires it', async () => {
+    await parkToolTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'written' }],
+    } as never);
+    const { server, loaded } = await loadReplacement();
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { checkpointId: string; activationId: string };
+    vi.spyOn(
+      ManagedSessionRecordSink.prototype,
+      'project',
+    ).mockRejectedValueOnce(new Error('projection lost'));
+    // The compensating settle's retirement write fails once: the marker
+    // stays durable-owed rather than silently dropped.
+    let failHistoryCommit = true;
+    const originalCommit =
+      LocalManagedSessionAuthority.prototype.commitDomainRecord;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'commitDomainRecord',
+    ).mockImplementation(async function (
+      this: LocalManagedSessionAuthority,
+      record,
+      ...rest
+    ) {
+      if (failHistoryCommit && record.operation === 'commitFileHistory') {
+        failHistoryCommit = false;
+        throw new Error('history write rejected');
+      }
+      return originalCommit.call(this, record, ...rest);
+    });
+    const continued = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(continued.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    // The failed drop left the settled Turn's marker pending…
+    const owed = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/files/history`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(owed.body.history.pendingTurn).toBe(PROMPT_ID);
+    // …and the next settled prompt's admission drive retires it.
+    const freshPrompt = [{ type: 'text', text: 'next turn' }];
+    const prompted = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt: freshPrompt,
+        promptId: '88888888-8888-4888-8888-888888888888',
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(freshPrompt)).digest('hex')}`,
+      });
+    expect(prompted.status).toBe(202);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    const retired = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/files/history`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(retired.body.history.pendingTurn).toBeNull();
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
     );
   });
 

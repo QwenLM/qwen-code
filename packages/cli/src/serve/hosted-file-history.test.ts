@@ -378,7 +378,23 @@ it.each([115, 125])(
 it('drops a pending marker only for the Turn that owns it', async () => {
   const record = history(1, true);
   const owner = randomUUID();
-  await commitHostedFileHistory(session, { ...record, pendingTurn: owner });
+  // A prepare-stage record: the pendingMessageId must not outlive the drop
+  // (the wire shape rejects it without a pendingTurn), and the undo receipts
+  // the drop never names must survive through the commit's merge.
+  const undoReceipts = [
+    {
+      requestId: randomUUID(),
+      promptId: record.state.snapshots[0].promptId,
+      filesChanged: Object.keys(record.state.files),
+      conflict: false,
+    },
+  ];
+  await commitHostedFileHistory(session, {
+    ...record,
+    pendingTurn: owner,
+    pendingMessageId: randomUUID(),
+    undoReceipts,
+  });
   // A caller naming another Turn must not drop this Turn's marker: the
   // parked Turn still needs it to reconcile its resume.
   await dropPendingHostedFileHistoryTurn(session, randomUUID());
@@ -388,5 +404,7 @@ it('drops a pending marker only for the Turn that owns it', async () => {
   await dropPendingHostedFileHistoryTurn(session, owner);
   const dropped = await readHostedFileHistory(session);
   expect(dropped?.pendingTurn).toBeNull();
+  expect(dropped?.pendingMessageId).toBeUndefined();
+  expect(dropped?.undoReceipts).toEqual(undoReceipts);
   expect(dropped?.state).toEqual(record.state);
 });
