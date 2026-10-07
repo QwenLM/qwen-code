@@ -854,12 +854,14 @@ bridge IP, and a loopback listener is unreachable through it. Publishing is
 an explicit opt-in, and the server refuses a non-loopback bind under the
 shipped `auto` auth mode, so the command must name an authentication
 posture — signed mode, as the introduction recommends (see "Broker
-authentication and writer credentials" above). The signing key is passed
-valueless so Docker forwards it from the shell environment — the `=`
-spelling would leave the HMAC secret in the command's argv for the
-container's whole lifetime. The datasource must also be named: the
-Prerequisites' `127.0.0.1` default is the container itself from inside,
-so the image cannot boot against it:
+authentication and writer credentials" above). The signing key and the
+datasource password are passed valueless so Docker forwards them from the
+shell environment — the `=` spelling would leave either secret in the
+command's argv for the container's whole lifetime. A valueless `-e`
+forwards the variable of the same name, so export
+`SPRING_DATASOURCE_PASSWORD` before the run. The datasource must also be
+named: the Prerequisites' `127.0.0.1` default is the container itself from
+inside, so the image cannot boot against it:
 
 ```bash
 docker run -p 8080:8080 \
@@ -868,7 +870,7 @@ docker run -p 8080:8080 \
   -e QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY \
   -e SPRING_DATASOURCE_URL='jdbc:mysql://<db-host>:3306/qwen_managed_agent' \
   -e SPRING_DATASOURCE_USERNAME='qwen' \
-  -e SPRING_DATASOURCE_PASSWORD="$DB_PASSWORD" \
+  -e SPRING_DATASOURCE_PASSWORD \
   <image>
 ```
 

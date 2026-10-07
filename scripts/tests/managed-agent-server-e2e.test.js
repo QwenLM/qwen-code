@@ -614,6 +614,20 @@ describe('managed-agent-server e2e runner', () => {
     ).rejects.toThrow(/exited early/);
   });
 
+  // A child killed BY signal (OOM-kill, segfault) keeps exitCode null and
+  // sets signalCode: an exitCode-only early-exit guard never trips, the
+  // poll burns its whole site budget, and the failure reads "did not
+  // become ready" — pointing at the dependency instead of the dead child.
+  it('waitUntil reports a child that died by signal as exited early', async () => {
+    const { waitUntil } = loadWaitUntil();
+    await expect(
+      waitUntil('probe', () => false, 300, {
+        child: { exitCode: null, signalCode: 'SIGKILL' },
+        log: () => '',
+      }),
+    ).rejects.toThrow(/exited early/);
+  });
+
   // A rejecting-then-hanging predicate must surface the real error, not the
   // synthetic stall metadata the race rejects with on later iterations.
   it('waitUntil keeps a real predicate error when a later iteration stalls', async () => {
@@ -690,6 +704,22 @@ describe('managed-agent-server e2e runner', () => {
     );
   });
 
+  // The pre-crash guard is pinned above; the poll loop and the
+  // survived-SIGKILL throw must read a by-signal death too: an exitCode-only
+  // poll burns the 5 s deadline on a child SIGKILL already reaped, and an
+  // exitCode-only throw reports that dead child as having survived.
+  it('crashProcess returns promptly once its SIGKILL lands', async () => {
+    const { crashProcess } = load(
+      ['crashProcess', 'childExited'],
+      'crashProcess',
+      'process',
+    )(process);
+    const child = spawn('node', ['-e', 'setTimeout(() => {}, 30_000)']);
+    const started = Date.now();
+    await expect(crashProcess(child, 'probe')).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
   // The success document must not reach stdout for a run the operator
   // stopped: every payload is assembled inside the try and printed only
   // after both post-finally throws, so the guard decides before the record
@@ -713,6 +743,18 @@ describe('managed-agent-server e2e runner', () => {
     // module-scope binding the deferred print reads is pinned by text:
     // dropped, the print below throws ReferenceError on the success path.
     expect(source).toMatch(/^let resultJson: string \| undefined;$/m);
+    // The behavioural tests inject the signal through this harness's
+    // synthesized setter, so the production link — the runner's own
+    // handleSignal assigning the module-scope receivedSignal the guards
+    // below read — is pinned by text: registered with an empty body, the
+    // handlers swallow Ctrl-C and a CI cancellation, and the run prints
+    // the success payload and exits 0. Pin the process.on pair only; the
+    // finally removes both listeners during teardown.
+    expect(source).toMatch(
+      /const handleSignal = \(signal: NodeJS\.Signals\) => \{\s*receivedSignal = signal;\s*\};/,
+    );
+    expect(source).toMatch(/process\.on\('SIGINT', handleSignal\);/);
+    expect(source).toMatch(/process\.on\('SIGTERM', handleSignal\);/);
     // An interrupted run is a non-pass: the finally's keep decision must
     // still honor the keep switch, or a stopped run deletes its own
     // evidence before the signal throw below reports it.
@@ -996,14 +1038,27 @@ describe('managed-agent-server e2e runner', () => {
           signed || insecure,
           'a documented server wildcard bind must pass -e AUTH_MODE=signed with a valueless signing key or -e AUTH_ALLOW_INSECURE_BIND=true',
         ).toBe(true);
+        // The datasource password is a credential of the same class as
+        // the signing key above: spelled with = it sits in the docker run
+        // argv, readable from /proc/<pid>/cmdline for the container's
+        // lifetime, so the recipe must forward it valueless.
+        expect(
+          block,
+          'a documented server wildcard bind must pass -e SPRING_DATASOURCE_PASSWORD valueless',
+        ).toMatch(/-e SPRING_DATASOURCE_PASSWORD(?!=)/);
         // Flyway runs against SPRING_DATASOURCE_URL at container start and
         // the yml default's 127.0.0.1 is the container itself: a publish
-        // recipe that omits the datasource passes the auth guard and then
-        // dies at the datasource with the published port refused.
+        // recipe that omits the datasource — or points it at loopback —
+        // passes the auth guard and then dies at the datasource with the
+        // published port refused. toContain stops at the flag name, so pin
+        // the loopback spellings away from the host; the <db-host>
+        // placeholder the recipes document stays valid.
         expect(
           block,
           'a documented server wildcard bind must pass -e SPRING_DATASOURCE_URL= with a container-reachable host',
-        ).toContain('-e SPRING_DATASOURCE_URL=');
+        ).toMatch(
+          /-e SPRING_DATASOURCE_URL='?jdbc:mysql:\/\/(?!127\.0\.0\.1|localhost)/,
+        );
       }
     }
   });

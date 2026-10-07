@@ -55,7 +55,7 @@ COPY --from=build /tmp/qwen-managed-agent-server.jar \
 #     -e QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY \
 #     -e SPRING_DATASOURCE_URL='jdbc:mysql://<db-host>:3306/qwen_managed_agent' \
 #     -e SPRING_DATASOURCE_USERNAME='qwen' \
-#     -e SPRING_DATASOURCE_PASSWORD=<db-password> \
+#     -e SPRING_DATASOURCE_PASSWORD \
 #     <image>
 # or the deliberately unauthenticated
 # QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true override.
