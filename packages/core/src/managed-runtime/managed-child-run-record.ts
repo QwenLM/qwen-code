@@ -531,7 +531,11 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
   // The same holds of a recoverable unknown dispatch: without the binding
   // it claimed, the re-attach and the original-result paths are both
   // unreachable, so the unknown could never be recovered as H0b frames it.
-  if (run.execution === 'dispatch_started' && run.runtime === null) {
+  if (
+    (run.execution === 'dispatch_started' ||
+      run.execution === 'outcome_unknown') &&
+    run.runtime === null
+  ) {
     fail('Child run dispatch needs a Runtime binding.');
   }
   const predecessorChildRunId = nullable(body.predecessorChildRunId, (each) =>
