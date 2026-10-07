@@ -77,6 +77,7 @@ export async function runHostedHarnessTextTurn(input: {
     Partial<
       Pick<HostedWorkspaceToolTurn, 'resumeHookResults' | 'hookStopReason'>
     >;
+  workspaceContext?: { read(): string | undefined };
   textDeltas?: HostedHarnessTextDeltas;
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
@@ -285,6 +286,10 @@ export async function runHostedHarnessTextTurn(input: {
     if (registry.getFunctionDeclarations().length !== 0) {
       throw new Error('Hosted Harness cannot advertise local tools.');
     }
+    // Safe mode stays on; the Session's Workspace instructions arrive through
+    // the context slot instead of the Harness host's filesystem. The loop below
+    // injects them before the first request too.
+    let injectedContext: string | undefined;
     const historyRecords = input.resumeFromToolResults
       ? input.history.slice(
           0,
@@ -340,6 +345,14 @@ export async function runHostedHarnessTextTurn(input: {
       (await input.hooks?.wasStopBlocked(input.promptId)) ?? false;
     for (let round = 0; round < 16; round++) {
       input.signal.throwIfAborted();
+      const contextAvailable = input.workspaceContext?.read();
+      if (contextAvailable && contextAvailable !== injectedContext) {
+        // setUserMemory alone never reaches the wire: the system instruction
+        // was assembled during initialize() and is cached on the chat.
+        config.setUserMemory(contextAvailable);
+        await client.refreshSystemInstruction();
+        injectedContext = contextAvailable;
+      }
       if (input.hooks?.hasPendingOperations)
         throw new HostedHookRecoveryRequiredError();
       if (input.toolTurn?.hookStopReason) {

@@ -321,15 +321,31 @@ describe('createJavaManagedAgentProvider', () => {
       'https://product.example/api/agent/web-shell/v1/turns/submit',
       'https://product.example/api/agent/web-shell/v1/turns/cancel',
     ]);
-    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual(
+    const createBody = JSON.parse(String(fetchImpl.mock.calls[0][1]?.body));
+    expect(createBody).toEqual(
       expect.objectContaining({
         requestId: expect.stringMatching(/^managed_/),
         idempotencyKey: 'key-1',
         agentId: 'qwen-code',
-        environmentId: 'python',
         input: [{ type: 'input_text', text: 'hello' }],
       }),
     );
+    // The standalone Java contract 400s any non-blank environmentId; the
+    // option stays a storageKey scope input only.
+    expect(createBody).not.toHaveProperty('environmentId');
+  });
+
+  it('scopes the storageKey by environmentId when no productScope is given', () => {
+    const a = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      environmentId: 'env-a',
+    });
+    const b = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      environmentId: 'env-b',
+    });
+    expect(a.storageKey).not.toBe(b.storageKey);
+    expect(a.storageKey).toContain('env-a');
   });
 
   it('uses lastEventId only as the Java public sequence cursor', async () => {
@@ -361,6 +377,33 @@ describe('createJavaManagedAgentProvider', () => {
       sessionId: 'session-1',
       afterSequence: 8,
     });
+  });
+
+  it('forwards stream establishment to the subscribe caller', async () => {
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            'id: 9\nevent: turn.completed\ndata: {"sequence":9,"eventId":"evt_9","sessionId":"session-1","turnId":"turn-1","type":"turn.completed","createdAt":9,"data":{},"terminal":true}\n\n',
+            { status: 200 },
+          ),
+        ),
+    });
+    const onEstablished = vi.fn();
+    const events = [];
+    for await (const event of provider.subscribeEvents('session-1', {
+      clientId: 'client-1',
+      lastEventId: 8,
+      onEstablished,
+    })) {
+      events.push(event);
+    }
+    expect(onEstablished).toHaveBeenCalledOnce();
+    expect(events).toEqual([
+      expect.objectContaining({ id: 9, type: 'completed' }),
+    ]);
   });
 
   it('turns a resync frame into a stream gap and stops', async () => {
@@ -535,125 +578,110 @@ describe('createJavaManagedAgentProvider', () => {
     expect(transcript.lastEventId).toBe(4);
   });
 
-  it('lists pending Actions, sends revisions, and rejects a failed replay', async () => {
-    const permission = {
-      actionId: 'tool_approval_1',
-      sessionId: 'session-1',
-      kind: 'permission',
-      source: { type: 'tool_call' },
-      state: 'requested',
-      inputRevision: 1,
-      policyRevision: 'hosted-tool-approval/1',
-      createdAt: 1,
-      expiresAt: 600_001,
-      options: [
-        { id: 'allow', label: 'Allow' },
-        { id: 'deny', label: 'Deny' },
-      ],
-      turnId: 'turn-1',
-      functionCallId: 'call-1',
-      toolName: 'write_file',
-    };
-    const fetchImpl = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        jsonResponse({
-          data: [
-            permission,
-            { ...permission, actionId: 'tool_approval_2', state: 'decided' },
-            {
-              ...permission,
-              actionId: 'question_1',
-              kind: 'question',
-              questions: [],
-            },
-          ],
-          hasMore: false,
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({ operationId: 'op-1', status: 'running' }),
-      );
-    const provider = createJavaManagedAgentProvider({
-      baseUrl: 'https://product.example',
-      fetch: fetchImpl,
-    });
-
-    const pending = await provider.actions!.listPending('session-1', {
-      clientId: 'client-1',
-    });
-    expect(pending).toEqual([
-      {
+  it.each([
+    undefined,
+    { text: '{"input":', truncated: true, byteLength: 9000 },
+  ])(
+    'lists pending Actions with optional preview %j, sends revisions, and rejects a failed replay',
+    async (inputPreview) => {
+      const permission = {
         actionId: 'tool_approval_1',
         sessionId: 'session-1',
-        turnId: 'turn-1',
-        functionCallId: 'call-1',
-        toolName: 'write_file',
+        kind: 'permission',
+        source: { type: 'tool_call' },
+        state: 'requested',
         inputRevision: 1,
         policyRevision: 'hosted-tool-approval/1',
+        createdAt: 1,
         expiresAt: 600_001,
         options: [
           { id: 'allow', label: 'Allow' },
           { id: 'deny', label: 'Deny' },
         ],
-      },
-    ]);
-    expect(String(fetchImpl.mock.calls[0][0])).toBe(
-      'https://product.example/api/agent/web-shell/v1/actions/query',
-    );
+        turnId: 'turn-1',
+        functionCallId: 'call-1',
+        toolName: 'write_file',
+        ...(inputPreview ? { inputPreview } : {}),
+      };
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          jsonResponse({
+            data: [
+              permission,
+              { ...permission, actionId: 'tool_approval_2', state: 'decided' },
+              {
+                ...permission,
+                actionId: 'question_1',
+                kind: 'question',
+                questions: [],
+              },
+            ],
+            hasMore: false,
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({ operationId: 'op-1', status: 'running' }),
+        );
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
 
-    await provider.actions!.respond(pending[0], 'deny', {
-      clientId: 'client-1',
-      idempotencyKey: 'tool_approval_1:deny',
-    });
-    expect(String(fetchImpl.mock.calls[1][0])).toBe(
-      'https://product.example/api/agent/web-shell/v1/actions/respond',
-    );
-    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
-      requestId: expect.any(String),
-      idempotencyKey: 'tool_approval_1:deny',
-      sessionId: 'session-1',
-      actionId: 'tool_approval_1',
-      response: {
-        kind: 'permission',
-        inputRevision: 1,
-        policyRevision: 'hosted-tool-approval/1',
-        optionId: 'deny',
-      },
-    });
-
-    fetchImpl.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          operationId: 'op-1',
+      const pending = await provider.actions!.listPending('session-1', {
+        clientId: 'client-1',
+      });
+      expect(pending).toEqual([
+        {
+          actionId: 'tool_approval_1',
           sessionId: 'session-1',
-          type: 'action_response',
-          status: 'failed',
-          admissionStage: 'java_durable',
-          deliveryState: 'blocked',
-          failureCode: 'action_delivery_failed',
-          replayed: true,
-        }),
-        { status: 202, headers: { 'content-type': 'application/json' } },
-      ),
-    );
-    await expect(
-      provider.actions!.respond(pending[0], 'deny', {
+          turnId: 'turn-1',
+          functionCallId: 'call-1',
+          toolName: 'write_file',
+          inputRevision: 1,
+          policyRevision: 'hosted-tool-approval/1',
+          expiresAt: 600_001,
+          ...(inputPreview ? { inputPreview } : {}),
+          options: [
+            { id: 'allow', label: 'Allow' },
+            { id: 'deny', label: 'Deny' },
+          ],
+        },
+      ]);
+      expect(String(fetchImpl.mock.calls[0][0])).toBe(
+        'https://product.example/api/agent/web-shell/v1/actions/query',
+      );
+
+      await provider.actions!.respond(pending[0], 'deny', {
         clientId: 'client-1',
         idempotencyKey: 'tool_approval_1:deny',
-      }),
-    ).rejects.toThrow('action_delivery_failed');
+      });
+      expect(String(fetchImpl.mock.calls[1][0])).toBe(
+        'https://product.example/api/agent/web-shell/v1/actions/respond',
+      );
+      expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+        requestId: expect.any(String),
+        idempotencyKey: 'tool_approval_1:deny',
+        sessionId: 'session-1',
+        actionId: 'tool_approval_1',
+        response: {
+          kind: 'permission',
+          inputRevision: 1,
+          policyRevision: 'hosted-tool-approval/1',
+          optionId: 'deny',
+        },
+      });
 
-    for (const status of ['cancelled', 'recovery_blocked'] as const) {
       fetchImpl.mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            operationId: `op-${status}`,
+            operationId: 'op-1',
             sessionId: 'session-1',
             type: 'action_response',
-            status,
+            status: 'failed',
             admissionStage: 'java_durable',
             deliveryState: 'blocked',
+            failureCode: 'action_delivery_failed',
             replayed: true,
           }),
           { status: 202, headers: { 'content-type': 'application/json' } },
@@ -664,9 +692,32 @@ describe('createJavaManagedAgentProvider', () => {
           clientId: 'client-1',
           idempotencyKey: 'tool_approval_1:deny',
         }),
-      ).rejects.toThrow(`approval answer ${status}`);
-    }
-  });
+      ).rejects.toThrow('action_delivery_failed');
+
+      for (const status of ['cancelled', 'recovery_blocked'] as const) {
+        fetchImpl.mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              operationId: `op-${status}`,
+              sessionId: 'session-1',
+              type: 'action_response',
+              status,
+              admissionStage: 'java_durable',
+              deliveryState: 'blocked',
+              replayed: true,
+            }),
+            { status: 202, headers: { 'content-type': 'application/json' } },
+          ),
+        );
+        await expect(
+          provider.actions!.respond(pending[0], 'deny', {
+            clientId: 'client-1',
+            idempotencyKey: 'tool_approval_1:deny',
+          }),
+        ).rejects.toThrow(`approval answer ${status}`);
+      }
+    },
+  );
 
   it('reports the actions capability only when the Session has it', async () => {
     const session = {
