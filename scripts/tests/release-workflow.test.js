@@ -2200,7 +2200,7 @@ describe('release workflow', () => {
     expect(gateCallLines[1]).toBeGreaterThan(buildLine);
     expect(firstVitestLine).toBeGreaterThan(gateCallLines[1]);
     expect(dockerIntegrationScript).toContain(
-      'DISK_FLOOR_MIN_FREE_KB:-8388608',
+      'DISK_FLOOR_DOCKER_MIN_FREE_KB:-8388608',
     );
   });
 
@@ -2219,9 +2219,12 @@ describe('release workflow', () => {
     imagePresent = false,
     runnerEnvironment = 'github-hosted',
     pruneFails = false,
+    imagePruneFails = false,
     dockerInfoFails = false,
     dockerRootMissing = false,
     helperAbsent = false,
+    ambientDiskFloorKb,
+    dockerFloorKb,
   } = {}) => {
     const directory = mkdtempSync(
       join(tmpdir(), 'release-docker-integration-'),
@@ -2254,6 +2257,10 @@ if [ "$1" = 'image' ] && [ "$2" = 'inspect' ]; then
   fi
   exit 1
 fi
+if [ "$1" = 'image' ] && [ "$2" = 'prune' ] && [ "$IMAGE_PRUNE_FAILS" = '1' ]; then
+  echo 'ERROR: failed to prune images' >&2
+  exit 1
+fi
 if [ "$1" = 'builder' ] && [ "$2" = 'prune' ] && [ "$PRUNE_FAILS" = '1' ]; then
   echo 'ERROR: failed to prune build cache' >&2
   exit 1
@@ -2281,22 +2288,34 @@ exit 0`,
       );
     }
     try {
+      const env = {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: directory,
+        RUNNER_ENVIRONMENT: runnerEnvironment,
+        RELEASE_CONTAINER_OWNER: 'test-owner',
+        CALLS_LOG: callsLog,
+        DOCKER_ROOT_DIR: dockerRoot,
+        IMAGE_PRESENT: imagePresent ? '1' : '0',
+        GATE_EXIT: gateExit,
+        PRUNE_FAILS: pruneFails ? '1' : '0',
+        IMAGE_PRUNE_FAILS: imagePruneFails ? '1' : '0',
+        DOCKER_INFO_FAILS: dockerInfoFails ? '1' : '0',
+      };
+      // The floor knobs come from the test, never the ambient environment:
+      // the suite's verdict must not depend on the env of whoever runs it.
+      delete env.DISK_FLOOR_MIN_FREE_KB;
+      delete env.DISK_FLOOR_DOCKER_MIN_FREE_KB;
+      if (ambientDiskFloorKb !== undefined) {
+        env.DISK_FLOOR_MIN_FREE_KB = ambientDiskFloorKb;
+      }
+      if (dockerFloorKb !== undefined) {
+        env.DISK_FLOOR_DOCKER_MIN_FREE_KB = dockerFloorKb;
+      }
       const result = spawnSync('bash', [dockerIntegrationScriptAbsolutePath], {
         cwd: directory,
         encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: `${bin}:${process.env.PATH}`,
-          HOME: directory,
-          RUNNER_ENVIRONMENT: runnerEnvironment,
-          RELEASE_CONTAINER_OWNER: 'test-owner',
-          CALLS_LOG: callsLog,
-          DOCKER_ROOT_DIR: dockerRoot,
-          IMAGE_PRESENT: imagePresent ? '1' : '0',
-          GATE_EXIT: gateExit,
-          PRUNE_FAILS: pruneFails ? '1' : '0',
-          DOCKER_INFO_FAILS: dockerInfoFails ? '1' : '0',
-        },
+        env,
       });
       return { result, calls: readFileSync(callsLog, 'utf8'), dockerRoot };
     } finally {
@@ -2424,6 +2443,47 @@ exit 0`,
   );
 
   it.skipIf(process.platform === 'win32')(
+    'keeps the 8 GiB docker floor when the workspace floor knob is set',
+    () => {
+      // The docker data-root gate reads DISK_FLOOR_DOCKER_MIN_FREE_KB, not
+      // the job-start gate's DISK_FLOOR_MIN_FREE_KB: one env setting must
+      // not move both floors (#13479).
+      const { result, calls, dockerRoot } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        ambientDiskFloorKb: '1',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const floors = calls
+        .trim()
+        .split('\n')
+        .filter((line) => line.startsWith('disk-floor'));
+      expect(floors).toHaveLength(2);
+      for (const floor of floors) {
+        expect(floor).toBe(`disk-floor ${dockerRoot} floor=8388608`);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'honors the dedicated docker floor knob',
+    () => {
+      const { result, calls, dockerRoot } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        dockerFloorKb: '4194304',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const floors = calls
+        .trim()
+        .split('\n')
+        .filter((line) => line.startsWith('disk-floor'));
+      expect(floors).toHaveLength(2);
+      for (const floor of floors) {
+        expect(floor).toBe(`disk-floor ${dockerRoot} floor=4194304`);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'skips the reclaim and the gate when the image already exists',
     () => {
       const { result, calls } = runDockerIntegrationScript({
@@ -2499,6 +2559,34 @@ exit 0`,
           .split('\n')
           .filter((line) => line.startsWith('npx vitest')),
       ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'continues with a warning when the dangling image prune fails',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        imagePruneFails: true,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain(
+        '::warning::dangling image cleanup failed',
+      );
+      expect(calls).toContain('npm run build:sandbox');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'continues with a warning when the labelled image prune fails',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        imagePruneFails: true,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain(
+        '::warning::old CI sandbox image cleanup failed',
+      );
+      expect(calls).toContain('npm run build:sandbox');
     },
   );
 

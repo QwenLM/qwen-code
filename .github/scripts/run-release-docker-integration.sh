@@ -46,7 +46,9 @@ check_docker_data_root_floor() {
     echo "::warning::docker data root floor gate skipped: docker data root '${docker_root:-<unreadable>}' is not a readable directory on ${RUNNER_NAME:-this runner}"
     return 0
   fi
-  DISK_FLOOR_MIN_FREE_KB="${DISK_FLOOR_MIN_FREE_KB:-8388608}" bash .github/scripts/check-disk-floor.sh "$docker_root"
+  # A dedicated knob, not the job-start gate's DISK_FLOOR_MIN_FREE_KB:
+  # one env setting must not move both floors.
+  DISK_FLOOR_MIN_FREE_KB="${DISK_FLOOR_DOCKER_MIN_FREE_KB:-8388608}" bash .github/scripts/check-disk-floor.sh "$docker_root"
 }
 
 if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
