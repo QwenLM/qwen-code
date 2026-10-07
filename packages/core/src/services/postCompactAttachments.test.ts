@@ -1816,4 +1816,67 @@ describe('stripAnalysisBlock', () => {
       'We traced <think> output and stray </analysis> closers in one pass.';
     expect(stripAnalysisBlock(input)).toBe(input);
   });
+
+  it('strips a closed instructed block behind a same-line lead-in', () => {
+    // The line-anchored pass misses a block that opens after a lead-in like
+    // "Here is my analysis:", and the unclosed fallback would then eat the
+    // real summary that follows the block.
+    expect(
+      stripAnalysisBlock(
+        'Here is my analysis: <analysis>drafting</analysis>\n\nREAL SUMMARY',
+      ),
+    ).toBe('Here is my analysis: REAL SUMMARY');
+  });
+
+  it('keeps the envelope behind a same-line lead-in and a closed draft', () => {
+    const snapshot =
+      '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
+    expect(
+      stripAnalysisBlock('Sure! <analysis>draft</analysis>\n' + snapshot),
+    ).toBe(snapshot);
+  });
+
+  it('keeps the envelope when prose names the instructed tag mid-sentence', () => {
+    // "The user was fixing the <analysis> strip regex." is a mention, not an
+    // open block; refusing the binding here discards a valid summary.
+    expect(
+      stripAnalysisBlock(
+        'The user was fixing the <analysis> strip regex.\n' +
+          '<state_snapshot>\nreal\n</state_snapshot>',
+      ),
+    ).toBe('<state_snapshot>\nreal\n</state_snapshot>');
+  });
+
+  it('ignores an envelope drafted inside a closed native think block', () => {
+    const real =
+      '<state_snapshot><primary_request_and_intent>real</primary_request_and_intent></state_snapshot>';
+    expect(
+      stripAnalysisBlock(
+        '<think>\n<state_snapshot>draft</state_snapshot>\n</think>\n' + real,
+      ),
+    ).toBe(real);
+  });
+
+  it('strips scratch drafted between two envelopes', () => {
+    expect(
+      stripAnalysisBlock(
+        '<state_snapshot>a</state_snapshot>\n' +
+          '<analysis>scratch</analysis>\n' +
+          '<state_snapshot>b</state_snapshot>',
+      ),
+    ).toBe(
+      '<state_snapshot>a</state_snapshot>\n<state_snapshot>b</state_snapshot>',
+    );
+  });
+
+  it('strips scratch between the envelope and a prose closer mention', () => {
+    const snapshot =
+      '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
+    expect(
+      stripAnalysisBlock(
+        snapshot +
+          '\n<analysis>post-note</analysis>\nthe format ends with </state_snapshot>',
+      ),
+    ).toBe(snapshot + '\nthe format ends with </state_snapshot>');
+  });
 });
