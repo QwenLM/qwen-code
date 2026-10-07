@@ -537,6 +537,14 @@ describe('managed session metadata', () => {
                   ? { title: value, titleSource: 'manual' }
                   : {
                       record: {
+                        uuid: `rec-source-${value}`,
+                        parentUuid: null,
+                        sessionId,
+                        timestamp: '2026-09-01T10:00:00.000Z',
+                        type: 'system',
+                        subtype: 'session_source',
+                        cwd: '/workspace',
+                        version: 'test',
                         systemPayload: { sourceType: 'fork', sourceId: value },
                       },
                     },
@@ -1034,6 +1042,14 @@ describe('maintenance on a sealed managed session', () => {
         domain: 'session_source',
         content: {
           record: {
+            uuid: 'rec-source-channel',
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-09-01T10:00:00.000Z',
+            type: 'system',
+            subtype: 'session_source',
+            cwd: '/workspace',
+            version: 'test',
             systemPayload: { sourceType: 'channel', sourceId: 'managed' },
           },
         },

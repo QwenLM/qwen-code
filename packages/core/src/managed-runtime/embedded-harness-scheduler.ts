@@ -153,6 +153,7 @@ export class EmbeddedHarnessScheduler {
       throw error;
     }
     if (this.started) {
+      this.memoryBlockedPollMs = MEMORY_BLOCKED_POLL_MS;
       void this.requestPump().catch(() => undefined);
     }
     return result;
@@ -160,6 +161,9 @@ export class EmbeddedHarnessScheduler {
 
   notifyCapacityChanged(): void {
     if (!this.started || this.disposed || this.fatalError) return;
+    // External triggers restart the blocked poll cadence: the backoff belongs
+    // to timer-driven polls, and a burst of submissions must not spend it.
+    this.memoryBlockedPollMs = MEMORY_BLOCKED_POLL_MS;
     void this.requestPump().catch(() => undefined);
   }
 
@@ -192,13 +196,6 @@ export class EmbeddedHarnessScheduler {
   private async pump(): Promise<void> {
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;
-
-    // A memory-blocked pump cannot claim until headroom returns, so a blocked
-    // tick re-consults the probe before paying for the store scans.
-    if (this.memoryBlocked && !this.options.hasMemoryHeadroom()) {
-      this.armBlockedWake();
-      return;
-    }
 
     while (this.active.size < this.options.maxActiveSlots) {
       const candidates = this.store
@@ -368,10 +365,11 @@ export class EmbeddedHarnessScheduler {
 
   /**
    * Arms the recovery wake for the next reclaimable lease expiry. A blocked
-   * pump passes its headroom poll cadence: it wins when no lease expires
-   * sooner, because reclaiming waits on headroom either way. Returns what
-   * was armed — 'lease' restarts the blocked backoff, since a lease
-   * transition is a fresh chance to claim.
+   * pump passes its headroom poll cadence and takes the sooner lease wake
+   * only when the lease expires inside the base poll interval: reclaiming
+   * waits on headroom either way, so a later expiry is covered by the
+   * cadence. Returns what was armed — 'lease' restarts the blocked backoff,
+   * since a lease transition is a fresh chance to claim.
    */
   private scheduleRecoveryWake(
     blockedPollMs?: number,
@@ -404,7 +402,7 @@ export class EmbeddedHarnessScheduler {
     const remaining = expiry - this.store.getCurrentTime();
     if (
       blockedPollMs !== undefined &&
-      (remaining <= 0 || remaining > blockedPollMs)
+      (remaining <= 0 || remaining > MEMORY_BLOCKED_POLL_MS)
     ) {
       this.armRecoveryTimer(blockedPollMs);
       return 'poll';

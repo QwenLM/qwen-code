@@ -967,6 +967,10 @@ describe('managed session authority activation fences', () => {
         });
         await installBodyVisible;
         const renewed = authority.renewActivation({ leaseDurationMs: 60_000 });
+        // Captured at the renewal's resolution, before the later awaits: the
+        // skip must pin the state the renewal saw, not only the final state
+        // any interleaving could end in.
+        const stateAtRenewal = renewed.then(() => authority.currentActivation);
         releaseCommitMayFinish();
         await release;
         await expect(installed).resolves.toEqual({
@@ -974,6 +978,11 @@ describe('managed session authority activation fences', () => {
           epoch: 2,
         });
         await expect(renewed).resolves.toBeUndefined();
+        await expect(stateAtRenewal).resolves.toMatchObject({
+          activationId: 'act-b',
+          epoch: 2,
+          phase: 'active',
+        });
         expect(authority.currentActivation).toMatchObject({
           activationId: 'act-b',
           epoch: 2,
@@ -1050,6 +1059,85 @@ describe('managed session authority activation fences', () => {
           phase: 'active',
           renewalSeq: 0,
         });
+      } finally {
+        await lease.release();
+      }
+    });
+
+    it('skips a renewal that overlaps an in-flight renewal of the same horizon', async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire({
+        runtimeBaseDir: fixture.runtimeBaseDir,
+        sessionId: fixture.sessionId,
+        transcriptPath: fixture.transcriptPath,
+      });
+      try {
+        const journal = LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKeyFor(fixture),
+        );
+        const authority = await LocalManagedSessionAuthority.open({
+          journal,
+          sessionKey: sessionKeyFor(fixture),
+          cwd: '/workspace',
+          version: 'test',
+          now: () => 1_000_000,
+          resources: LocalManagedSessionResourceStore.create({
+            runtimeBaseDir: fixture.runtimeBaseDir,
+            sessionKey: sessionKeyFor(fixture),
+          }),
+          create: {
+            definitionRef: ref('managed-definition'),
+            rootSnapshotRef: ref('managed-root'),
+            createdBy: 'daemon',
+          },
+        });
+        await authority.installActivation({
+          activationId: 'act-renew-overlap',
+          workerId: 'worker-1',
+          leaseDurationMs: 60_000,
+        });
+
+        // Hold the first renewal's commit inside the serial queue, so the
+        // second renewal captures the same pre-commit renewalSeq and queues
+        // behind it; the hold's renewalSeq conjunct is what drops it.
+        let renewalCommitStarted!: () => void;
+        const renewalCommitting = new Promise<void>((resolve) => {
+          renewalCommitStarted = resolve;
+        });
+        let renewalCommitMayFinish!: () => void;
+        const renewalCommitGate = new Promise<void>((resolve) => {
+          renewalCommitMayFinish = resolve;
+        });
+        const appendTransaction = journal.appendTransaction.bind(journal);
+        let held = false;
+        vi.spyOn(journal, 'appendTransaction').mockImplementation(
+          async (records) => {
+            if (
+              !held &&
+              JSON.stringify(records).includes('"operation":"renewActivation"')
+            ) {
+              held = true;
+              renewalCommitStarted();
+              await renewalCommitGate;
+            }
+            return appendTransaction(records);
+          },
+        );
+
+        const before = authority.committedSequence;
+        const first = authority.renewActivation({ leaseDurationMs: 60_000 });
+        await renewalCommitting;
+        const second = authority.renewActivation({ leaseDurationMs: 60_000 });
+        renewalCommitMayFinish();
+        await expect(first).resolves.toMatchObject({ renewalSeq: 1 });
+        await expect(second).resolves.toBeUndefined();
+        expect(authority.currentActivation).toMatchObject({
+          activationId: 'act-renew-overlap',
+          phase: 'active',
+          renewalSeq: 1,
+        });
+        expect(authority.committedSequence).toBe(before + 1);
       } finally {
         await lease.release();
       }
@@ -3004,6 +3092,48 @@ describe('managed session checkpoints', () => {
         HOLDS,
       ),
     ).rejects.toThrow(/turn result resource reference is required/);
+    expect(harness.authority.committedSequence).toBe(before);
+    await harness.close();
+  });
+
+  it('rejects a committed message whose content body is not reader-facing', async () => {
+    const harness = await openRunnableHarness();
+    const contentRef = await harness.store.publish(
+      'managed-message',
+      Buffer.from('{"state":"completed"}', 'utf8'),
+    );
+    const before = harness.authority.committedSequence;
+    // The cold projection validates this channel too, so the write-time fence
+    // must refuse the body before it can poison the whole history at restore.
+    await expect(
+      harness.authority.appendExecutionEvent(
+        inputCommand(harness.fixture, {
+          operation: 'commitMessage',
+          commandId: 'cmd-message-invalid-body',
+        }),
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'message:invalid-body',
+          sessionKey: sessionKeyFor(harness.fixture),
+          kind: 'message.committed',
+          occurredAt: 1,
+          subject: {
+            type: 'activation',
+            scopeId: 'act-1',
+            activationId: 'act-1',
+            epoch: 1,
+          },
+          payload: {
+            messageId: 'rec-invalid-body',
+            role: 'user',
+            contentRef,
+            parentMessageId: null,
+          },
+        }),
+        HOLDS,
+      ),
+    ).rejects.toThrow(/invalid reader-facing record/);
     expect(harness.authority.committedSequence).toBe(before);
     await harness.close();
   });

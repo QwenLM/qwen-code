@@ -133,6 +133,22 @@ describe('HTTP Managed Session store', () => {
     return { stores, session };
   }
 
+  // A committed message body must be the reader-facing record the cold
+  // projection will replay: the commit-time fence refuses anything else.
+  const MESSAGE_BODY = Buffer.from(
+    JSON.stringify({
+      uuid: 'rec-message-1',
+      parentUuid: null,
+      sessionId: SESSION_KEY.sessionId,
+      timestamp: '2026-09-01T10:00:00.000Z',
+      type: 'user',
+      cwd: '/workspace',
+      version: 'test',
+      message: { role: 'user', parts: [{ text: 'hi' }] },
+    }),
+    'utf8',
+  );
+
   async function appendMessage(
     session: Awaited<ReturnType<typeof openManagedSession>>,
     index: number,
@@ -2675,7 +2691,7 @@ describe('HTTP Managed Session store', () => {
     const { stores, session } = await bootStoresAndSession(server);
     const messageRef = await stores.resourceStore.publish(
       'managed-message',
-      Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+      MESSAGE_BODY,
     );
     for (let index = 1; index <= 105; index++) {
       await appendMessage(session, index, messageRef);
@@ -2772,10 +2788,7 @@ describe('HTTP Managed Session store', () => {
     await appendMessage(
       session,
       1,
-      await stores.resourceStore.publish(
-        'managed-message',
-        Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
-      ),
+      await stores.resourceStore.publish('managed-message', MESSAGE_BODY),
     );
     const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
     // A real (non-empty) page that claims to end the journal while the head
@@ -2814,7 +2827,7 @@ describe('HTTP Managed Session store', () => {
     server.receiptOverrides['journalRevision'] = 42;
     const messageRef = await stores.resourceStore.publish(
       'managed-message',
-      Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+      MESSAGE_BODY,
     );
     await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
       /receipt does not match/,

@@ -7,8 +7,6 @@
 import { randomUUID } from 'node:crypto';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
-import type { ChatRecord } from '../services/chatRecordingService.js';
-import { validateTranscriptRecord } from '../utils/transcript-records.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import {
   isDefinitionPinConsistent,
@@ -44,15 +42,18 @@ import {
   assertManagedSessionDigest,
   assertManagedSessionDomainEnabled,
   assertManagedSessionEventActor,
+  assertManagedSessionDurableRef,
   assertManagedSessionStableId,
   assertManagedSessionTransaction,
   boundedString,
   managedSessionEventsDigest,
   managedSessionKeysEqual,
+  managedSessionReaderFacingBody,
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
   parseManagedSessionHeader,
   parseManagedSessionRecordJson,
+  validateManagedReaderFacingRecord,
   type ManagedSessionActorClass,
   type ManagedSessionDomain,
   type ManagedSessionCommitMarker,
@@ -2259,9 +2260,7 @@ export class LocalManagedSessionAuthority {
     }
 
     for (const event of events) {
-      if (event.kind === 'turn.settled') {
-        await this.assertReaderFacingTurnResult(event.payload['resultRef']);
-      }
+      await this.assertReaderFacingBody(event);
     }
 
     const branches = await this.validateRecoveryFacts(events);
@@ -2575,65 +2574,62 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
-   * Reads back the result a `turn.settled` event commits, the way the cold
-   * projection will read it: a body that is not a reader-facing record fails
-   * the whole session at restore, so no writer of the event may commit one.
+   * Reads back the record an event's reader-facing channel commits, the way
+   * the cold projection will read it: a body that is not a reader-facing
+   * record fails the whole session at restore, so no writer of the event may
+   * commit one. The channel list and the acceptance predicate are the
+   * projection's own, so a channel the reader learns is fenced here the same
+   * day and the two cannot drift.
    */
-  private async assertReaderFacingTurnResult(
-    resultRef: unknown,
+  private async assertReaderFacingBody(
+    event: ManagedSessionEvent,
   ): Promise<void> {
+    const carried = managedSessionReaderFacingBody(event);
+    if (carried === undefined) return;
+    const noun =
+      event.kind === 'turn.settled' ? 'turn result' : `${event.kind} record`;
     const store = this.resources;
     if (store === undefined) {
       throw new ManagedSessionRecordError(
-        'a resource store is required to settle a turn.',
+        `a resource store is required to commit ${event.kind}.`,
       );
     }
-    if (resultRef === null) {
+    if (carried.ref === null) {
       throw new ManagedSessionRecordError(
-        'a turn result resource reference is required to settle a turn.',
+        `a ${noun} resource reference is required to commit ${event.kind}.`,
       );
     }
-    const ref = resultRef as ManagedSessionDurableRef;
-    const resultBody = await store.read(ref).catch((cause: unknown) => {
+    const ref = assertManagedSessionDurableRef(
+      carried.ref,
+      `${event.kind} event ${event.eventId} ref`,
+    );
+    const body = await store.read(ref).catch((cause: unknown) => {
       throw new ManagedSessionRecordError(
-        `turn result is unreadable: ${cause instanceof Error ? cause.message : String(cause)}`,
+        `${noun} is unreadable: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     });
-    let resultValue: unknown;
+    let value: unknown;
     try {
       // Decode the way the cold reader does: duplicate wire keys and deep
       // nesting that JSON.parse would wave through must refuse here too.
-      resultValue = parseManagedSessionRecordJson(
-        resultBody.toString('utf8'),
-        resultBody.byteLength,
+      value = parseManagedSessionRecordJson(
+        body.toString('utf8'),
+        body.byteLength,
       );
     } catch (error) {
       throw new ManagedSessionRecordError(
-        `turn result resource ${ref.resourceId} contains an invalid reader-facing record: ${error instanceof Error ? error.message : String(error)}`,
+        `${noun} resource ${ref.resourceId} contains an invalid reader-facing record: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    const validated = validateTranscriptRecord(resultValue);
-    const candidate = validated.record as Partial<ChatRecord> | undefined;
-    if (
-      validated.record !== undefined &&
-      validated.record.sessionId !== this.sessionKey.sessionId
-    ) {
+    const validated = validateManagedReaderFacingRecord(
+      carried.inDomainEnvelope
+        ? (value as { readonly record?: unknown }).record
+        : value,
+      this.sessionKey.sessionId,
+    );
+    if ('error' in validated) {
       throw new ManagedSessionRecordError(
-        `turn result resource ${ref.resourceId} contains an invalid reader-facing record: it belongs to session ${validated.record.sessionId}, not ${this.sessionKey.sessionId}.`,
-      );
-    }
-    if (
-      validated.record === undefined ||
-      typeof candidate?.cwd !== 'string' ||
-      typeof candidate?.version !== 'string' ||
-      typeof candidate?.timestamp !== 'string' ||
-      validated.diagnostics.length > 0
-    ) {
-      throw new ManagedSessionRecordError(
-        `turn result resource ${ref.resourceId} contains an invalid reader-facing record: ${
-          validated.diagnostics.map((entry) => entry.message).join('; ') ||
-          'missing sessionId/cwd/version/timestamp'
-        }`,
+        `${noun} resource ${ref.resourceId} contains an invalid reader-facing record: ${validated.error}`,
       );
     }
   }

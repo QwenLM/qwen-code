@@ -400,8 +400,11 @@ describe('managed session message projection', () => {
 
   it('rejects an invalid timestamp in a durable reader-facing record', async () => {
     const harness = await createHarness();
-    try {
-      await harness.projection.commit(
+    // The writer fence and the cold reader share one acceptance predicate, so
+    // the commit is refused before the log can carry the record.
+    const before = harness.authority.committedSequence;
+    await expect(
+      harness.projection.commit(
         command('commitMessage', 'invalid-timestamp'),
         {
           record: {
@@ -410,10 +413,68 @@ describe('managed session message projection', () => {
           },
         },
         HOLDS,
-      );
-    } finally {
-      await harness.close();
-    }
+      ),
+    ).rejects.toThrow(/invalid reader-facing record/);
+    expect(harness.authority.committedSequence).toBe(before);
+    await harness.close();
+
+    // A log a writer from before that fence could have left is still refused
+    // at read time: the event is spliced into the committed log directly.
+    const contentRef = await harness.store.publish(
+      'managed-message',
+      Buffer.from(
+        JSON.stringify({ ...records[0], timestamp: 'not-a-timestamp' }),
+        'utf8',
+      ),
+    );
+    const scan = await readManagedSessionLog(
+      harness.transcriptPath,
+      sessionKey,
+    );
+    const event = parseManagedSessionEvent({
+      v: 1,
+      sequence: scan.committed + 1,
+      eventId: 'message:invalid-timestamp',
+      sessionKey,
+      kind: 'message.committed',
+      occurredAt: 1,
+      subject: {
+        type: 'activation',
+        scopeId: 'act-1',
+        activationId: 'act-1',
+        epoch: 1,
+      },
+      payload: {
+        messageId: 'rec-user-1',
+        role: 'user',
+        contentRef,
+        parentMessageId: null,
+      },
+    });
+    const marker = {
+      transactionId: 'invalid-timestamp',
+      commandId: 'invalid-timestamp',
+      operation: 'commitMessage',
+      contentDigest: DIGEST,
+      firstSequence: event.sequence,
+      lastSequence: event.sequence,
+      eventCount: 1,
+      eventsDigest: managedSessionEventsDigest([event]),
+      previousCommitDigest: scan.lastMarkerDigest,
+    };
+    await fs.appendFile(
+      harness.transcriptPath,
+      [
+        JSON.stringify({
+          subtype: 'managed_session_event_v1',
+          managedSession: event,
+        }),
+        JSON.stringify({
+          subtype: 'managed_session_commit_v1',
+          managedSession: marker,
+        }),
+      ].join('\n') + '\n',
+    );
 
     await expect(
       readManagedSessionRecords({
