@@ -279,6 +279,63 @@ describe('collectSessionData', () => {
     expect(data.messages[0]?.message?.parts?.[0]?.text).toBe('hello');
   });
 
+  it('measures context usage by the prompt size, not the turn total', async () => {
+    const data = await collectSessionData(
+      {
+        sessionId: 'session-usage',
+        startTime: '2025-01-01T00:00:00.000Z',
+        messages: [
+          {
+            uuid: 'assistant-1',
+            parentUuid: null,
+            sessionId: 'session-usage',
+            timestamp: '2025-01-01T00:00:00.000Z',
+            type: 'assistant',
+            cwd: '',
+            version: '1.0.0',
+            message: { role: 'model', parts: [{ text: 'done' }] },
+            usageMetadata: {
+              promptTokenCount: 50_000,
+              candidatesTokenCount: 30_000,
+              totalTokenCount: 80_000,
+            },
+            contextWindowSize: 100_000,
+          },
+        ],
+      },
+      { getChannel: () => 'cli' },
+    );
+
+    expect(data.metadata?.contextUsagePercent).toBe(50);
+    expect(data.metadata?.totalTokens).toBe(80_000);
+  });
+
+  it('falls back to the turn total when the prompt size is missing', async () => {
+    const data = await collectSessionData(
+      {
+        sessionId: 'session-usage',
+        startTime: '2025-01-01T00:00:00.000Z',
+        messages: [
+          {
+            uuid: 'assistant-1',
+            parentUuid: null,
+            sessionId: 'session-usage',
+            timestamp: '2025-01-01T00:00:00.000Z',
+            type: 'assistant',
+            cwd: '',
+            version: '1.0.0',
+            message: { role: 'model', parts: [{ text: 'done' }] },
+            usageMetadata: { totalTokenCount: 80_000 },
+            contextWindowSize: 100_000,
+          },
+        ],
+      },
+      { getChannel: () => 'cli' },
+    );
+
+    expect(data.metadata?.contextUsagePercent).toBe(80);
+  });
+
   it('exports a session whose transcript ends on an active goal', async () => {
     // The daemon export config is a Proxy that throws on any method it does not
     // implement, and it implements none of the /goal trust gates. Anything the

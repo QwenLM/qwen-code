@@ -258,7 +258,7 @@ function extractTaskToolTokens(record: ChatRecord): number {
 /**
  * Calculate token statistics from ChatRecords.
  * Aggregates usageMetadata from assistant records and TaskTool executionSummary to get total token usage.
- * Uses the last assistant record that has both totalTokenCount and contextWindowSize for calculating context usage percent.
+ * Uses the last assistant record that has both a prompt size and contextWindowSize for calculating context usage percent.
  */
 function calculateTokenStats(records: ChatRecord[]): {
   totalTokens: number;
@@ -266,10 +266,10 @@ function calculateTokenStats(records: ChatRecord[]): {
   contextWindowSize?: number;
 } {
   let totalTokens = 0;
-  // Track the last assistant record that has BOTH totalTokenCount and contextWindowSize
+  // Track the last assistant record that has BOTH a prompt size and contextWindowSize
   // to ensure the percentage calculation uses values from the same record
   let lastValidRecord: {
-    totalTokenCount: number;
+    contextTokenCount: number;
     contextWindowSize: number;
   } | null = null;
 
@@ -279,13 +279,18 @@ function calculateTokenStats(records: ChatRecord[]): {
       if (record.usageMetadata) {
         totalTokens += record.usageMetadata.totalTokenCount ?? 0;
       }
+      // Context usage is the prompt size, as in the footer and on resume. The
+      // total also counts this turn's output, which is not in the context yet.
+      const contextTokenCount =
+        record.usageMetadata?.promptTokenCount ??
+        record.usageMetadata?.totalTokenCount;
       // Only update lastValidRecord when BOTH values are present in the same record
       if (
-        record.usageMetadata?.totalTokenCount !== undefined &&
+        contextTokenCount !== undefined &&
         record.contextWindowSize !== undefined
       ) {
         lastValidRecord = {
-          totalTokenCount: record.usageMetadata.totalTokenCount,
+          contextTokenCount,
           contextWindowSize: record.contextWindowSize,
         };
       }
@@ -299,10 +304,10 @@ function calculateTokenStats(records: ChatRecord[]): {
   }
 
   // Use last valid record's values for context usage calculation
-  // This represents how much of the context window is being used by the total tokens
+  // This represents how much of the context window the last prompt filled
   if (lastValidRecord) {
     const percent =
-      (lastValidRecord.totalTokenCount / lastValidRecord.contextWindowSize) *
+      (lastValidRecord.contextTokenCount / lastValidRecord.contextWindowSize) *
       100;
     return {
       totalTokens,
