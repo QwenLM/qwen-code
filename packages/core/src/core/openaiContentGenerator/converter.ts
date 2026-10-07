@@ -1282,16 +1282,23 @@ function canBeStandaloneThinkingTagPrefix(text: string): boolean {
 function scanThinkingTagBalance(rest: string): {
   balanced: boolean;
   hasNestedOpening: boolean;
+  remaining: string;
 } {
   let depth = 1;
   let hasNestedOpening = false;
   for (;;) {
     const nextTag = THINKING_TAG_PATTERN.exec(rest);
-    if (!nextTag) return { balanced: false, hasNestedOpening };
+    if (!nextTag) return { balanced: false, hasNestedOpening, remaining: rest };
 
     const closing = nextTag[0].startsWith('</');
     depth += closing ? -1 : 1;
-    if (depth === 0) return { balanced: true, hasNestedOpening };
+    if (depth === 0) {
+      return {
+        balanced: true,
+        hasNestedOpening,
+        remaining: rest.slice(nextTag.index + nextTag[0].length),
+      };
+    }
     hasNestedOpening ||= !closing;
     rest = rest.slice(nextTag.index + nextTag[0].length);
   }
@@ -1345,8 +1352,20 @@ function classifyContentOnlyThinkingTagPrefix(
     }
   }
 
-  const { balanced, hasNestedOpening } = scanThinkingTagBalance(rest);
-  if (balanced) return 'clean';
+  const { balanced, hasNestedOpening, remaining } =
+    scanThinkingTagBalance(rest);
+  if (balanced) {
+    const following = remaining.trimStart();
+    if (
+      following &&
+      !following.startsWith('</') &&
+      (LEADING_THINKING_TAG_PATTERN.test(following) ||
+        canBeStandaloneThinkingTagPrefix(following))
+    ) {
+      return streamFinished ? 'leaked' : 'pending';
+    }
+    return 'clean';
+  }
   if (!hasNestedOpening) return 'pending';
   return streamFinished ? 'leaked' : 'suspicious';
 }

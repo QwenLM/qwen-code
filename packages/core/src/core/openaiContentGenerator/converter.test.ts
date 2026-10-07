@@ -736,6 +736,28 @@ describe('OpenAIContentConverter', () => {
     });
 
     it.each([
+      ['opener', '<thi', 'nking>second reasoning</thinking>Answer'],
+      ['body', '<thinking>second reasoning', '</thinking>Answer'],
+    ])(
+      'holds nonempty thought blocks split inside the next %s',
+      (_name, tail, next) => {
+        const stream = contentOnlyStream();
+        const thought = 'first reasoning '.repeat(20);
+        const first = send(stream, {
+          content: `<thinking>${thought}</thinking>${tail}`,
+        });
+
+        expect(partsOf(first)).toEqual([]);
+        const last = send(stream, { content: next }, 'stop');
+        expect(partsOf(last)).toEqual([
+          { text: thought, thought: true },
+          { text: 'second reasoning', thought: true },
+          { text: 'Answer' },
+        ]);
+      },
+    );
+
+    it.each([
       [
         'at the start of the stream',
         ['<think></think><think>outer <think>literal', '</think></think>'],
