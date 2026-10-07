@@ -595,6 +595,41 @@ describe('ToolApproval accessibility', () => {
     expect(command?.textContent).toBe('ls -la');
   });
 
+  it('neutralises bidi and C0 controls in the rendered command block', () => {
+    // Mirrors what `toManagedPermissionRequest` produces for an exec tool
+    // (`rawInput: tool.args` + `contentIsInput: true`), i.e. the shape from
+    // #13517: the card takes the `isExec && command` branch and renders
+    // `rawInput.command`, so escaping the `content` producer is not enough.
+    const craftedCommand = [
+      'rm -rf /tmp/\u202eppa', // U+202E RIGHT-TO-LEFT OVERRIDE
+      'git push \u2066--force\u2069', // bidi isolates
+      'ls \u001b[31m--all\u001b[0m', // C0 ANSI escape
+    ].join('\n');
+    render(undefined, {
+      ...execRequest,
+      content: [{ type: 'text', text: JSON.stringify({ craftedCommand }) }],
+      contentIsInput: true,
+      rawInput: { command: craftedCommand },
+    });
+    const pre = container!.querySelector('pre')!;
+    const rendered = pre.textContent!;
+    // The invisible code points must not survive into the DOM, while the
+    // command stays legible and multi-line (`\n` is preserved on purpose).
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u2066');
+    expect(rendered).not.toContain('\u2069');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).toBe(
+      [
+        'rm -rf /tmp/\\u202eppa',
+        'git push \\u2066--force\\u2069',
+        'ls \\u001b[31m--all\\u001b[0m',
+      ].join('\n'),
+    );
+    // The tooltip must not re-introduce the raw payload either.
+    expect(pre.getAttribute('title')).toBe(rendered);
+  });
+
   it('renders exec warnings alongside the command block', () => {
     const adapted = extractPendingPermission([
       {

@@ -68,6 +68,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
@@ -254,6 +255,47 @@ class ManagedAgentApiContractTest {
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
     private RequestMappingHandlerMapping handlerMapping;
+
+    @Test
+    void migrationRefusalsDeclareTheActualErrorCodeAndRetryability() throws Exception {
+        String tenant = "contract-migration-" + UUID.randomUUID();
+        var actor = actor(tenant);
+        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, display_name,"
+                + " workspace_generation, storage_id, config_ref, policy_ref, state)"
+                + " VALUES (?, 'workspace', 'Workspace', 1, 'storage', 'config', 'policy', 'ACTIVE')", tenant);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
+                + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, actor.actorId().getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO qwen_runtime_storage_fence VALUES (?, ?, ?, 'storage', ?)",
+                JdbcRuntimeBindingRepository.storageFenceKey(tenant), JdbcRuntimeBindingRepository.storageFenceKey("storage"),
+                tenant, UUID.randomUUID().toString());
+        assertThat(CONTRACT.node("/components/schemas/ErrorEnvelope/properties/error/properties/retryable/type").asText())
+                .isEqualTo("boolean");
+        assertThat(CONTRACT.node("/components/responses/Conflict/description").asText())
+                .contains("workspace_unavailable", "retryable=false", "migration");
+        Map<String, String> drift = new TreeMap<>();
+        String publicBody = exchange(drift, "createSession", 409,
+                post("/v1/agents/sessions").header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "fenced-public"),
+                "{\"agent_id\":\"qwen-code\",\"input\":[],\"workspace\":{\"workspace_id\":\"workspace\"}}");
+        String webBody = exchange(drift, "webShellCreateSession", 409,
+                post(WEB_SHELL + "/sessions/create").header(TENANT, tenant).principal(actor),
+                "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"fenced-web\",\"input\":[],\"workspace\":{\"workspaceId\":\"workspace\"}}");
+        assertThat(drift).isEmpty();
+        for (String body : List.of(publicBody, webBody)) {
+            ObjectNode envelope = (ObjectNode) json(body);
+            assertThat(envelope.at("/error/code").asText()).isEqualTo("workspace_unavailable");
+            assertThat(envelope.at("/error/retryable").isBoolean()).isTrue();
+            assertThat(envelope.at("/error/retryable").booleanValue()).isFalse();
+            ((ObjectNode) envelope.required("error")).put("retryable", true);
+            assertThat(CONTRACT.validate("/components/schemas/ErrorEnvelope", envelope)).isEmpty();
+            ((ObjectNode) envelope.required("error")).put("retryable", "true");
+            assertThat(CONTRACT.validate("/components/schemas/ErrorEnvelope", envelope)).isNotEmpty();
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?", Long.class, tenant))
+                .isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ?", Long.class, tenant))
+                .isZero();
+    }
 
     @Test
     void tenantFilteredRoutesDeclareAndReturnTheActorScopeRefusal() throws Exception {

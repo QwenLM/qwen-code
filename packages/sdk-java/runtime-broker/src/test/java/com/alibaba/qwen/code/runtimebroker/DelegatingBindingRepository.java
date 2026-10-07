@@ -16,6 +16,21 @@ abstract class DelegatingBindingRepository implements RuntimeBindingRepository {
     }
 
     @Override
+    public void requestStorageFence(String tenant, String storage, String operation) {
+        delegate.requestStorageFence(tenant, storage, operation);
+    }
+
+    @Override
+    public boolean isStorageFenced(String tenant, String storage, String operation) {
+        return delegate.isStorageFenced(tenant, storage, operation);
+    }
+
+    @Override
+    public List<RuntimeBindingRecord> findByStorage(String tenant, String storage, String cursor, int limit) {
+        return delegate.findByStorage(tenant, storage, cursor, limit);
+    }
+
+    @Override
     public void requestHarnessDrain(String tenantId, String harnessSessionId) {
         delegate.requestHarnessDrain(tenantId, harnessSessionId);
     }
