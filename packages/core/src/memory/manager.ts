@@ -676,6 +676,10 @@ export class MemoryManager {
       pending?: ScheduleExtractParams;
     }
   >();
+  // One shared flush run per session (#13004), so overlapping boundaries wait
+  // for the same extraction instead of each passing on an entry the first one
+  // is already flushing. Each caller still applies its own timeout.
+  private readonly extractFlushRuns = new Map<string, Promise<boolean>>();
 
   // ── Skill-review in-flight dedup ─────────────────────────────────────────────
   private readonly skillReviewInFlightByProject = new Map<string, string>();
@@ -1335,17 +1339,64 @@ export class MemoryManager {
    * would discard them: compaction, `/clear`, a session switch or an ACP
    * session close. Callers must await it before switching sessions, because
    * the extraction reads the session's cache-safe params and checks the live
-   * session id. Resolves `false` if it did not settle within `timeoutMs`; the
-   * run itself continues and stays tracked.
+   * session id.
+   *
+   * Resolves `true` only when the pending turns were extracted. Resolves
+   * `false` when this call did not settle within `timeoutMs`, when the run
+   * extracted nothing (skipped or threw — the turns stay recorded so a later
+   * boundary can retry them), and when the snapshot went stale before it ran.
+   * Overlapping calls for one session share a single run while keeping their
+   * own timeout. A run whose caller timed out keeps going and is *not*
+   * registered in `inFlight`, so `drain()` does not wait for it.
    */
   async flushPendingExtract(
     sessionId: string,
     timeoutMs: number = EXTRACT_FLUSH_TIMEOUT_MS,
   ): Promise<boolean> {
     const pending = this.extractCadence.get(sessionId)?.pending;
-    this.extractCadence.delete(sessionId);
     if (!pending) return true;
-    const run = (async () => {
+    let run = this.extractFlushRuns.get(sessionId);
+    if (!run) {
+      run = this.runPendingExtractFlush(sessionId, pending);
+      this.extractFlushRuns.set(sessionId, run);
+      const started = run;
+      void started.then(() => {
+        if (this.extractFlushRuns.get(sessionId) === started) {
+          this.extractFlushRuns.delete(sessionId);
+        }
+      });
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        run,
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => {
+            debugLogger.warn(
+              'Pending auto-memory extraction did not settle in time.',
+              sessionId,
+              timeoutMs,
+            );
+            resolve(false);
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * The shared body behind {@link flushPendingExtract}: waits for the project
+   * slot, then extracts the pending snapshot unless it went stale, and settles
+   * the cadence entry exactly once no matter which caller timed out. Never
+   * rejects, so a boundary always gets a boolean.
+   */
+  private async runPendingExtractFlush(
+    sessionId: string,
+    pending: ScheduleExtractParams,
+  ): Promise<boolean> {
+    try {
       // Another session on the same project (daemon mode), or this session's
       // older trailing request, may hold the slot; wait for it and for any
       // trailing request it starts.
@@ -1355,23 +1406,52 @@ export class MemoryManager {
         if (!active) break;
         await active.catch(() => undefined);
       }
-      await this.scheduleExtract(pending, { bypassCadence: true });
-    })().catch((error: unknown) => {
+      // `pending.config` is the live Config, which `startNewSession()` mutates
+      // in place, so a flush that outlived its boundary would otherwise fork
+      // against the *incoming* session: both sides of the cache-safe mismatch
+      // guard move together and it never fires. The session this snapshot
+      // describes is gone, so drop it rather than keep its history alive for a
+      // retry no boundary will ever ask for.
+      const liveSessionId = pending.config?.getSessionId();
+      if (liveSessionId !== undefined && liveSessionId !== pending.sessionId) {
+        this.extractCadence.delete(sessionId);
+        return false;
+      }
+      // A newer run for this session completed while the slot was held, so it
+      // already covered the snapshot. Replaying it would fork over content
+      // that was extracted and persist the cursor backwards, which the next
+      // run then reads as a reason to re-scan everything after it. Leave the
+      // newer run's entry alone; only clear one this snapshot still owns.
+      const state = this.extractCadence.get(sessionId);
+      if (
+        state !== undefined &&
+        state.lastExtractedLength >= pending.history.length
+      ) {
+        if (state.pending === pending) this.extractCadence.delete(sessionId);
+        return false;
+      }
+      const result:
+        | Awaited<ReturnType<typeof runAutoMemoryExtract>>
+        | undefined = await this.scheduleExtract(pending, {
+        bypassCadence: true,
+      });
+      // Nothing was extracted (session mismatch, memory pressure, a queued
+      // slot, or the throw below): keep the entry so the next boundary retries
+      // the same turns instead of a no-op consuming them.
+      if (!result || result.skippedReason) return false;
+      // The run re-armed the cadence under the session this boundary is
+      // leaving behind, and `/resume` restores that id — drop the entry so a
+      // resumed session inherits no skip. The next completed run re-arms from
+      // scratch, including on the compaction boundary, where the session
+      // lives on.
+      this.extractCadence.delete(sessionId);
+      return true;
+    } catch (error) {
       debugLogger.warn(
         'Failed to flush pending auto-memory extraction.',
         error,
       );
-    });
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        run.then(() => true),
-        new Promise<boolean>((resolve) => {
-          timer = setTimeout(() => resolve(false), timeoutMs);
-        }),
-      ]);
-    } finally {
-      clearTimeout(timer);
+      return false;
     }
   }
 
