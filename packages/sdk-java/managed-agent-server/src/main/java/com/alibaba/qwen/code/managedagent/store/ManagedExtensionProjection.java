@@ -23,42 +23,47 @@ import java.util.function.Predicate;
 public final class ManagedExtensionProjection {
     /** The record bodies defined so far; a slice adds its body here. */
     public static final Map<String, Body> RECORD_BODIES = Map.of(
-            "monitor_run", new Body("monitor",
+            "monitor_run", new Body(record -> "monitor",
                     ManagedExtensionRecords::requireMonitorRun,
                     body -> body.get("monitorId").textValue(),
                     ManagedExtensionRecords::isMonitorRunStart,
                     ManagedExtensionRecords::isMonitorRunSuccessor),
-            "mcp_configuration", new Body(null,
+            "mcp_configuration", new Body(record -> null,
                     ManagedMcpRecords::requireConfiguration,
                     body -> body.get("configurationId").textValue(),
                     ManagedMcpRecords::isConfigurationStart,
                     ManagedMcpRecords::isConfigurationSuccessor),
-            "mcp_operation", new Body(null,
+            "mcp_operation", new Body(record -> null,
                     ManagedMcpRecords::requireOperation,
                     body -> body.get("operationId").textValue(),
                     ManagedMcpRecords::isOperationStart,
                     ManagedMcpRecords::isOperationSuccessor),
-            "hook_registration", new Body(null,
+            "hook_registration", new Body(record -> null,
                     ManagedHookRecords::requireRegistration,
                     body -> body.get("registrationId").textValue(),
                     ManagedHookRecords::isRegistrationStart,
                     ManagedHookRecords::isRegistrationSuccessor),
-            "hook_execution", new Body(null,
+            "hook_execution", new Body(record -> null,
                     ManagedHookRecords::requireExecution,
                     body -> body.get("hookExecutionId").textValue(),
                     ManagedHookRecords::isExecutionStart,
                     ManagedHookRecords::isExecutionSuccessor),
-            "child_run", new Body("background_shell",
+            "child_run", new Body(ManagedExtensionRecords::childRunTaskKind,
                     ManagedExtensionRecords::requireChildRun,
-                    body -> body.get("shellId").textValue(),
+                    ManagedExtensionRecords::childRunRecordId,
                     ManagedExtensionRecords::isChildRunStart,
                     ManagedExtensionRecords::isChildRunSuccessor),
-            "schedule", new Body(null,
+            "child_acceptance", new Body(record -> null,
+                    ManagedExtensionRecords::requireChildAcceptance,
+                    body -> body.get("childRunId").textValue(),
+                    ManagedExtensionRecords::isChildAcceptanceStart,
+                    ManagedExtensionRecords::isChildAcceptanceSuccessor),
+            "schedule", new Body(record -> null,
                     ManagedExtensionRecords::requireScheduleRecord,
                     body -> body.get("scheduleId").textValue(),
                     ManagedExtensionRecords::isScheduleStart,
                     ManagedExtensionRecords::isScheduleSuccessor),
-            "automation_run", new Body("automation_run",
+            "automation_run", new Body(record -> "automation_run",
                     ManagedExtensionRecords::requireAutomationRunRecord,
                     body -> body.get("automationRunId").textValue(),
                     ManagedExtensionRecords::isAutomationRunStart,
@@ -87,10 +92,14 @@ public final class ManagedExtensionProjection {
     /**
      * A record body: how to check it, the identity its revision chain is
      * keyed by, whether it may open a chain and whether it may follow a
-     * revision. Every body embeds its run block under {@code run}.
+     * revision. Every body embeds its run block under {@code run}. The task
+     * kind follows the record — a constant for every body so far except
+     * {@code child_run}, whose kind follows the body's own {@code kind}
+     * field — and is null for a body that projects no task.
      */
-    public record Body(String taskKind, Consumer<JsonNode> require,
-            Function<JsonNode, String> recordId, Predicate<JsonNode> isStart,
+    public record Body(Function<JsonNode, String> taskKindOf,
+            Consumer<JsonNode> require, Function<JsonNode, String> recordId,
+            Predicate<JsonNode> isStart,
             BiPredicate<JsonNode, JsonNode> isSuccessor) {
     }
 

@@ -84,16 +84,19 @@ describe('managed-automation-record/1 shared contract', () => {
     // The Schedule definition is no task; every run projects
     // automation_run. Enabling either domain is the H6 producer slice's
     // own explicit step.
-    expect(MANAGED_EXTENSION_RECORD_BODIES.schedule!.taskKind).toBe(
-      fixtures.domains.schedule.taskKind,
-    );
-    expect(MANAGED_EXTENSION_RECORD_BODIES.automation_run!.taskKind).toBe(
-      fixtures.domains.automation_run.taskKind,
-    );
-    expect(MANAGED_TASK_KINDS).toContain('automation_run');
+    const scheduleBody = MANAGED_EXTENSION_RECORD_BODIES.schedule!;
+    expect(
+      scheduleBody.taskKindOf(
+        scheduleBody.parse(fixtures.templates.schedule).record,
+      ),
+    ).toBe(fixtures.domains.schedule.taskKind);
     const parsed = MANAGED_EXTENSION_RECORD_BODIES.automation_run!.parse(
       fixtures.templates.automation_run,
     );
+    expect(
+      MANAGED_EXTENSION_RECORD_BODIES.automation_run!.taskKindOf(parsed.record),
+    ).toBe(fixtures.domains.automation_run.taskKind);
+    expect(MANAGED_TASK_KINDS).toContain('automation_run');
     expect(parsed.recordId).toBe('run-1');
     // The run block holds no definition pin of its own, so an
     // automation_run task row always reads definitionRevision: null; the

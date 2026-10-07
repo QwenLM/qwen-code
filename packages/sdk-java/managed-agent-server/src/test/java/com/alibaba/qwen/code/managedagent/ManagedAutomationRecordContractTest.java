@@ -46,8 +46,10 @@ class ManagedAutomationRecordContractTest {
                 jsonList(fixtures.required("sessionModes")));
         var schedule = ManagedExtensionProjection.RECORD_BODIES.get("schedule");
         var automation = ManagedExtensionProjection.RECORD_BODIES.get("automation_run");
-        assertEquals(null, schedule.taskKind());
-        assertEquals("automation_run", automation.taskKind());
+        assertEquals(null, schedule.taskKindOf().apply(
+                fixtures.get("templates").get("schedule")));
+        assertEquals("automation_run", automation.taskKindOf().apply(
+                fixtures.get("templates").get("automation_run")));
         JsonNode run = fixtures.get("templates").get("automation_run");
         assertEquals("run-1", automation.recordId().apply(run));
         // The run block holds no definition pin of its own, so an

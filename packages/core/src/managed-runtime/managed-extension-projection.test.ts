@@ -45,8 +45,12 @@ interface Revision {
 
 interface FixtureSuite {
   readonly contractVersion: 1;
-  readonly recordBodies: Record<string, string | null>;
-  /** The bodies H4/H6 added to the projection contract after version 1. */
+  // child_run's entry is the per-kind map the body dispatches on.
+  readonly recordBodies: Record<
+    string,
+    string | null | Record<string, string | null>
+  >;
+  /** The bodies H6 added to the projection contract after H4. */
   readonly additionalRecordBodies: Record<string, string | null>;
   readonly taskStates: readonly string[];
   readonly pendingDeliveryStates: readonly string[];
@@ -107,7 +111,24 @@ describe('managed-extension-projection/1 fixtures', () => {
     expect(
       Object.fromEntries(
         Object.entries(MANAGED_EXTENSION_RECORD_BODIES).map(
-          ([domain, body]) => [domain, body?.taskKind],
+          ([domain, body]) => [
+            domain,
+            // child_run's task kind follows the body's own kind; every other
+            // body is a constant or projects no task at all. The probing
+            // record carries managed identity field names, so a mapping
+            // that regressed into reading one cannot answer constant-by-luck.
+            domain === 'child_run'
+              ? {
+                  shell: body?.taskKindOf({ kind: 'shell' }),
+                  child_agent: body?.taskKindOf({ kind: 'child_agent' }),
+                }
+              : body?.taskKindOf({
+                  configurationId: 'probe',
+                  registrationId: 'probe',
+                  occurrenceId: 'probe',
+                  serverId: 'probe',
+                }),
+          ],
         ),
       ),
     ).toEqual({
