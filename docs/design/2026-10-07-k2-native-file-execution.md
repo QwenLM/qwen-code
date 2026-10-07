@@ -144,6 +144,16 @@ No replacement/adoption or non-Linux fallback is allowed. First empty bind may
 create the Session directory under current original admission; track that
 metadata I/O through drain. Existing nonempty/unknown directories are refused.
 
+The current CSI mount observer now retains a no-follow root directory fd and
+verifies both its identity and the named root before publishing each mount
+receipt. Concurrent observations share the original open; an observed root
+replacement permanently fences that lifetime. Worker startup failure and
+shutdown close the owned descriptor, including shutdown when the executor
+fails. This is the root-lifetime foundation used by the existing observer;
+ordinary file tools, backup preparation and inventory are not yet routed
+through it. POSIX directory-fixture tests do not qualify Linux CSI/NVMe
+execution, physical writer termination or NodeUnpublish.
+
 Copy raw preimage bytes from an opened ordinary-file descriptor into a unique
 leaf with `O_CREAT | O_EXCL | O_NOFOLLOW`. Use the same descriptors for
 stat/read/write/hash/chmod, handle short writes, then sync the file and directory

@@ -121,6 +121,13 @@ Write/Edit 必须要求已绑定并 prepared 的 history；不能使用 legacy e
 非 Linux fallback。首次空 bind 可以在当前原 admission 下创建 Session directory，
 该 metadata I/O 必须计入 drain；拒绝已有非空/未知目录。
 
+当前 CSI 挂载观察器已持续持有 no-follow 根目录 fd，并在发布每次挂载 receipt
+前验证 fd 身份和命名根路径。并发观察共享原始打开操作；观察到根替换后，该生命周期
+永久封锁。worker 启动失败和关闭都会关闭自有 fd，包括 executor 关闭失败的情况。
+这是已接入现有观察器的根目录生命周期基础；普通文件工具、备份准备和库存尚未通过它
+执行。POSIX 目录 fixture 测试不构成 Linux CSI/NVMe 执行、物理 writer 终止或
+NodeUnpublish 资格。
+
 从已打开普通文件 descriptor 复制 raw preimage bytes，以
 `O_CREAT | O_EXCL | O_NOFOLLOW` 创建唯一 leaf。同一 descriptor 完成
 stat/read/write/hash/chmod，处理短写，在发布 metadata 前 sync 文件和目录。

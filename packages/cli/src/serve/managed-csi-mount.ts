@@ -6,6 +6,7 @@
 
 import { promises as fs } from 'node:fs';
 import { ManagedContextMount } from './managed-context-worker.js';
+import { ManagedCsiRootDirectory } from './managed-csi-root-directory.js';
 import {
   linuxDeviceNumber,
   type ManagedCsiMountReceipt,
@@ -79,6 +80,8 @@ export class ManagedCsiMount extends ManagedContextMount {
   readonly #serial: string;
   #pinned: string | undefined;
   #closed = false;
+  #directory: Promise<ManagedCsiRootDirectory> | undefined;
+  #closing: Promise<void> | undefined;
 
   constructor(mountRoot: string, trustedDiskSerial: string) {
     super(mountRoot);
@@ -113,30 +116,28 @@ export class ManagedCsiMount extends ManagedContextMount {
       if (serial.replace(/\n$/, '') !== this.#serial) {
         throw new Error(UNAVAILABLE);
       }
-      const root = await fs.realpath(this.#mountRoot);
-      const stats = await fs.stat(root, { bigint: true });
-      if (
-        root !== this.#mountRoot ||
-        !stats.isDirectory() ||
-        stats.dev.toString() !== linuxDeviceNumber(before.device) ||
-        stats.ino <= 0n ||
-        stats.ino > 0xffff_ffff_ffff_ffffn
-      ) {
-        throw new Error(UNAVAILABLE);
-      }
+      if (this.#closed) throw new Error(UNAVAILABLE);
+      this.#directory ??= ManagedCsiRootDirectory.open(
+        this.#mountRoot,
+        linuxDeviceNumber(before.device),
+      );
+      const directory = await this.#directory;
+      await directory.verify();
       const after = parseManagedCsiMount(
         await readBounded('/proc/self/mountinfo', MOUNTINFO_LIMIT),
         this.#mountRoot,
       );
+      await directory.verify();
       const identity = JSON.stringify([
         before.mountId,
         before.device,
         before.source,
-        stats.dev.toString(),
-        stats.ino.toString(),
+        directory.rootDevice,
+        directory.rootInode,
       ]);
       if (
         this.#closed ||
+        directory.rootDevice !== linuxDeviceNumber(before.device) ||
         JSON.stringify(before) !== JSON.stringify(after) ||
         (this.#pinned !== undefined && this.#pinned !== identity)
       ) {
@@ -146,13 +147,24 @@ export class ManagedCsiMount extends ManagedContextMount {
       return Object.freeze({
         ...before,
         diskSerial: this.#serial,
-        rootDevice: stats.dev.toString(),
-        rootInode: stats.ino.toString(),
+        rootDevice: directory.rootDevice,
+        rootInode: directory.rootInode,
       });
     } catch {
-      this.#closed = true;
+      await this.close();
       throw new Error(UNAVAILABLE);
     }
+  }
+
+  close(): Promise<void> {
+    this.#closed = true;
+    this.#closing ??= this.#directory
+      ? this.#directory.then(
+          (directory) => directory.close(),
+          () => {},
+        )
+      : Promise.resolve();
+    return this.#closing;
   }
 
   override async resolve(cwdRelative: string): Promise<string | undefined> {
