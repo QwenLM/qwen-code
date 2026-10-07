@@ -1088,9 +1088,27 @@ function sweepStaleRuntimeLedgers(
       // proven, since a provable group keeps its retries. A file any sweep
       // ever judged keeps its proof and never re-enters the liveness ladder
       // (its ids may now answer for another job).
-      let lastNamed = unprovenGroupsOf(error);
+      // The lift is pinned per file: the groups a rejection still names as
+      // unproven are attributed to the ledger that named them, because one
+      // ledger's later proof is no evidence about another ledger's stop.
       let sawRetired = sweepRetiredLedger(error);
       const armedFiles = new Set(workFilesOf(error));
+      const namedByFile = new Map<string, Set<number>>();
+      const recordNames = (failure: unknown): void => {
+        const failures =
+          failure instanceof AggregateError ? failure.errors : [failure];
+        for (const each of failures) {
+          if (
+            each instanceof LedgerSweepUnprovenError &&
+            each.remaining.length > 0
+          ) {
+            const named = namedByFile.get(each.workFile) ?? new Set<number>();
+            for (const pgid of each.remaining) named.add(pgid);
+            namedByFile.set(each.workFile, named);
+          }
+        }
+      };
+      recordNames(error);
       const provenFiles = new Set<string>();
       startLedgerReaper(
         async (): Promise<LedgerReaperVerdict> => {
@@ -1106,19 +1124,17 @@ function sweepStaleRuntimeLedgers(
             // Accumulate, never replace: a failure that names fewer groups —
             // or none, a ledger nobody could read — must not forget the ones
             // earlier failures left outstanding.
-            lastNamed = [
-              ...new Set([...lastNamed, ...unprovenGroupsOf(retryError)]),
-            ];
+            recordNames(retryError);
             for (const workFile of workFilesOf(retryError)) {
               armedFiles.add(workFile);
             }
             throw retryError;
           }
-          let needsLiveness = false;
+          const vanished: string[] = [];
           for (const workFile of armedFiles) {
             if (provenFiles.has(workFile) || judged.has(workFile)) continue;
             if (!existsSync(workFile)) {
-              needsLiveness = true;
+              vanished.push(workFile);
               continue;
             }
             // Present but unjudged on a resolving pass — it landed between
@@ -1128,19 +1144,30 @@ function sweepStaleRuntimeLedgers(
           // A retirement never reaches this line: the retired ledger was
           // renamed away, so its armed path always fails existsSync above
           // and the end answers through the liveness check below.
-          if (!needsLiveness) return 'proven';
-          const alive = lastNamed.filter(
-            (pgid) => processGroupLiveness(pgid) !== 'gone',
-          );
-          if (alive.length > 0) {
-            lastNamed = alive;
-            return 'unproven';
+          if (vanished.length === 0) return 'proven';
+          // A file vanishing without ever being judged proves nothing by
+          // itself, so it answers only from the groups its own failures
+          // ever named: a sibling ledger's dead groups are no evidence
+          // about this one's stop. A file that named nothing — unreadable
+          // at every read and deleted from outside the sweep — has no
+          // provable stop behind it at all: the fact stays terminal, as
+          // the single-ledger reaper holds it.
+          let namedAlive = 0;
+          let unevidenced = false;
+          for (const workFile of vanished) {
+            const named = namedByFile.get(workFile);
+            if (named === undefined) {
+              unevidenced = true;
+              continue;
+            }
+            const alive = [...named].filter(
+              (pgid) => processGroupLiveness(pgid) !== 'gone',
+            );
+            namedByFile.set(workFile, new Set(alive));
+            namedAlive += alive.length;
           }
-          // A file vanishing without ever being judged proves nothing —
-          // never readable and deleted from outside the sweep, there is no
-          // provable stop behind it. Its single-ledger sibling holds the
-          // same fact terminal.
-          return sawRetired || lastNamed.length === 0 ? 'terminal' : 'proven';
+          if (namedAlive > 0) return 'unproven';
+          return unevidenced || sawRetired ? 'terminal' : 'proven';
         },
         () => {
           armedStaleSweeps.delete(ledgerDir);

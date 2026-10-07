@@ -961,14 +961,24 @@ export async function sweepWorkerLedger(
           `The Managed Runtime ledger ${workFile} became unreadable during the sweep; the stop it records stays unproven.`,
         );
       }
-      const persisted = finalDocument.groups.filter(
-        (group) => !seen.has(group.pgid),
+      // A pgid is not a record's identity: a worker that stayed alive until
+      // its kill was proven may have replaced a group's record under the
+      // same pgid (a new call, new stamps) while this sweep held the first
+      // snapshot. Only the final document dates what the record now names,
+      // so its record displaces the snapshot's — the identity judgement
+      // below must never read a replacement's young live group against the
+      // stamps of the group its pgid used to name, which would read the
+      // live group as 'recycled' and delete the ledger with it still
+      // running.
+      const finalByPgid = new Map(
+        finalDocument.groups.map((group) => [group.pgid, group]),
       );
-      if (persisted.length > 0) {
-        groups = [...groups, ...persisted];
-        for (const group of persisted) {
-          seen.add(group.pgid);
-          remaining.set(group.pgid, group);
+      groups = groups.map((group) => finalByPgid.get(group.pgid) ?? group);
+      for (const [pgid, group] of finalByPgid) {
+        remaining.set(pgid, group);
+        if (!seen.has(pgid)) {
+          groups = [...groups, group];
+          seen.add(pgid);
         }
       }
     }
@@ -1042,24 +1052,16 @@ export async function sweepWorkerLedger(
     }
     return 'proven';
   }
-  // A live worker can still be writing: the rewrite that drops this sweep's
-  // proven groups must keep every record it never saw, and an unreadable
-  // file is left untouched rather than overwritten with a stale snapshot.
-  const written = [...remaining.values()];
-  let rewrite = true;
-  if (!workerProven) {
-    const current = readLedgerDocument(workFile);
-    if (current === undefined) {
-      rewrite = false;
-    } else {
-      for (const group of current.groups) {
-        if (!seen.has(group.pgid)) written.push(group);
-      }
-    }
-  }
-  if (rewrite) {
+  // The ledger of a worker this sweep could not prove stopped is never
+  // written: any read the sweep merges from is already stale when the
+  // worker's next durable addGroup lands, and the sweep's write would lose
+  // that record (the group would then exit unsignalled and unswept). A live
+  // worker owns its own file — its writes are the truth and the next sweep
+  // re-judges the records this one left. Only a proven-stopped writer's
+  // file is rewritten: nobody is left to race.
+  if (workerProven) {
     try {
-      writeLedgerDocument(workFile, worker, written);
+      writeLedgerDocument(workFile, worker, [...remaining.values()]);
     } catch {
       // The previous truth is at least as good as what failed to be written.
     }

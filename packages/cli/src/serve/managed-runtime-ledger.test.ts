@@ -5,7 +5,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, utimesSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  statSync,
+  utimesSync,
+} from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os, { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -932,10 +938,75 @@ describe('Managed Runtime ledger', () => {
       expect(kept?.groups.map((group) => group.pgid)).toEqual([202]);
     });
 
+    it('adopts a same-pgid record the final read carries over the swept snapshot', async () => {
+      // The orphan worker replaces group 202's record — new call, new
+      // stamps — after this sweep's first read: a pgid is not a record's
+      // identity. The final read's record must displace the snapshot's, or
+      // the identity judgement reads the young replacement group against
+      // the stamps of the group its pgid used to name, calls it
+      // 'recycled', and deletes the ledger with the group still running.
+      const workFile = path.join(root, 'ledger.json');
+      const worker = {
+        pid: 101,
+        pgid: 101,
+        incarnation: 'incarnation-1',
+        startedAt: Date.now() - 90_000,
+      };
+      testInternals.writeLedgerDocument(workFile, worker, [
+        { pgid: 202, callId: 'call-old', startedAt: Date.now() - 60_000 },
+      ]);
+      const alive = new Set([101, 202]);
+      const signal = vi.fn((pgid: number) => {
+        alive.delete(pgid);
+        if (pgid === 101) {
+          // The replacement publish, landing while the sweep proves the kill.
+          testInternals.writeLedgerDocument(workFile, worker, [
+            { pgid: 202, callId: 'call-new', startedAt: Date.now() },
+          ]);
+        }
+        return 'sent' as const;
+      });
+      const table = () =>
+        new Map([
+          [
+            101,
+            {
+              pid: 101,
+              pgid: 101,
+              runningMs: 90_000,
+              args: 'node dist/cli.js managed-runtime-worker',
+            },
+          ],
+          [
+            202,
+            {
+              pid: 202,
+              pgid: 202,
+              runningMs: 1_000,
+              args: 'node our-shell.js',
+            },
+          ],
+        ]);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (alive.has(id) ? 'alive' : 'gone'),
+            signal,
+            table,
+          },
+        }),
+      ).resolves.toBe('proven');
+      // 'recycled' would have left the young group unsignalled and alive.
+      expect(signal).toHaveBeenCalledWith(202, 'SIGKILL');
+      expect(existsSync(workFile)).toBe(false);
+    });
+
     it('keeps a live worker late write out of the sweep rewrite', async () => {
-      // The worker cannot be proven stopped, so it may still be writing: the
-      // rewrite that drops this sweep's proven groups must not erase a record
-      // the worker persisted after the sweep's read.
+      // The worker cannot be proven stopped, so the sweep never writes its
+      // file at all: a record the worker persists anywhere in the pass is
+      // still there when the sweep throws its unproven truth.
       const workFile = path.join(root, 'ledger.json');
       const worker = {
         pid: 101,
@@ -978,6 +1049,46 @@ describe('Managed Runtime ledger', () => {
       const kept = testInternals.readLedgerDocument(workFile);
       expect(kept?.groups.map((group) => group.pgid)).toEqual([202]);
     });
+
+    it.skipIf(!POSIX)(
+      'never writes over the ledger of a worker it cannot prove stopped',
+      async () => {
+        // Every read a sweep merges from is already stale against a live
+        // writer: the worker's next durable addGroup lands after the read,
+        // and the sweep's stale write drops the record — the new group then
+        // exits unsignalled and unswept. The file's inode is the tell: the
+        // old rewrite landed through tmp+rename even when the content came
+        // out unchanged.
+        const workFile = path.join(root, 'ledger.json');
+        const worker = {
+          pid: 101,
+          pgid: 101,
+          incarnation: 'incarnation-1',
+          startedAt: Date.now(),
+        };
+        testInternals.writeLedgerDocument(workFile, worker, [
+          { pgid: 202, callId: 'call-1', startedAt: Date.now() },
+        ]);
+        const inode = statSync(workFile).ino;
+        const bytes = readFileSync(workFile, 'utf8');
+        const alive = new Set([101, 202]);
+        await expect(
+          sweepWorkerLedger(workFile, {
+            proofTimeoutMs: 300,
+            sys: {
+              platform: 'linux',
+              // No table at all: no identity to judge by, so nothing is
+              // signalled and the writer stays unproven.
+              table: () => undefined,
+              liveness: (id) => (alive.has(id) ? 'alive' : 'gone'),
+              signal: vi.fn(),
+            },
+          }),
+        ).rejects.toMatchObject({ remaining: [101, 202] });
+        expect(statSync(workFile).ino).toBe(inode);
+        expect(readFileSync(workFile, 'utf8')).toBe(bytes);
+      },
+    );
 
     it('resolves a group whose live member is provably younger than its record', async () => {
       // A ±120 s window would match |90 s − 150 s| and SIGKILL this group;
@@ -1959,9 +2070,11 @@ describe('Managed Runtime ledger', () => {
         }),
       ).rejects.toMatchObject({ remaining: [301, 401] });
       expect(signal).not.toHaveBeenCalled();
-      // The group's truth survives for the next sweep; the dead one resolved.
+      // An unproven writer's file is never rewritten: both records stay on
+      // disk and the next sweep re-judges them — a dead group's liveness
+      // answer is cheap to re-earn, a lost record is not recoverable.
       const kept = testInternals.readLedgerDocument(workFile);
-      expect(kept?.groups.map((group) => group.pgid)).toEqual([401]);
+      expect(kept?.groups.map((group) => group.pgid)).toEqual([401, 402]);
     });
 
     it('holds a live sibling whose ACP host uses the deprecated alias', async () => {

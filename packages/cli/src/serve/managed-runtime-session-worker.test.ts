@@ -1888,6 +1888,110 @@ describe.skipIf(process.platform === 'win32')(
     );
 
     it(
+      'holds the quarantine for a vanished unreadable ledger when a sibling ledger proves out beside it',
+      // The reaper's ticks are seconds apart.
+      { timeout: 40_000 },
+      async () => {
+        // One failure batch can arm several ledgers: an unreadable ghost
+        // (which names nothing) beside a sibling whose groups die later.
+        // The sibling's proof is evidence about ITS file only — the ghost's
+        // own vanished truth was never judged, so the quarantine must stay
+        // terminal where a union of every ledger's names would lift.
+        const sweeperConfig = new Config({
+          sessionId: '11111111-2222-3333-4444-555555555555',
+          targetDir: root,
+          cwd: root,
+          debugMode: false,
+          model: 'test-model',
+          usageStatisticsEnabled: false,
+          telemetry: { enabled: false },
+          deferTelemetryInitialization: true,
+        });
+        const reportSpy = vi.spyOn(
+          sweeperConfig,
+          'reportManagedEngineQuarantine',
+        );
+        const clearSpy = vi.spyOn(
+          sweeperConfig,
+          'clearManagedEngineQuarantine',
+        );
+        const ledgerDir = path.join(
+          sweeperConfig.storage.getProjectTempDir(),
+          'managed-runtime',
+        );
+        await mkdir(ledgerDir, { recursive: true });
+        // Ghost A: fresh enough to be swept, too young to retire — it names
+        // nothing and never will.
+        const ghost = path.join(ledgerDir, 'ghost.json');
+        await writeFile(ghost, '{not a ledger', 'utf8');
+        // Ledger B: names a real live process group this test owns. The
+        // record stamp sits just in the future, so the first passes judge
+        // the group 'unknown' and hold it unproven; once the wall clock
+        // passes the stamp, a retry judges the group against its own age,
+        // signals it, and proves B clean — evidence that must not speak
+        // for A.
+        const child = spawn('sleep', ['300'], {
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.unref();
+        const pgid = child.pid!;
+        const sibling = path.join(ledgerDir, 'sibling.json');
+        testInternals.writeLedgerDocument(
+          sibling,
+          {
+            pid: 42424244,
+            pgid: 42424244,
+            incarnation: 'incarnation-1',
+            startedAt: Date.now(),
+          },
+          [
+            {
+              pgid,
+              callId: 'call-sibling',
+              startedAt: Date.now() + 2_500,
+            },
+          ],
+        );
+        try {
+          environment = createManagedRuntimeEnvironment(sweeperConfig, () => ({
+            command: process.execPath,
+            args: [script],
+            env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
+          }));
+          await vi.waitFor(
+            () => {
+              expect(reportSpy).toHaveBeenCalled();
+            },
+            { timeout: 15_000 },
+          );
+          expect(clearSpy).not.toHaveBeenCalled();
+          // The ghost vanishes from outside the sweep.
+          await rm(ghost);
+          // A retry proves the sibling ledger itself — its own real group
+          // signed, its file unlinked.
+          await vi.waitFor(
+            () => {
+              expect(existsSync(sibling)).toBe(false);
+            },
+            { timeout: 15_000 },
+          );
+          // The sibling's proof is in. Several intervals pass: the ghost's
+          // unproven stop still keeps the quarantine.
+          await new Promise((resolve) => setTimeout(resolve, 4_000));
+          expect(clearSpy).not.toHaveBeenCalled();
+          expect(reportSpy).toHaveBeenCalledTimes(1);
+        } finally {
+          try {
+            process.kill(-pgid, 'SIGKILL');
+          } catch {
+            // Already proven by the sweep.
+          }
+        }
+      },
+    );
+
+    it(
       'lifts the quarantine when the retry sweep itself proves the ledger clean',
       // The reaper's ticks are seconds apart.
       { timeout: 30_000 },
