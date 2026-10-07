@@ -193,6 +193,23 @@ describe('goalToolResultProvenance', () => {
     },
   );
 
+  it.each([
+    ToolNames.THREAD_POST,
+    ToolNames.THREAD_WAIT,
+    ToolNames.THREAD_BLOCK,
+    ToolNames.THREAD_REVIEW,
+    ToolNames.THREAD_CREATE,
+  ])('keeps %s an ordinary external fact', (name) => {
+    // Only thread_read repeats another run's model-authored text; the rest of
+    // the family are a person's side of the conversation. thread_block's fixed
+    // reply is the user-authority evidence a blocked proposal cites, so
+    // stamping the whole family would leave the `infeasible` and `external`
+    // blockers with no external_fact to point at.
+    expect(goalToolResultProvenance({ name, goalContext: permit })).toEqual({
+      goalContext: permit,
+    });
+  });
+
   it('leaves a tool call made outside a Goal turn unstamped', () => {
     expect(goalToolResultProvenance({ name: 'read_file' })).toBeUndefined();
   });
