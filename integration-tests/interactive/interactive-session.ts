@@ -168,14 +168,20 @@ export class InteractiveSession {
     // the catch below closes the session, which disposes the terminal and
     // would otherwise discard the boot log unread.
     const exited = new Promise<never>((_, reject) => {
-      ptyProcess.onExit(({ exitCode, signal }) =>
+      ptyProcess.onExit(({ exitCode, signal }) => {
+        // onExit settles ahead of waitFor's next 200ms scan, so a child that
+        // printed the prompt and died inside that gap lands here too — word
+        // the failure from the captured output, not an unchecked ordering.
+        const sawPrompt = stripAnsi(session.rawOutput).includes(
+          'Type your message',
+        );
         reject(
           new Error(
-            `CLI exited before the ready prompt (code ${exitCode}, signal ${signal})\n` +
+            `CLI exited ${sawPrompt ? 'after printing' : 'before'} the ready prompt (code ${exitCode}, signal ${signal})\n` +
               `Last 500 chars: ${stripAnsi(session.rawOutput).slice(-500)}`,
           ),
-        ),
-      );
+        );
+      });
     });
     try {
       await Promise.race([

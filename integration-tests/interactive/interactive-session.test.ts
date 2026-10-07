@@ -21,8 +21,8 @@ import { InteractiveSession } from './interactive-session.js';
 // and interactive-session-start.test.ts), which test:scripts runs on every
 // PR. These real-spawn cases cover the behaviour a source pin cannot: the
 // tight branch's 30s value, options.command, refused-session cleanup,
-// dead-child fail-fast with its captured tail, and a pending waitFor
-// stopping at close().
+// dead-child fail-fast with its captured tail, the exit line's
+// captured-output wording, and a pending waitFor stopping at close().
 const PROMPT_DELAY_MS = 35_000;
 
 describe('InteractiveSession.start ready-prompt budget', () => {
@@ -96,6 +96,27 @@ setTimeout(() => {}, 120_000);`;
     );
     await expect(attempt).rejects.toThrow('BOOTCRASH_MARKER');
     expect(Date.now() - startedAt).toBeLessThan(30_000);
+  });
+
+  it('words a post-prompt death from the captured output', async () => {
+    // The prompt reaches the pty 50ms before the exit — inside waitFor's
+    // 200ms scan gap — so the rejection must not claim the CLI exited before
+    // the prompt its own tail contains.
+    const attempt = InteractiveSession.start({
+      command: {
+        bin: process.execPath,
+        args: [
+          '-e',
+          "console.log('Type your message'); setTimeout(() => process.exit(4), 50)",
+        ],
+      },
+    }).then((s) => {
+      session = s;
+    });
+    await expect(attempt).rejects.toThrow(
+      'CLI exited after printing the ready prompt (code 4',
+    );
+    await expect(attempt).rejects.not.toThrow('before the ready prompt');
   });
 
   it('stops a pending waitFor when the session closes', async () => {

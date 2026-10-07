@@ -16,7 +16,10 @@ import { describe, expect, it } from 'vitest';
 // start() contract a PR-gated witness at ~0ms through test:scripts — each
 // assertion names the revert it exists to redden, and each was probe-checked
 // against that revert. The behaviour behind them is covered by the
-// real-spawn cases beside the module.
+// real-spawn cases beside the module. Patterns that pin a call site must
+// tolerate the trailing-comma multi-line form prettier emits past 80
+// columns, or a pure reflow reddens a PR-gated lane with no behavioural
+// cause.
 const source = readFileSync(
   join(
     resolve(import.meta.dirname, '../..'),
@@ -28,19 +31,27 @@ const source = readFileSync(
 describe('InteractiveSession.start source pins (#13552)', () => {
   it('threads the resolved ready-prompt budget into the waitFor', () => {
     // A full revert to the literal 30_000 drops the readyPromptBudgetMs call
-    // and its import together, and otherwise passes every lane.
+    // and its import together, and otherwise passes every lane. The call
+    // sits one token short of printWidth, so the pattern must also match the
+    // trailing-comma multi-line form a reflow emits.
     expect(source).toMatch(
-      /session\.waitFor\(\s*'Type your message',\s*readyPromptBudgetMs\(process\.env\)\s*\)/,
+      /session\.waitFor\(\s*'Type your message',\s*readyPromptBudgetMs\(process\.env\),?\s*\)/,
     );
   });
 
   it('races the ready-prompt wait against child exit, keeping the tail', () => {
     // Reverting the race returns a dead-child boot to a full-budget wait;
     // dropping the tail discards the boot log that made #13552 diagnosable
-    // from the job log alone.
+    // from the job log alone. The exit line is worded from the captured
+    // output: onExit settles ahead of waitFor's 200ms scan, so a child that
+    // printed the prompt and died inside that gap must not be reported as
+    // having exited before it.
     expect(source).toContain('Promise.race([');
     expect(source).toContain('ptyProcess.onExit(');
-    expect(source).toContain('CLI exited before the ready prompt');
+    expect(source).toMatch(
+      /stripAnsi\(session\.rawOutput\)\.includes\(\s*'Type your message',?\s*\)/,
+    );
+    expect(source).toContain("'after printing' : 'before'");
     expect(source).toContain(
       'Last 500 chars: ${stripAnsi(session.rawOutput).slice(-500)}',
     );
@@ -53,7 +64,17 @@ describe('InteractiveSession.start source pins (#13552)', () => {
 
   it('stops the waitFor poll when the session closes', () => {
     // Without the flag, the race's abandoned loser keeps re-scanning a dead
-    // pty's output every 200ms until its own budget expires.
-    expect(source).toContain('while (!this.closed &&');
+    // pty's output every 200ms until its own budget expires. Pin the guard's
+    // semantics, not its byte prefix, so a reflow of the condition cannot
+    // redden a PR-gated lane.
+    expect(source).toMatch(/while\s*\([\s\S]*?!this\.closed\s*&&/);
+  });
+
+  it('fails an abandoned poll with the closed-session error', () => {
+    // Deleting either statement leaves the loop text intact, so the guard
+    // pin alone cannot see it: close() must set the flag, and waitFor must
+    // throw on it.
+    expect(source).toContain('this.closed = true;');
+    expect(source).toContain('Session closed while waiting for text:');
   });
 });
