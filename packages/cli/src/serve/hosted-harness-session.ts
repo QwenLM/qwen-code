@@ -112,6 +112,7 @@ import {
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isRetryableWorkspaceAcquisition,
+  type HostedWorkspaceContextSlot,
   type HostedWorkspaceToolProfile,
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
@@ -207,6 +208,8 @@ interface HostedSession {
   storeDescriptor: ReturnType<typeof parseBridgeManagedSessionStore>;
   lifecycle?: ManagedSessionLifecycleAuthority;
   lifecycleKind?: 'close' | 'delete';
+  /** Fetched Workspace instructions; undefined until the first fetch. */
+  workspaceContext?: string;
   monitorWake?: HostedMonitorWakeScheduler;
   /** A recovery load acquired the Runtime Session for this promptId. On
    * the cancellation path, only the terminal success route and session
@@ -1669,6 +1672,12 @@ async function executeHostedTurn(
           parentUuid = message.uuid;
           return message.uuid;
         };
+        const workspaceContext: HostedWorkspaceContextSlot = {
+          read: () => session.workspaceContext,
+          write: (context) => {
+            session.workspaceContext = context;
+          },
+        };
         toolTurn =
           session.toolProfile && brokerOptions
             ? new HostedWorkspaceToolTurn(
@@ -1688,12 +1697,15 @@ async function executeHostedTurn(
                   settings: session.approval,
                   waiters: session.waiters,
                 },
-                session.mcp,
-                session.toolProfile,
-                session.hooks,
-                session.childRuns,
-                session.monitors,
-                session.backgroundLane,
+                {
+                  mcp: session.mcp,
+                  hooks: session.hooks,
+                  profile: session.toolProfile,
+                  context: workspaceContext,
+                  childRuns: session.childRuns,
+                  monitors: session.monitors,
+                  backgroundLane: session.backgroundLane,
+                },
               )
             : undefined;
         if (resumeFromToolResults) {
@@ -1702,7 +1714,7 @@ async function executeHostedTurn(
               'Tool turn is unavailable.',
             );
           try {
-            await toolTurn.resumeCommittedResults();
+            await toolTurn.resumeCommittedResults(abort.signal);
           } catch (cause) {
             if (isRetryableWorkspaceAcquisition(cause)) throw cause;
             throw new HostedToolRecoveryRequiredError(cause);
@@ -1720,6 +1732,7 @@ async function executeHostedTurn(
             promptId,
             signal: abort.signal,
             modelScope,
+            workspaceContext,
             ...(session.hooks ? { hooks: session.hooks } : {}),
             ...(toolTurn ? { toolTurn } : {}),
             ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
@@ -3905,6 +3918,12 @@ export function registerHostedHarnessSessionRoutes(
           parentUuid = message.uuid;
           return message.uuid;
         };
+        const workspaceContext: HostedWorkspaceContextSlot = {
+          read: () => session.workspaceContext,
+          write: (context) => {
+            session.workspaceContext = context;
+          },
+        };
         toolTurn = new HostedWorkspaceToolTurn(
           brokerOptions,
           session.managed,
@@ -3921,12 +3940,14 @@ export function registerHostedHarnessSessionRoutes(
             settings: session.approval,
             waiters: session.waiters,
           },
-          session.mcp,
-          session.toolProfile,
-          undefined,
-          session.childRuns,
-          session.monitors,
-          session.backgroundLane,
+          {
+            mcp: session.mcp,
+            profile: session.toolProfile,
+            context: workspaceContext,
+            childRuns: session.childRuns,
+            monitors: session.monitors,
+            backgroundLane: session.backgroundLane,
+          },
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         try {
@@ -3934,7 +3955,7 @@ export function registerHostedHarnessSessionRoutes(
           // left behind before inference — a text-only continuation never
           // re-acquires, so without this the marker outlives the turn and
           // wedges every later cold load.
-          await toolTurn.resumeCommittedResults();
+          await toolTurn.resumeCommittedResults(abort.signal);
           const result = await runHostedHarnessTextTurn({
             sessionId,
             cwd,
@@ -3942,6 +3963,7 @@ export function registerHostedHarnessSessionRoutes(
             prompt: '',
             promptId,
             signal: abort.signal,
+            workspaceContext,
             toolTurn,
             resumeFromToolResults: resumeParts,
             textDeltas: deltas,

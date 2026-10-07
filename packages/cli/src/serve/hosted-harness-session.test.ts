@@ -154,6 +154,7 @@ const state = vi.hoisted(() => ({
       promptId?: string;
       modelScope?: import('@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js').ManagedHookModelScope;
       resumeFromToolResults?: readonly unknown[];
+      workspaceContext?: { read(): string | undefined };
     }) => ({
       text: 'hello back',
       model: 'test-model',
@@ -565,6 +566,10 @@ describe('settleCancelledHookTurn', () => {
 
 describe('Hosted Harness no-tool session', () => {
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
     resetManagedRuntimeDispatchGatesForTest();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'fileHistory').mockResolvedValue({
       ownerSessionId: SESSION_ID,
@@ -7963,6 +7968,10 @@ describe('Hosted Harness tool approvals', () => {
     vi.waitFor(check, { timeout: 10_000 });
 
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
     state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
     state.model.mockReset();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'fileHistory').mockResolvedValue({
@@ -9272,6 +9281,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
   let acquireSpy: MockInstance<HostedWorkspaceBroker['acquire']>;
 
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
     resetManagedRuntimeDispatchGatesForTest();
     state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
     state.model.mockReset();
@@ -9645,6 +9658,12 @@ describe('Hosted Harness Runtime turn takeover', () => {
         executionStatus: 'success',
         responseParts: [{ text: 'written' }],
       } as never);
+      // Non-empty so "fetched" is distinguishable from "never fetched": an
+      // empty read assembles to '', which the slot already looks like.
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'workspaceContext',
+      ).mockResolvedValue([{ name: 'AGENTS.md', text: 'never touch prod' }]);
       const release = vi
         .spyOn(HostedWorkspaceBroker.prototype, 'release')
         .mockResolvedValue();
@@ -9669,12 +9688,18 @@ describe('Hosted Harness Runtime turn takeover', () => {
         }),
       ]);
       let declarations: string[] | undefined;
-      state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
-        declarations = (await toolTurn!.declarations(signal)).map(
-          (tool) => tool.name!,
-        );
-        return { text: 'continued', model: 'test-model' };
-      });
+      let recoveredContext: string | undefined;
+      state.model.mockImplementationOnce(
+        async ({ toolTurn, signal, workspaceContext }) => {
+          // The takeover-built attachment must have read the Workspace
+          // instructions before this recovered turn drives the model.
+          recoveredContext = workspaceContext?.read();
+          declarations = (await toolTurn!.declarations(signal)).map(
+            (tool) => tool.name!,
+          );
+          return { text: 'continued', model: 'test-model' };
+        },
+      );
       const clientId = loaded.body.clientId as string;
       const continued = await replacementHeaders(
         supertest(server).post(
@@ -9704,6 +9729,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
         'edit',
         ...(toolProfile.endsWith('/2') ? ['glob'] : []),
       ]);
+      // The takeover-built attachment starts with an undefined slot: the
+      // recovered turn must have populated it before driving the model, or
+      // the user-visible answer is synthesized with no project instructions.
+      expect(recoveredContext).toContain('--- Context from: AGENTS.md ---');
+      expect(recoveredContext).toContain('never touch prod');
       const transcript = await replacementHeaders(
         supertest(server).get(`/session/${SESSION_ID}/transcript`),
       ).set('X-Qwen-Client-Id', clientId);
