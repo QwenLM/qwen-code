@@ -152,6 +152,28 @@ describe('SendMessageTool — team mode', () => {
     expect(teammateSchema.description).toContain('known teammate name');
   });
 
+  it('names list_agents only where it is reachable', async () => {
+    // A registered bridge without list_agents (tools.disabled) must not
+    // advertise it, in the description or in an addressing error.
+    const bridgeOnly = new SendMessageTool(
+      makeTeamConfig({
+        toolNames: [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+      }),
+    );
+    expect(bridgeOnly.schema.description).not.toContain('list_agents');
+    expectLlm(
+      await run(bridgeOnly, '*'),
+      ['address each session by name.'],
+      ['list_agents'],
+    );
+    const withRoster = new SendMessageTool(
+      makeTeamConfig({ toolNames: [ToolNames.LIST_AGENTS] }),
+    );
+    expectLlm(await run(withRoster, '*'), [
+      'address each session by name from list_agents.',
+    ]);
+  });
+
   it('describes text invisibility as peer-only for teammates', () => {
     const tool = noTeamTool();
     expect(tool.description).toContain(

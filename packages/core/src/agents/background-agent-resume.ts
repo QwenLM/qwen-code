@@ -444,14 +444,20 @@ function buildRecoveredNotice(count: number): string {
 
 function buildRecoveredModelNotice(
   count: number,
+  listAgentsAvailable: boolean,
   bridgeAvailable: boolean,
 ): string {
+  const restored = `${count} background agent${count === 1 ? ' was' : 's were'} restored from this session.`;
+  // Naming list_agents when it is not registered sends the model to a call
+  // that cannot resolve on every recovery.
+  if (!listAgentsAvailable) {
+    return `${restored} Use send_message with a task_id to continue one.`;
+  }
   return (
-    `${count} background agent${count === 1 ? ' was' : 's were'} restored ` +
-    `from this session. Use list_agents to inspect ${count === 1 ? 'it' : 'them'} ` +
-    'and send_message with a task_id to continue one. ' +
+    `${restored} Use list_agents to inspect ${count === 1 ? 'it' : 'them'} ` +
+    'and send_message with a task_id to continue one.' +
     (bridgeAvailable
-      ? `In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)}`
+      ? ` In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)}`
       : '')
   );
 }
@@ -1635,9 +1641,8 @@ export class BackgroundAgentResumeService {
     const registry = this.config.getToolRegistry?.();
     return buildRecoveredModelNotice(
       count,
-      !!registry &&
-        isDeferredToolBridgeAvailable(registry) &&
-        registry.getAllToolNames().includes(ToolNames.LIST_AGENTS),
+      !!registry?.getAllToolNames().includes(ToolNames.LIST_AGENTS),
+      !!registry && isDeferredToolBridgeAvailable(registry),
     );
   }
 

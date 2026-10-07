@@ -646,6 +646,19 @@ describe('BackgroundAgentResumeService', () => {
     ).not.toContain('tool_search');
   });
 
+  it('does not name list_agents when it is not registered', () => {
+    const service = new BackgroundAgentResumeService({
+      getToolRegistry: () => ({
+        getAllToolNames: () => [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+      }),
+    } as unknown as Config);
+    const notice = service.buildRecoveredBackgroundAgentsModelNotice(2);
+    expect(notice).not.toContain('list_agents');
+    expect(notice).toBe(
+      '2 background agents were restored from this session. Use send_message with a task_id to continue one.',
+    );
+  });
+
   it('restores interrupted and completed background agents without notifying again', async () => {
     const sessionId = 'session-1';
     const runningAgentId = 'agent-running';

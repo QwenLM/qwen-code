@@ -801,6 +801,10 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
    * cannot make two refreshes disagree about where the reference lives.
    */
   private readonly delegationSurface: BundledReferenceSurface;
+  // list_agents is excluded for subagents and teammates, whose registries can
+  // still list it. Decided once for the context that builds this instance, so
+  // a refresh fired from another scope cannot flip the description.
+  private readonly listAgentsReachable = isTopLevelSession() && !isTeammate();
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -980,6 +984,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     );
     const registry = this.config.getToolRegistry?.();
     const rosterDiscovery =
+      this.listAgentsReachable &&
       registry &&
       isDeferredToolBridgeAvailable(registry) &&
       registry.getAllToolNames().includes(ToolNames.LIST_AGENTS)

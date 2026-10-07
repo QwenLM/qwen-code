@@ -149,8 +149,10 @@ class SendMessageInvocation extends BaseToolInvocation<
 
       case 'self': {
         const msg =
-          `"${outcome.name}" is this session's own name — a session cannot message itself. ` +
-          'Use list_agents to see the other sessions you can reach.';
+          `"${outcome.name}" is this session's own name — a session cannot message itself.` +
+          (rosterReachable(this.config)
+            ? ' Use list_agents to see the other sessions you can reach.'
+            : '');
         return {
           llmContent: msg,
           returnDisplay: 'That is this session.',
@@ -162,7 +164,10 @@ class SendMessageInvocation extends BaseToolInvocation<
         if (outcome.suggestions.length === 0) return null;
         const msg =
           `No reachable session${teamActive ? ' and no teammate' : ''} is named "${to}". Did you mean: ` +
-          `${outcome.suggestions.join(', ')}? Use list_agents to see who is reachable.`;
+          `${outcome.suggestions.join(', ')}?` +
+          (rosterReachable(this.config)
+            ? ' Use list_agents to see who is reachable.'
+            : '');
         return {
           llmContent: msg,
           returnDisplay: 'No such session.',
@@ -406,7 +411,8 @@ class SendMessageInvocation extends BaseToolInvocation<
       if (!teamManager) {
         const msg =
           'No active team to broadcast to. Broadcasting to other Qwen Code sessions ' +
-          'is not supported — address each session by name from list_agents.';
+          'is not supported — address each session by name' +
+          (rosterReachable(this.config) ? ' from list_agents.' : '.');
         return {
           llmContent: msg,
           returnDisplay: 'No active team for broadcast.',
@@ -470,8 +476,10 @@ class SendMessageInvocation extends BaseToolInvocation<
         ? `No active team and no task_id, and cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so "${to}" cannot be another session. ` +
           'Create a team, or pass `task_id` to message a background task.'
         : `No active team, no task_id, and no reachable session named "${to}". ` +
-          'Create a team, pass `task_id` to message a background task, or use ' +
-          'list_agents to see which sessions are reachable.';
+          (rosterReachable(this.config)
+            ? 'Create a team, pass `task_id` to message a background task, or use ' +
+              'list_agents to see which sessions are reachable.'
+            : 'Create a team, or pass `task_id` to message a background task.');
       return {
         llmContent: msg,
         returnDisplay: msg,
@@ -499,7 +507,11 @@ class SendMessageInvocation extends BaseToolInvocation<
         // is hiding.
         errMsg += this.peerMessagingOff
           ? ` Cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so another session could not have taken that name either.`
-          : ` No reachable session has that name either; use list_agents to see who is reachable.`;
+          : ` No reachable session has that name either${
+              rosterReachable(this.config)
+                ? '; use list_agents to see who is reachable.'
+                : '.'
+            }`;
       }
       return {
         llmContent: `Failed to send message: ${errMsg}`,
@@ -510,12 +522,24 @@ class SendMessageInvocation extends BaseToolInvocation<
   }
 }
 
+/**
+ * Whether the caller can use list_agents: it is registered and this is not a
+ * teammate scope, which excludes it. Gates every model-facing mention, so an
+ * error never sends the model to a tool the description withheld.
+ */
+function rosterReachable(config: Config): boolean {
+  return (
+    !isTeammate() &&
+    !!config
+      .getToolRegistry?.()
+      ?.getAllToolNames()
+      .includes(ToolNames.LIST_AGENTS)
+  );
+}
+
 function sendMessageDescription(config: Config): string {
   const registry = config.getToolRegistry?.();
-  const rosterAvailable =
-    !isTeammate() &&
-    registry?.getAllToolNames().includes(ToolNames.LIST_AGENTS);
-  const rosterGuidance = rosterAvailable
+  const rosterGuidance = rosterReachable(config)
     ? 'Use list_agents to find a background task id or another session\'s "to" value, exactly as shown — list_agents appends " [ref]" whenever the bare name would not reach that session (another session or a teammate shares it). ' +
       (registry && isDeferredToolBridgeAvailable(registry)
         ? `In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)} `

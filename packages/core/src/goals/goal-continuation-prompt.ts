@@ -208,16 +208,16 @@ export function renderGoalContinuationPrompt(
   registry?: ToolRegistry,
 ): string {
   const toolNames = registry?.getAllToolNames() ?? [];
+  // exec is registered only under CodeModeOnly, where tool_call is hidden and
+  // refused, so the Direct-mode route would send the model to a dead end.
+  const codeModeOnly = toolNames.includes(ToolNames.EXEC);
   const discoveryLines: string[] = [];
-  if (registry && isDeferredToolBridgeAvailable(registry)) {
+  if (registry && !codeModeOnly && isDeferredToolBridgeAvailable(registry)) {
     discoveryLines.push(
       `In Direct mode: ${toolSearchBridgeSentence('get_goal or update_goal')}`,
     );
   }
-  if (
-    toolNames.includes(ToolNames.TOOL_SEARCH) &&
-    toolNames.includes(ToolNames.EXEC)
-  ) {
+  if (codeModeOnly && toolNames.includes(ToolNames.TOOL_SEARCH)) {
     discoveryLines.push(
       'In Code Mode, discover missing Goal tools with tool_search and invoke them through exec using the returned JavaScript name.',
     );
