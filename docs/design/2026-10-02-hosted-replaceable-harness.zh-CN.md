@@ -296,13 +296,13 @@ continuation——expired/cancelled 保持瞬态（路由的可重试 409），
   就撞上它留下的陈旧 checkpoint，而这恰是第十一轮探针用一次真实
   transport 故障注入搭出来的形状。helper 现在把故障顺势抛给调用
   方的 try-catch：由基线可重试拒绝回答，store 自己的重试阶梯负责
-  重试，故障过后同一形状照常结算。同一类 store 故障也会被权威
-  就地改写成判定而不是异常抛出——TransportError 落成
-  `blocked/missing_state` 返回值——所以「顺势抛出」仍会从它身边
-  走过（R9-5'）：故障形判定（`missing_state / opaque_state /
-  invalid_state`）同样按不可证拒付处理，只有表示「无 checkpoint
-  本来就合法」的 `missing_checkpoint` 保留偿付资格（Arm B 宿世
-  的正确形态）。
+  重试，故障过后同一形状照常结算。
+- 同一类 store 故障也会被权威就地改写成判定（R9-5'）：
+  TransportError 落成 `blocked/missing_state` 返回值、绝不抛出——
+  所以「顺势抛出」仍会从它身边走过。故障形判定
+  （`missing_state` / `opaque_state` / `invalid_state`）同样按不可证
+  拒付处理；只有表示「无 checkpoint 本来就合法」的
+  `missing_checkpoint` 保留偿付资格（Arm B 驻留的正确形态）。
 - 升级本身需要步距（R9-4）：对一道还不能结算的等待按 ~500ms
   lease-续期节奏强制发出取消接管 load，买到的只是每秒约 4 次
   请求的 daemon 开销——coordinator 现在按 Turn 为该 load 定步距

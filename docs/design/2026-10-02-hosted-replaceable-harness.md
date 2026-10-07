@@ -353,13 +353,13 @@ its readings (R9):
   transport fault into that read. The helper now propagates the fault
   into the caller's try-catch: the baseline retriable refusal answers,
   the store's retry ladder owns the retry, and the same shape settles
-  identically once the fault has passed. The authority itself converts
-  the same class of store fault in place — TransportError becomes a
-  `blocked/missing_state` verdict, never an exception — so propagation
-  alone still settled past it (R9-5'): fault-shaped verdicts
-  (`missing_state`, `opaque_state`, `invalid_state`) are refused
-  there too, while `missing_checkpoint` stays payable as the Arm B
-  park's honest form.
+  identically once the fault has passed.
+- The authority itself converts the same class of store fault in place
+  (R9-5'): TransportError becomes a `blocked/missing_state` verdict,
+  never an exception, so propagation alone still settled past it.
+  Fault-shaped verdicts (`missing_state`, `opaque_state`,
+  `invalid_state`) are refused there too; `missing_checkpoint` stays
+  payable as the Arm B park's honest form.
 - The escalation itself is paced (R9-4): a cancellation takeover load
   forced per ~500 ms lease-renewal tick against a wait that cannot
   settle yet only buys daemon work at ~4 requests/s — the coordinator
