@@ -1898,6 +1898,7 @@ export function registerHostedHarnessSessionRoutes(
       // exactly as on the first load.
       if (
         !resident.hooks &&
+        resident.active === undefined &&
         (passiveRecovery || driveRecovery) &&
         body?.['cancellationTakeover'] === true
       ) {

@@ -6874,7 +6874,7 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
-  it('reports an aborted turn as cancelled to the Java event projector', async () => {
+  it('reports an aborted live turn as cancelled after a Java-style cold reattach', async () => {
     const log = vi
       .spyOn(stdio, 'writeStderrLineSafe')
       .mockImplementation(() => {});
@@ -6902,9 +6902,19 @@ describe('Hosted Harness no-tool session', () => {
       .send({ prompt, promptId: PROMPT_ID, payloadDigest });
     expect(admitted.status).toBe(202);
     await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1));
+    const reattached = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      passiveManagedRuntimeRecovery: true,
+      driveRuntimeRecovery: false,
+      cancellationTakeover: true,
+    });
+    expect(reattached.status).toBe(200);
+    expect(reattached.body.clientId).toBe(created.body.clientId);
     const cancelled = await headers(
       supertest(server).post(`/session/${SESSION_ID}/cancel`),
-    ).set('X-Qwen-Client-Id', created.body.clientId as string);
+    ).set('X-Qwen-Client-Id', reattached.body.clientId as string);
     expect(cancelled.status).toBe(204);
     await vi.waitFor(
       async () => {
