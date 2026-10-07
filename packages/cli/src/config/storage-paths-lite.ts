@@ -4,12 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
 // Keep this literal in sync with core's QWEN_DIR. This lite module must not
 // import @qwen-code/qwen-code-core because it runs before serve listener ready.
 export const SETTINGS_DIRECTORY_NAME = '.qwen';
+
+// The system-wide settings directory on Windows, where the platform default
+// lives and an environment override may point.
+const WINDOWS_SYSTEM_SETTINGS_DIR = 'C:\\ProgramData\\qwen-code';
 
 /**
  * Whether a `QWEN_HOME` value expands against the home directory: `~`, or a
@@ -168,6 +173,57 @@ export function getGlobalQwenDirLite(
   return path.join(homeDir, SETTINGS_DIRECTORY_NAME);
 }
 
+/**
+ * Whether a path supplied by `QWEN_CODE_SYSTEM_SETTINGS_PATH` or
+ * `QWEN_CODE_SYSTEM_DEFAULTS_PATH` is trusted to carry system-wide settings.
+ *
+ * The platform defaults sit in locations only the OS administrator can
+ * write, and that boundary is what keeps system settings under administrator
+ * control; an override honored unconditionally would let a process's
+ * environment point the system layer at a file its user controls. So an
+ * override is honored only while it names a location the operating system
+ * keeps out of reach of ordinary users, and fails closed to the platform
+ * default otherwise: on Unix, a regular file owned by root, checked with
+ * `lstatSync` so a link to a root-owned file does not qualify; on Windows, a
+ * path that stays inside the system-wide settings directory once normalized.
+ */
+export function isSystemSettingsPathTrusted(configured: string): boolean {
+  if (os.platform() === 'win32') {
+    return isInsideWindowsSystemSettingsDir(configured);
+  }
+  try {
+    const stats = fs.lstatSync(configured);
+    return stats.isFile() && stats.uid === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a Windows path stays inside the system-wide settings directory
+ * once normalized: the path is case-folded and its forward slashes turned
+ * into backslashes, then each `..` segment is resolved against the segments
+ * that precede it, so a path such as `C:\ProgramData\qwen-code\..\..` cannot
+ * be written to point outside the directory.
+ */
+export function isInsideWindowsSystemSettingsDir(configured: string): boolean {
+  const segments: string[] = [];
+  for (const segment of String(configured)
+    .toLowerCase()
+    .replace(/\//g, '\\')
+    .split('\\')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  return segments
+    .join('\\')
+    .startsWith(`${WINDOWS_SYSTEM_SETTINGS_DIR.toLowerCase()}\\`);
+}
+
 export function getSystemSettingsPath(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
 ): string {
@@ -175,7 +231,7 @@ export function getSystemSettingsPath(
     env,
     'QWEN_CODE_SYSTEM_SETTINGS_PATH',
   );
-  if (configured) {
+  if (configured && isSystemSettingsPathTrusted(configured)) {
     return configured;
   }
   if (os.platform() === 'darwin') {
@@ -194,7 +250,7 @@ export function getSystemDefaultsPath(
     env,
     'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
   );
-  if (configured) {
+  if (configured && isSystemSettingsPathTrusted(configured)) {
     return configured;
   }
   return path.join(
