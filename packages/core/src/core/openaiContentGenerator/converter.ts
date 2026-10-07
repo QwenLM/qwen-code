@@ -1251,6 +1251,14 @@ function convertOpenAITextToParts(
         final || requestContext.hasThinkingTagInReasoning === true,
         completed && !requestContext.hasThinkingTagInReasoning,
       );
+      const filter = requestContext.trailingThinkingTagFilter;
+      if (filter.sanitizedTagName) {
+        requestContext.protocolTagSanitized = {
+          tagName: filter.sanitizedTagName,
+          toolCallCount: 0,
+        };
+        filter.sanitizedTagName = undefined;
+      }
     }
     return text ? [{ text }] : [];
   }

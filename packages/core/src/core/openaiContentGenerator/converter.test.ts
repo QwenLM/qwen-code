@@ -389,6 +389,10 @@ describe('OpenAIContentConverter', () => {
         { text: 'I need to verify the branch state.' },
       ]);
       expect(partsOf(finishStream(stream, 'stop'))).toEqual([]);
+      expect((stream as RequestContext).protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 0,
+      });
     });
 
     it.each([
@@ -398,7 +402,9 @@ describe('OpenAIContentConverter', () => {
       'Example:\n<think>literal\n</think>',
       'Explanation:\n</think>\nMore text.',
       'Pattern to strip:\n\n    </thinking>',
-      'Do this:\n\n\t</thinking>',
+      'Do this:\n\n\t</think>\n',
+      'Use:\n<pre>\n</thinking>',
+      'Use:\n<textarea>\n</think>',
       'First the closer:\n</thinking>\nthen again:\n</thinking>',
     ])('preserves ambiguous or nonterminal literal text: %s', (text) => {
       const stream = contentOnlyStream();
@@ -529,7 +535,10 @@ describe('OpenAIContentConverter', () => {
       tagName: string,
       toolCallCount: number,
     ) =>
-      expect(stream.protocolTagSanitized).toEqual({ tagName, toolCallCount });
+      expect((stream as RequestContext).protocolTagSanitized).toEqual({
+        tagName,
+        toolCallCount,
+      });
 
     const expectUnsanitizedLeak = (
       stream: RequestContext,
