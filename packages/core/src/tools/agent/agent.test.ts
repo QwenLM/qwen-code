@@ -212,6 +212,7 @@ function mockHeadless(finalText: string, summary: object, extra: object = {}) {
     getFinalText: vi.fn().mockReturnValue(finalText),
     getExecutionSummary: vi.fn().mockReturnValue(summary),
     getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+    getLastError: vi.fn().mockReturnValue(undefined),
     ...extra,
   } as unknown as AgentHeadless;
 }
@@ -2416,7 +2417,14 @@ describe('AgentTool', () => {
       vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
         AgentTerminateMode.ERROR,
       );
-      expect(await llm()).toBe(raw);
+      // The reason line now rides ahead of the raw text (#13597), same shape as
+      // the CANCELLED branch. What this test pins is unchanged: the raw text
+      // survives verbatim, because `toModelVisibleSubagentResult` strips
+      // `<analysis>`/`<summary>` only on GOAL and the parent needs those
+      // diagnostics to debug a failed run.
+      const text = await llm();
+      expect(text).toContain(raw);
+      expectText(text, ['terminate mode: ERROR']);
     });
 
     it('explains successful subagents with no model-visible output', async () => {
@@ -5498,27 +5506,94 @@ describe('AgentTool', () => {
     });
 
     it.each([
-      [AgentTerminateMode.CANCELLED, 'cancelled'],
-      [AgentTerminateMode.ERROR, 'failed'],
-      [AgentTerminateMode.MAX_TURNS, 'failed'],
-      [AgentTerminateMode.TIMEOUT, 'failed'],
+      // `has`/`lacks` pin what the PARENT model reads. CANCELLED keeps its own
+      // wording (regression guard); every other non-GOAL terminal must name the
+      // mode, because the foreground path has no `<status>` envelope to ride —
+      // without it a timed-out run is indistinguishable from a short answer and
+      // the parent just retries the same call (#13597). TIMEOUT/MAX_TURNS also
+      // have to say which budget to raise, or the retry is verbatim.
+      [
+        AgentTerminateMode.CANCELLED,
+        'cancelled',
+        ['Agent was cancelled by the user.', 'halfway through'],
+        ['terminate mode'],
+      ],
+      [
+        AgentTerminateMode.ERROR,
+        'failed',
+        [
+          'terminate mode: ERROR',
+          'model provider refused the request',
+          'halfway through',
+        ],
+        ['Subagent execution failed.'],
+      ],
+      [
+        AgentTerminateMode.MAX_TURNS,
+        'failed',
+        ['terminate mode: MAX_TURNS', 'max_turns', 'halfway through'],
+        ['Subagent execution failed.'],
+      ],
+      [
+        AgentTerminateMode.TIMEOUT,
+        'failed',
+        ['terminate mode: TIMEOUT', 'max_time_minutes', 'halfway through'],
+        ['Subagent execution failed.'],
+      ],
     ] as const)(
-      'foreground %s terminate mode patches meta as %s',
-      async (mode, expectedStatus) => {
+      'foreground %s terminate mode patches meta as %s and tells the parent why',
+      async (mode, expectedStatus, has, lacks) => {
         // fgTerminalStatus: GOAL → completed (see "reserves a JSONL+meta
         // path"), CANCELLED → cancelled, else failed; a 'completed' fallback
         // was a shipped bug (fixed in d67db4c50).
         loadForeground();
+        vi.mocked(mockAgent.getFinalText).mockReturnValue('halfway through');
         vi.mocked(mockAgent.getTerminateMode).mockReturnValue(mode);
+        vi.mocked(mockAgent.getLastError).mockReturnValue(
+          mode === AgentTerminateMode.ERROR
+            ? 'model provider refused the request'
+            : undefined,
+        );
         const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
-        await invoke(fg()).execute();
+        const result = await invoke(fg()).execute();
         expect(patchMetaSpy).toHaveBeenCalledWith(
           expect.stringMatching(/agent-file-search-.*\.meta\.json$/),
           expect.objectContaining({ status: expectedStatus }),
         );
+        expectText(textOf(result), [...has], [...lacks]);
         patchMetaSpy.mockRestore();
       },
     );
+
+    it('foreground ERROR with no retained message still names the mode', async () => {
+      // getLastError() is optional on SubagentExecutor (external executors do
+      // not implement it), so the reason line must not leak 'undefined'.
+      loadForeground();
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+      expectText(
+        textOf(await invoke(fg()).execute()),
+        ['terminate mode: ERROR'],
+        ['undefined', 'Subagent execution failed.'],
+      );
+    });
+
+    it('foreground GOAL result carries no terminate-mode framing', async () => {
+      // Protection test: the success path must stay byte-identical.
+      loadForeground();
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('all done');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.GOAL,
+      );
+      expectText(
+        textOf(await invoke(fg()).execute()),
+        ['all done'],
+        ['terminate mode', 'did not complete'],
+      );
+    });
 
     it('foreground CANCELLED prefixes the partial result so the parent sees the cancel', async () => {
       // Unprefixed it looks like a success; foreground has no registry

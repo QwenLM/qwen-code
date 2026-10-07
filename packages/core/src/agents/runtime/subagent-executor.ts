@@ -50,6 +50,12 @@ export interface SubagentExecutor {
 
   getFinalText(): string;
   getTerminateMode(): AgentTerminateMode;
+  /**
+   * The message of the failure that ended the run, when `getTerminateMode()` is
+   * ERROR; undefined otherwise. Optional because external executors (ACP,
+   * Codex) own their own failure reporting and do not retain one.
+   */
+  getLastError?(): string | undefined;
   getExecutionSummary(): AgentStatsSummary;
   getCore(): SubagentExecutorCore;
 

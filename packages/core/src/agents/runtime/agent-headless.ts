@@ -140,6 +140,11 @@ export class AgentHeadless implements SubagentExecutor {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
+  // The message behind an ERROR terminateMode. The reasoning loop rethrows, so
+  // a caller that survives the throw has no other way to learn why the run died
+  // — the AgentEventType.ERROR emission goes to the transcript, not to the
+  // caller's tool result (#13597).
+  private lastError: string | undefined;
   // Which loop detector fired when terminateMode is LOOP_DETECTED (#9450).
   private loopType: string | null = null;
   private chat?: LlmChat;
@@ -239,6 +244,7 @@ export class AgentHeadless implements SubagentExecutor {
     this.executing = true;
     this.finalText = '';
     this.terminateMode = AgentTerminateMode.ERROR;
+    this.lastError = undefined;
     // A re-executed instance (stop-hook continuation, resident turns) must
     // not carry the previous run's loop attribution into an ERROR/FINISH
     // spread; the field is only meaningful for a LOOP_DETECTED stop.
@@ -326,6 +332,7 @@ export class AgentHeadless implements SubagentExecutor {
 
     if (!chat) {
       this.terminateMode = AgentTerminateMode.ERROR;
+      this.lastError = 'Failed to create the agent chat session.';
       return;
     }
 
@@ -421,9 +428,13 @@ export class AgentHeadless implements SubagentExecutor {
       } catch (error) {
         debugLogger.error('Error during subagent execution:', error);
         this.terminateMode = AgentTerminateMode.ERROR;
+        const message = error instanceof Error ? error.message : String(error);
+        // Retained on the instance because the rethrow below is what the caller
+        // sees; without this the reason is only ever emitted as an event.
+        this.lastError = message;
         this.core.eventEmitter?.emit(AgentEventType.ERROR, {
           subagentId: this.core.subagentId,
-          error: error instanceof Error ? error.message : String(error),
+          error: message,
           timestamp: Date.now(),
         } as AgentErrorEvent);
 
@@ -515,6 +526,10 @@ export class AgentHeadless implements SubagentExecutor {
 
   getTerminateMode(): AgentTerminateMode {
     return this.terminateMode;
+  }
+
+  getLastError(): string | undefined {
+    return this.lastError;
   }
 
   /**

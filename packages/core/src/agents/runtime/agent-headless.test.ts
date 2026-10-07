@@ -1979,6 +1979,15 @@ describe('subagent.ts', () => {
         mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
         await expectExecuteError(await createAgent(config), 'API Failure');
       });
+
+      it('retains the failure message across the rethrow so the caller can report it (#13597)', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
+        const scope = await createAgent(config);
+        expect(scope.getLastError()).toBeUndefined();
+        await expectExecuteError(scope, 'API Failure');
+        expect(scope.getLastError()).toBe('API Failure');
+      });
     });
 
     describe('execute - retry waits', () => {

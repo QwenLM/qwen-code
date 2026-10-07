@@ -1422,6 +1422,33 @@ The background-agent rules above apply to background forks unchanged.${delegatio
 type SubagentOutcomeSink = (metadata: SubagentSpanMetadata) => void;
 
 /**
+ * The model-visible reason line for a foreground subagent that ended on
+ * anything but GOAL (CANCELLED has its own branch at the call site).
+ *
+ * The background path wraps its result in a `<status>` XML envelope; the
+ * foreground path has no envelope, so the terminate mode has to ride the
+ * llmContent itself. Without it the parent model reads a truncated answer that
+ * is indistinguishable from a short successful one and retries the same call
+ * verbatim — for TIMEOUT and MAX_TURNS the only fix is a bigger budget, so the
+ * line names the knob to raise (#13597). Wording follows `terminalDispatchError`
+ * in agents/runtime/workflow-orchestrator.ts.
+ */
+function subagentTerminalReason(
+  terminateMode: AgentTerminateMode,
+  lastError?: string,
+): string {
+  const head = `Subagent did not complete (terminate mode: ${terminateMode}).`;
+  switch (terminateMode) {
+    case AgentTerminateMode.TIMEOUT:
+      return `${head} It ran out of time, so re-running the same call will time out again; raise the agent's \`max_time_minutes\` instead.`;
+    case AgentTerminateMode.MAX_TURNS:
+      return `${head} It ran out of turns, so re-running the same call will stop at the same point; raise the agent's \`max_turns\` instead.`;
+    default:
+      return lastError ? `${head} ${lastError}` : head;
+  }
+}
+
+/**
  * Map `AgentTerminateMode` + signal/error state to the span's status taxonomy.
  * Mirrors the foreground/background display logic: GOAL → success, CANCELLED
  * (or signal abort) → user-initiated stop, everything else → failure.
@@ -4719,8 +4746,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           (await cleanupAfterExecution()) +
           (subagentConfig.executor !== undefined ? EXTERNAL_USAGE_NOTICE : '');
         if (terminateMode === AgentTerminateMode.ERROR) {
+          // Name the mode and carry the retained failure message. A bare
+          // 'Subagent execution failed.' tells the parent nothing it can act
+          // on, so it re-tests the tool instead of fixing the real cause
+          // (#13597).
+          const reason = subagentTerminalReason(
+            terminateMode,
+            subagent.getLastError?.(),
+          );
           return {
-            llmContent: (finalText || 'Subagent execution failed.') + wtSuffix,
+            llmContent:
+              (finalText
+                ? `${reason}\n\nPartial result follows:\n\n${finalText}`
+                : reason) + wtSuffix,
             returnDisplay: this.currentDisplay!,
           };
         }
@@ -4746,8 +4784,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
         const visibleFinalText =
           finalText || '(subagent produced no model-visible output)';
+        if (terminateMode === AgentTerminateMode.GOAL) {
+          return {
+            llmContent: [{ text: visibleFinalText + wtSuffix }],
+            returnDisplay: this.currentDisplay!,
+          };
+        }
+        // Every remaining terminal (TIMEOUT, MAX_TURNS, LOOP_DETECTED,
+        // SHUTDOWN) is an incomplete run. The parent used to receive the
+        // partial text alone and could not tell it apart from a finished
+        // answer, so it retried the same call (#13597).
         return {
-          llmContent: [{ text: visibleFinalText + wtSuffix }],
+          llmContent: [
+            {
+              text: `${subagentTerminalReason(terminateMode)}\n\nPartial result follows:\n\n${visibleFinalText}${wtSuffix}`,
+            },
+          ],
           returnDisplay: this.currentDisplay!,
         };
       } finally {
