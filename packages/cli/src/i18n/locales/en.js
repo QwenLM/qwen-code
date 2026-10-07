@@ -23,6 +23,8 @@ export default {
   'Project level': 'Project level',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -151,6 +153,7 @@ export default {
   'from {{marketplace}}': 'from {{marketplace}}',
   installed: 'installed',
   '{{count}} Agents': '{{count}} Agents',
+  '{{count}} Workflows': '{{count}} Workflows',
   '{{count}} Commands': '{{count}} Commands',
   '{{count}} MCP': '{{count}} MCP',
   '{{count}} Skills': '{{count}} Skills',
@@ -177,6 +180,7 @@ export default {
   // self-mapping and returns the bare display name. Localized values live in
   // zh.js / zh-TW.js; other locales fall back to the English display name.
   // ============================================================================
+  'toolDisplayName.Exec': 'toolDisplayName.Exec',
   'toolDisplayName.Edit': 'toolDisplayName.Edit',
   'toolDisplayName.WriteFile': 'toolDisplayName.WriteFile',
   'toolDisplayName.ReadFile': 'toolDisplayName.ReadFile',
@@ -190,9 +194,13 @@ export default {
   'toolDisplayName.UpdateGoal': 'toolDisplayName.UpdateGoal',
   'toolDisplayName.ProposeGoal': 'toolDisplayName.ProposeGoal',
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
+  'toolDisplayName.ManageMemory': 'toolDisplayName.ManageMemory',
+  'toolDisplayName.SearchMemory': 'toolDisplayName.SearchMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
+  'toolDisplayName.Advisor': 'toolDisplayName.Advisor',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
   'toolDisplayName.RecordArtifact': 'toolDisplayName.RecordArtifact',
+  'toolDisplayName.RecordSource': 'toolDisplayName.RecordSource',
   'toolDisplayName.ReportFindings': 'toolDisplayName.ReportFindings',
   'toolDisplayName.DisplayImage': 'toolDisplayName.DisplayImage',
   'toolDisplayName.Skill': 'toolDisplayName.Skill',
@@ -222,11 +230,36 @@ export default {
   'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
   'toolDisplayName.NotebookEdit': 'toolDisplayName.NotebookEdit',
   'toolDisplayName.ToolSearch': 'toolDisplayName.ToolSearch',
+  'toolDisplayName.ToolCall': 'toolDisplayName.ToolCall',
   'toolDisplayName.EnterWorktree': 'toolDisplayName.EnterWorktree',
   'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
   'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   'toolDisplayName.ImageGen': 'toolDisplayName.ImageGen',
+  'toolDisplayName.ThreadPost': 'toolDisplayName.ThreadPost',
+  'toolDisplayName.ThreadWait': 'toolDisplayName.ThreadWait',
+  'toolDisplayName.ThreadBlock': 'toolDisplayName.ThreadBlock',
+  'toolDisplayName.ThreadReview': 'toolDisplayName.ThreadReview',
+  'toolDisplayName.ThreadCreate': 'toolDisplayName.ThreadCreate',
+  'toolDisplayName.ThreadRead': 'toolDisplayName.ThreadRead',
+  'toolDisplayName.DownsampleImage': 'toolDisplayName.DownsampleImage',
+  'toolDisplayName.DownscaleVideo': 'toolDisplayName.DownscaleVideo',
+  'toolDisplayName.DownsampleAudio': 'toolDisplayName.DownsampleAudio',
+  'toolDisplayName.ExtractKeyframes': 'toolDisplayName.ExtractKeyframes',
+  'toolDisplayName.ExtractAudio': 'toolDisplayName.ExtractAudio',
+  'toolDisplayName.ClipVideo': 'toolDisplayName.ClipVideo',
+  'toolDisplayName.ClipImage': 'toolDisplayName.ClipImage',
+  'toolDisplayName.ClipAudio': 'toolDisplayName.ClipAudio',
+  'toolDisplayName.CaptionImage': 'toolDisplayName.CaptionImage',
+  'toolDisplayName.CaptionAudio': 'toolDisplayName.CaptionAudio',
+  'toolDisplayName.OcrImage': 'toolDisplayName.OcrImage',
+  'toolDisplayName.UnderstandVideoSegments':
+    'toolDisplayName.UnderstandVideoSegments',
+  'toolDisplayName.ConvertImage': 'toolDisplayName.ConvertImage',
+  'toolDisplayName.TranscribeAudio': 'toolDisplayName.TranscribeAudio',
+  'toolDisplayName.RecallMediaMemory': 'toolDisplayName.RecallMediaMemory',
+  '[fixed-only: runs via media policies, not the model]':
+    '[fixed-only: runs via media policies, not the model]',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -361,11 +394,10 @@ export default {
   'Search:': 'Search:',
   'type to filter…': 'type to filter…',
   'No skills are currently available.': 'No skills are currently available.',
-  'All available skills are locked at a higher scope (see below).':
-    'All available skills are locked at a higher scope (see below).',
   'No skills match the search.': 'No skills match the search.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Locked by higher-scope settings (cannot toggle here):',
+  'Locked by settings entries you cannot toggle here:':
+    'Locked by settings entries you cannot toggle here:',
+  '{{count}} locked not shown': '{{count}} locked not shown',
   'higher scope': 'higher scope',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [locked: {{scope}}]',
@@ -415,6 +447,8 @@ export default {
     'Rewinding does not affect files edited manually or via shell commands.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -691,6 +725,12 @@ export default {
   active: 'active',
   disabled: 'disabled',
   enabled: 'enabled',
+  'disabled (bare mode)': 'disabled (bare mode)',
+  'disabled (safe mode)': 'disabled (safe mode)',
+  'disabled (disableAllHooks)': 'disabled (disableAllHooks)',
+  'disabled (folder not trusted)': 'disabled (folder not trusted)',
+  'disabled (turned off for this session)':
+    'disabled (turned off for this session)',
   'View Details': 'View Details',
   'Update failed:': 'Update failed:',
   'Updating {{name}}...': 'Updating {{name}}...',
@@ -720,6 +760,7 @@ export default {
   // ============================================================================
   // Settings Labels
   // ============================================================================
+  'Code Mode Only (Experimental)': 'Code Mode Only (Experimental)',
   'Vim Mode': 'Vim Mode',
   'Attribution: commit': 'Attribution: commit',
   'Terminal Bell Notification': 'Terminal Bell Notification',
@@ -905,6 +946,10 @@ export default {
     'This extension will install the following skills:',
   'This extension will install the following subagents:':
     'This extension will install the following subagents:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'This extension will install the following workflows (JavaScript scripts that can start subagents):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'These workflow scripts changed since the installed version: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Installation cancelled for "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -984,6 +1029,7 @@ export default {
   'Context files:': 'Context files:',
   'Skills:': 'Skills:',
   'Agents:': 'Agents:',
+  'Workflows:': 'Workflows:',
   'MCP servers:': 'MCP servers:',
   'Link extension failed to install.': 'Link extension failed to install.',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -1083,6 +1129,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configured',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Reopen this menu to reload hook definitions.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook controls and HTTP security settings require a restart.',
+  'Failed to reload hook definitions: {{error}}':
+    'Failed to reload hook definitions: {{error}}',
   'Enter to select · Esc to cancel': 'Enter to select · Esc to cancel',
   // Hooks - Detail Step
   'Exit codes:': 'Exit codes:',
@@ -1099,6 +1151,20 @@ export default {
   'No hook config selected': 'No hook config selected',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'To modify or remove this hook, edit settings.json directly or ask Qwen to help.',
+  'Safe mode is on, so no hooks run in this session.':
+    'Safe mode is on, so no hooks run in this session.',
+  'Bare mode is on, so no hooks run in this session.':
+    'Bare mode is on, so no hooks run in this session.',
+  'All hooks are disabled by the disableAllHooks setting.':
+    'All hooks are disabled by the disableAllHooks setting.',
+  'Timeout:': 'Timeout:',
+  'Status message:': 'Status message:',
+  'Condition:': 'Condition:',
+  'Options:': 'Options:',
+  'Skill:': 'Skill:',
+  'runs in background': 'runs in background',
+  'runs once': 'runs once',
+  sequential: 'sequential',
   // Hooks - Disabled Step
   'Hook Configuration - Disabled': 'Hook Configuration - Disabled',
   'All hooks are currently disabled. You have {{count}} that are not running.':
@@ -1154,8 +1220,8 @@ export default {
     'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Input to command is JSON with notification message and type.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Input to command is JSON with command_name, command_args, and expanded prompt text.',
   'Input to command is JSON with session start source.':
@@ -2055,6 +2121,11 @@ export default {
   'No tasks currently running': 'No tasks currently running',
   'No entry to show.': 'No entry to show.',
   'needs approval': 'needs approval',
+  'Large workflow': 'Large workflow',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).',
   'rejected — edit config to re-approve':
     'rejected — edit config to re-approve',
   'Background agent needs approval': 'Background agent needs approval',
@@ -2365,6 +2436,10 @@ export default {
     'Context exceeds limit! Use /compress or /clear to reduce.',
   'No API response yet. Send a message to see actual usage.':
     'No API response yet. Send a message to see actual usage.',
+  'Estimated usage, including the conversation':
+    'Estimated usage, including the conversation',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'No provider usage yet. These are local estimates, including the conversation.',
   'Estimated pre-conversation overhead': 'Estimated pre-conversation overhead',
   'Context window': 'Context window',
   tokens: 'tokens',
@@ -2378,6 +2453,9 @@ export default {
   'Memory files': 'Memory files',
   Skills: 'Skills',
   Messages: 'Messages',
+  'Startup context': 'Startup context',
+  Unattributed: 'Unattributed',
+  'Cached prefix': 'Cached prefix',
   'Run /context detail for per-item breakdown.':
     'Run /context detail for per-item breakdown.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
@@ -2506,8 +2584,6 @@ export default {
     'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).',
   'It is saved but does not apply while this workspace is untrusted.':
     'It is saved but does not apply while this workspace is untrusted.',
-  'Set a goal — keep working until the condition is met':
-    'Set a goal — keep working until the condition is met',
   'Set or control a session goal': 'Set or control a session goal',
   'Exited plan mode. Previous approval mode restored.':
     'Exited plan mode. Previous approval mode restored.',
@@ -2542,6 +2618,15 @@ export default {
     'Ask a quick side question without affecting the main conversation',
   'Get a second opinion on the current conversation from a reviewer model':
     'Get a second opinion on the current conversation from a reviewer model',
+  'Configure the Advisor model': 'Configure the Advisor model',
+  'Disable Advisor': 'Disable Advisor',
+  'Select Advisor Model': 'Select Advisor Model',
+  'Advisor disabled': 'Advisor disabled',
+  'Advisor set to {{model}}': 'Advisor set to {{model}}',
+  'Selected Advisor model is unavailable.':
+    'Selected Advisor model is unavailable.',
+  'Advisor configuration is unavailable.':
+    'Advisor configuration is unavailable.',
   'Consulting advisor...': 'Consulting advisor...',
   'Advisor review failed: {{error}}': 'Advisor review failed: {{error}}',
   'No conversation context available for /advisor':
@@ -2761,6 +2846,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',
@@ -2855,6 +2942,8 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
   'Kept model as {{model}}': 'Kept model as {{model}}',
-  'Review messages held from other Qwen Code sessions (accept | deny)':
-    'Review messages held from other Qwen Code sessions (accept | deny)',
+  'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
+    'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)',
+  'Create a git commit with an AI-drafted message':
+    'Create a git commit with an AI-drafted message',
 };

@@ -78,7 +78,12 @@ import {
   finalizeToolResponses,
   endInteractionSpan,
   getActiveInteractionSpan,
-  renderGoalContinuationPrompt,
+  decideNotificationAdmission,
+  DroppedNotificationTally,
+  MAX_BACKGROUND_NOTIFICATION_QUEUE,
+  type BackgroundNotificationKind,
+  renderGoalContinuationTurn,
+  getApiHistoryPromptId,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -416,6 +421,44 @@ const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
  */
 export const INTERIM_MONITOR_MIN_TURN_INTERVAL_MS = 10_000;
 
+/**
+ * An overflow summary taken from the tally and awaiting a turn to carry it.
+ * `displayed` mirrors the per-notification flag so a re-queued summary is not
+ * rendered twice.
+ */
+interface PendingDroppedSummary {
+  displayText: string;
+  modelText: string;
+  status: 'dropped' | 'recorded';
+  displayed?: boolean;
+}
+
+/**
+ * One entry in the unified notification queue. `kind`, `taskId` and `interim`
+ * feed the shared admission rule and name what was lost when overflow discards
+ * an entry; `monitor` stays separate because the drain also uses it to prune
+ * pulses from monitors that were cancelled while queued.
+ */
+interface QueuedNotification {
+  displayText: string;
+  modelText: string;
+  sendMessageType: SendMessageType;
+  kind: BackgroundNotificationKind;
+  taskId?: string;
+  interim?: boolean;
+  monitor?: { id: string; status: string };
+  todoWorkChainId?: string;
+  onDelivered?: () => void;
+  onDeliveryFailed?: () => void;
+  displayed?: boolean;
+}
+
+function isProtectedNotification(item: QueuedNotification): boolean {
+  return (
+    item.kind === 'agent' || item.kind === 'workflow' || item.kind === 'cron'
+  );
+}
+
 type BufferedStreamEvent =
   | { kind: 'content'; value: string }
   | { kind: 'image'; value: InlineImageData }
@@ -516,6 +559,10 @@ export const useLlmStream = (
   onDebugMessage: (message: string) => void,
   handleSlashCommand: (
     cmd: PartListUnion,
+    oneTimeShellAllowlist?: Set<string>,
+    overwriteConfirmed?: boolean,
+    existingInvocationItemId?: number,
+    invocationPromptId?: string,
   ) => Promise<SlashCommandProcessorResult | false>,
   shellModeActive: boolean,
   getPreferredEditor: () => EditorType | undefined,
@@ -1541,6 +1588,7 @@ export const useLlmStream = (
       submitType: SendMessageType,
       submittedPrompt: string | undefined,
       preserveTurnOwnership: boolean,
+      shellModeIntent?: boolean,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
@@ -1599,7 +1647,13 @@ export const useLlmStream = (
 
         // Handle UI-only commands first
         const slashCommandResult = isSlashCommand(trimmedQuery)
-          ? await handleSlashCommand(trimmedQuery)
+          ? await handleSlashCommand(
+              trimmedQuery,
+              undefined,
+              undefined,
+              undefined,
+              submitType === SendMessageType.UserQuery ? prompt_id : undefined,
+            )
           : false;
 
         if (slashCommandResult) {
@@ -1612,6 +1666,11 @@ export const useLlmStream = (
                 args: toolArgs,
                 isClientInitiated: true,
                 prompt_id,
+                // Client-direct provenance (omni policy design): slash
+                // commands scheduling a tool are the in-process `client`
+                // channel — subject to the same media-policy modelAccess
+                // gate as model calls, never to fixed-policy semantics.
+                executionOrigin: { kind: 'client' },
               };
               registerToolBatch(toolCallRequest);
               scheduleToolCalls([toolCallRequest], abortSignal);
@@ -1683,7 +1742,12 @@ export const useLlmStream = (
           }
         }
 
-        if (shellModeActive && handleShellCommand(trimmedQuery, abortSignal)) {
+        // A queued submission carries the shell intent recorded when the
+        // user submitted it; the live flag may have flipped while the
+        // entry waited in the queue (#11626). Other producers record no
+        // intent and route on the live flag, as before.
+        const routeToShell = shellModeIntent ?? shellModeActive;
+        if (routeToShell && handleShellCommand(trimmedQuery, abortSignal)) {
           return { queryToSend: null, shouldProceed: false };
         }
 
@@ -2965,6 +3029,22 @@ export const useLlmStream = (
               llmMessageBuffer = '';
               assistantOutputStarted = false;
               break;
+            case ServerLlmEventType.GoalSettlementFailed:
+              flushBufferedStreamEvents();
+              if (pendingHistoryItemRef.current) {
+                commitItemInOrder(
+                  pendingHistoryItemRef.current,
+                  userMessageTimestamp,
+                );
+                setPendingHistoryItem(null);
+              }
+              addItem(
+                { type: 'warning', text: event.value },
+                userMessageTimestamp,
+              );
+              llmMessageBuffer = '';
+              assistantOutputStarted = false;
+              break;
             case ServerLlmEventType.UserPromptSubmitBlocked:
               flushBufferedStreamEvents();
               userPromptBlocked = true;
@@ -2980,8 +3060,6 @@ export const useLlmStream = (
               handleStopHookLoopEvent(event.value, userMessageTimestamp);
               llmMessageBuffer = '';
               assistantOutputStarted = false;
-              break;
-            case ServerLlmEventType.ActiveGoal:
               break;
             case ServerLlmEventType.GoalState:
               if (event.cause && shouldDisplayGoalStateCause(event.cause)) {
@@ -3145,6 +3223,16 @@ export const useLlmStream = (
         }
 
         if (executableToolCallRequests.length > 0) {
+          // The scheduler may complete a fast tool before this stream's caller
+          // regains control. Seal streamed assistant text first so the tool
+          // group cannot enter static history ahead of it.
+          if (pendingHistoryItemRef.current) {
+            commitItemInOrder(
+              pendingHistoryItemRef.current,
+              userMessageTimestamp,
+            );
+            setPendingHistoryItem(null);
+          }
           if (toolContinuationOwner) {
             for (const request of executableToolCallRequests) {
               continuationOwnersByToolCallIdRef.current.set(
@@ -3232,6 +3320,8 @@ export const useLlmStream = (
         const message = messages[index];
         if (GOAL_COMMAND_RE.test(message)) {
           await handleSlashCommand(message);
+          // The command has already taken effect; restoring it after cancelled
+          // steering preparation would execute that side effect again.
           continue;
         }
 
@@ -3241,11 +3331,24 @@ export const useLlmStream = (
         if (isAtCommand(message)) {
           const timeout = new AbortController();
           const atCommandSignal = AbortSignal.any([signal, timeout.signal]);
-          const timeoutId = setTimeout(() => {
-            timeout.abort(
-              new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
-            );
-          }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
+          // URL media refs are exempt from the fixed mid-turn budget: the
+          // omni URL path downloads and uploads media end-to-end inside
+          // resolveAtCommandQuery under its own watchdogs (30s header, 60s
+          // idle), so a 10s cap would structurally kill every mid-turn
+          // @https reference — and inside the resolver the timeout abort is
+          // indistinguishable from a user cancel, so the message would be
+          // dropped quietly rather than failing with a named error.
+          // Filesystem resolution keeps the cap unchanged.
+          const hasUrlMediaRef =
+            /@https?:\/\//i.test(message) &&
+            (config.isOmniEnabled?.() ?? false);
+          const timeoutId = hasUrlMediaRef
+            ? undefined
+            : setTimeout(() => {
+                timeout.abort(
+                  new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
+                );
+              }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
           try {
             const atCommandResult = await resolveWithAbort(
               atCommandSignal,
@@ -3461,8 +3564,16 @@ export const useLlmStream = (
         onDeliveryFailed?: () => void;
         onAdmissionFailed?: () => void;
         onGoalClaimDeferred?: () => void;
+        onRequestStarted?: () => void;
         steerInput?: SteerInput;
         submittedPrompt?: string;
+        /**
+         * Shell intent recorded when the user submitted this query
+         * (queued submissions carry it from the message queue). When set,
+         * it overrides the live `shellModeActive` flag for shell routing,
+         * so a flip after enqueue cannot misroute the entry (#11626).
+         */
+        shellMode?: boolean;
         goal?: QueuedGoalTurn;
         claimGoalTurn?: () => QueuedGoalTurn | undefined;
         userAdmission?: DirectUserAdmission;
@@ -3699,6 +3810,15 @@ export const useLlmStream = (
 
       const releaseSubmissionActivity =
         retainSubmissionActivity(submissionGeneration);
+      if (
+        submitType === SendMessageType.UserQuery &&
+        !allowConcurrentBtwDuringResponse &&
+        !isDetachedToolContinuation
+      ) {
+        // Media preparation can upload before the model stream starts.
+        // Submission activity owns clearing this state on every exit path.
+        setIsResponding(true);
+      }
       const submission = promptIdContext.run(prompt_id, async () => {
         let queuedGoal = metadata?.goal;
         let preparedQuery: {
@@ -3711,14 +3831,7 @@ export const useLlmStream = (
             submitType === SendMessageType.Goal
               ? queuedGoal
                 ? {
-                    queryToSend: renderGoalContinuationPrompt({
-                      goalId: queuedGoal.permit.goalId,
-                      revision: queuedGoal.permit.revision,
-                      objective: queuedGoal.continuationContext,
-                      objectiveUpdated: queuedGoal.objectiveUpdated,
-                      windDown: queuedGoal.windDown,
-                      verifierFeedback: queuedGoal.verifierFeedback,
-                    }),
+                    queryToSend: renderGoalContinuationTurn(queuedGoal),
                     shouldProceed: true,
                   }
                 : { queryToSend: null, shouldProceed: false }
@@ -3733,6 +3846,7 @@ export const useLlmStream = (
                     submittedPrompt,
                     allowConcurrentBtwDuringResponse ||
                       isDetachedToolContinuation,
+                    metadata?.shellMode,
                   );
         } catch (error) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
@@ -3990,6 +4104,7 @@ export const useLlmStream = (
                   : {}),
             },
           );
+          metadata?.onRequestStarted?.();
 
           const processingResult = await processLlmStreamEvents(
             stream,
@@ -4076,7 +4191,10 @@ export const useLlmStream = (
                     errorType: response.errorType,
                     executionStatus: response.executionStatus,
                   },
-                  goalToolResultProvenance(request),
+                  goalToolResultProvenance(
+                    request,
+                    finalized[index].responseParts,
+                  ),
                 );
               },
             );
@@ -4186,7 +4304,7 @@ export const useLlmStream = (
             });
           }
         } finally {
-          if (cleanupReviewLease) {
+          if (cleanupReviewLease && !config.getShellExecutionSandbox?.()) {
             cleanupReviewWorktreeLeases({
               sessionId: config.getSessionId(),
               promptId: prompt_id!,
@@ -4463,7 +4581,10 @@ export const useLlmStream = (
       };
       const orphanedEntries: Part[][] = [];
       try {
-        const history = llmClient?.getHistoryShallow?.() ?? [];
+        const history =
+          llmClient?.getChat?.()?.getHistoryForRecovery?.() ??
+          llmClient?.getHistoryShallow?.() ??
+          [];
         for (let i = history.length - 1; i >= 0; i--) {
           const entry = history[i];
           if (!entry || entry.role !== 'user') break;
@@ -5362,7 +5483,10 @@ export const useLlmStream = (
             errorType: response.errorType,
             executionStatus: response.executionStatus,
           },
-          goalToolResultProvenance(request),
+          goalToolResultProvenance(
+            request,
+            finalizedResponses[index].responseParts,
+          ),
         );
       });
 
@@ -5498,13 +5622,14 @@ export const useLlmStream = (
             if (
               status === 'complete' ||
               status === 'blocked' ||
+              status === 'paused' ||
               status === 'usage_limited'
             ) {
               addItem(
                 {
                   type: 'goal_state',
                   snapshot,
-                  cause: status,
+                  cause: status === 'paused' ? 'pause' : status,
                 },
                 Date.now(),
               );
@@ -5941,10 +6066,10 @@ export const useLlmStream = (
         // Reasoning renders above the streaming answer.
         pendingThoughtItem,
         ...pendingAssistantItems,
+        pendingToolCallGroupDisplay,
         pendingHistoryItem,
         pendingRetryErrorItem,
         pendingRetryCountdownItem,
-        pendingToolCallGroupDisplay,
       ].filter((i) => i !== undefined && i !== null),
     [
       pendingThoughtItem,
@@ -6006,6 +6131,11 @@ export const useLlmStream = (
             const fileName = path.basename(filePath);
             const toolCallWithSnapshotFileName = `${timestamp}-${fileName}-${toolName}.json`;
             const clientHistory = llmClient?.getHistoryShallow();
+            // JSON.stringify drops the Symbol-keyed prompt identity, so
+            // persist it as a parallel array for /restore to re-mark against.
+            const promptIds = clientHistory?.map(
+              (content) => getApiHistoryPromptId(content) ?? null,
+            );
             const toolCallWithSnapshotFilePath = path.join(
               checkpointDir,
               toolCallWithSnapshotFileName,
@@ -6017,6 +6147,7 @@ export const useLlmStream = (
                 {
                   history,
                   clientHistory,
+                  ...(promptIds?.some(Boolean) ? { promptIds } : {}),
                   toolCall: {
                     name: toolCall.request.name,
                     args: toolCall.request.args,
@@ -6042,19 +6173,63 @@ export const useLlmStream = (
   }, [toolCalls, config, onDebugMessage, history, llmClient, storage]);
 
   // ─── Unified notification queue (cron + background agents) ──────
-  const notificationQueueRef = useRef<
-    Array<{
-      displayText: string;
-      modelText: string;
-      sendMessageType: SendMessageType;
-      monitor?: { id: string; status: string };
-      todoWorkChainId?: string;
-      onDelivered?: () => void;
-      onDeliveryFailed?: () => void;
-      displayed?: boolean;
-    }>
-  >([]);
+  const notificationQueueRef = useRef<QueuedNotification[]>([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
+  /**
+   * Notifications lost to queue overflow since the last drain, reported as one
+   * summary on the next drained turn. Per-loss lines would reproduce the very
+   * flooding the cap exists to stop.
+   */
+  const droppedNotificationsRef = useRef(new DroppedNotificationTally());
+  /**
+   * A summary already taken from the tally but not yet accepted by a turn.
+   * `take()` resets the tally, so a rejected admission would otherwise lose
+   * the only record of what overflow discarded; the drain parks it here and
+   * the next drain reuses it, exactly as it re-queues the rejected batch.
+   */
+  const pendingDroppedSummaryRef = useRef<PendingDroppedSummary | undefined>(
+    undefined,
+  );
+  /**
+   * Admit one notification into the shared queue, evicting or dropping when it
+   * is full. Agent and workflow results and cron prompts are protected: an
+   * agent result is the only copy of what a background agent produced, and a
+   * cron prompt is work the user scheduled. Shell results and monitor pulses
+   * absorb the overflow, pulses first — the next poll supersedes them anyway.
+   */
+  const admitNotification = useCallback(
+    (item: QueuedNotification): void => {
+      const queue = notificationQueueRef.current;
+      const admission = decideNotificationAdmission(queue, item, {
+        max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
+        isProtected: isProtectedNotification,
+      });
+      if (admission.action === 'drop') {
+        debugLogger.warn(
+          `Notification queue overflow: dropping task=${item.taskId ?? 'unknown'} kind=${item.kind} because ${admission.reason === 'all-protected' ? 'every queued notification is protected' : 'the next monitor pulse will supersede it'}`,
+        );
+        droppedNotificationsRef.current.record(item);
+        return;
+      }
+      if (admission.action === 'evict') {
+        const [evicted] = queue.splice(admission.index, 1);
+        debugLogger.warn(
+          `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
+        );
+        if (evicted) {
+          const cancelledPulse =
+            evicted.interim &&
+            evicted.taskId !== undefined &&
+            config.getMonitorRegistry().get(evicted.taskId)?.status ===
+              'cancelled';
+          if (!cancelledPulse) droppedNotificationsRef.current.record(evicted);
+        }
+      }
+      queue.push(item);
+      setNotificationTrigger((n) => n + 1);
+    },
+    [config],
+  );
   // Last time an interim-monitor-led notification batch started a model turn
   // (#10818 cooldown).
   const lastInterimMonitorTurnAtRef = useRef(0);
@@ -6100,6 +6275,8 @@ export const useLlmStream = (
     }
     notificationQueueSessionIdRef.current = sessionStates.sessionId;
     notificationQueueRef.current = [];
+    droppedNotificationsRef.current.clear();
+    pendingDroppedSummaryRef.current = undefined;
     autonomousLoopTickResolverRef.current?.resetCache();
   }, [sessionStates.sessionId]);
 
@@ -6169,23 +6346,25 @@ export const useLlmStream = (
             const tick = resolver.resolveAutonomous(autonomousMode);
             label = 'Autonomous loop tick';
             modelText = tick.modelText;
-            notificationQueueRef.current.push({
+            admitNotification({
               displayText: `${job.missed ? 'Missed' : source}: ${label}`,
               modelText,
               sendMessageType: SendMessageType.Cron,
+              kind: 'cron',
+              taskId: job.id,
               todoWorkChainId: job.todoWorkChainId,
               onDelivered: () => resolver.markDelivered(),
             });
-            setNotificationTrigger((n) => n + 1);
             return;
           }
-          notificationQueueRef.current.push({
+          admitNotification({
             displayText: `${job.missed ? 'Missed' : source}: ${label}`,
             modelText,
             sendMessageType: SendMessageType.Cron,
+            kind: 'cron',
+            taskId: job.id,
             todoWorkChainId: job.todoWorkChainId,
           });
-          setNotificationTrigger((n) => n + 1);
         },
       );
     })();
@@ -6198,59 +6377,74 @@ export const useLlmStream = (
         process.stderr.write(summary + '\n');
       }
     };
-  }, [config, getAutonomousLoopTickResolver, isConfigInitialized]);
+  }, [
+    admitNotification,
+    config,
+    getAutonomousLoopTickResolver,
+    isConfigInitialized,
+  ]);
 
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
     registry.setNotificationCallback((displayText, modelText, meta) => {
-      notificationQueueRef.current.push({
+      admitNotification({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        kind: 'agent',
+        taskId: meta?.agentId,
         todoWorkChainId: meta?.todoWorkChainId,
       });
-      setNotificationTrigger((n) => n + 1);
     });
     return () => {
       registry.setNotificationCallback(undefined);
     };
-  }, [config]);
+  }, [admitNotification, config]);
 
   // Register background shell terminal notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundShellRegistry();
     registry.setNotificationCallback((displayText, modelText, meta) => {
-      notificationQueueRef.current.push({
+      admitNotification({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        kind: 'shell',
+        taskId: meta?.shellId,
         todoWorkChainId: meta?.todoWorkChainId,
       });
-      setNotificationTrigger((n) => n + 1);
     });
     return () => {
       registry.setNotificationCallback(undefined);
     };
-  }, [config]);
+  }, [admitNotification, config]);
 
-  // Register background workflow completions onto the shared queue. The
-  // registry keeps this separate from its terminal-bell subscriber.
+  // Register background and client-started foreground workflow completions.
+  // The registry keeps this separate from its terminal-bell subscriber.
   useEffect(() => {
     const registry = config.getWorkflowRunRegistry();
     registry.setCompletionCallback((displayText, modelText, meta) => {
-      notificationQueueRef.current.push({
+      // The result must remain visible even if the model request is delayed
+      // or fails. Background notifications retain their existing drain timing.
+      const displayed = meta.isBackgrounded === false;
+      if (displayed) {
+        addItem({ type: 'notification', text: displayText }, Date.now());
+      }
+      admitNotification({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        kind: 'workflow',
+        taskId: meta.runId,
         todoWorkChainId: meta.todoWorkChainId,
+        displayed,
       });
-      setNotificationTrigger((n) => n + 1);
     });
     return () => {
       registry.setCompletionCallback(undefined);
     };
-  }, [config]);
+  }, [addItem, admitNotification, config]);
 
   // Register monitor notification callback onto the shared queue.
   useEffect(() => {
@@ -6260,19 +6454,21 @@ export const useLlmStream = (
         const entry = registry.get(meta.monitorId);
         if (!entry || entry.status !== 'running') return;
       }
-      notificationQueueRef.current.push({
+      admitNotification({
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        kind: 'monitor',
+        taskId: meta.monitorId,
+        interim: meta.status === 'running',
         monitor: { id: meta.monitorId, status: meta.status },
         todoWorkChainId: meta.todoWorkChainId,
       });
-      setNotificationTrigger((n) => n + 1);
     });
     return () => {
       registry.setNotificationCallback(undefined);
     };
-  }, [config]);
+  }, [admitNotification, config]);
 
   // When idle, batch-drain all contiguous same-type notifications from the
   // front of the queue into a single API call. This reduces token waste: N
@@ -6342,15 +6538,65 @@ export const useLlmStream = (
         }
         const targetType = queue[0]!.sendMessageType;
 
+        // Report what overflow discarded on the first turn that follows it, so
+        // the model learns what it will never be told about before it acts on
+        // the notifications that survived. Parked until a turn accepts it.
+        const droppedSummary: PendingDroppedSummary | undefined =
+          pendingDroppedSummaryRef.current ??
+          droppedNotificationsRef.current.take();
+        pendingDroppedSummaryRef.current = droppedSummary;
+        const displayDroppedSummary = (at: number) => {
+          if (!droppedSummary || droppedSummary.displayed) return;
+          addItem(
+            { type: 'notification' as const, text: droppedSummary.displayText },
+            at,
+          );
+          droppedSummary.displayed = true;
+        };
+        const withDroppedSummary = (text: string) =>
+          droppedSummary ? `${droppedSummary.modelText}\n\n${text}` : text;
+        const releaseDroppedSummary = () => {
+          pendingDroppedSummaryRef.current = undefined;
+        };
+        const restoreDroppedSummary = () => {
+          pendingDroppedSummaryRef.current = droppedSummary;
+        };
+        const restoreBatch = (batch: QueuedNotification[]) => {
+          queue.unshift(...batch);
+          while (queue.length > MAX_BACKGROUND_NOTIFICATION_QUEUE) {
+            const admission = decideNotificationAdmission(
+              queue,
+              { ...queue[0]!, interim: false },
+              {
+                max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
+                isProtected: isProtectedNotification,
+              },
+            );
+            const victimIndex =
+              admission.action === 'evict' ? admission.index : queue.length - 1;
+            const [victim] = queue.splice(victimIndex, 1);
+            if (victim) droppedNotificationsRef.current.record(victim);
+          }
+        };
+
         // Cron prompts must run as individual turns — each needs its own
         // slash/shell/@ preprocessing and approval cycle. Only batch
         // Notification items (which pass through without preprocessing).
         if (targetType === SendMessageType.Cron) {
           const item = queue.shift()!;
+          const cronAt = Date.now();
+          if (
+            queue.some(
+              (queued) =>
+                queued.sendMessageType === SendMessageType.Notification,
+            )
+          ) {
+            displayDroppedSummary(cronAt);
+          }
           if (!item.displayed) {
             addItem(
               { type: 'notification' as const, text: item.displayText },
-              Date.now(),
+              cronAt,
             );
             item.displayed = true;
           }
@@ -6358,13 +6604,18 @@ export const useLlmStream = (
             notificationDisplayText: item.displayText,
             todoWorkChainId: item.todoWorkChainId,
             onDelivered: item.onDelivered,
-            onDeliveryFailed: item.onDeliveryFailed,
+            onDeliveryFailed: () => {
+              restoreDroppedSummary();
+              item.onDeliveryFailed?.();
+            },
             onAdmissionFailed: () => {
               queue.unshift(item);
+              restoreDroppedSummary();
             },
             claimGoalTurn: admission.claimGoalTurn,
             onGoalClaimDeferred: () => {
               queue.unshift(item);
+              restoreDroppedSummary();
               setNotificationTrigger((n) => n + 1);
             },
           }).catch((error) => {
@@ -6387,31 +6638,41 @@ export const useLlmStream = (
           lastInterimMonitorTurnAtRef.current = Date.now();
         }
 
-        const now = Date.now();
-        for (const item of batch) {
-          if (!item.displayed) {
-            addItem(
-              { type: 'notification' as const, text: item.displayText },
-              now,
-            );
-            item.displayed = true;
-          }
-        }
-
         const combinedModelText = batch.map((e) => e.modelText).join('\n\n');
         const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
-        void submitQuery(combinedModelText, targetType, undefined, {
-          notificationDisplayText: combinedDisplayText,
-          todoWorkChainId: batch[0]?.todoWorkChainId,
-          onAdmissionFailed: () => {
-            queue.unshift(...batch);
+        releaseDroppedSummary();
+        void submitQuery(
+          withDroppedSummary(combinedModelText),
+          targetType,
+          undefined,
+          {
+            notificationDisplayText: combinedDisplayText,
+            todoWorkChainId: batch[0]?.todoWorkChainId,
+            onAdmissionFailed: () => {
+              restoreBatch(batch);
+              restoreDroppedSummary();
+            },
+            claimGoalTurn: admission.claimGoalTurn,
+            onGoalClaimDeferred: () => {
+              restoreBatch(batch);
+              restoreDroppedSummary();
+              setNotificationTrigger((n) => n + 1);
+            },
+            onRequestStarted: () => {
+              const now = Date.now();
+              displayDroppedSummary(now);
+              for (const item of batch) {
+                if (!item.displayed) {
+                  addItem(
+                    { type: 'notification' as const, text: item.displayText },
+                    now,
+                  );
+                  item.displayed = true;
+                }
+              }
+            },
           },
-          claimGoalTurn: admission.claimGoalTurn,
-          onGoalClaimDeferred: () => {
-            queue.unshift(...batch);
-            setNotificationTrigger((n) => n + 1);
-          },
-        }).catch((error) => {
+        ).catch((error) => {
           debugLogger.warn('Failed to admit background notification', error);
         });
       });

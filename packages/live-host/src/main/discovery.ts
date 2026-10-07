@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { lstat, readFile } from 'node:fs/promises';
 import { LIVE_PROTOCOL_VERSION } from '../shared/protocol.ts';
 
@@ -11,6 +11,7 @@ const NONCE_PATTERN = /^[A-Za-z0-9_-]{16,256}$/;
 export type LiveDiscoveryRecord = {
   url: string;
   token?: string;
+  configPath?: string;
   protocolVersion: number;
   pid: number;
   instanceNonce: string;
@@ -114,6 +115,7 @@ export async function readDiscoveryFile(
 
   const protocolVersion = value.protocolVersion;
   const instanceNonce = value.instanceNonce;
+  const configPath = value.configPath;
   if (
     typeof value.url !== 'string' ||
     value.url.length > 4_096 ||
@@ -123,7 +125,13 @@ export async function readDiscoveryFile(
     typeof instanceNonce !== 'string' ||
     !NONCE_PATTERN.test(instanceNonce) ||
     (value.token !== undefined &&
-      (typeof value.token !== 'string' || value.token.length > 4_096))
+      (typeof value.token !== 'string' || value.token.length > 4_096)) ||
+    (configPath !== undefined &&
+      (typeof configPath !== 'string' ||
+        configPath.length > 4_096 ||
+        configPath.includes('\0') ||
+        !isAbsolute(configPath) ||
+        basename(configPath) !== 'config.json'))
   ) {
     return { kind: 'invalid', reason: 'discovery_shape' };
   }
@@ -145,6 +153,7 @@ export async function readDiscoveryFile(
   };
   if (typeof value.token === 'string' && value.token)
     record.token = value.token;
+  if (typeof configPath === 'string') record.configPath = configPath;
   return {
     kind: 'ready',
     record,
@@ -152,7 +161,7 @@ export async function readDiscoveryFile(
       'sha256',
     )
       .update(record.token ?? '')
-      .digest('hex')}`,
+      .digest('hex')}:${record.configPath ?? ''}`,
   };
 }
 

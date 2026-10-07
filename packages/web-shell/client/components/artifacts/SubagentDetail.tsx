@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
@@ -172,12 +172,15 @@ function SubagentDetailContent({
     };
   }, [artifacts, connection.sessionId, onArtifactsChange]);
 
-  const handleRightPanelOpen = (request: TurnOutputOpenRequest) => {
-    onRightPanelOpen?.({
-      ...request,
-      sourceSessionId: connection.sessionId,
-    });
-  };
+  const handleRightPanelOpen = useCallback(
+    (request: TurnOutputOpenRequest) => {
+      onRightPanelOpen?.({
+        ...request,
+        sourceSessionId: connection.sessionId,
+      });
+    },
+    [connection.sessionId, onRightPanelOpen],
+  );
 
   useEffect(() => {
     if (isRunning) return;
@@ -213,6 +216,7 @@ function SubagentDetailContent({
       firstTurnMetrics={metrics}
       includeSubagentToolUsageInMetrics={false}
       turnFileChanges={fileChangesByTurn}
+      sourceSessionId={connection.sessionId}
       turnArtifacts={artifactsByTurn}
       onTurnOutputOpen={handleRightPanelOpen}
       onError={onError}

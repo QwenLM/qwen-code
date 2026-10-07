@@ -7,6 +7,7 @@ import {
   ClientSideConnection,
   ndJsonStream,
   PROTOCOL_VERSION,
+  RequestError,
 } from '@agentclientprotocol/sdk';
 import type {
   Client,
@@ -20,6 +21,12 @@ import {
   CHANNEL_BTW_METHOD,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_TASK_RESULT_META_KEY,
+  CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
+  CHANNEL_TASK_OUTPUT_META_KEY,
+  ChannelPromptCancelledError,
+  parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
   type ChannelAgentBridge,
@@ -91,6 +98,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
   private readonly knownSessionIds = new Set<string>();
   private readonly sessionBindingTokens = new Map<string, object | undefined>();
+  private readonly toolCallKindsBySession = new Map<
+    string,
+    Map<string, string>
+  >();
   private channelLoopMcpRegistered = false;
   private channelLoopMcpRegistration: Promise<void> | null = null;
   private readonly pendingPermissions = new Map<
@@ -155,6 +166,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       this.resolvePendingPermissions();
       this.knownSessionIds.clear();
       this.sessionBindingTokens.clear();
+      this.toolCallKindsBySession.clear();
       this.connection = null;
       this.child = null;
       this.emit('disconnected', code, signal);
@@ -322,11 +334,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     prompt.push({ type: 'text', text });
 
     try {
-      await conn.prompt({
+      const result = await conn.prompt({
         sessionId,
         prompt: prompt as Array<{ type: 'text'; text: string }>,
         _meta: {
           [CHANNEL_PROMPT_META_KEY]: true,
+          ...(options?.outputMode === 'per_task'
+            ? { [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task' }
+            : {}),
           ...(options?.displayText !== undefined
             ? {
                 [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
@@ -334,13 +349,29 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
             : {}),
         },
       });
+      if (
+        options?.outputMode === 'per_task' &&
+        result?.stopReason === 'cancelled'
+      ) {
+        throw new ChannelPromptCancelledError();
+      }
+      const taskResult = result?._meta?.[CHANNEL_TASK_RESULT_META_KEY];
+      if (options?.outputMode === 'per_task') {
+        options.onTaskResult?.({
+          partial:
+            result?._meta?.[CHANNEL_TASK_RESULT_PARTIAL_META_KEY] === true,
+        });
+      }
+      return options?.outputMode === 'per_task' &&
+        typeof taskResult === 'string' &&
+        taskResult.trim()
+        ? taskResult
+        : chunks.join('') || slashCommandOutput;
     } finally {
       this.off('textChunk', onChunk);
       this.off('slashCommandOutput', onSlashCommandOutput);
       this.off('responseBoundary', clearChunks);
     }
-
-    return chunks.join('') || slashCommandOutput;
   }
 
   async btw(
@@ -394,6 +425,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     }
     if (!this.knownSessionIds.delete(sessionId)) return;
     this.sessionBindingTokens.delete(sessionId);
+    this.toolCallKindsBySession.delete(sessionId);
     this.resolvePendingPermissions(sessionId);
 
     const conn = this.connection;
@@ -423,6 +455,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.resolvePendingPermissions();
     this.knownSessionIds.clear();
     this.sessionBindingTokens.clear();
+    this.toolCallKindsBySession.clear();
     if (this.child) {
       this.child.kill();
       this.child = null;
@@ -458,10 +491,22 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           if (
             meta['source'] === 'background_notification_response' &&
             meta['rewritten'] !== true &&
-            content?.type === 'text' &&
-            content.text
+            meta[CHANNEL_TASK_OUTPUT_META_KEY] !== true
           ) {
-            this.emit('backgroundResponse', sessionId, content.text);
+            const context = parseBackgroundResponseContext(
+              meta['backgroundTask'],
+            );
+            if (
+              content?.type === 'text' &&
+              (content.text || context?.turnComplete)
+            ) {
+              this.emit(
+                'backgroundResponse',
+                sessionId,
+                content.text ?? '',
+                context,
+              );
+            }
           } else if (
             meta['source'] === 'vision_bridge_notice' &&
             content?.type === 'text' &&
@@ -482,19 +527,55 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         }
         break;
       }
-      case 'tool_call': {
+      case 'tool_call':
+      case 'tool_call_update': {
+        const toolCallId = (update['toolCallId'] as string) || '';
+        if (!toolCallId) break;
+        const explicitKind =
+          typeof update['kind'] === 'string' ? update['kind'] : '';
+        const meta = update['_meta'] as Record<string, unknown> | undefined;
+        if (
+          type === 'tool_call_update' &&
+          !explicitKind &&
+          update['status'] === 'in_progress' &&
+          (meta?.['shellProgress'] !== undefined ||
+            meta?.['subagentProgress'] === true)
+        ) {
+          // Matches the DaemonChannelBridge guard: kindless in_progress frames
+          // carrying only shell or subagent progress are heartbeats, not phase
+          // changes, and must not restore the slot kind onto the reaction/card.
+          break;
+        }
+        let sessionKinds = this.toolCallKindsBySession.get(sessionId);
+        const kind = explicitKind || sessionKinds?.get(toolCallId);
+        if (!kind) break;
+        if (type === 'tool_call' || explicitKind) {
+          const kinds = sessionKinds ?? new Map<string, string>();
+          kinds.set(toolCallId, kind);
+          this.toolCallKindsBySession.set(sessionId, kinds);
+          sessionKinds = kinds;
+        }
         const event: ToolCallEvent = {
           sessionId,
-          toolCallId: update['toolCallId'] as string,
-          kind: (update['kind'] as string) || '',
+          toolCallId,
+          kind,
           title: (update['title'] as string) || '',
           status: (update['status'] as string) || 'pending',
           rawInput: update['rawInput'] as Record<string, unknown> | undefined,
         };
-        if (event.status === 'pending' || event.status === 'in_progress') {
+        if (
+          type === 'tool_call' &&
+          (event.status === 'pending' || event.status === 'in_progress')
+        ) {
           this.emitResponseBoundary(sessionId);
         }
         this.emit('toolCall', event);
+        if (event.status === 'completed' || event.status === 'failed') {
+          sessionKinds?.delete(toolCallId);
+          if (sessionKinds?.size === 0) {
+            this.toolCallKindsBySession.delete(sessionId);
+          }
+        }
         break;
       }
       case 'plan': {
@@ -669,7 +750,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         hasQueuedPrompt: false,
       };
     }
-    throw new Error(`Method not found: ${method}`);
+    throw RequestError.methodNotFound(method);
   }
 
   private async handleClientMcpMessage(

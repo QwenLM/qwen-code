@@ -31,24 +31,34 @@ import { BranchPickerPopover } from '../BranchPickerPopover';
 import { FileTypeIcon } from '../FileTypeIcon';
 import { Skeleton } from '../ui/skeleton';
 import styles from './EnvironmentPanel.module.css';
+import { SourcesSection, type SourcesState } from './SourcesSection';
+import type { SessionSource } from '@qwen-code/sdk/daemon';
 
 interface EnvironmentPanelProps {
+  sources?: SourcesState;
+  onOpenSource?: (source: SessionSource) => void;
+  retrySourceRegistration?: () => Promise<void>;
   floating?: boolean;
   hidden?: boolean;
   workspaceCwd?: string;
   gitWorkspaceCwd?: string;
   gitCwd?: string;
+  gitSessionId?: string;
   branch?: string;
   gitStatus?: DaemonWorkspaceGitStatus;
   tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
   agentTasks?: readonly EnvironmentAgentTask[];
   attachments?: readonly DaemonSessionAttachmentReference[];
   attachmentsLoading?: boolean;
+  attachmentsError?: string;
+  onRetryAttachments?: () => void;
   artifacts?: readonly DaemonSessionArtifact[];
   artifactsLoading?: boolean;
   items?: readonly WebShellEnvironmentPanelItem[];
   onOpenGitDiff?: () => void;
   onOpenGitCommit?: () => void;
+  onOpenGitWorktrees?: () => void;
+  onOpenGitLog?: () => void;
   onOpenAgent?: (task: DaemonSessionAgentTaskStatus) => void;
   onOpenAgentWorkflow?: () => void;
   onOpenTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
@@ -67,7 +77,7 @@ export type EnvironmentAgentTask = DaemonSessionAgentTaskStatus & {
 };
 
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
-  ['environment', 'subagents', 'backgroundTasks', 'attachments', 'artifacts'];
+  ['environment', 'sources', 'subagents', 'backgroundTasks', 'artifacts'];
 const AGENT_COLORS: Readonly<Record<string, string>> = {
   red: '#e5484d',
   blue: 'var(--agent-blue-500)',
@@ -134,22 +144,30 @@ function agentColorValue(color: string | undefined): string {
 }
 
 export function EnvironmentPanel({
+  sources,
+  onOpenSource,
+  retrySourceRegistration,
   floating = false,
   hidden = false,
   workspaceCwd,
   gitWorkspaceCwd,
   gitCwd,
+  gitSessionId,
   branch,
   gitStatus,
   tasks,
   agentTasks,
   attachments,
   attachmentsLoading = false,
+  attachmentsError,
+  onRetryAttachments,
   artifacts,
   artifactsLoading = false,
   items = DEFAULT_ENVIRONMENT_PANEL_ITEMS,
   onOpenGitDiff,
   onOpenGitCommit,
+  onOpenGitWorktrees,
+  onOpenGitLog,
   onOpenAgent,
   onOpenAgentWorkflow,
   onOpenTask,
@@ -173,9 +191,9 @@ export function EnvironmentPanel({
   const [environmentExpanded, setEnvironmentExpanded] = useState(true);
   const [agentsExpanded, setAgentsExpanded] = useState(true);
   const [tasksExpanded, setTasksExpanded] = useState(true);
-  const [attachmentsExpanded, setAttachmentsExpanded] = useState(true);
   const [artifactsExpanded, setArtifactsExpanded] = useState(true);
   const [branchPickerOpen, setBranchPickerOpen] = useState(false);
+  const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
   const activeBranch = branch ?? gitStatus?.branch;
 
   useEffect(() => {
@@ -185,7 +203,14 @@ export function EnvironmentPanel({
   }, [activeBranch, environmentExpanded, gitWorkspaceCwd, hidden]);
 
   useEffect(() => {
-    if (!floating || hidden || !onDismiss || branchPickerOpen) return;
+    if (
+      !floating ||
+      hidden ||
+      !onDismiss ||
+      branchPickerOpen ||
+      sourceDialogOpen
+    )
+      return;
     const dismissOnOutsidePointerDown = (event: PointerEvent) => {
       if (
         event
@@ -208,7 +233,7 @@ export function EnvironmentPanel({
     document.addEventListener('pointerdown', dismissOnOutsidePointerDown);
     return () =>
       document.removeEventListener('pointerdown', dismissOnOutsidePointerDown);
-  }, [branchPickerOpen, floating, hidden, onDismiss]);
+  }, [branchPickerOpen, sourceDialogOpen, floating, hidden, onDismiss]);
 
   const gitDetails = [
     gitStatus?.operation
@@ -290,10 +315,13 @@ export function EnvironmentPanel({
                   onOpenChange={setBranchPickerOpen}
                   workspaceCwd={gitWorkspaceCwd}
                   gitCwd={gitCwd}
+                  gitSessionId={gitSessionId}
                   side="left"
                   status={gitStatus}
                   onOpenDiff={onOpenGitDiff}
                   onOpenCommit={onOpenGitCommit}
+                  onOpenWorktrees={onOpenGitWorktrees}
+                  onOpenLog={onOpenGitLog}
                 >
                   <button
                     type="button"
@@ -318,6 +346,25 @@ export function EnvironmentPanel({
         </section>
       )}
 
+      {(items.includes('sources') || items.includes('attachments')) && (
+        <SourcesSection
+          hidden={hidden}
+          state={items.includes('sources') ? sources : undefined}
+          attachments={attachments}
+          attachmentsLoading={attachmentsLoading}
+          attachmentsError={attachmentsError}
+          onRetryAttachments={onRetryAttachments}
+          onReadImage={onReadImage}
+          onImagePreview={onImagePreview}
+          onAttachmentPreview={onAttachmentPreview}
+          onAttachmentPreviewError={onAttachmentPreviewError}
+          onDialogOpenChange={setSourceDialogOpen}
+          onOpen={onOpenSource}
+          retryRegistration={
+            items.includes('sources') ? retrySourceRegistration : undefined
+          }
+        />
+      )}
       {items.includes('subagents') && agents.length > 0 && (
         <section className={styles.section}>
           <div className={styles.sectionHeaderRow}>
@@ -433,42 +480,6 @@ export function EnvironmentPanel({
         </section>
       )}
 
-      {items.includes('attachments') &&
-        (attachmentsLoading || Boolean(attachments?.length)) && (
-          <section className={styles.section}>
-            <button
-              type="button"
-              className={styles.sectionHeader}
-              aria-expanded={attachmentsExpanded}
-              onClick={() => setAttachmentsExpanded((expanded) => !expanded)}
-            >
-              <span>{t('environment.attachments')}</span>
-              {!attachmentsExpanded && <ChevronRightIcon />}
-            </button>
-            {attachmentsExpanded && (
-              <>
-                {attachmentsLoading ? (
-                  <FileListSkeleton label={t('common.loading')} />
-                ) : (
-                  <ul className={styles.attachmentFiles}>
-                    {(attachments ?? []).map((attachment) => (
-                      <li key={attachment.attachmentId}>
-                        <AttachmentRow
-                          attachment={attachment}
-                          onReadImage={onReadImage}
-                          onImagePreview={onImagePreview}
-                          onAttachmentPreview={onAttachmentPreview}
-                          onPreviewError={onAttachmentPreviewError}
-                        />
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </>
-            )}
-          </section>
-        )}
-
       {items.includes('artifacts') && (
         <section className={styles.section}>
           <button
@@ -537,60 +548,5 @@ function FileListSkeleton({ label }: { label: string }) {
         </li>
       ))}
     </ul>
-  );
-}
-
-function AttachmentRow({
-  attachment,
-  onReadImage,
-  onImagePreview,
-  onAttachmentPreview,
-  onPreviewError,
-}: {
-  attachment: DaemonSessionAttachmentReference;
-  onReadImage?: (attachmentId: string) => Promise<string>;
-  onImagePreview?: (src: string, alt?: string, source?: ImageTabSource) => void;
-  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
-  onPreviewError?: (error: unknown) => void;
-}) {
-  const isImage = attachment.type === 'image';
-  const openPreview = () => {
-    if (isImage) {
-      const source: ImageTabSource = {
-        kind: 'attachment',
-        attachmentId: attachment.attachmentId,
-      };
-      void onReadImage?.(attachment.attachmentId)
-        .then((dataUrl) => {
-          onImagePreview?.(dataUrl, attachment.attachmentId, source);
-        })
-        .catch((error: unknown) => onPreviewError?.(error));
-      return;
-    }
-    onAttachmentPreview?.({
-      name: attachment.attachmentId,
-      mimeType: attachment.mimeType,
-      attachmentId: attachment.attachmentId,
-    });
-  };
-  return (
-    <button
-      type="button"
-      className={styles.attachmentFile}
-      title={attachment.attachmentId}
-      onClick={openPreview}
-    >
-      <FileTypeIcon
-        name={attachment.attachmentId}
-        mimeType={attachment.mimeType}
-        size={16}
-        strokeWidth={1.7}
-        className={styles.attachmentFileIcon}
-        aria-hidden="true"
-      />
-      <span className={styles.attachmentFileName}>
-        {attachment.attachmentId}
-      </span>
-    </button>
   );
 }

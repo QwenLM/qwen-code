@@ -7,9 +7,24 @@
 import type { SlashCommand, ExecutionMode } from '../ui/commands/types.js';
 import type { ICommandLoader } from './types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
-import { filterCommandsForMode } from './commandUtils.js';
+import {
+  commandRestrictionNames,
+  filterCommandsForMode,
+} from './commandUtils.js';
 
 const debugLogger = createDebugLogger('CLI_COMMANDS');
+
+/**
+ * Where a command came from, for the shadowing diagnostic. A skill command with
+ * an owner reads as that owner's extension; otherwise the kind already names the
+ * source (built-in, file, mcp-prompt, skill).
+ */
+function commandOrigin(command: SlashCommand): string {
+  const owner = command.extensionName
+    ? `extension "${command.extensionName}"`
+    : command.kind;
+  return `${owner} command "${command.name}"`;
+}
 
 /**
  * Orchestrates the discovery and loading of all slash commands for the CLI.
@@ -47,7 +62,8 @@ export class CommandService {
    *   interface. Built-in commands should come first, followed by FileCommandLoader.
    * @param signal An AbortSignal to cancel the loading process.
    * @param disabledNames Optional set of command names to exclude. Matched
-   *   case-insensitively against the final (post-rename) command name. Intended
+   *   case-insensitively against the final (post-rename) command name, and for a
+   *   skill command against its authored name as well. Intended
    *   for settings- or flag-driven denylists that gate the CLI surface (see
    *   `slashCommands.disabled` and `--disabled-slash-commands`).
    * @returns A promise that resolves to a new, fully initialized `CommandService` instance.
@@ -88,6 +104,14 @@ export class CommandService {
         finalName = renamedName;
       }
 
+      // Overwriting stays last-loader-wins; the log only names what happened.
+      const shadowed = commandMap.get(finalName);
+      if (shadowed) {
+        debugLogger.warn(
+          `Slash command "/${finalName}" from ${commandOrigin(shadowed)} is ` +
+            `replaced by ${commandOrigin(cmd)}`,
+        );
+      }
       commandMap.set(finalName, {
         ...cmd,
         name: finalName,
@@ -102,11 +126,15 @@ export class CommandService {
       }
       if (normalizedDisabled.size > 0) {
         for (const [name, cmd] of Array.from(commandMap.entries())) {
-          const matchesPrimary = normalizedDisabled.has(name.toLowerCase());
-          const matchesAlias = (cmd.altNames ?? []).some((a) =>
-            normalizedDisabled.has(a.toLowerCase()),
-          );
-          if (matchesPrimary || matchesAlias) {
+          // Match either spelling — the registry name carries the extension
+          // prefix while an existing entry may hold the bare authored name — so
+          // the rename cannot un-disable a command an operator removed.
+          // Non-skill commands have one spelling.
+          if (
+            commandRestrictionNames(cmd).some((candidate) =>
+              normalizedDisabled.has(candidate),
+            )
+          ) {
             commandMap.delete(name);
           }
         }

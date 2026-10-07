@@ -7,6 +7,7 @@
 import type {
   ToolCallConfirmationDetails,
   ToolPlanConfirmationDetails,
+  ToolConfirmationPayload,
   ToolResult,
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
@@ -177,14 +178,29 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       hideAlwaysAllow: true,
       plan: snapshot.plan,
       prePlanMode: snapshot.prePlanMode,
-      onConfirm: async (outcome: ToolConfirmationOutcome) => {
+      onConfirm: async (
+        outcome: ToolConfirmationOutcome,
+        payload?: ToolConfirmationPayload,
+      ) => {
         switch (outcome) {
-          case ToolConfirmationOutcome.RestorePrevious:
+          case ToolConfirmationOutcome.RestorePrevious: {
+            this.approval = undefined;
+            const executionMode = this.config.getPlanExecutionMode?.();
+            if (
+              executionMode !== undefined &&
+              payload?.expectedPlanExecutionMode !== executionMode
+            ) {
+              throw new StructuredToolError(
+                'Execution permission changed or was not confirmed. Request plan approval again with the current permission.',
+                ToolErrorType.EXECUTION_DENIED,
+              );
+            }
             this.approval = {
               snapshot,
-              targetMode: snapshot.prePlanMode,
+              targetMode: executionMode ?? snapshot.prePlanMode,
             };
             break;
+          }
           case ToolConfirmationOutcome.ProceedAlways:
             this.approval = {
               snapshot,

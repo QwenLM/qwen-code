@@ -64,7 +64,72 @@ describe('ToolCallEmitter', () => {
     emitter = new ToolCallEmitter(mockContext);
   });
 
+  it('emits recorded timing on starts, results and errors without using send time', async () => {
+    const startedAt = 1_760_000_000_000;
+    await emitter.emitStart({
+      toolName: 'test_tool',
+      callId: 'timed',
+      startedAt,
+    });
+    await emitter.emitResult({
+      toolName: 'test_tool',
+      callId: 'timed',
+      success: true,
+      message: [],
+      startedAt,
+      durationMs: 4000,
+    });
+    await emitter.emitError(
+      'failed',
+      'test_tool',
+      new Error('failed'),
+      undefined,
+      { startedAt: startedAt + 10_000, durationMs: 20 },
+    );
+    expect(
+      sendUpdateSpy.mock.calls.map(([update]) => ({
+        status: update.status,
+        startedAt: update._meta?.startedAt,
+        durationMs: update._meta?.durationMs,
+      })),
+    ).toEqual([
+      { status: 'pending', startedAt, durationMs: undefined },
+      { status: 'completed', startedAt, durationMs: 4000 },
+      { status: 'failed', startedAt: startedAt + 10_000, durationMs: 20 },
+    ]);
+  });
+
   describe('emitStart', () => {
+    it.each([undefined, 'preparing'] as const)(
+      'marks agent launch frames unavailable during %s',
+      async (phase) => {
+        await emitter.emitStart({
+          toolName: ToolNames.AGENT,
+          callId: 'agent-1',
+          phase,
+        });
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            _meta: expect.objectContaining({ subagentSessionReady: false }),
+          }),
+        );
+      },
+    );
+
+    it('leaves legacy inline child streams without a readiness lifecycle compatible', async () => {
+      await emitter.emitStart({
+        toolName: ToolNames.AGENT,
+        callId: 'nested',
+        subagentMeta: {
+          parentToolCallId: 'parent',
+          subagentType: 'general-purpose',
+        },
+      });
+      expect(sendUpdateSpy.mock.calls[0][0]._meta).not.toHaveProperty(
+        'subagentSessionReady',
+      );
+    });
+
     it('should emit tool_call update with basic params when tool not in registry', async () => {
       const result = await emitter.emitStart({
         toolName: 'unknown_tool',

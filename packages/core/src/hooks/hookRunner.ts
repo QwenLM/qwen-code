@@ -9,20 +9,20 @@ import { randomUUID } from 'node:crypto';
 import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHookOutput, HookEventName, HookType } from './types.js';
+import { HookEventName, HookType } from './types.js';
+import { resolveCommandHookTimeoutMs } from './hook-timeout.js';
+import { applyHookOutputToInput } from './hook-sequential-input.js';
 import type {
   HookConfig,
   HookInput,
   HookOutput,
   HookExecutionResult,
-  PreToolUseInput,
-  UserPromptExpansionInput,
-  UserPromptSubmitInput,
   CommandHookConfig,
   FunctionHookContext,
   PromptHookConfig,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 import {
   escapeShellArg,
   getShellConfiguration,
@@ -36,13 +36,12 @@ import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import type { Config } from '../config/config.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import {
+  HookCommandCgroup,
+  HookCommandIsolationUnavailableError,
+} from './hook-command-cgroup.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
-
-/**
- * Default timeout for hook execution (60 seconds)
- */
-const DEFAULT_HOOK_TIMEOUT = 60000;
 
 /**
  * Maximum length for stdout/stderr output (1MB)
@@ -53,6 +52,7 @@ const MAX_OUTPUT_LENGTH = 1024 * 1024;
 const HOOK_TERMINATE_GRACE_MS = 2000;
 const HOOK_PROCESS_GROUP_POLL_MS = 50;
 const HOOK_CHILD_CLOSE_WAIT_MS = 1000;
+const activeHookCgroups = new Map<ChildProcess, HookCommandCgroup>();
 const WINDOWS_TASKKILL_TIMEOUT_MS = 2000;
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 const SURVIVING_HOOK_TIMEOUT_EXIT_CODE = 124;
@@ -106,7 +106,7 @@ const removeInput = () => {
 };
 
 const signalGroup = (signal) => {
-  if (!hook?.pid) return false;
+  if (!Number.isSafeInteger(hook?.pid) || hook.pid <= 1) return false;
   try {
     process.kill(-hook.pid, signal);
     return true;
@@ -120,7 +120,7 @@ const signalGroup = (signal) => {
 };
 
 const groupAlive = () => {
-  if (!hook?.pid) return false;
+  if (!Number.isSafeInteger(hook?.pid) || hook.pid <= 1) return false;
   if (process.platform === 'win32') return hook.exitCode === null;
   try {
     process.kill(-hook.pid, 0);
@@ -254,6 +254,20 @@ let parentExitCleanupRegistered = false;
 const EXIT_CODE_SUCCESS = 0;
 const EXIT_CODE_NON_BLOCKING_ERROR = 1;
 
+/**
+ * Events whose plain-text stdout on a successful exit is handed to the model
+ * as additional context, matching the events Claude Code promotes. Other
+ * events keep converting plain text to a system message, even those whose
+ * JSON `additionalContext` does reach the model (PostToolUse, SubagentStart,
+ * ...), so a hook that merely prints a log line does not start injecting it
+ * into tool results or subagent prompts.
+ */
+const PLAIN_TEXT_CONTEXT_EVENTS: ReadonlySet<HookEventName> = new Set([
+  HookEventName.SessionStart,
+  HookEventName.UserPromptSubmit,
+  HookEventName.UserPromptExpansion,
+]);
+
 function isNoSuchProcessError(error: unknown): boolean {
   return (error as NodeJS.ErrnoException)?.code === 'ESRCH';
 }
@@ -262,6 +276,13 @@ function signalProcessGroup(
   pid: number,
   signal: NodeJS.Signals,
 ): 'sent' | 'gone' | 'failed' {
+  // Negating PID 1 broadcasts to every permitted process on POSIX.
+  if (!Number.isSafeInteger(pid) || pid <= 1) {
+    debugLogger.warn(
+      `Refusing ${signal} for hook process group ${pid}: not a safe integer greater than 1`,
+    );
+    return 'gone';
+  }
   try {
     process.kill(-pid, signal);
     return 'sent';
@@ -277,6 +298,7 @@ function signalProcessGroup(
 }
 
 function isProcessGroupAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false;
   try {
     process.kill(-pid, 0);
     return true;
@@ -312,6 +334,16 @@ function killDirectChild(child: ChildProcess, signal: NodeJS.Signals): void {
 
 function forceKillActivePosixHookProcesses(): void {
   for (const child of activePosixHookProcesses) {
+    const unit = activeHookCgroups.get(child);
+    if (unit) {
+      killDirectChild(child, 'SIGKILL');
+      try {
+        unit.kill();
+      } catch {
+        // A failed cgroup cleanup cannot provide a drained receipt.
+      }
+      continue;
+    }
     const pid = child.pid;
     if (!pid) {
       killDirectChild(child, 'SIGKILL');
@@ -353,6 +385,7 @@ function registerActivePosixHookProcess(child: ChildProcess): void {
 }
 
 function unregisterActivePosixHookProcess(child: ChildProcess): void {
+  activeHookCgroups.delete(child);
   activePosixHookProcesses.delete(child);
   if (activePosixHookProcesses.size === 0 && parentExitCleanupRegistered) {
     process.removeListener('exit', forceKillActivePosixHookProcesses);
@@ -406,16 +439,13 @@ async function terminatePosixHookProcessTree(
   );
 }
 
-async function terminateWindowsHookProcessTree(
-  child: ChildProcess,
-): Promise<void> {
-  const pid = child.pid;
-  if (!pid) {
-    killDirectChild(child, 'SIGKILL');
-    return;
-  }
-
-  await new Promise<void>((resolve) => {
+/**
+ * `taskkill /f /t` a pid, resolving to false when the kill did not land so the
+ * caller can fall back. Windows has no process groups to signal, so the tree
+ * walk is the only way to reach a hook's descendants.
+ */
+async function taskkillProcessTree(pid: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     try {
       execFile(
         WINDOWS_TASKKILL,
@@ -429,19 +459,36 @@ async function terminateWindowsHookProcessTree(
             debugLogger.warn(
               `taskkill failed for hook process tree ${pid}: ${error.message}`,
             );
-            killDirectChild(child, 'SIGKILL');
+            resolve(false);
+            return;
           }
-          resolve();
+          resolve(true);
         },
       );
     } catch (error) {
       debugLogger.warn(
         `taskkill threw for hook process tree ${pid}: ${error instanceof Error ? error.message : String(error)}`,
       );
-      killDirectChild(child, 'SIGKILL');
-      resolve();
+      resolve(false);
     }
   });
+}
+
+async function terminateWindowsHookProcessTree(
+  child: ChildProcess,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  const pid = child.pid;
+  if (!pid) {
+    killDirectChild(child, 'SIGKILL');
+    return;
+  }
+
+  if (!(await taskkillProcessTree(pid))) {
+    killDirectChild(child, 'SIGKILL');
+  }
 }
 
 async function terminateHookProcessTree(
@@ -455,11 +502,111 @@ async function terminateHookProcessTree(
   await terminatePosixHookProcessTree(child, graceMs);
 }
 
+/**
+ * Tri-state `process.kill(pid, 0)` liveness probe for the surviving-hook
+ * branch: alive on success or EPERM/EACCES (the process exists but cannot be
+ * opened), gone on ESRCH, and unknown on any other errno, which establishes
+ * nothing about the pid and must not be silently folded into either answer.
+ * File-local on purpose: the shared `isPidAlive` deliberately exposes only
+ * the binary answer, and this branch is the only caller that needs the
+ * unknown case told apart.
+ */
+function probePidLiveness(
+  pid: number,
+): { state: 'alive' | 'gone' } | { state: 'unknown'; detail: string } {
+  try {
+    process.kill(pid, 0);
+    return { state: 'alive' };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === 'ESRCH') {
+      return { state: 'gone' };
+    }
+    if (code === 'EPERM' || code === 'EACCES') {
+      return { state: 'alive' };
+    }
+    return {
+      state: 'unknown',
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 async function terminateSurvivingHookProcessGroup(
   pid: number,
   graceMs = HOOK_TERMINATE_GRACE_MS,
 ): Promise<void> {
+  if (!Number.isSafeInteger(pid) || pid <= 1) {
+    debugLogger.warn(
+      `Skipping reap of surviving hook ${pid}: not a safe integer greater than 1`,
+    );
+    return;
+  }
   if (process.platform === 'win32') {
+    // The surviving hook runs under a detached supervisor, so the parent's own
+    // `terminateHookProcessTree` on the supervisor may miss it: the supervisor
+    // can already have exited (leaving the shell reparented and out of its
+    // tree), or its taskkill can fail. Without this branch nothing on Windows
+    // ever reaps the hook's cmd.exe tree. See #11303.
+    //
+    // The liveness probe is the #6067 guard: taskkill has no process-group
+    // equivalent, so it must not be fired at a pid that has already exited and
+    // may have been recycled onto an unrelated application. The tri-state
+    // classification (`probePidLiveness`) tells an unexpected errno (host
+    // memory or handle pressure, libuv's UV_UNKNOWN catch-all) apart from a
+    // provably gone pid: both skip the reap, but the unknown case leaves the
+    // hook's cmd.exe tree running, so it warns in the debug log (requires
+    // --debug) rather than vanishing without a trace. The alive/gone decision
+    // is unchanged from the shared `isPidAlive` helper — alive is exactly
+    // success or EPERM/EACCES, anything else still skips.
+    const probe = probePidLiveness(pid);
+    if (probe.state === 'unknown') {
+      debugLogger.warn(
+        `Skipping reap of surviving hook ${pid}: liveness probe failed: ${probe.detail}`,
+      );
+    }
+    if (probe.state !== 'alive') {
+      return;
+    }
+    // `taskkillProcessTree` resolves false when execFile errors or when
+    // taskkill exceeds WINDOWS_TASKKILL_TIMEOUT_MS — both reachable on a deep
+    // tree or a locked-down System32. Dropping that boolean leaves the hook's
+    // cmd.exe tree running with nothing else able to reap it, which is exactly
+    // the leak this branch exists to close. Mirrors the fallback in
+    // terminateWindowsHookProcessTree above.
+    //
+    // But taskkill also resolves false when the pid was ALREADY dead, and a
+    // pid-based kill against a recycled pid is a collateral kill (the #6067
+    // failure mode). Re-probe liveness before falling back so a dead pid is
+    // never signalled directly. The re-probe shares the first probe's
+    // tri-state classification: an unexpected errno still skips the fallback,
+    // but warns in the debug log instead of vanishing silently.
+    if (await taskkillProcessTree(pid)) {
+      return;
+    }
+    const reprobe = probePidLiveness(pid);
+    if (reprobe.state === 'unknown') {
+      debugLogger.warn(
+        `Skipping SIGKILL fallback for surviving hook ${pid}: liveness re-probe failed: ${reprobe.detail}`,
+      );
+    }
+    if (reprobe.state !== 'alive') {
+      return;
+    }
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch (error) {
+      // ESRCH means the pid is already gone; anything else (EPERM from an
+      // elevated or AV-protected hook) is a refused kill that must not
+      // vanish silently while the tree keeps running.
+      if (!isNoSuchProcessError(error)) {
+        debugLogger.warn(
+          `SIGKILL fallback failed for surviving hook ${pid}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
     return;
   }
 
@@ -530,6 +677,13 @@ export class HookRunner {
     eventName: HookEventName,
     input: HookInput,
     contextOrSignal?: FunctionHookContext | AbortSignal,
+    options?: {
+      waitForProcessTree?: true;
+      cgroupRoot?: string;
+      environment?: NodeJS.ProcessEnv;
+      trackHttpRequest?: true;
+      httpRequestSignal?: AbortSignal;
+    },
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
 
@@ -555,7 +709,9 @@ export class HookRunner {
     try {
       // Check if this is an async command hook
       if (this.isAsyncHook(hookConfig)) {
-        return this.executeAsyncHook(
+        // Awaited so a rejection lands in the catch below: executeHook never
+        // throws, and the caller's onHookEnd always runs.
+        return await this.executeAsyncHook(
           hookConfig as CommandHookConfig,
           eventName,
           input,
@@ -572,6 +728,7 @@ export class HookRunner {
             input,
             startTime,
             signal,
+            options,
           );
         case HookType.Http:
           return await this.httpRunner.execute(
@@ -579,6 +736,8 @@ export class HookRunner {
             eventName,
             input,
             signal,
+            options?.trackHttpRequest,
+            options?.httpRequestSignal,
           );
         case HookType.Function: {
           // Function hooks accept context, not just signal
@@ -622,6 +781,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         error: error instanceof Error ? error : new Error(errorMessage),
         duration,
       };
@@ -712,6 +872,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         duration: 0,
         isAsync: true,
         error: new Error(
@@ -728,7 +889,7 @@ export class HookRunner {
       hookEvent: eventName,
       sessionId: input.session_id,
       startTime: Date.now(),
-      timeout: hookConfig.timeout || DEFAULT_HOOK_TIMEOUT,
+      timeout: resolveCommandHookTimeoutMs(hookConfig.timeout, hookName),
       stdout: '',
       stderr: '',
     });
@@ -742,6 +903,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         duration: 0,
         isAsync: true,
         error: new Error(
@@ -785,6 +947,7 @@ export class HookRunner {
       hookConfig,
       eventName,
       success: true,
+      outcome: 'success',
       duration: 0,
       isAsync: true,
       output: { continue: true },
@@ -849,7 +1012,11 @@ export class HookRunner {
     eventName: HookEventName,
     input: HookInput,
     onHookStart?: (config: HookConfig, index: number) => void,
-    onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
+    onHookEnd?: (
+      config: HookConfig,
+      result: HookExecutionResult,
+      index: number,
+    ) => void,
     signal?: AbortSignal,
     context?: FunctionHookContext,
   ): Promise<HookExecutionResult[]> {
@@ -859,7 +1026,7 @@ export class HookRunner {
         ...context,
         signal,
       });
-      onHookEnd?.(config, result);
+      onHookEnd?.(config, result, index);
       return result;
     });
 
@@ -875,7 +1042,11 @@ export class HookRunner {
     eventName: HookEventName,
     input: HookInput,
     onHookStart?: (config: HookConfig, index: number) => void,
-    onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
+    onHookEnd?: (
+      config: HookConfig,
+      result: HookExecutionResult,
+      index: number,
+    ) => void,
     signal?: AbortSignal,
     context?: FunctionHookContext,
   ): Promise<HookExecutionResult[]> {
@@ -893,12 +1064,12 @@ export class HookRunner {
         ...context,
         signal,
       });
-      onHookEnd?.(config, result);
+      onHookEnd?.(config, result, i);
       results.push(result);
 
       // If the hook succeeded and has output, use it to modify the input for the next hook
       if (result.success && result.output) {
-        currentInput = this.applyHookOutputToInput(
+        currentInput = applyHookOutputToInput(
           currentInput,
           result.output,
           eventName,
@@ -907,71 +1078,6 @@ export class HookRunner {
     }
 
     return results;
-  }
-
-  /**
-   * Apply hook output to modify input for the next hook in sequential execution
-   */
-  private applyHookOutputToInput(
-    originalInput: HookInput,
-    hookOutput: HookOutput,
-    eventName: HookEventName,
-  ): HookInput {
-    // Create a copy of the original input
-    const modifiedInput = { ...originalInput };
-
-    // Apply modifications based on hook output and event type
-    if (hookOutput.hookSpecificOutput) {
-      switch (eventName) {
-        case HookEventName.UserPromptSubmit:
-          {
-            const additionalContext =
-              hookOutput.hookSpecificOutput['additionalContext'];
-            if (
-              typeof additionalContext === 'string' &&
-              additionalContext &&
-              'prompt' in modifiedInput
-            ) {
-              (modifiedInput as UserPromptSubmitInput).prompt +=
-                '\n\n' + additionalContext;
-            }
-          }
-          break;
-
-        case HookEventName.UserPromptExpansion:
-          {
-            const additionalContext = createHookOutput(
-              eventName,
-              hookOutput,
-            ).getAdditionalContext();
-            if (additionalContext && 'prompt' in modifiedInput) {
-              (modifiedInput as UserPromptExpansionInput).prompt +=
-                '\n\n' + additionalContext;
-            }
-          }
-          break;
-
-        case HookEventName.PreToolUse:
-          if ('tool_input' in hookOutput.hookSpecificOutput) {
-            const newToolInput = hookOutput.hookSpecificOutput[
-              'tool_input'
-            ] as Record<string, unknown>;
-            if (newToolInput && 'tool_input' in modifiedInput) {
-              (modifiedInput as PreToolUseInput).tool_input = {
-                ...(modifiedInput as PreToolUseInput).tool_input,
-                ...newToolInput,
-              };
-            }
-          }
-          break;
-
-        default:
-          // For other events, no special input modification is needed
-          break;
-      }
-    }
-
-    return modifiedInput;
   }
 
   /**
@@ -988,8 +1094,17 @@ export class HookRunner {
     input: HookInput,
     startTime: number,
     signal?: AbortSignal,
+    options?: {
+      waitForProcessTree?: true;
+      cgroupRoot?: string;
+      environment?: NodeJS.ProcessEnv;
+      trackHttpRequest?: true;
+    },
   ): Promise<HookExecutionResult> {
-    const timeout = hookConfig.timeout ?? DEFAULT_HOOK_TIMEOUT;
+    const timeout = resolveCommandHookTimeoutMs(
+      hookConfig.timeout,
+      hookConfig.name || hookConfig.command,
+    );
 
     return new Promise((resolve) => {
       if (!hookConfig.command) {
@@ -1014,6 +1129,7 @@ export class HookRunner {
       let settled = false;
       let terminationPromise: Promise<void> | undefined;
       let childClosed = false;
+      let processTreeDrained = false;
       let survivingHookPid: number | undefined;
       let survivingHookOutcome:
         | 'completed'
@@ -1081,7 +1197,7 @@ export class HookRunner {
       const env: NodeJS.ProcessEnv = {
         // Hook commands are child processes launched on the agent's behalf,
         // so they must not inherit Qwen-internal daemon secrets.
-        ...sanitizeChildEnv(process.env),
+        ...sanitizeChildEnv(options?.environment ?? process.env),
         GEMINI_PROJECT_DIR: input.cwd,
         CLAUDE_PROJECT_DIR: input.cwd, // For compatibility
         QWEN_PROJECT_DIR: input.cwd, // For Qwen Code compatibility
@@ -1089,10 +1205,30 @@ export class HookRunner {
         ...hookConfig.env,
       };
 
+      let processUnit: HookCommandCgroup | undefined;
+      if (options?.waitForProcessTree) {
+        try {
+          processUnit = HookCommandCgroup.create(options.cgroupRoot);
+        } catch {
+          resolve({
+            hookConfig,
+            eventName,
+            success: false,
+            outcome: 'non_blocking_error',
+            error: new HookCommandIsolationUnavailableError(),
+            processTreeDrained: true,
+            duration: Date.now() - startTime,
+          });
+          return;
+        }
+      }
+      let isolationUnavailable = false;
+
       const survivesParentExit =
-        eventName === HookEventName.MessageDisplay ||
-        eventName === HookEventName.StopFailure ||
-        eventName === HookEventName.SessionDelete;
+        !options?.waitForProcessTree &&
+        (eventName === HookEventName.MessageDisplay ||
+          eventName === HookEventName.StopFailure ||
+          eventName === HookEventName.SessionDelete);
       let parentIndependentInputPath: string | undefined;
       let child: ChildProcess;
       if (survivesParentExit) {
@@ -1139,18 +1275,33 @@ export class HookRunner {
         }
       } else {
         resolveSupervisorStarted();
-        child = spawn(
+        const launch = processUnit?.launch(
           shellConfig.executable,
           [...shellConfig.argsPrefix, command],
+          env,
+        );
+        child = spawn(
+          launch?.executable ?? shellConfig.executable,
+          launch?.args ?? [...shellConfig.argsPrefix, command],
           {
-            env,
+            env: launch?.env ?? env,
             cwd: input.cwd,
-            stdio: ['pipe', 'pipe', 'pipe'],
+            stdio: processUnit
+              ? ['pipe', 'pipe', 'pipe', 'pipe']
+              : ['pipe', 'pipe', 'pipe'],
             shell: false,
-            // Own a process group so cancellation can signal the entire tree.
+            // Own a process group for legacy cancellation.
             detached: process.platform !== 'win32',
           },
         );
+        if (processUnit) {
+          let status = '';
+          child.stdio[3]?.on('data', (data: Buffer) => {
+            status += data.toString();
+            isolationUnavailable = status.includes('unavailable\n');
+          });
+          activeHookCgroups.set(child, processUnit);
+        }
       }
       if (!survivesParentExit) {
         registerActivePosixHookProcess(child);
@@ -1167,8 +1318,18 @@ export class HookRunner {
           rmSync(parentIndependentInputPath, { force: true });
           parentIndependentInputPath = undefined;
         }
-        if (!survivesParentExit) {
+        if (
+          !survivesParentExit &&
+          (!options?.waitForProcessTree || processTreeDrained)
+        ) {
           unregisterActivePosixHookProcess(child);
+        }
+        if (processTreeDrained) {
+          try {
+            processUnit?.remove();
+          } catch {
+            debugLogger.warn('Failed to remove an empty hook cgroup');
+          }
         }
         if (signal && abortListenerAttached) {
           signal.removeEventListener('abort', abortHandler);
@@ -1182,7 +1343,11 @@ export class HookRunner {
         }
         settled = true;
         cleanup();
-        resolve(result);
+        resolve(
+          options?.waitForProcessTree
+            ? { ...result, processTreeDrained }
+            : result,
+        );
       };
 
       const finishCancellation = async () => {
@@ -1216,15 +1381,21 @@ export class HookRunner {
           child.stderr?.destroy();
         }
 
+        if (processUnit) {
+          processTreeDrained =
+            childClosed &&
+            (await processUnit.waitForEmpty(HOOK_CHILD_CLOSE_WAIT_MS));
+        }
         const duration = Date.now() - startTime;
         finish({
           hookConfig,
           eventName,
           success: false,
+          outcome: aborted ? 'cancelled' : 'timeout',
           error: new Error(
             aborted
               ? 'Hook execution cancelled (aborted)'
-              : `Hook timed out after ${timeout}ms`,
+              : `Hook timed out after ${timeout / 1000}s`,
           ),
           stdout,
           stderr,
@@ -1234,12 +1405,19 @@ export class HookRunner {
 
       const startTermination = () => {
         if (!terminationPromise) {
-          const childTermination = terminateHookProcessTree(
-            child,
-            survivesParentExit
-              ? SURVIVING_HOOK_SUPERVISOR_GRACE_MS
-              : HOOK_TERMINATE_GRACE_MS,
-          );
+          const childTermination = processUnit
+            ? (async () => {
+                // Stop the trusted launcher even if cancellation raced its
+                // initial cgroup join. The unit owns all command descendants.
+                killDirectChild(child, 'SIGKILL');
+                await processUnit.terminate(HOOK_TERMINATE_GRACE_MS);
+              })()
+            : terminateHookProcessTree(
+                child,
+                survivesParentExit
+                  ? SURVIVING_HOOK_SUPERVISOR_GRACE_MS
+                  : HOOK_TERMINATE_GRACE_MS,
+              );
           terminationPromise = survivesParentExit
             ? Promise.all([
                 childTermination,
@@ -1329,14 +1507,38 @@ export class HookRunner {
       });
 
       // Handle process exit
-      child.on('close', (exitCode) => {
+      child.on('close', async (exitCode) => {
         childClosed = true;
         resolveChildClosed();
         resolveSupervisorStarted();
-        if (aborted || timedOut) {
+        if (settled || aborted || timedOut) {
           return;
         }
+        if (processUnit) {
+          processTreeDrained = await processUnit.waitForEmpty(
+            Math.max(0, timeout - (Date.now() - startTime)),
+            () => aborted || timedOut,
+          );
+          if (aborted || timedOut) return;
+          if (!processTreeDrained) {
+            timedOut = true;
+            startTermination();
+            return;
+          }
+        }
         const duration = Date.now() - startTime;
+
+        if (isolationUnavailable) {
+          finish({
+            hookConfig,
+            eventName,
+            success: false,
+            outcome: 'non_blocking_error',
+            error: new HookCommandIsolationUnavailableError(),
+            duration,
+          });
+          return;
+        }
 
         if (survivesParentExit && survivingHookOutcome === 'timed_out') {
           timedOut = true;
@@ -1344,7 +1546,8 @@ export class HookRunner {
             hookConfig,
             eventName,
             success: false,
-            error: new Error(`Hook timed out after ${timeout}ms`),
+            outcome: 'timeout',
+            error: new Error(`Hook timed out after ${timeout / 1000}s`),
             stdout,
             stderr,
             duration,
@@ -1358,23 +1561,61 @@ export class HookRunner {
         const isBlockingError = exitCode === 2;
 
         // For exit code 2, only use stderr (ignore stdout)
+        const stdoutText = stdout.trim();
         const textToParse = isBlockingError
           ? stderr.trim()
-          : stdout.trim() || stderr.trim();
+          : stdoutText || stderr.trim();
+        // Only stdout is promoted as plain-text context; the stderr fallback
+        // stays a system message. JSON on stderr is still parsed as structured
+        // output when stdout is empty, as it was before.
+        const parsedFromStdout = !isBlockingError && stdoutText !== '';
 
         if (textToParse) {
-          // Try parsing as JSON to preserve structured output like
-          // hookSpecificOutput.additionalContext (applies to both exit 0 and exit 2)
+          // Structured output is a JSON object, possibly double-encoded as a
+          // JSON string (applies to both exit 0 and exit 2). Anything else,
+          // including bare JSON values such as `42` or `[1, 2]`, is plain text.
+          let parsed: unknown;
+          let parseFailed = false;
           try {
-            let parsed = JSON.parse(textToParse);
+            parsed = JSON.parse(textToParse);
             if (typeof parsed === 'string') {
               parsed = JSON.parse(parsed);
             }
-            if (parsed && typeof parsed === 'object') {
-              output = parsed as HookOutput;
-            }
           } catch {
-            // Not JSON, convert plain text to structured output
+            parseFailed = true;
+          }
+          if (
+            !parseFailed &&
+            parsed !== null &&
+            typeof parsed === 'object' &&
+            !Array.isArray(parsed)
+          ) {
+            output = parsed as HookOutput;
+          } else if (
+            parseFailed &&
+            !isBlockingError &&
+            textToParse.startsWith('{')
+          ) {
+            // Output that starts like a JSON object but does not parse is a
+            // broken structured payload, not context or a message: as in
+            // Claude Code, it is a non-blocking error and nothing of it reaches
+            // the model. Exit code 2 still blocks on its stderr text below.
+            debugLogger.warn(
+              `Hook "${hookConfig.name || hookConfig.command}" printed output that starts like a JSON object but is not valid JSON; it is ignored`,
+            );
+            finish({
+              hookConfig,
+              eventName,
+              success: false,
+              outcome: 'non_blocking_error',
+              error: new Error('Hook output is not valid JSON'),
+              stdout,
+              stderr,
+              exitCode: exitCode ?? -1,
+              duration,
+            });
+            return;
+          } else {
             output = this.convertPlainTextToHookOutput(
               textToParse,
               isBlockingError
@@ -1382,6 +1623,7 @@ export class HookRunner {
                 : exitCode === EXIT_CODE_SUCCESS
                   ? EXIT_CODE_SUCCESS
                   : EXIT_CODE_NON_BLOCKING_ERROR,
+              parsedFromStdout ? eventName : undefined,
             );
           }
         }
@@ -1391,6 +1633,14 @@ export class HookRunner {
           hookConfig,
           eventName,
           success: exitCode === EXIT_CODE_SUCCESS,
+          // A signal this runner did not send (it returned above for its own
+          // abort and timeout) leaves exitCode null: a failure, not a cancel.
+          outcome:
+            exitCode === EXIT_CODE_SUCCESS
+              ? 'success'
+              : exitCode === 2
+                ? 'blocking'
+                : 'non_blocking_error',
           output,
           stdout,
           stderr,
@@ -1404,6 +1654,8 @@ export class HookRunner {
 
       // Handle process errors
       child.on('error', (error) => {
+        if (options?.waitForProcessTree && !child.pid)
+          processTreeDrained = true;
         if (aborted || timedOut) {
           return;
         }
@@ -1413,6 +1665,7 @@ export class HookRunner {
           hookConfig,
           eventName,
           success: false,
+          outcome: 'non_blocking_error',
           error,
           stdout,
           stderr,
@@ -1423,29 +1676,62 @@ export class HookRunner {
   }
 
   /**
-   * Expand command with environment variables and input context
+   * Resolve project directory variables in a command string before launch.
+   *
+   * `QWEN_PROJECT_DIR`, `CLAUDE_PROJECT_DIR` and `GEMINI_PROJECT_DIR` are
+   * always exported in the hook's environment. Bash expands exported
+   * variables itself, so a bash command is passed through unchanged: a text
+   * substitution would put shell quotes inside a double-quoted
+   * `"$CLAUDE_PROJECT_DIR/..."` and break the path. cmd.exe never expands
+   * `$VAR`, and PowerShell reads a bare `$VAR` as an undefined variable, so
+   * for those shells each variable is replaced with the quoted project
+   * directory. `$env:QWEN_PROJECT_DIR` in PowerShell does not match and is
+   * left for the shell to read.
    */
   private expandCommand(
     command: string,
     input: HookInput,
     shellType: ShellType,
   ): string {
+    if (shellType === 'bash') {
+      return command;
+    }
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
     const escapedCwd = escapeShellArg(input.cwd, shellType);
     return command
-      .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
-      .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd); // For compatibility
+      .replace(/\$GEMINI_PROJECT_DIR\b/g, () => escapedCwd)
+      .replace(/\$CLAUDE_PROJECT_DIR\b/g, () => escapedCwd)
+      .replace(/\$QWEN_PROJECT_DIR\b/g, () => escapedCwd);
   }
 
   /**
-   * Convert plain text output to structured HookOutput
+   * Convert plain text output to structured HookOutput.
+   *
+   * @param stdoutEvent The firing event, passed only when `text` is the
+   *   hook's stdout. On a successful exit, stdout of a
+   *   {@link PLAIN_TEXT_CONTEXT_EVENTS} event becomes additional context.
    */
   private convertPlainTextToHookOutput(
     text: string,
     exitCode: number,
+    stdoutEvent?: HookEventName,
   ): HookOutput {
     if (exitCode === EXIT_CODE_SUCCESS) {
-      // Success - treat as system message or additional context
+      if (stdoutEvent && PLAIN_TEXT_CONTEXT_EVENTS.has(stdoutEvent)) {
+        return {
+          decision: 'allow',
+          reason: 'Hook executed successfully',
+          hookSpecificOutput: {
+            hookEventName: stdoutEvent,
+            // Terminal escapes from colored tool output must not reach the
+            // model; strip per line so newlines survive.
+            additionalContext: text
+              .split('\n')
+              .map((line) => stripAnsiAndControl(line))
+              .join('\n'),
+          },
+        };
+      }
       return {
         decision: 'allow',
         reason: 'Hook executed successfully',

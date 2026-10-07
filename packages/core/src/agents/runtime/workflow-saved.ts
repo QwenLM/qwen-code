@@ -17,19 +17,28 @@
  * project-level file wins (matches `FileCommandLoader`'s project-over-user
  * precedence for custom commands).
  *
- * A third root, `<projectDir>/workflows/generated`
+ * Active extensions add a third tier: the `.js` files an extension ships
+ * (`workflow-extension.ts` discovers them at extension load). They are always
+ * addressed as `<extension name>:<meta.name>`, which a project or user name
+ * can never spell, so the tiers never shadow each other. Their files are
+ * readable by exact path only — the extension directories are deliberately
+ * not workflow script roots (see {@link getWorkflowScriptRoots}).
+ *
+ * A generated-scripts root, `<projectDir>/workflows/generated`
  * (`Storage.getGeneratedWorkflowsDir`), is trusted for `{scriptPath}` loads
  * only. Scripts a tool generates for a single run go there: they are neither
  * listed as slash commands nor resolvable by name, so emitting one never
  * hands the user a command for a run that is already over.
  */
 
-import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { promises as fs, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
 import { Storage } from '../../config/storage.js';
 import { atomicWriteFile } from '../../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import type { ExtensionWorkflowDefinition } from './workflow-extension.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_SAVED');
 
@@ -41,16 +50,34 @@ const debugLogger = createDebugLogger('WORKFLOW_SAVED');
  */
 export const WORKFLOW_NAME_PATTERN = /^[a-z][a-z0-9-]{0,40}$/;
 
-export type SavedWorkflowSource = 'project' | 'user';
+/** The scopes a saved workflow can be written to. */
+export type SavedWorkflowScope = 'project' | 'user';
+
+/** Where a discovered saved workflow comes from. Extensions are read-only. */
+export type SavedWorkflowSource = SavedWorkflowScope | 'extension';
 
 /** One discovered saved-workflow script (metadata only — no source read). */
 export interface SavedWorkflowEntry {
-  /** Filename stem, e.g. `deep-research`. Doubles as the slash command name. */
+  /**
+   * Filename stem, e.g. `deep-research`, or `<extension>:<meta.name>` for an
+   * extension workflow. Doubles as the slash command name.
+   */
   name: string;
   /** Absolute path to the `.js` file. */
   scriptPath: string;
-  /** Which scope the file was found in. */
+  /** Which tier the file was found in. */
   source: SavedWorkflowSource;
+  /** Owning extension's manifest name; extension workflows only. */
+  extensionName?: string;
+  /** Owning extension's display name, when it declares one. */
+  extensionDisplayName?: string;
+  /** `meta.description`, parsed when the extension loaded; extension workflows only. */
+  description?: string;
+  /**
+   * `meta.whenToUse`, parsed when the extension loaded; extension workflows
+   * only. When present, the workflow's command is listed for the model.
+   */
+  whenToUse?: string;
 }
 
 /** A resolved saved workflow with its script source loaded. */
@@ -63,8 +90,8 @@ export interface ResolvedSavedWorkflow {
 
 /** Result of a {@link saveWorkflowScript} attempt. */
 export type WorkflowSaveResult =
-  | { status: 'saved'; name: string; scope: SavedWorkflowSource; path: string }
-  | { status: 'exists'; name: string; scope: SavedWorkflowSource; path: string }
+  | { status: 'saved'; name: string; scope: SavedWorkflowScope; path: string }
+  | { status: 'exists'; name: string; scope: SavedWorkflowScope; path: string }
   | { status: 'invalid-name'; error: string }
   | { status: 'empty-script'; error: string };
 
@@ -84,10 +111,107 @@ export function validateWorkflowName(name: string): string | null {
   return null;
 }
 
+/**
+ * Extension-name part of a qualified workflow name. Mirrors the extension
+ * manifest's `validateName` so every installable extension can prefix one.
+ */
+const EXTENSION_NAME_SOURCE = '[A-Za-z0-9._-]+';
+
+/** `<extension name>:<meta.name>` — how an extension workflow is addressed. */
+export const EXTENSION_WORKFLOW_NAME_PATTERN = new RegExp(
+  `^(${EXTENSION_NAME_SOURCE}):(${WORKFLOW_NAME_PATTERN.source.slice(1, -1)})$`,
+);
+
+const EXTENSION_NAME_PATTERN = new RegExp(`^${EXTENSION_NAME_SOURCE}$`);
+
+/** Whether an extension name can prefix its workflows' names. */
+export function isValidWorkflowExtensionName(extensionName: string): boolean {
+  return EXTENSION_NAME_PATTERN.test(extensionName);
+}
+
+/** `gcp` + `deep-research` → `gcp:deep-research`. */
+export function qualifyExtensionWorkflowName(
+  extensionName: string,
+  workflowName: string,
+): string {
+  return `${extensionName}:${workflowName}`;
+}
+
+/** Split `<extension>:<meta.name>`; `null` when the name does not have that shape. */
+export function parseExtensionWorkflowName(
+  name: string,
+): { extensionName: string; workflowName: string } | null {
+  const match = EXTENSION_WORKFLOW_NAME_PATTERN.exec(name);
+  return match ? { extensionName: match[1], workflowName: match[2] } : null;
+}
+
+/**
+ * Workflow definitions of the active extensions. The single place this tier
+ * reads extension state from, so listing, name resolution, and the file
+ * allowlist cannot disagree. Tolerates configs without extension support.
+ */
+export function getActiveExtensionWorkflows(
+  config: Config,
+): ExtensionWorkflowDefinition[] {
+  try {
+    return (config.getActiveExtensions?.() ?? []).flatMap(
+      (extension) => extension.workflows ?? [],
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The active extension workflow a `scriptPath` names, for synchronous labels;
+ * the approval dialog uses {@link findActiveExtensionWorkflowByPathCanonical}.
+ * Picks a label only — the security check is the loader's allowlist.
+ *
+ * Discovered paths are real paths, so a spelling through a symlinked ancestor
+ * (macOS `/var` → `/private/var`) misses the lexical comparison and is retried
+ * against its real path. The disk is touched only when an active extension
+ * workflow exists and the lexical spelling did not match.
+ */
+export function findActiveExtensionWorkflowByPath(
+  config: Config,
+  scriptPath: string,
+): ExtensionWorkflowDefinition | undefined {
+  const workflows = getActiveExtensionWorkflows(config);
+  if (workflows.length === 0) return undefined;
+  const resolved = path.resolve(scriptPath);
+  const lexical = workflows.find(
+    (workflow) => path.resolve(workflow.scriptPath) === resolved,
+  );
+  if (lexical) return lexical;
+  let real: string;
+  try {
+    real = realpathSync(scriptPath);
+  } catch {
+    return undefined;
+  }
+  return workflows.find((workflow) => workflow.scriptPath === real);
+}
+
+/** Like {@link findActiveExtensionWorkflowByPath}, comparing real paths. */
+export async function findActiveExtensionWorkflowByPathCanonical(
+  config: Config,
+  scriptPath: string,
+): Promise<ExtensionWorkflowDefinition | undefined> {
+  const workflows = getActiveExtensionWorkflows(config);
+  if (workflows.length === 0) return undefined;
+  let real: string;
+  try {
+    real = await fs.realpath(scriptPath);
+  } catch {
+    return undefined;
+  }
+  return workflows.find((workflow) => workflow.scriptPath === real);
+}
+
 /** Both scope directories, project first (higher precedence). */
 export function getSavedWorkflowDirs(config: Config): Array<{
   dir: string;
-  source: SavedWorkflowSource;
+  source: SavedWorkflowScope;
 }> {
   return [
     { dir: config.storage.getProjectWorkflowsDir(), source: 'project' },
@@ -100,6 +224,12 @@ export function getSavedWorkflowDirs(config: Config): Array<{
  * the generated-scripts root. Name resolution and discovery deliberately use
  * {@link getSavedWorkflowDirs} instead — a generated script is loadable by
  * path, never addressable by name.
+ *
+ * Extension directories are deliberately absent. The loader checks that a
+ * file sits under a root, not that it is a workflow script, so a root is a
+ * grant over every file beneath it: an extension declaring `"workflows": "."`
+ * would expose its `.env` settings file to `{scriptPath}`. Extension workflows
+ * are instead readable by exact real path, one discovered file at a time.
  */
 export function getWorkflowScriptRoots(config: Config): string[] {
   return [
@@ -186,7 +316,14 @@ async function readWorkflowFileSecurely(
   );
   const dirs = roots.flatMap((r) => (r.real === null ? [] : [r.real]));
   const inside = dirs.some((d) => real === d || real.startsWith(d + path.sep));
-  if (!inside) {
+  const extensionWorkflows = getActiveExtensionWorkflows(config);
+  // An extension workflow is allowed by its exact real path, recorded when
+  // the extension loaded. A file swapped for a symlink since then resolves
+  // elsewhere and no longer matches.
+  const isExtensionWorkflow = extensionWorkflows.some(
+    (workflow) => workflow.scriptPath === real,
+  );
+  if (!inside && !isExtensionWorkflow) {
     // Keep refused-but-considered roots visible: dropping a symlinked root
     // from the list reads as if the loader never considered it at all.
     const refused = roots.flatMap((r) => (r.real === null ? [r.dir] : []));
@@ -194,8 +331,12 @@ async function readWorkflowFileSecurely(
       refused.length > 0
         ? `; refused symlinked ${refused.length === 1 ? 'root' : 'roots'}: ${refused.join(', ')}`
         : '';
+    const extensionNote =
+      extensionWorkflows.length > 0
+        ? `; active extension workflow files: ${extensionWorkflows.length}`
+        : '';
     throw new Error(
-      `refusing to load a workflow file outside the workflow script roots (checked: ${dirs.join(', ')}${refusedNote}): '${filePath}'.`,
+      `refusing to load a workflow file outside the workflow script roots (checked: ${dirs.join(', ')}${refusedNote}${extensionNote}): '${filePath}'.`,
     );
   }
   return fs.readFile(real, 'utf8');
@@ -223,18 +364,36 @@ async function resolveSavedWorkflowNameForPath(
     const name = path.basename(realScriptPath).replace(/\.js$/, '');
     return WORKFLOW_NAME_PATTERN.test(name) ? name : undefined;
   }
-  return undefined;
+  return getActiveExtensionWorkflows(config).find(
+    (workflow) => workflow.scriptPath === realScriptPath,
+  )?.name;
 }
 
 /**
- * Enumerate all saved workflows across both scopes. Project entries shadow
- * same-named user entries (project wins). Sorted by name for stable
- * slash-command ordering.
+ * Enumerate all saved workflows across the project, user, and extension
+ * tiers. Project entries shadow same-named user entries (project wins), and
+ * both would shadow an extension entry — which cannot happen today, since an
+ * extension name always carries a `:` no file stem can. Sorted by name for
+ * stable slash-command ordering.
  */
 export async function listSavedWorkflows(
   config: Config,
 ): Promise<SavedWorkflowEntry[]> {
   const byName = new Map<string, SavedWorkflowEntry>();
+  // Lowest precedence first, so user and project entries overwrite.
+  for (const workflow of getActiveExtensionWorkflows(config)) {
+    byName.set(workflow.name, {
+      name: workflow.name,
+      scriptPath: workflow.scriptPath,
+      source: 'extension',
+      extensionName: workflow.extensionName,
+      ...(workflow.extensionDisplayName
+        ? { extensionDisplayName: workflow.extensionDisplayName }
+        : {}),
+      description: workflow.description,
+      ...(workflow.whenToUse ? { whenToUse: workflow.whenToUse } : {}),
+    });
+  }
   // Iterate user FIRST then project so project entries overwrite (win).
   for (const { dir, source } of [...getSavedWorkflowDirs(config)].reverse()) {
     for (const file of await listJsFiles(dir)) {
@@ -250,9 +409,26 @@ export async function listSavedWorkflows(
   );
 }
 
+/** Hex characters of the SHA-256 kept by {@link computeWorkflowScriptDigest}. */
+export const WORKFLOW_SCRIPT_DIGEST_CHARS = 16;
+
+/**
+ * Short content digest of a workflow script: the first
+ * {@link WORKFLOW_SCRIPT_DIGEST_CHARS} hex characters of its SHA-256. An
+ * "always allow" grant for a saved or extension workflow and an extension's
+ * install consent both record it, so a change to the script's code asks again.
+ */
+export function computeWorkflowScriptDigest(script: string): string {
+  return createHash('sha256')
+    .update(script, 'utf8')
+    .digest('hex')
+    .slice(0, WORKFLOW_SCRIPT_DIGEST_CHARS);
+}
+
 /**
  * Resolve `workflow('<name>')` or `workflow({scriptPath})` to a loaded
- * script. The string form looks up `<name>.js` in project then user scope;
+ * script. The string form looks up `<name>.js` in project then user scope,
+ * or an active extension's workflow when the name is `<extension>:<meta.name>`;
  * the `{scriptPath}` form reads the file at the given path directly, which
  * may sit in either saved scope or under the generated-scripts root.
  *
@@ -300,6 +476,42 @@ export async function resolveSavedWorkflowScript(
   }
 
   const name = nameOrRef;
+  const notFound = async (): Promise<never> => {
+    const available = (await listSavedWorkflows(config)).map((e) => e.name);
+    throw new Error(
+      `workflow('${name}'): no workflow with that name. Available: ` +
+        `${available.length > 0 ? available.join(', ') : '(none)'}.`,
+    );
+  };
+  // A qualified name addresses an extension workflow. Checked before the
+  // stem validation below, which would otherwise call it an invalid name.
+  if (parseExtensionWorkflowName(name)) {
+    const workflow = getActiveExtensionWorkflows(config).find(
+      (candidate) => candidate.name === name,
+    );
+    if (workflow) {
+      try {
+        const script = await readWorkflowFileSecurely(
+          workflow.scriptPath,
+          config,
+        );
+        return {
+          name,
+          scriptPath: workflow.scriptPath,
+          script,
+          savedWorkflowName: name,
+        };
+      } catch (error) {
+        // Listed but unreadable now (removed, or swapped for a symlink since
+        // the extension loaded). Report why: "no workflow with that name"
+        // would list this very name as available.
+        const reason = error instanceof Error ? error.message : String(error);
+        debugLogger.warn(`refusing extension workflow ${name}: ${reason}`);
+        throw new Error(`workflow('${name}'): ${reason}`);
+      }
+    }
+    return notFound();
+  }
   // Reject names that aren't legal workflow stems before joining them into a
   // directory path, so `workflow('../../outside')` can't escape the saved-
   // workflow dirs. The realpath boundary check in `readWorkflowFileSecurely`
@@ -318,11 +530,7 @@ export async function resolveSavedWorkflowScript(
     }
   }
 
-  const available = (await listSavedWorkflows(config)).map((e) => e.name);
-  throw new Error(
-    `workflow('${name}'): no workflow with that name. Available: ` +
-      `${available.length > 0 ? available.join(', ') : '(none)'}.`,
-  );
+  return notFound();
 }
 
 /**
@@ -340,7 +548,7 @@ export async function saveWorkflowScript(
   config: Config,
   opts: {
     name: string;
-    scope: SavedWorkflowSource;
+    scope: SavedWorkflowScope;
     script: string;
     overwrite?: boolean;
   },
@@ -381,12 +589,14 @@ export async function saveWorkflowScript(
 }
 
 /**
- * Run-id shape accepted for a persisted inline script. Mirrors the tool's
- * `resumeFromRunId` guard (`workflow.ts`) and the snapshot pruner: the id is
- * a path segment here, so anything but the generated `wf_<hex>` shape is
- * refused rather than joined into a path.
+ * Whether `value` has the shape of a generated run id, `wf_<hex>`. A run id
+ * becomes a path segment under the runs and inline-script directories, so an
+ * id from outside — a client's `taskId`, a directory name — is checked with
+ * this before it is joined into a path.
  */
-const INLINE_RUN_ID_PATTERN = /^wf_[0-9a-f]+$/;
+export function isWorkflowRunId(value: string): boolean {
+  return /^wf_[0-9a-f]+$/.test(value);
+}
 
 /**
  * Persist the source of an inline `Workflow({script})` run to
@@ -410,7 +620,7 @@ export async function persistInlineWorkflowScript(
   runId: string,
   script: string,
 ): Promise<string | null> {
-  if (!INLINE_RUN_ID_PATTERN.test(runId)) {
+  if (!isWorkflowRunId(runId)) {
     debugLogger.warn(`refusing to persist a script for run id: ${runId}`);
     return null;
   }
@@ -452,7 +662,7 @@ export async function deleteInlineWorkflowScript(
   config: Config,
   runId: string,
 ): Promise<boolean> {
-  if (!INLINE_RUN_ID_PATTERN.test(runId)) return false;
+  if (!isWorkflowRunId(runId)) return false;
   const storage = config.storage;
   if (!storage) return false;
   try {

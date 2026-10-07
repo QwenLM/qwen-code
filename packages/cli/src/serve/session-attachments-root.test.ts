@@ -128,7 +128,9 @@ describe('session attachment root resolution', () => {
   });
 
   it('expands a bare tilde in the standalone resolver', () => {
-    expect(resolveConfiguredSessionAttachmentsRoot('~')).toBe(homedir());
+    expect(resolveConfiguredSessionAttachmentsRoot('~')).toBe(
+      path.resolve(homedir()),
+    );
   });
 
   it('keeps an absolute path unchanged in the standalone resolver', () => {

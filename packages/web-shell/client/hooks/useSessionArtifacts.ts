@@ -6,6 +6,11 @@ import {
   useWorkspaceEventSignals,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import { setBoundedMapEntry } from '../utils/bounded-map';
+import {
+  useReportedArtifactRegistration,
+  type RegistrationErrorTranslator,
+} from './useReportedArtifactRegistration';
 
 const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';
 const MAX_CACHED_SESSIONS = 20;
@@ -19,13 +24,12 @@ function cacheArtifacts<Owner>(
   artifacts: DaemonSessionArtifact[],
   hydratedOwner?: Owner,
 ): void {
-  cache.delete(sessionKey);
-  cache.set(sessionKey, { artifacts, hydratedOwner });
-  while (cache.size > MAX_CACHED_SESSIONS) {
-    const oldest = cache.keys().next().value;
-    if (!oldest) break;
-    cache.delete(oldest);
-  }
+  setBoundedMapEntry(
+    cache,
+    sessionKey,
+    { artifacts, hydratedOwner },
+    MAX_CACHED_SESSIONS,
+  );
 }
 
 // A stable empty array for sessions whose artifact list cannot load (e.g. a
@@ -43,7 +47,9 @@ export interface SessionArtifactsState {
   refresh: () => Promise<void>;
 }
 
-export function useSessionArtifacts(): SessionArtifactsState {
+export function useSessionArtifacts(
+  translateError?: RegistrationErrorTranslator,
+): SessionArtifactsState {
   const actions = useActions();
   const connection = useConnection();
   const ownerGuard = useDaemonSessionOwnerGuard();
@@ -81,13 +87,15 @@ export function useSessionArtifacts(): SessionArtifactsState {
     }
     try {
       const result = await actions.loadArtifacts();
-      if (requestIdRef.current !== requestId || !owner.isCurrent()) return;
-      cacheArtifacts(
-        artifactsBySessionRef.current,
-        sessionKey,
-        result.artifacts,
-        owner,
-      );
+      if (!owner.isCurrent()) return;
+      if (requestIdRef.current === requestId) {
+        cacheArtifacts(
+          artifactsBySessionRef.current,
+          sessionKey,
+          result.artifacts,
+          owner,
+        );
+      }
     } catch {
       // The artifacts panel treats a failed refresh as an empty error state.
       if (
@@ -139,6 +147,16 @@ export function useSessionArtifacts(): SessionArtifactsState {
     () => new Map(visibleArtifacts.map((artifact) => [artifact.id, artifact])),
     [visibleArtifacts],
   );
+  const hydrated = Boolean(
+    sessionKey &&
+      artifactsBySessionRef.current.get(sessionKey)?.hydratedOwner === owner,
+  );
+  useReportedArtifactRegistration(
+    visibleArtifacts,
+    hydrated,
+    refresh,
+    translateError,
+  );
   return {
     artifacts: visibleArtifacts,
     artifactById,
@@ -148,10 +166,7 @@ export function useSessionArtifacts(): SessionArtifactsState {
       ) &&
       Boolean(sessionKey && !artifactsBySessionRef.current.has(sessionKey)),
     error: null,
-    hydrated: Boolean(
-      sessionKey &&
-        artifactsBySessionRef.current.get(sessionKey)?.hydratedOwner === owner,
-    ),
+    hydrated,
     refresh,
   };
 }

@@ -8,4 +8,8 @@ dist
 **/tsconfig.tsbuildinfo
 
 # Version control
+# Both forms: the release workflow checks its trusted scripts out into
+# `.release-workflow/`, which sits inside this build context, and a bare
+# `.git` is root-anchored under Docker's pattern syntax.
 .git
+**/.git

@@ -16,7 +16,9 @@ import { t } from '../../i18n/index.js';
 import {
   getAllSettingKeys,
   getFlattenedSchema,
+  getDefaultValue,
   getNestedProperty,
+  nextBooleanSettingValue,
   getSettingDefinition,
   validateSettingValue,
 } from '../../config/settingsUtils.js';
@@ -298,7 +300,10 @@ export const configCommand: SlashCommand = {
     }
 
     if (isToggle && def.type === 'boolean') {
-      const newValue = !currentValue;
+      const newValue = nextBooleanSettingValue(
+        currentValue,
+        getDefaultValue(key),
+      );
       try {
         context.services.settings.setValues([
           { scope: SettingScope.User, key, value: newValue },

@@ -14,7 +14,6 @@ import {
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import type { ConversationWorkspace } from './conversation-workspace.js';
-import type { ConversationRuntimeOwnership } from './conversation-runtime-ownership.js';
 import {
   ConversationRuntimeManager,
   type ConversationRuntimeManagerOptions,
@@ -105,9 +104,9 @@ function createOwnedRuntime(bridge = createBridge()): WorkspaceRuntime {
 function createManager(
   options: Omit<
     ConversationRuntimeManagerOptions,
-    'ownership' | 'quarantineRuntime'
+    'checkLegacyOwner' | 'quarantineRuntime'
   > & {
-    ownership?: ConversationRuntimeOwnership;
+    checkLegacyOwner?: () => Promise<void>;
     quarantineRuntime?: ConversationRuntimeManagerOptions['quarantineRuntime'];
   },
 ): ConversationRuntimeManager {
@@ -115,28 +114,40 @@ function createManager(
     ...options,
     quarantineRuntime:
       options.quarantineRuntime ?? vi.fn(async () => undefined),
-    ownership: options.ownership ?? {
-      acquire: vi.fn(async () => ({ reclaimed: false })),
-      release: vi.fn(async () => false),
-    },
+    checkLegacyOwner: options.checkLegacyOwner ?? vi.fn(async () => undefined),
   });
 }
 
 describe('ConversationRuntimeManager', () => {
-  it('acquires ownership before touching the root or registry', async () => {
+  it('retries legacy admission after failure but never polls a published runtime', async () => {
+    const candidate = createOwnedRuntime();
+    const checkLegacyOwner = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error('legacy active'))
+      .mockResolvedValue(undefined);
+    const manager = createManager({
+      workspace: createWorkspace(),
+      registry: createRegistry(candidate),
+      publishRuntime: vi.fn(),
+      checkLegacyOwner,
+    });
+    await expect(manager.ensure()).rejects.toThrow('legacy active');
+    await expect(manager.ensure()).resolves.toBe(candidate);
+    await expect(manager.ensure()).resolves.toBe(candidate);
+    expect(checkLegacyOwner).toHaveBeenCalledTimes(2);
+  });
+
+  it('checks the legacy owner before touching the root or registry', async () => {
     const workspace = createWorkspace();
     const registry = createRegistry();
     const publishRuntime = vi.fn();
     const ownershipError = new Error('owner unavailable');
-    const ownership = {
-      acquire: vi.fn(async () => Promise.reject(ownershipError)),
-      release: vi.fn(async () => false),
-    };
+    const checkLegacyOwner = vi.fn(async () => Promise.reject(ownershipError));
     const manager = createManager({
       workspace,
       registry,
       publishRuntime,
-      ownership,
+      checkLegacyOwner,
     });
 
     await expect(manager.ensure()).rejects.toBe(ownershipError);

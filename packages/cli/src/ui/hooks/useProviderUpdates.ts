@@ -14,6 +14,7 @@ import {
   ALL_PROVIDERS,
   applyProviderInstallPlan,
   buildInstallPlan,
+  getModelsForProviderProtocol,
   buildProviderTemplate,
   computeModelListVersion,
   getDefaultModelIds,
@@ -21,6 +22,7 @@ import {
   providerMatchesCredentials,
   resolveBaseUrl,
   resolveMetadataKey,
+  tryResolveModelProtocol,
   resolveOwnsModel,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -170,7 +172,9 @@ function readInstalledOwnedIds(
     | Record<string, ProviderModelConfig[]>
     | undefined;
   if (!modelProviders) return [];
-  const allModels: ProviderModelConfig[] = modelProviders[protocol] ?? [];
+  const allModels = (modelProviders[protocol] ?? []).filter(
+    (model) => tryResolveModelProtocol(protocol, model) === protocol,
+  );
   const ownsFn = resolveOwnsModel(provider);
   return ownsFn
     ? allModels.filter(ownsFn).map((m) => m.id)
@@ -258,17 +262,40 @@ export function useProviderUpdates(
       try {
         const providerCfg = pending.provider;
         const resolved = resolveBaseUrl(providerCfg, pending.baseUrl);
-        // An update only refreshes built-in models — user-added custom IDs
-        // must be carried through so they are not deleted by the
-        // prepend-and-remove-owned merge.
         const defaultIds = getDefaultModelIds(providerCfg);
-        const customIds = readInstalledOwnedIds(settings, providerCfg).filter(
-          (id) => !defaultIds.includes(id),
+        const ownsModel = resolveOwnsModel(providerCfg);
+        const existingModels = getModelsForProviderProtocol(
+          settings.merged.modelProviders,
+          providerCfg.protocol,
+          settings.merged.providerProtocol,
+        ).filter((model) => !ownsModel || ownsModel(model));
+        const prebuiltModels: ProviderModelConfig[] = defaultIds.flatMap(
+          (id) => {
+            const installed = existingModels.filter((model) => model.id === id);
+            return (installed.length ? installed : [undefined]).flatMap(
+              (existing) =>
+                buildInstallPlan(providerCfg, {
+                  baseUrl: resolved,
+                  apiKey: '',
+                  modelIds: [id],
+                  wireApi: existing?.wireApi,
+                }).modelProviders![0]!.models.map((model) => ({
+                  ...existing,
+                  ...model,
+                  ...(existing?.wireApi ? { wireApi: existing.wireApi } : {}),
+                  envKey: existing?.envKey ?? model.envKey,
+                })),
+            );
+          },
+        );
+        prebuiltModels.push(
+          ...existingModels.filter((model) => !defaultIds.includes(model.id)),
         );
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
           apiKey: '',
-          modelIds: [...defaultIds, ...customIds],
+          modelIds: prebuiltModels.map((model) => model.id),
+          prebuiltModels,
         });
         installPlan.providerState![
           `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
@@ -278,7 +305,12 @@ export function useProviderUpdates(
         delete installPlan.modelSelection;
         const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =
-          activeConfig?.authType === providerCfg.protocol &&
+          activeConfig?.authType !== undefined &&
+          prebuiltModels.some(
+            (model) =>
+              tryResolveModelProtocol(providerCfg.protocol, model) ===
+              activeConfig.authType,
+          ) &&
           providerMatchesCredentials(
             providerCfg,
             activeConfig.baseUrl,
@@ -298,7 +330,7 @@ export function useProviderUpdates(
           },
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
           ...(updatesActiveProvider && {
-            refreshAuth: (authType) => config.refreshAuth(authType),
+            refreshAuth: () => config.refreshAuth(activeConfig!.authType!),
           }),
         });
 

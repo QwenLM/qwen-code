@@ -11,6 +11,7 @@ import {
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
+import { resolveLanguage, resolveLanguageSetting } from '../../i18n/index.js';
 import {
   ignoreBrokenPipe,
   writeStderrLine,
@@ -45,6 +46,7 @@ import {
   registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
+  resolveChannelLocale,
   selectFirstModel,
   sessionsPath,
 } from './runtime.js';
@@ -110,6 +112,13 @@ function channelMemoryOptions(
   };
 }
 
+function isUnverifiablePidfileError(err: unknown): err is Error {
+  return (
+    err instanceof Error &&
+    (err as NodeJS.ErrnoException).code === 'channel_service_conflict'
+  );
+}
+
 async function writeServiceInfoOrExit(
   channels: string[],
   cleanup: () => Promise<void>,
@@ -122,6 +131,12 @@ async function writeServiceInfoOrExit(
       writeStderrLine(
         'Error: Channel service was started concurrently. Use "qwen channel status" to inspect it.',
       );
+      process.exit(1);
+    }
+    if (isUnverifiablePidfileError(err)) {
+      // Retrying cannot clear a record this side can never verify, so the
+      // pidfile's own recovery step replaces the concurrent-startup advice.
+      writeStderrLine(`Error: ${err.message}`);
       process.exit(1);
     }
     throw err;
@@ -231,6 +246,12 @@ function createBridgeRecovery(options: BridgeRecoveryOptions): {
 
   const attachDisconnectHandler = (failedBridge: AcpBridge): void => {
     failedBridge.on('disconnected', () => {
+      // A dead bridge never settles its in-flight turns; let every channel
+      // clear turn-scoped transient state. Crash recovery restores the
+      // sessions, so routing state must stay.
+      for (const channel of channels.values()) {
+        channel.onBridgeDisconnected();
+      }
       if (isShuttingDown() || failedBridge !== getBridge()) return;
       if (recoveryTask) {
         if (failedBridge !== recoverySourceBridge) recoveryRequested = true;
@@ -351,6 +372,8 @@ async function startSingle(
   name: string,
   proxy: string | undefined,
   cronEnabled: boolean,
+  locale: 'en' | 'zh',
+  displayLanguage?: string,
 ): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
@@ -409,8 +432,10 @@ async function startSingle(
   const channels: Map<string, ChannelBase> = new Map();
 
   const channel = await createChannel(name, config, bridge, {
+    locale,
     router,
     proxy,
+    ...(displayLanguage ? { displayLanguage } : {}),
     ...channelMemoryOptions(() => bridge, config.cwd),
     ...(loopController ? { loopController } : {}),
     bridgeRecovery: bridgeReadiness.current,
@@ -507,6 +532,8 @@ async function startSingle(
 async function startAll(
   proxy: string | undefined,
   cronEnabled: boolean,
+  locale: 'en' | 'zh',
+  displayLanguage?: string,
 ): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
@@ -573,8 +600,10 @@ async function startAll(
     channels.set(
       name,
       await createChannel(name, config, bridge, {
+        locale,
         router,
         proxy,
+        ...(displayLanguage ? { displayLanguage } : {}),
         ...channelMemoryOptions(() => bridge, config.cwd),
         ...(loopController ? { loopController } : {}),
         bridgeRecovery: bridgeReadiness.current,
@@ -704,10 +733,16 @@ export const startCommand: CommandModule<object, { name?: string }> = {
       settings.merged.proxy as string | undefined,
     );
     const cronEnabled = isChannelCronEnabled(settings);
+    const locale = resolveChannelLocale(settings.merged.general?.language);
+    const displayLanguage = resolveLanguage(
+      resolveLanguageSetting(
+        settings.merged.general?.language as string | undefined,
+      ),
+    );
     if (argv.name) {
-      await startSingle(argv.name, proxy, cronEnabled);
+      await startSingle(argv.name, proxy, cronEnabled, locale, displayLanguage);
     } else {
-      await startAll(proxy, cronEnabled);
+      await startAll(proxy, cronEnabled, locale, displayLanguage);
     }
   },
 };
