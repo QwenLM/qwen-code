@@ -59,7 +59,9 @@ describe('managed-channel-record/1 shared contract', () => {
   it('registers both bodies without enabling their domains or projecting tasks', () => {
     for (const domain of ['channel_route', 'channel_delivery'] as const) {
       expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain(domain);
-      expect(MANAGED_EXTENSION_RECORD_BODIES[domain]!.taskKind).toBeNull();
+      expect(
+        MANAGED_EXTENSION_RECORD_BODIES[domain]!.taskKindOf({}),
+      ).toBeNull();
     }
   });
 

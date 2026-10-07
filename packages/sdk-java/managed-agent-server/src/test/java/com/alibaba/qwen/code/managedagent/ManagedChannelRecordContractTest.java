@@ -24,7 +24,7 @@ class ManagedChannelRecordContractTest {
             String domain = fixture.get("domain").textValue();
             String id = fixture.get("id").textValue();
             var body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
-            assertNull(body.taskKind());
+            assertNull(body.taskKindOf().apply(null));
             JsonNode record = merge(fixtures.get("templates").get(domain), fixture.get("patch"));
             if (fixture.get("valid").booleanValue()) {
                 body.require().accept(record);
