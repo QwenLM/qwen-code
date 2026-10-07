@@ -35,6 +35,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
@@ -68,7 +69,11 @@ import org.springframework.transaction.PlatformTransactionManager;
  * {@code action_forbidden} on Action respond, 403
  * {@code artifact_content_forbidden} on artifact content with the policy
  * off) — plus one admitted-shape probe per rule class proving the request
- * reached business logic. Twin public/WebShell routes of one capability sit
+ * reached business logic. The walk also fires the caller the two weakest
+ * classes name as enough — the reader on reader routes, any tenant caller on
+ * tenant-scoped ones — and requires an answer outside the admission
+ * refusals, so demoting a whole capability family to a weaker class fails
+ * too. Twin public/WebShell routes of one capability sit
  * in the same rule class, so the shared expectation table makes twin drift
  * fail. The refusal expectations pinned here are today's matrix; slice C
  * flips them with the role enforcement.
@@ -122,6 +127,11 @@ class SurfaceAdmissionAcceptanceTest {
     private static final String ARTIFACT_TENANT = "tenant-1";
     private static final String ARTIFACT_WORKSPACE = "workspace-1";
     private static final String ARTIFACT_SESSION = "session-1";
+    private static final Set<String> ADMISSION_REFUSALS = Set.of(
+            "actor_required", "actor_scope_mismatch", "session_not_found",
+            "workspace_not_found", "workspace_forbidden",
+            "workspace_unavailable", "session_operation_forbidden",
+            "action_forbidden", "artifact_content_forbidden");
 
     @Autowired
     private MockMvc mvc;
@@ -190,11 +200,6 @@ class SurfaceAdmissionAcceptanceTest {
         return Stream.of(SurfaceRegistry.values());
     }
 
-    static Stream<SurfaceRegistry> refusalProbedRoutes() {
-        return Stream.of(SurfaceRegistry.values()).filter(entry ->
-                entry.ruleClass() != RuleClass.TENANT_SCOPED);
-    }
-
     @ParameterizedTest
     @MethodSource("everyRoute")
     void wrongTenantIsRefusedOnEveryRoute(SurfaceRegistry entry)
@@ -210,7 +215,7 @@ class SurfaceAdmissionAcceptanceTest {
     }
 
     @ParameterizedTest
-    @MethodSource("refusalProbedRoutes")
+    @MethodSource("everyRoute")
     void belowReadAndBelowFamilyProbesFollowTheRuleClass(SurfaceRegistry entry)
             throws Exception {
         switch (entry.ruleClass()) {
@@ -229,9 +234,14 @@ class SurfaceAdmissionAcceptanceTest {
                     expectListed(entry, READER, true);
                 } else {
                     // Every other reader family entry hides a bound
-                    // Session below the grant.
+                    // Session below the grant and admits the reader. The
+                    // stream would stay open; its public twin carries the
+                    // admitted arm.
                     expect(entry, STRANGER, 404, "session_not_found");
                     expect(entry, null, 404, "session_not_found");
+                    if (entry != SurfaceRegistry.WEBSHELL_EVENT_STREAM) {
+                        expectAdmitted(entry, READER);
+                    }
                 }
             }
             case READER_ACTOR -> {
@@ -262,6 +272,10 @@ class SurfaceAdmissionAcceptanceTest {
             }
             case WORKSPACE_DISCOVERY ->
                 expect(entry, null, 401, "actor_required");
+            case TENANT_SCOPED -> {
+                expectAdmitted(entry, STRANGER);
+                expectAdmitted(entry, null);
+            }
             case INTERNAL_WRITER ->
                 expectInternal(entry);
             default -> throw new AssertionError(
@@ -697,6 +711,27 @@ class SurfaceAdmissionAcceptanceTest {
                 .as("%s answered %d for a wrong credential", entry.routeKey(),
                         result.getResponse().getStatus())
                 .isEqualTo(status);
+    }
+
+    /**
+     * The caller the route's class names as enough gets an answer outside
+     * the admission refusals: success or a domain refusal of its own. This
+     * is what makes demoting a whole capability family to a weaker class
+     * fail, since the probes of the stronger class are no longer fired.
+     */
+    private void expectAdmitted(SurfaceRegistry entry, String actor)
+            throws Exception {
+        String caller = actor == null ? "anonymous" : actor;
+        MvcResult result = mvc.perform(requestFor(entry, actor, tenant))
+                .andReturn();
+        int status = result.getResponse().getStatus();
+        String body = result.getResponse().getContentAsString();
+        String code = body.isEmpty() ? ""
+                : JSON.readTree(body).path("error").path("code").asText();
+        assertThat(status).as("%s answered %d (%s): %s", entry.routeKey(),
+                status, caller, body).isNotIn(401, 403).isLessThan(500);
+        assertThat(code).as("%s refused %s", entry.routeKey(), caller)
+                .isNotIn(ADMISSION_REFUSALS);
     }
 
     private void expect(SurfaceRegistry entry, String actor, int status,
