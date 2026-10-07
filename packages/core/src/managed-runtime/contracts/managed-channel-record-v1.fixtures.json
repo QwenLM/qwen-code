@@ -2129,6 +2129,29 @@
       "start": false
     },
     {
+      "id": "delivery-null-segment",
+      "domain": "channel_delivery",
+      "patch": {
+        "segments": [
+          {
+            "segmentId": "seg-1",
+            "ordinal": 0,
+            "contentRef": {
+              "resourceId": "seg-1-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "receipt": null
+          },
+          null
+        ]
+      },
+      "valid": false,
+      "start": false
+    },
+    {
       "id": "delivery-segments-at-bound",
       "domain": "channel_delivery",
       "patch": {

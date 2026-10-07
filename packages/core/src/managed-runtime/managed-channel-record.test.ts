@@ -80,4 +80,23 @@ describe('managed-channel-record/1 shared contract', () => {
       ),
     ).toBe(fixture.valid);
   });
+
+  it('rejects a sparse segment plan before publication', () => {
+    const body = MANAGED_EXTENSION_RECORD_BODIES.channel_delivery!;
+    const sparse = structuredClone(fixtures.templates.channel_delivery) as {
+      segments: unknown[];
+    };
+    // One hole of length 1: the index walk must see it as a non-object.
+    sparse.segments = new Array(1) as unknown[];
+    expect(() => body.parse(sparse)).toThrow();
+    expect(body.isStart(sparse)).toBe(false);
+
+    // A hole behind a real segment: deletion leaves the hole, not null.
+    const holed = structuredClone(fixtures.templates.channel_delivery) as {
+      segments: unknown[];
+    };
+    delete holed.segments[1];
+    expect(holed.segments).toHaveLength(2);
+    expect(() => body.parse(holed)).toThrow();
+  });
 });

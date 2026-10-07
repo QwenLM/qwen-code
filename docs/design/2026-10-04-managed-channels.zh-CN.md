@@ -61,7 +61,7 @@ Legacy channel（`packages/channels/*`）的适配器运行在 daemon 或 CLI �
 
 ## 记录正文（H5a）
 
-两个正文都原样嵌入 H0b 运行块，都以 `taskKind: null` 注册进 `MANAGED_EXTENSION_RECORD_BODIES`——Channel 的 route 与 delivery 不是 Session 任务——并继续缺席 `MANAGED_SESSION_ENABLED_DOMAINS`。字节级契约位于 `packages/core/src/managed-runtime/managed-channel-record.ts`，由 `packages/sdk-java/managed-agent-server` 的 `ManagedChannelRecords` 镜像，并由共用语料 `contracts/managed-channel-record-v1.fixtures.json`（83 个形态用例与 54 个后继用例）固定，TypeScript 与 Java 回放完全一致。
+两个正文都原样嵌入 H0b 运行块，都以 `taskKind: null` 注册进 `MANAGED_EXTENSION_RECORD_BODIES`——Channel 的 route 与 delivery 不是 Session 任务——并继续缺席 `MANAGED_SESSION_ENABLED_DOMAINS`。字节级契约位于 `packages/core/src/managed-runtime/managed-channel-record.ts`，由 `packages/sdk-java/managed-agent-server` 的 `ManagedChannelRecords` 镜像，并由共用语料 `contracts/managed-channel-record-v1.fixtures.json`（84 个形态用例与 54 个后继用例）固定，TypeScript 与 Java 回放完全一致。
 
 - `managed-channel_route`（链身份 `routeId`）：封闭键 `routeId`、`channelInstanceId`、`accountId`、`accountGeneration`、`routeRevision`、`rootSessionId`、`sessionId`、`scope`、`policyRef`、`run`。scope 按 kind 携带 Legacy 路由键实际派生的身份：`user` 以 chat 内的发送者为键（`senderId` 与 `chatId` 必填，`threadId` 为 null）；`thread` 以 thread 为键并回退到 chat（`threadId`/`chatId` 恰填其一，`senderId` 为 null）；`chat_thread` 以 chat 为键、仅可细化到其一个 thread（`chatId` 必填，`threadId` 可填，`senderId` 为 null）；`single` 仅以实例为键（三者全 null）。运行只钉 `effectId: routeId`：无 definition、execution、Runtime、dispatch 或 delivery——绑定的生命周期是唯一状态。
 - route 后继：身份（`routeId`、`channelInstanceId`、`accountId`、`scope`）不变。`routeRevision` 相同时重绑定集合——`accountGeneration`、`rootSessionId`、`sessionId`、`policyRef`——逐字节相同；重绑定或换代把 `routeRevision` 恰好加一，并且此时才能改动集合，但 `accountGeneration` 绝不后退（决策 6）。运行终态冻结整条记录。

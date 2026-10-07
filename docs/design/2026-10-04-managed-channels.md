@@ -219,7 +219,7 @@ route or delivery is not a Session task — and both stay absent from
 `packages/core/src/managed-runtime/managed-channel-record.ts`, is mirrored
 by `ManagedChannelRecords` in `packages/sdk-java/managed-agent-server`, and
 is pinned by the shared corpus
-`contracts/managed-channel-record-v1.fixtures.json` (83 shape cases and 54
+`contracts/managed-channel-record-v1.fixtures.json` (84 shape cases and 54
 successor cases), which TypeScript and Java replay identically.
 
 - `managed-channel_route` (chain identity `routeId`): closed keys

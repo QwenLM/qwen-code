@@ -265,29 +265,35 @@ function parseSegments(
     );
   }
   const seen = new Set<string>();
-  return Object.freeze(
-    value.map((entry, index) => {
-      const body = closed(entry, SEGMENT_KEYS);
-      const segmentId = id(body.segmentId, `segments[${index}].segmentId`);
-      if (seen.has(segmentId)) {
-        fail(`Channel delivery segment ${segmentId} is named twice.`);
-      }
-      seen.add(segmentId);
-      const ordinal = assertManagedSessionSequence(
-        body.ordinal,
-        `segments[${index}].ordinal`,
-      );
-      if (ordinal !== index) {
-        fail('Channel delivery segment ordinals must be dense from zero.');
-      }
-      return Object.freeze({
+  // Array.prototype.map would silently skip empty slots, letting a sparse
+  // plan through every check and betraying its JSON round-trip when the
+  // holes serialize as null; walk every index so a hole fails as a
+  // non-object entry.
+  const segments: ChannelDeliverySegment[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const body = closed(value[index], SEGMENT_KEYS);
+    const segmentId = id(body.segmentId, `segments[${index}].segmentId`);
+    if (seen.has(segmentId)) {
+      fail(`Channel delivery segment ${segmentId} is named twice.`);
+    }
+    seen.add(segmentId);
+    const ordinal = assertManagedSessionSequence(
+      body.ordinal,
+      `segments[${index}].ordinal`,
+    );
+    if (ordinal !== index) {
+      fail('Channel delivery segment ordinals must be dense from zero.');
+    }
+    segments.push(
+      Object.freeze({
         segmentId,
         ordinal,
         contentRef: ref(body.contentRef, `segments[${index}].contentRef`),
         receipt: body.receipt === null ? null : parseReceipt(body.receipt),
-      });
-    }),
-  );
+      }),
+    );
+  }
+  return Object.freeze(segments);
 }
 
 function deliveryRun(value: unknown, deliveryId: string): ExtensionRun {
