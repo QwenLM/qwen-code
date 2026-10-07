@@ -4553,6 +4553,52 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it.each([
+    ['cancelSession', 'qwen:user-cancel'],
+    ['interrupted cancel', 'qwen:prompt-interrupted'],
+  ] as const)(
+    'rejects an in-flight prompt with an AbortError on %s',
+    async (label, reason) => {
+      const events = new EventQueue();
+      const session = createFakeSession(events);
+      // Mirrors DaemonSessionClient, which rejects with signal.reason.
+      session.prompt.mockImplementation(
+        (_req: unknown, signal?: AbortSignal) =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          }),
+      );
+      const bridge = new DaemonChannelBridge({
+        cwd: '/repo',
+        sessionFactory: vi.fn().mockResolvedValue(session),
+      });
+
+      await bridge.start();
+      await bridge.newSession('/repo');
+      const promptPromise = bridge.prompt('session-1', 'hello');
+      void promptPromise.catch(() => {});
+      await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+
+      await bridge.cancelSession(
+        'session-1',
+        label === 'cancelSession' ? undefined : { cancelReason: 'interrupted' },
+      );
+
+      const error = await promptPromise.then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).name).toBe('AbortError');
+      expect(session.prompt.mock.calls[0]?.[1]?.reason).toBe(reason);
+
+      events.close();
+      bridge.stop();
+    },
+  );
+
   it('clears permission ownership when daemon permission responses fail', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

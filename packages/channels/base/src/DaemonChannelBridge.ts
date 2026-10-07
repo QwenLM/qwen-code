@@ -751,6 +751,16 @@ export class DaemonChannelBridge
         if (isDefinitePromptAdmissionRejection(error)) {
           rollbackUploadedAttachments = true;
         }
+        // The signal reason is a provenance string for the daemon; the
+        // session client rejects with it verbatim, but callers above still
+        // classify and render the AbortError a bare abort() produced.
+        if (
+          controller.signal.aborted &&
+          typeof error === 'string' &&
+          error === controller.signal.reason
+        ) {
+          throw new DOMException('This operation was aborted', 'AbortError');
+        }
         throw error;
       }
       // Prefer turn_complete for deterministic chunk collection (SSE path).
