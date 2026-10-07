@@ -23,7 +23,7 @@ request when the Session already holds it, and between model rounds when a
 fetch landed mid-turn.
 
 Out of scope: project settings, skills, and rules directories (safe mode keeps
-them off deliberately); nested or hierarchical discovery outside the Session working directory; a durable record of the fetched context. Durability needs a new Session
+them off deliberately); nested or hierarchical discovery outside the Session working directory; an `InstructionsLoaded` hook event for the injected files (safe mode skips core's only firing site, and the Hosted hook dispatcher does not synthesize one); a durable record of the fetched context. Durability needs a new Session
 domain, which is a cross-language contract change (the Java store mirrors the
 closed domain namespace), so it is deferred: a cold-loaded Session refetches on
 its next ordinary tool turn. Recovery of an already-running tool turn fetches

@@ -21,7 +21,7 @@ safe mode 是一个不可分割的捆绑（hooks、extensions、skills、MCP、�
 模型轮次之间注入。
 
 不在范围内：项目 settings、skills、rules 目录（safe mode 有意保持关闭）；
-Session 工作目录之外的嵌套或层级发现；已取回上下文的持久记录。持久化需要
+Session 工作目录之外的嵌套或层级发现；为注入的文件触发 `InstructionsLoaded` hook 事件（safe mode 跳过了 core 唯一的触发点，Hosted hook 分发器也不会补发）；已取回上下文的持久记录。持久化需要
 新增 Session 域，而这是一个跨语言的契约变更（Java 存储侧镜像了封闭的域名
 空间），因此延后：冷加载的 Session 在下一个普通工具回合重新读取。恢复已运行中的工具回合
 在同一条「每个 attachment 只读一次」的闩锁下读取：已持有文本的 attachment
