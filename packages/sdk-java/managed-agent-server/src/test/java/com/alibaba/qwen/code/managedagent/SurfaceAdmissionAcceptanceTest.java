@@ -220,14 +220,19 @@ class SurfaceAdmissionAcceptanceTest {
                 expect(entry, READER, 403, "workspace_forbidden");
             }
             case READER -> {
-                // The Session lists are tenant-scoped sets with the bound
-                // rows filtered out; every other reader family entry hides
-                // a bound Session below the grant.
-                int status = entry.capabilities().contains(
-                        Capability.SESSION_LIST) ? 200 : 404;
-                String code = status == 404 ? "session_not_found" : null;
-                expect(entry, STRANGER, status, code);
-                expect(entry, null, status, code);
+                if (entry.capabilities().contains(Capability.SESSION_LIST)) {
+                    // The Session lists are tenant-scoped sets with the
+                    // bound rows filtered below the grant; the reader is
+                    // the control that proves the bound row is listable.
+                    expectListed(entry, STRANGER, false);
+                    expectListed(entry, null, false);
+                    expectListed(entry, READER, true);
+                } else {
+                    // Every other reader family entry hides a bound
+                    // Session below the grant.
+                    expect(entry, STRANGER, 404, "session_not_found");
+                    expect(entry, null, 404, "session_not_found");
+                }
             }
             case READER_ACTOR -> {
                 expect(entry, null, 401, "actor_required");
@@ -639,24 +644,29 @@ class SurfaceAdmissionAcceptanceTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.writerGeneration").value(1));
         // A publication route carrying the writer credential refuses the
-        // wrong token through the same policy.
-        mvc.perform(get("/internal/managed-tool-publications/v1/sessions/"
-                        + session + "/publications/pub/finished")
+        // wrong token through the same policy. With the credential, the
+        // same request passes the check and the writer's lease and reaches
+        // the store, which finds no committed publication for the receipt:
+        // a domain 400, never the credential refusal.
+        String verify = "/internal/managed-tool-publications/v1/sessions/"
+                + session + "/receipts/verify";
+        mvc.perform(post(verify)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header(WRITER_TOKEN, WRONG_TOKEN)
-                        .param("workspaceId", "ws"))
+                        .param("workspaceId", "ws")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"receipt\":{}}"))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error.code")
                         .value("writer_credential_invalid"));
-        // With the credential the same route reaches the store: a domain
-        // refusal (no journal head), not an admission one.
-        mvc.perform(get("/internal/managed-tool-publications/v1/sessions/"
-                        + session + "/publications/pub/finished")
+        mvc.perform(post(verify)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header(WRITER_TOKEN, token)
-                        .param("workspaceId", "ws"))
-                .andExpect(result -> assertThat(result.getResponse()
-                        .getStatus()).isBetween(400, 599));
+                        .param("workspaceId", "ws")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"receipt\":{}}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
     }
 
     /**
@@ -711,6 +721,37 @@ class SurfaceAdmissionAcceptanceTest {
     }
 
     /**
+     * A Session list probe: every caller of the tenant gets a page holding
+     * the legacy Session, and only a Workspace grant holder's page holds
+     * the bound one. The page is sized past the class's Session count, so
+     * an absent row was filtered, not paged out.
+     */
+    private void expectListed(SurfaceRegistry entry, String actor,
+            boolean boundListed) throws Exception {
+        String caller = actor == null ? "anonymous" : actor;
+        MvcResult result = mvc.perform(requestFor(entry, actor, tenant))
+                .andReturn();
+        assertThat(result.getResponse().getStatus())
+                .as("%s answered %d (%s)", entry.routeKey(),
+                        result.getResponse().getStatus(), caller)
+                .isEqualTo(200);
+        String idField = entry.surface() == Surface.PUBLIC ? "id"
+                : "sessionId";
+        List<String> listed = new ArrayList<>();
+        JSON.readTree(result.getResponse().getContentAsString()).path("data")
+                .forEach(row -> listed.add(row.path(idField).asText()));
+        assertThat(listed).as("%s listed for %s", entry.routeKey(), caller)
+                .contains(legacy);
+        if (boundListed) {
+            assertThat(listed).as("%s listed for %s", entry.routeKey(),
+                    caller).contains(bound);
+        } else {
+            assertThat(listed).as("%s listed for %s", entry.routeKey(),
+                    caller).doesNotContain(bound);
+        }
+    }
+
+    /**
      * The request the walk fires for a registry entry: path variables
      * substituted from the fixture graph, the probe actor's principal (null
      * for anonymous, FOREIGN for a principal of another tenant), the
@@ -754,6 +795,9 @@ class SurfaceAdmissionAcceptanceTest {
         if (path.startsWith("/internal/managed-session-store/")
                 && "GET".equals(entry.method())) {
             query.add("workspaceId=ws");
+        }
+        if (entry == SurfaceRegistry.PUBLIC_SESSION_LIST) {
+            query.add("limit=100");
         }
         if (!query.isEmpty()) {
             path += "?" + String.join("&", query);
@@ -824,7 +868,7 @@ class SurfaceAdmissionAcceptanceTest {
                     : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\""
                             + nextKey() + "\",\"cwdRelative\":\"probe\","
                             + "\"expectedContextRevision\":1}";
-            case SESSION_LIST -> "{}";
+            case SESSION_LIST -> "{\"limit\":100}";
             case SESSION_GET -> "{\"sessionId\":\"" + session + "\"}";
             case TRANSCRIPT_QUERY -> "{\"sessionId\":\"" + session + "\"}";
             case TAIL_EVENTS -> "{\"sessionId\":\"" + session
