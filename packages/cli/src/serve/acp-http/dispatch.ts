@@ -209,7 +209,11 @@ import {
   type JsonRpcResponse,
 } from './json-rpc.js';
 
-/** Sources only the daemon's own dispatcher may create a session under. */
+/**
+ * Sources only the daemon itself may create a session under: `agent` sessions
+ * are spawned in-process by the session-agents orchestrator, and acpAgent
+ * additionally requires a persisted session-agents binding for them.
+ */
 function isAgentSessionSourceType(sourceType: unknown): boolean {
   return (
     sourceType === AGENT_HOST_SESSION_SOURCE_TYPE ||
@@ -1982,8 +1986,8 @@ export class AcpDispatcher {
             return;
           }
           const sessionRuntime = this.getSessionRuntimeContext();
-          // Same reservation as the REST route: only the daemon's dispatcher
-          // creates agent-host and agent sessions.
+          // Same reservation as the REST route: only the daemon creates
+          // agent-host and agent sessions.
           if (isAgentSessionSourceType(params['sourceType'])) {
             conn.sendConn(
               error(

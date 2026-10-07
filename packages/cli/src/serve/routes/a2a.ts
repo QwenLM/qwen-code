@@ -4,6 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * A2A inbound transport: the public Agent Card and `POST /a2a/v1`
+ * (JSON-RPC). Mounted only while agent collaboration is enabled for some
+ * workspace, and refused per request for a workspace that has it off.
+ *
+ * A task is one agent run in a chat session the daemon creates for the
+ * caller; the `contextId` it returns is that session, and a later message
+ * with it continues there (core `a2a-contract.ts`). The caller cannot answer
+ * the agent's tool approvals: a run waiting on one reports `INPUT_REQUIRED`
+ * and the workspace owner answers it in WebShell.
+ */
+
 import {
   AgentCard,
   Role,
@@ -30,6 +42,7 @@ import type {
   A2AAgentCard,
   A2ACaller,
   A2AFailure,
+  A2ASessionPort,
   A2ATaskView,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -40,6 +53,9 @@ import {
   QWEN_A2A_EXTENSION_URI,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-contract.js';
 import {
+  A2A_CARD_DESCRIPTION,
+  A2A_CARD_NAME,
+  A2A_EXTENSION_DESCRIPTION,
   a2aAgentCardForCaller,
   a2aCancelTask,
   a2aGetTask,
@@ -55,13 +71,19 @@ import type {
   Response,
 } from 'express';
 import type { RateLimiterInstance } from '../rate-limit.js';
-import type { WorkspaceRegistry } from '../workspace-registry.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from '../workspace-registry.js';
+import { createA2ASessionPort } from '../session-agents/a2a-sessions.js';
+import { getSessionAgentOrchestrator } from '../session-agents/orchestrator.js';
 import { requireTrustedWorkspaceRuntime } from '../workspace-route-runtime.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const A2A_PATH = '/a2a/v1';
 const REQUEST_REFUSED = -32010;
 const IDEMPOTENCY_CONFLICT = -32011;
+const AGENTS_UNAVAILABLE = -32012;
 
 const HEADER_WORKSPACE = 'x-qwen-workspace-id';
 const HEADER_CALLER = 'x-qwen-caller-id';
@@ -76,6 +98,7 @@ class AuthenticatedA2AUser implements User {
     readonly agentId: string,
     readonly baseUrl: string,
     readonly assertCurrent: () => void,
+    readonly sessions: A2ASessionPort,
   ) {}
 
   get userName(): string {
@@ -103,10 +126,29 @@ function rateLimitExceeded(res: Response): void {
   });
 }
 
+/** The A2A view of a workspace's session agents. */
+export type A2ASessionPortFactory = (
+  runtime: WorkspaceRuntime,
+) => A2ASessionPort;
+
+/**
+ * Built per request from the runtime's current bridge and the orchestrator
+ * the session-agent routes own; refuses as unavailable when that
+ * orchestrator is not up (or belongs to a replaced bridge).
+ */
+function defaultSessionPort(runtime: WorkspaceRuntime): A2ASessionPort {
+  return createA2ASessionPort({
+    workspaceCwd: runtime.workspaceCwd,
+    bridge: runtime.bridge,
+    orchestrator: getSessionAgentOrchestrator(runtime.workspaceCwd),
+  });
+}
+
 function authenticateA2A(
   registry: WorkspaceRegistry,
-  rateLimiter?: Pick<RateLimiterInstance, 'checkRate'>,
-  isEnabledFor?: (workspaceCwd: string) => boolean,
+  rateLimiter: Pick<RateLimiterInstance, 'checkRate'> | undefined,
+  isEnabledFor: ((workspaceCwd: string) => boolean) | undefined,
+  sessionPortFor: A2ASessionPortFactory,
 ): RequestHandler {
   return async (request, res, next) => {
     const req = request as A2ARequest;
@@ -195,6 +237,7 @@ function authenticateA2A(
       () => {
         if (!isCurrent()) fail({ kind: 'refused' });
       },
+      sessionPortFor(runtime),
     );
     next();
   };
@@ -226,14 +269,21 @@ function fail(failure: A2AFailure): never {
         envelopeCode: REQUEST_REFUSED,
         message: 'Request refused.',
       });
+    case 'unavailable':
+      throw new JsonRpcRequestMalformedError({
+        envelopeCode: AGENTS_UNAVAILABLE,
+        message: 'Agents are not available in this workspace right now.',
+      });
     case 'conflict':
       throw new JsonRpcRequestMalformedError({
         envelopeCode: IDEMPOTENCY_CONFLICT,
-        message: `Message id was already used for different content. Existing task: ${failure.existingTaskId}.`,
-        metadata: { existingTaskId: failure.existingTaskId },
+        message: failure.existingTaskId
+          ? `Message id was already used for different content. Existing task: ${failure.existingTaskId}.`
+          : 'Message id was already used for different content.',
+        ...(failure.existingTaskId
+          ? { metadata: { existingTaskId: failure.existingTaskId } }
+          : {}),
       });
-    case 'unsupported':
-      throw new JsonRpcUnsupportedOperationError({ message: failure.detail });
     default: {
       // `A2AFailure` is a closed union, so this is unreachable today. It is
       // here so that adding a member is a compile error at the one place that
@@ -251,30 +301,45 @@ function unwrap<T>(
   return result.ok ? result.value : fail(result);
 }
 
+function textPart(value: string) {
+  return {
+    content: { $case: 'text' as const, value },
+    metadata: undefined,
+    filename: '',
+    mediaType: 'text/plain',
+  };
+}
+
 function task(view: A2ATaskView): Task {
   return {
     id: view.id,
     contextId: view.contextId,
     status: {
       state: taskStateFromJSON(view.status.state),
-      message: undefined,
+      // Why the task is where it is, when that needs saying: waiting on the
+      // workspace owner's approval, or the error it failed with.
+      message: view.statusText
+        ? {
+            messageId: `${view.id}:status`,
+            contextId: view.contextId,
+            taskId: view.id,
+            role: Role.ROLE_AGENT,
+            parts: [textPart(view.statusText)],
+            metadata: undefined,
+            extensions: [],
+            referenceTaskIds: [],
+          }
+        : undefined,
       timestamp: view.status.timestamp,
     },
-    // The agent's latest post, replaced as the thread moves on.
+    // The granted agent's reply, once the run has finished.
     artifacts: view.answer
       ? [
           {
             artifactId: 'answer',
             name: 'answer',
             description: '',
-            parts: [
-              {
-                content: { $case: 'text', value: view.answer },
-                metadata: undefined,
-                filename: '',
-                mediaType: 'text/plain',
-              },
-            ],
+            parts: [textPart(view.answer)],
             metadata: undefined,
             extensions: [],
           },
@@ -380,8 +445,8 @@ function card(source: A2AAgentCard): AgentCard {
 function publicCard(origin: string): AgentCard {
   return card({
     protocolVersion: A2A_PROTOCOL_VERSION,
-    name: 'Qwen Code workspace agents',
-    description: 'Workspace agents collaborating on shared task threads',
+    name: A2A_CARD_NAME,
+    description: A2A_CARD_DESCRIPTION,
     interfaces: [
       {
         url: `${origin}${A2A_PATH}`,
@@ -395,7 +460,7 @@ function publicCard(origin: string): AgentCard {
       extensions: [
         {
           uri: QWEN_A2A_EXTENSION_URI,
-          description: 'Carries Qwen Code thread state and known token usage',
+          description: A2A_EXTENSION_DESCRIPTION,
           required: false,
         },
       ],
@@ -412,10 +477,13 @@ function messageText(params: Parameters<A2ARequestHandler['sendMessage']>[0]) {
       detail: 'A user message with messageId is required.',
     });
   }
-  if (message.taskId || message.contextId) {
+  // A task is one agent turn; further input is a new message in the same
+  // context, which starts the next turn (and task) in that chat session.
+  if (message.taskId) {
     fail({
       kind: 'invalid',
-      detail: 'Continuing an existing task or context is not supported.',
+      detail:
+        'Messages cannot be added to an existing task; send a new message with its contextId.',
     });
   }
   if (
@@ -426,7 +494,8 @@ function messageText(params: Parameters<A2ARequestHandler['sendMessage']>[0]) {
   }
   return {
     messageId: message.messageId,
-    body: message.parts
+    ...(message.contextId ? { contextId: message.contextId } : {}),
+    text: message.parts
       .map((part) => (part.content?.$case === 'text' ? part.content.value : ''))
       .join('\n'),
   };
@@ -498,24 +567,11 @@ function requestHandler(): A2ARequestHandler {
     sendMessage: async (params, context) => {
       const user = authenticated(context);
       const input = messageText(params);
-      const metadata = extensionMetadata(
-        params.metadata?.[QWEN_A2A_EXTENSION_URI],
-      );
-      const title =
-        typeof metadata['title'] === 'string'
-          ? metadata['title']
-          : input.body.slice(0, 80);
-      const acceptanceCriteria = metadata['acceptanceCriteria'];
       return task(
         unwrap(
-          await a2aSendMessage(user.projectRoot, user.caller, {
+          await a2aSendMessage(user.projectRoot, user.sessions, user.caller, {
             agentId: user.agentId,
-            messageId: input.messageId,
-            title,
-            body: input.body,
-            ...(typeof acceptanceCriteria === 'string'
-              ? { acceptanceCriteria }
-              : {}),
+            ...input,
           }),
         ),
       );
@@ -524,14 +580,26 @@ function requestHandler(): A2ARequestHandler {
     getTask: async (params, context) => {
       const user = authenticated(context);
       return task(
-        unwrap(await a2aGetTask(user.projectRoot, user.caller, params.id)),
+        unwrap(
+          await a2aGetTask(
+            user.projectRoot,
+            user.sessions,
+            user.caller,
+            params.id,
+          ),
+        ),
       );
     },
 
     listTasks: async (params, context): Promise<ListTasksResponse> => {
       const user = authenticated(context);
       let tasks = unwrap(
-        await a2aListTasks(user.projectRoot, user.caller, user.agentId),
+        await a2aListTasks(
+          user.projectRoot,
+          user.sessions,
+          user.caller,
+          user.agentId,
+        ),
       ).map(task);
       if (params.contextId) {
         tasks = tasks.filter((entry) => entry.contextId === params.contextId);
@@ -561,7 +629,12 @@ function requestHandler(): A2ARequestHandler {
     cancelTask: async (params, context) => {
       const user = authenticated(context);
       const cancelled = unwrap(
-        await a2aCancelTask(user.projectRoot, user.caller, params.id),
+        await a2aCancelTask(
+          user.projectRoot,
+          user.sessions,
+          user.caller,
+          params.id,
+        ),
       );
       const result = task(cancelled.task);
       const metadata = extensionMetadata(
@@ -607,6 +680,7 @@ export function registerA2ATransportRoutes(
   workspaceRegistry: WorkspaceRegistry,
   rateLimiter?: Pick<RateLimiterInstance, 'checkRate'>,
   isEnabledFor?: (workspaceCwd: string) => boolean,
+  sessionPortFor: A2ASessionPortFactory = defaultSessionPort,
 ): void {
   app.get(`/${A2A_AGENT_CARD_PATH}`, (req: Request, res: Response): void => {
     res.setHeader('A2A-Version', A2A_PROTOCOL_VERSION);
@@ -618,7 +692,12 @@ export function registerA2ATransportRoutes(
 
   app.use(
     A2A_PATH,
-    authenticateA2A(workspaceRegistry, rateLimiter, isEnabledFor),
+    authenticateA2A(
+      workspaceRegistry,
+      rateLimiter,
+      isEnabledFor,
+      sessionPortFor,
+    ),
     (req: Request, res: Response, next: NextFunction): void => {
       if (req.is(A2A_CONTENT_TYPE)) {
         req.headers['content-type'] = 'application/json';
