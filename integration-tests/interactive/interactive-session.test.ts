@@ -13,11 +13,16 @@ import { InteractiveSession } from './interactive-session.js';
 // #13552's CI failure was the ready-prompt wait in InteractiveSession.start
 // dying at 30s while the sandbox:docker leg's container was still booting —
 // `Timeout (30000ms) waiting for text: "Type your message"` on all three
-// retries. The budget decision itself is pinned state-by-state in
-// scripts/tests/ready-prompt-budget.test.ts (no PR-triggered job executes
-// integration-tests/**); these real-spawn cases keep the wiring proof that
-// start() passes the resolved budget to waitFor, honours options.command,
-// closes the session it refuses to hand out, and fails fast on a dead child.
+// retries. No PR-triggered job collects this file — the PR-gated
+// integration_no_ak leg runs an explicit allow-list under
+// --root ./integration-tests that does not name it, and the whole-root legs
+// run post-merge and at release — so the budget decision and start()'s
+// contract are pinned byte-wise in scripts/tests/ (ready-prompt-budget.test.ts
+// and interactive-session-start.test.ts), which test:scripts runs on every
+// PR. These real-spawn cases cover the behaviour a source pin cannot: the
+// tight branch's 30s value, options.command, refused-session cleanup,
+// dead-child fail-fast with its captured tail, and a pending waitFor
+// stopping at close().
 const PROMPT_DELAY_MS = 35_000;
 
 describe('InteractiveSession.start ready-prompt budget', () => {
@@ -71,13 +76,47 @@ setTimeout(() => {}, 120_000);`;
 
   it('fails fast when the CLI exits before the ready prompt', async () => {
     const startedAt = Date.now();
-    await expect(
-      InteractiveSession.start({
-        command: { bin: process.execPath, args: ['-e', 'process.exit(3)'] },
-      }).then((s) => {
-        session = s;
-      }),
-    ).rejects.toThrow('CLI exited before the ready prompt (code 3');
+    // The marker must survive into the rejection: the exit path carries the
+    // same captured tail as waitFor's timeout, or a dead child's boot log is
+    // discarded unread (the sandbox-hop lines that made #13552 diagnosable).
+    // The exit is delayed so the write reaches the pty before the child dies.
+    const attempt = InteractiveSession.start({
+      command: {
+        bin: process.execPath,
+        args: [
+          '-e',
+          "console.error('BOOTCRASH_MARKER'); setTimeout(() => process.exit(3), 300)",
+        ],
+      },
+    }).then((s) => {
+      session = s;
+    });
+    await expect(attempt).rejects.toThrow(
+      'CLI exited before the ready prompt (code 3',
+    );
+    await expect(attempt).rejects.toThrow('BOOTCRASH_MARKER');
     expect(Date.now() - startedAt).toBeLessThan(30_000);
+  });
+
+  it('stops a pending waitFor when the session closes', async () => {
+    session = await InteractiveSession.start({
+      command: {
+        bin: process.execPath,
+        args: [
+          '-e',
+          "console.log('Type your message'); setTimeout(() => {}, 120_000)",
+        ],
+      },
+    });
+    // Attach the assertion before closing so the rejection is never
+    // unhandled: close() must settle the abandoned poll well inside its
+    // budget instead of leaving it to re-scan a dead pty's output.
+    const settled = expect(
+      session.waitFor('text the child never prints', 10_000),
+    ).rejects.toThrow('Session closed');
+    const startedAt = Date.now();
+    await session.close();
+    await settled;
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
   });
 });

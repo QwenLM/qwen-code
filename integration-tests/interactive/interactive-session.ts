@@ -89,6 +89,7 @@ export class InteractiveSession {
   private terminal: Terminal;
   private rawOutput = '';
   private pendingWrite: Promise<void> = Promise.resolve();
+  private closed = false;
 
   private constructor(ptyProcess: pty.IPty, terminal: Terminal) {
     this.ptyProcess = ptyProcess;
@@ -162,12 +163,16 @@ export class InteractiveSession {
     const session = new InteractiveSession(ptyProcess, terminal);
     // A child that dies before printing its prompt fails fast with its exit
     // code instead of waiting the budget out; only a live-but-slow boot
-    // (#13552) pays the full readyPromptBudgetMs window.
+    // (#13552) pays the full readyPromptBudgetMs window. The tail reuses
+    // waitFor's spelling so both failure paths grep the same in a job log —
+    // the catch below closes the session, which disposes the terminal and
+    // would otherwise discard the boot log unread.
     const exited = new Promise<never>((_, reject) => {
       ptyProcess.onExit(({ exitCode, signal }) =>
         reject(
           new Error(
-            `CLI exited before the ready prompt (code ${exitCode}, signal ${signal})`,
+            `CLI exited before the ready prompt (code ${exitCode}, signal ${signal})\n` +
+              `Last 500 chars: ${stripAnsi(session.rawOutput).slice(-500)}`,
           ),
         ),
       );
@@ -209,13 +214,16 @@ export class InteractiveSession {
   /** Wait for text to appear in raw output. */
   async waitFor(text: string, timeout = 120_000): Promise<void> {
     const start = Date.now();
-    while (Date.now() - start < timeout) {
+    while (!this.closed && Date.now() - start < timeout) {
       if (
         stripAnsi(this.rawOutput).toLowerCase().includes(text.toLowerCase())
       ) {
         return;
       }
       await sleep(200);
+    }
+    if (this.closed) {
+      throw new Error(`Session closed while waiting for text: "${text}"`);
     }
     throw new Error(
       `Timeout (${timeout}ms) waiting for text: "${text}"\n` +
@@ -284,6 +292,10 @@ export class InteractiveSession {
 
   /** Kill the PTY process and dispose the terminal. */
   async close(): Promise<void> {
+    // Set the flag first so a waitFor poll abandoned by start()'s fail-fast
+    // race stops at its next tick instead of re-scanning a dead pty's output
+    // until its own budget expires.
+    this.closed = true;
     try {
       this.ptyProcess.kill();
     } catch {
