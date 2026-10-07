@@ -616,7 +616,11 @@ export interface DaemonSessionActions {
   recapSession(): Promise<DaemonSessionRecapResult>;
   generateSessionContent(
     prompt: string,
-    opts?: { signal?: AbortSignal },
+    opts?: {
+      signal?: AbortSignal;
+      skipOutputLanguagePreference?: boolean;
+      outputLanguageFallback?: string;
+    },
   ): AsyncGenerator<DaemonSessionGenerationEvent>;
   getRewindSnapshots(opts?: {
     /** Rethrow failures raw instead of recording a notice; for best-effort
