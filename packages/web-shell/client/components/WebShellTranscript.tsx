@@ -61,7 +61,7 @@ export interface WebShellTranscriptProps {
   blocks: readonly DaemonTranscriptBlock[];
   renderMode?: 'readonly' | 'document';
   theme?: WebShellTheme;
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
+  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn' | 'ru';
   className?: string;
   style?: CSSProperties;
   chatMaxWidth?: number;

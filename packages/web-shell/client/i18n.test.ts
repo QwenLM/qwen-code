@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { getTranslator } from './i18n';
+import {
+  getTranslator,
+  languageSettingToWebShellLanguage,
+  normalizeLanguage,
+} from './i18n';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -50,5 +54,31 @@ describe('web-shell i18n catalog', () => {
         t('settings.liveSetup.modelCustom'),
       );
     }
+  });
+});
+
+// The ru catalog ships the goal card first (#13391); everything else falls
+// back to EN, so the language mapping and a few pinned strings are what can
+// regress silently.
+describe('ru locale', () => {
+  it('maps Russian browser languages and settings aliases to ru', () => {
+    expect(normalizeLanguage('ru')).toBe('ru');
+    expect(normalizeLanguage('ru-RU')).toBe('ru');
+    expect(normalizeLanguage('fr-FR')).toBe('en');
+    expect(languageSettingToWebShellLanguage('ru')).toBe('ru');
+    expect(languageSettingToWebShellLanguage('ru-ru')).toBe('ru');
+    expect(languageSettingToWebShellLanguage('russian')).toBe('ru');
+    expect(languageSettingToWebShellLanguage('Русский')).toBe('ru');
+  });
+
+  it('renders goal-card strings in Russian and falls back to EN', () => {
+    const t = getTranslator('ru');
+    expect(t('goal.blocked')).toBe('Цель заблокирована');
+    expect(t('goal.lastCheck')).toBe('Последняя проверка');
+    expect(t('approval.goal.title')).toBe('Подтвердите цель сессии');
+    expect(t('goal.turns', { count: 1 })).toBe('1 ход');
+    expect(t('goal.turns', { count: 5 })).toBe('5 ходов');
+    expect(t('goals.count', { count: 2 })).toBe('2 активные цели');
+    expect(t('memory.add')).toBe('Add');
   });
 });

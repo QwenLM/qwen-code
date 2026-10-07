@@ -15,7 +15,7 @@ import {
   SETTINGS_MESSAGES_ZH,
 } from './settings/messages.js';
 
-export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
+export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'ru'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
 
@@ -8277,14 +8277,156 @@ const ZH: Messages = {
   ...SETTINGS_MESSAGES_ZH,
 };
 
+/** Russian count plus its noun: 1 ход, 2 хода, 5 ходов. */
+function ruPluralForm(
+  count: string | number | undefined,
+  one: string,
+  few: string,
+  many: string,
+): string {
+  const value = typeof count === 'number' ? count : Number(count ?? 0);
+  const mod100 = Math.abs(value) % 100;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  const mod10 = mod100 % 10;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
+}
+
+// The goal card is the first surface shipped for ru (#13391); keys missing
+// here fall back to EN through getTranslator.
+const RU: Messages = {
+  'approval.goal.title': 'Подтвердите цель сессии',
+  'approval.goal.overview': 'Обзор цели',
+  'approval.goal.full': 'Полное содержимое',
+  'approval.goal.outcome': 'Результат',
+  'approval.goal.doneWhen': 'Критерий завершения',
+  'approval.goal.mustNot': 'Ограничения',
+  'approval.goal.budget': 'Бюджет',
+  'approval.goal.onBlock': 'При блокировке',
+  'approval.goal.context': 'Контекст',
+  'approval.goal.confirm': 'Задать цель и продолжить',
+  'approval.goal.reject': 'Не сейчас',
+  'approval.goal.hint':
+    'После задания цели выполнение продолжится, а прогресс будет проверяться после каждого хода. О блокировках будет сообщено.',
+  'approval.goal.pending': 'Отправка…',
+  'approval.goal.failed': 'Не удалось отправить ваш выбор. Попробуйте ещё раз.',
+  'goal.aborted': 'Выполнение цели прервано',
+  'goal.blocked': 'Цель заблокирована',
+  'goal.usageLimited': 'Достигнут лимит использования цели',
+  'goal.paused': 'Цель на паузе',
+  'goal.achieved': 'Цель достигнута',
+  'goal.check': 'Проверка цели',
+  'goal.cleared': 'Цель очищена',
+  'goal.failed': 'Цель не удалось достичь',
+  'goal.judge': 'Оценка',
+  'goal.label': 'Цель',
+  'goal.lastCheck': 'Последняя проверка',
+  'goal.notYetMet': 'пока не выполнено',
+  'goal.set': 'Цель задана',
+  'goal.statusActive': '/goal активна',
+  'goal.status.active': 'В работе',
+  'goal.status.paused': 'Пауза',
+  'goal.status.blocked': 'Заблокирована',
+  'goal.status.usage_limited': 'Лимит исчерпан',
+  'goal.status.complete': 'Завершена',
+  'goal.activity.idle': 'Ожидание',
+  'goal.activity.running': 'Работает',
+  'goal.activity.verifying': 'Проверка',
+  'goal.edit': 'Изменить цель',
+  'goal.pause': 'Поставить цель на паузу',
+  'goal.resume': 'Возобновить цель',
+  'goal.turn': (v) =>
+    `${v?.count ?? 0} ${ruPluralForm(v?.count, 'ход', 'хода', 'ходов')}`,
+  'goal.turnLabel': (v) => `ход ${v?.count ?? 0}`,
+  'goal.turns': (v) =>
+    `${v?.count ?? 0} ${ruPluralForm(v?.count, 'ход', 'хода', 'ходов')}`,
+  'goal.turnsOfBudget': (v) =>
+    `${v?.count ?? 0} / ${v?.budget ?? 0} ${ruPluralForm(
+      v?.budget,
+      'ход',
+      'хода',
+      'ходов',
+    )}`,
+  'goal.activeOfBudget': (v) => `${v?.used ?? ''} / ${v?.budget ?? ''}`,
+  'goal.tokens': (v) =>
+    `${v?.used ?? 0} ${ruPluralForm(v?.used, 'токен', 'токена', 'токенов')}`,
+  'goal.tokensOfBudget': (v) =>
+    `${v?.used ?? 0} / ${v?.budget ?? 0} ${ruPluralForm(
+      v?.budget,
+      'токен',
+      'токена',
+      'токенов',
+    )}`,
+  'goals.title': 'Цели',
+  'goals.subtitle':
+    'Цель удерживает свою сессию в работе, пока её условие не выполнится. Здесь показаны только загруженные сейчас сессии — цель продвигается, только пока её сессия запущена.',
+  'goals.loading': 'Загрузка целей…',
+  'goals.count': (v) =>
+    `${v?.count ?? 0} ${ruPluralForm(
+      v?.count,
+      'активная цель',
+      'активные цели',
+      'активных целей',
+    )}`,
+  'goals.empty': 'Активных целей нет. Задайте их командой /goal <условие>.',
+  'goals.refresh': 'Обновить',
+  'goals.new': 'Новая цель',
+  'goals.newHint':
+    'Цель запускается в новой сессии и работает, пока её условие не выполнится. Чтобы задать лимит ходов или времени, выполните в чате /config model.goalMaxTurns=20 или /config model.goalMaxActiveMinutes=30; настройка применится после перезапуска демона и будет действовать для целей, созданных позже.',
+  'goals.condition': 'Условие',
+  'goals.conditionPlaceholder':
+    'например: `npm test` завершается с кодом 0 и `npm run lint` не выдаёт предупреждений (вставьте вывод); не изменять тестовые файлы; как руководство для модели — после 20 ходов остановиться со статусом blocked',
+  'goals.cancel': 'Отмена',
+  'goals.create': 'Задать цель',
+  'goals.creating': 'Запуск…',
+  'goals.saving': 'Сохранение…',
+  'goals.save': 'Сохранить',
+  'goals.edit': 'Изменить цель',
+  'goals.objective': 'Цель',
+  'goals.clear': 'Очистить цель',
+  'goals.clearConfirm': (v) => `Очистить цель "${v?.condition ?? ''}"?`,
+  'goals.running': 'Работает',
+  'goals.idle': 'Ожидание',
+  'goals.dropped': (v) =>
+    `Не удалось связаться с ${v?.count ?? 0} ${ruPluralForm(
+      v?.count,
+      'сессией',
+      'сессиями',
+      'сессиями',
+    )} — запущенные в них цели отсутствуют в этом списке.`,
+  'goals.notYetEvaluated': 'ещё не проверялась',
+  'goals.openSessionHint': 'Открыть сессию этой цели',
+  'goals.error.emptyCondition': 'Введите условие для цели.',
+  'goals.error.clearKeyword': (v) =>
+    `"${v?.word ?? ''}" снимает цель, а не задаёт её. Опишите условие, которого нужно достичь.`,
+  'goals.error.createFailed': 'Не удалось запустить цель',
+  'goals.error.saveFailed': 'Не удалось сохранить цель',
+  'goals.error.goalUnavailable': 'Цель больше недоступна.',
+  'goals.error.requiresObjective': (v) =>
+    `Команда /goal ${v?.keyword ?? 'set'} требует указать цель.`,
+  'goals.error.invalidCommand': 'Некорректная команда /goal',
+  'goals.error.goalsUnavailable': 'Просмотр целей недоступен в этом режиме.',
+  'goals.error.attachmentsUnsupported':
+    'Удалите вложения перед использованием /goal.',
+  'goals.error.editFailed': 'Не удалось изменить цель',
+  'goals.error.pauseFailed': 'Не удалось поставить цель на паузу',
+  'goals.error.resumeFailed': 'Не удалось возобновить цель',
+  'goals.error.clearFailed': 'Не удалось очистить цель',
+  'goals.error.controlBusy':
+    'Другая операция с целью ещё выполняется. Повторите попытку после её завершения.',
+};
+
 const MESSAGES: Record<WebShellLanguage, Messages> = {
   en: EN,
   'zh-CN': ZH,
+  ru: RU,
 };
 
 const LANGUAGE_LABELS: Record<WebShellLanguage, string> = {
   en: 'English [en]',
   'zh-CN': '中文 [zh-CN]',
+  ru: 'Русский [ru]',
 };
 
 const Context = createContext<{
@@ -8302,6 +8444,9 @@ export function normalizeLanguage(
   if (!normalized) return 'en';
   if (normalized === 'zh' || normalized === 'zh-cn' || normalized === 'zh_cn') {
     return 'zh-CN';
+  }
+  if (normalized === 'ru' || normalized.startsWith('ru-')) {
+    return 'ru';
   }
   return 'en';
 }
@@ -8331,6 +8476,14 @@ export function languageSettingToWebShellLanguage(
     normalized === 'english'
   ) {
     return 'en';
+  }
+  if (
+    normalized === 'ru' ||
+    normalized === 'ru-ru' ||
+    normalized === 'russian' ||
+    normalized === 'русский'
+  ) {
+    return 'ru';
   }
   return undefined;
 }
