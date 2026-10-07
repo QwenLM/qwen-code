@@ -17,6 +17,7 @@ import type {
 // Use the Node-free transcriptRecords subpath so the browser replay bundle
 // does not pull in the full core package barrel.
 import {
+  isInternalCodeModeToolResult,
   projectUserTranscriptForDisplay,
   stripGeneratedAttachmentTokens,
   type TranscriptProjectionDiagnostic,
@@ -792,7 +793,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         yield* this.projectAssistantRecord(record, emit, meta);
         break;
       case 'tool_result':
-        if (record.subtype !== 'code_mode_tool_result') {
+        if (!isInternalCodeModeToolResult(record)) {
           yield* this.projectToolResult(record, emit, meta);
         }
         break;
