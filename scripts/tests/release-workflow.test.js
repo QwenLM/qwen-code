@@ -2171,37 +2171,6 @@ describe('release workflow', () => {
     expect(dockerIntegrationScript).toContain(
       "timeout 60 docker info --format '{{.DockerRootDir}}'",
     );
-    const scriptLines = dockerIntegrationScript.split('\n');
-    const gateCallLines = scriptLines
-      .map((line, index) =>
-        line.trim() === 'check_docker_data_root_floor' ? index : -1,
-      )
-      .filter((index) => index >= 0);
-    const cachePruneLine = scriptLines.findIndex((line) =>
-      line.includes('docker builder prune'),
-    );
-    const buildLine = scriptLines.findIndex((line) =>
-      line.includes('npm run build:sandbox'),
-    );
-    const firstVitestLine = scriptLines.findIndex((line) =>
-      line.includes('npx vitest'),
-    );
-    expect(gateCallLines).toHaveLength(2);
-    // The pre-build gate stays inside the image-missing branch; the second
-    // gate is hoisted out of it, directly before the vitest phase — the
-    // actual #13479 death site — so a re-run that finds the image already
-    // cached on a still-saturated host is gated too.
-    expect(scriptLines[gateCallLines[0]]).toBe(
-      '  check_docker_data_root_floor',
-    );
-    expect(scriptLines[gateCallLines[1]]).toBe('check_docker_data_root_floor');
-    expect(gateCallLines[0]).toBeGreaterThan(cachePruneLine);
-    expect(buildLine).toBeGreaterThan(gateCallLines[0]);
-    expect(gateCallLines[1]).toBeGreaterThan(buildLine);
-    expect(firstVitestLine).toBeGreaterThan(gateCallLines[1]);
-    expect(dockerIntegrationScript).toContain(
-      'DISK_FLOOR_DOCKER_MIN_FREE_KB:-8388608',
-    );
   });
 
   const dockerIntegrationScriptAbsolutePath = join(
@@ -2224,7 +2193,9 @@ describe('release workflow', () => {
     dockerRootMissing = false,
     helperAbsent = false,
     ambientDiskFloorKb,
+    ambientDiskFloorInodes,
     dockerFloorKb,
+    dockerFloorInodes,
   } = {}) => {
     const directory = mkdtempSync(
       join(tmpdir(), 'release-docker-integration-'),
@@ -2282,7 +2253,7 @@ exit 0`,
       writeFileSync(
         join(directory, '.github', 'scripts', 'check-disk-floor.sh'),
         '#!/bin/sh\n' +
-          'printf \'disk-floor %s floor=%s\\n\' "$*" "${DISK_FLOOR_MIN_FREE_KB:-unset}" >> "$CALLS_LOG"\n' +
+          'printf \'disk-floor %s floor=%s inodes=%s\\n\' "$*" "${DISK_FLOOR_MIN_FREE_KB:-unset}" "${DISK_FLOOR_MIN_FREE_INODES:-100000}" >> "$CALLS_LOG"\n' +
           'exit "${GATE_EXIT:-0}"\n',
         { mode: 0o755 },
       );
@@ -2305,12 +2276,20 @@ exit 0`,
       // The floor knobs come from the test, never the ambient environment:
       // the suite's verdict must not depend on the env of whoever runs it.
       delete env.DISK_FLOOR_MIN_FREE_KB;
+      delete env.DISK_FLOOR_MIN_FREE_INODES;
       delete env.DISK_FLOOR_DOCKER_MIN_FREE_KB;
+      delete env.DISK_FLOOR_DOCKER_MIN_FREE_INODES;
       if (ambientDiskFloorKb !== undefined) {
         env.DISK_FLOOR_MIN_FREE_KB = ambientDiskFloorKb;
       }
+      if (ambientDiskFloorInodes !== undefined) {
+        env.DISK_FLOOR_MIN_FREE_INODES = ambientDiskFloorInodes;
+      }
       if (dockerFloorKb !== undefined) {
         env.DISK_FLOOR_DOCKER_MIN_FREE_KB = dockerFloorKb;
+      }
+      if (dockerFloorInodes !== undefined) {
+        env.DISK_FLOOR_DOCKER_MIN_FREE_INODES = dockerFloorInodes;
       }
       const result = spawnSync('bash', [dockerIntegrationScriptAbsolutePath], {
         cwd: directory,
@@ -2409,8 +2388,12 @@ exit 0`,
       // One gate sample before the build and one after it: the #13479 death
       // landed in the vitest phase, after the build had already finished.
       expect(gates).toHaveLength(2);
-      expect(lines[gates[0]]).toBe(`disk-floor ${dockerRoot} floor=8388608`);
-      expect(lines[gates[1]]).toBe(`disk-floor ${dockerRoot} floor=8388608`);
+      expect(lines[gates[0]]).toBe(
+        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+      );
+      expect(lines[gates[1]]).toBe(
+        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+      );
       expect(gates[0]).toBeGreaterThan(cachePrune);
       expect(build).toBeGreaterThan(gates[0]);
       expect(buildUnlock).toBeGreaterThan(build);
@@ -2459,7 +2442,9 @@ exit 0`,
         .filter((line) => line.startsWith('disk-floor'));
       expect(floors).toHaveLength(2);
       for (const floor of floors) {
-        expect(floor).toBe(`disk-floor ${dockerRoot} floor=8388608`);
+        expect(floor).toBe(
+          `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+        );
       }
     },
   );
@@ -2478,7 +2463,55 @@ exit 0`,
         .filter((line) => line.startsWith('disk-floor'));
       expect(floors).toHaveLength(2);
       for (const floor of floors) {
-        expect(floor).toBe(`disk-floor ${dockerRoot} floor=4194304`);
+        expect(floor).toBe(
+          `disk-floor ${dockerRoot} floor=4194304 inodes=100000`,
+        );
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps the default docker inode floor when the workspace inode knob is set',
+    () => {
+      // The job-start gate's DISK_FLOOR_MIN_FREE_INODES must not move the
+      // docker data-root floor either: hardening the workspace gate would
+      // otherwise silently retune a filesystem the operator never targeted
+      // (#13479).
+      const { result, calls, dockerRoot } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        ambientDiskFloorInodes: '999999999',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const floors = calls
+        .trim()
+        .split('\n')
+        .filter((line) => line.startsWith('disk-floor'));
+      expect(floors).toHaveLength(2);
+      for (const floor of floors) {
+        expect(floor).toBe(
+          `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+        );
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'honors the dedicated docker inode knob',
+    () => {
+      const { result, calls, dockerRoot } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        dockerFloorInodes: '200000',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const floors = calls
+        .trim()
+        .split('\n')
+        .filter((line) => line.startsWith('disk-floor'));
+      expect(floors).toHaveLength(2);
+      for (const floor of floors) {
+        expect(floor).toBe(
+          `disk-floor ${dockerRoot} floor=8388608 inodes=200000`,
+        );
       }
     },
   );
@@ -2522,7 +2555,9 @@ exit 0`,
         line.startsWith('npx vitest'),
       );
       expect(gates).toHaveLength(1);
-      expect(lines[gates[0]]).toBe(`disk-floor ${dockerRoot} floor=8388608`);
+      expect(lines[gates[0]]).toBe(
+        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+      );
       expect(firstVitest).toBeGreaterThan(gates[0]);
     },
   );
