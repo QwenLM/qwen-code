@@ -5,9 +5,12 @@
  */
 
 import { once } from 'node:events';
+import { readdirSync, readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import net from 'node:net';
 import type { AddressInfo, Socket } from 'node:net';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { relayedHeaders, relayUpstream } from './hosted-relay-headers.js';
 
@@ -75,9 +78,10 @@ describe('Hosted proxy header relay', () => {
       sockets.add(socket);
       socket.once('data', () => {
         // Hold the socket open: with a short-lived origin the mutant dies on
-        // a socket-reuse race instead of on the assertion.
+        // a socket-reuse race instead of on the assertion. The 503 pins
+        // relayUpstream's status pass-through.
         socket.write(
-          'HTTP/1.1 200 OK\r\n' +
+          'HTTP/1.1 503 Service Unavailable\r\n' +
             'Cache-Control: no-store\r\n' +
             'Keep-Alive: timeout=60\r\n' +
             'Content-Length: 2\r\n' +
@@ -97,6 +101,7 @@ describe('Hosted proxy header relay', () => {
         relayUpstream(res, response, Buffer.from(await response.arrayBuffer()));
       });
       const response = await fetch(await listen(proxy));
+      expect(response.status).toBe(503);
       expect(await response.text()).toBe('{}');
       expect(response.headers.get('cache-control')).toBe('no-store');
       expect(response.headers.get('keep-alive')).toBe(
@@ -110,5 +115,28 @@ describe('Hosted proxy header relay', () => {
       raw.close();
       await closed;
     }
+  });
+
+  it('keeps the five store relays calling the shared helper', () => {
+    // The sdk-java workflow step runs this file after `cd integration-tests`
+    // while the repo-root lanes use `--root ./integration-tests`, so resolve
+    // the drivers relative to this file, never process.cwd(). Read source
+    // text because importing a driver throws — each parses process.argv[2]
+    // at module load. Positive pin only: a new driver hand-rolling its relay
+    // is absent from the enumerated list and still passes.
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const callers = readdirSync(dir)
+      .filter((name) => /^hosted-.*-driver\.ts$/.test(name))
+      .filter((name) =>
+        readFileSync(join(dir, name), 'utf8').includes('relayUpstream(res,'),
+      )
+      .sort();
+    expect(callers).toEqual([
+      'hosted-latency-driver.ts',
+      'hosted-process-crash-driver.ts',
+      'hosted-shell-output-driver.ts',
+      'hosted-store-failure-driver.ts',
+      'hosted-workspace-tool-turn-driver.ts',
+    ]);
   });
 });
