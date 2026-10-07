@@ -43,6 +43,21 @@ const readFileSyncControl = vi.hoisted(() => ({ failing: new Set<string>() }));
 const writeFileSyncControl = vi.hoisted(() => ({
   failingPrefix: new Set<string>(),
 }));
+// A count of the blocking ps consults the module under test issues:
+// every process-table read goes through one execFileSync, so a fanout that
+// should share one consult shows up as a count here. Transparent: every
+// call passes through.
+const psExecCount = vi.hoisted(() => ({ count: 0 }));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFileSync: ((...args: unknown[]) => {
+      psExecCount.count += 1;
+      return (actual.execFileSync as (...a: unknown[]) => unknown)(...args);
+    }) as unknown as typeof actual.execFileSync,
+  };
+});
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
@@ -306,6 +321,52 @@ describe('Managed Runtime ledger', () => {
           groups: unknown[];
         };
         expect(written.groups).toEqual([]);
+      },
+    );
+
+    it.skipIf(!POSIX)(
+      'killOutstanding consults the process table once for the whole fanout, not once per group',
+      async () => {
+        // Three outstanding groups judged at once must cost ONE blocking ps
+        // consult (plus the prune's own): a poll per waiter would fork the
+        // same ps three times ahead of the budget's first await. The counts
+        // are exact because the pass settles inside one liveness interval:
+        // the prune consults once, the fanout's shared reader once more —
+        // never a per-group refresh.
+        const workFile = path.join(root, 'ledger.json');
+        const ledger = ManagedRuntimeLedger.create({
+          workFile,
+          worker: {
+            pid: process.pid,
+            pgid: process.pid,
+            incarnation: 'inc',
+            startedAt: Date.now(),
+          },
+        });
+        const procs = [
+          spawnGroupLeader(),
+          spawnGroupLeader(),
+          spawnGroupLeader(),
+        ];
+        for (const proc of procs) {
+          strays.add(proc);
+          ledger.addGroup({
+            pgid: proc.pid!,
+            callId: `c-${proc.pid}`,
+            startedAt: Date.now(),
+          });
+        }
+        try {
+          const before = psExecCount.count;
+          await ledger.killOutstanding(600);
+          expect(ledger.outstandingGroups()).toEqual([]);
+          expect(psExecCount.count - before).toBe(2);
+        } finally {
+          for (const proc of procs) {
+            killGroup(proc.pid!);
+            strays.delete(proc);
+          }
+        }
       },
     );
 
@@ -1193,6 +1254,53 @@ describe('Managed Runtime ledger', () => {
         expect(readFileSync(workFile, 'utf8')).toBe(bytes);
       },
     );
+
+    it('rides the proof deadline on the monotonic clock, so a backward wall step cannot stretch it', async () => {
+      // A wall-clock deadline would quietly extend for every second the
+      // clock just stepped back; the proof owes the group's death its
+      // budget — 600 ms here — in whichever direction the host's time
+      // happens to run. The step lands inside the first poll the proof
+      // takes, and the measured wall wait must stay at the budget's
+      // magnitude.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 101 }, [
+        { pgid: 202, startedAt: Date.now() },
+      ]);
+      const alive = new Set([202]);
+      const realNow = Date.now.bind(Date);
+      let stepped = false;
+      const nowSpy = vi
+        .spyOn(Date, 'now')
+        .mockImplementation(() => (stepped ? realNow() - 10_000 : realNow()));
+      let probesOn202 = 0;
+      const liveness = vi.fn((id: number) => {
+        if (id === 202) {
+          probesOn202 += 1;
+          // The second probe is the first poll inside the proof.
+          if (probesOn202 === 2) stepped = true;
+        }
+        return alive.has(id) ? 'alive' : 'gone';
+      });
+      try {
+        const t0 = performance.now();
+        await expect(
+          sweepWorkerLedger(workFile, {
+            exitWitnessed: true,
+            proofTimeoutMs: 600,
+            sys: {
+              platform: 'linux',
+              liveness,
+              signal: vi.fn(() => 'sent' as const),
+              table: () => undefined,
+            },
+          }),
+        ).rejects.toMatchObject({ remaining: [202] });
+        // A wall-clock deadline would have waited ~10.6 s here.
+        expect(performance.now() - t0).toBeLessThan(4_000);
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
 
     it('resolves a group whose live member is provably younger than its record', async () => {
       // A ±120 s window would match |90 s − 150 s| and SIGKILL this group;

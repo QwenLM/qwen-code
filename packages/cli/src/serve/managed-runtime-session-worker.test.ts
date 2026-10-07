@@ -44,13 +44,26 @@ const sweepWitnesses = vi.hoisted(() => ({
     exitWitnessed: boolean | undefined;
     at: number;
   }>,
+  /**
+   * When set, the wrapped sweep parks on this promise after the record is
+   * pushed: a test can hold one pass mid-flight and fire a second trigger
+   * against it. Engagement is per-call, so the record count keeps naming
+   * how many passes actually started.
+   */
+  hold: undefined as Promise<void> | undefined,
+  /**
+   * Every directory sweep started: sweepWorkerLedger calls from inside
+   * sweepStaleLedgers never cross the module boundary, so directory passes
+   * are counted at their own entry point instead.
+   */
+  dirCalls: [] as Array<{ directory: string; at: number }>,
 }));
 vi.mock('./managed-runtime-ledger.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('./managed-runtime-ledger.js')>();
   return {
     ...actual,
-    sweepWorkerLedger: (
+    sweepWorkerLedger: async (
       workFile: string,
       options?: Parameters<typeof actual.sweepWorkerLedger>[1],
     ) => {
@@ -59,7 +72,16 @@ vi.mock('./managed-runtime-ledger.js', async (importOriginal) => {
         exitWitnessed: options?.exitWitnessed,
         at: Date.now(),
       });
+      if (sweepWitnesses.hold !== undefined) await sweepWitnesses.hold;
       return actual.sweepWorkerLedger(workFile, options);
+    },
+    sweepStaleLedgers: (
+      directory: string,
+      options?: Parameters<typeof actual.sweepStaleLedgers>[1],
+      onFileJudged?: Parameters<typeof actual.sweepStaleLedgers>[2],
+    ) => {
+      sweepWitnesses.dirCalls.push({ directory, at: Date.now() });
+      return actual.sweepStaleLedgers(directory, options, onFileJudged);
     },
   };
 });
@@ -1007,6 +1029,132 @@ describe.skipIf(process.platform === 'win32')(
           }
         }
       });
+
+      it('close joins the sweep the exit hook is already running over the same ledger', async () => {
+        // Two triggers in one window — the exit hook and an explicit
+        // close() — must pay one sweep over the ledger, not two: the
+        // second joins the in-flight pass. The wrapped sweep records every
+        // pass it starts, so the join shows as one record for the file.
+        const ledgerDir = path.join(root, 'ledgers');
+        const quarantine = { report: vi.fn(), lift: vi.fn() };
+        const created = ledgerWorker('exit-after-call', {
+          ledgerDir,
+          quarantine,
+        });
+        sweepWitnesses.records.length = 0;
+        let release: (() => void) | undefined;
+        // Engage before the worker can exit: the exit observation is a
+        // macrotask away, but only if the hold precedes the call.
+        sweepWitnesses.hold = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        await created.execute('read_file', { file_path: 'a.txt' }, signal);
+        const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
+        try {
+          // The exit hook reached the sweep and parked inside it.
+          await vi.waitFor(
+            () => {
+              expect(
+                sweepWitnesses.records.some(
+                  (record) => record.workFile === workFile,
+                ),
+              ).toBe(true);
+            },
+            { timeout: 10_000 },
+          );
+          // close() now fires the same path: it must join, not re-enter.
+          const closing = created.close().catch(() => undefined);
+          release?.();
+          await closing;
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          expect(
+            sweepWitnesses.records.filter(
+              (record) => record.workFile === workFile,
+            ),
+          ).toHaveLength(1);
+        } finally {
+          release?.();
+          sweepWitnesses.hold = undefined;
+          sweepWitnesses.records.length = 0;
+        }
+      });
+
+      it(
+        'a reaper keeps the groups an earlier failure named across a later nameless one',
+        // Reaper ticks are seconds apart; the choreography observes each
+        // one rather than sleeping fixed gaps.
+        { timeout: 45_000 },
+        async () => {
+          // The arming close-sweep reads garbage and names nothing; the
+          // first retry names a live held group; the next retry reads
+          // garbage again and names nothing. The names of the first retry
+          // must survive the nameless one — a read problem is no proof
+          // about the group. With the ledger then gone and the group dead,
+          // only the accumulated name lets the reaper answer 'proven' and
+          // lift. A replace-instead-of-accumulate reaper ends terminal
+          // instead and never lifts.
+          const ledgerDir = path.join(root, 'ledgers');
+          const quarantine = { report: vi.fn(), lift: vi.fn() };
+          const created = ledgerWorker('ok', { ledgerDir, quarantine });
+          await created.execute('read_file', { file_path: 'a.txt' }, signal);
+          const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
+          const sleeper = spawnSleeper();
+          // Too fresh to retire: both garbage phases throw, naming nothing.
+          await writeFile(workFile, 'not a ledger at all', 'utf8');
+          await created.close().catch(() => undefined);
+          expect(quarantine.report).toHaveBeenCalledTimes(1);
+          const retries = () =>
+            sweepWitnesses.records.filter(
+              (record) =>
+                record.workFile === workFile && record.exitWitnessed !== true,
+            );
+          // The first retry reads a valid ledger naming a held group: the
+          // stamp sits far enough ahead that every pass up to the kill
+          // judges 'unknown' — held, never signal-worthy.
+          testInternals.writeLedgerDocument(
+            workFile,
+            {
+              pid: 42424243,
+              pgid: 42424243,
+              incarnation: 'incarnation-1',
+              startedAt: Date.now(),
+            },
+            [
+              {
+                pgid: sleeper,
+                callId: 'call-named',
+                startedAt: Date.now() + 10_000,
+              },
+            ],
+          );
+          await vi.waitFor(
+            () => {
+              expect(retries().length).toBeGreaterThanOrEqual(1);
+            },
+            { timeout: 10_000 },
+          );
+          // The nameless failure the names must survive.
+          await writeFile(workFile, 'not a ledger at all', 'utf8');
+          await vi.waitFor(
+            () => {
+              expect(retries().length).toBeGreaterThanOrEqual(2);
+            },
+            { timeout: 10_000 },
+          );
+          await rm(workFile);
+          killGroup(sleeper);
+          // Absent file, named group gone: only the accumulated name can
+          // turn this verdict 'proven'.
+          await vi.waitFor(
+            () => {
+              expect(quarantine.lift).toHaveBeenCalledTimes(1);
+            },
+            { timeout: 20_000 },
+          );
+          expect(quarantine.report).toHaveBeenCalledTimes(1);
+          expect(quarantine.lift).toHaveBeenCalledTimes(1);
+        },
+      );
     });
   },
 );
@@ -1987,6 +2135,84 @@ describe.skipIf(process.platform === 'win32')(
           } catch {
             // Already proven by the sweep.
           }
+        }
+      },
+    );
+
+    it(
+      'two environment creations in one sweep window share the stale-ledger pass',
+      { timeout: 30_000 },
+      async () => {
+        // The installation-time directory sweep is once per ledger dir per
+        // window: a second environment created while the first pass is in
+        // flight joins it rather than paying a second full scan on the
+        // child's single thread. The wrapped sweep records every pass it
+        // starts; the seeded ledger must show up in it exactly once.
+        const sweeperConfig = (sessionId: string) =>
+          new Config({
+            sessionId,
+            targetDir: root,
+            cwd: root,
+            debugMode: false,
+            model: 'test-model',
+            usageStatisticsEnabled: false,
+            telemetry: { enabled: false },
+            deferTelemetryInitialization: true,
+          });
+        const firstConfig = sweeperConfig(
+          '22222222-2222-3333-4444-555555555555',
+        );
+        const ledgerDir = path.join(
+          firstConfig.storage.getProjectTempDir(),
+          'managed-runtime',
+        );
+        await mkdir(ledgerDir, { recursive: true });
+        // A stale ledger another child provable finished with: dead worker,
+        // no groups — it proves fast, on the first pass that reads it.
+        const stale = path.join(ledgerDir, 'stale.json');
+        testInternals.writeLedgerDocument(
+          stale,
+          {
+            pid: 42424246,
+            pgid: 42424246,
+            incarnation: 'incarnation-1',
+            startedAt: Date.now(),
+          },
+          [],
+        );
+        sweepWitnesses.records.length = 0;
+        sweepWitnesses.dirCalls.length = 0;
+        const launch = () => ({
+          command: process.execPath,
+          args: [script],
+          env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
+        });
+        // Both creations land before the first pass can settle, so the
+        // second joins it.
+        environment = createManagedRuntimeEnvironment(firstConfig, launch);
+        const second = createManagedRuntimeEnvironment(
+          sweeperConfig('33333333-2222-3333-4444-555555555555'),
+          launch,
+        );
+        try {
+          // The pass actually judged the seeded ledger (it unlinks a
+          // proven one): without that, a zero-pass count would green the
+          // assertion vacuously.
+          await vi.waitFor(
+            () => {
+              expect(existsSync(stale)).toBe(false);
+            },
+            { timeout: 10_000 },
+          );
+          // Any accidental second pass would land in the same window.
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          expect(
+            sweepWitnesses.dirCalls.filter(
+              (call) => call.directory === ledgerDir,
+            ),
+          ).toHaveLength(1);
+        } finally {
+          await second.dispose();
         }
       },
     );
