@@ -224,6 +224,14 @@ CSI, Shell or MCP profiles. The shared Harness closes its Monitor wake
 scheduler only after detach authorization succeeds, so a refused detach leaves
 the live Session and its scheduler intact. The synchronous closing/busy fence
 still prevents a wake from starting while authorization is pending.
+G3 generation adoption also covers lifecycle settlement and detach. A call
+that discovers a new Harness generation invalidates the stale client and
+attachment and still returns the generation error. The existing delivery retry
+renegotiates with the same operation and current claim; it does not redispatch
+within the discovering call, enable ordinary recovery or cancellation takeover,
+replace the original Runtime, or clear an unknown outcome. The new Harness boot
+is not stop evidence for the original Runtime; effects receipts, writer seals
+and original-handle stop proofs remain required.
 Historical admitted operations retain their original protocol and evidence,
 without new Hook identities.
 Operation reads before the lifecycle migration treat an absent protocol column

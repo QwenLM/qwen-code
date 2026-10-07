@@ -166,6 +166,10 @@ Hook owner 可在 Turn 完成后继续保留;其不可变原上下文必须继�
 本次整合保留 H3 后台 Shell/Monitor 行为，不增加 CSI、Shell 或 MCP profile 生命周期支持。
 共享 Harness 仅在 detach 授权成功后关闭 Monitor 唤醒调度器；拒绝 detach 时，存活 Session 及其调度器保持可用。
 同步 closing/busy 围栏仍阻止授权等待期间的新唤醒。
+G3 代际恢复同样覆盖生命周期结算与 detach。发现新 Harness 代际的调用会清除旧客户端及 attachment，
+仍返回代际错误；既有交付重试以相同 operation 与当前 claim 重新协商。
+发现错误的调用内不再次派发，不启用普通恢复或 cancellation takeover，不替换原 Runtime，也不清除 unknown 结果。
+新 Harness boot 不是原 Runtime 的停机证据；effects receipt、writer seal 与原 handle 的停机证明仍为必需。
 升级前已接纳的操作沿用原协议与证据，不产生新 Hook 身份。
 生命周期迁移前读取 operation 时，缺少协议列表示历史 protocol-zero；已有 protocol-one 值原样保留。
 此投影兼容不授予执行权限，也不绕过 schema 升级。

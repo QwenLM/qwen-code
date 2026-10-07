@@ -41,6 +41,19 @@ public interface HarnessConnector extends AutoCloseable {
                 "Managed Runtime recovery is unavailable");
     }
 
+    /**
+     * Sends the cancellation takeover load even when this Harness already
+     * serves the Session: a plain cancel the daemon refused with
+     * {@code hosted_turn_recovery_required} is payable only by that load,
+     * while the healthy-attachment shortcut would answer from cache and
+     * never tell the daemon (R9-P1-2).
+     */
+    default Attachment recoverManagedCancellation(String tenantId,
+            String sessionId) {
+        throw new UnsupportedOperationException(
+                "Managed Runtime recovery is unavailable");
+    }
+
     Admission submit(String tenantId, String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest);
 

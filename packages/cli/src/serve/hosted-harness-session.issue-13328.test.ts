@@ -63,6 +63,18 @@ vi.mock(
   '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js',
   () => ({
     HTTP_MANAGED_SESSION_STORE_CONTRACT: { maxInlineResourceBytes: 64 * 1024 },
+    // The load route's catch classifies with instanceof against this class;
+    // the wholesale module mock must still export it or the handler dies.
+    ManagedSessionStoreHttpError: class ManagedSessionStoreHttpError extends Error {
+      constructor(
+        readonly status: number,
+        readonly remoteCode: string,
+        message: string,
+      ) {
+        super(message);
+        this.name = 'ManagedSessionStoreHttpError';
+      }
+    },
     createHttpManagedSessionStores: (options: {
       sessionKey: { tenantId: string; workspaceId: string; sessionId: string };
     }) => {
@@ -307,7 +319,12 @@ describe('issue #13328: a second concurrent Session on the same Workspace mount'
 
       // First Turn: admitted and holds the mount.
       expect((await submit(SESSION_A, clientA, PROMPT_A)).status).toBe(202);
-      await vi.waitFor(() => expect(holder).toBeDefined());
+      // The mount hold arrives over the mocked Broker control; the default
+      // 1 s window races the admission pipeline on the loaded CI runner
+      // (same family as #13411/#13323/#13430).
+      await vi.waitFor(() => expect(holder).toBeDefined(), {
+        timeout: 10_000,
+      });
       // Second Turn: also admitted (202) while the mount is busy.
       expect((await submit(SESSION_B, clientB, PROMPT_B)).status).toBe(202);
       // The second Turn settles — observe, don't yet judge.
