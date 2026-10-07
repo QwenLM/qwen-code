@@ -80,7 +80,46 @@ import { AuthType } from '../../core/contentGenerator.js';
 const USAGE_STATS_HOSTNAME = 'gb4w8c3ygj-default-sea.rum.aliyuncs.com';
 const USAGE_STATS_PATH = '/';
 
+/**
+ * Port the upload reaches {@link USAGE_STATS_HOSTNAME} on: the request sets no
+ * explicit port, so `https.request` falls back to the scheme default.
+ */
+const USAGE_STATS_PORT = 443;
+
 const RUN_APP_ID = 'gb4w8c3ygj@851d5d500f08f92';
+
+/**
+ * Whether `NO_PROXY` / `no_proxy` excludes a host from proxying, mirroring
+ * undici's `EnvHttpProxyAgent#shouldProxy` — the dispatcher the session's own
+ * egress installs, and the reason `NO_PROXY` is honored there.
+ * `HttpsProxyAgent` has no such notion, so the rule has to be applied at the
+ * point the agent is chosen or uploads ignore an explicit exclusion.
+ *
+ * Mirrored details: lowercase `no_proxy` wins over `NO_PROXY`; a bare `*`
+ * disables proxying entirely; entries split on comma/whitespace; a leading `.`
+ * or `*.` is stripped so an entry matches the host and its subdomains; a
+ * port-qualified entry only matches that port.
+ */
+function isExcludedByNoProxy(hostname: string, port: number): boolean {
+  const noProxy = process.env['no_proxy'] ?? process.env['NO_PROXY'] ?? '';
+  if (!noProxy) return false;
+  if (noProxy === '*') return true;
+
+  for (const entry of noProxy.split(/[,\s]/)) {
+    if (!entry) continue;
+    const withPort = entry.match(/^(.+):(\d+)$/);
+    const entryPort = withPort ? Number.parseInt(withPort[2], 10) : 0;
+    if (entryPort && entryPort !== port) continue;
+    const entryHost = (withPort ? withPort[1] : entry)
+      .replace(/^\*?\./, '')
+      .toLowerCase();
+    if (hostname === entryHost) return true;
+    if (hostname.slice(-(entryHost.length + 1)) === `.${entryHost}`)
+      return true;
+  }
+
+  return false;
+}
 
 /**
  * Interval in which buffered events are sent to RUM.
@@ -1162,6 +1201,9 @@ export class QwenLogger {
   getProxyAgent() {
     const proxyUrl = this.config?.getProxy();
     if (!proxyUrl) return undefined;
+    if (isExcludedByNoProxy(USAGE_STATS_HOSTNAME, USAGE_STATS_PORT)) {
+      return undefined;
+    }
     // undici which is widely used in the repo can only support http & https proxy protocol,
     // https://github.com/nodejs/undici/issues/2224
     if (/^https?:\/\//i.test(proxyUrl)) {

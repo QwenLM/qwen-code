@@ -8,6 +8,9 @@ public final class LoadHarnessSession {
     private final String harnessSessionId;
     private final ManagedSessionStoreConnection managedSessionStore;
     private final boolean passiveManagedRuntimeRecovery;
+    private final String toolProfile;
+    private final boolean driveRuntimeRecovery;
+    private final boolean cancellationTakeover;
 
     public LoadHarnessSession(String harnessSessionId) {
         this(harnessSessionId, null, false);
@@ -21,14 +24,49 @@ public final class LoadHarnessSession {
     public LoadHarnessSession(String harnessSessionId,
             ManagedSessionStoreConnection managedSessionStore,
             boolean passiveManagedRuntimeRecovery) {
+        this(harnessSessionId, managedSessionStore, passiveManagedRuntimeRecovery, null);
+    }
+
+    public LoadHarnessSession(String harnessSessionId,
+            ManagedSessionStoreConnection managedSessionStore,
+            boolean passiveManagedRuntimeRecovery, String toolProfile) {
+        this(harnessSessionId, managedSessionStore,
+                passiveManagedRuntimeRecovery, toolProfile, false);
+    }
+
+    public LoadHarnessSession(String harnessSessionId,
+            ManagedSessionStoreConnection managedSessionStore,
+            boolean passiveManagedRuntimeRecovery, String toolProfile,
+            boolean driveRuntimeRecovery) {
+        this(harnessSessionId, managedSessionStore,
+                passiveManagedRuntimeRecovery, toolProfile,
+                driveRuntimeRecovery, false);
+    }
+
+    /** The cancellation flag is deliberately carried separately from
+     * {@code passiveManagedRuntimeRecovery}: a plain passive re-attach and
+     * a cancellation takeover share that wire shape today, and only an
+     * explicit cancellation may let the daemon settle a parked Turn whose
+     * producer is proven dead — anything else would stamp a live wait. */
+    public LoadHarnessSession(String harnessSessionId,
+            ManagedSessionStoreConnection managedSessionStore,
+            boolean passiveManagedRuntimeRecovery, String toolProfile,
+            boolean driveRuntimeRecovery, boolean cancellationTakeover) {
         this.harnessSessionId = HostedHarnessClient.requireUuid(
                 harnessSessionId, "harnessSessionId");
         this.managedSessionStore = managedSessionStore;
         this.passiveManagedRuntimeRecovery = passiveManagedRuntimeRecovery;
+        this.toolProfile = toolProfile;
+        this.driveRuntimeRecovery = driveRuntimeRecovery;
+        this.cancellationTakeover = cancellationTakeover;
     }
 
     String getHarnessSessionId() {
         return harnessSessionId;
+    }
+
+    boolean isRuntimeRecoveryLoad() {
+        return passiveManagedRuntimeRecovery || driveRuntimeRecovery;
     }
 
     Map<String, Object> toJson() {
@@ -38,6 +76,15 @@ public final class LoadHarnessSession {
         }
         if (passiveManagedRuntimeRecovery) {
             result.put("passiveManagedRuntimeRecovery", true);
+        }
+        if (toolProfile != null) {
+            result.put("toolProfile", toolProfile);
+        }
+        if (driveRuntimeRecovery) {
+            result.put("driveRuntimeRecovery", true);
+        }
+        if (cancellationTakeover) {
+            result.put("cancellationTakeover", true);
         }
         return result;
     }

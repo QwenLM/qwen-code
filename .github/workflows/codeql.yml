@@ -22,12 +22,25 @@ concurrency:
 
 jobs:
   codeql:
-    name: 'CodeQL'
+    name: 'CodeQL (${{ matrix.language }})'
     runs-on: 'ubuntu-latest'
-    # Analysis normally finishes in ~7-9 min (22 min worst case observed). Cap it
-    # so a runner that drops its heartbeat mid-analysis can't hold a slot for the
-    # default 6h.
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: 'javascript'
+            timeout: 90
+          - language: 'java'
+            timeout: 15
+            sourceroot: 'packages/sdk-java'
+    # One job per language, each with its own measured cap: a shared job let
+    # the JavaScript leg's overrun kill the Java analysis with it. The
+    # JavaScript leg took 44m12s on the 2026-10-02 dispatch (run 37019120152)
+    # after the old shared 30-minute cap had cancelled the nightly on
+    # thirteen consecutive runs (2026-09-20 through 2026-10-02); the
+    # buildless Java leg took 4m40s. The caps stay finite so a runner that
+    # drops its heartbeat mid-analysis can't hold a slot for the default 6h.
+    timeout-minutes: '${{ matrix.timeout }}'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -35,7 +48,49 @@ jobs:
       - name: 'Initialize CodeQL'
         uses: 'github/codeql-action/init@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/init@v3
         with:
-          languages: 'javascript'
+          languages: '${{ matrix.language }}'
+          # The Maven modules depend on each other through locally installed
+          # snapshots, so a real build here would duplicate sdk-java.yml's
+          # install dance. build-mode none extracts from source instead
+          # (javascript is interpreted and never builds either way). The java
+          # leg scans only the Maven modules: the Gradle tree under
+          # packages/mobile-shell needs a real build, its Kotlin sources are
+          # out of scope, and its Gradle JDK recommendation must not set the
+          # API model for the Java 21 Maven modules.
+          build-mode: 'none'
+          source-root: "${{ matrix.sourceroot || '' }}"
 
       - name: 'Perform CodeQL Analysis'
         uses: 'github/codeql-action/analyze@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/analyze@v3
+
+  # The scan is schedule-only and never a required check, so a dead nightly is
+  # otherwise silent (#13249). `always()` because an overrun leg reports
+  # `cancelled`, which `failure()` misses. Scheduled runs only: they are the
+  # ones on `main`, and a dispatch is somebody already watching.
+  report_failure:
+    name: 'Report a CodeQL scan that did not finish'
+    needs: ['codeql']
+    if: "${{ always() && github.repository == 'QwenLM/qwen-code' && github.event_name == 'schedule' && needs.codeql.result != 'success' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      # A job-level block replaces the workflow's, so checkout needs contents
+      # spelled out here even though the job only files an issue.
+      contents: 'read'
+      # Read this run's per-leg job conclusions.
+      actions: 'read'
+      issues: 'write'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: 'File or update the CodeQL failure issue'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REPO: '${{ github.repository }}'
+          RUN_ID: '${{ github.run_id }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          DEDUP_LABEL: 'scope/ci-cd'
+        run: 'bash .github/scripts/codeql-failure-issue.sh'

@@ -46,14 +46,17 @@ class HostedHarnessClientTest {
     private HttpServer server;
     private ExecutorService serverExecutor;
     private URI baseUri;
+    private AtomicReference<String> capabilitiesBody;
 
     @BeforeEach
     void setUp() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         serverExecutor = Executors.newCachedThreadPool();
         server.setExecutor(serverExecutor);
+        capabilitiesBody =
+                new AtomicReference<>(capabilitiesJson(DIGEST, BOOT_ID));
         server.createContext("/capabilities", exchange -> sendJson(exchange,
-                200, capabilitiesJson(DIGEST, BOOT_ID), false));
+                200, capabilitiesBody.get(), false));
         server.start();
         baseUri = URI.create("http://127.0.0.1:"
                 + server.getAddress().getPort());
@@ -101,6 +104,7 @@ class HostedHarnessClientTest {
                     CreateHarnessSession.builder()
                             .harnessSessionId(SESSION_ID)
                             .approvalMode(DaemonApprovalMode.DEFAULT)
+                            .toolProfile("hosted-workspace-files/1")
                             .managedSessionStore(
                                     ManagedSessionStoreConnection.builder()
                                             .baseUri(URI.create(
@@ -108,6 +112,8 @@ class HostedHarnessClientTest {
                                             .tenantId("tenant-a")
                                             .workspaceId("workspace-a")
                                             .writerId(BOOT_ID)
+                                            .writerToken("qwt1_"
+                                                    + "a".repeat(43))
                                             .leaseDuration(
                                                     Duration.ofSeconds(45))
                                             .build())
@@ -125,6 +131,7 @@ class HostedHarnessClientTest {
         assertTrue(body.get().contains("\"sessionId\":\"" + SESSION_ID
                 + "\""));
         assertTrue(body.get().contains("\"sessionScope\":\"thread\""));
+        assertTrue(body.get().contains("\"toolProfile\":\"hosted-workspace-files/1\""));
         assertTrue(body.get().contains("\"managedSessionStore\":{"
                 + "\"baseUrl\":\"https://store.example\","));
         assertTrue(body.get().contains("\"tenantId\":\"tenant-a\""));
@@ -132,8 +139,82 @@ class HostedHarnessClientTest {
                 "\"workspaceId\":\"workspace-a\""));
         assertTrue(body.get().contains("\"writerId\":\"" + BOOT_ID
                 + "\""));
+        assertTrue(body.get().contains("\"writerToken\":\"qwt1_"
+                + "a".repeat(43) + "\""));
         assertTrue(body.get().contains("\"leaseDurationMs\":45000"));
         assertFalse(body.get().contains("cwd"));
+        assertThrows(IllegalArgumentException.class,
+                () -> ManagedSessionStoreConnection.builder()
+                        .baseUri(URI.create("https://store.example/"))
+                        .tenantId("tenant-a")
+                        .workspaceId("workspace-a")
+                        .writerId(BOOT_ID)
+                        .writerToken("short")
+                        .build());
+    }
+
+    @Test
+    void connectionOmitsUnsetOptionalCredentials() {
+        Map<String, Object> json = ManagedSessionStoreConnection.builder()
+                .baseUri(URI.create("https://store.example"))
+                .tenantId("tenant-a")
+                .workspaceId("workspace-a")
+                .writerId(BOOT_ID)
+                .build()
+                .toJson();
+        assertFalse(json.containsKey("writerToken"));
+        assertFalse(json.containsKey("allowInsecureHttp"));
+    }
+
+    @Test
+    void writerTokenLengthBoundsMatchTheSharedFixture() throws Exception {
+        var limits = com.alibaba.fastjson2.JSON
+                .parseObject(java.nio.file.Files.readString(locateFixture()))
+                .getJSONObject("limits");
+        int minimum = limits.getIntValue("minimumWriterTokenLength");
+        int maximum = limits.getIntValue("maximumWriterTokenLength");
+        assertTokenRejected("a".repeat(minimum - 1));
+        assertTokenAccepted("a".repeat(minimum));
+        assertTokenAccepted("a".repeat(maximum));
+        assertTokenRejected("a".repeat(maximum + 1));
+    }
+
+    private static void assertTokenAccepted(String token) {
+        ManagedSessionStoreConnection.builder()
+                .baseUri(URI.create("https://store.example"))
+                .tenantId("tenant-a")
+                .workspaceId("workspace-a")
+                .writerId(BOOT_ID)
+                .writerToken(token)
+                .build();
+    }
+
+    private static void assertTokenRejected(String token) {
+        assertThrows(IllegalArgumentException.class,
+                () -> ManagedSessionStoreConnection.builder()
+                        .baseUri(URI.create("https://store.example"))
+                        .tenantId("tenant-a")
+                        .workspaceId("workspace-a")
+                        .writerId(BOOT_ID)
+                        .writerToken(token)
+                        .build());
+    }
+
+    private static java.nio.file.Path locateFixture() {
+        java.nio.file.Path current = java.nio.file.Path
+                .of(System.getProperty("user.dir")).toAbsolutePath();
+        for (int depth = 0; depth < 6 && current != null; depth++) {
+            java.nio.file.Path candidate = current.resolve(java.nio.file.Path
+                    .of("packages", "core", "src", "managed-runtime",
+                            "contracts",
+                            "managed-session-store-v1.fixtures.json"));
+            if (java.nio.file.Files.isRegularFile(candidate)) {
+                return candidate;
+            }
+            current = current.getParent();
+        }
+        throw new AssertionError(
+                "cannot locate shared Managed Session store fixture");
     }
 
     @Test
@@ -327,7 +408,7 @@ class HostedHarnessClientTest {
                                     .workspaceId("workspace-a")
                                     .writerId(BOOT_ID)
                                     .leaseDuration(Duration.ofSeconds(45))
-                                            .build(), true));
+                                            .build(), true, "hosted-workspace-files/1"));
             HarnessRuntimeRecovery recovery = session.getRuntimeRecovery();
             assertNotNull(recovery);
             assertEquals("await_runtime", recovery.getPhase());
@@ -358,12 +439,39 @@ class HostedHarnessClientTest {
         assertEquals(1, detached.get());
         assertEquals(1, deleted.get());
         assertTrue(loadBody.get().contains("\"managedSessionStore\":{"));
+        assertTrue(loadBody.get().contains("\"toolProfile\":\"hosted-workspace-files/1\""));
         assertTrue(loadBody.get().contains(
                 "\"baseUrl\":\"https://store.example\""));
         assertTrue(loadBody.get().contains("\"writerId\":\"" + BOOT_ID
                 + "\""));
         assertTrue(loadBody.get().contains(
                 "\"passiveManagedRuntimeRecovery\":true"));
+    }
+
+    // The cancellation flag rides the wire separately: a plain passive
+    // re-attach omits it, and only an explicit cancellation takeover adds
+    // the field — anything else would let the daemon mint a canned
+    // CANCELLED record for a wait whose owner could still exist (Arm B).
+    @Test
+    void carriesTheCancellationTakeoverFlagOnlyOnTheCancellationLoad() {
+        AtomicReference<String> loadBody = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> {
+                    loadBody.set(new String(exchange.getRequestBody()
+                            .readAllBytes(), StandardCharsets.UTF_8));
+                    sendSessionJson(exchange, 200, sessionJson());
+                });
+        try (HostedHarnessClient client = newClient()) {
+            client.loadSession(new LoadHarnessSession(SESSION_ID, null,
+                    true));
+        }
+        assertFalse(loadBody.get().contains("cancellationTakeover"));
+        try (HostedHarnessClient client = newClient()) {
+            client.loadSession(new LoadHarnessSession(SESSION_ID, null,
+                    true, null, false, true));
+        }
+        assertTrue(loadBody.get().contains(
+                "\"cancellationTakeover\":true"));
     }
 
     @Test
@@ -681,6 +789,137 @@ class HostedHarnessClientTest {
         assertEquals(1, closes.get());
     }
 
+    @Test
+    void actionResolutionCarriesOriginalRevisionsAndClientIdentity() {
+        String action = "tool_approval_" + "a".repeat(32);
+        AtomicReference<String> payload = new AtomicReference<>();
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200,
+                sessionJson().replace("\"workspaceCwd\"", "\"approvalMode\":\"default\",\"workspaceCwd\"")));
+        server.createContext("/session/" + SESSION_ID + "/actions/" + action + "/resolve", exchange -> {
+            assertEquals(CLIENT_ID, exchange.getRequestHeaders().getFirst(HostedHarnessClient.CLIENT_ID_HEADER));
+            assertEquals("Bearer harness-token", exchange.getRequestHeaders().getFirst("Authorization"));
+            payload.set(readBody(exchange));
+            sendSessionJson(exchange, 200, "{\"requestId\":\"" + action + "\",\"state\":\"decided\",\"optionId\":\"allow\"}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = client.createSession(CreateHarnessSession.builder()
+                    .harnessSessionId(SESSION_ID).approvalMode(DaemonApprovalMode.DEFAULT)
+                    .approvalTimeoutMs(2000).build());
+            assertEquals("default", session.getApprovalMode());
+            client.resolveAction(session, action, "allow", 1, "hosted-tool-approval/1");
+            assertEquals(Map.of("optionId", "allow", "inputRevision", 1, "policyRevision", "hosted-tool-approval/1"),
+                    JsonSupport.parseObject(payload.get(), "Action response"));
+        }
+    }
+
+    // Issue #13320: a load refused fail-closed with a machine-readable code
+    // on the wire (e.g. a mixed-version takeover where the journal is newer
+    // than this reader) must surface the code to the caller; a failure
+    // without a recognizable code stays outcome-unknown.
+    @Test
+    void namedLoadRefusalSurfacesItsMachineReadableCode() {
+        AtomicInteger loadCalls = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> {
+                    loadCalls.incrementAndGet();
+                    // error and code deliberately differ, so the assertion
+                    // proves which field is read.
+                    sendJson(exchange, 503, "{\"error\":\"session open"
+                            + " failed\",\"code\":\"managed_session_open_"
+                            + "failed\"}", true);
+                });
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRefusedException failure = assertThrows(
+                    HarnessSessionRefusedException.class,
+                    () -> client.loadSession(new LoadHarnessSession(
+                            SESSION_ID)));
+            assertEquals(1, loadCalls.get(), "a named refusal must not be"
+                    + " retried by the SDK");
+            assertEquals(503, failure.getStatusCode());
+            assertEquals("managed_session_open_failed", failure.getCode());
+            assertTrue(failure.getMessage()
+                    .contains("managed_session_open_failed"));
+            assertTrue(failure.getCause()
+                    instanceof MutationOutcomeUnknownException);
+        }
+    }
+
+    @Test
+    void codelessLoadFailureStaysOutcomeUnknown() {
+        // An intermediary 503 carries no refusal envelope at all.
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendJson(exchange, 503, "Service Unavailable",
+                        true));
+
+        try (HostedHarnessClient client = newClient()) {
+            MutationOutcomeUnknownException failure = assertThrows(
+                    MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(new LoadHarnessSession(
+                            SESSION_ID)));
+            assertTrue(failure.getCause() instanceof DaemonHttpException);
+        }
+    }
+
+    @Test
+    void loadFailureWithoutARefusalCodeFieldStaysOutcomeUnknown() {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendJson(exchange, 503,
+                        "{\"error\":\"managed_session_open_failed\"}", true));
+
+        try (HostedHarnessClient client = newClient()) {
+            assertThrows(MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(new LoadHarnessSession(
+                            SESSION_ID)));
+        }
+    }
+
+    @Test
+    void oversizedLoadRefusalCodeStaysOutcomeUnknown() {
+        // The refusal code flows into the turn's error_code column, a
+        // VARCHAR(128): anything longer is not a named refusal.
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendJson(exchange, 503, "{\"error\":\"x\","
+                        + "\"code\":\"" + "c".repeat(129) + "\"}", true));
+
+        try (HostedHarnessClient client = newClient()) {
+            assertThrows(MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(new LoadHarnessSession(
+                            SESSION_ID)));
+        }
+    }
+
+    @Test
+    void loadRefusalCodeOutsideTheVocabularyStaysOutcomeUnknown() {
+        // A code carrying control characters could forge log lines where the
+        // refusal is recorded; only the snake_case vocabulary is named.
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendJson(exchange, 503, "{\"error\":\"x\","
+                        + "\"code\":\"managed_session_open_failed\\nforged\""
+                        + "}", true));
+
+        try (HostedHarnessClient client = newClient()) {
+            assertThrows(MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(new LoadHarnessSession(
+                            SESSION_ID)));
+        }
+    }
+
+    @Test
+    void loadTransportFailureStaysOutcomeUnknown() {
+        // The connection drops without an HTTP status: nothing to classify.
+        server.createContext("/session/" + SESSION_ID + "/load",
+                HttpExchange::close);
+
+        try (HostedHarnessClient client = newClient()) {
+            MutationOutcomeUnknownException failure = assertThrows(
+                    MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(new LoadHarnessSession(
+                            SESSION_ID)));
+            assertFalse(failure.getCause() instanceof DaemonHttpException);
+        }
+    }
+
     private HostedHarnessClient newClient() {
         return HostedHarnessClient.builder()
                 .baseUri(baseUri)
@@ -688,6 +927,99 @@ class HostedHarnessClientTest {
                 .capabilityDigest(DIGEST)
                 .heartbeatInterval(Duration.ZERO)
                 .build();
+    }
+
+    // The journal-contract marker is part of negotiation: a build too old to
+    // open message.delta journals is refused once here, not per Session.
+    @Test
+    void refusesAHarnessWithoutTheJournalContractToken() {
+        capabilitiesBody.set(
+                capabilitiesJsonWithoutJournalToken(DIGEST, BOOT_ID));
+        DaemonProtocolException error = assertThrows(
+                DaemonProtocolException.class, this::newClient);
+        assertTrue(error.getMessage()
+                .contains("managed_session_journal_delta_v1"));
+    }
+
+    // The load timeout is a distinct builder knob, validated like the
+    // other timeouts.
+    @Test
+    void loadTimeoutMustBePositive() {
+        assertThrows(IllegalArgumentException.class,
+                () -> HostedHarnessClient.builder()
+                        .loadTimeout(Duration.ZERO));
+    }
+
+    // The two knobs discriminate at the call site: a recovery-flagged load
+    // pays loadTimeout while a plain attach load meets requestTimeout
+    // (which also guards the connector's ConcurrentHashMap bin locks).
+    @Test
+    void recoveryLoadUsesLoadTimeoutPlainLoadUsesRequestTimeout()
+            throws Exception {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> {
+                    try {
+                        Thread.sleep(2_500);
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                    }
+                    sendSessionJson(exchange, 200, sessionJson());
+                });
+        try (HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ZERO)
+                // requestTimeout also caps the /capabilities negotiation
+                // inside build(); give it headroom past the contended-lane
+                // round trip while keeping requestTimeout < sleep <
+                // loadTimeout so the discrimination itself is unchanged.
+                .requestTimeout(Duration.ofMillis(1_000))
+                .loadTimeout(Duration.ofSeconds(10))
+                .build()) {
+            assertThrows(MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(
+                            new LoadHarnessSession(SESSION_ID, null,
+                                    false)));
+            assertNotNull(client.loadSession(
+                    new LoadHarnessSession(SESSION_ID, null, true)));
+            // The drive disjunct of the same predicate: an active takeover
+            // drive (passive=false, drive=true) also pays loadTimeout —
+            // the connector's headline recovery path.
+            assertNotNull(client.loadSession(
+                    new LoadHarnessSession(SESSION_ID, null, false, null,
+                            true)));
+        }
+    }
+
+    // The serve delegating app answers with a bare 404 while its runtime is
+    // still starting (before the contract middleware exists); that window is
+    // transient, never a protocol defect (G3 Harness-restart race).
+    @Test
+    void preContract404IsTransientNotAProtocolDefect() {
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    exchange.getResponseHeaders().set("Content-Type",
+                            "text/plain");
+                    exchange.sendResponseHeaders(404, -1);
+                    exchange.close();
+                });
+        Map<String, Object> block = Map.of("type", "text", "text", "hi");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            DaemonTransportException error = assertThrows(
+                    DaemonTransportException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build()));
+            assertTrue(error.getMessage().contains("pre-contract"));
+        }
     }
 
     private void createSessionRoute() {
@@ -714,6 +1046,17 @@ class HostedHarnessClientTest {
     }
 
     private static String capabilitiesJson(String digest, String bootId) {
+        return "{\"v\":1,\"mode\":\"http-bridge\","
+                + "\"features\":[\"hosted_harness_private_v1\","
+                + "\"managed_session_journal_delta_v1\"],"
+                + "\"transports\":[\"rest\"],\"hostedHarness\":{"
+                + "\"protocolVersions\":{\"current\":1,"
+                + "\"supported\":[1]},\"bootId\":\"" + bootId
+                + "\",\"capabilityDigest\":\"" + digest + "\"}}";
+    }
+
+    private static String capabilitiesJsonWithoutJournalToken(String digest,
+            String bootId) {
         return "{\"v\":1,\"mode\":\"http-bridge\","
                 + "\"features\":[\"hosted_harness_private_v1\"],"
                 + "\"transports\":[\"rest\"],\"hostedHarness\":{"

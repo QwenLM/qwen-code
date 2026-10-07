@@ -6,7 +6,10 @@
 
 import type { Application } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
-import { getServeProtocolVersions } from '../capabilities.js';
+import {
+  getServeProtocolVersions,
+  hostedPersonaServeFeatures,
+} from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
 import { MAX_UPLOAD_BYTES } from '../fs/index.js';
 import {
@@ -39,6 +42,7 @@ interface RegisterCapabilitiesRoutesDeps {
   sessionRestoreTimeoutMs: number;
   languageCodes: string[];
   daemonEnv: Readonly<NodeJS.ProcessEnv>;
+  agentCollaborationEnabledFor?: (workspaceCwd: string) => boolean;
   hostedHarness?: HostedHarnessCapabilities;
 }
 
@@ -89,9 +93,7 @@ export function registerCapabilitiesRoutes(
     )?.current?.runtime;
     const multipleAdmissionPools = entries.length > 1;
     const features = deps.hostedHarness
-      ? (['hosted_harness_private_v1'] as ReturnType<
-          typeof getAdvertisedServeFeatures
-        >)
+      ? hostedPersonaServeFeatures()
       : deps.currentServeFeatures();
     const runtimeRemoval = features.includes('workspace_runtime_removal');
     const envelope: CapabilitiesEnvelope = {
@@ -154,6 +156,15 @@ export function registerCapabilitiesRoutes(
         primary: entry.primary,
         trusted:
           entry.state === 'active' && entry.current?.runtime.trusted === true,
+        ...(features.includes('agent_collaboration_v1')
+          ? {
+              agentCollaborationEnabled:
+                entry.state === 'active' &&
+                entry.current?.runtime.trusted === true &&
+                deps.agentCollaborationEnabledFor?.(entry.workspaceCwd) ===
+                  true,
+            }
+          : {}),
         workflowsEnabled: workflowsEnabledForRuntime(
           entry.state === 'active' ? entry.current?.runtime : undefined,
           deps.daemonEnv,

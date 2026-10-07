@@ -8,6 +8,8 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import java.util.List;
 import java.util.Map;
+import jakarta.validation.constraints.NotNull;
+import com.fasterxml.jackson.annotation.JsonAnySetter;
 
 public final class ApiModels {
     private ApiModels() {
@@ -67,13 +69,23 @@ public final class ApiModels {
             long contextRevision, String state) {
     }
 
-    public record SessionCapabilities(boolean items, boolean snapshots,
-            boolean artifacts, boolean resync,
+    public record SessionCapabilities(
+            boolean items,
+            boolean snapshots,
+            boolean artifacts,
+            boolean resync,
             @JsonProperty("session_lifecycle") boolean sessionLifecycle,
-            boolean tasks) {
+            boolean tasks,
+            boolean actions,
+            @JsonProperty("session_close") boolean sessionClose,
+            @JsonProperty("session_archive") boolean sessionArchive,
+            @JsonProperty("session_unarchive") boolean sessionUnarchive,
+            @JsonProperty("session_delete") boolean sessionDelete) {
     }
 
-    public record WebShellSessionCapabilities(boolean tasks) {
+    public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
+            boolean workspaceTurns, boolean sessionClose, boolean sessionArchive, boolean sessionUnarchive,
+            boolean sessionDelete) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -94,13 +106,38 @@ public final class ApiModels {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record PublicCommandOperation(String id,
-            @JsonProperty("session_id") String sessionId, String type,
+    public record PublicCommandOperation(
+            String id,
+            @JsonProperty("session_id") String sessionId,
+            String type,
             String status,
             @JsonProperty("admission_stage") String admissionStage,
             @JsonProperty("delivery_state") String deliveryState,
             @JsonProperty("receipt_id") String receiptId,
-            boolean replayed) {
+            boolean replayed,
+            @JsonProperty("action_resolution") JsonNode actionResolution,
+            @JsonProperty("failure_code") String failureCode) {
+        public PublicCommandOperation(
+                String id,
+                String sessionId,
+                String type,
+                String status,
+                String admissionStage,
+                String deliveryState,
+                String receiptId,
+                boolean replayed) {
+            this(
+                    id,
+                    sessionId,
+                    type,
+                    status,
+                    admissionStage,
+                    deliveryState,
+                    receiptId,
+                    replayed,
+                    null,
+                    null);
+        }
     }
 
     public record PublicList<T>(String object, List<T> data,
@@ -200,15 +237,85 @@ public final class ApiModels {
             @NotBlank @Size(max = 128) String idempotencyKey) {
     }
 
+    public record ChangeCwdRequest(
+            @NotNull @JsonProperty("cwd_relative") String cwdRelative,
+            @NotNull @JsonProperty("expected_context_revision")
+                    Long expectedContextRevision) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicCwdOperation(
+            String id,
+            @JsonProperty("session_id") String sessionId,
+            String type,
+            String status,
+            @JsonProperty("expected_context_revision")
+                    long expectedContextRevision,
+            @JsonProperty("target_cwd_relative") String targetCwdRelative,
+            @JsonProperty("result_context_revision")
+                    Long resultContextRevision,
+            @JsonProperty("failure_code") String failureCode,
+            boolean replayed) {
+    }
+
+    public record WebShellChangeCwdRequest(
+            @Size(max = 128) String requestId,
+            @NotBlank String sessionId,
+            @NotBlank @Size(max = 128) String idempotencyKey,
+            @NotNull String cwdRelative,
+            @NotNull Long expectedContextRevision) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellCwdOperation(
+            String operationId,
+            String sessionId,
+            String type,
+            String status,
+            long expectedContextRevision,
+            String targetCwdRelative,
+            Long resultContextRevision,
+            String failureCode,
+            boolean replayed) {
+    }
+
     public record WebShellOperationRequest(@NotBlank String sessionId,
             @NotBlank @Size(max = 64) String operationId) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record WebShellCommandOperation(String operationId,
-            String sessionId, String type, String status,
-            String admissionStage, String deliveryState, String receiptId,
-            boolean replayed) {
+    public record WebShellCommandOperation(
+            String operationId,
+            String sessionId,
+            String type,
+            String status,
+            String admissionStage,
+            String deliveryState,
+            String receiptId,
+            boolean replayed,
+            JsonNode actionResolution,
+            String failureCode) {
+        public WebShellCommandOperation(
+                String operationId,
+                String sessionId,
+                String type,
+                String status,
+                String admissionStage,
+                String deliveryState,
+                String receiptId,
+                boolean replayed) {
+            this(
+                    operationId,
+                    sessionId,
+                    type,
+                    status,
+                    admissionStage,
+                    deliveryState,
+                    receiptId,
+                    replayed,
+                    null,
+                    null);
+        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -234,6 +341,7 @@ public final class ApiModels {
             @JsonProperty("created_at") long createdAt,
             @JsonProperty("started_at") Long startedAt,
             @JsonProperty("settled_at") Long settledAt,
+            @JsonProperty("output_cursor") String outputCursor,
             @JsonProperty("artifact_refs") List<String> artifactRefs,
             @JsonProperty("action_capabilities")
                     List<String> actionCapabilities) {
@@ -243,8 +351,105 @@ public final class ApiModels {
     public record WebShellTask(String taskId, String sessionId, String kind,
             String state, Long definitionRevision, String runtimeState,
             long createdAt, Long startedAt, Long settledAt,
+            String outputCursor,
             List<String> artifactRefs, List<String> actionCapabilities) {
     }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicTaskEvent(
+            @JsonProperty("schema_version") int schemaVersion,
+            @JsonProperty("projection_version") int projectionVersion,
+            @JsonProperty("task_id") String taskId,
+            @JsonProperty("session_id") String sessionId,
+            String type, String cursor,
+            @JsonProperty("created_at") long createdAt,
+            String state,
+            @JsonProperty("runtime_state") String runtimeState,
+            String text, Boolean truncated,
+            @JsonProperty("artifact_id") String artifactId) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellTaskEvent(int schemaVersion, int projectionVersion,
+            String taskId, String sessionId, String type, String cursor,
+            long createdAt, String state, String runtimeState, String text,
+            Boolean truncated, String artifactId) {
+    }
+
+    public record WebShellTaskEventQueryRequest(@NotBlank String sessionId,
+            @NotBlank String taskId, @Size(max = 512) String after,
+            Integer limit) {
+    }
+
+    public record PermissionResponse(
+            @NotBlank String kind,
+            @JsonProperty("input_revision") JsonNode inputRevision,
+            @JsonProperty("policy_revision") @NotBlank @Size(max = 128) String policyRevision,
+            @JsonProperty("option_id") @NotBlank @Size(max = 128) String optionId) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown Action request field: " + name);
+        }
+    }
+
+    public record WebShellPermissionResponse(
+            @NotBlank String kind,
+            JsonNode inputRevision,
+            @NotBlank @Size(max = 128) String policyRevision,
+            @NotBlank @Size(max = 128) String optionId) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown Action request field: " + name);
+        }
+    }
+
+    public record WebShellActionQueryRequest(
+            @NotBlank String sessionId, @Size(max = 512) String cursor, Integer limit) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown Action request field: " + name);
+        }
+    }
+
+    public record WebShellActionGetRequest(
+            @NotBlank String sessionId, @NotBlank @Size(max = 128) String actionId) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown Action request field: " + name);
+        }
+    }
+
+    public record WebShellActionRespondRequest(
+            @Size(max = 128) String requestId,
+            @NotBlank String sessionId,
+            @NotBlank @Size(max = 128) String actionId,
+            @NotBlank @Size(max = 128) String idempotencyKey,
+            @NotNull @Valid WebShellPermissionResponse response) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown Action request field: " + name);
+        }
+    }
+
+    public record PublicActionList(
+            List<JsonNode> data,
+            @JsonProperty("has_more") boolean hasMore,
+            @JsonProperty("next_cursor") String nextCursor) {}
+
+    public record ArtifactAccess(@JsonProperty("can_read_content") boolean canReadContent) { }
+
+    public record ToolResultResponse(JsonNode result, ArtifactAccess access) { }
+
+    public record ArtifactResponse(JsonNode artifact, ArtifactAccess access) { }
+
+    public record WebShellToolResultRequest(@NotBlank String sessionId,
+            @NotBlank String itemId) { }
+
+    public record WebShellArtifactRequest(@NotBlank String sessionId,
+            @NotBlank String artifactId) { }
+
+    public record WebShellArtifactQueryRequest(@NotBlank String sessionId,
+            String cursor, Integer limit) { }
 
     public record WebShellTaskQueryRequest(@NotBlank String sessionId,
             String cursor, Integer limit) {
@@ -285,5 +490,30 @@ public final class ApiModels {
     public record WebShellTranscript(List<WebShellItem> items,
             List<WebShellEvent> events, long coveredSequence,
             String olderCursor, boolean hasMore, long lastSequence) {
+    }
+
+    /**
+     * An AgentDefinition revision's content (D8a). The server stores and
+     * digests it; no field changes Session execution yet.
+     */
+    public record AgentDefinitionRequest(
+            @NotNull Map<String, Object> model,
+            @NotNull @Size(max = 1_000_000) String instructions,
+            @NotNull @Size(max = 1000)
+                    List<@NotNull Map<String, Object>> tools,
+            @Size(max = 1000) List<@NotNull Map<String, Object>> skills,
+            @JsonProperty("mcp_servers") @Size(max = 100)
+                    List<@NotNull Map<String, Object>> mcpServers,
+            @JsonProperty("permission_policy") @NotNull
+                    Map<String, Object> permissionPolicy,
+            @JsonProperty("environment_template_id") @Size(max = 128)
+                    String environmentTemplateId,
+            Map<String, Object> metadata) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record AgentDefinition(String id, String object, String revision,
+            String digest, @JsonProperty("created_at") long createdAt,
+            Map<String, Object> metadata) {
     }
 }

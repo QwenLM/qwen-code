@@ -18,6 +18,7 @@ import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import {
   getEmptyMcpToolTitleDescription,
   localizeToolDisplayName,
+  sanitizeControlChars,
 } from './toolFormatting';
 import {
   ThinkingTranslateButton,
@@ -44,6 +45,14 @@ interface ToolApprovalProps {
    * it — it just never grabs focus on its own.
    */
   keyboardActive?: boolean;
+  /**
+   * Id of an extra description the caller renders beside this panel, added to
+   * `aria-describedby`. The Managed approvals card states there that the tool
+   * arguments are unavailable, which is exactly the case where the panel's own
+   * description (tool name only) would let a screen-reader user confirm blind.
+   * Pass it only while that element is mounted, so no IDREF dangles.
+   */
+  extraDescriptionId?: string;
   planTodos?: readonly TodoItem[];
   planExecutionMode?: string;
   generateContent?: SessionContentGenerator;
@@ -247,6 +256,7 @@ export function ToolApproval({
   variant = 'inline',
   disabled = false,
   keyboardActive = true,
+  extraDescriptionId,
   planTodos = [],
   planExecutionMode,
   generateContent,
@@ -555,6 +565,14 @@ export function ToolApproval({
     [request.content, hostOwnsEditDiffPreview],
   );
   const command = getCommandFromRawInput(request);
+  // The command block renders `rawInput.command`, which every producer leaves
+  // verbatim — so this is the last choke point before an approver reads what
+  // they are about to authorize. Neutralise invisible controls here (C0/ANSI,
+  // C1, and the bidi embedding/isolate controls) so a crafted command cannot
+  // display one string while authorizing different bytes. Same helper
+  // `ShellToolOutput` already uses for shell data. The raw `command` is kept
+  // for execution and for the explain button below.
+  const commandDisplay = sanitizeControlChars(command ?? '');
   const showsCommandBlock =
     !isGoal && Boolean((isExec && command) || showsContent);
   // Exec warnings (e.g. command-substitution notices) arrive as real content
@@ -598,6 +616,7 @@ export function ToolApproval({
       aria-describedby={[
         questionId,
         descriptionText ? descId : null,
+        extraDescriptionId ?? null,
         showsCommandBlock || isGoal ? commandId : null,
         execWarningsText ? contentId : null,
       ]
@@ -630,8 +649,12 @@ export function ToolApproval({
       ) : isExec && command ? (
         <>
           <div className={styles.code}>
-            <pre className={styles.codeBlock} id={commandId} title={command}>
-              {command}
+            <pre
+              className={styles.codeBlock}
+              id={commandId}
+              title={commandDisplay}
+            >
+              {commandDisplay}
             </pre>
           </div>
           {execWarningsText && (

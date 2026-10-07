@@ -83,7 +83,10 @@ correct `cursor_expired` or resync.
   the frame can be older than the Snapshot the client then reads.
 - The WebShell transcript states what it already returned: without a cursor, a
   Session with a Snapshot gets all of its Items, the events up to the Snapshot
-  other than input, text-delta and tool-call updates, and every later event;
+  other than `turn.accepted`, `item.output_text.delta`,
+  `item.reasoning.delta`, `item.tool_call.updated` and
+  `item.tool_result.updated`, which the Items already hold, and every later
+  event;
   `limit` bounds the event pages otherwise.
 - `PublicEvent` and `WebShellEvent` state that events replay with the versions
   and identity they were accepted with, except after a `stream.reconciled`
@@ -109,7 +112,7 @@ Part that an event changes:
 | `turn.accepted`                                               | `data.itemId`, else `item_<turn>_input`                                                      | none; the event fills several Parts                                                                                                    |
 | `item.output_text.delta` and `item.reasoning.delta` with text | `data.itemId`, else `item_<turn>_assistant`                                                  | the Part of the event right before it, when that event is a delta of the same type and Item; otherwise `part_<turn>_<type>_<sequence>` |
 | a text delta with empty text                                  | none                                                                                         | none; the projection skips it                                                                                                          |
-| `item.tool_call.updated`                                      | `data.itemId`, else derived from the tool call id, or from the turn and sequence without one | none                                                                                                                                   |
+| `item.tool_call.updated` and `item.tool_result.updated`       | `data.itemId`, else derived from the tool call id, or from the turn and sequence without one | none                                                                                                                                   |
 | any other event                                               | none                                                                                         | none                                                                                                                                   |
 
 This is the rule the materializer already applies when it builds Items, and
@@ -120,8 +123,10 @@ key; other events need no read. `data.contentPartId` is left as it was, and
 clients should use the top-level field.
 
 Flyway V15 is a Java migration that gives the events written before V14 their
-identity with the same rule, one Session at a time in sequence order and in
-pages of 5,000 events, so its memory does not grow with a Session's length. It
+identity with the same rule. It lists the Sessions from their own table in
+pages of 1,000 and reads each Session's events in sequence order in pages of
+5,000, so its memory grows neither with the number of Sessions nor with a
+Session's length. It
 reads `data_json` only for the four event types that have an identity, and it
 writes
 each run of consecutive events with the same identity, such as one text Part,
@@ -189,8 +194,41 @@ one response.
 
 The client recognizes the resync frame by its event name and the missing id.
 The provider turns it into the existing `stream_gap` event, so the session hook
-reloads the transcript and resumes after its `lastSequence`, as it does after
+reloads the transcript and resumes from the transcript head, as it does after
 `stream.reconciled`.
+
+The hook's gap recovery merges the fresh transcript into the displayed events
+instead of replacing them. The snapshot is authoritative for the range it
+covers ([first event, lastSequence]): live events missing from it — for
+example, streamed deltas the server has since assembled into an Item — are
+dropped rather than duplicated, while live events newer than the snapshot head
+survive a lagging read. Below the window, events the user paged in survive
+only while the paged region stays contiguous with the window — a hole between
+them would otherwise render two unrelated delta runs as one assistant bubble,
+so on a hole the pages drop and the window's cursor is adopted to page them
+back — and item projections never survive — after a retraction the server
+stands behind the raw events. The paging cursor follows the retained content:
+cleared when a non-empty snapshot carries the full history, adopted from the
+snapshot when the client has none or a hole opens between the paged pages and
+the window, and left with the user otherwise. A gap resync that does not
+advance the cursor counts as a stall; the third consecutive stall surfaces a
+persistent error, and any delivered event or advancing snapshot resets the
+count.
+
+The stream client tolerates corrupt frames. A frame whose data payload does
+not parse, parses to something without a string `type`, or — mid-stream —
+carries no `data:` line at all counts as corrupt. The default is fail closed:
+only the delta types whose text the snapshot re-assembles
+(`item.output_text.delta`, `item.reasoning.delta`) are skipped, with a
+rate-limited warning, and later frames move the consumer's cursor past them.
+Every other corrupt frame yields a resync — including one whose `event:` name
+is unusable. A resync also fires when more than three corrupt frames arrive
+with no decoded event between them (heartbeats do not reset the count — only
+a delivered event does), or when a whole connection delivered nothing but
+skips. A torn final buffer is a mid-frame disconnect: logged as such and
+never charged to the corruption budget. Synthesized resync frames carry
+placeholder watermarks (`replayFloorSequence: 0`,
+`snapshotThroughSequence: 0`) that no client code reads.
 
 ## 5. Tests
 
@@ -209,13 +247,15 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
   - a catch-up that races a writer and hands over to live events without gaps
     or duplicates;
   - a stuck stream that falls behind by 600 events, more than the 512 the hub
-    keeps, and reads the dropped ones back from the store;
+    keeps (the test asserts this), reads the dropped ones back from the store
+    and sends no resync frame;
   - a floor raised past a lagging stream, which then sends one resync frame
     after the last event it delivered;
   - expired cursors on the JSON query and on both streams, and the floor's cap
     and monotonicity.
 
-  The suite sets both the poll and the heartbeat interval to one minute, so an
+  The stuck-stream and lagging-stream cases run on each stream, since each has
+  its own delivery loop, and resume from a non-zero cursor. The suite sets both the poll and the heartbeat interval to one minute, so an
   idle stream does not read the store during a test and live events can reach
   it only through the hub.
 
@@ -228,15 +268,25 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
   `ManagedAgentMySqlIT` runs the same upgrade on MySQL and checks the replay
   floor there.
 - The web-shell tests decode a resync frame and check that the provider yields
-  one `stream_gap` and stops.
+  one `stream_gap` and stops, and that the session hook then reloads the
+  transcript and resubscribes from its head. The hook's gap-merge tests pin
+  the window semantics: paged pages survive while contiguous with the window,
+  superseded deltas drop, the cursor tracks the retained content, and
+  repeated non-advancing resyncs surface an error. The stream client's tests
+  pin the corrupt-frame policy: only re-assemblable deltas skip (at a bounded
+  warning rate), every other corrupt frame resyncs — including one with no
+  usable event name — more than three corrupt frames with no decoded event
+  between them resync (heartbeats do not dilute the count), a mid-frame close
+  logs distinctly and spares the budget, and a connection of only skips ends
+  with a resync.
 
 ## 6. Compatibility
 
 - Events gain fields and Sessions report the stored floor; nothing is removed.
 - The WebShell stream's `409` response leaves the contract; the server never
   returned it.
-- V14 adds columns with defaults. V15 lists the Sessions that have events,
-  reads each Session's events once in pages, all in the migration's
+- V14 adds columns with defaults. V15 lists the Sessions in pages, reads each
+  Session's events once in pages, all in the migration's
   transaction, and updates each run of events with one statement. On a local MariaDB it migrated 200,000 events in 100 Sessions
   in under three seconds; a table with many short runs takes longer.
 - Upgrade all replicas together. A replica that still runs the previous

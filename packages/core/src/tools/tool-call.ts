@@ -61,6 +61,20 @@ function bridgeRefusal(message: string): Error {
   return new Error(`${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${message}`);
 }
 
+/**
+ * Names the target in a validation error its own `build()` raised after
+ * tool_call unwrapped it. Unlabelled, "params must have required property
+ * 'url'" reads as a fault in tool_call's `{name, arguments}` envelope
+ * (#12889). Only relabels a rejection the target already made, so it can never
+ * refuse a call the target would accept.
+ */
+export function describeBridgedArgumentError(
+  targetName: string,
+  message: string,
+): string {
+  return `Deferred tool "${targetName}" (called through ${ToolNames.TOOL_CALL}) rejected the arguments: ${message.replace(/\.$/, '')}. Pass arguments matching the schema returned by ${ToolNames.TOOL_SEARCH} for "${targetName}".`;
+}
+
 export async function resolveDeferredToolCall(
   registry: ToolRegistry,
   envelope: Record<string, unknown>,
@@ -213,11 +227,31 @@ export async function resolveDeferredToolCall(
     };
   }
 
+  // The arguments must be written against a schema the model currently has.
+  // A review is recorded when tool_search returns the schema and rebuilt
+  // from surviving results after history replacement, so a tool
+  // never reviewed here, or whose review left context with a compaction,
+  // clear or rewind, is refused rather than run by name (#12569). A registry
+  // that does not define the lookup at all is deliberately not gated: both
+  // production callers (coreToolScheduler, the ACP Session) pass a
+  // ToolRegistry, which always defines it, so only partial test registries
+  // reach that branch.
+  const reviewed = registry.getReviewedDeclaration?.(target.name);
+  if (
+    typeof registry.getReviewedDeclaration === 'function' &&
+    reviewed === undefined
+  ) {
+    return {
+      error: bridgeRefusal(
+        `Deferred tool "${target.name}" has no verified schema review in the current context. Run tool_search with select:${target.name} and call it with the returned schema.`,
+      ),
+      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+      targetName: target.name,
+    };
+  }
   // A hidden tool whose declaration or MCP server changed since tool_search
   // returned it would run arguments written against a schema the model no
-  // longer has, possibly on a replacement server. A tool never reviewed in
-  // this session keeps working by name.
-  const reviewed = registry.getReviewedDeclaration?.(target.name);
+  // longer has, possibly on a replacement server.
   if (
     reviewed !== undefined &&
     reviewed !== deferredDeclarationFingerprint(target)

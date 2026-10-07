@@ -4,11 +4,43 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { invalidateModelCatalog } from '@qwen-code/qwen-code-core/models/model-catalog.js';
 import {
   extractModelInfoFromNewSessionResult,
   extractSessionModelState,
 } from './acpModelInfo.js';
+
+let tempDir: string;
+let previousHome: string | undefined;
+let previousSwitch: string | undefined;
+
+beforeAll(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-model-info-'));
+  previousHome = process.env['QWEN_HOME'];
+  previousSwitch = process.env['QWEN_CODE_MODELS_DEV'];
+  process.env['QWEN_HOME'] = tempDir;
+  delete process.env['QWEN_CODE_MODELS_DEV'];
+  invalidateModelCatalog();
+});
+
+afterAll(() => {
+  if (previousHome === undefined) {
+    delete process.env['QWEN_HOME'];
+  } else {
+    process.env['QWEN_HOME'] = previousHome;
+  }
+  if (previousSwitch === undefined) {
+    delete process.env['QWEN_CODE_MODELS_DEV'];
+  } else {
+    process.env['QWEN_CODE_MODELS_DEV'] = previousSwitch;
+  }
+  invalidateModelCatalog();
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
 
 describe('extractSessionModelState', () => {
   it('extracts full model state from NewSessionResponse.models', () => {

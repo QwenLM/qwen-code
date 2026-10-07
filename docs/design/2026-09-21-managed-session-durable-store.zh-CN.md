@@ -109,7 +109,7 @@ DELETE /v1/agents/sessions/{sessionId}
 
 归档会清除在线事件游标，但保留最后一代 Harness generation，作为私有权威已经存在的哨兵。取消归档后，下一次 Turn 会先冷加载该 Session，再绑定新的 generation。没有哨兵的 Session 也会先探测 load，只有明确收到 not-found 才执行 create，从而覆盖首次私有写入是元数据而不是 Turn 的 Session。私有 `create` 路径遇到已有权威时返回 `409`，而 `load` 在权威不存在时返回 `404`，不会顺手初始化空权威，从而避免重试恢复静默替换或凭空生成会话历史。
 
-在线 Hosted attachment 还会绑定到规范化后的 Store endpoint、tenant、workspace 和 Harness writer generation。热 attach、并发冷加载合并和 restore race 都会比较这组身份；一旦不同，就以 `managed_session_store_conflict` fail closed，而不会让另一个 tenant 或 Store 描述复用内存中的 Session。lease 时长变化不改变存储身份。
+当前切片中，Java connector 以 `(tenantId, sessionId)` 缓存在线 Hosted attachment，因此一个租户的缓存引用不会被 connector 交给另一个租户；Harness 本身仅以 `sessionId` 作为内存 Session 的键，热 attach、并发冷加载合并与 restore race 都不比较所呈现的租户，也不比较规范化的 Store endpoint 或 workspace；但 Harness writer generation 会被检查——`writerId` 与 Harness 进程 boot ID 不一致的 attach 会以 `409 hosted_harness_generation_mismatch` fail closed；`managed_session_store_conflict` 的 fail-closed 围栏属于集成切片的目标设计而非已交付行为。lease 时长变化不改变存储身份。
 
 第一阶段删除有意只实现软 tombstone。`GET` 和列表 API 会隐藏 `DELETED` Session，而已连接客户端仍可重放已经提交的公共删除事件。私有 journal/resource 字节会继续保留，直到 writer seal、execution 对账、legal hold、保留期和垃圾回收全部实现。因此不能把当前能力宣称为物理擦除。
 
@@ -172,6 +172,8 @@ interface ManagedSessionResourceStore {
 | `created_at`、`updated_at`                                                 | 数据库时间                                                              |
 
 主键为 `(tenant_id, session_id)`。每个变更事务通过唯一键锁定这一行。InnoDB locking read 为 head CAS 提供所需的行级串行化。[MySQL InnoDB locking](https://dev.mysql.com/doc/refman/8.0/en/innodb-best-practices.html)
+
+writer API 的 `leaseUntil` 与 publication/activation 到期值均为 Unix epoch 毫秒，不能使用 JDBC 将数据库本地 `DATETIME` 解码后得到的偏移 epoch。内部租约计算和持久化 `DATETIME` 保持不变，仅在标量 epoch 边界由数据库转换。绑定整秒并单独加回原小数部分，保留 MariaDB 精度。在原加锁 SQL 查询中检查 producer writer 是否存活，避免按 JVM 时区转换 `LocalDateTime`。JDBC/JVM/数据库时区不同时，获取、重复获取、续约和接管的返回值都必须与持久化 SQL Unix epoch 一致；activation 即使 phase 仍为 active，到期后也应拒绝。本修正不增加时区设置或 schema 迁移。混版滚动升级对它不是安全路径：只要仍有旧版本实例写入偏移的到期值，已修正的实例就会回收它们，于是进行中的 tool publication 是丢失，而不是被排空。必须先停止所有旧版本实例，这与[持久生命周期](2026-09-28-managed-agent-durable-lifecycle.zh-CN.md)为其自身迁移设定的边界一致。
 
 ### 6.2 `qwen_managed_session_journal_tx`
 

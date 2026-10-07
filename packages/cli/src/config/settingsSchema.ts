@@ -38,6 +38,7 @@ import {
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
+import type { Mem0Settings } from './mem0-settings.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
@@ -2330,6 +2331,67 @@ const SETTINGS_SCHEMA = {
     description: 'Settings for managed auto-memory.',
     showInDialog: false,
     properties: {
+      mem0: {
+        type: 'object',
+        label: 'Mem0',
+        category: 'Memory',
+        requiresRestart: true,
+        default: undefined as Mem0Settings | undefined,
+        description:
+          'Bundled Mem0 connection. Configure in user or system settings.',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['baseUrl'],
+          properties: {
+            baseUrl: { type: 'string', format: 'uri' },
+            envKey: {
+              type: 'string',
+              pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
+              default: 'MEM0_API_KEY',
+              description:
+                'Credential environment variable name. Its value may come from the process environment, .env, or the top-level settings env field.',
+            },
+            credentialEnv: {
+              type: 'string',
+              pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
+              deprecated: true,
+              description:
+                'Legacy alias for envKey. If both are set, their values must match.',
+            },
+            protocol: {
+              type: 'string',
+              enum: [
+                'mem0-v2',
+                'mem0-v3',
+                'mem0-oss-2026-08',
+                'aliyun-polardb-mysql-2026-08',
+                'mem0-platform-v3',
+                'mem0-oss-rest-2026-08',
+              ],
+              default: 'mem0-v2',
+            },
+            scope: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                userId: { type: 'string', minLength: 1, maxLength: 256 },
+                agentId: { type: 'string', minLength: 1, maxLength: 256 },
+                appId: { type: 'string', minLength: 1, maxLength: 256 },
+              },
+            },
+            enableWrites: { type: 'boolean', default: false },
+            allowInsecureHttp: { type: 'boolean', default: false },
+            timeoutMs: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 30000,
+              default: 5000,
+            },
+          },
+        },
+      },
       enableManagedAutoMemory: {
         type: 'boolean',
         label: 'Enable Managed Auto-Memory',
@@ -2378,7 +2440,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         minimum: 0,
         description:
-          "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults.",
+          "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review, memory metadata migration). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults. User/System/SystemDefaults scopes only; Workspace values are ignored with a warning.",
         showInDialog: false,
       },
       agentMaxTurns: {
@@ -2389,7 +2451,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         minimum: 0,
         description:
-          "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); 0 disables the turn limit.",
+          "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); 0 disables the turn limit. User/System/SystemDefaults scopes only; Workspace values are ignored with a warning.",
         showInDialog: false,
       },
       enableTeamMemory: {
@@ -2829,7 +2891,10 @@ const SETTINGS_SCHEMA = {
           required: ['filesystem', 'network'],
           additionalProperties: false,
           properties: {
-            backend: { type: 'string', enum: ['auto', 'bwrap'] },
+            backend: {
+              type: 'string',
+              enum: ['auto', 'bwrap', 'landlock'],
+            },
             filesystem: {
               type: 'string',
               enum: ['read-only', 'workspace-write'],
@@ -2847,6 +2912,16 @@ const SETTINGS_SCHEMA = {
         description:
           'Expose ordinary tools through the isolated exec JavaScript tool. Load deferred descriptions and schemas on demand with tool_search; if search is unavailable, include all allowed signatures in exec. Direct control tools remain available. Ignored in safe and bare modes.',
         showInDialog: true,
+      },
+      freeform: {
+        type: 'boolean',
+        label: 'Freeform Tool Input (Experimental)',
+        category: 'Tools',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Use raw text input for the Code Mode exec tool on OpenAI Responses models. Effective only when tools.codeModeOnly is true and the selected model uses wireApi "responses". Enable only for endpoints that support Responses Custom Tools.',
+        showInDialog: false,
       },
       sandbox: {
         type: 'object',
@@ -3747,7 +3822,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         minimum: 1,
         description:
-          'Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Use maxParallelAgentsByModel to cap a specific model below this global limit.',
+          'Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Foreground per-model launches are bounded by maxParallelAgentsByModel and do not consume this global background budget. Use maxParallelAgentsByModel to cap a specific model below this global limit.',
         showInDialog: false,
         jsonSchemaOverride: {
           type: 'integer',
@@ -3761,7 +3836,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as Record<string, number> | undefined,
         description:
-          'Per-model maximum number of background sub-agents that can run concurrently, keyed by model ID (e.g. { "qwen3-max": 2 }). Useful when a model has a lower concurrency capacity. Takes precedence over the global maxParallelAgents for the matched model; models not listed here fall back to the global limit.',
+          'Per-model maximum number of top-level sub-agents that can run concurrently on a given model, keyed by model ID (e.g. { "qwen3-max": 2 }). Bounds both background and foreground launches: a foreground launch on a capped model queues inline (showing "Waiting for a model slot") until a slot frees. Applies to top-level launches only — nested sub-agents, teammate fan-out, foreground interactive forks, external-executor subagents, and agents dispatched by a workflow script are not capped by this setting. For background launches the tighter of this cap and the global maxParallelAgents binds; foreground launches are bounded by this cap alone. Models not listed here fall back to the global maxParallelAgents for background launches and are uncapped for foreground launches — list a model here to bound its foreground fan-out.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.SHALLOW_MERGE,
         jsonSchemaOverride: {
@@ -4306,6 +4381,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.',
+        showInDialog: true,
+      },
+      agentCollaboration: {
+        type: 'boolean',
+        label: 'Enable Agent Collaboration',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable persistent workspace Agents collaborating on shared task threads (experimental). Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
         showInDialog: true,
       },
       artifact: {

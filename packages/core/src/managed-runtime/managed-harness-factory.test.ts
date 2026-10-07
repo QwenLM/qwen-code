@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Storage } from '../config/storage.js';
 import {
@@ -843,6 +844,32 @@ describe('managed harness factory', () => {
     await session.close();
   });
 
+  it('binds a Hosted Runtime wait to its original turn', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const commit = await runtimeCommit(session);
+    await handle.commitAwaitRuntimeBatch([commit], {
+      turnId: 'turn-1',
+      promptId: 'prompt-1',
+    });
+    const wait = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(wait.identity).toMatchObject({
+      turnId: 'turn-1',
+      promptId: 'prompt-1',
+      activationId: session.activation.activationId,
+    });
+    await expect(
+      handle.commitAwaitRuntimeBatch([commit], {
+        turnId: 'turn-2',
+        promptId: 'prompt-2',
+      }),
+    ).rejects.toThrow(/cannot change the current unfinished turn/);
+    await session.close();
+  });
+
   it('marks settled Runtime receipts consumed without a second dispatch', async () => {
     const workspace = await createWorkspace();
     const session = await open(workspace);
@@ -926,6 +953,63 @@ describe('managed harness factory', () => {
     );
     expect(checkpoint.tools?.items.map((item) => item.ordinal)).toEqual([0, 1]);
     await session.close();
+  });
+
+  it('settles an after-tool Hook stop without claiming consumption, survives cold reopen and allows the next turn', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    expect(await handle.settleHookStoppedRuntimeContinuation()).toBeNull();
+    await handle.commitAwaitRuntimeBatch([await runtimeCommit(session)], {
+      turnId: 'turn-1',
+      promptId: 'prompt-1',
+    });
+    expect(await handle.settleHookStoppedRuntimeContinuation()).toBeNull();
+    const bytes = Buffer.from(
+      '{"outcome":"completed","output":"original physical receipt"}',
+    );
+    const outcomeRef = await session.resources.publish(
+      'managed-tool-outcome',
+      bytes,
+    );
+    const ready = await handle.resolveAwaitRuntime('ex-1', outcomeRef);
+    expect(await handle.settleConsumedRuntimeContinuation()).toBeNull();
+    const stopped = await handle.settleHookStoppedRuntimeContinuation();
+    expect(stopped?.continuation.phase).toBe('turn_settled');
+    expect(stopped?.tools).toEqual(ready?.tools);
+    expect(stopped?.tools?.items[0]).toMatchObject({
+      state: 'settled',
+      consumed: false,
+      outcomeRef,
+    });
+    expect(stopped?.runtime).toEqual(ready?.runtime);
+    expect(await session.resources.read(outcomeRef)).toEqual(bytes);
+    expect(await handle.settleHookStoppedRuntimeContinuation()).toBeNull();
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+    const restored = await open(workspace);
+    try {
+      const successor = createManagedHarnessHandle(restored);
+      const restoredCheckpoint = await successor.ensureRunnable();
+      expect(restoredCheckpoint.continuation.phase).toBe('turn_settled');
+      expect(restoredCheckpoint.tools).toEqual(ready?.tools);
+      expect(await restored.resources.read(outcomeRef)).toEqual(bytes);
+      await successor.commitDurableWait(waitCommit(await waitRefs(restored)), {
+        turnId: 'turn-2',
+        promptId: 'prompt-2',
+      });
+      const next = parseHarnessCheckpointV1(
+        (await restored.authority.readCheckpointState())!,
+      );
+      expect(next.identity).toMatchObject({
+        turnId: 'turn-2',
+        promptId: 'prompt-2',
+      });
+      expect(next.continuation.phase).toBe('await_action');
+    } finally {
+      await restored.close();
+    }
   });
 
   it('keeps await_runtime across a cold reopen until results are settled', async () => {
@@ -1060,6 +1144,185 @@ describe('managed harness factory', () => {
     ).rejects.toThrow(/approval wait must resolve before Runtime dispatch/);
     await session.close();
   });
+
+  it('continues a turn that starts with an approval into its Runtime batch', async () => {
+    const session = await open(await createWorkspace());
+    const previous = createManagedHarnessHandle(session);
+    await previous.ensureRunnable();
+    await settleTurnComplete(session);
+    await previous.detach();
+    const activation = await session.replaceActivation();
+    const handle = createManagedHarnessHandle(session);
+    const turn = { turnId: 'turn-2', promptId: 'turn-2' };
+
+    await handle.commitDurableWait(waitCommit(await waitRefs(session)), turn);
+    const waiting = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(waiting.identity).toMatchObject({
+      activationId: activation.activationId,
+      ...turn,
+    });
+    await decideAction(session);
+    await handle.resolveDurableWait();
+    await expect(
+      handle.commitAwaitRuntimeBatch([await runtimeCommit(session)], turn),
+    ).resolves.toMatchObject({ kind: 'durable_wait' });
+
+    const checkpoint = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(checkpoint.continuation.phase).toBe('await_runtime');
+    expect(checkpoint.identity).toMatchObject({
+      activationId: activation.activationId,
+      ...turn,
+    });
+    await session.close();
+  });
+
+  it('binds an approval that starts a turn after a settled Runtime continuation', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    await handle.commitAwaitRuntimeBatch([await runtimeCommit(session)], {
+      turnId: 'turn-1',
+      promptId: 'turn-1',
+    });
+    await handle.resolveAwaitRuntime(
+      'ex-1',
+      await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      ),
+    );
+    await handle.consumeRuntimeResults();
+    await handle.settleConsumedRuntimeContinuation();
+
+    await handle.commitDurableWait(waitCommit(await waitRefs(session)), {
+      turnId: 'turn-2',
+      promptId: 'turn-2',
+    });
+    const checkpoint = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(checkpoint.continuation.phase).toBe('await_action');
+    expect(checkpoint.identity).toMatchObject({
+      turnId: 'turn-2',
+      promptId: 'turn-2',
+    });
+    await session.close();
+  });
+
+  it('refuses an approval that would change an unfinished turn', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    await handle.commitAwaitRuntimeBatch([await runtimeCommit(session)], {
+      turnId: 'turn-1',
+      promptId: 'turn-1',
+    });
+    await handle.resolveAwaitRuntime(
+      'ex-1',
+      await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      ),
+    );
+    const sequence = session.authority.committedSequence;
+
+    await expect(
+      handle.commitDurableWait(waitCommit(await waitRefs(session)), {
+        turnId: 'turn-2',
+        promptId: 'turn-2',
+      }),
+    ).rejects.toThrow(/cannot change the current unfinished turn/);
+    await expect(
+      handle.commitDurableWait(waitCommit(await waitRefs(session)), {
+        turnId: 'turn-1',
+        promptId: 'turn-2',
+      }),
+    ).rejects.toThrow(/cannot change the current unfinished turn/);
+    expect(session.authority.action('fc-1')).toBeUndefined();
+    expect(session.authority.committedSequence).toBe(sequence);
+    await expect(
+      handle.commitDurableWait(waitCommit(await waitRefs(session)), {
+        turnId: 'turn-1',
+        promptId: 'turn-1',
+      }),
+    ).resolves.toMatchObject({ kind: 'durable_wait' });
+    await session.close();
+  });
+
+  it('lets the activation that consumed a taken-over batch commit the next one', async () => {
+    const session = await open(await createWorkspace());
+    const previous = createManagedHarnessHandle(session);
+    await previous.ensureRunnable();
+    const turn = { turnId: 'turn-1', promptId: 'turn-1' };
+    await previous.commitAwaitRuntimeBatch(
+      [await runtimeCommit(session)],
+      turn,
+    );
+    await previous.detach();
+    await session.replaceActivation();
+    const next = createManagedHarnessHandle(session);
+    await next.resolveAwaitRuntime(
+      'ex-1',
+      await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      ),
+    );
+    const consumed = await next.consumeRuntimeResults();
+    expect(consumed?.identity.activationId).toBe(
+      session.activation.activationId,
+    );
+
+    await expect(
+      next.commitAwaitRuntimeBatch(
+        [
+          {
+            ...(await runtimeCommit(session)),
+            functionCallId: 'fc-2',
+            executionCallId: 'ex-2',
+            invocationBindingId: 'bind-2',
+            modelMessageId: 'msg-2',
+            attemptId: 'att-fc-2',
+          },
+        ],
+        turn,
+      ),
+    ).resolves.toMatchObject({ kind: 'durable_wait' });
+    await session.close();
+  });
+
+  it('refuses an approval in an unfinished turn from another activation', async () => {
+    const session = await open(await createWorkspace());
+    const previous = createManagedHarnessHandle(session);
+    await previous.ensureRunnable();
+    const turn = { turnId: 'turn-1', promptId: 'turn-1' };
+    await previous.commitAwaitRuntimeBatch(
+      [await runtimeCommit(session)],
+      turn,
+    );
+    await previous.detach();
+    await session.replaceActivation();
+    const next = createManagedHarnessHandle(session);
+    await next.resolveAwaitRuntime(
+      'ex-1',
+      await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      ),
+    );
+    const sequence = session.authority.committedSequence;
+
+    await expect(
+      next.commitDurableWait(waitCommit(await waitRefs(session)), turn),
+    ).rejects.toThrow(/cannot continue a prior activation/);
+    expect(session.authority.action('fc-1')).toBeUndefined();
+    expect(session.authority.committedSequence).toBe(sequence);
+    await session.close();
+  });
 });
 
 async function waitRefs(session: ManagedSession): Promise<{
@@ -1140,3 +1403,50 @@ async function runtimeCommit(
     ),
   };
 }
+
+describe('ensureCheckpoint', () => {
+  it('starts an empty log at before_model, and calls it idempotently', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    try {
+      const harness = createManagedHarnessHandle(session);
+      const checkpoint = await harness.ensureCheckpoint();
+      expect(checkpoint.continuation.phase).toBe('before_model');
+      const again = await harness.ensureCheckpoint();
+      expect(again.identity.checkpointId).toBe(
+        checkpoint.identity.checkpointId,
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('answers blocked with the authorization\u0027s own message on a checkpoint it cannot parse', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    try {
+      const garbage = Buffer.from('{"v":2,"opaque":true}', 'utf8');
+      await session.authority.commitCheckpoint(
+        {
+          operation: 'commitCheckpoint',
+          commandId: 'opaque-checkpoint-1',
+          sessionKey: session.authority.sessionHeader.sessionKey,
+          contentDigest: createHash('sha256').update(garbage).digest('hex'),
+        },
+        { state: garbage, boundary: null },
+        { class: 'harness', activation: session.activation },
+      );
+      const harness = createManagedHarnessHandle(session);
+      const failure = harness.ensureCheckpoint();
+      await expect(failure).rejects.toBeInstanceOf(ManagedHarnessBlockedError);
+      // The parser diagnostic is kept, not rewritten to a bare reason.
+      const cause = await failure.catch((error: unknown) => error);
+      expect(cause).toBeInstanceOf(ManagedHarnessBlockedError);
+      expect((cause as ManagedHarnessBlockedError).message).not.toContain(
+        'missing_checkpoint',
+      );
+    } finally {
+      await session.close();
+    }
+  });
+});

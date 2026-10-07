@@ -58,7 +58,30 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
     CONSTRAINT uq_runtime_binding_generation
         UNIQUE (request_key, runtime_generation),
     INDEX idx_runtime_binding_scope
-        (scope_key, isolation_key, binding_state)
+        (scope_key, isolation_key, binding_state),
+    INDEX qwen_runtime_harness_bindings_idx (isolation_key, isolation_class)
+);
+
+CREATE TABLE IF NOT EXISTS managed_workspace_operator_recovery (
+    recovery_id CHAR(36) PRIMARY KEY,
+    binding_id VARCHAR(512) NOT NULL,
+    runtime_generation BIGINT NOT NULL,
+    storage_key CHAR(64) NOT NULL,
+    holder_key CHAR(64) NOT NULL,
+    runtime_session_id VARCHAR(512) NOT NULL,
+    provision_request_id VARCHAR(512) NOT NULL,
+    resource_handle_json LONGTEXT NOT NULL,
+    runtime_lease_id VARCHAR(512) NOT NULL,
+    runtime_epoch BIGINT NOT NULL,
+    blocked_execution_call_id VARCHAR(512) NOT NULL,
+    operator_id VARCHAR(512) NOT NULL,
+    reason VARCHAR(2048) NOT NULL,
+    prepared_at DATETIME(6) NOT NULL,
+    attestation_json LONGTEXT,
+    attestation_sha256 CHAR(64),
+    attested_at DATETIME(6),
+    completed_at DATETIME(6),
+    UNIQUE (binding_id, runtime_generation)
 );
 
 CREATE TABLE IF NOT EXISTS qwen_runtime_session (
@@ -108,10 +131,20 @@ CREATE TABLE IF NOT EXISTS qwen_tool_execution (
     settled_at DATETIME(6),
     abandoned_at DATETIME(6),
     loss_evidence_id VARCHAR(512),
+    authorized_dispatch_generation BIGINT,
+    authorized_binding_version BIGINT,
     CONSTRAINT uq_tool_execution_idempotency
         UNIQUE (idempotency_key_hash),
     INDEX idx_tool_execution_session
         (runtime_session_key, execution_state),
     INDEX idx_tool_execution_binding
         (binding_id, runtime_generation, execution_state)
+);
+
+CREATE TABLE IF NOT EXISTS qwen_runtime_harness_drain (
+    tenant_key VARCHAR(64) NOT NULL,
+    harness_key VARCHAR(64) NOT NULL,
+    tenant_id VARCHAR(512) NOT NULL,
+    harness_session_id VARCHAR(512) NOT NULL,
+    PRIMARY KEY (tenant_key, harness_key)
 );

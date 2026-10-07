@@ -1,6 +1,7 @@
 import {
   isJavaAgentResyncRequired,
   JavaManagedAgentClient,
+  type JavaAgentAction,
   type JavaAgentSession,
   type JavaManagedAgentClientOptions,
 } from './java-managed-agent-client';
@@ -10,7 +11,10 @@ import {
   toTimestamp,
 } from './java-managed-agent-event-projector';
 import { managedRequestId } from './managed-session-storage';
+import { browserArtifactSave } from './managed-artifact-download';
+import type { ManagedArtifactSave } from './managed-tool-result-types';
 import type {
+  ManagedAgentPendingAction,
   ManagedAgentProvider,
   ManagedAgentRuntimeState,
   ManagedAgentSessionPhase,
@@ -21,14 +25,18 @@ export interface JavaManagedAgentProviderOptions
   extends JavaManagedAgentClientOptions {
   agentId?: string;
   environmentId?: string;
+  /** Include tenant and actor identity; replace this scope/provider when either changes. Token refresh alone can use getHeaders. */
   productScope?: string;
   enableWorkspaceBinding?: boolean;
+  /** Acquire a streaming save target during the user gesture, then call openStream. */
+  saveArtifact?: ManagedArtifactSave;
 }
 
 export function createJavaManagedAgentProvider(
   options: JavaManagedAgentProviderOptions,
 ): ManagedAgentProvider {
   const client = new JavaManagedAgentClient(options);
+  const saveArtifact = options.saveArtifact ?? browserArtifactSave();
   const agentId = options.agentId ?? 'qwen-code';
   if (options.enableWorkspaceBinding && !options.productScope?.trim()) {
     throw new Error('Workspace binding requires an explicit productScope');
@@ -38,6 +46,68 @@ export function createJavaManagedAgentProvider(
     storageKey: storageKey(options),
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    actions: {
+      async listPending(sessionId, request) {
+        // The service lists only requested Actions, newest first, so one page
+        // holds every pending one unless more than 20 wait at once.
+        const page = await client.queryActions(
+          { sessionId, limit: 20 },
+          request.signal,
+        );
+        return page.data.flatMap(toPendingAction);
+      },
+      async respond(action, optionId, command) {
+        const result = await client.respondAction(
+          {
+            requestId: managedRequestId(),
+            idempotencyKey: command.idempotencyKey,
+            sessionId: action.sessionId,
+            actionId: action.actionId,
+            response: {
+              kind: 'permission',
+              inputRevision: action.inputRevision,
+              policyRevision: action.policyRevision,
+              optionId,
+            },
+          },
+          command.signal,
+        );
+        // A cancelled or recovery-blocked operation did not apply the answer,
+        // so the card must stay rather than hide as if it had.
+        if (
+          result.status === 'failed' ||
+          result.status === 'cancelled' ||
+          result.status === 'recovery_blocked'
+        ) {
+          throw new Error(
+            `Managed Agent approval answer ${result.status} (${result.failureCode ?? 'unknown'})`,
+          );
+        }
+      },
+    },
+    toolResults: {
+      canDownload: saveArtifact !== undefined,
+      getResult: (sessionId, itemId, request) =>
+        client.getToolResult(sessionId, itemId, request.signal),
+      listArtifacts: (sessionId, request) =>
+        client.listArtifacts(
+          { sessionId, cursor: request.cursor, limit: request.limit },
+          request.signal,
+        ),
+      getArtifact: (sessionId, artifactId, request) =>
+        client.getArtifact(sessionId, artifactId, request.signal),
+      readRange: (artifact, offset, length, request) =>
+        client.readArtifactRange(artifact, offset, length, request.signal),
+      async downloadArtifact(artifact, request) {
+        if (!saveArtifact) {
+          throw new Error('This host does not support streaming downloads');
+        }
+        await saveArtifact(artifact, {
+          signal: request.signal,
+          openStream: () => client.openArtifactStream(artifact, request.signal),
+        });
+      },
+    },
     ...(options.enableWorkspaceBinding
       ? {
           workspaceBinding: {
@@ -125,7 +195,8 @@ export function createJavaManagedAgentProvider(
           requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           agentId,
-          environmentId: options.environmentId,
+          // environmentId scopes the storageKey only: the standalone Java
+          // server 400s any non-blank value with unsupported_feature.
           title: titleFor(request.text),
           input: [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
@@ -168,6 +239,7 @@ export function createJavaManagedAgentProvider(
       for await (const event of client.streamEvents(
         { sessionId, afterSequence: request.lastEventId },
         request.signal,
+        request.onEstablished,
       )) {
         if (isJavaAgentResyncRequired(event)) {
           // Events after the cursor are gone: reload the transcript.
@@ -200,6 +272,10 @@ function toSessionSummary(
       turnStatus,
     );
   const sessionActive = session.status.toLowerCase() === 'active';
+  // A bound Session takes later Turns only from the caller the service
+  // allows; everything else about a bound Session stays read-only.
+  const workspaceTurns =
+    Boolean(session.workspace) && session.capabilities?.workspaceTurns === true;
   const errorCode =
     session.activeTurn?.errorCode ?? session.environment?.errorCode;
   return {
@@ -216,15 +292,37 @@ function toSessionSummary(
     runtimeReady: runtimeState === 'ready',
     runtimeState,
     capabilities: {
-      canSend: sessionActive && !active && !session.workspace,
+      ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
+      canSend:
+        sessionActive && !active && (!session.workspace || workspaceTurns),
       canCancel:
         sessionActive &&
         active &&
         turnStatus !== 'cancelling' &&
-        !session.workspace,
+        (!session.workspace || workspaceTurns),
+      ...(workspaceTurns ? { workspaceTurns: true } : {}),
+      ...(session.capabilities?.actions === true ? { actions: true } : {}),
     },
     ...(errorCode ? { failure: { code: errorCode, message: errorCode } } : {}),
   };
+}
+
+function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
+  if (action.kind !== 'permission' || action.state !== 'requested') return [];
+  return [
+    {
+      actionId: action.actionId,
+      sessionId: action.sessionId,
+      ...(action.turnId ? { turnId: action.turnId } : {}),
+      functionCallId: action.functionCallId,
+      toolName: action.toolName,
+      inputRevision: action.inputRevision,
+      policyRevision: action.policyRevision,
+      expiresAt: action.expiresAt,
+      options: action.options.map(({ id, label }) => ({ id, label })),
+      ...(action.inputPreview ? { inputPreview: action.inputPreview } : {}),
+    },
+  ];
 }
 
 function toRuntimeState(value: string | undefined): ManagedAgentRuntimeState {

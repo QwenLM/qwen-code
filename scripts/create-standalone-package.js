@@ -70,17 +70,21 @@ const TARGET_OPENTUI_PACKAGES = new Map([
 ]);
 
 const DIST_REQUIRED_PATHS = [
+  'mem0/main.js',
+  'mem0/write-confirmation.js',
   'cli.js',
   'cli-entry.js',
   'codeModeHost.js',
   'execution-worker.js',
   'sandboxBwrapRelay.js',
+  'sandboxLandlockRelay.js',
   'sandboxFileWorker.js',
   'chunks',
   'vendor',
   'bundled/qc-helper/docs',
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
+  'mem0',
   'cli.js',
   'execution-worker.js',
   // bin wrapper emitted by prepare-package.js. Standalone shims use it for
@@ -89,11 +93,13 @@ const DIST_ALLOWED_ENTRIES = new Set([
   // fzf fuzzy-search worker; esbuild emits it as a standalone entry that must
   // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
   'fzfWorker.js',
+  'glob-search-worker.js',
   'codeModeHost.js',
-  // bwrap sandbox relay + confined file worker; esbuild emits them as
+  // Sandbox relays + confined file worker; esbuild emits them as
   // standalone entries that sandboxAsset() resolves from the bundle dir at
-  // execution time (packages/core/src/sandbox/bwrap-execution.ts).
+  // execution time (packages/core/src/sandbox/sandbox-execution.ts).
   'sandboxBwrapRelay.js',
+  'sandboxLandlockRelay.js',
   'sandboxFileWorker.js',
   'chunks',
   'vendor',
