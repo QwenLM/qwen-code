@@ -5,13 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import {
-  chmodSync,
-  existsSync,
-  readFileSync,
-  statSync,
-  utimesSync,
-} from 'node:fs';
+import { existsSync, readFileSync, statSync, utimesSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os, { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -42,10 +36,33 @@ const rmSyncControl = vi.hoisted(() => ({ failing: new Set<string>() }));
 // A controllable readFileSync for the transient read-failure paths: enrolled
 // paths throw EMFILE, everything else passes through.
 const readFileSyncControl = vi.hoisted(() => ({ failing: new Set<string>() }));
+// A controllable writeFileSync for the write-failure paths: enrolled path
+// prefixes throw EACCES, everything else passes through — the failure is
+// enforced in code, so it also fails for runners whose uid ignores mode
+// bits (root).
+const writeFileSyncControl = vi.hoisted(() => ({
+  failingPrefix: new Set<string>(),
+}));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
+    writeFileSync: ((target: unknown, ...rest: unknown[]): unknown => {
+      if (
+        typeof target === 'string' &&
+        [...writeFileSyncControl.failingPrefix].some((prefix) =>
+          target.startsWith(prefix),
+        )
+      ) {
+        throw Object.assign(new Error(`EACCES: cannot write ${target}`), {
+          code: 'EACCES',
+        });
+      }
+      return (actual.writeFileSync as (...args: unknown[]) => unknown)(
+        target,
+        ...rest,
+      );
+    }) as typeof actual.writeFileSync,
     rmSync: (
       target: Parameters<typeof actual.rmSync>[0],
       options?: Parameters<typeof actual.rmSync>[1],
@@ -214,9 +231,7 @@ describe('Managed Runtime ledger', () => {
     it.skipIf(!POSIX)(
       'addGroup records durably first, so a write failure leaves both views holding nothing',
       async () => {
-        const directory = path.join(root, 'readonly-dir');
-        await mkdir(directory, { recursive: true });
-        const workFile = path.join(directory, 'ledger.json');
+        const workFile = path.join(root, 'ledger.json');
         testInternals.writeLedgerDocument(
           workFile,
           {
@@ -237,7 +252,9 @@ describe('Managed Runtime ledger', () => {
           },
         });
         // Every write from here fails: the tmp staging cannot be created.
-        chmodSync(directory, 0o555);
+        // Enforced in code (mock), not by mode bits — root runners fail it
+        // exactly like everyone else.
+        writeFileSyncControl.failingPrefix.add(`${workFile}.tmp`);
         const proc = spawnGroupLeader();
         strays.add(proc);
         try {
@@ -252,7 +269,7 @@ describe('Managed Runtime ledger', () => {
           const onDisk = testInternals.readLedgerDocument(workFile);
           expect(onDisk?.groups).toEqual([]);
         } finally {
-          chmodSync(directory, 0o755);
+          writeFileSyncControl.failingPrefix.clear();
           killGroup(proc.pid!);
           strays.delete(proc);
         }
@@ -554,13 +571,14 @@ describe('Managed Runtime ledger', () => {
       );
     });
 
-    it('parses table rows and skips malformed ones', () => {
+    it('parses table rows, skips the unparseable, and keeps the undatable', () => {
       const rows = testInternals.parseProcessTable(
         [
           '  123   100 00:05 node worker.js managed-runtime-worker',
           '  456   100 01:02:03 sleep 300',
           'garbage line',
           '  789   100 not-a-time whatever',
+          '  790   100 441077234-00:18:40 node wrapped.js',
         ].join('\n'),
       );
       expect(rows.get(123)).toMatchObject({
@@ -569,7 +587,14 @@ describe('Managed Runtime ledger', () => {
         args: 'node worker.js managed-runtime-worker',
       });
       expect(rows.get(456)?.args).toBe('sleep 300');
-      expect(rows.has(789)).toBe(false);
+      // A real row whose elapsed column cannot be dated stays in the table
+      // as an undatable member — dropping it would read its group as empty.
+      expect(rows.get(789)).toMatchObject({ pgid: 100, runningMs: undefined });
+      expect(rows.get(790)).toMatchObject({
+        pgid: 100,
+        runningMs: undefined,
+        args: 'node wrapped.js',
+      });
     });
 
     it.skipIf(!POSIX)(
@@ -1001,6 +1026,85 @@ describe('Managed Runtime ledger', () => {
       // 'recycled' would have left the young group unsignalled and alive.
       expect(signal).toHaveBeenCalledWith(202, 'SIGKILL');
       expect(existsSync(workFile)).toBe(false);
+    });
+
+    it('holds a group whose only live member carries an undatable age', async () => {
+      // procps's negative-elapsed wraparound makes a real row undatable;
+      // the row still counts as a member, so the group must judge
+      // 'unknown' — held unproven, never silently resolved 'gone' while the
+      // group keeps running with its ledger deleted.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 101 }, [
+        { pgid: 202, startedAt: Date.now() },
+      ]);
+      const alive = new Set([202]);
+      const signal = vi.fn(() => 'sent' as const);
+      const table = () =>
+        new Map([
+          [
+            202,
+            {
+              pid: 202,
+              pgid: 202,
+              // The wrapped etime: present and running, but undatable.
+              runningMs: undefined,
+              args: 'node wrapped.js',
+            },
+          ],
+        ]);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (alive.has(id) ? 'alive' : 'gone'),
+            signal,
+            table,
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [202] });
+      expect(signal).not.toHaveBeenCalled();
+      const kept = testInternals.readLedgerDocument(workFile);
+      expect(kept?.groups.map((group) => group.pgid)).toEqual([202]);
+    });
+
+    it('a witnessed sweep signals a group whose member age is undatable', async () => {
+      // The witness names the group the dead worker's; the undatable age
+      // only bars the silent-resolve paths, never the witnessed stop.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 101 }, [
+        { pgid: 202, startedAt: Date.now() },
+      ]);
+      const alive = new Set([202]);
+      const signal = vi.fn((pgid: number) => {
+        alive.delete(pgid);
+        return 'sent' as const;
+      });
+      const table = () =>
+        new Map([
+          [
+            202,
+            {
+              pid: 202,
+              pgid: 202,
+              runningMs: undefined,
+              args: 'node wrapped.js',
+            },
+          ],
+        ]);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          exitWitnessed: true,
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (alive.has(id) ? 'alive' : 'gone'),
+            signal,
+            table,
+          },
+        }),
+      ).resolves.toBe('proven');
+      expect(signal).toHaveBeenCalledWith(202, 'SIGKILL');
     });
 
     it('keeps a live worker late write out of the sweep rewrite', async () => {

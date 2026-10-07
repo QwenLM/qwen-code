@@ -156,8 +156,15 @@ export function signalProcessGroup(
 export interface ProcessTableRow {
   readonly pid: number;
   readonly pgid: number;
-  /** Milliseconds the process has been running, from ps's elapsed column. */
-  readonly runningMs: number;
+  /**
+   * Milliseconds the process has been running, from ps's elapsed column.
+   * undefined when ps printed an elapsed value this side cannot date (e.g.
+   * procps's negative wraparound): the row still COUNTS as a member — a
+   * group whose only row is undatable is not gone — but no age judgement
+   * may ever be made from it, so the group can only judge 'unknown' (held
+   * unproven), never 'gone' and never 'recycled'.
+   */
+  readonly runningMs: number | undefined;
   readonly args: string;
 }
 
@@ -193,11 +200,13 @@ function parseProcessTable(
       !Number.isSafeInteger(pid) ||
       pid <= 0 ||
       !Number.isSafeInteger(pgid) ||
-      pgid <= 0 ||
-      runningMs === undefined
+      pgid <= 0
     ) {
       continue;
     }
+    // A row whose elapsed column cannot be dated stays in the table:
+    // dropping it would read the group's only member as absent — 'gone',
+    // resolved silently, ledger deleted with the live group running.
     rows.set(pid, { pid, pgid, runningMs, args: match[4] ?? '' });
   }
   return rows;
@@ -293,6 +302,9 @@ function judgeWorkerIdentity(
   platform: NodeJS.Platform = process.platform,
 ): WorkerIdentity {
   if (!row.args.includes('managed-runtime-worker')) return 'recycled';
+  // The pid answers but its age cannot be read: nothing here dates the
+  // process AS the record's, and nothing proves it a recycler either.
+  if (row.runningMs === undefined) return 'unknown';
   // A record from the future — the wall clock stepped back past its stamp —
   // matches nothing: a negative age would be older than every live process.
   // A boot-stamped record on Linux is immune: its domain never stepped.
@@ -322,8 +334,12 @@ function groupMatchesRecord(
     return false;
   }
   const recordedAge = recordAgeMs(record, now, platform);
+  // An undatable member matches nothing: never the record's 'ours', and
+  // (via the leader branch below) never the proof a young holder gives.
   return members.some(
-    (member) => member.runningMs >= recordedAge - RECORD_LEAD_SKEW_MS,
+    (member) =>
+      member.runningMs !== undefined &&
+      member.runningMs >= recordedAge - RECORD_LEAD_SKEW_MS,
   );
 }
 
@@ -358,6 +374,7 @@ function judgeGroupIdentity(
   const leader = members.find((member) => member.pid === record.pgid);
   if (
     leader !== undefined &&
+    leader.runningMs !== undefined &&
     leader.runningMs < recordAgeMs(record, now, platform) - RECORD_LEAD_SKEW_MS
   ) {
     return 'recycled';
@@ -1122,6 +1139,9 @@ function holdsForLiveHost(
   ) {
     return false;
   }
+  // Genesis needs a date: an undatable host row cannot disprove it spawned
+  // the worker — hold rather than touch a possible live sibling.
+  if (host.runningMs === undefined) return true;
   // A process younger than the worker it is named as parenting is an
   // impostor: the recorded child's id was recycled by some other ACP host.
   return host.runningMs >= recordAgeMs(worker, now) - RECORD_LEAD_SKEW_MS;
