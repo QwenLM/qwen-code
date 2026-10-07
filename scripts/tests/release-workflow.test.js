@@ -2161,28 +2161,31 @@ describe('release workflow', () => {
   it('prunes BuildKit cache and gates the docker data root before the build and the vitest phase', () => {
     // #13479: run 37374675168 passed the job-start disk floor gate and the
     // runner still died on ENOSPC 24 minutes into the docker test step. The
-    // lane prunes the labelled CI images, the dangling images that prune
-    // cannot reach, and the BuildKit cache, and gates the docker data root
-    // at a build-sized floor immediately before the build and again before
-    // the vitest phase, so a saturated host fails fast with a legible error
-    // instead of the runner worker crashing mid-step.
-    const imagePrune = dockerIntegrationScript.indexOf(
-      "timeout 20m docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h'",
-    );
+    // lane reclaims dangling images and BuildKit cache on every path — a
+    // cached-image re-run reaches the pre-vitest gate with nothing else
+    // reclaimed ahead of it — prunes the labelled CI images under the build
+    // mutex when it does build, and gates the docker data root at a
+    // build-sized floor immediately before the build and at the repo's
+    // calibrated job floor before the vitest phase, so a saturated host
+    // fails fast with a legible error instead of the runner worker crashing
+    // mid-step.
     const danglingPrune = dockerIntegrationScript.indexOf(
       "timeout 20m docker image prune --force --filter 'until=24h'",
     );
     const cachePrune = dockerIntegrationScript.indexOf(
       "timeout 20m docker builder prune --all --force --filter 'until=24h'",
     );
-    expect(imagePrune).toBeGreaterThanOrEqual(0);
-    expect(danglingPrune).toBeGreaterThan(imagePrune);
+    const imagePrune = dockerIntegrationScript.indexOf(
+      "timeout 20m docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h'",
+    );
+    expect(danglingPrune).toBeGreaterThanOrEqual(0);
     expect(cachePrune).toBeGreaterThan(danglingPrune);
-    // The prunes and the gate's `docker info` can execute while the
-    // exclusive host build mutex is held, so each carries a time bound: a
-    // wedged daemon GC cannot be allowed to starve the E2E lane's 30-minute
-    // lock wait (run 33637097713). A `docker info` timeout degrades into
-    // the gate's warn-and-skip path.
+    expect(imagePrune).toBeGreaterThan(cachePrune);
+    // The prunes and the gate's `docker info` can execute while the shared
+    // host locks are held, so each carries a time bound: a wedged daemon GC
+    // cannot be allowed to starve a peer lane's 30-minute lock wait
+    // (run 33637097713). A `docker info` timeout degrades into the gate's
+    // warn-and-skip path.
     expect(dockerIntegrationScript).toMatch(
       /timeout [0-9]+m docker builder prune --all --force --filter 'until=24h'/,
     );
@@ -2214,6 +2217,7 @@ describe('release workflow', () => {
     ambientDiskFloorInodes,
     dockerFloorKb,
     dockerFloorInodes,
+    dockerPostFloorKb,
   } = {}) => {
     const directory = mkdtempSync(
       join(tmpdir(), 'release-docker-integration-'),
@@ -2297,6 +2301,7 @@ exit 0`,
       delete env.DISK_FLOOR_MIN_FREE_INODES;
       delete env.DISK_FLOOR_DOCKER_MIN_FREE_KB;
       delete env.DISK_FLOOR_DOCKER_MIN_FREE_INODES;
+      delete env.DISK_FLOOR_DOCKER_POST_MIN_FREE_KB;
       if (ambientDiskFloorKb !== undefined) {
         env.DISK_FLOOR_MIN_FREE_KB = ambientDiskFloorKb;
       }
@@ -2308,6 +2313,9 @@ exit 0`,
       }
       if (dockerFloorInodes !== undefined) {
         env.DISK_FLOOR_DOCKER_MIN_FREE_INODES = dockerFloorInodes;
+      }
+      if (dockerPostFloorKb !== undefined) {
+        env.DISK_FLOOR_DOCKER_POST_MIN_FREE_KB = dockerPostFloorKb;
       }
       const result = spawnSync('bash', [dockerIntegrationScriptAbsolutePath], {
         cwd: directory,
@@ -2326,22 +2334,22 @@ exit 0`,
       const { result, calls } = runDockerIntegrationScript();
       expect(result.status, result.stderr).toBe(0);
       const lines = calls.trim().split('\n');
-      const imagePrune = lines.findIndex((line) =>
-        line.startsWith('docker image prune --all'),
-      );
       const danglingPrune = lines.findIndex((line) =>
         line.startsWith('docker image prune --force'),
       );
       const cachePrune = lines.findIndex((line) =>
         line.startsWith('docker builder prune'),
       );
+      const imagePrune = lines.findIndex((line) =>
+        line.startsWith('docker image prune --all'),
+      );
       const build = lines.findIndex((line) =>
         line.startsWith('npm run build:sandbox'),
       );
-      expect(imagePrune).toBeGreaterThanOrEqual(0);
-      expect(danglingPrune).toBeGreaterThan(imagePrune);
+      expect(danglingPrune).toBeGreaterThanOrEqual(0);
       expect(cachePrune).toBeGreaterThan(danglingPrune);
-      expect(build).toBeGreaterThan(cachePrune);
+      expect(imagePrune).toBeGreaterThan(cachePrune);
+      expect(build).toBeGreaterThan(imagePrune);
       // The floor gate is scoped to the persistent self-hosted pool, like
       // every other check-disk-floor.sh call site.
       expect(calls).not.toContain('disk-floor');
@@ -2373,14 +2381,14 @@ exit 0`,
       const buildLock = lines.findIndex(
         (line) => line === 'flock --wait 1800 7',
       );
-      const imagePrune = lines.findIndex((line) =>
-        line.startsWith('docker image prune --all'),
-      );
       const danglingPrune = lines.findIndex((line) =>
         line.startsWith('docker image prune --force'),
       );
       const cachePrune = lines.findIndex((line) =>
         line.startsWith('docker builder prune'),
+      );
+      const imagePrune = lines.findIndex((line) =>
+        line.startsWith('docker image prune --all'),
       );
       const gates = lines
         .map((line, index) => (line.startsWith('disk-floor') ? index : -1))
@@ -2399,20 +2407,25 @@ exit 0`,
       );
       expect(daemonLock).toBeGreaterThanOrEqual(0);
       expect(coordinatorLock).toBeGreaterThan(daemonLock);
-      expect(buildLock).toBeGreaterThan(coordinatorLock);
-      expect(imagePrune).toBeGreaterThan(buildLock);
-      expect(danglingPrune).toBeGreaterThan(imagePrune);
+      // The unlabelled prunes run on every path, outside the build mutex:
+      // the daily host sweep runs the same two with no lock at all.
+      expect(danglingPrune).toBeGreaterThan(coordinatorLock);
       expect(cachePrune).toBeGreaterThan(danglingPrune);
+      expect(buildLock).toBeGreaterThan(cachePrune);
+      expect(imagePrune).toBeGreaterThan(buildLock);
       // One gate sample before the build and one after it: the #13479 death
       // landed in the vitest phase, after the build had already finished.
+      // The pre-build sample charges the build-sized floor; the pre-vitest
+      // sample charges the repo's calibrated job floor, because the build
+      // budget is spent by then.
       expect(gates).toHaveLength(2);
       expect(lines[gates[0]]).toBe(
         `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
       );
       expect(lines[gates[1]]).toBe(
-        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+        `disk-floor ${dockerRoot} floor=2097152 inodes=100000`,
       );
-      expect(gates[0]).toBeGreaterThan(cachePrune);
+      expect(gates[0]).toBeGreaterThan(imagePrune);
       expect(build).toBeGreaterThan(gates[0]);
       expect(buildUnlock).toBeGreaterThan(build);
       expect(gates[1]).toBeGreaterThan(build);
@@ -2444,11 +2457,12 @@ exit 0`,
   );
 
   it.skipIf(process.platform === 'win32')(
-    'keeps the 8 GiB docker floor when the workspace floor knob is set',
+    'keeps the docker floors when the workspace floor knob is set',
     () => {
-      // The docker data-root gate reads DISK_FLOOR_DOCKER_MIN_FREE_KB, not
-      // the job-start gate's DISK_FLOOR_MIN_FREE_KB: one env setting must
-      // not move both floors (#13479).
+      // The docker data-root gates read DISK_FLOOR_DOCKER_MIN_FREE_KB and
+      // DISK_FLOOR_DOCKER_POST_MIN_FREE_KB, not the job-start gate's
+      // DISK_FLOOR_MIN_FREE_KB: one env setting must not move both floors
+      // (#13479).
       const { result, calls, dockerRoot } = runDockerIntegrationScript({
         runnerEnvironment: 'self-hosted',
         ambientDiskFloorKb: '1',
@@ -2459,11 +2473,12 @@ exit 0`,
         .split('\n')
         .filter((line) => line.startsWith('disk-floor'));
       expect(floors).toHaveLength(2);
-      for (const floor of floors) {
-        expect(floor).toBe(
-          `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
-        );
-      }
+      expect(floors[0]).toBe(
+        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+      );
+      expect(floors[1]).toBe(
+        `disk-floor ${dockerRoot} floor=2097152 inodes=100000`,
+      );
     },
   );
 
@@ -2480,11 +2495,69 @@ exit 0`,
         .split('\n')
         .filter((line) => line.startsWith('disk-floor'));
       expect(floors).toHaveLength(2);
-      for (const floor of floors) {
-        expect(floor).toBe(
-          `disk-floor ${dockerRoot} floor=4194304 inodes=100000`,
-        );
-      }
+      // DISK_FLOOR_DOCKER_MIN_FREE_KB sizes the pre-build sample only: the
+      // pre-vitest checkpoint has its own knob so the build budget is
+      // charged once.
+      expect(floors[0]).toBe(
+        `disk-floor ${dockerRoot} floor=4194304 inodes=100000`,
+      );
+      expect(floors[1]).toBe(
+        `disk-floor ${dockerRoot} floor=2097152 inodes=100000`,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'honors the dedicated post-build docker floor knob',
+    () => {
+      const { result, calls, dockerRoot } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        dockerPostFloorKb: '3145728',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const floors = calls
+        .trim()
+        .split('\n')
+        .filter((line) => line.startsWith('disk-floor'));
+      expect(floors).toHaveLength(2);
+      // DISK_FLOOR_DOCKER_POST_MIN_FREE_KB sizes the pre-vitest sample
+      // only: an operator can tune the two checkpoints independently.
+      expect(floors[0]).toBe(
+        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+      );
+      expect(floors[1]).toBe(
+        `disk-floor ${dockerRoot} floor=3145728 inodes=100000`,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'runs both vitest phases on a host admitted between the build and vitest floors',
+    () => {
+      // A host admitted by the pre-build floor can drop below it during the
+      // build: the build's own layers are exactly what the 8 GiB budget
+      // pays for. Re-charging that budget at the pre-vitest checkpoint
+      // would fail every such host after the build it already paid for, so
+      // this gate charges the repo's calibrated job floor instead.
+      const { result, calls, dockerRoot } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const lines = calls.trim().split('\n');
+      const gates = lines
+        .map((line, index) => (line.startsWith('disk-floor') ? index : -1))
+        .filter((index) => index >= 0);
+      expect(gates).toHaveLength(2);
+      expect(lines[gates[0]]).toBe(
+        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+      );
+      expect(lines[gates[1]]).toBe(
+        `disk-floor ${dockerRoot} floor=2097152 inodes=100000`,
+      );
+      expect(calls).toContain('npm run build:sandbox');
+      expect(
+        lines.filter((line) => line.startsWith('npx vitest')),
+      ).toHaveLength(2);
     },
   );
 
@@ -2505,11 +2578,12 @@ exit 0`,
         .split('\n')
         .filter((line) => line.startsWith('disk-floor'));
       expect(floors).toHaveLength(2);
-      for (const floor of floors) {
-        expect(floor).toBe(
-          `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
-        );
-      }
+      expect(floors[0]).toBe(
+        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+      );
+      expect(floors[1]).toBe(
+        `disk-floor ${dockerRoot} floor=2097152 inodes=100000`,
+      );
     },
   );
 
@@ -2526,23 +2600,31 @@ exit 0`,
         .split('\n')
         .filter((line) => line.startsWith('disk-floor'));
       expect(floors).toHaveLength(2);
-      for (const floor of floors) {
-        expect(floor).toBe(
-          `disk-floor ${dockerRoot} floor=8388608 inodes=200000`,
-        );
-      }
+      expect(floors[0]).toBe(
+        `disk-floor ${dockerRoot} floor=8388608 inodes=200000`,
+      );
+      expect(floors[1]).toBe(
+        `disk-floor ${dockerRoot} floor=2097152 inodes=200000`,
+      );
     },
   );
 
   it.skipIf(process.platform === 'win32')(
-    'skips the reclaim and the gate when the image already exists',
+    'reclaims but skips the build and the gate when a hosted runner finds the image cached',
     () => {
       const { result, calls } = runDockerIntegrationScript({
         imagePresent: true,
       });
       expect(result.status, result.stderr).toBe(0);
-      expect(calls).not.toContain('docker image prune');
-      expect(calls).not.toContain('docker builder prune');
+      // The unlabelled prunes run on every path: a cached image skips the
+      // build branch, and without them nothing would reclaim ahead of the
+      // pre-vitest gate (#13479). The labelled prune stays inside the
+      // image-missing branch under the build mutex.
+      expect(calls).toContain('docker image prune --force --filter until=24h');
+      expect(calls).toContain(
+        'docker builder prune --all --force --filter until=24h',
+      );
+      expect(calls).not.toContain('docker image prune --all');
       expect(calls).not.toContain('disk-floor');
       expect(calls).not.toContain('npm run build:sandbox');
       expect(calls).toContain('npx vitest run --root ./integration-tests cli');
@@ -2557,25 +2639,34 @@ exit 0`,
         runnerEnvironment: 'self-hosted',
       });
       expect(result.status, result.stderr).toBe(0);
-      // The reclaim and the build are skipped, but a re-run landing on the
-      // same still-saturated host with the image now cached must still pass
-      // the data-root gate before vitest writes container layers to that
-      // filesystem — the actual #13479 death site.
-      expect(calls).not.toContain('docker image prune');
-      expect(calls).not.toContain('docker builder prune');
+      // The build is skipped, but the reclaim is not: a re-run landing on
+      // the same still-saturated host with the image now cached must get
+      // its reclaim before the data-root gate samples the filesystem, or
+      // the gate trips again on the reading that failed the previous
+      // attempt and no retry can recover (#13479).
+      expect(calls).not.toContain('docker image prune --all');
       expect(calls).not.toContain('npm run build:sandbox');
       expect(calls).toContain('docker info --format {{.DockerRootDir}}');
       const lines = calls.trim().split('\n');
+      const danglingPrune = lines.findIndex((line) =>
+        line.startsWith('docker image prune --force'),
+      );
+      const cachePrune = lines.findIndex((line) =>
+        line.startsWith('docker builder prune'),
+      );
       const gates = lines
         .map((line, index) => (line.startsWith('disk-floor') ? index : -1))
         .filter((index) => index >= 0);
       const firstVitest = lines.findIndex((line) =>
         line.startsWith('npx vitest'),
       );
+      expect(danglingPrune).toBeGreaterThanOrEqual(0);
+      expect(cachePrune).toBeGreaterThan(danglingPrune);
       expect(gates).toHaveLength(1);
       expect(lines[gates[0]]).toBe(
-        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+        `disk-floor ${dockerRoot} floor=2097152 inodes=100000`,
       );
+      expect(gates[0]).toBeGreaterThan(cachePrune);
       expect(firstVitest).toBeGreaterThan(gates[0]);
     },
   );
