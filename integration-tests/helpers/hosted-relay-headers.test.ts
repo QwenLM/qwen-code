@@ -128,7 +128,7 @@ describe('Hosted proxy header relay', () => {
     const callers = readdirSync(dir)
       .filter((name) => /^hosted-.*-driver\.ts$/.test(name))
       .filter((name) =>
-        readFileSync(join(dir, name), 'utf8').includes('relayUpstream(res,'),
+        /\brelayUpstream\s*\(/.test(readFileSync(join(dir, name), 'utf8')),
       )
       .sort();
     expect(callers).toEqual([
