@@ -877,6 +877,7 @@ describe('Gemini Client (client.ts)', () => {
       getUserAgent: vi.fn().mockReturnValue('test-agent'),
       getUserMemory: vi.fn().mockReturnValue(''),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
+      getAutoMemoryContext: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
@@ -12447,6 +12448,40 @@ Other open files:
       expect(lastSystemInstruction()).toBe(
         'Custom side-query prompt\n\n---\n\n# auto memory\nMEMORY_INDEX_MARKER',
       );
+    });
+
+    it('appends the auto-memory catalog to the request tail without mutating the caller contents', async () => {
+      // The catalog is request-only: it must be appended after modality
+      // slimming, and generateContent must leave the array the caller owns
+      // untouched so stored history never reproduces it.
+      vi.mocked(mockConfig.getAutoMemoryContext).mockReturnValue(
+        'CATALOG_MARKER',
+      );
+      const contents: Content[] = [
+        content('user', { text: 'first turn' }),
+        content('model', { text: 'first reply' }),
+      ];
+      const ownedByCaller = structuredClone(contents);
+
+      await client.generateContent(
+        contents,
+        {},
+        new AbortController().signal,
+        'test-model',
+      );
+
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      const sent = (request?.contents ?? []) as Content[];
+      const catalogParts = sent
+        .flatMap((entry) => entry.parts ?? [])
+        .filter((part) => part.text === 'CATALOG_MARKER');
+      expect(catalogParts).toHaveLength(1);
+      expect(sent.at(-1)?.parts?.at(-1)).toEqual(
+        expect.objectContaining({ text: 'CATALOG_MARKER' }),
+      );
+      expect(contents).toEqual(ownedByCaller);
     });
 
     it('includes context and auto-memory but omits appendPrompt/gitStatus in the per-call systemInstruction branch', async () => {
