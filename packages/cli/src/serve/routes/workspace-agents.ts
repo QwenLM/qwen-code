@@ -916,12 +916,13 @@ export function registerWorkspaceAgentRoutes(
                   executing ||
                   sessionsForAgent.some((entry) => entry.hasActivePrompt)
                 ? 'working'
-                : blocked
-                  ? 'blocked'
-                  : failed ||
-                      sessionsForAgent.some((entry) => entry.hasTurnError)
-                    ? 'error'
-                    : 'idle';
+                : // A blocked agent needs attention the same way a failed
+                  // one does; the web shell has no separate "blocked" badge.
+                  blocked ||
+                    failed ||
+                    sessionsForAgent.some((entry) => entry.hasTurnError)
+                  ? 'error'
+                  : 'idle';
           return {
             id: agent.id,
             name: agent.name,

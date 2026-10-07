@@ -195,6 +195,14 @@ export async function restoreAgentHostConnections(
       if (runtime && !runtime.generationGuard?.closed) {
         const credential = await hasAgentHostCredential(record);
         if (signal?.aborted) return;
+        if (credential === undefined) {
+          // Unreadable is not revoked: keep the record and try again later.
+          writeStderrLine(
+            `qwen serve: could not read the Agent Host credential for ${record.serverUrl}; retrying.`,
+          );
+          await pause(retryMs, signal);
+          continue;
+        }
         if (!credential) {
           await removeAgentHostConnection(record).catch(() => undefined);
           writeStderrLine(
@@ -234,11 +242,31 @@ export async function restoreAgentHostConnections(
       await pause(watchMs, signal);
     }
   };
-  for (const record of await readAgentHostConnections()) {
-    void keep(record).catch((error: unknown) =>
-      writeStderrLine(
-        `qwen serve: stopped restoring the Agent Host connection to ${record.serverUrl}: ${error instanceof Error ? error.message : String(error)}`,
-      ),
-    );
-  }
+  // One loop per saved connection. The file is read again every watch tick,
+  // so a record saved after boot (`qwen agents join` against this running
+  // daemon) is supervised too, instead of only on the next restart.
+  const supervised = new Set<string>();
+  const supervise = (record: AgentHostConnectionRecord) => {
+    const key = `${record.serverUrl}\0${record.workspaceId}\0${record.workspaceCwd}`;
+    if (supervised.has(key)) return;
+    supervised.add(key);
+    void keep(record)
+      .catch((error: unknown) =>
+        writeStderrLine(
+          `qwen serve: stopped restoring the Agent Host connection to ${record.serverUrl}: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      )
+      .finally(() => supervised.delete(key));
+  };
+  for (const record of await readAgentHostConnections()) supervise(record);
+  void (async () => {
+    while (!signal?.aborted) {
+      await pause(watchMs, signal);
+      if (signal?.aborted) return;
+      const records = await readAgentHostConnections().catch(
+        (): AgentHostConnectionRecord[] => [],
+      );
+      for (const record of records) supervise(record);
+    }
+  })();
 }

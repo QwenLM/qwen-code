@@ -141,6 +141,11 @@ export interface AgentHostRelayRun {
   close(): void;
 }
 
+/** Whether this daemon can offer agent-host relays at all (an addressable base URL). */
+export function hasAgentHostRelay(): boolean {
+  return Boolean(baseUrlGetter?.());
+}
+
 /**
  * Opens the relay for one run. Undefined when this daemon has no relay
  * route mounted or no loopback address (the turn then runs without

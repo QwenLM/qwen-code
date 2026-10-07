@@ -34,9 +34,10 @@ import {
   type HostDecision,
 } from './agent-host-decisions.js';
 
-const { getAdapter, openRelay } = vi.hoisted(() => ({
+const { getAdapter, openRelay, hasRelay } = vi.hoisted(() => ({
   getAdapter: vi.fn<(...args: unknown[]) => AgentAdapter>(),
   openRelay: vi.fn<(...args: unknown[]) => unknown>(),
+  hasRelay: { value: true },
 }));
 
 vi.mock('./agent-host-programs.js', () => ({
@@ -49,7 +50,10 @@ vi.mock('./agent-host-programs.js', () => ({
     probes.filter((probe) => probe.available).map((probe) => probe.program),
 }));
 vi.mock('./session-agents/adapters/index.js', () => ({ getAdapter }));
-vi.mock('./agent-host-relay.js', () => ({ openAgentHostRelayRun: openRelay }));
+vi.mock('./agent-host-relay.js', () => ({
+  openAgentHostRelayRun: openRelay,
+  hasAgentHostRelay: () => hasRelay.value,
+}));
 // A remote qwen turn writes a Host-local session-agents binding first; keep
 // that off the real agent store in these tests.
 vi.mock(
@@ -186,6 +190,7 @@ async function withHost(
     stopAgentHostConnection(target);
     getAdapter.mockReset();
     openRelay.mockReset();
+    hasRelay.value = true;
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     await fs.rm(qwenHome, { recursive: true, force: true });
@@ -459,6 +464,34 @@ it('keeps a qwen binding relay across its run and closes it with the connection'
       workspaceCwd,
     });
     await vi.waitFor(() => expect(closed).toEqual([relayId]));
+  });
+});
+
+it('keeps a qwen binding current on a daemon that can offer no relay', async () => {
+  hasRelay.value = false;
+  openRelay.mockReturnValue(undefined);
+  const current: unknown[] = [];
+  const coordinator = fakeCoordinator([
+    assignment('run-1', { program: 'qwen' }),
+  ]);
+  getAdapter.mockImplementation((_program, options) => ({
+    program: 'qwen',
+    async runTurn() {
+      const send = (
+        options as {
+          sessionSend?: { rotate(): unknown; isCurrent(): boolean };
+        }
+      ).sessionSend;
+      send?.rotate();
+      // No token was ever issued, so none can be stale: reusing the hidden
+      // session must not be refused on every turn.
+      current.push(send?.isCurrent());
+      return { status: 'completed', outputText: 'ok' };
+    },
+  }));
+  await withHost(coordinator, async () => {
+    await vi.waitFor(() => expect(coordinator.results).toHaveLength(1));
+    expect(current).toEqual([true]);
   });
 });
 

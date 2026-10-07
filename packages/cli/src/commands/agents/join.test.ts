@@ -141,6 +141,20 @@ it('reads the enrollment token without echoing it', async () => {
   expect(emitter.listenerCount('data')).toBe(0);
 });
 
+it('drops whole escape sequences instead of their printable tails', async () => {
+  const keys = fakeTty();
+  const typed = readHiddenLine('Token: ', keys.input, () => undefined);
+  // Arrow keys, Delete and an SS3 Home key between real characters.
+  keys.type('tok\u001b[A\u001b[D\u001b[3~\u001bOHen\r');
+  await expect(typed).resolves.toBe('token');
+
+  // Bracketed paste keeps the pasted text and drops both markers.
+  const paste = fakeTty();
+  const pasted = readHiddenLine('Token: ', paste.input, () => undefined);
+  paste.type('\u001b[200~abc\u001b[201~\r');
+  await expect(pasted).resolves.toBe('abc');
+});
+
 it('cancels the hidden prompt on Ctrl+C and skips it without a TTY', async () => {
   const tty = fakeTty();
   const cancelled = readHiddenLine('Token: ', tty.input, () => undefined);
