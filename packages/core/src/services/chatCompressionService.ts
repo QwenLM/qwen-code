@@ -254,6 +254,9 @@ export function isBelowCompactionWarn(
   config: Config,
   promptTokens: number,
 ): boolean {
+  // A count of 0 means the chat has no report for this route yet (or the read
+  // crossed routes), not an empty prompt: fail closed so no turn is skipped.
+  if (promptTokens <= 0) return false;
   const window =
     config.getContentGeneratorConfig()?.contextWindowSize ??
     DEFAULT_TOKEN_LIMIT;
@@ -570,14 +573,6 @@ export class ChatCompressionService {
         },
       };
     }
-
-    // Compaction replaces the history the memory extractor reads, so first
-    // extract any turns the #13004 cadence skipped. A subagent chat compacting
-    // under a derived config flushes the session's pending turns too, which is
-    // early but correct. No-op unless the experiment left a turn pending.
-    await config
-      .getMemoryManager?.()
-      ?.flushPendingExtract?.(config.getSessionId());
 
     // Fire PreCompact hook before compression begins. Pass any user-supplied
     // `/compress` instructions so hook scripts can read / log / amend them

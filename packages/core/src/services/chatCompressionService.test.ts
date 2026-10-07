@@ -14,6 +14,7 @@ import {
   COMPACTION_BUDGET_SAFETY_MARGIN,
   computeCompactionOutputBudget,
   computeThresholds,
+  isBelowCompactionWarn,
   MAX_CONSECUTIVE_FAILURES,
   MAX_HOOK_INSTRUCTIONS_CHARS,
   PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
@@ -1736,6 +1737,23 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
     await expectGate(false, 200_000, 80_000, {
       pendingUserMessage: userText('short'),
     });
+  });
+});
+
+describe('isBelowCompactionWarn', () => {
+  const config = {
+    getContentGeneratorConfig: () => ({ contextWindowSize: 200_000 }),
+    getAutoCompactThreshold: () => undefined,
+  } as unknown as Config;
+
+  it('compares the prompt with the warning tier', () => {
+    const { warn } = computeThresholds(200_000);
+    expect(isBelowCompactionWarn(config, warn - 1)).toBe(true);
+    expect(isBelowCompactionWarn(config, warn)).toBe(false);
+  });
+
+  it('fails closed on a zero count, which means no report for the route', () => {
+    expect(isBelowCompactionWarn(config, 0)).toBe(false);
   });
 });
 

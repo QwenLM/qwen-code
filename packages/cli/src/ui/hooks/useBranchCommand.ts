@@ -23,7 +23,6 @@ import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import {
-  flushMemoryBeforeSessionSwitch,
   hasBlockingBackgroundWork,
   buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
@@ -146,10 +145,6 @@ export function useBranchCommand(
       let prevSessionData: ResumedSessionData | undefined;
 
       try {
-        // Extract turns the memory cadence skipped while this is still the
-        // outgoing session, before the swap transaction snapshots its usage.
-        await flushMemoryBeforeSessionSwitch(config);
-
         // 0. Open the telemetry swap transaction BEFORE touching the
         //    outgoing session. Opening takes the session-switch latch and
         //    fixes the outgoing session for this attempt; see the lifetime

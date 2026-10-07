@@ -21,12 +21,15 @@ export const MAX_EXTRACT_NOOP_SKIP_TURNS = 3;
  * The extractor reads the last 40 curated history entries captured after the
  * turn (`captureCacheSafeParams`), not the cursor's unprocessed slice. A skip
  * is safe only while every unprocessed entry stays inside the next run's tail,
- * so skips stop at half of it. The guard counts raw entries, which are never
- * fewer than curated ones, so it errs toward running.
+ * so a skip needs at most half of it pending. The guard counts raw entries,
+ * which are never fewer than curated ones, so it errs toward running. It is
+ * checked at skip time only: a following turn that adds more entries than the
+ * remaining room can still push a skipped turn out of the next run's tail.
+ * That is a known limit of this experiment, not a guarantee.
  */
 export const EXTRACT_CADENCE_MAX_PENDING_ENTRIES = 20;
 
-/** Upper bound for a pending-turn flush at a session or compaction boundary. */
+/** Default bound for the pending-turn flush at an ACP session close. */
 export const EXTRACT_FLUSH_TIMEOUT_MS = 60_000;
 
 export function getExtractNoopSkipTurns(): number {

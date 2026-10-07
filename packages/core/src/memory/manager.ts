@@ -665,8 +665,9 @@ export class MemoryManager {
     string,
     { taskId: string; params: ScheduleExtractParams }
   >();
-  // #13004 cadence, per session and in memory only: /clear, a session switch
-  // or a derived config never inherits another session's skips.
+  // #13004 cadence, per session and in memory only. A session switch drops
+  // both ids' entries (discardExtractCadence), so /clear, /resume and /branch
+  // never inherit another session's skips.
   private readonly extractCadence = new Map<
     string,
     {
@@ -1335,11 +1336,12 @@ export class MemoryManager {
   }
 
   /**
-   * Runs one extraction for turns the cadence skipped, before a boundary that
-   * would discard them: compaction, `/clear`, a session switch or an ACP
-   * session close. Callers must await it before switching sessions, because
-   * the extraction reads the session's cache-safe params and checks the live
-   * session id.
+   * Runs one extraction for turns the cadence skipped, before an ACP session
+   * close discards them. Other boundaries (compaction, `/clear`, `/resume`,
+   * `/branch`, process exit) do not flush: the experiment accepts losing up to
+   * N skipped turns there. The extraction reads the session's cache-safe
+   * params and checks the live session id, so the caller awaits it while the
+   * session is still current.
    *
    * Resolves `true` only when the pending turns were extracted. Resolves
    * `false` when this call did not settle within `timeoutMs`, when the run
@@ -1384,6 +1386,15 @@ export class MemoryManager {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * Drops the #13004 cadence state of the sessions a switch leaves and enters.
+   * Skipped turns are not flushed there, and a resumed id must not inherit an
+   * earlier skip.
+   */
+  discardExtractCadence(...sessionIds: string[]): void {
+    for (const sessionId of sessionIds) this.extractCadence.delete(sessionId);
   }
 
   /**

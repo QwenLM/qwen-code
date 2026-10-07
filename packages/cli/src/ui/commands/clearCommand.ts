@@ -15,7 +15,6 @@ import {
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import {
-  flushMemoryBeforeSessionSwitch,
   hasBlockingBackgroundWork,
   buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
@@ -69,10 +68,6 @@ export const clearCommand: SlashCommand = {
         .catch((err) => {
           config.getDebugLogger().warn(`SessionEnd hook failed: ${err}`);
         });
-
-      // Extract turns the memory cadence skipped while this is still the
-      // outgoing session, before its usage is persisted below.
-      await flushMemoryBeforeSessionSwitch(config);
 
       // Abort old-session async work before creating the new session so
       // cancellation notifications cannot leak across the reset boundary.

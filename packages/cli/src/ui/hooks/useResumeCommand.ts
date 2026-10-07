@@ -20,7 +20,6 @@ import {
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import {
-  flushMemoryBeforeSessionSwitch,
   hasBlockingBackgroundWork,
   buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
@@ -135,10 +134,6 @@ export function useResumeCommand(
       // that pre-swap work can never settle a transaction this attempt did
       // not open.
       let swapOpened = false;
-      // Extract turns the memory cadence skipped while this is still the
-      // outgoing session, before the swap transaction snapshots its usage.
-      await flushMemoryBeforeSessionSwitch(config);
-
       const telemetrySwapOpened =
         config.getLlmClient()?.beginTelemetrySwap?.() ?? true;
       if (!telemetrySwapOpened) {

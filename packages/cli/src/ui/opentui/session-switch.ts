@@ -39,7 +39,6 @@ import {
   buildResumedHistoryItems,
 } from '../utils/resumeHistoryUtils.js';
 import {
-  flushMemoryBeforeSessionSwitch,
   buildBackgroundWorkBlockedMessage,
   hasBlockingBackgroundWork,
   resetBackgroundStateForSessionSwitch,
@@ -112,10 +111,6 @@ export async function handleResumeSession(
     );
     return;
   }
-
-  // Extract turns the memory cadence skipped while this is still the
-  // outgoing session, before the swap transaction snapshots its usage.
-  await flushMemoryBeforeSessionSwitch(config);
 
   // Open the telemetry swap transaction BEFORE touching the outgoing
   // session (ink useResumeCommand parity): the slot is the only
@@ -294,10 +289,6 @@ export async function handleBranchSession(
     );
     return;
   }
-
-  // Extract turns the memory cadence skipped while this is still the
-  // outgoing session, before the swap transaction snapshots its usage.
-  await flushMemoryBeforeSessionSwitch(config);
 
   // Telemetry swap transaction (ink useBranchCommand parity): the slot is
   // the only serialization for session switches; see the resume handler.

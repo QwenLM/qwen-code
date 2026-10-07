@@ -2168,6 +2168,19 @@ describe('MemoryManager', () => {
       expect((await turn(mgr, 2, 'b')).skippedReason).toBeUndefined();
     });
 
+    it('drops the skip state of both sessions a switch touches', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+      // /clear, /resume and /branch do not flush: the skipped turn is dropped
+      // and the resumed id runs its next turn instead of inheriting the skip.
+      mgr.discardExtractCadence('other', 'sess');
+      expect((await turn(mgr, 6)).skippedReason).toBeUndefined();
+      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+    });
+
     it('flushes the latest skipped turn once and then forgets it', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       const mgr = new MemoryManager();
