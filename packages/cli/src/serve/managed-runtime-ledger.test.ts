@@ -201,6 +201,30 @@ describe('Managed Runtime ledger', () => {
   });
 
   describe('worker-side document', () => {
+    it.skipIf(!POSIX)(
+      'creates the ledger directory and staging-written file owner-only',
+      async () => {
+        // The ledger names live pids and call ids: another local user able
+        // to traverse $HOME/.qwen must not read them, so both the directory
+        // and every file the tmp+rename dance produces land owner-only
+        // regardless of the ambient umask.
+        const ledgerDir = path.join(root, 'owned');
+        const workFile = path.join(ledgerDir, 'ledger.json');
+        const ledger = ManagedRuntimeLedger.create({
+          workFile,
+          worker: {
+            pid: process.pid,
+            pgid: process.pid,
+            incarnation: 'inc',
+            startedAt: Date.now(),
+          },
+        });
+        ledger.addGroup({ pgid: 4242, callId: 'c1', startedAt: 123 });
+        expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
+        expect(statSync(workFile).mode & 0o777).toBe(0o600);
+      },
+    );
+
     it('writes the worker record at creation and persists groups synchronously', async () => {
       const workFile = path.join(root, 'nested', 'ledger.json');
       const ledger = ManagedRuntimeLedger.create({

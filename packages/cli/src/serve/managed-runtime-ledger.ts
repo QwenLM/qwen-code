@@ -459,7 +459,10 @@ function writeLedgerDocument(
   writeFileSync(
     temporary,
     JSON.stringify({ version: LEDGER_FILE_VERSION, worker, groups }),
-    'utf8',
+    // Worker pids, group ids and call ids are read-side hygiene: another
+    // local user who can traverse $HOME/.qwen should not read them, so the
+    // file (and, via rename, its finished shape) lands owner-only.
+    { encoding: 'utf8', mode: 0o600 },
   );
   renameSync(temporary, workFile);
 }
@@ -488,7 +491,11 @@ export class ManagedRuntimeLedger {
     readonly worker: ManagedRuntimeLedgerWorkerRecord;
   }): ManagedRuntimeLedger {
     const ledger = new ManagedRuntimeLedger(options.workFile, options.worker);
-    mkdirSync(path.dirname(options.workFile), { recursive: true });
+    mkdirSync(path.dirname(options.workFile), {
+      recursive: true,
+      // The directory guards the same secrets as the files inside it.
+      mode: 0o700,
+    });
     ledger.rewrite();
     return ledger;
   }

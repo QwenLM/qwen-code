@@ -43,6 +43,7 @@ import {
   ManagedRuntimeLedger,
   processGroupLiveness,
   queryProcessTable,
+  testInternals as ledgerTestInternals,
 } from './managed-runtime-ledger.js';
 import {
   ManagedMcpToolUnknownError,
@@ -206,8 +207,52 @@ describe.skipIf(process.platform === 'win32')(
       expect(ledger.outstandingGroups().map((group) => group.pgid)).toContain(
         pgid,
       );
+      // The memory view is only as good as its file: the on-disk document
+      // names the same group, proving the durable-first write carried it.
+      const onDisk = ledgerTestInternals.readLedgerDocument(ledgerFile);
+      expect(onDisk?.groups.map((group) => group.pgid)).toContain(pgid);
       await exec.close();
       strayGroups.delete(pgid);
+    });
+
+    it('kills in pid order when the ledger fails to record: never a settle-then-kill', async () => {
+      // The failure path has one admissible order: the group the ledger
+      // could not record dies BEFORE the caller hears the call failed — a
+      // settle-then-kill shape would hand back an error while the group
+      // still runs.
+      const events: string[] = [];
+      const realWait = ledger.waitForGroupExit.bind(ledger);
+      const doubled = {
+        addGroup: () => {
+          events.push('record-fail');
+          throw new Error('ledger disk full');
+        },
+        outstandingGroups: ledger.outstandingGroups.bind(ledger),
+        waitForGroupExit: (pgid: number, budgetMs: number) => {
+          events.push('kill-started');
+          return realWait(pgid, budgetMs);
+        },
+        killOutstanding: ledger.killOutstanding.bind(ledger),
+        complete: ledger.complete.bind(ledger),
+        prune: ledger.prune.bind(ledger),
+        watch: ledger.watch.bind(ledger),
+      } as unknown as ManagedRuntimeLedger;
+      const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-b', {
+        ledger: doubled,
+        groupEvidenceTimeoutMs: 800,
+      });
+      const input = {
+        command: LONG_RUN,
+        description: 'long-running foreground process',
+      };
+      const result = await exec.execute(
+        reference('call-order', input),
+        'run_shell_command',
+        input,
+      );
+      expect(events.slice(0, 2)).toEqual(['record-fail', 'kill-started']);
+      expect(result.executionStatus).toBe('error');
+      await exec.close();
     });
 
     it('fails the call and kills the group when the ledger cannot record it', async () => {
@@ -245,8 +290,16 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.executionStatus).toBe('error');
       expect(result.error?.message).toContain('ledger disk full');
       expect(seen).toHaveLength(1);
-      // The callback killed the group it could not record.
-      expect(processGroupLiveness(seen[0]!)).toBe('gone');
+      // The callback killed the group it could not record. Post-SIGKILL
+      // reaping is scheduler-paced: assert the consequence it settles into,
+      // never the instant the kill lands.
+      const deathDeadline = Date.now() + 3_000;
+      while (processGroupLiveness(seen[0]!) !== 'gone') {
+        if (Date.now() > deathDeadline) {
+          throw new Error('the unrecorded group never died');
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
       await exec.close();
     });
 

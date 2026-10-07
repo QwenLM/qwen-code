@@ -273,6 +273,7 @@ import {
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
+import { isUnprovenSweepReport } from '../runtime/managed-quarantine-report.js';
 import {
   getConversationDirectoryName,
   hasVerifiableInode,
@@ -881,21 +882,6 @@ function managedQuarantineSummary(reason: Error): string {
     entries.push('a ledger it could not read held the unproven stop');
   }
   return entries.join('; ');
-}
-
-/**
- * The structural half of the serve side's LedgerSweepUnprovenError, which the
- * acp-integration boundary forbids importing here.
- */
-function isUnprovenSweepReport(
-  failure: unknown,
-): failure is { workFile: string; remaining: unknown[] } {
-  return (
-    typeof failure === 'object' &&
-    failure !== null &&
-    typeof (failure as { workFile?: unknown }).workFile === 'string' &&
-    Array.isArray((failure as { remaining?: unknown }).remaining)
-  );
 }
 
 function getSessionWriterError(error: unknown):

@@ -5,7 +5,7 @@
  */
 
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { existsSync, utimesSync } from 'node:fs';
+import { existsSync, statSync, utimesSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -22,6 +22,7 @@ import {
   processGroupLiveness,
   queryProcessTable,
   testInternals,
+  type ProcessTableRow,
 } from './managed-runtime-ledger.js';
 import {
   createManagedRuntimeEnvironment,
@@ -251,7 +252,11 @@ describe.skipIf(process.platform === 'win32')(
     });
 
     afterEach(async () => {
-      await Promise.all(workers.splice(0).map((worker) => worker.close()));
+      await Promise.all(
+        workers
+          .splice(0)
+          .map((worker) => worker.close().catch(() => undefined)),
+      );
       await rm(root, { recursive: true, force: true });
     });
 
@@ -798,6 +803,8 @@ describe.skipIf(process.platform === 'win32')(
         expect(ledgerEnv!.endsWith('.json')).toBe(true);
         // The host names the file; only the worker ever writes it.
         expect(existsSync(ledgerEnv!)).toBe(false);
+        // The directory the host just made is owner-only (read-side hygiene).
+        expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
       });
 
       it('sweeps the ledger of a worker that exits between calls', async () => {
@@ -914,8 +921,9 @@ describe.skipIf(process.platform === 'win32')(
       it('leaves a ledger its reaper already owns to the reaper at close', async () => {
         // A close that finds its ledger unprovable reports the quarantine
         // once and arms the reaper; a repeated close must not pay a second
-        // proof budget over the same path nor reject with a duplicate of
-        // the failure its report already counts.
+        // proof budget over the same path — and deferring is not proving:
+        // it rejects with the SAME reason that armed the reaper rather than
+        // resolving as if the stop were done.
         const ledgerDir = path.join(root, 'ledgers');
         const quarantine = { report: vi.fn(), lift: vi.fn() };
         const created = ledgerWorker('ok', { ledgerDir, quarantine });
@@ -933,9 +941,15 @@ describe.skipIf(process.platform === 'win32')(
         }
         expect(quarantine.report).toHaveBeenCalledTimes(1);
 
-        // The path is the reaper's now: a repeated close sweeps nothing
-        // again, reports nothing again, and does not reject.
-        await expect(created.close()).resolves.toBeUndefined();
+        const repeated = await created.close().catch((error: unknown) => error);
+        expect(repeated).toBeInstanceOf(AggregateError);
+        const armedMessage = (quarantine.report.mock.calls[0]![0] as Error)
+          .message;
+        expect(
+          (repeated as AggregateError).errors.some(
+            (reason) => reason.message === armedMessage,
+          ),
+        ).toBe(true);
         expect(quarantine.report).toHaveBeenCalledTimes(1);
       });
 
@@ -1079,6 +1093,83 @@ describe.skipIf(process.platform === 'win32')(
         }
       });
 
+      it('close rejects with the arming reason while the reaper it armed keeps proving', async () => {
+        // A stop a reaper is still proving is not a clean close: the first
+        // close() arms the reaper and rejects; a second close() must not
+        // resolve on the back of the first's work. It rejects with the SAME
+        // reason the arming sweep produced — deferring is not proving.
+        const ledgerDir = path.join(root, 'ledgers');
+        const quarantine = { report: vi.fn(), lift: vi.fn() };
+        const created = ledgerWorker('ok', { ledgerDir, quarantine });
+        await created.execute('read_file', { file_path: 'a.txt' }, signal);
+        const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
+        await writeFile(workFile, 'not a ledger at all', 'utf8');
+
+        sweepWitnesses.records.length = 0;
+        const first = await created.close().catch((error: unknown) => error);
+        expect(first).toBeInstanceOf(AggregateError);
+        expect(quarantine.report).toHaveBeenCalledTimes(1);
+        const armedReason = quarantine.report.mock.calls[0]![0] as Error;
+        const [sweepsAfterFirst] = [sweepWitnesses.records.length];
+
+        const second = await created.close().catch((error: unknown) => error);
+        expect(second).toBeInstanceOf(AggregateError);
+        const reasons = (second as AggregateError).errors as Error[];
+        expect(
+          reasons.some((reason) => reason.message === armedReason.message),
+        ).toBe(true);
+        // The second close paid no new sweep: the armed reaper owns it.
+        expect(sweepWitnesses.records.length).toBe(sweepsAfterFirst);
+      });
+
+      it('an unproven sweep from the exit hook arms the reaper from inside its own failure', async () => {
+        // The exit hook's catch swallows the sweep's throw because the
+        // arming already happened inside: the quarantine report is the
+        // observable consequence, and the armed reaper — not a late caller —
+        // owns the stop from there.
+        const ledgerDir = path.join(root, 'ledgers');
+        const quarantine = { report: vi.fn(), lift: vi.fn() };
+        const created = ledgerWorker('exit-after-call', {
+          ledgerDir,
+          quarantine,
+        });
+        sweepWitnesses.records.length = 0;
+        let release: (() => void) | undefined;
+        sweepWitnesses.hold = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        try {
+          await created.execute('read_file', { file_path: 'a.txt' }, signal);
+          const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
+          // The hook's sweep is parked pre-read; the unreadable content
+          // lands before it learns the file.
+          await vi.waitFor(
+            () => {
+              expect(
+                sweepWitnesses.records.some(
+                  (record) => record.workFile === workFile,
+                ),
+              ).toBe(true);
+            },
+            { timeout: 10_000 },
+          );
+          await writeFile(workFile, 'not a ledger at all', 'utf8');
+          release?.();
+          await vi.waitFor(
+            () => {
+              expect(quarantine.report).toHaveBeenCalledTimes(1);
+            },
+            { timeout: 10_000 },
+          );
+          // The lift never comes from garbage: the quarantine stands.
+          expect(quarantine.lift).not.toHaveBeenCalled();
+        } finally {
+          release?.();
+          sweepWitnesses.hold = undefined;
+          sweepWitnesses.records.length = 0;
+        }
+      });
+
       it('sweeps the ledger of a worker that never finished launching', async () => {
         // A launch that fails attestation leaves no live session to own the
         // file: the inline sweep at the launch failure is what both stops
@@ -1203,6 +1294,15 @@ describe.skipIf(process.platform === 'win32')(
     });
   },
 );
+
+/** A transient ps failure retries within the poll's deadline instead of aborting the test. */
+function queryProcessTableTolerant(): ReadonlyMap<number, ProcessTableRow> {
+  try {
+    return queryProcessTable();
+  } catch {
+    return new Map();
+  }
+}
 
 describe.skipIf(process.platform === 'win32')(
   'createManagedRuntimeEnvironment',
@@ -2414,7 +2514,7 @@ describe.skipIf(process.platform === 'win32')(
           try {
             const memberDeadline = Date.now() + 10_000;
             for (;;) {
-              const rows = [...queryProcessTable().values()].filter(
+              const rows = [...queryProcessTableTolerant().values()].filter(
                 (row) => row.pgid === groupId,
               );
               const leaderGone = !rows.some((row) => row.pid === groupId);
@@ -2479,7 +2579,7 @@ describe.skipIf(process.platform === 'win32')(
             try {
               const settleDeadline = Date.now() + 10_000;
               for (;;) {
-                const rows = [...queryProcessTable().values()].filter(
+                const rows = [...queryProcessTableTolerant().values()].filter(
                   (row) => row.pgid === youngPid,
                 );
                 if (rows.length === 1 && rows[0]!.pid === youngPid) break;
@@ -2566,12 +2666,12 @@ describe.skipIf(process.platform === 'win32')(
             'managed-runtime',
           );
           await mkdir(ledgerDir, { recursive: true });
+          // Fresh garbage arms the sweep as transient-unreadable; the file
+          // is back-dated ONLY after the arming recorded, so the 750 ms
+          // debris-age margin can never let the arming pass retire the
+          // ledger itself and skip the retry-side branch this tests.
           const ghost = path.join(ledgerDir, 'ghost.json');
           await writeFile(ghost, '{not a ledger', 'utf8');
-          // Just inside the debris age: the arming sweep still reads it as
-          // unproven; the first retry, a second later, retires it.
-          const almostAged = new Date(Date.now() - 59_250);
-          utimesSync(ghost, almostAged, almostAged);
 
           environment = createManagedRuntimeEnvironment(sweeperConfig, () => ({
             command: process.execPath,
@@ -2585,6 +2685,10 @@ describe.skipIf(process.platform === 'win32')(
             { timeout: 15_000 },
           );
           expect(clearSpy).not.toHaveBeenCalled();
+          // Armed. Now the next pass must retire: age the file past the
+          // debris bound and let the reaper run into it.
+          const aged = new Date(Date.now() - 2 * 24 * 3_600_000);
+          utimesSync(ghost, aged, aged);
 
           // The retry sets the ledger aside, reads its own rejection as
           // terminal, and stops: over the next intervals there is no lift.
@@ -2654,7 +2758,7 @@ describe.skipIf(process.platform === 'win32')(
           try {
             const memberDeadline = Date.now() + 10_000;
             for (;;) {
-              const rows = [...queryProcessTable().values()].filter(
+              const rows = [...queryProcessTableTolerant().values()].filter(
                 (row) => row.pgid === groupId,
               );
               const leaderGone = !rows.some((row) => row.pid === groupId);
@@ -2780,7 +2884,7 @@ describe.skipIf(process.platform === 'win32')(
           try {
             const memberDeadline = Date.now() + 10_000;
             for (;;) {
-              const rows = [...queryProcessTable().values()].filter(
+              const rows = [...queryProcessTableTolerant().values()].filter(
                 (row) => row.pgid === groupId,
               );
               const leaderGone = !rows.some((row) => row.pid === groupId);
@@ -2906,7 +3010,7 @@ describe.skipIf(process.platform === 'win32')(
             // judged: a live young leader would read the id as recycled.
             const memberDeadline = Date.now() + 10_000;
             for (;;) {
-              const rows = [...queryProcessTable().values()].filter(
+              const rows = [...queryProcessTableTolerant().values()].filter(
                 (row) => row.pgid === groupId,
               );
               const leaderGone = !rows.some((row) => row.pid === groupId);
@@ -3003,8 +3107,11 @@ describe.skipIf(process.platform === 'win32')(
       },
     );
 
-    it('sweeps the stale worker ledgers of an earlier child when it starts', async () => {
-      {
+    it(
+      'sweeps the stale worker ledgers of an earlier child when it starts',
+      // Two 15 s inner deadlines need more room than the per-test ceiling.
+      { timeout: 30_000 },
+      async () => {
         const sweeperConfig = new Config({
           sessionId: '11111111-2222-3333-4444-555555555555',
           targetDir: root,
@@ -3132,8 +3239,8 @@ describe.skipIf(process.platform === 'win32')(
             }
           }
         }
-      }
-    });
+      },
+    );
   },
 );
 

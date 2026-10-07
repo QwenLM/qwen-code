@@ -509,8 +509,14 @@ export class ManagedSessionRuntimeWorker {
     for (const ledgerPath of [...this.ledgerPaths]) {
       // A path whose unproven sweep already armed a reaper is the reaper's
       // to settle: re-sweeping it here pays a second proof budget over the
-      // same groups and re-reports a quarantine that is already counted.
-      if (this.unprovenLedgerPaths.has(ledgerPath)) continue;
+      // same groups and re-reports a quarantine that is already counted. But
+      // deferring is not proving: close() must reject with the reason that
+      // armed the reaper rather than resolve as if the stop were done.
+      const armedReason = this.unprovenLedgerPaths.get(ledgerPath);
+      if (armedReason !== undefined) {
+        failures.push(armedReason);
+        continue;
+      }
       try {
         await this.sweepLedgerOnce(ledgerPath);
       } catch (error) {
@@ -522,8 +528,13 @@ export class ManagedSessionRuntimeWorker {
     }
   }
 
-  /** Ledger paths whose unproven stop is already reported and being retried. */
-  private readonly unprovenLedgerPaths = new Set<string>();
+  /**
+   * Ledger paths whose unproven stop is already reported and being retried,
+   * with the reason that armed them: a close() that defers the sweep to the
+   * armed reaper must reject with THAT reason rather than resolve as if the
+   * stop were proven.
+   */
+  private readonly unprovenLedgerPaths = new Map<string, Error>();
 
   /**
    * Reports a stop the ledger's sweep could not prove: the engine is
@@ -533,7 +544,7 @@ export class ManagedSessionRuntimeWorker {
    */
   private reportUnproven(ledgerPath: string, reason: Error): void {
     if (this.unprovenLedgerPaths.has(ledgerPath)) return;
-    this.unprovenLedgerPaths.add(ledgerPath);
+    this.unprovenLedgerPaths.set(ledgerPath, reason);
     this.options.quarantine?.report(reason);
     // The groups the last failure named: a sweep that finds the file gone
     // has proven nothing about them, so the lift waits for their own
@@ -737,7 +748,12 @@ export class ManagedSessionRuntimeWorker {
       : undefined;
     if (ledgerPath !== undefined) {
       // Fail before spawn: a worker without its ledger cannot be swept.
-      mkdirSync(path.dirname(ledgerPath), { recursive: true });
+      mkdirSync(path.dirname(ledgerPath), {
+        recursive: true,
+        // Same read-side hygiene as the staging write: the ledger dir is
+        // owner-only, so a traversal of $HOME/.qwen stops before the pids.
+        mode: 0o700,
+      });
       this.ledgerPaths.add(ledgerPath);
       launchedLedgerPaths.add(ledgerPath);
     }
