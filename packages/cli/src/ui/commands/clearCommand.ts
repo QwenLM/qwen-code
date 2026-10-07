@@ -15,6 +15,7 @@ import {
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import {
+  flushMemoryBeforeSessionSwitch,
   hasBlockingBackgroundWork,
   buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
@@ -95,6 +96,7 @@ export const clearCommand: SlashCommand = {
         }
       }
 
+      await flushMemoryBeforeSessionSwitch(config);
       const newSessionId = config.startNewSession();
 
       // Reset UI telemetry metrics for the new session

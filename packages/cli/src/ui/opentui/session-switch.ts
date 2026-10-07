@@ -39,6 +39,7 @@ import {
   buildResumedHistoryItems,
 } from '../utils/resumeHistoryUtils.js';
 import {
+  flushMemoryBeforeSessionSwitch,
   buildBackgroundWorkBlockedMessage,
   hasBlockingBackgroundWork,
   resetBackgroundStateForSessionSwitch,
@@ -167,6 +168,7 @@ export async function handleResumeSession(
 
     // 1. Core swap first (ink order): any failure before the UI commits
     //    rolls the core back to the previous session below.
+    await flushMemoryBeforeSessionSwitch(config);
     resetBackgroundStateForSessionSwitch(config);
     config.startNewSession(sessionId, sessionData);
     coreSwapped = true;
@@ -362,6 +364,7 @@ export async function handleBranchSession(
     }
 
     // 7. Core swap first.
+    await flushMemoryBeforeSessionSwitch(config);
     config.startNewSession(newSessionId, resumed);
     coreSwapped = true;
     await waitForGoalRuntime(config);

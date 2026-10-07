@@ -20,6 +20,7 @@ import {
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import {
+  flushMemoryBeforeSessionSwitch,
   hasBlockingBackgroundWork,
   buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
@@ -210,6 +211,7 @@ export function useResumeCommand(
         //    user is not stranded with a half-live client. The transaction
         //    opened above covers the initialize() replay (#9833; see
         //    beginTelemetrySwap's JSDoc in core client.ts).
+        await flushMemoryBeforeSessionSwitch(config);
         resetBackgroundStateForSessionSwitch(config);
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;

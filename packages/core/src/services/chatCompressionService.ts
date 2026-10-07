@@ -245,6 +245,24 @@ export function computeThresholds(
   return { warn, auto, hard, effectiveWindow };
 }
 
+/**
+ * Whether a prompt of `promptTokens` sits below the compaction warning tier
+ * for this config's window. Memory extraction cadence (#13004) only skips a
+ * turn there, so no skipped turn is pending when compaction is near.
+ */
+export function isBelowCompactionWarn(
+  config: Config,
+  promptTokens: number,
+): boolean {
+  const window =
+    config.getContentGeneratorConfig()?.contextWindowSize ??
+    DEFAULT_TOKEN_LIMIT;
+  return (
+    promptTokens <
+    computeThresholds(window, config.getAutoCompactThreshold()).warn
+  );
+}
+
 export type CompactTrigger = 'manual' | 'auto';
 
 /**
@@ -552,6 +570,14 @@ export class ChatCompressionService {
         },
       };
     }
+
+    // Compaction replaces the history the memory extractor reads, so first
+    // extract any turns the #13004 cadence skipped. A subagent chat compacting
+    // under a derived config flushes the session's pending turns too, which is
+    // early but correct. No-op unless the experiment left a turn pending.
+    await config
+      .getMemoryManager?.()
+      ?.flushPendingExtract?.(config.getSessionId());
 
     // Fire PreCompact hook before compression begins. Pass any user-supplied
     // `/compress` instructions so hook scripts can read / log / amend them

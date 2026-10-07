@@ -37,6 +37,8 @@ import {
   type MicrocompactOptions,
 } from '../services/microcompaction/microcompact.js';
 import { buildLegacyRelevantAutoMemoryPrompt } from '../memory/recall.js';
+import { getExtractNoopSkipTurns } from '../memory/extract-cadence.js';
+import { isBelowCompactionWarn } from '../services/chatCompressionService.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import {
   GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
@@ -3167,6 +3169,12 @@ export class LlmClient {
         sessionId,
         history,
         config: this.config,
+        ...(getExtractNoopSkipTurns() > 0 && {
+          belowCompactionWarn: isBelowCompactionWarn(
+            this.config,
+            this.getChat().getLastPromptTokenCount(),
+          ),
+        }),
       })
       .then((result) => result.touchedTopics.length)
       .catch((error: unknown) => {

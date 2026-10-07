@@ -66,6 +66,11 @@ import {
 import { ensureAutoMemoryScaffold } from './store.js';
 import { runAutoMemoryExtract } from './extract.js';
 import {
+  EXTRACT_CADENCE_MAX_PENDING_ENTRIES,
+  EXTRACT_FLUSH_TIMEOUT_MS,
+  getExtractNoopSkipTurns,
+} from './extract-cadence.js';
+import {
   runManagedAutoMemoryDream,
   type AutoMemoryDreamResult,
 } from './dream.js';
@@ -168,6 +173,11 @@ export interface ScheduleExtractParams {
   history: Content[];
   now?: Date;
   config?: Config;
+  /**
+   * Whether the turn's prompt stayed below the compaction warning threshold.
+   * Cadence skips (#13004) need `true`; near compaction every turn extracts.
+   */
+  belowCompactionWarn?: boolean;
 }
 
 export interface ScheduleSkillReviewParams {
@@ -655,6 +665,17 @@ export class MemoryManager {
     string,
     { taskId: string; params: ScheduleExtractParams }
   >();
+  // #13004 cadence, per session and in memory only: /clear, a session switch
+  // or a derived config never inherits another session's skips.
+  private readonly extractCadence = new Map<
+    string,
+    {
+      armed: boolean;
+      skips: number;
+      lastExtractedLength: number;
+      pending?: ScheduleExtractParams;
+    }
+  >();
 
   // ── Skill-review in-flight dedup ─────────────────────────────────────────────
   private readonly skillReviewInFlightByProject = new Map<string, string>();
@@ -1092,6 +1113,7 @@ export class MemoryManager {
    */
   async scheduleExtract(
     params: ScheduleExtractParams,
+    options: { bypassCadence?: boolean } = {},
   ): Promise<
     ReturnType<typeof runAutoMemoryExtract> extends Promise<infer T> ? T : never
   > {
@@ -1115,6 +1137,13 @@ export class MemoryManager {
           historyLength: params.history.length,
         },
       });
+      // The main agent saved memory itself; do not keep skipping on the
+      // strength of an older no-op. Pending turns stay pending for the next run.
+      const cadence = this.extractCadence.get(params.sessionId);
+      if (cadence) {
+        cadence.armed = false;
+        cadence.skips = 0;
+      }
       if (wroteUserMemory && params.config) {
         await this.recordUserMutation(
           params.projectRoot,
@@ -1125,6 +1154,44 @@ export class MemoryManager {
       return {
         touchedTopics: [],
         skippedReason: 'memory_tool' as const,
+        cursor: {
+          sessionId: params.sessionId,
+          updatedAt: (params.now ?? new Date()).toISOString(),
+        },
+      } as never;
+    }
+
+    if (!options.bypassCadence && this.shouldSkipForCadence(params)) {
+      const record = makeTaskRecord(
+        'extract',
+        params.projectRoot,
+        params.sessionId,
+      );
+      this.storeWith(record, {
+        status: 'skipped',
+        progressText:
+          'Skipped: the last extraction saved nothing and recent turns still fit its window.',
+        metadata: {
+          skippedReason: 'cadence',
+          historyLength: params.history.length,
+        },
+      });
+      if (params.config) {
+        logMemoryExtract(
+          params.config,
+          new MemoryExtractEvent({
+            trigger: 'auto',
+            status: 'skipped',
+            skipped_reason: 'cadence',
+            patches_count: 0,
+            touched_topics: [],
+            duration_ms: 0,
+          }),
+        );
+      }
+      return {
+        touchedTopics: [],
+        skippedReason: 'cadence' as const,
         cursor: {
           sessionId: params.sessionId,
           updatedAt: (params.now ?? new Date()).toISOString(),
@@ -1201,6 +1268,111 @@ export class MemoryManager {
     );
     this.store(record);
     return this.track(record.id, this.runExtract(record.id, params)) as never;
+  }
+
+  /**
+   * #13004: skip this turn's extraction only when the previous run for the
+   * session engaged with memory and saved nothing, the skip budget is not
+   * spent, every unprocessed entry still fits the next run's history tail,
+   * and the prompt is below the compaction warning. A skip records the turn as
+   * pending for {@link flushPendingExtract} and leaves the cursor untouched.
+   * Arming requires a completed run, so a skip can overlap this session's own
+   * extraction only when that run is a trailing request with older history
+   * (see {@link recordCadenceOutcome}).
+   */
+  private shouldSkipForCadence(params: ScheduleExtractParams): boolean {
+    const budget = getExtractNoopSkipTurns();
+    const state = this.extractCadence.get(params.sessionId);
+    if (budget === 0 || !state?.armed || state.skips >= budget) return false;
+    if (params.belowCompactionWarn !== true) return false;
+    const pendingEntries = params.history.length - state.lastExtractedLength;
+    if (
+      pendingEntries < 0 ||
+      pendingEntries > EXTRACT_CADENCE_MAX_PENDING_ENTRIES
+    ) {
+      return false;
+    }
+    state.skips += 1;
+    state.pending = params;
+    return true;
+  }
+
+  private recordCadenceOutcome(
+    params: ScheduleExtractParams,
+    result: Awaited<ReturnType<typeof runAutoMemoryExtract>> | undefined,
+  ): void {
+    if (getExtractNoopSkipTurns() === 0) {
+      this.extractCadence.delete(params.sessionId);
+      return;
+    }
+    // A failed run retries on the next turn as before; it never arms.
+    if (!result) {
+      const state = this.extractCadence.get(params.sessionId);
+      if (state) {
+        state.armed = false;
+        state.skips = 0;
+      }
+      return;
+    }
+    if (result.skippedReason) return;
+    // A trailing request queued before a later skip carries older history;
+    // keep that skipped turn pending rather than treating it as extracted.
+    const previous = this.extractCadence.get(params.sessionId)?.pending;
+    this.extractCadence.set(params.sessionId, {
+      armed:
+        result.extractorEngaged === true && result.touchedTopics.length === 0,
+      skips: 0,
+      lastExtractedLength: params.history.length,
+      ...(previous &&
+        previous.history.length > params.history.length && {
+          pending: previous,
+        }),
+    });
+  }
+
+  /**
+   * Runs one extraction for turns the cadence skipped, before a boundary that
+   * would discard them: compaction, `/clear`, a session switch or an ACP
+   * session close. Callers must await it before switching sessions, because
+   * the extraction reads the session's cache-safe params and checks the live
+   * session id. Resolves `false` if it did not settle within `timeoutMs`; the
+   * run itself continues and stays tracked.
+   */
+  async flushPendingExtract(
+    sessionId: string,
+    timeoutMs: number = EXTRACT_FLUSH_TIMEOUT_MS,
+  ): Promise<boolean> {
+    const pending = this.extractCadence.get(sessionId)?.pending;
+    this.extractCadence.delete(sessionId);
+    if (!pending) return true;
+    const run = (async () => {
+      // Another session on the same project (daemon mode), or this session's
+      // older trailing request, may hold the slot; wait for it and for any
+      // trailing request it starts.
+      for (;;) {
+        const taskId = this.extractCurrentTaskId.get(pending.projectRoot);
+        const active = taskId ? this.inFlight.get(taskId) : undefined;
+        if (!active) break;
+        await active.catch(() => undefined);
+      }
+      await this.scheduleExtract(pending, { bypassCadence: true });
+    })().catch((error: unknown) => {
+      debugLogger.warn(
+        'Failed to flush pending auto-memory extraction.',
+        error,
+      );
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        run.then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -1282,6 +1454,7 @@ export class MemoryManager {
       }
 
       const result = await runAutoMemoryExtract(params);
+      this.recordCadenceOutcome(params, result);
       if (result.touchedUserScope && params.config) {
         await this.recordUserMutation(
           params.projectRoot,
@@ -1323,6 +1496,7 @@ export class MemoryManager {
       return result;
     } catch (error) {
       const durationMs = Date.now() - t0;
+      this.recordCadenceOutcome(params, undefined);
       this.update(record, {
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),

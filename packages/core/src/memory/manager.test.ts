@@ -2079,6 +2079,139 @@ describe('MemoryManager', () => {
     });
   });
 
+  describe('scheduleExtract() cadence (#13004)', () => {
+    const tmp = useTempProject('mgr-cadence-', {});
+    const turns = (count: number): Content[] =>
+      Array.from({ length: count }, (_, i) => userText(`turn ${i}`));
+    const turn = (mgr: MemoryManager, length: number, sessionId = 'sess') =>
+      mgr.scheduleExtract({
+        ...extractParams(tmp.projectRoot, sessionId, turns(length)),
+        belowCompactionWarn: true,
+      });
+    const engagedNoop = (sessionId = 'sess') => ({
+      ...extractResult(sessionId),
+      extractorEngaged: true,
+    });
+
+    beforeEach(() => {
+      vi.mocked(runAutoMemoryExtract).mockReset();
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue(engagedNoop());
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it('runs every turn while the experiment is off', async () => {
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      await turn(mgr, 4);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+    });
+
+    it('skips up to N turns after a run that read memory and saved nothing', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+      await turn(mgr, 8);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[1][0].history,
+      ).toHaveLength(8);
+    });
+
+    it('does not arm after a run that saved memory or used no tool', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce({
+        ...engagedNoop(),
+        touchedTopics: ['user'],
+      });
+      await turn(mgr, 2);
+      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce(
+        extractResult('sess'),
+      );
+      await turn(mgr, 4);
+      await turn(mgr, 6);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+    });
+
+    it("runs when unprocessed entries would leave the next run's window", async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 22)).skippedReason).toBe('cadence');
+      expect((await turn(mgr, 23)).skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+    });
+
+    it('runs near compaction, and a failed run disarms', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      // No belowCompactionWarn: the turn runs although the session is armed.
+      vi.mocked(runAutoMemoryExtract).mockRejectedValueOnce(new Error('boom'));
+      await expect(
+        mgr.scheduleExtract(extractParams(tmp.projectRoot, 'sess', turns(4))),
+      ).rejects.toThrow('boom');
+      await turn(mgr, 6);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+    });
+
+    it('keeps cadence state per session', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2, 'a');
+      await mgr.drain();
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue(engagedNoop('b'));
+      expect((await turn(mgr, 2, 'b')).skippedReason).toBeUndefined();
+    });
+
+    it('flushes the latest skipped turn once and then forgets it', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      await turn(mgr, 4);
+      await turn(mgr, 6);
+
+      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[1][0].history,
+      ).toHaveLength(6);
+      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+    });
+
+    it("flush waits for another session's run on the same project", async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      await turn(mgr, 4);
+
+      let release!: () => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve(engagedNoop('other'));
+          }),
+      );
+      const other = turn(mgr, 2, 'other');
+      const flushed = mgr.flushPendingExtract('sess');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+
+      release();
+      await other;
+      await expect(flushed).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+      expect(vi.mocked(runAutoMemoryExtract).mock.calls[2][0].sessionId).toBe(
+        'sess',
+      );
+    });
+  });
+
   describe('scheduleSkillReview()', () => {
     beforeEach(() => {
       vi.resetAllMocks();

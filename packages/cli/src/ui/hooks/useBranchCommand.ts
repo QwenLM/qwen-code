@@ -23,6 +23,7 @@ import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import {
+  flushMemoryBeforeSessionSwitch,
   hasBlockingBackgroundWork,
   buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
@@ -252,6 +253,7 @@ export function useBranchCommand(
         //    The transaction opened in step 0 covers the initialize()
         //    replay (#9833; see beginTelemetrySwap's JSDoc in core
         //    client.ts).
+        await flushMemoryBeforeSessionSwitch(config);
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);

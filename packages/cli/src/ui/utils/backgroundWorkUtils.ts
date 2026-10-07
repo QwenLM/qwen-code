@@ -32,6 +32,20 @@ export function hasBlockingBackgroundWork(config: Config): boolean {
   );
 }
 
+/**
+ * Extracts memory from turns the #13004 cadence skipped before the session
+ * changes. Must be awaited before `config.startNewSession()`: the extraction
+ * reads this session's cache-safe params and checks the live session id.
+ * No-op unless the experiment left a turn pending.
+ */
+export async function flushMemoryBeforeSessionSwitch(
+  config: Config,
+): Promise<void> {
+  await config
+    .getMemoryManager?.()
+    ?.flushPendingExtract?.(config.getSessionId());
+}
+
 export function resetBackgroundStateForSessionSwitch(config: Config): void {
   config.getBackgroundTaskRegistry().reset();
   config.getMonitorRegistry().reset();

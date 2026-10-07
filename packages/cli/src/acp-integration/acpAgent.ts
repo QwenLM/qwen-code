@@ -4896,6 +4896,13 @@ class QwenAgent implements Agent {
         drainTimeoutMs,
       );
 
+      // Turns are settled; extract any the #13004 cadence skipped before the
+      // session (and its cache-safe params) goes away. No-op unless pending.
+      const closingConfig = session.getConfig();
+      await closingConfig
+        .getMemoryManager?.()
+        ?.flushPendingExtract?.(closingConfig.getSessionId(), drainTimeoutMs);
+
       const blockedByHolds = await this.runExclusiveHistoryMutation(
         sessionId,
         async () => {
