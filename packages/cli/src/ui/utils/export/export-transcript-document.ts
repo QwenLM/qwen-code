@@ -399,7 +399,11 @@ function applyRecordExportPolicy(
     if (visible || type === 'system' || internalCodeModeToolResult) {
       projectionRecords.push(record);
       const uuid = record['uuid'];
-      if (visible && typeof uuid === 'string') visibleRecordIds.add(uuid);
+      // The internal result projects no block of its own, but the replay
+      // machine stamps its uuid on the history-gap notice, which must survive.
+      if ((visible || internalCodeModeToolResult) && typeof uuid === 'string') {
+        visibleRecordIds.add(uuid);
+      }
       if (type === 'system' && !acceptedSystemSubtype) {
         diagnostics.add('record_internal_excluded', 'info');
       }
