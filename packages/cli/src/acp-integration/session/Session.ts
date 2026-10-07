@@ -810,7 +810,10 @@ type PendingToolResultRecord = {
 
 type QueueToolResultRecord = (
   fc: FunctionCall,
-  record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence' | 'toolArgs'>,
+  record: Omit<
+    PendingToolResultRecord,
+    'ordinal' | 'sequence' | 'toolArgs' | 'subtype'
+  >,
 ) => void;
 
 type HistoryMutationRunner = <T>(operation: () => Promise<T>) => Promise<T>;
