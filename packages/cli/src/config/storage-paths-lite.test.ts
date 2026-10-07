@@ -309,6 +309,64 @@ describe('system settings overrides are honored only for administrator-controlle
     Object.defineProperty(process, 'platform', platform);
   });
 
+  // The Unix gate reads real ownership metadata, which only a Unix host can
+  // arrange, so these run where the host itself is Unix.
+  const itOnUnix = os.platform() === 'win32' ? it.skip : it;
+  const itOnWindows = os.platform() === 'win32' ? it : it.skip;
+  const euid = typeof process.getuid === 'function' ? process.getuid() : -1;
+
+  // The rejection warning is one-shot per process, so these run before any
+  // other test in the file that rejects an override: an earlier rejection
+  // would suppress the warning under observation.
+  itOnUnix(
+    'warns once when a user-owned override is rejected, and stays quiet after',
+    () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-system-trust-'));
+      const file = path.join(root, 'settings.json');
+      fs.writeFileSync(file, '{}');
+      if (euid === 0) fs.chownSync(file, 12345, 12345);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        expect(
+          getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: file }),
+        ).toBe(getSystemSettingsPath({}));
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(
+          `QWEN_CODE_SYSTEM_SETTINGS_PATH is set to ${JSON.stringify(file)}, which is not a regular root-owned file, so the platform default is used instead.`,
+        );
+        // A second rejection, through either getter, stays quiet.
+        getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: file });
+        getSystemDefaultsPath({ QWEN_CODE_SYSTEM_DEFAULTS_PATH: file });
+        expect(warn).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itOnWindows(
+    'warns once when a Windows override points outside the system settings directory',
+    () => {
+      const configured = 'C:\\evil\\settings.json';
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        expect(
+          getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: configured }),
+        ).toBe('C:\\ProgramData\\qwen-code\\settings.json');
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(
+          `QWEN_CODE_SYSTEM_SETTINGS_PATH is set to ${JSON.stringify(configured)}, which does not point inside C:\\ProgramData\\qwen-code\\, so the platform default is used instead.`,
+        );
+        getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: configured });
+        getSystemDefaultsPath({ QWEN_CODE_SYSTEM_DEFAULTS_PATH: configured });
+        expect(warn).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
+
   it.each([
     ['C:\\ProgramData\\qwen-code\\settings.json', true],
     ['c:/programdata/qwen-code/system-defaults.json', true],
@@ -362,11 +420,6 @@ describe('system settings overrides are honored only for administrator-controlle
       ).toBe('C:\\ProgramData\\qwen-code\\settings.json');
     },
   );
-
-  // The Unix gate reads real ownership metadata, which only a Unix host can
-  // arrange, so these run where the host itself is Unix.
-  const itOnUnix = os.platform() === 'win32' ? it.skip : it;
-  const euid = typeof process.getuid === 'function' ? process.getuid() : -1;
 
   itOnUnix(
     'fails closed for an override that is not a root-owned regular file',

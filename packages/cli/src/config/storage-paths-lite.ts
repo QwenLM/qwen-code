@@ -224,6 +224,32 @@ export function isInsideWindowsSystemSettingsDir(configured: string): boolean {
     .startsWith(`${WINDOWS_SYSTEM_SETTINGS_DIR.toLowerCase()}\\`);
 }
 
+let warnedAboutRejectedSystemSettingsOverride = false;
+
+/**
+ * The one-shot breadcrumb for a system settings override the trust gate
+ * rejected: which variable, the path it was set to, and why the platform
+ * default is used instead. One warning per process, because the resolver
+ * runs on every settings load and the reason does not change within one,
+ * and the resolver runs before the debug log file is available, so
+ * `console.warn` is the only channel left.
+ */
+function warnAboutRejectedSystemSettingsOverride(
+  name: string,
+  configured: string,
+): void {
+  if (warnedAboutRejectedSystemSettingsOverride) return;
+  warnedAboutRejectedSystemSettingsOverride = true;
+  const reason =
+    os.platform() === 'win32'
+      ? `does not point inside ${WINDOWS_SYSTEM_SETTINGS_DIR}\\`
+      : 'is not a regular root-owned file';
+  // eslint-disable-next-line no-console -- one-shot breadcrumb; the debug log file is off where this resolver runs
+  console.warn(
+    `${name} is set to ${JSON.stringify(configured)}, which ${reason}, so the platform default is used instead.`,
+  );
+}
+
 export function getSystemSettingsPath(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
 ): string {
@@ -233,6 +259,12 @@ export function getSystemSettingsPath(
   );
   if (configured && isSystemSettingsPathTrusted(configured)) {
     return configured;
+  }
+  if (configured) {
+    warnAboutRejectedSystemSettingsOverride(
+      'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+      configured,
+    );
   }
   if (os.platform() === 'darwin') {
     return '/Library/Application Support/QwenCode/settings.json';
@@ -252,6 +284,12 @@ export function getSystemDefaultsPath(
   );
   if (configured && isSystemSettingsPathTrusted(configured)) {
     return configured;
+  }
+  if (configured) {
+    warnAboutRejectedSystemSettingsOverride(
+      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+      configured,
+    );
   }
   return path.join(
     path.dirname(getSystemSettingsPath(env)),
