@@ -64,7 +64,7 @@ public class SessionLifecycleCoordinator {
     private final RuntimeWarmer runtimeWarmer;
     private final ChildResultRelayStore childScopes;
     private final ObjectMapper objectMapper;
-    private final RequestDigests digests;
+    private final ChildLifecycleAdmissions childCloses;
     private final ObjectProvider<RuntimeBrokerService> brokerProviders;
     private final ExecutorService executor;
     private final Clock clock;
@@ -91,7 +91,8 @@ public class SessionLifecycleCoordinator {
     public SessionLifecycleCoordinator(AgentStateStore store,
             ManagedSessionStore sessionStore, HarnessConnector harness,
             RuntimeWarmer runtimeWarmer, ChildResultRelayStore childScopes,
-            ObjectMapper objectMapper, RequestDigests digests,
+            ObjectMapper objectMapper,
+            ChildLifecycleAdmissions childCloses,
             ObjectProvider<RuntimeBrokerService> brokerProviders,
             ExecutorService executor,
             Clock clock, ManagedAgentProperties properties) {
@@ -101,7 +102,7 @@ public class SessionLifecycleCoordinator {
         this.runtimeWarmer = runtimeWarmer;
         this.childScopes = childScopes;
         this.objectMapper = objectMapper;
-        this.digests = digests;
+        this.childCloses = childCloses;
         this.brokerProviders = brokerProviders;
         this.executor = executor;
         this.clock = clock;
@@ -460,9 +461,9 @@ public class SessionLifecycleCoordinator {
                     // one, so the close re-arms instead of committing a
                     // close_scope proof for a close that never ran.
                     try {
-                        OperationAdmission admitted =
-                                admitChildClose(operation, childSessionId,
-                                        scope.childRunId());
+                        OperationAdmission admitted = childCloses
+                                .admitChildClose(tenantId, sessionId,
+                                        childSessionId, scope.childRunId());
                         if (!"COMPLETED".equals(
                                 admitted.operation().state())) {
                             dispatch(tenantId, childSessionId,
@@ -571,17 +572,5 @@ public class SessionLifecycleCoordinator {
         return broker == null ? null
                 : broker.findLatestBindingByHarnessSession(tenantId,
                         sessionId);
-    }
-
-    private OperationAdmission admitChildClose(OperationRecord parent,
-            String childSessionId, String childRunId) {
-        String actor = "child:" + parent.sessionId();
-        return store.beginWorkspaceLifecycle(parent.tenantId(),
-                childSessionId, OperationKind.CLOSE, actor,
-                digests.digest(Map.of("actorId", actor)),
-                "child-close-" + childRunId,
-                digests.digest(Map.of("sessionId", childSessionId,
-                        "operation", "CLOSE_SESSION")),
-                runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose());
     }
 }

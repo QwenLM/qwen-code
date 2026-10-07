@@ -13,6 +13,8 @@ import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import {
+  CHILD_NOTIFICATION_INLINE_LIMIT,
+  childResultNotificationText,
   HostedChildAgentSession,
   type ChildAgentLaunchParams,
 } from './hosted-child-agent-session.js';
@@ -140,6 +142,39 @@ async function settleThroughAttach(
   });
   await children.attach('run-1', 'session-child');
 }
+
+describe('childResultNotificationText', () => {
+  it('round-trips a result far below the inline cap untouched', () => {
+    const notification = childResultNotificationText({
+      taskId: TASK_ID,
+      description: 'audit the diff',
+      text: '审阅通过,生成文件两份。',
+    });
+    expect(notification).toContain(`<task-id>${TASK_ID}</task-id>`);
+    expect(notification).toContain('<result>审阅通过,生成文件两份。</result>');
+    expect(notification).not.toContain('truncated');
+    expect(notification).not.toContain('prompt:callId');
+    expect(Buffer.byteLength(notification, 'utf8')).toBeLessThan(
+      CHILD_NOTIFICATION_INLINE_LIMIT,
+    );
+  });
+
+  it('bounds an XML-hostile result under the inline cap, with the marker', () => {
+    // The real-stack B1 finding: 20 KiB of '<' escapes beyond 64 KiB and
+    // rejected accept at the bundled-input inline bound.
+    const notification = childResultNotificationText({
+      taskId: TASK_ID,
+      description: 'audit',
+      text: '<'.repeat(20 * 1024),
+    });
+    expect(Buffer.byteLength(notification, 'utf8')).toBeLessThanOrEqual(
+      CHILD_NOTIFICATION_INLINE_LIMIT,
+    );
+    expect(notification).toContain('&lt;');
+    expect(notification).toContain('truncated: the full result is on the');
+    expect(notification).toContain('acceptance record');
+  });
+});
 
 describe('hosted child agent session (H4b)', () => {
   it('chains the sent arm into a wake-carrying acceptance', async () => {

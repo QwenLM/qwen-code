@@ -45,6 +45,10 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import {
+  managedExtensionRecordKey,
+  managedTaskId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
 import {
   stripDisplayControlChars,
@@ -128,21 +132,64 @@ export function childLaunchAdmission(params: {
   });
 }
 
+/** The inline byte cap of a bundled notification input. */
+export const CHILD_NOTIFICATION_INLINE_LIMIT = 64 * 1024;
+
+const TRUNCATION_MARKER =
+  '\n… (truncated: the full result is on the acceptance record, H4b decision 5)';
+
 /** The text of a background child's result, wrapped for its waiting turn. */
 export function childResultNotificationText(params: {
-  readonly childRunId: string;
+  /** The task id the launch's own answer returned (task_…), so the model
+   * can follow the child's terminal list surface — never the internal
+   * `promptId:callId` marker. */
+  readonly taskId: string;
   readonly description: string;
   readonly text: string;
 }): string {
-  return [
+  const head = [
     '<task-notification>',
-    `<task-id>${escapeXml(params.childRunId)}</task-id>`,
+    `<task-id>${escapeXml(params.taskId)}</task-id>`,
     '<kind>child_agent</kind>',
     '<status>completed</status>',
     `<summary>Child agent "${escapeXml(truncateNotificationLabel(params.description))}" finished.</summary>`,
-    `<result>${escapeXml(stripDisplayControlChars(params.text))}</result>`,
-    '</task-notification>',
+    '<result>',
   ].join('\n');
+  const tail = '</result>\n</task-notification>';
+  const escaped = escapeXml(stripDisplayControlChars(params.text));
+  // Design 5 names the notification the summary, not the full bytes: an
+  // XML-hostile result that only dwells below 64 KiB must still fit the
+  // inline cap of the acceptance transaction's bundled input.
+  if (
+    Buffer.byteLength(head + escaped + tail, 'utf8') <=
+    CHILD_NOTIFICATION_INLINE_LIMIT
+  ) {
+    return head + escaped + tail;
+  }
+  const fits = (chars: number): boolean =>
+    Buffer.byteLength(
+      head +
+        escapeXml(
+          stripDisplayControlChars(params.text.slice(0, chars)) +
+            TRUNCATION_MARKER,
+        ) +
+        tail,
+      'utf8',
+    ) <= CHILD_NOTIFICATION_INLINE_LIMIT;
+  let low = 0;
+  let high = params.text.length;
+  while (low < high) {
+    const middle = (low + high + 1) >> 1;
+    if (fits(middle)) low = middle;
+    else high = middle - 1;
+  }
+  return (
+    head +
+    escapeXml(
+      stripDisplayControlChars(params.text.slice(0, low)) + TRUNCATION_MARKER,
+    ) +
+    tail
+  );
 }
 
 export class HostedChildAgentSession {
@@ -482,7 +529,13 @@ export class HostedChildAgentSession {
         Buffer.from(
           JSON.stringify({
             text: childResultNotificationText({
-              childRunId,
+              taskId: managedTaskId(
+                managedExtensionRecordKey(
+                  this.key.sessionId,
+                  'child_run',
+                  childRunId,
+                ),
+              ),
               description: params.description,
               text: (await this.store.resources.read(resultRef)).toString(
                 'utf8',

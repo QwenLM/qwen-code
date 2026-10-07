@@ -40,12 +40,15 @@ public class ChildResultRelay {
     /** Bounded retries before a fact is declared unknown, never guessed. */
     private static final int MAX_ATTEMPTS = 64;
     private static final long LEASE_MS = 30_000;
+    /** The watch gap for a Turn that keeps running — a wait, not a failure. */
+    private static final long HEARTBEAT_MS = 5_000;
 
     private final ChildResultRelayStore relayStore;
     private final ManagedAgentService sessions;
     private final RuntimeBrokerService broker;
     private final HarnessConnector harness;
     private final ObjectMapper mapper;
+    private final ChildLifecycleAdmissions childCloses;
     private final Supplier<Long> clock;
     private final String owner = "child-relay-" + UUID.randomUUID();
 
@@ -53,8 +56,9 @@ public class ChildResultRelay {
     public ChildResultRelay(ChildResultRelayStore relayStore,
             ManagedAgentService sessions,
             org.springframework.beans.factory.ObjectProvider<RuntimeBrokerService> broker,
-            HarnessConnector harness, ObjectMapper mapper) {
-        this(relayStore, sessions, broker, harness, mapper,
+            HarnessConnector harness, ObjectMapper mapper,
+            ChildLifecycleAdmissions childCloses) {
+        this(relayStore, sessions, broker, harness, mapper, childCloses,
                 System::currentTimeMillis);
     }
 
@@ -62,12 +66,14 @@ public class ChildResultRelay {
             ManagedAgentService sessions,
             org.springframework.beans.factory.ObjectProvider<RuntimeBrokerService> broker,
             HarnessConnector harness, ObjectMapper mapper,
+            ChildLifecycleAdmissions childCloses,
             Supplier<Long> clock) {
         this.relayStore = relayStore;
         this.sessions = sessions;
         this.broker = broker.getIfAvailable();
         this.harness = harness;
         this.mapper = mapper;
+        this.childCloses = childCloses;
         this.clock = clock;
     }
 
@@ -169,8 +175,8 @@ public class ChildResultRelay {
         // The physical Runtime binding exists from the construction of the
         // child's Hosted tool turn — a child that answers end-to-end in
         // plain text holds one without ever acquiring a tool Session.
-        RuntimeBindingRecord binding = broker
-                .findLatestBindingByHarnessSession(row.tenantId(),
+        RuntimeBindingRecord binding = broker == null ? null
+                : broker.findLatestBindingByHarnessSession(row.tenantId(),
                         row.childSessionId());
         if (binding == null) {
             throw new RelayRetry("child runtime binding is not visible yet");
@@ -220,9 +226,14 @@ public class ChildResultRelay {
                         row.parentSessionId(), fail);
                 relayStore.classify(row, owner, "done",
                         "child Turn " + turn.status(), now);
+                closeFinishedChild(row, now);
             }
-            default -> throw new RelayRetry(
-                    "child Turn is " + turn.status());
+            // A running child is not a failed watch: look again after the
+            // scan gap instead of eating the attempt budget — the lifetime
+            // cap measures failures, never a child's own runtime.
+            default -> relayStore.scheduleRetry(row, owner,
+                    now + HEARTBEAT_MS,
+                    now + LEASE_MS, now);
         }
     }
 
@@ -299,6 +310,29 @@ public class ChildResultRelay {
         harness.runChildOperation(row.tenantId(), row.parentSessionId(),
                 accepted);
         relayStore.classify(row, owner, "done", null, now);
+        closeFinishedChild(row, now);
+    }
+
+    /** A run whose classification is durable `done` owes its child Session
+     * a close: v1 builds no continueChildRun, so a finished child keeps an
+     * ACTIVE Session and its worker only past this point. The admission is
+     * idempotent, and the coordinator's own recover-operations picks the
+     * pending op up even while this worker moves on. */
+    private void closeFinishedChild(RelayRow row, long now) {
+        if (row.childSessionId() == null) {
+            return;
+        }
+        try {
+            childCloses.admitChildClose(row.tenantId(),
+                    row.parentSessionId(), row.childSessionId(),
+                    row.childRunId());
+        } catch (RuntimeException error) {
+            LOG.warn("child result relay's close admission for a done child"
+                            + " faltered tenant={} parent={} run={} child={}"
+                            + " — owed by its operation row; failure={}",
+                    row.tenantId(), row.parentSessionId(), row.childRunId(),
+                    row.childSessionId(), error.getMessage());
+        }
     }
 
     private void defer(RelayRow row, RuntimeException error, long now) {

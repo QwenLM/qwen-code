@@ -174,6 +174,23 @@ class ChildResultRelayStoreTest {
                 .containsExactly("run-live");
         relayStore.classify(claimed, "owner", "done", null, 200);
         assertThat(relayStore.findPendingChildren(10)).isEmpty();
+        // A record the consumer already advanced owes the delivering
+        // ledger its owed step: it surfaces, until classify retires it.
+        jdbc.update("UPDATE qwen_managed_session_extension_record SET"
+                        + " delivery_state = 'consumed'"
+                        + " WHERE tenant_id = ? AND record_id = 'run-settled'",
+                TENANT);
+        RelayRow delivering = relayStore.claim(TENANT, session, "run-settled",
+                "key-settled", "owner", 30_000, 400);
+        assertThat(delivering).isNotNull();
+        relayStore.advance(delivering, "owner", "delivering", null, 0, null,
+                30_000, 400);
+        assertThat(relayStore.findPendingChildren(10))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("run-settled");
+        relayStore.classify(relayStore.find(TENANT, session, "run-settled"),
+                "owner", "done", null, 500);
+        assertThat(relayStore.findPendingChildren(10)).isEmpty();
     }
 
     private void insertRecordRow(String scopeKey, String sessionId,
@@ -276,8 +293,8 @@ class ChildResultRelayStoreTest {
                         + " session_id, item_id, part_id, part_type,"
                         + " part_text, first_sequence, last_sequence,"
                         + " created_at, updated_at, revision)"
-                        + " VALUES (?, ?, 'item-1', 'part-1', 'text', '审阅通过',"
-                        + " 2, 2, 1, 1, 1)",
+                        + " VALUES (?, ?, 'item-1', 'part-1', 'output_text',"
+                        + " '审阅通过', 2, 2, 1, 1, 1)",
                 TENANT, session);
         assertThat(relayStore.terminalResultText(TENANT, session, "turn-1"))
                 .isEqualTo("审阅通过");

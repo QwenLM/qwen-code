@@ -327,6 +327,10 @@ it('answers the tool arm from the committed acceptance, accepting it', async () 
     ])
   )[0];
   expect(JSON.stringify(responses)).toContain('审阅通过');
+  // An agent-only batch never takes the mount: a turn that would mount
+  // against its own Session is exactly the deadlock a shared Workspace
+  // creates between the waiting parent and the child's first tool call.
+  expect(broker.acquire).not.toHaveBeenCalled();
   const record = children.record(childRunId)!;
   expect(record.run.delivery).toEqual({
     target: 'session',

@@ -37,6 +37,13 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 class SessionLifecycleCoordinatorTest {
+    private static ChildLifecycleAdmissions admissions(
+            com.alibaba.qwen.code.managedagent.store.AgentStateStore store,
+            RuntimeWarmer warmer) {
+        return new ChildLifecycleAdmissions(store, new RequestDigests(),
+                warmer);
+    }
+
     @Test
     void unsupportedTakeoverKeepsAcceptedCloseBlockedWithAStableFailure() {
         var source = new JdbcDataSource();
@@ -66,7 +73,7 @@ class SessionLifecycleCoordinatorTest {
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(store, new ManagedSessionStore(jdbc),
                     new UnavailableHarnessConnector(), unsupported, new ChildResultRelayStore(jdbc),
-                    new ObjectMapper(), new RequestDigests(), brokerProvider(null), executor,
+                    new ObjectMapper(), admissions(store, unsupported), brokerProvider(null), executor,
                     Clock.systemUTC(), properties);
             try {
                 coordinator.dispatch("tenant", session, operation);
@@ -319,7 +326,8 @@ class SessionLifecycleCoordinatorTest {
             var coordinator = new SessionLifecycleCoordinator(world.store,
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
-                    new RequestDigests(), brokerProvider(null), executor,
+                    admissions(world.store, warmer(true, false)),
+                    brokerProvider(null), executor,
                     Clock.systemUTC(), world.properties);
             try {
                 // First attempt: the stop write falters, yet the child's own
@@ -364,7 +372,8 @@ class SessionLifecycleCoordinatorTest {
             var coordinator = new SessionLifecycleCoordinator(world.store,
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, true), world.relayStore, new ObjectMapper(),
-                    new RequestDigests(), brokerProvider(null), executor,
+                    admissions(world.store, warmer(true, true)),
+                    brokerProvider(null), executor,
                     Clock.systemUTC(), world.properties);
             try {
                 coordinator.dispatch("tenant", world.session,
@@ -414,7 +423,7 @@ class SessionLifecycleCoordinatorTest {
             var coordinator = new SessionLifecycleCoordinator(world.store,
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
-                    new RequestDigests(),
+                    admissions(world.store, warmer(true, false)),
                     brokerProvider(bindingOf("binding-1", 7L)), executor,
                     Clock.systemUTC(), world.properties);
             try {
@@ -467,7 +476,7 @@ class SessionLifecycleCoordinatorTest {
             var coordinator = new SessionLifecycleCoordinator(world.store,
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
-                    new RequestDigests(),
+                    admissions(world.store, warmer(true, false)),
                     brokerProvider(bindingOf("binding-1", 7L)), executor,
                     Clock.systemUTC(), world.properties);
             try {
@@ -519,7 +528,7 @@ class SessionLifecycleCoordinatorTest {
             var coordinator = new SessionLifecycleCoordinator(world.store,
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
-                    new RequestDigests(),
+                    admissions(world.store, warmer(true, false)),
                     brokerProvider(bindingOf("binding-1", 7L)), executor,
                     Clock.systemUTC(), world.properties);
             try {

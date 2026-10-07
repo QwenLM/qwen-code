@@ -42,6 +42,7 @@ class ChildResultRelayTest {
     private RuntimeBrokerService broker;
     private RecordingHarness harness;
     private ChildResultRelay relay;
+    private ChildLifecycleAdmissions childCloses;
     private PendingChild pending;
     private AtomicReference<RelayRow> row;
     private long now;
@@ -103,10 +104,11 @@ class ChildResultRelayTest {
                 Mockito.mock(ObjectProvider.class);
         when(provider.getIfAvailable()).thenAnswer(ignored -> broker);
         harness = new RecordingHarness();
+        childCloses = mock(ChildLifecycleAdmissions.class);
         now = 1_000_000L;
         AtomicReference<Long> clock = new AtomicReference<>(now);
         relay = new ChildResultRelay(store, sessions, provider, harness,
-                new ObjectMapper(), clock::get);
+                new ObjectMapper(), childCloses, clock::get);
         pending = new PendingChild(TENANT, PARENT, RUN, 1, "planned",
                 "resource-body");
         row = new AtomicReference<>(new RelayRow(TENANT, PARENT, RUN,
@@ -212,6 +214,8 @@ class ChildResultRelayTest {
                 .map(operation -> operation.get("kind")))
                 .containsExactly("dispatch_started", "attach", "commit_result",
                         "accept", "mark_accepted");
+        // A done child owes its own Session a close (P2-1).
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
     }
 
     @Test
@@ -222,6 +226,9 @@ class ChildResultRelayTest {
         assertThat(harness.operations).isEmpty();
         verify(sessions, never()).createChildSession(anyString(), anyString(),
                 anyString(), anyString(), anyString());
+        // An orphaned run closes nothing: the cascade owns that side.
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
     }
 
     @Test
@@ -258,6 +265,24 @@ class ChildResultRelayTest {
     }
 
     @Test
+    void aRunningChildWaitsWithoutEatingAttempts() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "RUNNING", now + 1L, null));
+        relay.scan();
+        // A running Turn is a wait, not a failure: no attempt, no error,
+        // no harness call.
+        assertThat(row.get().attempts()).isZero();
+        assertThat(row.get().lastError()).isNull();
+        assertThat(harness.operations).isEmpty();
+        verify(store, never()).defer(any(RelayRow.class), anyString(),
+                anyLong(), anyString(), anyLong(), anyLong());
+        verify(store, never()).classify(any(RelayRow.class), anyString(),
+                anyString(), any(), anyLong());
+    }
+
+    @Test
     void aTurnFailureSettlesTheRunFailedWithoutAnAcceptance() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
@@ -271,6 +296,7 @@ class ChildResultRelayTest {
         Map<String, Object> fail = harness.operations.get(0);
         assertThat(fail).containsEntry("stopReason", "child_failed")
                 .containsEntry("started", true);
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
     }
 
     @Test

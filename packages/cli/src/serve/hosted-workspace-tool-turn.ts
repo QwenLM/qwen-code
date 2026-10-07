@@ -1381,7 +1381,13 @@ export class HostedWorkspaceToolTurn {
       }
     }
     await waitForTurn(this.warmed, signal);
-    if (!this.acquired) {
+    // H4b: an agent-only batch runs entirely inside its own Sessions and
+    // needs no Runtime at all — holding the parent's mount across the
+    // child's wait is exactly the deadlock a shared Workspace creates
+    // (parent turn held, child tool call queued behind it forever). v1
+    // therefore takes the mount only for a batch with at least one
+    // non-agent tool.
+    if (!this.acquired && requests.some((request) => request.agent !== true)) {
       // Acquisition may have taken effect even when its reply is lost.
       await this.acquire(false, signal);
     }

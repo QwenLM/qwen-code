@@ -39,7 +39,10 @@ public class ChildResultRelayStore {
     // drops every row whose classification is terminal (delivered,
     // orphaned or given up), because the bounded discovery set is for
     // work still owed — accumulated terminal rows would otherwise starve
-    // the fleet-wide scan behind an ORDER BY created_at LIMIT.
+    // the fleet-wide scan behind an ORDER BY created_at LIMIT. A record
+    // whose delivery already advanced (the consumer raced ahead) still
+    // owes its delivering ledger row the mark_accepted step, so that one
+    // state surfaces too — the final classify retires it next scan.
     private static final String PENDING_SQL =
             "SELECT r.tenant_id, r.session_id, r.record_id, r.revision,"
                     + " r.delivery_state, r.record_resource_id"
@@ -47,10 +50,12 @@ public class ChildResultRelayStore {
                     + " LEFT JOIN qwen_managed_child_result_relay l"
                     + " ON l.parent_session_id = r.session_id"
                     + " AND l.child_run_id = r.record_id"
-                    + " WHERE r.domain = 'child_run' AND r.delivery_state IN"
-                    + " ('planned', 'accepting', 'unknown')"
-                    + " AND (l.state IS NULL OR l.state NOT IN ('done',"
-                    + " 'orphaned', 'unknown'))"
+                    + " WHERE r.domain = 'child_run'"
+                    + " AND ((r.delivery_state IN ('planned', 'accepting',"
+                    + " 'unknown') AND (l.state IS NULL OR l.state NOT IN"
+                    + " ('done', 'orphaned', 'unknown')))"
+                    + " OR (r.delivery_state IN ('accepted', 'consumed')"
+                    + " AND l.state = 'delivering'))"
                     + " ORDER BY r.created_at, r.session_id, r.record_id"
                     + " LIMIT ?";
 
@@ -162,7 +167,7 @@ public class ChildResultRelayStore {
         List<String> parts = jdbc.query(
                 "SELECT part_text FROM managed_agent_item_part"
                         + " WHERE tenant_id = ? AND session_id = ?"
-                        + " AND item_id = ? AND part_type = 'text'"
+                        + " AND item_id = ? AND part_type = 'output_text'"
                         + " ORDER BY last_sequence, part_id",
                 (result, row) -> result.getString("part_text"), tenantId,
                 sessionId, items.getFirst());
@@ -263,6 +268,19 @@ public class ChildResultRelayStore {
                 nextRetryAt, lastError, owner, leaseUntil, now,
                 row.tenantId(), row.parentSessionId(), row.childRunId(),
                 owner);
+    }
+
+    /** A still-running child is not a failed step: no attempt, just the
+     * next look. */
+    public void scheduleRetry(RelayRow row, String owner, long nextRetryAt,
+            long leaseUntil, long now) {
+        jdbc.update("UPDATE qwen_managed_child_result_relay SET"
+                        + " next_retry_at = ?, claimed_until = ?,"
+                        + " updated_at = ? WHERE tenant_id = ?"
+                        + " AND parent_session_id = ? AND child_run_id = ?"
+                        + " AND claimed_by = ?",
+                nextRetryAt, leaseUntil, now, row.tenantId(),
+                row.parentSessionId(), row.childRunId(), owner);
     }
 
     /** A failed step counts an attempt and reschedules with backoff. */

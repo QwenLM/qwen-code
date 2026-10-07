@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.LegacyLifecycleCommands.Sessions;
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCommandOperation;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.service.ChildLifecycleAdmissions;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
@@ -69,7 +70,9 @@ class ManagedSessionOperationMigrationTest {
                     new SessionLifecycleCoordinator(store,
                             new ManagedSessionStore(jdbc), harness,
                             new DrainedRuntime(), new ChildResultRelayStore(jdbc),
-                            new ObjectMapper(), digests,
+                            new ObjectMapper(),
+                            new ChildLifecycleAdmissions(store, digests,
+                                    new DrainedRuntime()),
                             org.mockito.Mockito.mock(
                                     org.springframework.beans.factory.ObjectProvider.class),
                             executor, Clock.systemUTC(), properties);

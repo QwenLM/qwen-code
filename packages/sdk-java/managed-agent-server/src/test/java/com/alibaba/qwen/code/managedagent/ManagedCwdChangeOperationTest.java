@@ -1391,7 +1391,10 @@ class ManagedCwdChangeOperationTest {
             return new SessionLifecycleCoordinator(store, null, null,
                     warmer, new ChildResultRelayStore(jdbc),
                     new ObjectMapper(),
-                    new com.alibaba.qwen.code.managedagent.service.RequestDigests(),
+                    new com.alibaba.qwen.code.managedagent.service.ChildLifecycleAdmissions(
+                            store,
+                            new com.alibaba.qwen.code.managedagent.service.RequestDigests(),
+                            warmer),
                     org.mockito.Mockito.mock(
                             org.springframework.beans.factory.ObjectProvider.class),
                     new AbstractExecutorService() {
