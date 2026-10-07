@@ -8,6 +8,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.MathContext;
+import java.math.RoundingMode;
 import java.nio.ByteBuffer;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
@@ -129,6 +132,15 @@ public final class CsiNativeActivationProof {
         closed(marker, MARKER);
         id(marker, "transactionId");
         id(marker, "commandId");
+        require(number(marker.get("firstSequence")) == first
+                && number(marker.get("lastSequence")) == first + count - 1
+                && number(marker.get("eventCount")) == count);
+        text(marker, "operation");
+        text(marker, "contentDigest");
+        text(marker, "eventsDigest");
+        if (!marker.path("previousCommitDigest").isNull()) {
+            text(marker, "previousCommitDigest");
+        }
         for (String field : MARKER) {
             require(metadata.has(field) && canonical(marker.get(field)).equals(canonical(metadata.get(field))));
         }
@@ -400,10 +412,45 @@ public final class CsiNativeActivationProof {
             return quote(node.textValue());
         }
         if (node.isNumber()) {
-            return Long.toString(number(node));
+            return canonicalNumber(node.doubleValue());
         }
         require(node.isNull() || node.isBoolean());
         return node.toString();
+    }
+
+    private static String canonicalNumber(double value) {
+        require(Double.isFinite(value));
+        if (value == 0) {
+            return "0";
+        }
+        double magnitude = Math.abs(value);
+        BigDecimal decimal = BigDecimal.valueOf(magnitude).stripTrailingZeros();
+        // Java 21 may prefer two digits when one suffices; native JSON uses one.
+        if (decimal.precision() == 2) {
+            BigDecimal exact = new BigDecimal(magnitude);
+            BigDecimal lower = exact.round(new MathContext(1, RoundingMode.FLOOR)).stripTrailingZeros();
+            BigDecimal upper = exact.round(new MathContext(1, RoundingMode.CEILING)).stripTrailingZeros();
+            boolean lowerMatches = lower.doubleValue() == magnitude;
+            if (lowerMatches) {
+                decimal = lower;
+            }
+            if (upper.doubleValue() == magnitude) {
+                int distance = upper.subtract(exact).abs().compareTo(lower.subtract(exact).abs());
+                if (!lowerMatches || distance < 0 || distance == 0 && !upper.unscaledValue().testBit(0)) {
+                    decimal = upper;
+                }
+            }
+        }
+        int exponent = decimal.precision() - decimal.scale() - 1;
+        String encoded;
+        if (exponent >= -6 && exponent < 21) {
+            encoded = decimal.toPlainString();
+        } else {
+            String digits = decimal.unscaledValue().toString();
+            encoded = digits.substring(0, 1) + (digits.length() == 1 ? "" : "." + digits.substring(1))
+                    + "e" + (exponent < 0 ? "" : "+") + exponent;
+        }
+        return value < 0 ? "-" + encoded : encoded;
     }
 
     private static String quote(String text) {

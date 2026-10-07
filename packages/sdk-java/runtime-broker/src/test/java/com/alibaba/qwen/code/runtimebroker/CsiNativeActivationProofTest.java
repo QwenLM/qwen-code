@@ -34,6 +34,110 @@ class CsiNativeActivationProofTest {
         }
         return null;
     };
+    private final JsonNode jsonFixture = readFixture("/csi-native-json-fixture.json");
+    private final RuntimeProvisionRequest jsonOriginal = CsiFilesRetirementProfile.request(new ContextBinding(
+            jsonFixture.path("sessionKey").path("tenantId").textValue(),
+            jsonFixture.path("sessionKey").path("workspaceId").textValue(), 1, "json-unit-storage", ".",
+            CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1), jsonFixture.path("cwd").textValue(),
+            jsonFixture.path("sessionKey").path("sessionId").textValue());
+
+    @Test
+    void acceptsCompleteUnmodifiedNativeJsonProducerTransactions() {
+        assertEquals(4, jsonFixture.path("cases").size());
+        for (JsonNode sample : jsonFixture.path("cases")) {
+            byte[] bytes = Base64.getDecoder().decode(sample.path("recordBytesBase64").textValue());
+            assertEquals(sample.path("recordDigest").textValue(), CsiNativeActivationProof.sha256(bytes));
+            var parsed = jsonTransaction(CsiNativeActivationProof.records(bytes), sample.path("metadata"));
+            assertEquals(1, parsed.events().size());
+            assertEquals("00000000-0000-4000-8000-000000000003", parsed.lastRecordUuid());
+        }
+    }
+
+    @Test
+    void genericNumbersDoNotRelaxMarkerOrEventStructuralCounters() {
+        JsonNode sample = jsonFixture.path("cases").get(2);
+        String wire = new String(Base64.getDecoder().decode(sample.path("recordBytesBase64").textValue()),
+                StandardCharsets.UTF_8);
+        for (String field : List.of("firstSequence", "lastSequence", "eventCount", "v", "sequence")) {
+            for (String value : List.of("1.0", "1e0", "-1", "9007199254740991")) {
+                String changed = wire.replace("\"" + field + "\":1", "\"" + field + "\":" + value);
+                assertTrue(!wire.equals(changed));
+                rejected(() -> jsonTransaction(CsiNativeActivationProof.records(
+                        changed.getBytes(StandardCharsets.UTF_8)), sample.path("metadata")));
+            }
+        }
+        for (String field : List.of("firstSequence", "lastSequence", "eventCount")) {
+            ObjectNode metadata = sample.path("metadata").deepCopy();
+            metadata.put(field, 1.0);
+            rejected(() -> jsonTransaction(CsiNativeActivationProof.records(
+                    wire.getBytes(StandardCharsets.UTF_8)), metadata));
+        }
+    }
+
+    @Test
+    void refusesWrongMarkerTypesWithMatchingActualProducerHashes() {
+        assertEquals(6, jsonFixture.path("malformedMarkers").size());
+        for (JsonNode sample : jsonFixture.path("malformedMarkers")) {
+            byte[] bytes = Base64.getDecoder().decode(sample.path("recordBytesBase64").textValue());
+            assertEquals(sample.path("recordDigest").textValue(), CsiNativeActivationProof.sha256(bytes));
+            rejected(() -> jsonTransaction(CsiNativeActivationProof.records(bytes), sample.path("metadata")));
+        }
+    }
+
+    @Test
+    void preservesBinary64LeafSemanticsAndRejectsOverflow() {
+        JsonNode zero = jsonFixture.path("cases").get(2);
+        String wire = new String(Base64.getDecoder().decode(zero.path("recordBytesBase64").textValue()),
+                StandardCharsets.UTF_8);
+        for (String value : List.of("-0", "0.0", "0e0", "1e-400", "-1e-400")) {
+            String changed = wire.replace("\"target\":0", "\"target\":" + value);
+            assertTrue(!wire.equals(changed));
+            assertEquals(1, jsonTransaction(CsiNativeActivationProof.records(changed.getBytes(StandardCharsets.UTF_8)),
+                    zero.path("metadata")).events().size());
+        }
+        for (String value : List.of("1e400", "-1e400")) {
+            String changed = wire.replace("\"target\":0", "\"target\":" + value);
+            rejected(() -> jsonTransaction(CsiNativeActivationProof.records(changed.getBytes(StandardCharsets.UTF_8)),
+                    zero.path("metadata")));
+        }
+        JsonNode rounded = jsonFixture.path("cases").get(3);
+        String changed = new String(Base64.getDecoder().decode(rounded.path("recordBytesBase64").textValue()),
+                StandardCharsets.UTF_8).replace("\"target\":9007199254740992", "\"target\":9007199254740993");
+        assertEquals(1, jsonTransaction(CsiNativeActivationProof.records(changed.getBytes(StandardCharsets.UTF_8)),
+                rounded.path("metadata")).events().size());
+    }
+
+    @Test
+    void matchingGenericDigestDoesNotAuthorizeActivationOrCheckpoint() {
+        JsonNode sample = jsonFixture.path("cases").get(0);
+        var parsed = jsonTransaction(CsiNativeActivationProof.records(Base64.getDecoder().decode(
+                sample.path("recordBytesBase64").textValue())), sample.path("metadata"));
+        assertTrue(!CsiNativeActivationProof.hasActivation(parsed));
+        var genesis = genesis();
+        var install = activation(transaction(1, genesis.lastRecordUuid()), request(1), genesis, null, resources);
+        rejected(() -> CsiNativeActivationProof.activation(parsed, request(1), jsonOriginal,
+                install.workerId(), genesis.definitionDigest(), null, resources));
+        ObjectNode checkpointMetadata = request(1).deepCopy();
+        checkpointMetadata.put("operation", "commitCheckpoint");
+        rejected(() -> CsiNativeActivationProof.initialCheckpoint(parsed, checkpointMetadata, jsonOriginal,
+                install.workerId(), genesis, install, 0, resources));
+    }
+
+    private CsiNativeActivationProof.Transaction jsonTransaction(List<JsonNode> records, JsonNode metadata) {
+        return CsiNativeActivationProof.transaction(records, metadata, jsonOriginal,
+                jsonFixture.path("parentUuid").textValue());
+    }
+
+    private static JsonNode readFixture(String name) {
+        try (var input = CsiNativeActivationProofTest.class.getResourceAsStream(name)) {
+            if (input == null) {
+                throw new IllegalStateException("Native JSON fixture is unavailable");
+            }
+            return JSON.readTree(input);
+        } catch (IOException error) {
+            throw new IllegalStateException(error);
+        }
+    }
 
     @Test
     void acceptsUnmodifiedNativeProducerBytesAndRenewalWithChangedLease() {
