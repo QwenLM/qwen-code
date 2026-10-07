@@ -4,6 +4,9 @@
 
 ## Problem and Current Behavior
 
+This design supersedes the Worktree confirmation step and option copy in
+[Web Shell session Git mode selection](2026-07-22-webshell-session-git-mode.md).
+
 The empty-session composer requires selecting Worktree and then clicking
 “Create worktree”. That confirmation only records a draft intent; it does not
 create a checkout. The first prompt already sends `worktree: {}` with
@@ -27,8 +30,8 @@ path supplies the intent to the daemon, which chooses the worktree name.
 
 ## Scope and Constraints
 
-Only the Web Shell selector, styles, English/Chinese copy, and its browser
-tests change. Keep the existing eligibility checks, workspace intent reset,
+Only the Web Shell selector, styles, English/Chinese copy, and its unit and
+browser tests change. Keep the existing eligibility checks, workspace intent reset,
 session creation, ownership, failure handling, and cleanup behavior. Do not
 add settings, new API fields, naming inputs, or automatic isolation for normal
 sessions. Branch mode still needs its name and confirmation.
@@ -39,6 +42,9 @@ No daemon route or core module changes are required.
 
 - One click on Worktree selects it and closes the popover without a second
   confirmation or naming step.
+- Reopening the popover preserves the checked Worktree option and its command
+  preview without restoring the confirmation button. Component tests cover
+  selection and reopening in the PR unit-test gate.
 - Selection alone does not create a session. Sending the first message sends
   exactly one `POST /session` with `worktree: {}` and no `branch`.
 - Resetting a worktree draft before sending creates a normal session.
