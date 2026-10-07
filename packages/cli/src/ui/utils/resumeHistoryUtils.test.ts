@@ -559,6 +559,59 @@ describe('resumeHistoryUtils', () => {
       expect(userItem.modelText).toBeUndefined();
     });
 
+    it('shows the vouched displayText rather than the model-facing userText for a paired at-command', () => {
+      // The at-command recorder's userText is the model-facing query —
+      // injected envelope included — while systemPayload.displayText is the
+      // pre-injection projection. When the record's parts witness the
+      // projection's leading run, the row must show the vouched projection;
+      // userText stays the modelText carry-through so the rewind re-arm
+      // keeps the consumed envelope.
+      const userEnvelope =
+        '<system-reminder>\nuser pasted note\n</system-reminder>';
+      const injectedEnvelope =
+        '<system-reminder>\ninjected notice\n</system-reminder>';
+      const userText = `${injectedEnvelope}\n\n${userEnvelope}\n\nmy @file prompt`;
+      const conversation = {
+        messages: [
+          {
+            type: 'system',
+            subtype: 'at_command',
+            systemPayload: {
+              userText,
+              filesRead: ['/tmp/file.ts'],
+              status: 'success',
+            },
+          },
+          {
+            type: 'user',
+            message: {
+              parts: [
+                {
+                  text: `${injectedEnvelope}\n\n${userEnvelope}\n\nexpanded model prompt`,
+                },
+              ],
+            },
+            systemPayload: {
+              displayText: `${userEnvelope}\n\nmy @file prompt`,
+              hookContext: 'ctx',
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        1_000,
+      );
+      const userItem = items.find((i) => i.type === 'user') as {
+        text: string;
+        sentToModel?: boolean;
+        modelText?: string;
+      };
+      expect(userItem.text).toBe(`${userEnvelope}\n\nmy @file prompt`);
+      expect(userItem.modelText).toBe(userText);
+    });
+
     it('strips an injected envelope from at-command userText when the parts lack the run', () => {
       // The mirror: the paired record's displayText carries a leading run
       // its model-facing parts do NOT — the witness fails and the strip
@@ -2460,6 +2513,42 @@ describe('resumed identity survives a synthetic display string', () => {
     }),
     model('r1'),
   ];
+
+  it('does not count an ACP-recorded local slash command as a real turn', () => {
+    // Session.prompt() records a local slash command's input as a bare user
+    // record and its output as a slash_command result; the API projection
+    // pops the input record (session-api-history.ts), so the UI side must
+    // not count it either — a phantom turn cuts the rewind one prompt late
+    // or refuses it outright.
+    expect(
+      truncationIndexForLastUserTurn([
+        rec({
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'A' }] },
+        }),
+        model('ans A'),
+        rec({
+          type: 'user',
+          message: { role: 'user', parts: [{ text: '/help' }] },
+        }),
+        rec({
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'result',
+            rawCommand: '/help',
+            sentToModel: false,
+            outputHistoryItems: [{ type: 'assistant', text: 'help text' }],
+          },
+        }),
+        rec({
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'B' }] },
+        }),
+        model('ans B'),
+      ]),
+    ).toBe(2);
+  });
 
   it('resolves it identically when the record carries attachments', () => {
     // Identity is independent of the synthetic attachment display text.

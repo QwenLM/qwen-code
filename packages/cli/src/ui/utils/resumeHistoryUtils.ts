@@ -359,6 +359,26 @@ function convertToHistoryItems(
         }
         if (payload.phase === 'result') {
           const outputs = payload.outputHistoryItems ?? [];
+          // An ACP/daemon session records a local slash command's input as
+          // a bare user record just before this result record, and the
+          // API-history projection pops that input record
+          // (session-api-history.ts). The rebuild above stamped the row
+          // sentToModel: true, but the turn never reached the model — clear
+          // the stamp so the lexical fallback classifies the row exactly
+          // like the popped API entry; a phantom turn makes
+          // computeApiTruncationIndex cut one turn late or refuse the
+          // rewind outright.
+          const previousItem = items[items.length - 1];
+          if (
+            payload.sentToModel !== true &&
+            outputs.length > 0 &&
+            outputs.every((output) => output?.['type'] === 'assistant') &&
+            previousItem?.type === 'user' &&
+            previousItem.sentToModel === true &&
+            previousItem.text === payload.rawCommand
+          ) {
+            delete previousItem.sentToModel;
+          }
           for (const raw of outputs) {
             const restored = restoreHistoryItem(raw);
             if (restored) {
@@ -441,6 +461,14 @@ function convertToHistoryItems(
           const raw =
             payload.userText ||
             (projection.displayText ?? extractTextFromParts(projection.parts));
+          // The gate vouches for `displayText`, so the projection is the
+          // value to show: `raw` resolves to `userText` first, and the
+          // at-command recorder's userText is the model-facing query,
+          // injected envelopes included — returning `raw` here would leak
+          // the envelope into the user's row even though the vouched
+          // projection excludes it. `raw` stays the modelText
+          // carry-through below: it is the unstripped model text the
+          // rewind re-arm needs.
           const text =
             projection.displayText &&
             hasUserAuthoredLeadingReminders(
@@ -451,7 +479,7 @@ function convertToHistoryItems(
                 ),
               ),
             )
-              ? raw
+              ? projection.displayText
               : stripLeadingSystemReminders(raw);
           if (text) {
             // A recorded user message is a turn that reached the model:

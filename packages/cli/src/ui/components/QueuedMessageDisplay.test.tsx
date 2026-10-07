@@ -26,8 +26,9 @@ describe('QueuedMessageDisplay', () => {
 
   it('previews a user-authored leading envelope verbatim from the projection', () => {
     // `messageQueue` entries are producer-resolved display text: a leading
-    // envelope the user typed themselves is content and must stay visible
-    // (the injected-envelope strip lives in useMessageQueue's fallback).
+    // envelope the user typed themselves is content and must stay visible.
+    // useMessageQueue emits the producer projection when one exists and the
+    // entry's own text otherwise — neither fallback shape-strips.
     const { lastFrame } = render(
       <QueuedMessageDisplay
         messageQueue={[

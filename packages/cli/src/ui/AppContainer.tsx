@@ -2795,11 +2795,20 @@ export const AppContainer = (props: AppContainerProps) => {
         // runs do not line up, the leading split is all that is safe to
         // remove.
         if (submission.reminders !== undefined) {
-          reminders = submission.reminders;
-          displayText = omitSystemReminderBlocks(
+          // The decomposition names only the envelopes the producer could
+          // see: a projection-less member's leading envelope (baked into
+          // the joined model text by the re-arm prepend) rides it
+          // undecomposed. After omitting the named blocks, split the
+          // leading run that remains and arm it too — leaving it in the
+          // refill would read injected context back as the user's own
+          // typed text and lose the notice for the rest of the session.
+          const withoutDecomposition = omitSystemReminderBlocks(
             submission.modelText,
-            reminders,
+            submission.reminders,
           );
+          const leading = splitLeadingSystemReminders(withoutDecomposition);
+          reminders = leading.reminders + submission.reminders;
+          displayText = leading.rest;
         } else {
           const injectedLeading =
             producerDisplay === undefined
@@ -2815,11 +2824,15 @@ export const AppContainer = (props: AppContainerProps) => {
               injectedLeading,
             );
           } else {
-            reminders = split.reminders;
-            displayText = omitSystemReminderBlocks(
-              submission.modelText,
-              reminders,
-            );
+            // No producer projection (a vim submit, a remote single-arg
+            // addMessage, a Ctrl+R-recalled fill) or one that proves
+            // nothing about the leading run (a collapsed-paste placeholder,
+            // an attachment @ref the projection predates): the leading
+            // envelope run cannot be told apart from a block the user
+            // pasted, so restore the text verbatim and arm nothing rather
+            // than deleting user content by shape.
+            reminders = '';
+            displayText = submission.modelText;
           }
         }
       }
@@ -3300,7 +3313,11 @@ export const AppContainer = (props: AppContainerProps) => {
         ? undefined
         : restoredSubmission !== null
           ? restoredSubmission.displayText === submittedValue
-            ? restoredSubmission.displayText
+            ? // addMessage trims the queued text, so the projection must be
+              // trimmed too: an untrimmed stash value silently fails the
+              // queue's suffix decomposition and the dispatch gate's
+              // byte-identity.
+              restoredSubmission.displayText.trim() || undefined
             : // The composer diverged without an observed edit (a
               // programmatic submit while a stash is armed): the caller's
               // own fresh text is still the right projection — the stash
@@ -3476,7 +3493,13 @@ export const AppContainer = (props: AppContainerProps) => {
         restoredReminders !== null &&
         !shellModeActive &&
         !isSlashCommand(userPromptText) &&
-        !isBtwCommand(userPromptText)
+        !isBtwCommand(userPromptText) &&
+        // An empty submit is dropped by addMessage; prepending the pile
+        // onto it would fabricate a non-empty reminder-only prompt that IS
+        // queued and dispatched, consuming the one-shot notices onto a
+        // turn the user never wrote. Leave the pile armed for the next
+        // model-bound submit instead.
+        userPromptText.trim() !== ''
       ) {
         pendingRestoredRemindersRef.current = null;
         submittedValue = prependMissingSystemReminders(
