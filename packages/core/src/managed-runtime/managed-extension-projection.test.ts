@@ -112,13 +112,20 @@ describe('managed-extension-projection/1 fixtures', () => {
           ([domain, body]) => [
             domain,
             // child_run's task kind follows the body's own kind; every other
-            // body is a constant or projects no task at all.
+            // body is a constant or projects no task at all. The probing
+            // record carries managed identity field names, so a mapping
+            // that regressed into reading one cannot answer constant-by-luck.
             domain === 'child_run'
               ? {
                   shell: body?.taskKindOf({ kind: 'shell' }),
                   child_agent: body?.taskKindOf({ kind: 'child_agent' }),
                 }
-              : body?.taskKindOf(null),
+              : body?.taskKindOf({
+                  configurationId: 'probe',
+                  registrationId: 'probe',
+                  occurrenceId: 'probe',
+                  serverId: 'probe',
+                }),
           ],
         ),
       ),

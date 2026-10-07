@@ -219,7 +219,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     }
                     throw unavailable(cause);
                 });
-        returned.whenComplete((value, error) -> {
+        // A deadline completes the stage on the shared CompletableFuture delay
+        // thread, and cancelling the exchange closes a socket: keep that off
+        // the caller's completion path and off the timer thread.
+        returned.whenCompleteAsync((value, error) -> {
             if (error != null || returned.isCancelled()) {
                 exchange.cancel(true);
                 result.cancel(false);
@@ -1109,7 +1112,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     }
                     throw unavailable(cause);
                 });
-        returned.whenComplete((value, error) -> {
+        // A deadline completes the stage on the shared CompletableFuture delay
+        // thread, and cancelling the exchange closes a socket: keep that off
+        // the caller's completion path and off the timer thread.
+        returned.whenCompleteAsync((value, error) -> {
             if (error != null || returned.isCancelled()) {
                 exchange.cancel(true);
                 result.cancel(false);

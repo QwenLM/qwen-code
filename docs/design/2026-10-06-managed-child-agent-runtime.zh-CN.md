@@ -44,7 +44,7 @@ H4a 不扩大任何 profile 可运行的范围:`child_run` 与 `child_acceptance
 
 ## 决策
 
-1. **一个 domain、一个 body 版本、按 kind 划分的封闭形态。** `child_run` 保持 recordRef `managed-child_run` schema version 1,由记录体自身的 `kind` 字段分发封闭键集:`shell`(H3)与本次新增的 `child_agent`。存储设计 §3.1 把 v1 索引的 `recordRef.schemaVersion = 1` 钉死, `domain.committed` 也强制它(`managed-session-records.ts:31`,1117-1138),所以新 kind 是新的记录体形态,不是新的 envelope 版本;H3 所说的 "its own body version" 因此读作 v1 envelope 内各 kind 自身的记录体形态。旧 reader 会拒绝 `child_agent` 记录体——缺该 body 的 writer 根本不会提交它,缺该 body 的 reader 无法重新打开——这正是 H3 为新记录形态确立的 fail-stop 立场。由于任何已部署 profile 中的 Session 都还不持有 `child_run` 记录(该 domain 处处禁用),不存在混版窗口;启用 `child_run` 与 `child_acceptance` 仍是 H4b 中显式的、server 先部署的一步,与 H1/H2 的顺序以及 H3 为其自身待启用项记录的方式同类。
+1. **一个 domain、一个 body 版本、按 kind 划分的封闭形态。** `child_run` 保持 recordRef `managed-child_run` schema version 1,由记录体自身的 `kind` 字段分发封闭键集:`shell`(H3)与本次新增的 `child_agent`。存储设计 §3.1 把 v1 索引的 `recordRef.schemaVersion = 1` 钉死, `domain.committed` 也强制它(`managed-session-records.ts:30`,1146-1157),所以新 kind 是新的记录体形态,不是新的 envelope 版本;H3 所说的 "its own body version" 因此读作 v1 envelope 内各 kind 自身的记录体形态。旧 reader 会拒绝 `child_agent` 记录体——缺该 body 的 writer 根本不会提交它,缺该 body 的 reader 无法重新打开——这正是 H3 为新记录形态确立的 fail-stop 立场。由于任何已部署 profile 中的 Session 都还不持有 `child_run` 记录(该 domain 处处禁用),不存在混版窗口;启用 `child_run` 与 `child_acceptance` 仍是 H4b 中显式的、server 先部署的一步,与 H1/H2 的顺序以及 H3 为其自身待启用项记录的方式同类。
 2. **链身份按 kind 定。** `shell` 链以 `shellId` 键控;`child_agent` 链以 `childRunId` 键控。H0c 的键控规则不变(决策 3:domain 加记录体自身身份),任务 ID 推导也不变。
 3. **launch 身份就是开启命令。** 自动化设计的 `launchId` 就是开启 `child_run` 记录的 operation:H0c 已强制一个开启命令最多开启一条记录,authority 对重试命令重放其已提交记录,Java store 保存开启命令的 hash。H4b 从 record key 推导跨 Session 创建的幂等键,所以记录体不携带与 envelope 重复的字段——"创建与首次输入使用原 `launchId`" 由推导满足,不明确的创建绝不另铸第二条记录。
 4. **child agent 的交付走 run block,acceptance 自成记录。** `child_agent` 的 run 携带 `session` 目标的 delivery 行(`planned → accepting → accepted → consumed`,另有 `unknown`、`rejected`、`cancelled`),outbox 投影与任何 dispatcher 扫描读的就是它。它不承载 acceptance 证据:去重、内容绑定与消费跟踪都在 `managed-child_acceptance` 里——§3.1 为此命名的独立 domain——因为三个事实(child terminal、父 accepted、父 consumed)必须各自独立提交、各自可被 kill(自动化 §8 A06)。一个 `commitExtensionRecord` 事务只携带一条记录修订,所以 acceptance 动作 = acceptance 记录 + 其 input 与 wake 在一个事务内;推进 `child_run` 的 delivery 行是另一个由 relay 驱动的提交——崩溃可以延后它,但绝不会破坏它(acceptance 记录已使重投停止)。
@@ -72,7 +72,7 @@ Schema version 1。链以 `childRunId` 键控。所有键都是必需的;可空�
 | `completion`            | `"tool"` 或 `"sent"`(决策:前台只经原工具结果返回,后台只经持久 notification input 返回)                                                                                           |
 | `inputRef`              | durable ref:launch 输入——child 的首个 prompt——由父 Session 持有                                                                                                                  |
 | `workspaceMode`         | `"shared"`、`"snapshot"` 或 `"worktree"`:launch 时固定的隔离策略(参考设计 §8);v1 运行时只准入它能证明的模式(H4b)                                                                 |
-| `workingDirectory`      | 绑定 Workspace 内的 id 安全相对目录文本,根目录为 `.`:NFC 规范化、无前导 `/`、无 `..` 段、无盘符前缀、至多 512 UTF-8 字节                                                         |
+| `workingDirectory`      | 绑定 Workspace 内的 id 安全相对目录文本,根目录为 `.`:NFC 规范化、无前导或结尾 `/`、不含反斜杠、无空段或 `.` 段或 `..` 段、无盘符前缀、至多 512 UTF-8 字节                        |
 | `childSessionId`        | null 或 id:与控制面准入创建的那次 dispatch 一起设置一次;幂等创建指向同一 Session。执行为 null、intent、dispatch 在途或已证未开始时为 null——Session 只存在于 dispatch attach 之后 |
 | `predecessorChildRunId` | null 或 id:continued 时在 launch 设置,不再改变                                                                                                                                   |
 | `resultVersion`         | count,v1 恰为 1(决策 7)                                                                                                                                                          |
@@ -131,7 +131,8 @@ Schema version 1。链以 `childRunId` 键控——每个 child run 一条 accep
 - `packages/core/src/managed-runtime/contracts/managed-child-acceptance-record-v1.fixtures.json`(新),以及 `contracts/managed-extension-projection-v1.fixtures.json`(`recordBodies` 钉住项对 `child_run` 改为按-kind,并增加 `child_acceptance`)。
 - `packages/core/src/managed-runtime/managed-extension-projection.ts` 及其测试:记录体注册的静态 `taskKind` 改为 `taskKindOf(record)`——`child_acceptance` 注册为 null 任务 kind——hook 与 MCP 记录测试随之一并改名。
 - `packages/core/src/managed-runtime/managed-session-authority.ts`:两个记录体的引用闭包与提交路径上的 acceptance 跨记录检查,由新的 `managed-session-authority.child-agent.test.ts` 沿用 H3 child-run 套件所用的 `assertManagedSessionDomainEnabled` mock 模式在启用前演练。
-- `packages/cli/src/serve/hosted-child-run-session.ts`、`hosted-harness-session.ts`、`hosted-child-run-session.test.ts` 与 `hosted-shell-publisher.background.test.ts`:只处理 shell 的消费方从 `parseChildRun` 改用 `parseChildShellRun`(行为不变)。
+- `packages/cli/src/serve/hosted-child-run-session.ts`、`hosted-child-run-session.test.ts`、`hosted-shell-publisher.background.test.ts`、`local-shell-stream-result-session.ts` 与其测试:只处理 shell 的消费方从 `parseChildRun` 迁至 `parseChildShellRun`(行为不变),最后一处配有断言 `Child run kind must be 'shell' for this consumer` 的新见证。
+- `packages/cli/src/serve/hosted-harness-session.ts` 与 `hosted-harness-session.test.ts`:工作区恢复枚举保留返回联合类型的 `parseChildRun`,遇到 `child_agent` 记录即跳过——child agent 没有 output manifest——而不是让整个 Session 打不开;回归用例把一条 child agent 提交放在已结算 Shell 谱系旁验证恢复。
 - `packages/sdk-java/managed-agent-server` 中:`ManagedExtensionRecords`(按-kind 分发、`requireChildAgent`、`requireChildAcceptance` 及其 start/successor 检查)、`ManagedExtensionProjection`(记录体的 `taskKind` 改为记录的函数;`child_acceptance` 注册为无任务)、`ManagedExtensionRecordStore`(acceptance 的提交时跨记录检查与两个记录体的引用闭包),以及重放共享 fixtures 的 `ManagedChildRunRecordContractTest`、新的 `ManagedChildAcceptanceRecordContractTest` 与 `ManagedExtensionProjectionContractTest`,另有 `ManagedExtensionRecordStoreTest` 中与 TypeScript 套件对应的 store 级链测试。
 - 本设计的双语版本。
 
@@ -139,7 +140,7 @@ Schema version 1。链以 `childRunId` 键控——每个 child run 一条 accep
 
 - **TypeScript:** 重放每个用例,含 start 与 successor;Shell 链与 child agent 链的任务投影;authority 套件(`managed-session-authority.child-agent.test.ts`)覆盖提交、重建、引用闭包、跨记录规则、禁用 domain 拒绝,以及重试命令返回原修订——全部以 mock 启用 domain 的方式进行,与 H3 套件相同。
 - **Java:** 经 `ManagedExtensionRecords` 重放每个用例;两种 kind 的投影;`ManagedExtensionRecordStore` 在 H2(MySQL 模式)上提交并重建 fixture 链,拒绝跨记录违规、开启命令复用与越界资源;CI 的 MySQL 车道跑的是未变更的集成套件——目前没有任何车道在真实 MySQL 上提交这些链。
-- **变异检查:** 对新增与改动的校验器中每个 fail、提前返回、比较与逻辑运算符,两种语言各自逐一变异并重跑同语言套件,沿用 H0b 的做法。
+- **变异检查:** 对本切片新增或修改的每一处守卫,用同语言套件逐一变异并确认只经其指名的见证变红——dispatch 的 Runtime 绑定与 definition pin 守卫、盘符子句(含共享语料抓出的 Java 整段匹配回归)、跨记录检查、successor 的停止与终态冻结子句,以及 acceptance 绑定。第二轮评审指出的十处无见证子句,已在共享语料或 store 套件中各自补齐见证。
 
 ## 验收标准
 
@@ -147,7 +148,7 @@ Schema version 1。链以 `childRunId` 键控——每个 child run 一条 accep
 - H3 的 shell fixtures 除 `kind-unknown` 外重放不变;该用例由 `kind: "child_agent"` 改指 `kind: "workflow"`,继续承担未知 kind 见证。
 - authority 与 Java store 在启用前提交并重建 `child_agent` 链与 acceptance 链,且 `child_acceptance` 行不投影任务。
 - 跨租户与缺资源的提交保持 store 既有答案;一致性违规答案为 `409 managed_session_extension_record_rejected`。
-- `child_run` 与 `child_acceptance` 保持拒绝提交;新校验器之外不改变任何 Session reader 或 writer 行为。
+- `child_run` 与 `child_acceptance` 保持拒绝提交;新校验器之外,唯一的行为变化是工作区恢复的 detached-lineage 枚举对 child agent 记录跳过而非拒开整个 Session。
 - 其余行为不变,包括全部 H1/H2/H3 契约测试与零条目的 `contract-known-gaps.txt`。
 
 ## 待决问题

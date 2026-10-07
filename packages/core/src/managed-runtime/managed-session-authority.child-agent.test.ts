@@ -535,6 +535,35 @@ describe('managed session authority child_agent records', () => {
     });
   });
 
+  it('binds an acceptance to the child run it names, not its sibling', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = life(refs);
+    await withAuthority(harness, async (authority) => {
+      await settleChild(harness, authority, chain);
+      await authority.commitExtensionRecord(
+        command('run-2:1'),
+        {
+          domain: 'child_run',
+          record: childAgent(refs, {}, { childRunId: 'run-2' }),
+        },
+        TRUSTED,
+      );
+      // The sibling child run exists as a child_agent but has not ended:
+      // an acceptance for the settled run-1 may not claim its chain.
+      await expect(
+        authority.commitExtensionRecord(
+          command('accept-2:1'),
+          {
+            domain: 'child_acceptance',
+            record: acceptance(refs, 'accepted', { childRunId: 'run-2' }),
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow('must name a run that ended with its result committed');
+    });
+  });
+
   it('commits and consumes an acceptance without projecting a task', async () => {
     const harness = await createHarness();
     const refs = await publishRefs(harness);

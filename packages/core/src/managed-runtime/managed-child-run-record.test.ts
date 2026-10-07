@@ -168,7 +168,6 @@ describe('managed-child-run-record/1 shared contract', () => {
         'kind',
         'ownerScopeId',
         'predecessorChildRunId',
-        'resultVersion',
         'rootSessionId',
         'workspaceMode',
         'workingDirectory',

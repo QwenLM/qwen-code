@@ -374,6 +374,38 @@ class ManagedExtensionRecordStoreTest {
     }
 
     @Test
+    void bindsAnAcceptanceToTheChildRunItNamesNotItsSibling()
+            throws Exception {
+        CommitResource inputResource = hookResource("input-s", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-s",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-s",
+                "managed-runtime-receipt",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        ObjectNode sibling = childAgent(sessionId, "sent", "admitted",
+                "intent", null, inputResource);
+        sibling.put("childRunId", "run-y");
+        commitDomain(journal, "agent-b", "child_run", sibling,
+                List.of(inputResource));
+        ObjectNode claimingSibling = acceptance(resultResource,
+                receiptResource, "accepted");
+        claimingSibling.put("childRunId", "run-y");
+        assertRefused("an acceptance naming its sibling child run's unended"
+                        + " chain", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must name a run that ended with its result committed",
+                () -> journal.commit(journal.requestDomain("accept-1",
+                        "child_acceptance", claimingSibling,
+                        List.of(resultResource, receiptResource), 1_000)));
+    }
+
+    @Test
     void refusesAFirstLevelChildAgentRootedAtAnotherSession()
             throws Exception {
         CommitResource inputResource = hookResource("input-r", "managed-input",
