@@ -748,8 +748,7 @@ class SurfaceAdmissionAcceptanceTest {
             }
         }
         List<String> query = new ArrayList<>();
-        if (path.startsWith("/internal/managed-tool-publications/")
-                && !path.endsWith("/grant")) {
+        if (path.startsWith("/internal/managed-tool-publications/")) {
             query.add("workspaceId=ws");
         }
         if (path.startsWith("/internal/managed-session-store/")
