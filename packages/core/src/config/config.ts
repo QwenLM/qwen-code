@@ -2438,6 +2438,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getWorkspaceContext'
     | 'getFileService'
     | 'getEffectiveInputModalities'
+    | 'isOmniEnabled'
     | 'getFileReadCache'
     | 'getFileHistoryService'
     | 'getToolRegistry'

@@ -17,6 +17,8 @@ import type {
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
+import type { ReadFileMediaLimits } from '../utils/inline-media.js';
+import { ToolErrorType } from './tool-error.js';
 
 import type { PartListUnion, FunctionDeclaration } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
@@ -86,6 +88,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   constructor(
     private config: Config,
     params: ReadFileToolParams,
+    private readonly mediaLimits?: ReadFileMediaLimits,
   ) {
     super(params);
   }
@@ -209,6 +212,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         preserveUnsupportedImage: prepareForVisionBridge,
         preparePdfForVisionBridge: prepareForVisionBridge,
         signal,
+        mediaLimits: this.mediaLimits,
       },
     );
     signal.throwIfAborted();
@@ -338,10 +342,33 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       ),
     );
 
-    return {
+    const toolResult: ToolResult = {
       llmContent,
       returnDisplay: this.toToolResultDisplay(result),
     };
+    if (this.mediaLimits) {
+      const media = normalizeParts(llmContent).filter(
+        (part) => part.inlineData !== undefined,
+      );
+      if (
+        media.length > 0 &&
+        (media.reduce(
+          (sum, part) => sum + (part.inlineData?.data?.length ?? 0),
+          0,
+        ) > this.mediaLimits.maxInlineMediaBase64Bytes ||
+          Buffer.byteLength(JSON.stringify(toolResult), 'utf8') >
+            this.mediaLimits.maxMediaResultBytes)
+      ) {
+        const message =
+          "File exceeds the inline media result byte limit. For PDFs, use 'pages' with a narrower range; otherwise use a smaller file.";
+        return {
+          llmContent: message,
+          returnDisplay: message,
+          error: { message, type: ToolErrorType.FILE_TOO_LARGE },
+        };
+      }
+    }
+    return toolResult;
   }
 
   private async transcribePdfCandidate(
@@ -587,7 +614,10 @@ export class ReadFileTool extends BaseDeclarativeTool<
     return Number.POSITIVE_INFINITY;
   }
 
-  constructor(private config: Config) {
+  constructor(
+    private config: Config,
+    private readonly mediaLimits?: ReadFileMediaLimits,
+  ) {
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
@@ -708,6 +738,6 @@ export class ReadFileTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: ReadFileToolParams,
   ): ToolInvocation<ReadFileToolParams, ToolResult> {
-    return new ReadFileToolInvocation(this.config, params);
+    return new ReadFileToolInvocation(this.config, params, this.mediaLimits);
   }
 }

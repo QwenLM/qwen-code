@@ -989,6 +989,80 @@ describe('fileUtils', () => {
       expect(result.error).toBeUndefined();
     };
 
+    it('uses the effective getter without consulting generator configuration', async () => {
+      const bytes = await sharp({
+        create: { width: 1, height: 1, channels: 3, background: '#306090' },
+      })
+        .gif()
+        .toBuffer();
+      const generator = vi.fn(() => {
+        throw new Error('must not initialize a generator');
+      });
+      const config = withConfig({
+        getEffectiveInputModalities: () => ({ image: true, pdf: true }),
+        getContentGeneratorConfig: generator,
+      });
+      const image = await readMedia(
+        'effective.gif',
+        bytes,
+        'image/gif',
+        config,
+      );
+      expectInline(image, bytes, 'image/gif', 'effective.gif');
+      const pdf = await readMedia(
+        'effective.pdf',
+        '%PDF-1.7',
+        'application/pdf',
+        config,
+      );
+      expectInline(pdf, '%PDF-1.7', 'application/pdf', 'effective.pdf');
+      expect(generator).not.toHaveBeenCalled();
+    });
+
+    it.each([{}, { image: false, pdf: false }])(
+      'keeps effective %j authoritative over enabled legacy modalities',
+      async (modalities) => {
+        const config = withConfig({
+          getEffectiveInputModalities: () => modalities,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true, pdf: true },
+          }),
+        });
+        const image = await readFakePng(config);
+        expect(image.llmContent).toContain('Unsupported image');
+        expect(JSON.stringify(image.llmContent)).not.toContain('inlineData');
+        const pdf = await readMedia(
+          'disabled.pdf',
+          '%PDF-1.7',
+          'application/pdf',
+          config,
+        );
+        expect(pdf.errorType).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        expect(JSON.stringify(pdf.llmContent)).not.toContain('inlineData');
+      },
+    );
+
+    it('retains legacy partial Config media reads when the effective getter is absent', async () => {
+      const bytes = await sharp({
+        create: { width: 1, height: 1, channels: 3, background: '#306090' },
+      })
+        .gif()
+        .toBuffer();
+      const config = withModalities({ image: true, pdf: true });
+      expectInline(
+        await readMedia('legacy.gif', bytes, 'image/gif', config),
+        bytes,
+        'image/gif',
+        'legacy.gif',
+      );
+      expectInline(
+        await readMedia('legacy.pdf', '%PDF-1.7', 'application/pdf', config),
+        '%PDF-1.7',
+        'application/pdf',
+        'legacy.pdf',
+      );
+    });
+
     beforeEach(() => {
       // Default: renderer unavailable, so PDF reads fall back to the text path
       // unless a test opts into rendering. Set after the global resetAllMocks.
@@ -1725,6 +1799,7 @@ describe('fileUtils', () => {
       expect(mockRender).toHaveBeenCalledWith(testPdfFilePath, {
         firstPage,
         lastPage,
+        signal: undefined,
       });
     const hasText = (parts: MediaPart[], pattern: RegExp) =>
       parts.some((p) => typeof p.text === 'string' && pattern.test(p.text));

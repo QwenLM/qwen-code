@@ -5,11 +5,14 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
   MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+  MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES,
+  MAX_PROVIDER_MEDIA_RESULT_BYTES,
   ManagedRuntimeProviderProtocolError,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
@@ -55,6 +58,10 @@ const reference = {
   invocationId: 'invocation-1',
   argsDigest: managedToolDigest({ file_path: 'note.txt' }),
 };
+
+function resultDigest(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
 
 describe('managed-runtime-provider/1', () => {
   it.each(fixtures.cases)('$name', ({ valid, request }) => {
@@ -896,7 +903,7 @@ describe('managed-runtime-provider/1', () => {
       expect(kept.length + omitted).toBe(20_000);
     });
 
-    it('stubs model content the cut cannot reach when nothing else is left', () => {
+    it('refuses unadmitted media without replacing its retained outcome', () => {
       const limit = 1024 * 1024;
       const result = {
         executionStatus: 'success',
@@ -907,11 +914,167 @@ describe('managed-runtime-provider/1', () => {
           ] as unknown,
         },
       };
-      fitManagedRuntimeProviderResult(execute, result, limit);
-      expect(
-        Buffer.byteLength(JSON.stringify(result), 'utf8'),
-      ).toBeLessThanOrEqual(limit);
-      expect(typeof result.result.llmContent).toBe('string');
+      const original = structuredClone(result);
+      expect(() =>
+        fitManagedRuntimeProviderResult(execute, result, limit),
+      ).toThrow('media result exceeds its admitted budget');
+      expect(resultDigest(result)).toBe(resultDigest(original));
+    });
+
+    it.each(['execute', 'status', 'cancel'] as const)(
+      'preserves the entire maximum media result through %s fitting',
+      (kind) => {
+        const toolResult = {
+          llmContent: [
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'A'.repeat(MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES),
+              },
+            },
+            { text: 'caption "中"\n' },
+          ],
+          returnDisplay: 'original display',
+        };
+        const caption = toolResult.llmContent[1];
+        if (!('text' in caption))
+          throw new Error('Caption fixture is missing.');
+        caption.text += 'x'.repeat(
+          MAX_PROVIDER_MEDIA_RESULT_BYTES -
+            Buffer.byteLength(JSON.stringify(toolResult)),
+        );
+        const original = structuredClone(toolResult);
+        const terminal = {
+          executionStatus: 'success',
+          result: toolResult,
+          postHook: { note: 'h'.repeat(140 * 1024) },
+        };
+        const value =
+          kind === 'execute'
+            ? terminal
+            : {
+                state: 'settled',
+                cancelRequested: false,
+                lastSeq: Number.MAX_SAFE_INTEGER - 1,
+                firstAvailableSeq: Number.MAX_SAFE_INTEGER - 1,
+                progressGap: false,
+                progress: [
+                  {
+                    seq: Number.MAX_SAFE_INTEGER - 1,
+                    output: 'p'.repeat(300 * 1024),
+                  },
+                ],
+                result: terminal,
+              };
+        const maximumSession = {
+          ...session,
+          harnessSessionId: 's'.repeat(512),
+        };
+        const envelope = (result: unknown) => ({
+          protocolVersion: 1,
+          providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+          session: maximumSession,
+          result,
+        });
+        const limit =
+          1024 * 1024 - Buffer.byteLength(JSON.stringify(envelope(0))) + 1;
+        fitManagedRuntimeProviderResult(
+          kind === 'execute' ? execute : { kind, reference },
+          value,
+          limit,
+        );
+        expect(resultDigest(terminal.result)).toBe(resultDigest(original));
+        expect(() =>
+          parseManagedRuntimeProviderResult(
+            kind === 'execute' ? execute : { kind, reference },
+            value,
+            maximumSession,
+          ),
+        ).not.toThrow();
+        expect(terminal).not.toHaveProperty('postHook');
+        expect(
+          Buffer.byteLength(JSON.stringify(envelope(value))),
+        ).toBeLessThanOrEqual(1024 * 1024);
+        if ('progress' in value) {
+          expect(value.progressGap).toBe(true);
+          expect(value.progress).toEqual([]);
+        }
+      },
+    );
+
+    it.each([
+      { mimeType: 'text/html', data: 'AA==' },
+      { mimeType: 'image/png', data: 'AR==' },
+      { mimeType: 'application/pdf', data: 'not-base64' },
+    ])(
+      'rejects invalid inline media even when its envelope fits',
+      (inlineData) => {
+        const result = {
+          executionStatus: 'success',
+          result: { llmContent: { inlineData }, returnDisplay: 'image' },
+        };
+        const original = structuredClone(result);
+        expect(() =>
+          fitManagedRuntimeProviderResult(execute, result, 1024 * 1024),
+        ).toThrow('invalid inline media');
+        expect(result).toEqual(original);
+      },
+    );
+
+    it('refuses a media-bearing result above its complete JSON budget', () => {
+      const result = {
+        executionStatus: 'success',
+        result: {
+          llmContent: [
+            { inlineData: { mimeType: 'image/png', data: 'AA==' } },
+            { text: 'x'.repeat(MAX_PROVIDER_MEDIA_RESULT_BYTES) },
+          ],
+        },
+      };
+      expect(() =>
+        fitManagedRuntimeProviderResult(execute, result, 1024 * 1024),
+      ).toThrow('media result exceeds its admitted budget');
+    });
+
+    it('preserves a Hook stop decision when fitting its media observation', () => {
+      const result = {
+        executionStatus: 'success',
+        result: {
+          llmContent: {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'A'.repeat(MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES),
+            },
+          },
+        },
+        postHook: {
+          shouldStop: true,
+          stopReason: 'Do not continue the model.',
+          additionalContext: 'c'.repeat(512 * 1024),
+        },
+      };
+      const original = resultDigest(result.result);
+      fitManagedRuntimeProviderResult(execute, result, 1024 * 1024);
+      expect(result.postHook).toEqual({
+        shouldStop: true,
+        stopReason: 'Do not continue the model.',
+      });
+      expect(resultDigest(result.result)).toBe(original);
+    });
+
+    it('keeps original media when an impossible observation budget is refused', () => {
+      const result = {
+        executionStatus: 'success',
+        result: {
+          llmContent: { inlineData: { mimeType: 'image/png', data: 'AA==' } },
+          returnDisplay: 'original display',
+        },
+      };
+      const original = structuredClone(result);
+      expect(() =>
+        fitManagedRuntimeProviderResult(execute, result, 16),
+      ).toThrow('media observation exceeds its wire budget');
+      expect(result).toEqual(original);
     });
 
     it('keeps hooks when cutting the text makes room', () => {
