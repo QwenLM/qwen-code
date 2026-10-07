@@ -636,6 +636,12 @@ class ManagedExtensionRecordStoreTest {
                         List.of(result, seg1), 1_000)));
         String proofWs = UUID.randomUUID().toString();
         ExtensionRecordJournal noProof = journal(proofWs);
+        // H5c: a delivery binds to its committed route, so the proof
+        // Session opens the route first.
+        var proofRoute = noProof.requestDomain("route-1", "channel_route",
+                channelRoute(templates, policy), List.of(policy), 500);
+        noProof.commit(proofRoute);
+        noProof.committed(proofRoute);
         var base = noProof.requestDomain("delivery-1", "channel_delivery",
                 channelDelivery(templates, result, seg1, seg2),
                 List.of(result, seg1, seg2), 1_000);
@@ -1417,6 +1423,68 @@ class ManagedExtensionRecordStoreTest {
             assertThat(new ManagedExtensionRecordStore(jdbc, state)
                     .latestHookRegistration(TENANT, sessionId)).contains(newer);
         }
+    }
+
+    @Test
+    void commitsAChannelDeliveryOnlyAgainstItsCommittedRoute() throws Exception {
+        JsonNode fixtures = ManagedChannelRecordContractTest.fixtures();
+        CommitResource policy = inline("{\"adapter\":\"email\"}",
+                "managed-channel-policy");
+        CommitResource result = inline("{\"text\":\"ok\"}",
+                "managed-channel-reply");
+        CommitResource seg1 = inline("part one", "managed-channel-segment");
+        CommitResource seg2 = inline("part two", "managed-channel-segment");
+        ObjectNode route = fixtures.get("templates").get("channel_route")
+                .deepCopy();
+        route.set("policyRef", hookRef(policy));
+        ObjectNode delivery = fixtures.get("templates").get("channel_delivery")
+                .deepCopy();
+        delivery.set("contentRef", hookRef(result));
+        ((ObjectNode) delivery.get("segments").get(0)).set("contentRef",
+                hookRef(seg1));
+        ((ObjectNode) delivery.get("segments").get(1)).set("contentRef",
+                hookRef(seg2));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        // H5c: no route yet, no delivery.
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain(
+                "delivery-0", "channel_delivery", delivery,
+                List.of(result, seg1, seg2), 1000)))
+                .hasMessageContaining("pinned revision");
+        commitDomain(journal, "route-1", "channel_route", route,
+                List.of(policy));
+        // The route is at revision 3; a plan against another revision is
+        // refused.
+        ObjectNode stale = delivery.deepCopy();
+        stale.put("routeRevision", 2);
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain(
+                "delivery-stale", "channel_delivery", stale,
+                List.of(result, seg1, seg2), 1000)))
+                .hasMessageContaining("pinned revision");
+        commitDomain(journal, "delivery-1", "channel_delivery", delivery,
+                List.of(result, seg1, seg2));
+        assertThat(records.listRecords(TENANT, sessionId, "channel_delivery"))
+                .extracting(record -> record.get("deliveryId").asText())
+                .containsExactly("delivery-1");
+        // A retired route admits no new delivery.
+        ObjectNode retired = route.deepCopy();
+        retired.withObject("/run").put("state", "cancelled");
+        commitDomain(journal, "route-2", "channel_route", retired, List.of());
+        ObjectNode second = delivery.deepCopy();
+        second.put("deliveryId", "delivery-2");
+        second.withObject("/run").put("effectId", "delivery-2")
+                .put("deliveryId", "delivery-2");
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain(
+                "delivery-2", "channel_delivery", second,
+                List.of(result, seg1, seg2), 2000)))
+                .hasMessageContaining("pinned revision");
+    }
+
+    private static CommitResource inline(String text, String kind) {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        return new CommitResource(ExtensionRecordJournal.resourceId(bytes),
+                kind, 1, bytes.length, ExtensionRecordJournal.sha256(bytes),
+                Base64.getEncoder().encodeToString(bytes));
     }
 
     private static void commitDomain(ExtensionRecordJournal journal, String commandId,

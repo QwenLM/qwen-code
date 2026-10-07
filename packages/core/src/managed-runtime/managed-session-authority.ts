@@ -10,6 +10,7 @@ import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import {
   isDefinitionPinConsistent,
+  isTerminalRunState,
   parseMonitorRun,
   parseOperationGrant,
   type ExtensionRun,
@@ -39,6 +40,7 @@ import {
   MANAGED_SESSION_LIMITS,
   MANAGED_SESSION_MINIMUM_READER,
   ManagedSessionRecordError,
+  assertManagedSessionChannelAdapterEnabled,
   assertManagedSessionDigest,
   assertManagedSessionDomainEnabled,
   assertManagedSessionEventActor,
@@ -75,6 +77,7 @@ import {
   parseChannelDelivery,
   parseChannelRoute,
 } from './managed-channel-record.js';
+import { decodeChannelPolicy } from './managed-channel-operations.js';
 import {
   parseChildAcceptance,
   type ChildAcceptance,
@@ -1458,6 +1461,7 @@ export class LocalManagedSessionAuthority {
       this.assertDomainAdmittable(request.domain);
       const parsed = body.parse(request.record);
       await this.verifyExtensionResources(request.domain, parsed.record);
+      await this.assertChannelRouteAdmittable(request.domain, parsed);
       this.assertExtensionRevision(
         request.domain,
         body,
@@ -1716,6 +1720,26 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
+   * H5b: a route chain opens only for an enabled adapter. The committed
+   * policy names the adapter, so the gate reads the policy the closure just
+   * verified; a later revision keeps the adapter its chain opened with.
+   */
+  private async assertChannelRouteAdmittable(
+    domain: ManagedSessionDomain,
+    parsed: ReturnType<ManagedExtensionRecordBody['parse']>,
+  ): Promise<void> {
+    if (
+      domain !== 'channel_route' ||
+      this.extensionRecord(domain, parsed.recordId) !== undefined
+    )
+      return;
+    const policy = decodeChannelPolicy(
+      await this.resources!.read(parseChannelRoute(parsed.record).policyRef),
+    );
+    assertManagedSessionChannelAdapterEnabled(policy.adapter);
+  }
+
+  /**
    * `operationId` is the command that commits the revision. The command that
    * opens a record becomes its operation, so it may open no other record.
    */
@@ -1727,6 +1751,24 @@ export class LocalManagedSessionAuthority {
     reject: (message: string) => never,
   ): void {
     const previous = this.extensionRecord(domain, parsed.recordId);
+    if (domain === 'channel_delivery' && previous === undefined) {
+      // H5c: a delivery goes out through a committed, live binding at the
+      // revision it was planned against — never through a retired route or
+      // one re-keyed since the plan.
+      const delivery = parseChannelDelivery(parsed.record);
+      const route = this.extensionRecord('channel_route', delivery.routeId);
+      const binding =
+        route === undefined ? undefined : parseChannelRoute(route.record);
+      if (
+        binding === undefined ||
+        binding.routeRevision !== delivery.routeRevision ||
+        isTerminalRunState(binding.run.state)
+      ) {
+        reject(
+          'Channel delivery must bind to its committed route at the pinned revision.',
+        );
+      }
+    }
     if (domain === 'mcp_configuration') {
       for (const configuration of this.extensionRecordsInDomain(domain)) {
         if (

@@ -25,6 +25,8 @@ import { pendingSessionInputs } from './hosted-wake-intake.js';
 export interface HostedMonitorWakeTurn {
   readonly turnId: string;
   readonly text: string;
+  /** The input's source, so a settle hook can tell a channel turn apart. */
+  readonly source?: string;
 }
 
 export type HostedMonitorWakeState = 'idle' | 'busy' | 'blocked';
@@ -173,7 +175,10 @@ export async function settlePendingMonitorInputs(params: {
   readonly sink: ManagedSessionRecordSink;
   readonly sessionId: string;
   readonly cwd: string;
+  /** The notification sources to settle; H5 adds `channel` to `monitor`. */
+  readonly sources?: readonly string[];
 }): Promise<number> {
+  const sources = params.sources ?? ['monitor'];
   // The whole committed prefix, not a bounded page: a notification input
   // lands late in the log, and `readEvents()` alone would stop at the
   // default page and leave the Session's owed inputs unsettled — which is
@@ -184,7 +189,7 @@ export async function settlePendingMonitorInputs(params: {
     authority.eventsInSequenceRange(1, authority.committedSequence),
   ).filter(
     (input) =>
-      input.source === 'monitor' &&
+      sources.includes(input.source) &&
       !wakeHasPriorAttempt(attempted, input.turnId),
   );
   for (const input of pending) {

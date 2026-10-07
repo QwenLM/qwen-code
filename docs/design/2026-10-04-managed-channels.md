@@ -2,9 +2,10 @@
 
 [English](2026-10-04-managed-channels.md) | [简体中文](2026-10-04-managed-channels.zh-CN.md)
 
-Status: slice H5a (the record contract of both domains) is implemented; slices
-H5b and H5c remain proposed, and no domain this document names is enabled for
-submission. This is the design for slice H5 of
+Status: slices H5a (the record contract of both domains), H5b and H5c (the
+email inbound and outbound verticals, see the [runtime design](2026-10-07-managed-channel-runtime.md))
+are implemented; both domains are enabled for submission for the email
+adapter only. This is the design for slice H5 of
 [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the
 Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380).
 It builds on the task contract of H0a

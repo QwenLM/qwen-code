@@ -171,7 +171,14 @@ class ManagedAgentApiContractTest {
                     entry(PublicList.class, List.of("PublicSessionList",
                             "PublicEventList", "PublicTaskList",
                             "PublicTaskEventList", "PublicTurnList",
-                            "PublicArtifactList")),
+                            "PublicArtifactList", "PublicChannelList",
+                            "PublicChannelDeliveryList")),
+                    entry(ApiModels.PublicChannel.class,
+                            List.of("PublicChannel")),
+                    entry(ApiModels.PublicChannelRoute.class,
+                            List.of("PublicChannelRoute")),
+                    entry(ApiModels.PublicChannelDelivery.class,
+                            List.of("PublicChannelDelivery")),
                     entry(PublicEvent.class, List.of("PublicEvent")),
                     entry(SessionResyncRequired.class,
                             List.of("SessionResyncRequired")),
@@ -1213,6 +1220,7 @@ class ManagedAgentApiContractTest {
                 get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId), null);
         exchangeTurns(drift, tenant, otherTenant);
         exchangeAgents(drift, tenant, otherTenant);
+        exchangeChannels(drift, tenant, otherTenant);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
@@ -1521,6 +1529,118 @@ class ManagedAgentApiContractTest {
                 .isEqualTo(created.path("digest").asText());
         exchange(drift, "getAgent", 404, get("/v1/agents/{id}", agentId)
                 .header(TENANT, otherTenant), null);
+    }
+
+    /**
+     * H5c: the three channel resources, served over seeded rows exactly as
+     * the channel service writes them — a registered connection, an
+     * admitted ingress row and a delivered ledger row.
+     */
+    private void exchangeChannels(Map<String, String> drift, String tenant,
+            String otherTenant) throws Exception {
+        String channelTenant = tenant + "-channel";
+        AuthenticatedTenantActor reader = new AuthenticatedTenantActor() {
+            @Override
+            public String getName() {
+                return actorId();
+            }
+
+            @Override
+            public String tenantId() {
+                return channelTenant;
+            }
+
+            @Override
+            public String actorId() {
+                return "channel-reader";
+            }
+        };
+        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+                        + " workspace_id, workspace_generation, storage_id,"
+                        + " display_name, config_ref, policy_ref, state)"
+                        + " VALUES (?, 'ws-channel', 1, 'storage', 'Channel',"
+                        + " 'config', 'policy', 'ACTIVE')", channelTenant);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, can_read, can_create)"
+                        + " VALUES (?, 'ws-channel', ?, TRUE, TRUE)",
+                channelTenant,
+                reader.actorId().getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO qwen_managed_channel_instance (tenant_id,"
+                        + " channel_id, platform, account_id,"
+                        + " account_generation, state, actor_id, workspace_id,"
+                        + " cwd_relative, policy_json, created_at, updated_at)"
+                        + " VALUES (?, 'mail-1', 'email', 'agent@example.com',"
+                        + " 1, 'connected', 'channel-reader', 'ws-channel',"
+                        + " '.', '{}', 1000, 1000)", channelTenant);
+        String sessionId = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO qwen_managed_channel_route (tenant_id,"
+                        + " route_key, channel_instance_id,"
+                        + " account_generation, platform_event_id,"
+                        + " semantic_revision, session_id, sender_id, chat_id,"
+                        + " thread_id, state, input_id,"
+                        + " staged_attachment_refs_json, created_at,"
+                        + " updated_at) VALUES (?, ?, 'mail-1', 1, '1700:42',"
+                        + " 1, ?, 'alice@example.com', 'alice@example.com',"
+                        + " 'thread-1', 'admitted', ?, ?, 1000, 1000)",
+                channelTenant, "a".repeat(64), sessionId,
+                "chin-" + "a".repeat(64), "[\"sha256:" + "b".repeat(64)
+                        + "\"]");
+        jdbc.update("INSERT INTO qwen_managed_channel_delivery (tenant_id,"
+                        + " channel_instance_id, delivery_id, segment_id,"
+                        + " segment_ordinal, state, provider_receipt,"
+                        + " created_at, updated_at) VALUES (?, 'mail-1',"
+                        + " 'delivery-1', 'delivery-1:0', 0, 'delivered',"
+                        + " '<m1@example.com>', 1000, 1000)", channelTenant);
+        JsonNode channels = json(exchange(drift, "listAgentChannels", 200,
+                get("/v1/agent-channels").header(TENANT, channelTenant)
+                        .principal(reader).param("limit", "10"), null));
+        assertThat(channels.path("data")).hasSize(1);
+        assertThat(channels.path("data").get(0).path("routes")).hasSize(1);
+        assertThat(channels.path("data").get(0).path("routes").get(0)
+                .path("session_id").asText()).isEqualTo(sessionId);
+        exchange(drift, "listAgentChannels", 400,
+                get("/v1/agent-channels").header(TENANT, channelTenant)
+                        .principal(reader).param("cursor", "!!"), null);
+        exchange(drift, "listAgentChannels", 400,
+                get("/v1/agent-channels").header(TENANT, channelTenant)
+                        .principal(reader).param("limit", "0"), null);
+        exchange(drift, "listAgentChannels", 403,
+                get("/v1/agent-channels").header(TENANT, channelTenant)
+                        .principal(actor(otherTenant)), null);
+        JsonNode deliveries = json(exchange(drift,
+                "listAgentChannelDeliveries", 200,
+                get("/v1/agent-channels/{id}/deliveries", "mail-1")
+                        .header(TENANT, channelTenant).principal(reader),
+                null));
+        assertThat(deliveries.path("data")).hasSize(1);
+        assertThat(deliveries.path("data").get(0).path("state").asText())
+                .isEqualTo("delivered");
+        exchange(drift, "listAgentChannelDeliveries", 404,
+                get("/v1/agent-channels/{id}/deliveries", "missing")
+                        .header(TENANT, channelTenant).principal(reader),
+                null);
+        exchange(drift, "listAgentChannelDeliveries", 400,
+                get("/v1/agent-channels/{id}/deliveries", "mail-1")
+                        .header(TENANT, channelTenant).principal(reader)
+                        .param("cursor", "!!"), null);
+        exchange(drift, "listAgentChannelDeliveries", 403,
+                get("/v1/agent-channels/{id}/deliveries", "mail-1")
+                        .header(TENANT, channelTenant)
+                        .principal(actor(otherTenant)), null);
+        JsonNode delivery = json(exchange(drift, "getAgentChannelDelivery",
+                200, get("/v1/agent-channels/{id}/deliveries/{d}", "mail-1",
+                        "delivery-1").header(TENANT, channelTenant)
+                        .principal(reader), null));
+        assertThat(delivery.path("provider_receipt").asText())
+                .isEqualTo("<m1@example.com>");
+        exchange(drift, "getAgentChannelDelivery", 404,
+                get("/v1/agent-channels/{id}/deliveries/{d}", "mail-1",
+                        "missing").header(TENANT, channelTenant)
+                        .principal(reader), null);
+        exchange(drift, "getAgentChannelDelivery", 403,
+                get("/v1/agent-channels/{id}/deliveries/{d}", "mail-1",
+                        "delivery-1").header(TENANT, channelTenant)
+                        .principal(actor(otherTenant)), null);
     }
 
     private void exchangeTurns(Map<String, String> drift, String tenant,

@@ -130,7 +130,41 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'mcp_operation',
     'hook_registration',
     'hook_execution',
+    'channel_route',
+    'channel_delivery',
   ];
+
+/**
+ * The channel adapters whose routes a Session may actually commit today
+ * (H5b/H5c). `channel_route` and `channel_delivery` are enabled as domains,
+ * but a route's committed policy names the adapter that produced it, and
+ * the authority admits a first route revision only for an adapter listed
+ * here; deliveries bind to a committed route, so they are gated with it.
+ * The Java store validates both bodies since H5a and deploys before any
+ * writer, keeping the server-first order H1/H2 used.
+ */
+export const MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS = Object.freeze([
+  'email',
+] as const);
+
+/**
+ * The channel adapter gate. This stands beside {@link
+ * assertManagedSessionDomainEnabled} for the two channel domains: enablement
+ * is decided per adapter, and the route policy names the adapter.
+ */
+export function assertManagedSessionChannelAdapterEnabled(
+  adapter: string,
+): void {
+  if (
+    !(MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS as readonly string[]).includes(
+      adapter,
+    )
+  ) {
+    throw new ManagedSessionRecordError(
+      `channel adapter ${adapter} is not enabled for submission.`,
+    );
+  }
+}
 
 /**
  * The enabled domains whose records commit through the envelope path

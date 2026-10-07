@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.33.0",
-    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 adds deployment-opted-in creation with an initial Workspace file-tool Turn (G0) on the public and WebShell surfaces; the fixed server-owned profile does not enable later Workspace operations. v1.23 settles the planned task event and cancel semantics: a durable retention floor, committed-prefix publication, stable cursors, Artifact visibility before expiry, bounded backlog under archival failure, ordered idempotent cancellation and command outcomes. Clients tolerate unknown optional event fields across minor versions. Task events and cancel remain planned. v1.24 serves the read-only Session MCP catalog as partial (Stage H1), projecting display metadata and schemas from committed records without Runtime identities, credentials or production profile enablement. v1.25 implements permission Actions (Stage D6b) on both surfaces: list, get and respond, projected from the Session's action.changed records; a WebShell permission Action carries inputRevision, policyRevision, functionCallId, toolName and expiresAt, its option ids allow and deny are stable, a Turn has at most one requested approval at a time, and a response is a durable command operation carrying requestId. v1.26 declares the tenant filter's 403 actor_scope_mismatch on every covered public and WebShell route, including planned routes, and pins the refusal code in contract traffic. v1.27 adds O3 durable tool-result projection, artifact metadata, immutable range/streaming content and WebShell result reads. Artifact capability requires a configured O3 reader and a Workspace-bound Session; execution admission remains independent. v1.28 admits later Turns of a Workspace-bound Session for the Session's creator under the deployment's Workspace files opt-in, including cancel and rename; WebShell Session capabilities advertise the per-caller workspaceTurns flag. v1.29 implements the AgentDefinition routes (Stage D8a): create, get and update store tenant-scoped, immutable revisions with a content digest, and an unchanged update adds no revision. Sessions still pin qwen-code and the configured revision, and no definition field changes execution yet. v1.30 adds the qwenSignature security scheme for gateway-free deployments: in signed authentication mode the broker authenticates the X-Qwen-Tenant-Id and X-Qwen-Actor-Id header pair itself with an HMAC signature over method, path, query, tenant, actor, timestamp, body digest and Idempotency-Key, carried in X-Qwen-Signature and X-Qwen-Signature-Timestamp, and answers 401 authentication_required or invalid_signature, 400 invalid_request on a repeated Idempotency-Key header, and 413 payload_too_large beyond the signed-body limit; a Session now records its creator so approval responses are owned without a Workspace creation record; a Session with no recorded creator and no recorded create command answers approvals to any caller in its tenant. v1.31 serves the task events routes as partial (Stage H3): a bounded per-task event journal in SQL commits each task view change with its record revision, the durable retention floor survives an empty retained set under the Artifact visibility barrier, output cursors lift with the routes, and the cancel routes stay planned. v1.32 implements the W2 controlled same-Workspace cwd change on both surfaces: the creator changes the bound Session's relative directory under an idle, opt-in deployment through a durable operation with revision CAS and busy barriers; completion emits the session.context.changed Session event and bumps context_revision, while WorkspaceContext.state stays ready and its other values remain reserved for the read-model follow-up, and bound later-turn submission answers 409 session_context_busy while a context-changing operation is open (the cross-slice busy-barrier handshake; permission-action responses and pending mutation commands are excluded from that barrier, so they can never wedge Turn admission). v1.33 shapes the planned Stage H5 channel resources: a channel connection lists its route bindings, a channel lists its outbound deliveries with per-segment states and a stable cursor, and a delivery detail query is named as planned; all mutations stay Idempotency-Key based with 202 plus operation id."
+    "version": "1.34.0",
+    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 adds deployment-opted-in creation with an initial Workspace file-tool Turn (G0) on the public and WebShell surfaces; the fixed server-owned profile does not enable later Workspace operations. v1.23 settles the planned task event and cancel semantics: a durable retention floor, committed-prefix publication, stable cursors, Artifact visibility before expiry, bounded backlog under archival failure, ordered idempotent cancellation and command outcomes. Clients tolerate unknown optional event fields across minor versions. Task events and cancel remain planned. v1.24 serves the read-only Session MCP catalog as partial (Stage H1), projecting display metadata and schemas from committed records without Runtime identities, credentials or production profile enablement. v1.25 implements permission Actions (Stage D6b) on both surfaces: list, get and respond, projected from the Session's action.changed records; a WebShell permission Action carries inputRevision, policyRevision, functionCallId, toolName and expiresAt, its option ids allow and deny are stable, a Turn has at most one requested approval at a time, and a response is a durable command operation carrying requestId. v1.26 declares the tenant filter's 403 actor_scope_mismatch on every covered public and WebShell route, including planned routes, and pins the refusal code in contract traffic. v1.27 adds O3 durable tool-result projection, artifact metadata, immutable range/streaming content and WebShell result reads. Artifact capability requires a configured O3 reader and a Workspace-bound Session; execution admission remains independent. v1.28 admits later Turns of a Workspace-bound Session for the Session's creator under the deployment's Workspace files opt-in, including cancel and rename; WebShell Session capabilities advertise the per-caller workspaceTurns flag. v1.29 implements the AgentDefinition routes (Stage D8a): create, get and update store tenant-scoped, immutable revisions with a content digest, and an unchanged update adds no revision. Sessions still pin qwen-code and the configured revision, and no definition field changes execution yet. v1.30 adds the qwenSignature security scheme for gateway-free deployments: in signed authentication mode the broker authenticates the X-Qwen-Tenant-Id and X-Qwen-Actor-Id header pair itself with an HMAC signature over method, path, query, tenant, actor, timestamp, body digest and Idempotency-Key, carried in X-Qwen-Signature and X-Qwen-Signature-Timestamp, and answers 401 authentication_required or invalid_signature, 400 invalid_request on a repeated Idempotency-Key header, and 413 payload_too_large beyond the signed-body limit; a Session now records its creator so approval responses are owned without a Workspace creation record; a Session with no recorded creator and no recorded create command answers approvals to any caller in its tenant. v1.31 serves the task events routes as partial (Stage H3): a bounded per-task event journal in SQL commits each task view change with its record revision, the durable retention floor survives an empty retained set under the Artifact visibility barrier, output cursors lift with the routes, and the cancel routes stay planned. v1.32 implements the W2 controlled same-Workspace cwd change on both surfaces: the creator changes the bound Session's relative directory under an idle, opt-in deployment through a durable operation with revision CAS and busy barriers; completion emits the session.context.changed Session event and bumps context_revision, while WorkspaceContext.state stays ready and its other values remain reserved for the read-model follow-up, and bound later-turn submission answers 409 session_context_busy while a context-changing operation is open (the cross-slice busy-barrier handshake; permission-action responses and pending mutation commands are excluded from that barrier, so they can never wedge Turn admission). v1.33 shapes the planned Stage H5 channel resources: a channel connection lists its route bindings, a channel lists its outbound deliveries with per-segment states and a stable cursor, and a delivery detail query is named as planned; all mutations stay Idempotency-Key based with 202 plus operation id. v1.34 serves the three channel resources as partial (Stage H5b/H5c): connections and their route bindings, and the delivery list and detail, are read over the registered connections, the committed ingress rows and the delivery ledger; the email reference adapter routes inbound events into bound Sessions and sends replies through the receipted outbox, where unknown is a terminal outcome that is never resent automatically and an explicit resend opens a new delivery id."
   },
   "servers": [
     {
@@ -2782,7 +2782,7 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "listAgentChannels",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
             "description": "Channel connections of the tenant with their route bindings, newest first (created_at descending, then id descending), so a connection that changes state does not move between pages. Each entry's routes list its newest 100 route bindings, oldest first; a binding rotated past the bound stays persisted but is no longer discoverable from the connection. A route binding names the authenticated channel instance, account generation, platform event and semantic revision it committed; two platform events with identical text stay two bindings. Ordinary chat still uses the Session prompt and event APIs. 400 invalid_cursor on a malformed cursor, 400 invalid_limit when limit is outside 1 to 100.",
@@ -2827,7 +2827,7 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "listAgentChannelDeliveries",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
             "description": "Outbound deliveries of the channel, newest first (created_at descending, then id descending), so a delivery whose state changes does not move between pages. Each delivery carries its stable segment identity and ordinal: a streaming card or segmented reply keeps one segmentId per card, only segments proven unsent are sent again, and an explicit resend creates a new deliveryId for its segment rather than rewriting an existing delivery. unknown means the connection dropped after sending without a provider query or idempotency key, so the platform may hold the segment; the user is warned about possible duplication before resending. 404 channel_not_found when the channel is absent or outside the caller's scope. 400 invalid_cursor on a malformed cursor, 400 invalid_limit when limit is outside 1 to 100.",
@@ -3395,7 +3395,7 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "getAgentChannelDelivery",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "responses": {
           "200": {
             "description": "One delivery of the channel, including provider_receipt once the provider returned one. The model turn's completion and the external delivery stay separate views: a delivered segment does not say the user saw it. 404 delivery_not_found covers deliveries outside the caller's scope.",
@@ -8728,12 +8728,12 @@
       "ChannelConnectionState": {
         "type": "string",
         "enum": ["connected", "disconnected"],
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "ChannelRouteState": {
         "type": "string",
         "enum": ["staged", "admitted"],
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "ChannelDeliveryState": {
         "type": "string",
@@ -8746,7 +8746,7 @@
           "rejected",
           "cancelled"
         ],
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "PublicChannelRoute": {
         "type": "object",
@@ -8829,7 +8829,7 @@
             "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {
@@ -8901,7 +8901,7 @@
             "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "PublicChannelList": {
         "type": "object",
@@ -8926,7 +8926,7 @@
             "maxLength": 512
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {
@@ -9007,7 +9007,7 @@
             "description": "Unix epoch milliseconds, unlike the seconds that the public Session, turn, event and item resources report."
           }
         },
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "PublicChannelDeliveryList": {
         "type": "object",
@@ -9032,7 +9032,7 @@
             "maxLength": 512
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {

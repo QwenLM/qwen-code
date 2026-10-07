@@ -26,6 +26,7 @@ import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-ru
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
   ManagedSessionAlreadyExistsError,
+  ManagedSessionConflictError,
   ManagedSessionNotFoundError,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
@@ -57,6 +58,7 @@ import type {
   ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
+  ManagedSessionRecordError,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -73,6 +75,17 @@ import {
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
+import {
+  ChannelGenerationStaleError,
+  HostedChannelSession,
+} from './hosted-channel-session.js';
+import {
+  CHANNEL_INPUT_SOURCE,
+  MANAGED_CHANNEL_LIMITS,
+  assertChannelPolicy,
+  assertChannelRouteScope,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-operations.js';
+import type { ChannelDelivery } from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-record.js';
 import {
   HostedMonitorWakeScheduler,
   settlePendingMonitorInputs,
@@ -195,6 +208,8 @@ interface HostedSession {
   hooks?: HostedHookSession;
   childRuns?: HostedChildRunSession;
   monitors?: HostedMonitorSession;
+  /** H5: the Session's channel routes and deliveries, on every profile. */
+  channels?: HostedChannelSession;
   hooksBusy?: boolean;
   mcpBusy?: boolean;
   mcpClosing?: boolean;
@@ -254,6 +269,100 @@ function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+const CHANNEL_ID = /^[A-Za-z0-9._:@+-]{1,128}$/u;
+
+/**
+ * H5b: the closed shape of a `submit_input` channel operation. Attachments
+ * arrive base64-encoded and bounded; anything malformed answers 400, never
+ * a partial commit.
+ */
+function parseChannelSubmitInput(
+  body: Record<string, unknown> | null,
+): import('./hosted-channel-session.js').ChannelSubmitInputParams | undefined {
+  const inputId = body?.['inputId'];
+  const channelInstanceId = body?.['channelInstanceId'];
+  const accountId = body?.['accountId'];
+  const accountGeneration = body?.['accountGeneration'];
+  const platformEventId = body?.['platformEventId'];
+  const semanticRevision = body?.['semanticRevision'];
+  const senderId = body?.['senderId'];
+  const chatId = body?.['chatId'] ?? null;
+  const threadId = body?.['threadId'] ?? null;
+  const subject = body?.['subject'] ?? null;
+  const text = body?.['text'];
+  const attachments = body?.['attachments'] ?? [];
+  const bounded = (value: unknown, max: number): value is string =>
+    typeof value === 'string' && value.length >= 1 && value.length <= max;
+  if (
+    !bounded(inputId, 512) ||
+    !bounded(channelInstanceId, 128) ||
+    !CHANNEL_ID.test(channelInstanceId) ||
+    !bounded(accountId, 512) ||
+    !Number.isSafeInteger(accountGeneration) ||
+    (accountGeneration as number) < 1 ||
+    !bounded(platformEventId, 512) ||
+    !Number.isSafeInteger(semanticRevision) ||
+    (semanticRevision as number) < 1 ||
+    !bounded(senderId, 512) ||
+    (chatId !== null && !bounded(chatId, 512)) ||
+    (threadId !== null && !bounded(threadId, 512)) ||
+    (subject !== null &&
+      !bounded(subject, MANAGED_CHANNEL_LIMITS.maxSubjectChars)) ||
+    typeof text !== 'string' ||
+    text.length > MANAGED_CHANNEL_LIMITS.maxTextChars ||
+    !Array.isArray(attachments) ||
+    attachments.length > MANAGED_CHANNEL_LIMITS.maxAttachments
+  ) {
+    return undefined;
+  }
+  let scope: import('@qwen-code/qwen-code-core/managed-runtime/managed-channel-record.js').ChannelRouteScope;
+  let policy: import('@qwen-code/qwen-code-core/managed-runtime/managed-channel-operations.js').ChannelPolicy;
+  try {
+    scope = assertChannelRouteScope(body?.['scope']);
+    policy = assertChannelPolicy(body?.['policy']);
+  } catch {
+    return undefined;
+  }
+  const staged: Array<{ fileName: string; mimeType: string; bytes: Buffer }> =
+    [];
+  for (const entry of attachments as unknown[]) {
+    const attachment = object(entry);
+    const fileName = attachment?.['fileName'];
+    const mimeType = attachment?.['mimeType'];
+    const bytesBase64 = attachment?.['bytesBase64'];
+    if (
+      !bounded(fileName, 128) ||
+      !bounded(mimeType, 128) ||
+      typeof bytesBase64 !== 'string' ||
+      !/^[A-Za-z0-9+/]*={0,2}$/.test(bytesBase64)
+    ) {
+      return undefined;
+    }
+    staged.push({
+      fileName,
+      mimeType,
+      bytes: Buffer.from(bytesBase64, 'base64'),
+    });
+  }
+  return {
+    inputId,
+    channelInstanceId,
+    accountId,
+    accountGeneration: accountGeneration as number,
+    platformEventId,
+    semanticRevision: semanticRevision as number,
+    scope,
+    policy,
+    senderId,
+    chatId,
+    threadId,
+    subject,
+    text,
+    attachments: staged,
+    replyContext: body?.['replyContext'] ?? null,
+  };
 }
 
 function error(
@@ -346,10 +455,13 @@ function acceptedInputSequence(
 
 // H3: a monitor notification input is never a parked Turn — the wake pump
 // owns its consumption, so reopen and takeover arithmetic skips it exactly
-// like the close path settles it model-free.
+// like the close path settles it model-free. H5: a channel input rides the
+// same pump and the same rules.
 function isMonitorInput(event: ManagedSessionEvent): boolean {
   return (
-    event.kind === 'input.accepted' && event.payload['source'] === 'monitor'
+    event.kind === 'input.accepted' &&
+    (event.payload['source'] === 'monitor' ||
+      event.payload['source'] === CHANNEL_INPUT_SOURCE)
   );
 }
 
@@ -1080,6 +1192,9 @@ async function verifyWorkspaceRestore(
         // their own record parsers up front.
         'child_run',
         'monitor_run',
+        // H5: channel routes and deliveries, parsed by their own bodies.
+        'channel_route',
+        'channel_delivery',
       ].includes(event.payload['domain'] as string)
     )
       throw new Error('Hosted recovery domain is unsupported.');
@@ -2251,15 +2366,27 @@ export function registerHostedHarnessSessionRoutes(
           },
           session.managed.authority.sessionHeader.sessionKey,
         );
-      // H3: the embedded wake scheduler of a Monitor-capable Session. A
-      // notification rides its observation revision; the pump delivers it
-      // as an ordinary text turn while the Session idles, queues in the
-      // journal while a turn runs, and leaves the remainder accurately
-      // pending the moment anything is parked or blocked.
+      // H5b: every hosted Session owns its channel funnel — a channel input
+      // needs no Runtime, and its reply plans from the settled turn alone.
+      session.channels = new HostedChannelSession(
+        {
+          authority: managed.authority,
+          resources: managed.resources,
+          sink: managed.sink,
+        },
+        managed.authority.sessionHeader.sessionKey,
+      );
+      // H3: the embedded wake scheduler of a notification-capable Session.
+      // A notification rides its observation revision (H5: a channel input
+      // rides its route revision) the same way; the pump delivers it as an
+      // ordinary text turn while the Session idles, queues in the journal
+      // while a turn runs, and leaves the remainder accurately pending the
+      // moment anything is parked or blocked.
       if (
-        session.monitors &&
-        brokerOptions &&
-        (session.shell || session.backgroundLane)
+        (session.monitors &&
+          brokerOptions &&
+          (session.shell || session.backgroundLane)) ||
+        session.channels
       ) {
         const wakeBusy = () =>
           session.active !== undefined ||
@@ -2280,8 +2407,18 @@ export function registerHostedHarnessSessionRoutes(
             const authority = session.managed.authority;
             const first = pendingSessionInputs(
               authority.eventsInSequenceRange(1, authority.committedSequence),
-            ).find((input) => input.source === 'monitor');
+            ).find(
+              (input) =>
+                input.source === 'monitor' ||
+                input.source === CHANNEL_INPUT_SOURCE,
+            );
             if (first === undefined) return undefined;
+            if (first.source === CHANNEL_INPUT_SOURCE) {
+              const text = await session.channels!.turnText(first.inputId);
+              if (text === undefined)
+                throw new Error('Channel wake input has no envelope.');
+              return { turnId: first.turnId, text, source: first.source };
+            }
             const ref = assertManagedSessionDurableRef(
               first.contentRef,
               'monitor wake input',
@@ -2299,24 +2436,46 @@ export function registerHostedHarnessSessionRoutes(
           },
           state: () =>
             wakeBlocked() ? 'blocked' : wakeBusy() ? 'busy' : 'idle',
-          runTurn: createMonitorWakeRunTurn({
-            session,
-            sessionId,
-            cwd,
-            executeHostedTurn: (promptId, text, abort) =>
-              executeHostedTurn(
-                session,
-                sessionId,
-                cwd,
-                promptId,
-                text,
-                abort,
-                brokerOptions,
-              ),
-            busy: wakeBusy,
-            needsRecovery: monitorWakeNeedsRecovery,
-            writeStderr: writeStderrLineSafe,
-          }),
+          runTurn: (() => {
+            const runWakeTurn = createMonitorWakeRunTurn({
+              session,
+              sessionId,
+              cwd,
+              executeHostedTurn: (promptId, text, abort) =>
+                executeHostedTurn(
+                  session,
+                  sessionId,
+                  cwd,
+                  promptId,
+                  text,
+                  abort,
+                  brokerOptions,
+                ),
+              busy: wakeBusy,
+              needsRecovery: monitorWakeNeedsRecovery,
+              writeStderr: writeStderrLineSafe,
+            });
+            // H5c: the channel turn settled; its reply plans from the
+            // committed result now, and again on the next open if this
+            // commit is lost — never twice, never from memory.
+            return async (turn) => {
+              const outcome = await runWakeTurn(turn);
+              if (
+                outcome === 'settled' &&
+                turn.source === CHANNEL_INPUT_SOURCE &&
+                session.channels
+              ) {
+                try {
+                  await session.channels.planReply(turn.turnId);
+                } catch (cause) {
+                  writeStderrLineSafe(
+                    `qwen serve: Hosted channel reply of turn ${turn.turnId} could not be planned: ${String(cause)}`,
+                  );
+                }
+              }
+              return outcome;
+            };
+          })(),
           failed: (cause) => {
             session.blocked = true;
             writeStderrLineSafe(
@@ -2776,6 +2935,15 @@ export function registerHostedHarnessSessionRoutes(
           });
       }
       sessions.set(sessionId, session);
+      // H5c: a settle → plan crash window closes here, before the pump
+      // can start another channel turn.
+      void session.channels
+        ?.reconcileReplies()
+        .catch((cause: unknown) =>
+          writeStderrLineSafe(
+            `qwen serve: Hosted channel replies of session ${sessionId} could not be reconciled: ${String(cause)}`,
+          ),
+        );
       session.monitorWake?.kick();
       // The registered Session now carries the owed lease itself; the
       // refusal-time record is discharged.
@@ -3539,6 +3707,149 @@ export function registerHostedHarnessSessionRoutes(
         );
       });
   };
+
+  /**
+   * H5b/H5c: the control plane's channel operations onto this Session's
+   * journal. Each verb maps to one funnel act; replay-safety rides the
+   * funnel's derived command ids, so a redriven adapter request never mints
+   * a second input, revision or chain. A turn in flight is not a refusal:
+   * an input queues behind it in the journal.
+   */
+  app.post('/session/:id/channels/operations', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.channels)
+      return error(res, 409, 'hosted_channels_unavailable');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    const body = object(req.body);
+    const operationId = body?.['operationId'];
+    const kind = body?.['kind'];
+    if (typeof operationId !== 'string' || !HOSTED_UUID.test(operationId)) {
+      return error(res, 400, 'invalid_channel_operation');
+    }
+    const channels = session.channels;
+    const summary = (delivery: ChannelDelivery) => ({
+      deliveryId: delivery.deliveryId,
+      routeId: delivery.routeId,
+      routeRevision: delivery.routeRevision,
+      sourceTurnId: delivery.sourceTurnId,
+      state: delivery.run.delivery?.state ?? null,
+      cancelRequested: delivery.cancelRequested,
+      segments: delivery.segments.map((segment) => ({
+        ordinal: segment.ordinal,
+        segmentId: segment.segmentId,
+        providerMessageId: segment.receipt?.providerMessageId ?? null,
+      })),
+    });
+    const deliveryId = body?.['deliveryId'];
+    const needsDelivery = kind !== 'submit_input';
+    if (
+      needsDelivery &&
+      (typeof deliveryId !== 'string' ||
+        deliveryId.length < 1 ||
+        deliveryId.length > 512)
+    ) {
+      return error(res, 400, 'invalid_channel_operation');
+    }
+    let result: Record<string, unknown>;
+    try {
+      switch (kind) {
+        case 'submit_input': {
+          const parsed = parseChannelSubmitInput(body);
+          if (parsed === undefined)
+            return error(res, 400, 'invalid_channel_operation');
+          result = { ...(await channels.submitInput(parsed)) };
+          break;
+        }
+        case 'claim_delivery': {
+          const claimed = await channels.claim(deliveryId as string);
+          result = {
+            delivery: summary(claimed.delivery),
+            reply: claimed.reply,
+            segments: claimed.segments,
+          };
+          break;
+        }
+        case 'segment_receipt': {
+          const ordinal = body?.['ordinal'];
+          const providerMessageId = body?.['providerMessageId'];
+          const acceptedAt = body?.['acceptedAt'];
+          if (
+            !Number.isSafeInteger(ordinal) ||
+            (ordinal as number) < 0 ||
+            typeof providerMessageId !== 'string' ||
+            providerMessageId.length < 1 ||
+            providerMessageId.length > 512 ||
+            !Number.isSafeInteger(acceptedAt) ||
+            (acceptedAt as number) < 0
+          ) {
+            return error(res, 400, 'invalid_channel_operation');
+          }
+          result = {
+            delivery: summary(
+              await channels.receipt(deliveryId as string, ordinal as number, {
+                providerMessageId,
+                acceptedAt: acceptedAt as number,
+                proofRef: null,
+              }),
+            ),
+          };
+          break;
+        }
+        case 'settle_delivery': {
+          const outcome = body?.['outcome'];
+          if (outcome !== 'unknown' && outcome !== 'rejected') {
+            return error(res, 400, 'invalid_channel_operation');
+          }
+          result = {
+            delivery: summary(
+              await channels.settle(deliveryId as string, outcome),
+            ),
+          };
+          break;
+        }
+        case 'cancel_delivery':
+          result = {
+            delivery: summary(await channels.cancel(deliveryId as string)),
+          };
+          break;
+        case 'resend_delivery':
+          result = {
+            delivery: summary(await channels.resend(deliveryId as string)),
+            possibleDuplicate: true,
+          };
+          break;
+        default:
+          return error(res, 400, 'invalid_channel_operation');
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (cause instanceof ChannelGenerationStaleError)
+        return error(res, 409, 'channel_generation_stale', message);
+      if (message.includes('is not enabled for submission'))
+        return error(res, 409, 'channel_adapter_disabled', message);
+      if (
+        cause instanceof ManagedSessionRecordError &&
+        !(cause instanceof ManagedSessionConflictError)
+      )
+        return error(res, 400, 'invalid_channel_operation', message);
+      if (
+        message.includes('cannot follow') ||
+        message.includes('cannot be') ||
+        message.includes('already') ||
+        message.includes('has no ') ||
+        message.includes('must bind')
+      ) {
+        return error(res, 409, 'channel_operation_conflict', message);
+      }
+      writeStderrLineSafe(
+        `qwen serve: Hosted channel operation ${String(kind)} of session ${req.params['id']} failed: ${message}`,
+      );
+      return error(res, 503, 'channel_operation_failed', message);
+    }
+    session.monitorWake?.kick();
+    res.status(202).json({ operationId, state: 'settled', ...result });
+  });
 
   app.post('/session/:id/managed-runtime/continue', async (req, res) => {
     const session = identity(req, sessions);
@@ -4394,12 +4705,16 @@ export function registerHostedHarnessSessionRoutes(
       await session.mcp?.close();
       // No monitor notification may park the Session: every pending one
       // settles cancelled here, model-free, before the log closes.
-      if (session.monitors)
+      if (session.monitors || session.channels)
         await settlePendingMonitorInputs({
           authority: session.managed.authority,
           sink: session.managed.sink,
           sessionId: req.params['id'],
           cwd: session.cwd,
+          sources: [
+            ...(session.monitors ? ['monitor'] : []),
+            ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
+          ],
         });
       await session.managed.close();
       for (const stop of session.streams) stop();
