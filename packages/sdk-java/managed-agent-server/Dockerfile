@@ -52,7 +52,10 @@ COPY --from=build /tmp/qwen-managed-agent-server.jar \
 #   docker run -p 8080:8080 \
 #     -e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0 \
 #     -e QWEN_MANAGED_AGENT_AUTH_MODE=signed \
-#     -e QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY=<at-least-32-bytes> \
+#     -e QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY \
+#     -e SPRING_DATASOURCE_URL='jdbc:mysql://<db-host>:3306/qwen_managed_agent' \
+#     -e SPRING_DATASOURCE_USERNAME='qwen' \
+#     -e SPRING_DATASOURCE_PASSWORD=<db-password> \
 #     <image>
 # or the deliberately unauthenticated
 # QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true override.

@@ -84,8 +84,15 @@ describe('managed-agent-server e2e runner', () => {
   const WAIT_UNTIL_DEPS = ['waitUntil', 'receivedSignal', 'childExited'];
   const load = (names, returns, ...params) =>
     new Function(...params, `${extracted(names)}\nreturn { ${returns} };`);
+  // The interrupt setter closes over the extracted body's own
+  // receivedSignal: without it the binding is permanently undefined and no
+  // test can reach the poll-head interrupt early-exit.
   const loadWaitUntil = () =>
-    load(WAIT_UNTIL_DEPS, 'waitUntil', 'inspect')(inspect);
+    load(
+      WAIT_UNTIL_DEPS,
+      'waitUntil, interrupt: (signal) => { receivedSignal = signal }',
+      'inspect',
+    )(inspect);
 
   // Source-level MySQL launch sites, selected on the launched binary
   // rather than the callee or a hand-listed identifier: a launch through
@@ -120,7 +127,7 @@ describe('managed-agent-server e2e runner', () => {
         // unquoted spelling: the quote style must not hide a launch.
         const binary = node.arguments[0]
           .getText(ast)
-          .replace(/^['"]|['"]$/g, '');
+          .replace(/^['"`]|['"`]$/g, '');
         if (binaries.has(binary)) {
           const args = node.arguments[1];
           const firstArg =
@@ -556,9 +563,35 @@ describe('managed-agent-server e2e runner', () => {
   // instances would drop the one diagnostic the budget produced.
   it('waitUntil surfaces a non-Error predicate rejection', async () => {
     const { waitUntil } = loadWaitUntil();
+    // An object rejection discriminates inspect from String: the latter
+    // renders "[object Object]" and drops the one diagnostic the poll
+    // produced.
     await expect(
-      waitUntil('probe', () => Promise.reject('wedged'), 300),
-    ).rejects.toThrow(/wedged/);
+      waitUntil('probe', () => Promise.reject({ status: 503 }), 300),
+    ).rejects.toThrow(/503/);
+    // The harness injects its own inspect as a parameter, so the runner's
+    // binding is pinned by text: without the import, the free identifier
+    // resolves to Node's deprecated global inspect in production.
+    expect(read('scripts/run-managed-agent-server-e2e.ts')).toMatch(
+      /import \{ inspect \} from 'node:util'/,
+    );
+  });
+
+  it('exercises the poll-head interrupt early-exit through the setter', async () => {
+    const { waitUntil, interrupt } = loadWaitUntil();
+    interrupt('SIGINT');
+    await expect(waitUntil('probe', () => false, 300)).rejects.toThrow(
+      /Interrupted by SIGINT/,
+    );
+  });
+
+  // Positive control: with no signal set the same poll fails by deadline,
+  // so the setter — not a spurious initial value — drives the exit above.
+  it('does not throw before the signal is set (positive control)', async () => {
+    const { waitUntil } = loadWaitUntil();
+    await expect(waitUntil('probe', () => false, 300)).rejects.toThrow(
+      /did not become ready/,
+    );
   });
 
   it('waitUntil bounds a stalled iteration by the deadline', async () => {
@@ -665,7 +698,27 @@ describe('managed-agent-server e2e runner', () => {
   // unguarded.
   it('checks the received signal at the success exit too', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
-    expect(source).not.toContain('console.log(JSON.stringify(');
+    // The base's eager prints were multi-line calls, so a single-line
+    // negative pin is true of base and head alike and can never fire: pin
+    // the deferred assignment on every mode branch, and that no success
+    // payload is printed eagerly. The freeze arm's wake record is a
+    // mid-run diagnostic with no sessionId key, so the payload shape —
+    // not any console.log(JSON.stringify( spelling — is what must not
+    // print inside the try.
+    expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(4);
+    expect(source).not.toMatch(
+      /console\.log\(\s*JSON\.stringify\(\s*\{\s*(?:model,\s*)?sessionId/,
+    );
+    // No gate typechecks scripts/ (tsx strips types unchecked), so the
+    // module-scope binding the deferred print reads is pinned by text:
+    // dropped, the print below throws ReferenceError on the success path.
+    expect(source).toMatch(/^let resultJson: string \| undefined;$/m);
+    // An interrupted run is a non-pass: the finally's keep decision must
+    // still honor the keep switch, or a stopped run deletes its own
+    // evidence before the signal throw below reports it.
+    expect(source).toMatch(
+      /\(failure \|\| receivedSignal\) &&\s*process\.env\['QWEN_MANAGED_E2E_KEEP_TMP'\]/,
+    );
     const failureThrow = source.indexOf('if (failure) throw failure;');
     const signalThrow = source.indexOf(
       'if (receivedSignal) throw new Error',
@@ -755,6 +808,20 @@ describe('managed-agent-server e2e runner', () => {
         `${call.binary} must run with the isolated mysqlClientEnv`,
       ).toContain('env: mysqlClientEnv');
     }
+  });
+
+  // The inventory promises quote-style blindness: TypeScript reports a
+  // no-substitution template literal with its backticks on, so the strip
+  // class must cover the third JS string spelling or a backticked launch
+  // is never inventoried.
+  it('inventories a MySQL launch spelled with any quote style', () => {
+    const { calls } = mysqlCalls(`
+      const mysql = command('mysql');
+      spawnSync('mysql', ['--no-defaults']);
+      spawnSync("mysql", ['--no-defaults']);
+      spawnSync(\`mysql\`, ['--no-defaults']);
+    `);
+    expect(calls).toHaveLength(3);
   });
 
   // spawnSync blocks the event loop, so waitUntil's race cannot bound a
@@ -916,15 +983,27 @@ describe('managed-agent-server e2e runner', () => {
           before === -1 ? 0 : before,
           after === -1 ? undefined : after,
         );
+        // The signing key must be forwarded valueless: the = spelling
+        // leaves the HMAC secret in the docker run argv, readable by any
+        // local user from /proc/<pid>/cmdline for the container's
+        // lifetime.
         const signed =
           /-e QWEN_MANAGED_AGENT_AUTH_MODE='?signed'?/.test(block) &&
-          block.includes('-e QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY=');
+          /-e QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY(?!=)/.test(block);
         const insecure =
           /-e QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND='?true'?/.test(block);
         expect(
           signed || insecure,
-          'a documented server wildcard bind must pass -e AUTH_MODE=signed with a signing key or -e AUTH_ALLOW_INSECURE_BIND=true',
+          'a documented server wildcard bind must pass -e AUTH_MODE=signed with a valueless signing key or -e AUTH_ALLOW_INSECURE_BIND=true',
         ).toBe(true);
+        // Flyway runs against SPRING_DATASOURCE_URL at container start and
+        // the yml default's 127.0.0.1 is the container itself: a publish
+        // recipe that omits the datasource passes the auth guard and then
+        // dies at the datasource with the published port refused.
+        expect(
+          block,
+          'a documented server wildcard bind must pass -e SPRING_DATASOURCE_URL= with a container-reachable host',
+        ).toContain('-e SPRING_DATASOURCE_URL=');
       }
     }
   });

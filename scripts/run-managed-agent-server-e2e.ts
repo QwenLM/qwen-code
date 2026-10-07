@@ -2211,7 +2211,13 @@ try {
   await replacementBrokerProxy?.close();
   releaseContinuationHold();
   await fake?.close();
-  if (failure && process.env['QWEN_MANAGED_E2E_KEEP_TMP'] === '1') {
+  // An interrupt during teardown is a non-pass: the keep switch must still
+  // hold, or a stopped run deletes its own evidence before the post-finally
+  // throw reports it.
+  if (
+    (failure || receivedSignal) &&
+    process.env['QWEN_MANAGED_E2E_KEEP_TMP'] === '1'
+  ) {
     console.error(`Keeping temporary directory: ${temporary}`);
   } else {
     rmSync(temporary, { recursive: true, force: true });
