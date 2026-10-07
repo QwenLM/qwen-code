@@ -2157,6 +2157,115 @@ describe('PermissionManager', () => {
       }
     });
 
+    it('deny rule still fires when the comment hides behind a line continuation (#R1-4)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // bash drops the `\<newline>` pair, so the `#` opens a real comment and
+      // the cd still happens; leaving the comment words as extra operands
+      // de-resolved it and the deny went to ask.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd .qwen \\\n# note\necho {} > settings.json',
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies the write a comment apostrophe balances away from the bash scan (#R1-1)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // The trailing comment apostrophe closes the quote the bash scan is
+      // stuck in, so the scan reports balanced and the early return used to
+      // drop the settings write from the operation set entirely.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd .qwen ; echo 'a\\' ; echo x > one.txt ; echo done # note '\necho {} > settings.json # trailing '`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('does not hard-deny the phantom a coarser merge walk misplaces (#R1-5)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(f)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // Real bash writes /repo/sub/f here; the escape-everywhere merge walk
+      // used to add a phantom /repo/f this deny rule would cite against a
+      // write the command never performs. The shape is the single-segment
+      // one: the conservative rule splitter keeps the whole command inside
+      // one quoted span, so the per-segment compound pass is skipped and the
+      // verdict isolates the cross-command op set.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `echo hi # c 'a\\' ; cd sub ; echo x > f # note '`,
+        }),
+      ).toBe('allow');
+    });
+
+    it('denies the write a union-only cd target used to relocate (#R1-3)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(sub/docs/plan.md)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // Real bash fails the artifact cd (`x\;echo ` does not exist) and
+      // writes sub/docs/plan.md, the exact denied path; the trusted phantom
+      // cwd used to publish it under /repo/x/sub/docs/plan.md and the deny
+      // evaluated to allow.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd 'x\\'';echo ' & cd sub ; echo # note '\necho {} > docs/plan.md`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('deny rule still cites a directory whose text contains a sibling segment (#R1-2)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(build *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(C:/build/R&D/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // The inert `build` segment's text occurs inside the cd target, but no
+      // reading cuts inside the segment's span, so the directory keeps its
+      // static cwd and the Write deny still fires.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd 'C:\\build\\R&D' && build && echo {} > settings.json`,
+        }),
+      ).toBe('deny');
+    });
+
     it('semicolon compound: deny in second → deny', async () => {
       pm = makePm(echoRm);
       expect(await pm.evaluate(sh('echo hello; rm -rf /'))).toBe('deny');

@@ -798,6 +798,12 @@ describe('R8 review round: operand counting, directional artifacts, bash-authori
       '/repo/sub/.qwen/settings.json',
     ],
     ['cd .qwen {fd}>log ; echo {} > settings.json', REPO_SETTINGS],
+    // bash drops a `\<newline>` continuation outright, so a `#` opening the
+    // continuation line still starts a comment; emitting the pair as an
+    // escaped newline would keep the comment words as extra operands (#12280
+    // R1-4).
+    ['cd .qwen \\\n# note\necho {} > settings.json', REPO_SETTINGS],
+    ['cd .qwen \\\n  # note\necho {} > settings.json', REPO_SETTINGS],
   ])(
     'counts only real cd operands in `%s` (#R7-2)',
     (command, expectedPath) => {
@@ -887,5 +893,58 @@ describe('R8 review round: operand counting, directional artifacts, bash-authori
         `echo real > one.txt && bash -lc "echo done # note 'a\\''\necho {} > .qwen/settings.json"`,
       ),
     ).toEqual([write('/repo/one.txt'), write(REPO_SETTINGS)]);
+  });
+});
+
+describe('R1 review round: comment desync, union-merge cwd, artifact spans', () => {
+  // The `#` comment's apostrophe re-closes the quote the bash scan is stuck
+  // in, so the scan ends balanced while the settings write sits inside what
+  // bash's reading treats as a quoted blob. A comment anywhere the scanners
+  // do not model forces the merge walk too; gating on the open quote alone
+  // drops the write and the deny rule never sees it (#12280 R1-1).
+  it('merges the write a comment apostrophe balances away from the bash scan (#R1-1)', () => {
+    expect(
+      across(
+        `cd .qwen ; echo 'a\\' ; echo x > one.txt ; echo done # note '\necho {} > settings.json # trailing '`,
+      ),
+    ).toEqual([write('/repo/.qwen/one.txt'), write(REPO_SETTINGS)]);
+  });
+
+  // The merge walk triggered by the open quote must use the union split:
+  // re-walking under the escape-everywhere reading alone from the original
+  // cwd loses the `cd sub` and publishes a phantom /repo/f next to the real
+  // /repo/sub/f (#12280 R1-5).
+  it('merge walk keeps the bash-found cd boundaries (#R1-5)', () => {
+    expect(
+      across(`echo y > g ; echo 'a\\' ; cd sub ; echo x > f # note '`),
+    ).toEqual([write('/repo/g'), write('/repo/sub/f')]);
+  });
+
+  // The bash walk finds no operation here (its last segment is one quoted
+  // blob), so the union-split fallback runs. Its `cd 'x\'';echo '` target is
+  // a quoting artifact only the union split produces, and marking it used to
+  // require a metacharacter in the word; without one it became a trusted
+  // static cwd and the write was published under a phantom /repo/x path with
+  // no cwd-unknown flags (#12280 R1-3).
+  it('escalates a cd target only the union split produces (#R1-3)', () => {
+    expect(
+      across(
+        `cd 'x\\'';echo ' & cd sub ; echo # note '\necho {} > docs/plan.md`,
+      ),
+    ).toEqual([uncertainWrite('/repo/sub/docs/plan.md')]);
+  });
+
+  // An inert sibling segment whose text happens to occur inside the `cd`
+  // target (`ls` inside `tools`, `build` inside `C:\build`) is not a split
+  // artifact; only a finer cut strictly inside the segment's span marks one.
+  // Substring containment escalated these genuine directories and lost the
+  // concrete paths a deny rule cites (#12280 R1-2).
+  it('resolves a genuine directory whose text contains a sibling segment (#R1-2)', () => {
+    expect(
+      across(`cd '/opt/R&D\\tools' ; ls ; echo {} > settings.json`),
+    ).toEqual([dir('/opt/R&D/tools'), write('/opt/R&D/tools/settings.json')]);
+    expect(
+      across(`cd 'C:\\build\\R&D' && build && echo {} > settings.json`),
+    ).toEqual([write('C:/build/R&D/settings.json')]);
   });
 });
