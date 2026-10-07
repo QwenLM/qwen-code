@@ -230,6 +230,11 @@ describe('Hosted Harness model boundary', () => {
       { type: LlmEventType.Content, value: 'answer' },
       { type: LlmEventType.Finished },
     ]);
+    // initialize() runs a safe-mode memory refresh that clears user memory,
+    // so the injection must come after it.
+    hooks.initialize.mockImplementation(async () => {
+      order.push('initialize');
+    });
     hooks.setUserMemory.mockImplementation(() => {
       order.push('inject');
     });
@@ -254,7 +259,7 @@ describe('Hosted Harness model boundary', () => {
     expect(hooks.setUserMemory).toHaveBeenCalledWith('project rules');
     // setUserMemory only writes the field; without the refresh the cached
     // system instruction still carries the pre-injection prompt.
-    expect(order).toEqual(['inject', 'refresh', 'request']);
+    expect(order).toEqual(['initialize', 'inject', 'refresh', 'request']);
   });
 
   it('picks up the Workspace context a tool batch fetched, on the next request', async () => {

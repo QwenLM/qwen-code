@@ -1418,6 +1418,9 @@ it('cancels a turn without waiting for a stalled Workspace context read', async 
 });
 
 it('never blocks a turn when the Workspace context read fails', async () => {
+  const log = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
   const slot = contextSlot();
   broker.workspaceContext.mockRejectedValue(new Error('Broker transport down'));
   turn = turnWithContext(slot);
@@ -1431,6 +1434,11 @@ it('never blocks a turn when the Workspace context read fails', async () => {
     output: 'original result',
   });
   expect(slot.value).toBeUndefined();
+  // The stderr line is the only signal of Broker/worker skew (design doc,
+  // Deployment and rollout).
+  expect(log).toHaveBeenCalledWith(
+    expect.stringContaining('Hosted Workspace context read failed'),
+  );
   // Nothing was reserved, so nothing needs cancelling.
   expect(broker.cancel).not.toHaveBeenCalled();
   await turn.consumeResults();
@@ -1897,6 +1905,9 @@ it.each(['refresh', 'warmup'] as const)(
 );
 
 it('keeps native file tools in the MCP profile on their existing shared runtime', async () => {
+  // MCP turns are outside the Workspace-context slice: a slot handed to one
+  // must never trigger the read.
+  const slot = contextSlot();
   const mcp = {
     broker: { ...broker, runtimeSessionId: 'mcp:session' },
     ensureReady: async () => undefined,
@@ -1916,6 +1927,7 @@ it('keeps native file tools in the MCP profile on their existing shared runtime'
     undefined,
     {
       mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      context: slot,
     },
   );
   await mcpTurn.execute(calls, parts, 'model', new AbortController().signal);
@@ -1924,6 +1936,8 @@ it('keeps native file tools in the MCP profile on their existing shared runtime'
   expect(broker.execute).toHaveBeenCalledTimes(2);
   expect(broker.fileHistory).not.toHaveBeenCalled();
   expect(broker.release).not.toHaveBeenCalled();
+  expect(broker.workspaceContext).not.toHaveBeenCalled();
+  expect(slot.value).toBeUndefined();
 });
 
 it('executes against the declarations actually advertised before a catalog replacement', async () => {

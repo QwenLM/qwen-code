@@ -255,7 +255,9 @@ class ProviderRuntimeTransportTest {
             assertEquals(8 * 1024 * 1024, ProviderRuntimeProtocol.limit(kind), kind);
         }
         for (String kind : Set.of("acquire", "release", "manifest", "begin-turn", "prepare",
-                "confirmation", "confirm", "preflight", "execute", "status", "cancel")) {
+                "confirmation", "confirm", "preflight", "execute", "status", "cancel",
+                // The TS per-file cap is sized against this tier.
+                "workspace-context")) {
             assertEquals(1024 * 1024, ProviderRuntimeProtocol.limit(kind), kind);
         }
     }
