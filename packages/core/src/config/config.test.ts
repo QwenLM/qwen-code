@@ -8010,6 +8010,49 @@ describe('Server Config (config.ts)', () => {
     expectWarning(config, ALWAYS_ON_CONTEXT);
   });
 
+  it('refreshHierarchicalMemory should count the request-only catalog in the context warning estimate', async () => {
+    // The warning is built from [userMemory, policy, catalog]. With
+    // forceFullProtocol the policy alone already exceeds the small-window
+    // bound, so asserting only that the warning fires cannot tell which term
+    // it was built from — dropping the catalog keeps it green while the
+    // estimate under-reports by every MEMORY.md index line. Compare the quoted
+    // figure across two index sizes instead.
+    const warningTokenFigure = (config: Config) => {
+      const warning = config
+        .getWarnings()
+        .find((w) => w.includes(ALWAYS_ON_CONTEXT));
+      const match = /uses about ([\d,]+) tokens/.exec(warning ?? '');
+      expect(match).not.toBeNull();
+      return Number(match![1].replace(/,/g, ''));
+    };
+    const indexWithLines = (count: number) =>
+      '# Managed Auto-Memory Index\n\n' +
+      Array.from(
+        { length: count },
+        (_, i) => `- [Entry ${i}](entry-${i}.md) — remembered note`,
+      ).join('\n');
+    const refreshWithIndex = async (indexContent: string) => {
+      const config = makeConfig(smallWindow());
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue(
+        memoryLoad({ memoryContent: 'short project rules', fileCount: 1 }),
+      );
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+        mockAutoMemoryIndexRead(indexContent),
+      );
+      await config.refreshHierarchicalMemory();
+      return config;
+    };
+
+    const smallIndex = warningTokenFigure(
+      await refreshWithIndex(indexWithLines(2)),
+    );
+    const largeIndex = warningTokenFigure(
+      await refreshWithIndex(indexWithLines(60)),
+    );
+
+    expect(largeIndex).toBeGreaterThan(smallIndex);
+  });
+
   it('refreshHierarchicalMemory should warn when always-loaded context is large for the model window', async () => {
     const config = makeConfig(smallWindow());
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce(
