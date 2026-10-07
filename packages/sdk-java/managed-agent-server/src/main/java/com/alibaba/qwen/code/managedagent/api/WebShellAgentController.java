@@ -3,8 +3,10 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCancelRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCreateRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCwdOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellListRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellOperationRequest;
@@ -206,10 +208,24 @@ public class WebShellAgentController {
     }
 
     @PostMapping("/operations/query")
-    public WebShellCommandOperation queryOperation(TenantContext tenant,
+    public Object queryOperation(TenantContext tenant,
             @Valid @RequestBody WebShellOperationRequest request) {
-        return lifecycle.getWebShell(tenant.tenantId(), tenant.actorId(),
-                request.sessionId(), request.operationId());
+        return lifecycle.getWebShellOperation(tenant.tenantId(),
+                tenant.actorId(), request.sessionId(), request.operationId());
+    }
+
+    @PostMapping("/sessions/cwd/change")
+    public ResponseEntity<WebShellCwdOperation> changeCwd(
+            TenantContext tenant,
+            @Valid @RequestBody WebShellChangeCwdRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse,
+                request.requestId());
+        return ResponseEntity.accepted().body(
+                lifecycle.admitWebShellCwdChange(tenant.tenantId(),
+                        tenant.actorId(), request.sessionId(),
+                        request.idempotencyKey(), request.cwdRelative(),
+                        request.expectedContextRevision()));
     }
 
     private ResponseEntity<WebShellCommandOperation> operation(

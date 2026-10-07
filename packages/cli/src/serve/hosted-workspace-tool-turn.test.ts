@@ -45,6 +45,8 @@ import {
   HostedWorkspaceToolTurn,
   HostedToolRecoveryRequiredError,
   HOSTED_WORKSPACE_FILE_TOOLS,
+  HOSTED_WORKSPACE_SHELL_TOOLS,
+  HOSTED_INPUT_PREVIEW_TOOLS,
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -147,6 +149,7 @@ function createTurn(
       },
       waiters,
     },
+    undefined,
     undefined,
     hooks,
   );
@@ -933,6 +936,291 @@ it('preserves trimmed and normalized valid file paths', async () => {
   expect(payload.input.file_path).toBe('dir/file.txt');
   await turn.consumeResults();
   await turn.finish();
+});
+
+it('offers glob only under the /2 Workspace profiles', async () => {
+  const signal = new AbortController().signal;
+  const advertised = async (profile?: string, shell = false) =>
+    (
+      await new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        shell
+          ? { resources: session.resources, assertWritable: async () => {} }
+          : undefined,
+        undefined,
+        undefined,
+        undefined,
+        profile,
+      ).declarations(signal)
+    ).map((tool) => tool.name);
+  const file = ['read_file', 'write_file', 'edit'];
+  const shellTools = [...file, 'run_shell_command', 'monitor'];
+  await expect(advertised()).resolves.toEqual(file);
+  await expect(advertised('hosted-workspace-files/1')).resolves.toEqual(file);
+  await expect(advertised('hosted-workspace-shell/1', true)).resolves.toEqual(
+    shellTools,
+  );
+  await expect(advertised('hosted-workspace-files/2')).resolves.toEqual([
+    ...file,
+    'glob',
+  ]);
+  await expect(advertised('hosted-workspace-shell/2', true)).resolves.toEqual([
+    ...shellTools,
+    'glob',
+  ]);
+});
+
+function createSearchTurn() {
+  return new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    'hosted-workspace-files/2',
+  );
+}
+
+it('refuses a glob call a /1 profile never advertised', async () => {
+  const call = {
+    ...calls[0],
+    name: 'glob',
+    args: { pattern: '**/*.ts' },
+  };
+  await expect(
+    turn.execute(
+      [call],
+      [
+        {
+          functionCall: { id: call.callId, name: call.name, args: call.args },
+        },
+      ],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it.each([
+  {},
+  { pattern: '' },
+  { pattern: '   ' },
+  { pattern: 7 },
+  { pattern: '/**/*.ts' },
+  { pattern: '../**/*' },
+  { pattern: '\\.\\./**/*' },
+  { pattern: 'src/{x,\\.\\.}/**/*' },
+  // The guard must judge the value it dispatches, which is the trimmed one:
+  // leading whitespace otherwise masks both shapes past this pre-acquisition
+  // refusal and into a durable Runtime round trip.
+  { pattern: ' ../**/*' },
+  { pattern: '\t/etc/host*' },
+  // Brace expansion composes what the literal segment check cannot see,
+  // and its cost is bounded before any expansion runs.
+  { pattern: '{/etc,/zz-nonexistent}/host*' },
+  { pattern: '{.,..}/**/*' },
+  { pattern: 'src/{..,x}/**' },
+  // Bounded before anything expands it: nesting deep enough to overflow
+  // brace-expansion's recursion, a range glob would search 100000 times,
+  // and an alternative product that exhausts memory.
+  { pattern: '{a,'.repeat(3400) + 'x' + '}'.repeat(3400) },
+  { pattern: '{1..100000}/passwd' },
+  { pattern: '{9007199254740992..9007199254740992}/*' },
+  { pattern: '{a,b}'.repeat(30) },
+  { pattern: 'x'.repeat(1025) },
+  { pattern: '**/*.ts', path: '/private/secret-host-path' },
+  { pattern: '**/*.ts', path: '../escape' },
+  { pattern: '**/*.ts', path: 'a\\b' },
+  { pattern: '**/*.ts', path: 5 },
+])(
+  'persists correctable glob argument errors without dispatch: %j',
+  async (args) => {
+    turn = createSearchTurn();
+    const call = { ...calls[0], name: 'glob', args };
+    const original = [
+      { functionCall: { id: call.callId, name: call.name, args: call.args } },
+    ];
+    const responses = await turn.execute(
+      [call],
+      original,
+      'model',
+      new AbortController().signal,
+    );
+    const error = responses[0].functionResponse?.response?.['error'];
+    expect(responses[0].functionResponse?.id).toBe(call.callId);
+    expect(error).toContain('glob');
+    expect(error).toContain('retry');
+    expect(error).not.toContain('secret-host-path');
+    const history = await session.sink.project();
+    expect(history.slice(-2).map((record) => record.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(history.at(-2)?.message?.parts).toEqual(original);
+    expect(history.at(-1)?.message?.parts).toEqual(responses);
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    await expect(turn.finish()).resolves.toBeUndefined();
+  },
+);
+
+it('normalizes a glob pattern and path before dispatch', async () => {
+  turn = createSearchTurn();
+  const call = {
+    ...calls[0],
+    name: 'glob',
+    args: { pattern: ' **/*.ts ', path: ' ./src//nested ' },
+  };
+  await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const payload = JSON.parse(broker.execute.mock.calls[0][1]);
+  expect(payload).toEqual({
+    toolName: 'glob',
+    input: { pattern: '**/*.ts', path: 'src/nested' },
+  });
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it('treats a blank glob path as omitted and still dispatches', async () => {
+  // The declaration marks `path` optional; an explicit blank must not read
+  // as a traversal refusal (which would also poison every valid sibling
+  // call in the batch).
+  turn = createSearchTurn();
+  const call = {
+    ...calls[0],
+    name: 'glob',
+    args: { pattern: '**/*.ts', path: '' },
+  };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
+  expect(broker.execute).toHaveBeenCalledOnce();
+  const payload = JSON.parse(broker.execute.mock.calls[0][1]);
+  expect(payload.input).toEqual({ pattern: '**/*.ts' });
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+it('treats a null glob path as omitted and still dispatches the whole batch', async () => {
+  // `null` is one more provider encoding of an unset optional. Argument
+  // validation is batch-wide, so refusing it as traversal would also cancel
+  // the valid sibling call in the same turn.
+  turn = createSearchTurn();
+  const nullPath = {
+    ...calls[0],
+    name: 'glob',
+    args: { pattern: '**/*.ts', path: null },
+  };
+  const sibling = { ...calls[1], name: 'glob', args: { pattern: '*.md' } };
+  const responses = await turn.execute(
+    [nullPath, sibling],
+    [nullPath, sibling].map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  for (const response of responses)
+    expect(response.functionResponse?.response?.['error']).toBeUndefined();
+  expect(broker.execute).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual({
+    pattern: '**/*.ts',
+  });
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+it('truncates an oversized glob result to a fitting prefix with a narrowing hint', async () => {
+  turn = createSearchTurn();
+  messageFitsInline.mockImplementation(
+    (type, messageParts) =>
+      Buffer.byteLength(
+        JSON.stringify({
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+          timestamp: new Date().toISOString(),
+          type,
+          cwd: root,
+          version: 'test',
+          daemonPromptId: 'prompt',
+          message: {
+            role: type === 'assistant' ? 'model' : 'user',
+            parts: messageParts,
+          },
+        }),
+      ) <=
+      64 * 1024,
+  );
+  const lines = Array.from(
+    { length: 400 },
+    (_, index) =>
+      `src/file-${String(index).padStart(3, '0')}-${'x'.repeat(150)}.ts`,
+  );
+  broker.execute.mockResolvedValue({
+    executionStatus: 'success',
+    responseParts: [
+      {
+        text: `Found ${lines.length} file(s) matching "**/*.ts" in the workspace directory, sorted by modification time (newest first):\n---\n${lines.join('\n')}`,
+      },
+    ],
+  });
+  const publish = vi.spyOn(session.resources, 'publish');
+  const call = {
+    ...calls[0],
+    name: 'glob',
+    args: { pattern: '**/*.ts' },
+  };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const response = responses[0].functionResponse?.response;
+  expect(response?.['executionStatus']).toBe('success');
+  expect(response?.['outputTruncated']).toBe(true);
+  const output = response?.['output'];
+  expect(typeof output).toBe('string');
+  expect(output).toContain('file-000');
+  expect(output).not.toContain('file-399');
+  expect(output).toContain('Narrow the pattern or path.');
+  expect(response).not.toHaveProperty('outputOmitted');
+  const outcome = publish.mock.calls.find(
+    ([kind]) => kind === 'managed-tool-outcome',
+  )?.[1];
+  expect(outcome?.byteLength).toBeLessThanOrEqual(64 * 1024);
+  const receipt = (await session.sink.project()).at(-1);
+  expect(receipt?.message?.parts).toEqual(responses);
+  expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThanOrEqual(
+    64 * 1024,
+  );
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.execute).toHaveBeenCalledOnce();
+  expect(broker.release).toHaveBeenCalledOnce();
 });
 
 it.each([
@@ -1921,7 +2209,8 @@ it('asks before an edit in default mode and runs the batch once the owner allows
     (await session.resources.read(action.optionsRef!)).toString(),
   );
   expect(options).toEqual({
-    v: 1,
+    v: 2,
+    inputRef: (await checkpoint()).approval!.invocationRef,
     requestId,
     turnId: 'prompt',
     functionCallId: 'call-1',
@@ -2081,6 +2370,15 @@ it.each(['allow', 'deny'])(
     const requestId = await requested();
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
+    const options = JSON.parse(
+      (
+        await session.resources.read(
+          session.authority.action(requestId)!.optionsRef!,
+        )
+      ).toString(),
+    );
+    expect(options.v).toBe(1);
+    expect(options).not.toHaveProperty('inputRef');
     const approvedRef = (await checkpoint()).approval!.invocationRef!;
     const approved = (await session.resources.read(approvedRef)).toString();
     expiresAt = 2;
@@ -2121,7 +2419,7 @@ it.each(['allow', 'deny'])(
   },
 );
 
-it('asks one call at a time in the model order', async () => {
+it('binds successive approvals for the same tool to their own inputs', async () => {
   const batch = [
     {
       ...calls[1],
@@ -2129,7 +2427,11 @@ it('asks one call at a time in the model order', async () => {
       callId: 'call-0',
       args: { file_path: 'new.txt', content: 'new' },
     },
-    calls[1],
+    {
+      ...calls[1],
+      name: 'write_file',
+      args: { file_path: 'second.txt', content: 'second' },
+    },
   ];
   turn = createTurn(false, { mode: 'default' });
   const running = turn.execute(
@@ -2142,6 +2444,14 @@ it('asks one call at a time in the model order', async () => {
   );
   const first = await requested(1);
   expect(actionIds()).toEqual([first]);
+  const firstOptions = JSON.parse(
+    (
+      await session.resources.read(session.authority.action(first)!.optionsRef!)
+    ).toString(),
+  );
+  expect(firstOptions.inputRef).toEqual(
+    (await checkpoint()).approval!.invocationRef,
+  );
   await resolveHostedAction(session, waiters, first, answer('allow'));
   const second = await requested(2);
   const options = JSON.parse(
@@ -2151,7 +2461,23 @@ it('asks one call at a time in the model order', async () => {
       )
     ).toString(),
   );
-  expect(options).toMatchObject({ functionCallId: 'call-1', toolName: 'edit' });
+  expect(options).toMatchObject({
+    v: 2,
+    functionCallId: 'call-1',
+    toolName: 'write_file',
+    inputRef: (await checkpoint()).approval!.invocationRef,
+  });
+  expect(options.inputRef).not.toEqual(firstOptions.inputRef);
+  for (const [ref, input] of [
+    [firstOptions.inputRef, batch[0].args],
+    [options.inputRef, batch[1].args],
+  ] as const) {
+    const captured = JSON.parse((await session.resources.read(ref)).toString());
+    expect(JSON.parse(captured.payloadJson)).toEqual({
+      toolName: 'write_file',
+      input,
+    });
+  }
   await resolveHostedAction(session, waiters, second, answer('deny'));
   const responses = await running;
   expect(broker.execute).toHaveBeenCalledOnce();
@@ -2603,9 +2929,20 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
   );
   const requestId = await requested();
   const action = session.authority.action(requestId)!;
+  const options = JSON.parse(
+    (await session.resources.read(action.optionsRef!)).toString(),
+  );
+  expect(options).toMatchObject({
+    v: 2,
+    functionCallId: 'call-1',
+    toolName: 'run_shell_command',
+  });
   expect(
-    JSON.parse((await session.resources.read(action.optionsRef!)).toString()),
-  ).toMatchObject({ functionCallId: 'call-1', toolName: 'run_shell_command' });
+    JSON.parse(
+      JSON.parse((await session.resources.read(options.inputRef)).toString())
+        .payloadJson,
+    ).input,
+  ).toMatchObject({ command: 'rm -rf build' });
   expect(broker.registerPublisher).toHaveBeenCalledOnce();
   await resolveHostedAction(session, waiters, requestId, answer('deny'));
   const responses = await running;
@@ -2617,6 +2954,21 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
     undefined,
     'The Session owner denied this tool call, so it was not run.',
   ]);
+});
+
+it('admits exactly the declared native tools to the version 2 input preview', () => {
+  // The Java reader admits a closed set. A name missing on either side degrades
+  // to "Tool arguments are unavailable for this approval." with no error, so the
+  // set is pinned here and each name must still be a declared native tool.
+  expect(HOSTED_INPUT_PREVIEW_TOOLS).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+    'run_shell_command',
+  ]);
+  const declared = HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name);
+  for (const name of HOSTED_INPUT_PREVIEW_TOOLS)
+    expect(declared).toContain(name);
 });
 
 it('writes nothing once the Turn blocks during an answer', async () => {
@@ -3134,10 +3486,25 @@ it('runs PreToolUse after approval and asks again for changed arguments', async 
   expect(fire.mock.calls.map(([event]) => event)).toEqual([
     HookEventName.PermissionRequest,
   ]);
+  const original = (await checkpoint()).approval!.invocationRef!;
   await resolveHostedAction(session, waiters, first, answer('allow'));
   const second = await requested(2);
   expect(second).not.toBe(first);
   const revised = (await checkpoint()).approval!.invocationRef!;
+  expect(revised).not.toEqual(original);
+  for (const [requestId, inputRef] of [
+    [first, original],
+    [second, revised],
+  ] as const) {
+    const options = JSON.parse(
+      (
+        await session.resources.read(
+          session.authority.action(requestId)!.optionsRef!,
+        )
+      ).toString(),
+    );
+    expect(options).toMatchObject({ v: 2, inputRef });
+  }
   expect(
     JSON.parse(
       JSON.parse((await session.resources.read(revised)).toString())
@@ -4217,6 +4584,7 @@ function backgroundTurnRig(
     undefined,
     undefined,
     undefined,
+    undefined,
     orchestrator as never,
     undefined,
     options.lane,
@@ -4370,6 +4738,7 @@ function monitorTurnRig(
     () => true,
     { owner, captureBytes: 1024 * 1024 },
     opts.lane !== undefined ? undefined : options,
+    undefined,
     undefined,
     undefined,
     undefined,
@@ -4678,6 +5047,7 @@ describe('hosted Monitor admission arm', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       {
         admit: async () => undefined,
         dispatchStarted: async () => undefined,
@@ -4758,6 +5128,7 @@ describe('hosted Monitor admission arm', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       monitors,
     );
     (bare as unknown as { publisher: unknown }).publisher = publisher;
@@ -4791,6 +5162,7 @@ describe('hosted Monitor admission arm', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
     );
     const result = await bare.execute(
       [call],
@@ -4818,6 +5190,7 @@ describe('hosted Monitor admission arm', () => {
         resources: {} as never,
         assertWritable: async () => undefined,
       } as never,
+      undefined,
       undefined,
       undefined,
       undefined,
