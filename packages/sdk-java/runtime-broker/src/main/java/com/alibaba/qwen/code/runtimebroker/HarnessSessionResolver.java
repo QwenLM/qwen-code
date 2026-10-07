@@ -22,4 +22,8 @@ public interface HarnessSessionResolver {
             String harnessSessionId) {
         return resolve(harnessSessionId);
     }
+
+    default CompletionStage<String> resolveTenant(String harnessSessionId) {
+        return resolve(harnessSessionId).thenApply(RuntimeScope::getTenantId);
+    }
 }

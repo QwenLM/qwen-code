@@ -13,8 +13,10 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
@@ -317,9 +319,11 @@ class EmbeddedRuntimeBrokerTest {
         ManagedAgentProperties properties = properties();
         InMemoryRuntimeSessionRepository sessions =
                 new InMemoryRuntimeSessionRepository();
-        seedReleasedSession(sessions, properties);
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        seedReleasedSession(sessions, bindings, properties);
         try (EmbeddedRuntimeBroker broker = new EmbeddedRuntimeBroker(store,
-                properties, new InMemoryRuntimeBindingRepository(), sessions,
+                properties, bindings, sessions,
                 new InMemoryToolExecutionRepository())) {
             // The admission fence refuses new work on a closed Session, but
             // release is a teardown route: it must still resolve the
@@ -356,7 +360,9 @@ class EmbeddedRuntimeBrokerTest {
         ManagedAgentProperties properties = properties();
         InMemoryRuntimeSessionRepository sessions =
                 new InMemoryRuntimeSessionRepository();
-        seedReleasedSession(sessions, properties);
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        seedReleasedSession(sessions, bindings, properties);
         InMemoryToolExecutionRepository executions =
                 new InMemoryToolExecutionRepository();
         String digest = "sha256:" + "b".repeat(64);
@@ -371,8 +377,7 @@ class EmbeddedRuntimeBrokerTest {
         assertThat(executions.compareAndSet(claimed, claimed.withUnknown(),
                 "owner-1", claimed.getDispatchGeneration())).isNotNull();
         try (EmbeddedRuntimeBroker broker = new EmbeddedRuntimeBroker(store,
-                properties, new InMemoryRuntimeBindingRepository(), sessions,
-                executions)) {
+                properties, bindings, sessions, executions)) {
             // The reconcile of an UNKNOWN outcome is evidence work after the
             // close: the fence must not answer it, so the path reaches the
             // binding check and reports the retired generation.
@@ -455,6 +460,7 @@ class EmbeddedRuntimeBrokerTest {
 
     private static void seedReleasedSession(
             InMemoryRuntimeSessionRepository sessions,
+            InMemoryRuntimeBindingRepository bindings,
             ManagedAgentProperties properties) {
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
@@ -463,11 +469,15 @@ class EmbeddedRuntimeBrokerTest {
                 broker.getWorkspaceCwd(),
                 properties.getHarness().getCapabilityDigest(),
                 broker.getIsolationClass());
+        // persistedSession confirms the historical record's parent binding
+        // before it settles anything.
+        RuntimeBindingRecord binding = bindings.findOrCreate(
+                new RuntimeProvisionRequest(scope, null));
         RuntimeSessionRecord acquiring = new RuntimeSessionRecord(
                 new RuntimeSession(SESSION_ID, RUNTIME_ID, "bootstrap",
                         scope),
-                "binding-1", 1, RuntimeSessionRecord.State.ACQUIRING, 0,
-                Instant.now());
+                binding.getBindingId(), binding.getGeneration(),
+                RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
         sessions.findOrCreate(acquiring);
         sessions.compareAndSet(acquiring, acquiring.withState(
                 RuntimeSessionRecord.State.RELEASED, Instant.now()));

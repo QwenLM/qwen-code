@@ -1133,6 +1133,45 @@ describe('Managed context tool gate', () => {
     expect(JSON.stringify(strayFilePath)).not.toContain('secret.txt');
   });
 
+  it('refuses a read whose file is a symlink escaping the Workspace', async () => {
+    const root = workspace(['services/api']);
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    await post(origin, CONTEXT, installation('session-1', 'services/api'));
+    const read = (callId: string, filePath: string) => ({
+      ...shell('session-1', callId, ''),
+      toolName: 'read_file',
+      input: { file_path: filePath },
+    });
+
+    // A planted symlink targeting a file outside the mount must not be
+    // followed.
+    const outside = workspace(['staged']);
+    fs.writeFileSync(
+      path.join(outside, 'staged/host-secret.txt'),
+      'host-secret',
+    );
+    fs.symlinkSync(
+      path.join(outside, 'staged/host-secret.txt'),
+      path.join(root, 'services/api/AGENTS.md'),
+    );
+    const escaped = await (
+      await post(origin, EXECUTE, read('call-1', 'AGENTS.md'))
+    ).json();
+    expect(escaped.result.executionStatus).toBe('error');
+    expect(JSON.stringify(escaped)).not.toContain('host-secret');
+
+    // Positive control: a regular file inside the Session still reads.
+    fs.rmSync(path.join(root, 'services/api/AGENTS.md'));
+    fs.writeFileSync(
+      path.join(root, 'services/api/AGENTS.md'),
+      'in-bounds-rules',
+    );
+    const plain = await (
+      await post(origin, EXECUTE, read('call-2', 'AGENTS.md'))
+    ).json();
+    expect(plain.result.executionStatus).toBe('success');
+    expect(JSON.stringify(plain)).toContain('in-bounds-rules');
+  });
   it('allows a pattern segment that merely starts with `..`', async () => {
     // The containment guard matches `..` by segment equality, so `a/..b/*.ts`
     // is legitimate; nothing else pinned that before a hardening edit could
@@ -1845,6 +1884,7 @@ describe('Managed context tool gate', () => {
     ]);
     fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
     fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+
     fs.writeFileSync(path.join(root, 'packages/ui/src/index.ts'), 'ui-source');
     fs.symlinkSync(
       path.join('..', 'web'),
@@ -2703,6 +2743,20 @@ describe('Managed Workspace execution activation', () => {
     expect(
       fs.readFileSync(path.join(root, 'child/proof.txt'), 'utf8').trim(),
     ).toBe('activated');
+    // An absolute path inside the Session directory is admitted.
+    const readOwn = {
+      ...shell(request.sessionId, 'read-own', ''),
+      toolName: 'read_file',
+      input: {
+        file_path: path.join(realDirectory(root, 'child'), 'proof.txt'),
+      },
+    };
+    expect(
+      (await (await post(origin, EXECUTE, readOwn)).json()).result
+        .executionStatus,
+    ).toBe('success');
+    // So is one outside it but inside the mount: the file-tool boundary is
+    // the mount, vetoed only for another installed Session's directory.
     const readRoot = {
       ...shell(request.sessionId, 'read-root', ''),
       toolName: 'read_file',

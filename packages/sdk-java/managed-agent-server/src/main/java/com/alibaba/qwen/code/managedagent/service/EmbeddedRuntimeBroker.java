@@ -125,6 +125,17 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 return resolveScope(sessionId, true);
             }
 
+            @Override
+            public CompletionStage<String> resolveTenant(String sessionId) {
+                return store.findSessionById(sessionId)
+                        .map(session -> CompletableFuture.completedFuture(
+                                session.tenantId()))
+                        .orElseGet(() -> CompletableFuture.failedFuture(
+                                new IllegalArgumentException(
+                                        "Session is not owned by this"
+                                                + " service")));
+            }
+
             private CompletionStage<RuntimeScope> resolveScope(
                     String sessionId, boolean admission) {
                 SessionRecord session = store.findSessionById(sessionId)

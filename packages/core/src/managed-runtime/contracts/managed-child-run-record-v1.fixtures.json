@@ -49,6 +49,49 @@
         "runtime": null,
         "delivery": null
       }
+    },
+    "child_agent": {
+      "childRunId": "run-1",
+      "childSessionId": null,
+      "completion": "sent",
+      "depth": 1,
+      "inputRef": {
+        "resourceId": "input-1",
+        "kind": "managed-input",
+        "schemaVersion": 1,
+        "byteLength": 2,
+        "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "kind": "child_agent",
+      "ownerScopeId": "scope-1",
+      "predecessorChildRunId": null,
+      "resultRef": null,
+      "resultVersion": 1,
+      "rootSessionId": "session-1",
+      "run": {
+        "state": "admitted",
+        "reason": null,
+        "definition": {
+          "definitionId": "agent-1",
+          "definitionRevision": 1,
+          "definitionDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "intent",
+        "runtime": null,
+        "delivery": {
+          "target": "session",
+          "state": "planned"
+        }
+      },
+      "stopReason": null,
+      "stopRequested": false,
+      "terminalReceiptRef": null,
+      "workspaceMode": "shared",
+      "workingDirectory": "."
     }
   },
   "cases": [
@@ -69,9 +112,11 @@
     {
       "id": "kind-unknown",
       "domain": "child_run",
-      "patch": { "kind": "child_agent" },
+      "patch": {
+        "kind": "workflow"
+      },
       "valid": false,
-      "error": "must be 'shell' in schema version 1",
+      "error": "must be one of shell, child_agent in schema version 1",
       "start": false
     },
     {
@@ -929,6 +974,1268 @@
       "valid": false,
       "error": "is set exactly when the run ends",
       "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-start",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-tool-completion",
+      "patch": {
+        "completion": "tool"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-dispatched",
+      "patch": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-attached",
+      "patch": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-attached-without-session",
+      "patch": {
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "childSessionId is set once creation is proven"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-settled-without-session",
+      "patch": {
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "childSessionId is set once creation is proven"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-degraded-running",
+      "patch": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "running",
+          "reason": "runtime_lost",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-2",
+            "generation": "2"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-settled",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-creation-failed",
+      "patch": {
+        "stopReason": "creation_failed",
+        "run": {
+          "state": "failed",
+          "execution": "not_started_proven",
+          "dispatchId": "dispatch-1",
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-child-failed",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "child_failed",
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-quota-exceeded",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "quota_exceeded",
+        "run": {
+          "state": "failed",
+          "reason": "count_limit",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-cancelled-after-execution",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopRequested": true,
+        "stopReason": "stop_requested",
+        "run": {
+          "state": "cancelled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-start-stop-requested",
+      "patch": {
+        "stopRequested": true
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-nested",
+      "patch": {
+        "workingDirectory": "a/b/c"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-shell-keys",
+      "patch": {
+        "commandRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "exitCode": null,
+        "exitSignal": null,
+        "outputRef": null,
+        "shellId": "shell-1",
+        "startReceiptRef": null
+      },
+      "valid": false,
+      "start": false,
+      "error": "exactly"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-kind-workflow",
+      "patch": {
+        "kind": "workflow"
+      },
+      "valid": false,
+      "start": false,
+      "error": "must be one of shell, child_agent in schema version 1"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-extra-key",
+      "patch": {
+        "extra": "x"
+      },
+      "valid": false,
+      "start": false,
+      "error": "exactly"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-no-start-call",
+      "patch": {
+        "run": {
+          "executionCallId": null,
+          "execution": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must name its start call, never an effect"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-effect-id",
+      "patch": {
+        "run": {
+          "effectId": "effect-1",
+          "executionCallId": null,
+          "execution": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must name its start call, never an effect"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-delivery-id",
+      "patch": {
+        "run": {
+          "deliveryId": "delivery-1"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "deliveryId is set exactly for a channel delivery"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-no-delivery",
+      "patch": {
+        "run": {
+          "delivery": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "delivery must target the parent session"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-channel-delivery",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "channel",
+            "state": "planned"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "deliveryId is set exactly for a channel delivery"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-reserved-delivery",
+      "patch": {
+        "run": {
+          "state": "reserved",
+          "execution": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "has nothing dispatched while reserved"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-depth-zero",
+      "patch": {
+        "depth": 0
+      },
+      "valid": false,
+      "start": false,
+      "error": "depth must be an integer from 1 to 8"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-depth-nine",
+      "patch": {
+        "depth": 9
+      },
+      "valid": false,
+      "start": false,
+      "error": "depth must be an integer from 1 to 8"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-depth-fractional",
+      "patch": {
+        "depth": 1.5
+      },
+      "valid": false,
+      "start": false,
+      "error": "depth must be an integer from 1 to 8"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-depth-eight",
+      "patch": {
+        "depth": 8
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-child-run-id-empty",
+      "patch": {
+        "childRunId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "childRunId must be a non-empty string"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-session-id-empty",
+      "patch": {
+        "childSessionId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "childSessionId must be a non-empty string"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-owner-scope-number",
+      "patch": {
+        "ownerScopeId": 42
+      },
+      "valid": false,
+      "start": false,
+      "error": "ownerScopeId must be a non-empty string"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-input-ref-digest-bad",
+      "patch": {
+        "inputRef": {
+          "resourceId": "input-1",
+          "kind": "managed-input",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "xyz"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "inputRef.digest must be a lowercase SHA-256 hex digest"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-predecessor-set",
+      "patch": {
+        "predecessorChildRunId": "run-0"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-predecessor-empty",
+      "patch": {
+        "predecessorChildRunId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "predecessorChildRunId must be a non-empty string"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-root-session-nfd",
+      "patch": {
+        "rootSessionId": "café"
+      },
+      "valid": false,
+      "start": false,
+      "error": "rootSessionId must use NFC normalization"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-completion-unknown",
+      "patch": {
+        "completion": "answer"
+      },
+      "valid": false,
+      "start": false,
+      "error": "completion must be 'tool' or 'sent'"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-workspace-mode-unknown",
+      "patch": {
+        "workspaceMode": "private"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workspaceMode must be one of shared, snapshot, worktree"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-absolute",
+      "patch": {
+        "workingDirectory": "/tmp"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-parent",
+      "patch": {
+        "workingDirectory": "../logs"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-null",
+      "patch": {
+        "workingDirectory": null
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-dot-segment",
+      "patch": {
+        "workingDirectory": "a/./b"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-trailing",
+      "patch": {
+        "workingDirectory": "a/"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-backslash",
+      "patch": {
+        "workingDirectory": "a\\b"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-drive",
+      "patch": {
+        "workingDirectory": "C:/evil"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-drive-relative",
+      "patch": {
+        "workingDirectory": "C:evil"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-drive-line-separator",
+      "patch": {
+        "workingDirectory": "C: evil"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-double-slash",
+      "patch": {
+        "workingDirectory": "a//b"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-nfd",
+      "patch": {
+        "workingDirectory": "café"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-long",
+      "patch": {
+        "workingDirectory": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-control",
+      "patch": {
+        "workingDirectory": "a\u0007b"
+      },
+      "valid": false,
+      "start": false,
+      "error": "workingDirectory must be a normalized relative directory"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-session-before-dispatch",
+      "patch": {
+        "childSessionId": "session-2"
+      },
+      "valid": false,
+      "start": false,
+      "error": "childSessionId needs its admitted creation dispatch"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-attached-without-runtime",
+      "patch": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "needs the Runtime binding that hosts it"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-dispatched-without-runtime",
+      "patch": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "dispatchId": "dispatch-1",
+          "runtime": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "dispatch needs a Runtime binding"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-outcome-unknown-without-runtime",
+      "patch": {
+        "run": {
+          "state": "recovery_blocked",
+          "reason": "dispatch_unknown",
+          "execution": "outcome_unknown",
+          "dispatchId": "dispatch-1",
+          "runtime": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "dispatch needs a Runtime binding"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-dispatched-without-definition",
+      "patch": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "dispatchId": "dispatch-1",
+          "definition": null,
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must pin the definition it dispatched"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-result-version-two",
+      "patch": {
+        "resultVersion": 2
+      },
+      "valid": false,
+      "start": false,
+      "error": "resultVersion must be 1 in schema version 1"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-result-version-overflow",
+      "patch": {
+        "resultVersion": 1e400
+      },
+      "valid": false,
+      "start": false,
+      "error": "resultVersion must be 1 in schema version 1"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-settled-without-refs",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "resultRef and terminalReceiptRef are set exactly when the run settles"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-failed-with-result-ref",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "child_failed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "set exactly when the run settles"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-half-result",
+      "patch": {
+        "childSessionId": "session-2",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "change only together"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-failed-delivery-planned",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "child_failed",
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "delivery cancelled is set exactly when the run ends without a result"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-settled-delivery-cancelled",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "delivery cancelled is set exactly when the run ends without a result"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-stop-reason-unknown",
+      "patch": {
+        "stopReason": "exploded"
+      },
+      "valid": false,
+      "start": false,
+      "error": "stopReason is not a closed stop reason"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-stop-reason-early",
+      "patch": {
+        "stopReason": "completed"
+      },
+      "valid": false,
+      "start": false,
+      "error": "stopReason is set exactly when the run ends"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-stop-misfit",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "stopReason completed does not fit the failed state"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-stop-request-without-flag",
+      "patch": {
+        "stopReason": "stop_requested",
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "stop_requested needs its stop request"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-stop-not-boolean",
+      "patch": {
+        "stopRequested": "yes"
+      },
+      "valid": false,
+      "start": false,
+      "error": "stopRequested must be boolean"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-quota-mismatch",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "quota_exceeded",
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "quota_exceeded exactly for a quota reason"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-quota-reason-unmarked",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "child_failed",
+        "run": {
+          "state": "failed",
+          "reason": "count_limit",
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "quota_exceeded exactly for a quota reason"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-creation-failed-after-execution",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "creation_failed",
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "creation_failed needs a creation that never started"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-child-failed-needs-settled",
+      "patch": {
+        "stopReason": "child_failed",
+        "run": {
+          "state": "failed",
+          "execution": "not_started_proven",
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "child_failed needs its settled execution"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-settled-unproven-execution",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "dispatch_started",
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "execution proven to have ended"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-settled-without-execution",
+      "patch": {
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": null,
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Child run settled needs its settled execution"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-cancelled-without-execution",
+      "patch": {
+        "stopRequested": true,
+        "stopReason": "stop_requested",
+        "run": {
+          "state": "cancelled",
+          "execution": null,
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Child run cancelled needs settled or not_started_proven execution"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-failed-without-execution",
+      "patch": {
+        "stopReason": "child_failed",
+        "run": {
+          "state": "failed",
+          "execution": null,
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Child run failed needs settled or not_started_proven execution"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-recovery-unknown-delivery",
+      "patch": {
+        "run": {
+          "state": "recovery_blocked",
+          "execution": "outcome_unknown",
+          "dispatchId": "dispatch-1",
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "cannot hand over a result before the run ends"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-start-delivery-accepting",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "cannot hand over a result before the run ends"
     }
   ],
   "successors": [
@@ -1555,6 +2862,1000 @@
         }
       },
       "valid": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-admit-dispatch",
+      "before": {},
+      "after": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-dispatch-attach",
+      "before": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-settle-result",
+      "before": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-delivery-accept",
+      "before": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-delivery-consume",
+      "before": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-delivery-unknown-then-accepted",
+      "before": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-cancel-before-dispatch",
+      "before": {},
+      "after": {
+        "stopRequested": true,
+        "stopReason": "stop_requested",
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-reattach-later-generation",
+      "before": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "recovery_blocked",
+          "reason": "runtime_lost",
+          "execution": "outcome_unknown",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "running",
+          "reason": "runtime_lost",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-2",
+            "generation": "2"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-identity-changed",
+      "before": {},
+      "after": {
+        "childRunId": "run-2"
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-completion-changed",
+      "before": {},
+      "after": {
+        "completion": "tool"
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-session-recreated",
+      "before": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-3",
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-attach-skips-dispatch",
+      "before": {},
+      "after": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-result-restated",
+      "before": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-2",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-receipt-restated",
+      "before": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-2",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-delivery-regress",
+      "before": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "planned"
+          }
+        }
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-owner-scope-changed",
+      "before": {},
+      "after": {
+        "ownerScopeId": "scope-2"
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-root-session-changed",
+      "before": {},
+      "after": {
+        "rootSessionId": "session-9"
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-input-ref-changed",
+      "before": {},
+      "after": {
+        "inputRef": {
+          "resourceId": "input-2",
+          "kind": "managed-input",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-working-dir-changed",
+      "before": {},
+      "after": {
+        "workingDirectory": "a/b"
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-predecessor-changed",
+      "before": {},
+      "after": {
+        "predecessorChildRunId": "run-0"
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-depth-changed",
+      "before": {},
+      "after": {
+        "depth": 2
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-workspace-changed",
+      "before": {},
+      "after": {
+        "workspaceMode": "worktree"
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-stop-cleared",
+      "before": {
+        "childSessionId": "session-2",
+        "stopRequested": true,
+        "run": {
+          "state": "waiting",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "planned"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "stopRequested": false
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-failed-freeze-identical",
+      "before": {
+        "childSessionId": "session-2",
+        "stopRequested": true,
+        "stopReason": "child_failed",
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopRequested": true,
+        "stopReason": "child_failed",
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-stop-after-failed",
+      "before": {
+        "childSessionId": "session-2",
+        "stopReason": "child_failed",
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopRequested": true,
+        "stopReason": "child_failed",
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-stop-after-terminal",
+      "before": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "stopRequested": true
+      },
+      "valid": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-stop-persists-through-settle",
+      "before": {
+        "childSessionId": "session-2",
+        "stopRequested": true,
+        "run": {
+          "state": "waiting",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "stopRequested": true
+      },
+      "valid": true
     }
-  ]
+  ],
+  "childAgentKeys": [
+    "childRunId",
+    "childSessionId",
+    "completion",
+    "depth",
+    "inputRef",
+    "kind",
+    "ownerScopeId",
+    "predecessorChildRunId",
+    "resultRef",
+    "resultVersion",
+    "rootSessionId",
+    "run",
+    "stopReason",
+    "stopRequested",
+    "terminalReceiptRef",
+    "workingDirectory",
+    "workspaceMode"
+  ],
+  "childAgentFixedKeys": [
+    "childRunId",
+    "completion",
+    "depth",
+    "inputRef",
+    "kind",
+    "ownerScopeId",
+    "predecessorChildRunId",
+    "rootSessionId",
+    "workingDirectory",
+    "workspaceMode"
+  ],
+  "childAgentStopReasons": {
+    "settled": ["completed"],
+    "failed": ["creation_failed", "child_failed", "quota_exceeded"],
+    "cancelled": ["stop_requested"]
+  }
 }
