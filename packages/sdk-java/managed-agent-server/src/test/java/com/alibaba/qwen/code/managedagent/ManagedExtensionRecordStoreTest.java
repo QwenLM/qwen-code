@@ -170,6 +170,512 @@ class ManagedExtensionRecordStoreTest {
                                 "child_run", "shell-x")));
     }
 
+    @Test
+    void commitsAndProjectsAChildAgentChainWithItsAcceptance() throws Exception {
+        CommitResource inputResource = hookResource("input-x", "managed-input",
+                "{\"prompt\":\"audit\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-x",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-x",
+                "managed-runtime-receipt",
+                "{\"outcome\":\"settled\"}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "child_run",
+                        "run-x"));
+        assertThat(records.findTask(TENANT, sessionId, taskId).orElseThrow()
+                .kind()).isEqualTo("child_agent");
+        assertThat(records.findTask(TENANT, sessionId, taskId).orElseThrow()
+                .projection().state()).isEqualTo("completed");
+        // The acceptance is a receipt, not a task: the child task alone shows.
+        commitDomain(journal, "accept-1", "child_acceptance",
+                acceptance(resultResource, receiptResource, "accepted"),
+                List.of(resultResource, receiptResource));
+        assertThat(records.listTasks(TENANT, sessionId, null, null, 10).tasks())
+                .extracting(ManagedExtensionRecordStore.TaskRow::taskId)
+                .containsExactly(taskId);
+        assertThat(records.listRecords(TENANT, sessionId, "child_acceptance"))
+                .hasSize(1);
+        commitDomain(journal, "accept-2", "child_acceptance",
+                acceptance(resultResource, receiptResource, "consumed"),
+                List.of(resultResource, receiptResource));
+        assertThat(records.listRecords(TENANT, sessionId, "child_acceptance")
+                .get(0).required("run").required("delivery")
+                .required("state").textValue()).isEqualTo("consumed");
+    }
+
+    @Test
+    void refusesAChildAcceptanceWithoutItsTarget() throws Exception {
+        CommitResource inputResource = hookResource("input-y", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-y",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource otherContent = hookResource("result-z",
+                "managed-child-result",
+                "{\"summary\":\"changed\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-y",
+                "managed-runtime-receipt", "{}".getBytes(StandardCharsets.UTF_8));
+        String missingChild = UUID.randomUUID().toString();
+        ExtensionRecordJournal missingJournal = journal(missingChild);
+        assertRefused("an acceptance without its child run", missingChild,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must name a child agent run of this Session",
+                () -> missingJournal.commit(missingJournal.requestDomain(
+                        "accept-1", "child_acceptance",
+                        acceptance(resultResource, receiptResource, "accepted"),
+                        List.of(resultResource, receiptResource), 1_000)));
+        String running = UUID.randomUUID().toString();
+        ExtensionRecordJournal runningJournal = journal(running);
+        commitDomain(runningJournal, "agent-1", "child_run",
+                childAgent(running, "sent", "admitted", "intent", null,
+                        inputResource),
+                List.of(inputResource));
+        assertRefused("an acceptance before the result", running,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must name a run that ended with its result committed",
+                () -> runningJournal.commit(runningJournal.requestDomain(
+                        "accept-1", "child_acceptance",
+                        acceptance(resultResource, receiptResource, "accepted"),
+                        List.of(resultResource, receiptResource), 1_000)));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        ObjectNode foreign = acceptance(resultResource, receiptResource,
+                "accepted");
+        foreign.put("parentScopeId", "scope-other");
+        assertRefused("an acceptance with a foreign scope", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must match its child run scope and result version",
+                () -> journal.commit(journal.requestDomain("accept-1",
+                        "child_acceptance", foreign,
+                        List.of(resultResource, receiptResource), 1_000)));
+        ObjectNode missing = acceptance(resultResource, receiptResource,
+                "accepted");
+        missing.withObject("/contentRef").put("resourceId", "never-committed");
+        assertRefused("an acceptance citing a resource the Session does not"
+                        + " hold", sessionId,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> journal.commit(journal.requestDomain("accept-missing",
+                        "child_acceptance", missing, List.of(), 1_000)));
+        commitDomain(journal, "accept-1", "child_acceptance",
+                acceptance(resultResource, receiptResource, "accepted"),
+                List.of(resultResource, receiptResource));
+        assertRefused("a redelivery with conflicting content", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must bind the result and receipt",
+                () -> journal.commit(journal.requestDomain("accept-2",
+                        "child_acceptance",
+                        acceptance(otherContent, receiptResource, "accepted"),
+                        List.of(otherContent, receiptResource), 1_000)));
+    }
+
+    @Test
+    void bindsAChildAcceptanceToItsRunKindCallReceiptAndClosure()
+            throws Exception {
+        CommitResource argsResource = hookResource("args-w",
+                "managed-tool-args",
+                "{\"command\":\"yes\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource inputResource = hookResource("input-w", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-w",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-w",
+                "managed-runtime-receipt", "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource otherReceipt = hookResource("receipt-v",
+                "managed-runtime-receipt",
+                "{\"other\":1}".getBytes(StandardCharsets.UTF_8));
+        // An acceptance naming a background Shell's record is not a child
+        // agent's acceptance, whatever it carries.
+        String shellSession = UUID.randomUUID().toString();
+        ExtensionRecordJournal shellJournal = journal(shellSession);
+        commitDomain(shellJournal, "shell-1", "child_run",
+                childRun("admitted", "intent", null, argsResource),
+                List.of(argsResource));
+        ObjectNode namingShell = acceptance(resultResource, receiptResource,
+                "accepted");
+        namingShell.put("childRunId", "shell-x");
+        assertRefused("an acceptance naming a background Shell", shellSession,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must name a child agent run of this Session",
+                () -> shellJournal.commit(shellJournal.requestDomain(
+                        "accept-1", "child_acceptance", namingShell,
+                        List.of(resultResource, receiptResource), 1_000)));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        // A "sent" child returns through a notification input, never a call.
+        ObjectNode withCall = acceptance(resultResource, receiptResource,
+                "accepted");
+        withCall.put("parentExecutionCallId", "call-x");
+        assertRefused("an acceptance attaching a call to a sent child",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must attach the completion call its child run names",
+                () -> journal.commit(journal.requestDomain("accept-1",
+                        "child_acceptance", withCall,
+                        List.of(resultResource, receiptResource), 1_000)));
+        // Same content, another receipt: the receipt binds on its own.
+        assertRefused("an acceptance citing another terminal receipt",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must bind the result and receipt",
+                () -> journal.commit(journal.requestDomain("accept-1",
+                        "child_acceptance",
+                        acceptance(resultResource, otherReceipt, "accepted"),
+                        List.of(resultResource, otherReceipt), 1_000)));
+        // A child agent's launch input closes over the Session's resources.
+        String unheld = UUID.randomUUID().toString();
+        ExtensionRecordJournal unheldJournal = journal(unheld);
+        assertRefused("a child agent launch citing an input the Session"
+                        + " does not hold", unheld,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> unheldJournal.commit(unheldJournal.requestDomain(
+                        "agent-1", "child_run",
+                        childAgent(unheld, "sent", "admitted", "intent", null,
+                                inputResource),
+                        List.of(), 1_000)));
+        // So do the result and receipt its settling revision names.
+        String unheldResult = UUID.randomUUID().toString();
+        ExtensionRecordJournal resultJournal = journal(unheldResult);
+        commitDomain(resultJournal, "agent-1", "child_run",
+                childAgent(unheldResult, "sent", "admitted", "intent", null,
+                        inputResource),
+                List.of(inputResource));
+        ObjectNode dispatching = childAgent(unheldResult, "sent", "running",
+                "dispatch_started", "binding-1", inputResource);
+        dispatching.withObject("/run").put("dispatchId", "dispatch-1");
+        commitDomain(resultJournal, "agent-2", "child_run", dispatching,
+                List.of());
+        ObjectNode attached = childAgent(unheldResult, "sent", "running",
+                "running_attached", "binding-1", inputResource);
+        attached.withObject("/run").put("dispatchId", "dispatch-1");
+        attached.put("childSessionId", "session-child");
+        commitDomain(resultJournal, "agent-3", "child_run", attached,
+                List.of());
+        ObjectNode settled = childAgent(unheldResult, "sent", "settled",
+                "settled", "binding-1", inputResource);
+        settled.withObject("/run").put("dispatchId", "dispatch-1");
+        settled.put("childSessionId", "session-child");
+        settled.put("stopReason", "completed");
+        settled.set("resultRef", hookRef(resultResource));
+        settled.set("terminalReceiptRef", hookRef(receiptResource));
+        assertRefused("a settled child agent citing a result the Session"
+                        + " does not hold", unheldResult,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> resultJournal.commit(resultJournal.requestDomain(
+                        "agent-4", "child_run", settled,
+                        List.of(receiptResource), 4_000)));
+    }
+
+    @Test
+    void bindsAnAcceptanceToTheChildRunItNamesNotItsSibling()
+            throws Exception {
+        CommitResource inputResource = hookResource("input-s", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-s",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-s",
+                "managed-runtime-receipt",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        ObjectNode sibling = childAgent(sessionId, "sent", "admitted",
+                "intent", null, inputResource);
+        sibling.put("childRunId", "run-y");
+        commitDomain(journal, "agent-b", "child_run", sibling,
+                List.of(inputResource));
+        ObjectNode claimingSibling = acceptance(resultResource,
+                receiptResource, "accepted");
+        claimingSibling.put("childRunId", "run-y");
+        assertRefused("an acceptance naming its sibling child run's unended"
+                        + " chain", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must name a run that ended with its result committed",
+                () -> journal.commit(journal.requestDomain("accept-1",
+                        "child_acceptance", claimingSibling,
+                        List.of(resultResource, receiptResource), 1_000)));
+    }
+
+    @Test
+    void refusesAFirstLevelChildAgentRootedAtAnotherSession()
+            throws Exception {
+        CommitResource inputResource = hookResource("input-r", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        ObjectNode foreign = childAgent(sessionId, "sent", "admitted",
+                "intent", null, inputResource);
+        foreign.put("rootSessionId", "session-other");
+        assertRefused("a first-level child agent rooted at another Session",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "rootSessionId must be this Session for a first-level child",
+                () -> journal.commit(journal.requestDomain("agent-1",
+                        "child_run", foreign, List.of(inputResource), 1_000)));
+    }
+
+    @Test
+    void bindsAToolCompletionAcceptanceToItsCompletionCall()
+            throws Exception {
+        CommitResource inputResource = hookResource("input-t", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-t",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-t",
+                "managed-runtime-receipt",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "tool", journal, inputResource,
+                resultResource, receiptResource);
+        // A "tool" child's result attaches to the parent's start call.
+        ObjectNode noCall = acceptance(resultResource, receiptResource,
+                "accepted");
+        assertRefused("a tool-completion acceptance without its completion"
+                        + " call", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "must attach the completion call its child run names",
+                () -> journal.commit(journal.requestDomain("accept-1",
+                        "child_acceptance", noCall,
+                        List.of(resultResource, receiptResource), 1_000)));
+        ObjectNode withCall = acceptance(resultResource, receiptResource,
+                "accepted");
+        withCall.put("parentExecutionCallId", "call-x");
+        commitDomain(journal, "accept-2", "child_acceptance", withCall,
+                List.of(resultResource, receiptResource));
+        assertThat(records.listRecords(TENANT, sessionId,
+                "child_acceptance")).hasSize(1);
+    }
+
+    /** Commits a child agent through its settled result. */
+    private static void settleChildAgentChain(String sessionId,
+            String completion, ExtensionRecordJournal journal,
+            CommitResource inputResource, CommitResource resultResource,
+            CommitResource receiptResource) {
+        commitDomain(journal, "agent-1", "child_run",
+                childAgent(sessionId, completion, "admitted", "intent", null,
+                        inputResource),
+                List.of(inputResource));
+        ObjectNode dispatching = childAgent(sessionId, completion, "running",
+                "dispatch_started", "binding-1", inputResource);
+        dispatching.withObject("/run").put("dispatchId", "dispatch-1");
+        commitDomain(journal, "agent-2", "child_run", dispatching, List.of());
+        ObjectNode attached = childAgent(sessionId, completion, "running",
+                "running_attached", "binding-1", inputResource);
+        attached.withObject("/run").put("dispatchId", "dispatch-1");
+        attached.put("childSessionId", "session-child");
+        commitDomain(journal, "agent-3", "child_run", attached, List.of());
+        ObjectNode settled = childAgent(sessionId, completion, "settled",
+                "settled", "binding-1", inputResource);
+        settled.withObject("/run").put("dispatchId", "dispatch-1");
+        settled.put("childSessionId", "session-child");
+        settled.put("stopReason", "completed");
+        settled.set("resultRef", hookRef(resultResource));
+        settled.set("terminalReceiptRef", hookRef(receiptResource));
+        commitDomain(journal, "agent-4", "child_run", settled,
+                List.of(resultResource, receiptResource));
+    }
+
+    private static ObjectNode acceptance(CommitResource content,
+            CommitResource receipt, String deliveryState) {
+        ObjectNode body = JsonNodeFactory.instance.objectNode();
+        body.put("childRunId", "run-x");
+        body.put("parentScopeId", "scope-x");
+        body.putNull("parentExecutionCallId");
+        body.put("resultVersion", 1);
+        body.set("contentRef", hookRef(content));
+        body.put("contentDigest", content.digest());
+        body.set("terminalReceiptRef", hookRef(receipt));
+        ObjectNode run = JsonNodeFactory.instance.objectNode();
+        run.put("state", "settled");
+        run.putNull("reason");
+        run.putNull("definition");
+        run.putNull("executionCallId");
+        run.putNull("effectId");
+        run.putNull("dispatchId");
+        run.putNull("deliveryId");
+        run.putNull("execution");
+        run.putNull("runtime");
+        ObjectNode delivery = JsonNodeFactory.instance.objectNode();
+        delivery.put("target", "session");
+        delivery.put("state", deliveryState);
+        run.set("delivery", delivery);
+        body.set("run", run);
+        return body;
+    }
+
+    private static ObjectNode childAgent(String sessionId, String completion,
+            String state, String execution, String runtimeBinding,
+            CommitResource inputResource) {
+        ObjectNode body = JsonNodeFactory.instance.objectNode();
+        body.put("kind", "child_agent");
+        body.put("childRunId", "run-x");
+        body.put("ownerScopeId", "scope-x");
+        // A first-level child's root is the Session that owns this journal.
+        body.put("rootSessionId", sessionId);
+        body.put("depth", 1);
+        body.put("completion", completion);
+        body.set("inputRef", hookRef(inputResource));
+        body.put("workspaceMode", "shared");
+        body.put("workingDirectory", ".");
+        body.putNull("childSessionId");
+        body.putNull("predecessorChildRunId");
+        body.put("resultVersion", 1);
+        body.putNull("resultRef");
+        body.putNull("terminalReceiptRef");
+        body.putNull("stopReason");
+        body.put("stopRequested", false);
+        ObjectNode run = JsonNodeFactory.instance.objectNode();
+        run.put("state", state);
+        run.putNull("reason");
+        ObjectNode definition = JsonNodeFactory.instance.objectNode();
+        definition.put("definitionId", "agent-def-1");
+        definition.put("definitionRevision", 1);
+        definition.put("definitionDigest", "f".repeat(64));
+        run.set("definition", definition);
+        run.put("executionCallId", "call-x");
+        run.putNull("effectId");
+        run.putNull("dispatchId");
+        run.putNull("deliveryId");
+        run.put("execution", execution);
+        if (runtimeBinding != null) {
+            ObjectNode runtime = JsonNodeFactory.instance.objectNode();
+            runtime.put("runtimeBindingId", runtimeBinding);
+            runtime.put("generation", "1");
+            run.set("runtime", runtime);
+        } else {
+            run.putNull("runtime");
+        }
+        String delivery = "settled".equals(state) ? "accepting"
+                : "failed".equals(state) || "cancelled".equals(state)
+                        ? "cancelled" : "planned";
+        ObjectNode line = JsonNodeFactory.instance.objectNode();
+        line.put("target", "session");
+        line.put("state", delivery);
+        run.set("delivery", line);
+        body.set("run", run);
+        return body;
+    }
+
+    @Test
+    void verifiesTheChannelResourceClosure() throws Exception {
+        JsonNode templates = ManagedChannelRecordContractTest.fixtures()
+                .required("templates");
+        CommitResource policy = channelResource("policy-1", "channel-policy",
+                "{\"allowed\":[\"sender-1\"]}");
+        CommitResource result = channelResource("result-1", "managed-tool-result",
+                "{\"text\":\"ok\"}");
+        CommitResource seg1 = channelResource("seg-1-data",
+                "channel-delivery-segment", "part one");
+        CommitResource seg2 = channelResource("seg-2-data",
+                "channel-delivery-segment", "part two");
+        CommitResource proof = channelResource("proof-1",
+                "channel-delivery-receipt", "{\"250\":\"ok\"}");
+        // Positive: both shared templates commit with their closures, and a
+        // revision closing a proofed receipt commits with the proof. The
+        // corpus templates carry placeholder reference digests, so pin them
+        // onto the resources this transaction actually provides.
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        var route = journal.requestDomain("route-1", "channel_route",
+                channelRoute(templates, policy), List.of(policy), 1_000);
+        journal.commit(route);
+        journal.committed(route);
+        var delivery = journal.requestDomain("delivery-1", "channel_delivery",
+                channelDelivery(templates, result, seg1, seg2),
+                List.of(result, seg1, seg2), 2_000);
+        journal.commit(delivery);
+        journal.committed(delivery);
+        ObjectNode sending = channelDelivery(templates, result, seg1, seg2);
+        ObjectNode run = (ObjectNode) sending.required("run");
+        run.put("state", "running");
+        ObjectNode line = (ObjectNode) run.required("delivery");
+        line.put("state", "sending");
+        ObjectNode firstSegment = (ObjectNode) sending.required("segments")
+                .get(0);
+        ObjectNode receipt = JsonNodeFactory.instance.objectNode();
+        receipt.put("providerMessageId", "provider-msg-1");
+        receipt.put("acceptedAt", 1_750_000_000_000L);
+        receipt.set("proofRef", hookRef(proof));
+        firstSegment.set("receipt", receipt);
+        var proofed = journal.requestDomain("delivery-2", "channel_delivery",
+                sending, List.of(proof), 3_000);
+        journal.commit(proofed);
+        journal.committed(proofed);
+        // Negative: every missing resource kind refuses on its own.
+        String routeWs = UUID.randomUUID().toString();
+        ExtensionRecordJournal routeless = journal(routeWs);
+        assertRefused("channel_route names no policy resource", routeWs,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> routeless.commit(routeless.requestDomain("route-1",
+                        "channel_route", channelRoute(templates, policy),
+                        List.of(), 1_000)));
+        String deliveryWs = UUID.randomUUID().toString();
+        ExtensionRecordJournal noResult = journal(deliveryWs);
+        assertRefused("channel_delivery names no result resource", deliveryWs,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> noResult.commit(noResult.requestDomain("delivery-1",
+                        "channel_delivery",
+                        channelDelivery(templates, result, seg1, seg2),
+                        List.of(seg1, seg2), 1_000)));
+        assertRefused("channel_delivery names no segment resource",
+                deliveryWs,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> noResult.commit(noResult.requestDomain("delivery-1",
+                        "channel_delivery",
+                        channelDelivery(templates, result, seg1, seg2),
+                        List.of(result, seg1), 1_000)));
+        String proofWs = UUID.randomUUID().toString();
+        ExtensionRecordJournal noProof = journal(proofWs);
+        var base = noProof.requestDomain("delivery-1", "channel_delivery",
+                channelDelivery(templates, result, seg1, seg2),
+                List.of(result, seg1, seg2), 1_000);
+        noProof.commit(base);
+        noProof.committed(base);
+        assertRefused("channel_delivery names no proof resource", proofWs,
+                ManagedSessionStoreModels.ERROR_RESOURCE_MISSING, null,
+                () -> noProof.commit(noProof.requestDomain("delivery-2",
+                        "channel_delivery", sending.deepCopy(), List.of(),
+                        2_000)));
+    }
+
+    private static CommitResource channelResource(String resourceId,
+            String kind, String text) {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        return new CommitResource(resourceId, kind, 1, bytes.length,
+                ExtensionRecordJournal.sha256(bytes),
+                Base64.getEncoder().encodeToString(bytes));
+    }
+
+    private static ObjectNode channelRoute(JsonNode templates,
+            CommitResource policy) {
+        ObjectNode route = (ObjectNode) templates.required("channel_route")
+                .deepCopy();
+        route.set("policyRef", hookRef(policy));
+        return route;
+    }
+
+    private static ObjectNode channelDelivery(JsonNode templates,
+            CommitResource result, CommitResource seg1, CommitResource seg2) {
+        ObjectNode delivery = (ObjectNode) templates
+                .required("channel_delivery").deepCopy();
+        delivery.set("contentRef", hookRef(result));
+        // segments are an ArrayNode; each element is mutable in place.
+        ((ObjectNode) delivery.required("segments").get(0)).set("contentRef",
+                hookRef(seg1));
+        ((ObjectNode) delivery.required("segments").get(1)).set("contentRef",
+                hookRef(seg2));
+        return delivery;
+    }
     private static ObjectNode childRun(String state, String execution,
             String runtimeBinding, CommitResource argsResource) {
         ObjectNode body = JsonNodeFactory.instance.objectNode();
