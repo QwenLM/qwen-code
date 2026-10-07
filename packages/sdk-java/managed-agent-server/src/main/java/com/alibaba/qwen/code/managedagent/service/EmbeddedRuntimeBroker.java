@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.StaticRuntimeProvisioner;
@@ -51,7 +52,10 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeBrokerHttpServer server;
     private final RuntimeRecoveryCoordinator recovery;
     private final AgentStateStore store;
+    private final WorkspaceRuntimeResolver workspaces;
     private final Set<String> retired = ConcurrentHashMap.newKeySet();
+    private static final Set<String> LIFECYCLE_FENCED = Set.of("CLOSING",
+            "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED");
 
     public EmbeddedRuntimeBroker(AgentStateStore store,
             ManagedAgentProperties properties,
@@ -100,8 +104,9 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         require(properties.getHarness().getCapabilityDigest(),
                 "Hosted Harness capability digest");
         HttpRuntimeTransport http = new HttpRuntimeTransport();
-        WorkspaceRuntimeResolver workspaces = workspaceExecutionStore == null ? null
+        this.workspaces = workspaceExecutionStore == null ? null
                 : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties);
+        WorkspaceRuntimeResolver workspaces = this.workspaces;
         RuntimeTransport transport = workspaces == null ? http
                 : new WorkspaceRuntimeTransport(http, workspaces, workspaceExecutionStore,
                         bindingRepository, sessionRepository);
@@ -142,14 +147,12 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                                     "Hosted Workspace execution is not available.",
                                     false));
                 }
-                // The durable row is the fence for archived/deleted
-                // Sessions: unlike the in-process retired set it survives
-                // restarts and never accumulates in memory. Bootstrap only:
-                // teardown (release, reconciliation) must still converge
-                // after the Session closed.
-                if (!teardown
-                        && ("ARCHIVED".equals(session.status())
-                                || "DELETED".equals(session.status()))) {
+                // The durable row is the fence for closing/closed, archived
+                // and deleted Sessions: unlike the in-process retired set it
+                // survives restarts and never accumulates in memory.
+                // Bootstrap only: teardown (release, reconciliation) must
+                // still converge after the Session closed.
+                if (!teardown && LIFECYCLE_FENCED.contains(session.status())) {
                     return CompletableFuture.failedFuture(
                             new RuntimeBrokerException(409,
                                     "runtime_broker_session_closed",
@@ -240,11 +243,10 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
      */
     @Override
     public CompletionStage<Void> drain(String sessionId) {
-        // Retire only the states the durable row cannot fence: the resolver
-        // already rejects ARCHIVED/DELETED, so keeping entries for those
-        // would grow this set for the life of the process.
-        SessionRecord row = store.findSessionById(sessionId).orElse(null);
-        if (row == null || "CLOSED".equals(row.status())) {
+        // drain() runs while the row still reads CLOSING/DELETING; the
+        // resolver fences every lifecycle status durably, so only a vanished
+        // row needs the in-process entry.
+        if (store.findSessionById(sessionId).isEmpty()) {
             retired.add(sessionId);
         }
         return CompletableFuture.completedFuture(null);
@@ -263,6 +265,15 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     @Override
     public CompletionStage<Void> closeWorkspace(String tenantId, String sessionId) {
         return service.drainHarnessSession(tenantId, sessionId);
+    }
+
+    @Override
+    public void verifyWorkspaceCwdTarget(ContextBinding binding,
+            String targetCwdRelative) {
+        if (workspaces == null) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        workspaces.verifyInstallable(binding, targetCwdRelative);
     }
 
     public URI getBaseUri() {

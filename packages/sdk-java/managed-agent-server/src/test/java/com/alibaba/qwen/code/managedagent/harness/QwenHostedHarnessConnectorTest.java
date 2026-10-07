@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
@@ -21,6 +22,7 @@ import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.daemon.PromptReceipt;
+import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
@@ -889,6 +891,43 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @Test
+    void closeReleasesTheClientLockBeforeClosingTheClient()
+            throws Exception {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        CountDownLatch closing = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            closing.countDown();
+            finish.await();
+            return null;
+        }).when(client).close();
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        Thread shutdown = new Thread(connector::close);
+        shutdown.setDaemon(true);
+        shutdown.start();
+        assertThat(closing.await(10, TimeUnit.SECONDS)).isTrue();
+
+        // The client close awaits its executors for seconds; the clientLock
+        // must be free across it, or every client() caller and a repeated
+        // close() queue behind the full shutdown wait.
+        ReentrantLock lock = (ReentrantLock) ReflectionTestUtils.getField(
+                connector, "clientLock");
+        try {
+            assertThat(lock.tryLock(10, TimeUnit.SECONDS)).isTrue();
+            lock.unlock();
+        } finally {
+            finish.countDown();
+        }
+        shutdown.join(10_000);
+        assertThat(shutdown.isAlive()).isFalse();
+        verify(client).close();
+    }
+
+    @Test
     void doesNotBuildAClientAfterClose() {
         QwenHostedHarnessConnector connector =
                 new QwenHostedHarnessConnector(properties(), sessions(),
@@ -921,10 +960,30 @@ class QwenHostedHarnessConnectorTest {
                 mock(WorkspaceExecutionStore.class)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("base URL");
+
+        // An ftp URL carries a scheme and a host, so only the scheme
+        // allowlist rejects it.
+        ManagedAgentProperties ftp = properties();
+        ftp.getHarness().setBaseUrl("ftp://host:21");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(ftp,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
+
+        // A hostless http URI parses with a null host, so only the host
+        // clause rejects it ("http://" itself is rejected by URI.create).
+        ManagedAgentProperties hostless = properties();
+        hostless.getHarness().setBaseUrl("http:///path");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(hostless,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
     }
 
     @Test
-    void loadsOnceAcrossConcurrentFreeAttachCalls() {
+    void loadsOnceForRepeatedFreeAttachCalls() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities =
                 mock(HostedHarnessCapabilities.class);
@@ -942,6 +1001,94 @@ class QwenHostedHarnessConnectorTest {
         connector.createOrLoad("tenant-a", SESSION_ID, true);
 
         verify(client, times(1)).loadSession(any());
+    }
+
+    @Test
+    void unknownCreateOutcomeFallsBackToLoadAndPropagatesTheFullAttachment() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getRuntimeRecovery()).thenReturn(recovery);
+        when(attached.getHarnessLastEventId()).thenReturn(41L);
+        when(attached.getHarnessEventEpoch()).thenReturn("epoch-7");
+        SessionCreationOutcomeUnknownException unknown =
+                mock(SessionCreationOutcomeUnknownException.class);
+        // A mock reads getSuppressed() and getStackTrace() as null; if the
+        // fallback regresses and the exception escapes to JUnit, surefire's
+        // reporter dereferences them and aborts the class report, losing
+        // the failing test's name.
+        when(unknown.getSuppressed()).thenReturn(new Throwable[0]);
+        when(unknown.getStackTrace()).thenReturn(new StackTraceElement[0]);
+        when(client.createSession(any())).thenThrow(unknown);
+        when(client.loadSession(any())).thenReturn(attached);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        HarnessConnector.Attachment admission =
+                connector.createOrLoad("tenant-a", SESSION_ID, false);
+
+        // The unknown-outcome create must recover by loading, and every
+        // Attachment component the coordinator resumes on must travel.
+        assertThat(admission.bootId()).isEqualTo(BOOT_ID);
+        assertThat(admission.runtimeRecovery()).isSameAs(recovery);
+        assertThat(admission.lastEventId()).isEqualTo(41L);
+        assertThat(admission.eventEpoch()).isEqualTo("epoch-7");
+        ArgumentCaptor<LoadHarnessSession> load =
+                ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).loadSession(load.capture());
+        // Passive recovery belongs to the observe-only attachment; the
+        // create fallback keeps the session on the active path.
+        assertThat(ReflectionTestUtils.getField(load.getValue(),
+                "passiveManagedRuntimeRecovery")).isEqualTo(false);
+    }
+
+    @Test
+    void loadPathAlsoPropagatesTheFullAttachment() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getRuntimeRecovery()).thenReturn(recovery);
+        when(attached.getHarnessLastEventId()).thenReturn(23L);
+        when(attached.getHarnessEventEpoch()).thenReturn("epoch-3");
+        when(client.loadSession(any())).thenReturn(attached);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        HarnessConnector.Attachment admission =
+                connector.createOrLoad("tenant-a", SESSION_ID, true);
+
+        assertThat(admission.bootId()).isEqualTo(BOOT_ID);
+        assertThat(admission.runtimeRecovery()).isSameAs(recovery);
+        assertThat(admission.lastEventId()).isEqualTo(23L);
+        assertThat(admission.eventEpoch()).isEqualTo("epoch-3");
+    }
+
+    @Test
+    void rethrowsANonConflictDaemonErrorWithoutLoading() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        DaemonHttpException failure = mock(DaemonHttpException.class);
+        when(failure.getStatusCode()).thenReturn(500);
+        when(client.createSession(any())).thenThrow(failure);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        // Widening the 409 fallback to any daemon error would mask a real
+        // daemon bug as an attach to an unrelated session.
+        assertThatThrownBy(
+                () -> connector.createOrLoad("tenant-a", SESSION_ID, false))
+                .isSameAs(failure);
+        verify(client, never()).loadSession(any());
     }
 
     private static ManagedAgentProperties properties() {

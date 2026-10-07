@@ -298,16 +298,22 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public void close() {
+        HostedHarnessClient current;
         clientLock.lock();
         try {
             closed = true;
-            HostedHarnessClient current = client;
-            if (current != null) {
-                current.close();
-            }
+            current = client;
             client = null;
         } finally {
             clientLock.unlock();
+        }
+        // client.close() awaits its executors for seconds; holding
+        // clientLock across it stalls every client() caller behind the
+        // shutdown wait. The capture keeps the no-leak guarantee: builds
+        // publish under the same lock, so a client built later either sees
+        // closed or is captured here.
+        if (current != null) {
+            current.close();
         }
         attachments.clear();
         pendingRecovery.clear();
