@@ -32,8 +32,8 @@ export function isAgentProgram(value: unknown): value is AgentProgramView {
 }
 
 /**
- * The programs a runtime offers, in display order. A runtime that reports none
- * (the local daemon, or an older Host) runs Qwen Code.
+ * The programs a runtime offers, in display order. An omitted field keeps the
+ * older daemon's Qwen default; an explicit empty list offers no programs.
  */
 export function runtimePrograms(runtime: {
   programs?: readonly string[];
@@ -41,7 +41,7 @@ export function runtimePrograms(runtime: {
   const reported = AGENT_PROGRAMS.filter((program) =>
     runtime.programs?.includes(program),
   );
-  return reported.length > 0 ? reported : ['qwen'];
+  return runtime.programs === undefined ? ['qwen'] : reported;
 }
 
 type Translate = (

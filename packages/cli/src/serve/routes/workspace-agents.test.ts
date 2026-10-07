@@ -446,6 +446,7 @@ it('shows an online host offering the bound program when the first host is offli
         {
           workspaceCwd: `/remote/${name}`,
           providers: [...providers],
+          protocol: 2,
         },
       );
     }
@@ -487,6 +488,107 @@ it('shows an online host offering the bound program when the first host is offli
     (app.locals['stopWorkspaceAgentRecovery'] as (() => void) | undefined)?.();
   }
 });
+
+it.each([undefined, 1])(
+  'does not advertise or bind a Host with legacy protocol %s',
+  async (protocol) => {
+    const workspaceCwd = path.join(runtimeDir, 'legacy-host');
+    const { token } = await issueAgentHostEnrollment(workspaceCwd);
+    const enrolled = await enrollAgentHost(workspaceCwd, {
+      token,
+      name: 'legacy',
+      workspaceCwd: '/remote/legacy',
+      providers: ['Qwen Code ACP'],
+    });
+    await heartbeatAgentHost(workspaceCwd, enrolled.host.id, enrolled.secret, {
+      workspaceCwd: '/remote/legacy',
+      providers: ['Qwen Code ACP'],
+      ...(protocol !== undefined ? { protocol } : {}),
+    });
+    await updateWorkspaceAgents(workspaceCwd, () => [
+      { id: 'ag_local', name: 'local', createdAt: 1 },
+    ]);
+    const app = appFor(runtimeAt(workspaceCwd));
+    const response = await request(app)
+      .get('/workspaces/workspace/agent/agents')
+      .expect(200);
+    expect(response.body.runtimes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: enrolled.host.id,
+          programs: [],
+          status: 'offline',
+        }),
+      ]),
+    );
+    const execution = {
+      mode: 'managed-host',
+      hostIds: [enrolled.host.id],
+    };
+    await request(app)
+      .post('/workspaces/workspace/agent/agents')
+      .send({ name: 'remote', execution })
+      .expect(400, { error: 'program_unavailable' });
+    await request(app)
+      .patch('/workspaces/workspace/agent/agents/ag_local')
+      .send({ execution: { ...execution, provider: 'qwen' } })
+      .expect(400, { error: 'program_unavailable' });
+    expect(await readWorkspaceAgents(workspaceCwd)).toEqual([
+      { id: 'ag_local', name: 'local', createdAt: 1 },
+    ]);
+  },
+);
+
+it.each(['qwen', 'claude'])(
+  'allows inheriting an offline protocol-v2 Host program: %s',
+  async (program) => {
+    const workspaceCwd = path.join(runtimeDir, 'offline-v2-host');
+    const { token } = await issueAgentHostEnrollment(workspaceCwd);
+    const enrolled = await enrollAgentHost(workspaceCwd, {
+      token,
+      name: 'offline',
+      workspaceCwd: '/remote/offline',
+      providers: [program],
+    });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1);
+    try {
+      await heartbeatAgentHost(
+        workspaceCwd,
+        enrolled.host.id,
+        enrolled.secret,
+        {
+          workspaceCwd: '/remote/offline',
+          providers: [program],
+          protocol: 2,
+        },
+      );
+    } finally {
+      clock.mockRestore();
+    }
+    const app = appFor(runtimeAt(workspaceCwd));
+    const response = await request(app)
+      .get('/workspaces/workspace/agent/agents')
+      .expect(200);
+    expect(response.body.runtimes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: enrolled.host.id,
+          programs: [program],
+          status: 'offline',
+        }),
+      ]),
+    );
+    const execution = { mode: 'managed-host', hostIds: [enrolled.host.id] };
+    const created = await request(app)
+      .post('/workspaces/workspace/agent/agents')
+      .send({ name: 'remote', execution })
+      .expect(200);
+    await request(app)
+      .patch(`/workspaces/workspace/agent/agents/${created.body.id}`)
+      .send({ execution: { ...execution, provider: program } })
+      .expect(200);
+  },
+);
 
 it('reports local programs and agent status from the live session-agent runs', async () => {
   const workspaceCwd = path.join(runtimeDir, 'status');

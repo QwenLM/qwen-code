@@ -34,7 +34,10 @@ import type {
   Thread,
   ThreadRun,
 } from '@qwen-code/qwen-code-core';
-import type { SessionAgentProgram } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
+import {
+  HOST_PROTOCOL_VERSION,
+  type SessionAgentProgram,
+} from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 import { updateWorkspaceAgentsWithSquads } from '@qwen-code/qwen-code-core/agents/session-agents/squad-store.js';
 import {
   assignThread,
@@ -73,7 +76,7 @@ import {
   DEFAULT_THREAD_TOKEN_BUDGET,
   AGENT_PROGRAM_LABELS,
   hostAvailablePrograms,
-  hostOffersProgram,
+  type AgentHostView,
   isAgentProgram,
   isThreadTerminal,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
@@ -151,6 +154,12 @@ const EXECUTING_SESSION_RUN_STATUSES: ReadonlySet<string> = new Set([
   'running',
   'awaiting_approval',
 ]);
+
+function sessionHostPrograms(host: AgentHostView): SessionAgentProgram[] {
+  return host.protocol === HOST_PROTOCOL_VERSION
+    ? hostAvailablePrograms(host)
+    : [];
+}
 
 /** The programs this machine can run agents with, as ids. */
 async function localPrograms(): Promise<SessionAgentProgram[]> {
@@ -787,8 +796,9 @@ export function registerWorkspaceAgentRoutes(
           kind: 'external' as const,
           label: host.name,
           provider: host.providers.join(', '),
-          programs: hostAvailablePrograms(host),
+          programs: sessionHostPrograms(host),
           status:
+            host.protocol === HOST_PROTOCOL_VERSION &&
             host.lastSeenAt !== undefined &&
             now - host.lastSeenAt <= AGENT_HOST_ONLINE_WINDOW_MS
               ? ('online' as const)
@@ -1580,10 +1590,13 @@ export function registerWorkspaceAgentRoutes(
             res.status(400).json({ error: 'agent_host_not_found' });
             return;
           }
-          const { provider } = execution;
           if (
-            provider &&
-            !placed.some((host) => hostOffersProgram(host, provider))
+            !placed.some((host) => {
+              const programs = sessionHostPrograms(host);
+              return execution.provider === undefined
+                ? programs.length > 0
+                : programs.includes(execution.provider);
+            })
           ) {
             res.status(400).json({ error: 'program_unavailable' });
             return;
@@ -1880,6 +1893,27 @@ export function registerWorkspaceAgentRoutes(
         ) {
           res.status(400).json({ error: 'program_unavailable' });
           return;
+        }
+        if (execution?.mode === 'managed-host') {
+          const hosts = await readAgentHosts(runtime.workspaceCwd);
+          const placed = hosts.filter((host) =>
+            execution.hostIds.includes(host.id),
+          );
+          if (placed.length !== execution.hostIds.length) {
+            res.status(400).json({ error: 'agent_host_not_found' });
+            return;
+          }
+          if (
+            !placed.some((host) => {
+              const programs = sessionHostPrograms(host);
+              return execution.provider === undefined
+                ? programs.length > 0
+                : programs.includes(execution.provider);
+            })
+          ) {
+            res.status(400).json({ error: 'program_unavailable' });
+            return;
+          }
         }
         const result = await updateWorkspaceAgent(
           runtime.workspaceCwd,
