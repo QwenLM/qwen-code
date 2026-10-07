@@ -61,6 +61,10 @@ import {
   reconcileThreadOutbox,
   retireWorkspaceAgent,
   setWorkspaceAgentEnabled,
+  updateWorkspaceAgent,
+  issueAgentHostEnrollment,
+  enrollAgentHost,
+  heartbeatAgentHost,
   isAgentAddressable,
   updateWorkspaceAgents,
   withAgentStoreTransaction,
@@ -424,6 +428,44 @@ describe('agent versioned store', () => {
     );
   });
 
+  // Each receipt breaks exactly one term of `isValidHostResultReceipt`, so the
+  // attempt and leaseId cases carry a well-formed digest and cannot be refused
+  // by the digest term instead. The non-record case is `null` rather than a
+  // string: `null['attempt']` throws instead of validating, which is what tells
+  // that term apart from the ones after it.
+  const malformedReceipts: Array<[string, unknown]> = [
+    [
+      'digest is not sha256 hex',
+      { attempt: 1, leaseId: 'lease', digest: 'invalid' },
+    ],
+    [
+      'attempt is not a positive integer',
+      { attempt: 0, leaseId: 'lease', digest: 'a'.repeat(64) },
+    ],
+    ['leaseId is empty', { attempt: 1, leaseId: '', digest: 'a'.repeat(64) }],
+    ['digest is missing', { attempt: 1, leaseId: 'lease' }],
+    ['receipt is not a record', null],
+  ];
+
+  it.each(malformedReceipts)(
+    'rejects a persisted Host result receipt whose %s',
+    async (_term, receipt) => {
+      await writeRaw(
+        getThreadPath(PROJECT_ROOT, 'th_root'),
+        thread({
+          runs: [
+            run(1, 0, {
+              hostResultReceipt: receipt as ThreadRun['hostResultReceipt'],
+            }),
+          ],
+        }),
+      );
+      await expect(readThread(PROJECT_ROOT, 'th_root')).rejects.toThrow(
+        /Malformed/,
+      );
+    },
+  );
+
   it('persists a run counter allocation before any thread write', async () => {
     await expect(allocateRunSequence(PROJECT_ROOT)).resolves.toBe(1);
     await expect(allocateRunSequence(PROJECT_ROOT)).resolves.toBe(2);
@@ -608,6 +650,59 @@ describe('agent versioned store', () => {
     );
     expect(fromAgent.outcomes[0]?.decision).toEqual({ kind: 'dispatch' });
   });
+  it('consumes a fresh enrollment token without replacing a valid host', async () => {
+    const first = await issueAgentHostEnrollment(PROJECT_ROOT);
+    const enrolled = await enrollAgentHost(PROJECT_ROOT, {
+      token: first.token,
+      name: 'worker',
+      workspaceCwd: '/worker',
+      providers: ['Qwen Code ACP'],
+    });
+    const fresh = await issueAgentHostEnrollment(PROJECT_ROOT);
+
+    await expect(
+      heartbeatAgentHost(PROJECT_ROOT, enrolled.host.id, enrolled.secret, {
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+        enrollmentToken: fresh.token,
+      }),
+    ).resolves.toMatchObject({ id: enrolled.host.id });
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token: fresh.token,
+        name: 'other',
+        workspaceCwd: '/other',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).rejects.toThrow('Invalid or expired Agent Host enrollment token.');
+  });
+
+  it('keeps a fresh enrollment token when the saved credential is invalid', async () => {
+    const first = await issueAgentHostEnrollment(PROJECT_ROOT);
+    const enrolled = await enrollAgentHost(PROJECT_ROOT, {
+      token: first.token,
+      name: 'worker',
+      workspaceCwd: '/worker',
+      providers: ['Qwen Code ACP'],
+    });
+    const fresh = await issueAgentHostEnrollment(PROJECT_ROOT);
+
+    await expect(
+      heartbeatAgentHost(PROJECT_ROOT, enrolled.host.id, 'invalid', {
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+        enrollmentToken: fresh.token,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token: fresh.token,
+        name: 'replacement',
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).resolves.toMatchObject({ host: { name: 'replacement' } });
+  });
 });
 
 describe('retiring an agent', () => {
@@ -717,6 +812,87 @@ describe('retiring an agent', () => {
     ).resolves.toBe('updated');
     const [alice] = await readWorkspaceAgents(PROJECT_ROOT);
     expect(isAgentAddressable(alice)).toBe(true);
+  });
+
+  it('leaves every roster field unchanged when a combined placement update is refused', async () => {
+    await seed([ALICE]);
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ runs: [run(1, 0, { status: 'running' })] }),
+    );
+    await expect(
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        applyConfig: (agent) => ({ ...agent, description: 'changed' }),
+        execution: { mode: 'local' },
+        enabled: false,
+      }),
+    ).resolves.toBe('has_live_work');
+    expect(await readWorkspaceAgents(PROJECT_ROOT)).toEqual([ALICE]);
+  });
+
+  it('does not apply config when disabling is refused by unreadable threads', async () => {
+    await seed([ALICE]);
+    await writeRaw(getThreadPath(PROJECT_ROOT, 'th_broken'), {
+      schemaVersion: AGENTS_SCHEMA_VERSION,
+    });
+    await expect(
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        applyConfig: (agent) => ({ ...agent, description: 'changed' }),
+        enabled: false,
+      }),
+    ).rejects.toThrow('thread records are unreadable');
+    expect(await readWorkspaceAgents(PROJECT_ROOT)).toEqual([ALICE]);
+  });
+
+  it('checks concurrent persona and placement patches against the locked roster', async () => {
+    await seed([ALICE]);
+    const enrollment = await issueAgentHostEnrollment(PROJECT_ROOT);
+    const { host } = await enrollAgentHost(PROJECT_ROOT, {
+      token: enrollment.token,
+      name: 'worker',
+      workspaceCwd: '/worker',
+      providers: ['Qwen Code ACP'],
+    });
+    const results = await Promise.all([
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        execution: {
+          mode: 'managed-host',
+          hostIds: [host.id],
+          provider: 'qwen',
+        },
+      }),
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        applyConfig: (agent) => ({ ...agent, model: 'custom-model' }),
+      }),
+    ]);
+    expect(results.sort()).toEqual([
+      'managed_host_persona_unsupported',
+      'updated',
+    ]);
+    const [agent] = await readWorkspaceAgents(PROJECT_ROOT);
+    expect(
+      agent.execution?.mode === 'managed-host' && Boolean(agent.model),
+    ).toBe(false);
+  });
+
+  it('combines a config change with disable and settles queued work', async () => {
+    await seed([ALICE]);
+    await writeThread(
+      PROJECT_ROOT,
+      thread({ runs: [run(1, 0, { status: 'queued', endedAt: undefined })] }),
+    );
+    await expect(
+      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
+        applyConfig: (agent) => ({ ...agent, description: 'paused' }),
+        enabled: false,
+      }),
+    ).resolves.toBe('updated');
+    expect(await readWorkspaceAgents(PROJECT_ROOT)).toEqual([
+      { ...ALICE, description: 'paused', enabled: false },
+    ]);
+    expect((await readThread(PROJECT_ROOT, 'th_root'))?.runs[0]?.status).toBe(
+      'cancelled',
+    );
   });
 
   it('cancels queued runs on disable so they cannot wedge their thread', async () => {

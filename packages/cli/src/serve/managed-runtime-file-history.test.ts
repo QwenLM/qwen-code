@@ -81,6 +81,31 @@ it('restores overwritten files and removes new files after multiple batches and 
   expect((await restored.rewind('prompt')).filesChanged).toEqual([]);
 });
 
+it('retains later snapshots and tracked paths when rewinding an earlier prompt', async () => {
+  const existing = path.join(workspace, 'existing');
+  const created = path.join(workspace, 'new');
+  await writeFile(existing, 'before');
+  await history.prepare('prompt', ['existing']);
+  await history.execute('existing', () => writeFile(existing, 'after'));
+  await history.prepare('next-prompt', ['new']);
+  await history.execute('new', () => writeFile(created, 'created'));
+  const snapshots = history.state().snapshots;
+  const result = await history.rewind('prompt');
+  expect(result.conflict).toBe(false);
+  expect(result.filesFailed).toEqual([]);
+  expect(result.state.snapshots).toEqual(snapshots);
+  expect(result.state.snapshots.map((snapshot) => snapshot.promptId)).toEqual([
+    'prompt',
+    'next-prompt',
+  ]);
+  expect(result.state.files).toEqual({
+    existing: expect.objectContaining({ mode: expect.any(Number) }),
+    new: null,
+  });
+  expect(await readFile(existing, 'utf8')).toBe('before');
+  await expect(readFile(created)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
 it('refuses external changes before undo without modifying another file', async () => {
   await writeFile(path.join(workspace, 'a'), 'old a');
   await writeFile(path.join(workspace, 'b'), 'old b');
@@ -497,6 +522,57 @@ it('admits history preparation beside async Hooks while retaining their close an
   executor.closeSessionAdmission(runtime);
 });
 
+it.skipIf(process.platform === 'win32')(
+  'records and rewinds the path consumed by an escaped write',
+  async () => {
+    const file = path.join(workspace, 'notes file.txt');
+    await writeFile(file, 'before');
+    const runtime = randomUUID();
+    const executor = new ManagedToolExecutor(async () =>
+      createManagedToolSet(workspace, runtime),
+    );
+    const control = (
+      operation: Parameters<typeof executor.controlFileHistory>[2],
+    ) => executor.controlFileHistory(owner, runtime, operation);
+    try {
+      await control({ kind: 'raw-file-history', action: 'bind', state: null });
+      await control({
+        kind: 'raw-file-history',
+        action: 'prepare',
+        promptId: runtime,
+        paths: ['notes file.txt'],
+      });
+      const answer = await executor.execute(
+        {
+          sessionId: runtime,
+          promptId: runtime,
+          callId: randomUUID(),
+          argsDigest: 'digest',
+        },
+        'write_file',
+        { file_path: String.raw`notes\ file.txt`, content: 'after' },
+      );
+      expect(answer.executionStatus).toBe('success');
+      expect(await readFile(file, 'utf8')).toBe('after');
+      const saved = parseHostedFileHistoryState(
+        await control({ kind: 'raw-file-history', action: 'snapshot' }),
+        owner,
+      );
+      expect(Object.keys(saved.files)).toEqual(['notes file.txt']);
+      expect(
+        await control({
+          kind: 'raw-file-history',
+          action: 'rewind',
+          promptId: runtime,
+        }),
+      ).toMatchObject({ conflict: false, filesChanged: ['notes file.txt'] });
+      expect(await readFile(file, 'utf8')).toBe('before');
+    } finally {
+      await executor.close();
+    }
+  },
+);
+
 it('wires history to the real raw executor and preserves its original invocation', async () => {
   const runtime = randomUUID();
   const tools = createManagedToolSet(workspace, runtime);
@@ -621,7 +697,12 @@ it('wires history to the real raw executor and preserves its original invocation
   const app = express();
   registerManagedRuntimeToolRoutes(
     app,
-    { token: 'token', leaseId: 'lease', epoch: 1 },
+    {
+      token: 'token',
+      leaseId: 'lease',
+      epoch: 1,
+      runtimeIncarnation: 'incarnation',
+    },
     executor,
   );
   const replay = await supertest(app)

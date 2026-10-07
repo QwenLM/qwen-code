@@ -10,7 +10,9 @@ import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
   MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+  ManagedRuntimeProviderProtocolError,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
+  MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
   fitManagedRuntimeProviderResult,
   managedRuntimeProviderLimit,
   parseManagedRuntimeProviderOperation,
@@ -272,6 +274,44 @@ describe('managed-runtime-provider/1', () => {
         session,
       ),
     ).toThrow('digest changed');
+  });
+
+  it('admits only the known context files, in order and within the cap', () => {
+    const operation = { kind: 'workspace-context' } as const;
+    const parse = (files: unknown) =>
+      parseManagedRuntimeProviderResult(operation, { files }, session);
+    const files = [
+      { name: 'QWEN.md', text: 'rules' },
+      { name: 'AGENTS.md', text: '' },
+    ];
+    expect(parse(files)).toEqual(files);
+    expect(parse([])).toEqual([]);
+    expect(
+      parseManagedRuntimeProviderOperation(
+        { kind: 'workspace-context' },
+        session,
+      ),
+    ).toEqual(operation);
+    for (const invalid of [
+      [{ name: '../etc/passwd', text: 'x' }],
+      [files[1], files[0]],
+      [files[0], files[0]],
+      [{ name: 'QWEN.md', text: 1 }],
+      [{ name: 'QWEN.md', text: 'x', path: '/etc' }],
+      [
+        {
+          name: 'QWEN.md',
+          text: 'x'.repeat(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS + 1),
+        },
+      ],
+    ])
+      expect(() => parse(invalid)).toThrow();
+    expect(() =>
+      parseManagedRuntimeProviderOperation(
+        { kind: 'workspace-context', path: '/' },
+        session,
+      ),
+    ).toThrow();
   });
 
   it('pins prepared references and normalized arguments to the original request', () => {
@@ -982,4 +1022,74 @@ it('validates raw file history ownership, paths and the closed operation shape',
       session,
     ),
   ).toThrow();
+});
+
+it('refuses rewind outcomes that cannot form a valid stored receipt', () => {
+  const promptId = session.runtimeSessionId;
+  const backup = {
+    backupFileName: null,
+    version: 1,
+    backupTime: '2026-10-01T00:00:00.000Z',
+  };
+  const state = {
+    ownerSessionId: session.harnessSessionId,
+    snapshots: [
+      {
+        promptId,
+        timestamp: backup.backupTime,
+        trackedFileBackups: Object.fromEntries([
+          ['a.txt', backup],
+          ['__proto__', backup],
+        ]),
+      },
+    ],
+    files: Object.fromEntries([
+      ['a.txt', null],
+      ['__proto__', null],
+    ]),
+  };
+  const operation = {
+    kind: 'raw-file-history',
+    action: 'rewind',
+    promptId,
+  } as const;
+  const outcome = {
+    state,
+    filesChanged: ['a.txt', '__proto__'],
+    filesFailed: [],
+    conflict: false,
+  };
+  for (const valid of [
+    outcome,
+    { ...outcome, filesChanged: [], conflict: true },
+  ])
+    expect(
+      parseManagedRuntimeProviderResult(operation, valid, session),
+    ).toEqual(valid);
+  for (const invalid of [
+    { ...outcome, filesChanged: ['a.txt', 'a.txt'] },
+    { ...outcome, filesChanged: ['missing.txt'] },
+    { ...outcome, filesChanged: ['constructor'] },
+    { ...outcome, conflict: true },
+    {
+      ...outcome,
+      state: {
+        ...state,
+        snapshots: [
+          { ...state.snapshots[0], promptId: session.harnessSessionId },
+        ],
+      },
+    },
+  ])
+    expect(() =>
+      parseManagedRuntimeProviderResult(operation, invalid, session),
+    ).toThrow(ManagedRuntimeProviderProtocolError);
+  for (const filesChanged of [['./a.txt'], [null]])
+    expect(() =>
+      parseManagedRuntimeProviderResult(
+        operation,
+        { ...outcome, filesChanged },
+        session,
+      ),
+    ).toThrow('Invalid Hosted file history path.');
 });

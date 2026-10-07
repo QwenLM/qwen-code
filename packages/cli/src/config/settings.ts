@@ -55,6 +55,7 @@ import {
 import {
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
+  SETTINGS_DIRECTORY_NAME,
   getHomeEnvFallbackVars,
   loadEnvironment,
   preResolveHomeEnvOverrides,
@@ -1229,58 +1230,111 @@ function readSettingsLayers(
             opts.preserveInvalidWorkspaceSettings
           )
             throw parseError;
-          // ===== JSON parse failed — enter corruption recovery =====
-          // Strategy: save corrupted file as .corrupted → reset to empty →
-          // show dialog in UI. Never crash due to a corrupted settings file.
-          //
-          // Failed saves may retain private recovery copies, but those can
-          // predate another writer's save and must not be restored automatically.
-
-          // Step 1: copy corrupted file to .corrupted for reference
-          // MUST guarantee .corrupted exists so onExit can restore it.
-          // Use copy (not rename) — the file must stay on disk so that
-          // child processes spawned by relaunchAppInChildProcess() can
-          // enter the existsSync block where env-var propagation is checked.
+          // Workspace-only recovery preserves a copy for the existing dialog.
           debugLogger.warn(
-            `Settings file ${filePath} has invalid JSON (${getErrorMessage(parseError)}). Resetting to empty settings.`,
+            `Workspace settings ${filePath} have invalid JSON (${getErrorMessage(parseError)}).`,
           );
-
+          let original: fs.Stats;
           try {
-            fs.copyFileSync(filePath, corruptedPath);
-            corruptedSaved = true;
+            if (
+              fs.existsSync(corruptedPath) &&
+              fs.realpathSync(filePath) === fs.realpathSync(corruptedPath)
+            )
+              throw new Error(
+                'The corruption copy resolves to the original settings file.',
+              );
+            original = fs.lstatSync(filePath);
+            if (
+              !original.isFile() ||
+              original.nlink !== 1 ||
+              fs.realpathSync(filePath) !==
+                path.join(
+                  realWorkspaceDir,
+                  SETTINGS_DIRECTORY_NAME,
+                  'settings.json',
+                )
+            )
+              throw new Error(
+                'Linked Workspace settings cannot be recovered automatically; repair the original file.',
+              );
+            const source = fs.openSync(
+              filePath,
+              fs.constants.O_RDONLY |
+                fs.constants.O_NOFOLLOW |
+                fs.constants.O_NONBLOCK,
+            );
+            try {
+              const opened = fs.fstatSync(source);
+              if (
+                !opened.isFile() ||
+                opened.nlink !== 1 ||
+                opened.dev !== original.dev ||
+                opened.ino !== original.ino
+              )
+                throw new Error(
+                  'Workspace settings changed before preservation.',
+                );
+              const bytes = fs.readFileSync(source);
+              fs.rmSync(corruptedPath, { force: true });
+              const copy = fs.openSync(
+                corruptedPath,
+                'wx',
+                original.mode & 0o777,
+              );
+              try {
+                fs.fchmodSync(copy, original.mode & 0o777);
+                fs.writeFileSync(copy, bytes);
+              } finally {
+                fs.closeSync(copy);
+              }
+            } finally {
+              fs.closeSync(source);
+            }
           } catch (copyError) {
-            debugLogger.warn(
-              `Failed to copy corrupted file: ${getErrorMessage(copyError)}`,
+            throw new Error(
+              `Cannot preserve malformed workspace settings ${filePath}: ${getErrorMessage(copyError)}`,
             );
           }
-
-          // Step 2: no recoverable content — start with empty settings
-          if (!rawSettings) {
-            const warningMsg = `Settings file ${filePath} has invalid JSON. Your settings have been reset.`;
-            debugLogger.warn(warningMsg);
-            if (corruptedSaved) {
-              // Clear the original file so the settings UI shows empty settings
-              // instead of the corrupted content.
-              try {
-                fs.writeFileSync(filePath, '{}', 'utf-8');
-              } catch {
-                /* ignore — settings are already empty in memory */
-              }
+          try {
+            const target = fs.openSync(
+              filePath,
+              fs.constants.O_WRONLY |
+                fs.constants.O_NOFOLLOW |
+                fs.constants.O_NONBLOCK,
+            );
+            try {
+              const opened = fs.fstatSync(target);
+              if (
+                !opened.isFile() ||
+                opened.nlink !== 1 ||
+                opened.dev !== original.dev ||
+                opened.ino !== original.ino
+              )
+                throw new Error('Workspace settings changed before reset.');
+              fs.ftruncateSync(target, 0);
+              fs.writeFileSync(target, '{}', 'utf-8');
+            } finally {
+              fs.closeSync(target);
             }
-            return {
-              settings: {},
-              migrationWarnings: [],
-              corruptedPath: corruptedSaved ? corruptedPath : undefined,
-              wasRecovered: false,
-            };
+          } catch (writeError) {
+            debugLogger.warn(
+              `Could not reset malformed workspace settings ${filePath}: ${getErrorMessage(writeError)}. Using empty Workspace settings; the preserved copy is ${corruptedPath}.`,
+            );
           }
+          return {
+            settings: {},
+            migrationWarnings: [],
+            corruptedPath,
+            wasRecovered: false,
+          };
         }
 
         // Propagate corruption state from parent process via env vars.
         // relaunchAppInChildProcess() spawns a child that re-reads
         // settings.json (already valid after parent recovered it). The
         // env vars preserve the corruption marker across the boundary.
-        // Only apply to user scope since that's where corruption is detected.
+        // Operator settings never enter this flow; only the matching Workspace
+        // backup can be offered for restoration.
         // Clear env vars after reading so subsequent loadSettings calls
         // don't re-trigger this path.
         const envCorruptedPath = process.env[ENV_CORRUPTED_PATH];
@@ -1288,7 +1342,11 @@ function readSettingsLayers(
           (opts.consumeCorruptionEnvVars ?? true) &&
           envCorruptedPath &&
           envCorruptedPath === corruptedPath &&
-          scope === SettingScope.User
+          scope === SettingScope.Workspace &&
+          !snapshot &&
+          !operatorSandbox &&
+          !opts.preserveInvalidWorkspaceSettings &&
+          fs.existsSync(corruptedPath)
         ) {
           corruptedSaved = true;
           recoveredFromEnvVar = process.env[ENV_WAS_RECOVERED] === '1';
@@ -1428,11 +1486,7 @@ function readSettingsLayers(
   );
   const userResult = loadAndMigrate(userSettingsPath, SettingScope.User);
 
-  let workspaceResult: {
-    settings: Settings;
-    rawJson?: string;
-    migrationWarnings?: string[];
-  } = {
+  let workspaceResult: ReturnType<typeof loadAndMigrate> = {
     settings: {} as Settings,
     rawJson: undefined,
   };
@@ -1582,8 +1636,8 @@ function readSettingsLayers(
     isTrusted,
     migratedInMemoryScopes,
     allMigrationWarnings,
-    userResult.corruptedPath,
-    userResult.wasRecovered ?? false,
+    workspaceResult.corruptedPath,
+    workspaceResult.wasRecovered ?? false,
     workspaceSettingsActive,
   );
 }

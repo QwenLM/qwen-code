@@ -3,8 +3,10 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCancelRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCreateRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellCwdOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellListRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellOperationRequest;
@@ -14,6 +16,8 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellStreamRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSubmitRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEvent;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEventQueryRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskGetRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskQueryRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
@@ -66,6 +70,15 @@ public class WebShellAgentController {
             @Valid @RequestBody WebShellTaskGetRequest request) {
         return tasks.getWebShellTask(tenant.tenantId(), tenant.actorId(),
                 request.sessionId(), request.taskId());
+    }
+
+    @PostMapping("/tasks/events/query")
+    public WebShellPage<WebShellTaskEvent> taskEvents(TenantContext tenant,
+            @Valid @RequestBody WebShellTaskEventQueryRequest request) {
+        return tasks.queryWebShellTaskEvents(tenant.tenantId(),
+                tenant.actorId(), request.sessionId(), request.taskId(),
+                request.after(),
+                request.limit() == null ? 20 : request.limit());
     }
 
     @PostMapping("/sessions/query")
@@ -127,7 +140,7 @@ public class WebShellAgentController {
         }
         validateTraceMetadata(request.metadata());
         WebShellAdmission admission = webShell(selection == null
-                ? service.createSession(tenant.tenantId(),
+                ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         request.idempotencyKey(), request.agentId(), null,
                         request.title(), null, request.input())
                 : service.createWorkspaceSession(tenant.tenantId(),
@@ -185,11 +198,34 @@ public class WebShellAgentController {
         return operation(tenant, request, OperationKind.DELETE);
     }
 
+    @PostMapping("/sessions/unarchive")
+    public ResponseEntity<WebShellSession> unarchive(TenantContext tenant,
+            @Valid @RequestBody WebShellLifecycleRequest request) {
+        var result = service.unarchiveWebShellSession(tenant.tenantId(), tenant.actorId(),
+                request.idempotencyKey(), request.sessionId());
+        return ResponseEntity.ok().header("X-Qwen-Idempotent-Replay", Boolean.toString(result.replayed()))
+                .body(result.body());
+    }
+
     @PostMapping("/operations/query")
-    public WebShellCommandOperation queryOperation(TenantContext tenant,
+    public Object queryOperation(TenantContext tenant,
             @Valid @RequestBody WebShellOperationRequest request) {
-        return lifecycle.getWebShell(tenant.tenantId(), tenant.actorId(),
-                request.sessionId(), request.operationId());
+        return lifecycle.getWebShellOperation(tenant.tenantId(),
+                tenant.actorId(), request.sessionId(), request.operationId());
+    }
+
+    @PostMapping("/sessions/cwd/change")
+    public ResponseEntity<WebShellCwdOperation> changeCwd(
+            TenantContext tenant,
+            @Valid @RequestBody WebShellChangeCwdRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse,
+                request.requestId());
+        return ResponseEntity.accepted().body(
+                lifecycle.admitWebShellCwdChange(tenant.tenantId(),
+                        tenant.actorId(), request.sessionId(),
+                        request.idempotencyKey(), request.cwdRelative(),
+                        request.expectedContextRevision()));
     }
 
     private ResponseEntity<WebShellCommandOperation> operation(

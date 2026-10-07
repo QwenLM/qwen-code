@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { parseManagedRuntimeProviderResult } from './managed-runtime-provider-protocol.js';
+import {
+  parseManagedRuntimeProviderResult,
+  type ManagedWorkspaceContextFile,
+} from './managed-runtime-provider-protocol.js';
 import type {
   RawFileHistoryOperation,
   HostedFileHistoryState,
@@ -118,6 +121,19 @@ export class HostedWorkspaceBroker {
       ...this.identity,
       turnKind: 'bootstrap',
     });
+  }
+
+  /** The Session's project instruction files, read outside the execution ledger. */
+  async workspaceContext(): Promise<ManagedWorkspaceContextFile[]> {
+    const operation = { kind: 'workspace-context' } as const;
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    return parseManagedRuntimeProviderResult(operation, response['result'], {
+      ...this.identity,
+      turnKind: 'bootstrap',
+    }) as ManagedWorkspaceContextFile[];
   }
 
   async warm(): Promise<void> {
@@ -539,17 +555,29 @@ export class HostedWorkspaceBroker {
   }
 
   async acknowledge(id: string, receipt: LocalShellReceipt): Promise<void> {
-    const response = await this.request(
-      `/executions/${encodeURIComponent(id)}:acknowledge`,
-      {
-        receipt: {
-          executionCallId: receipt.executionCallId,
-          manifest: receipt.manifest,
-          deliveryStatus: receipt.deliveryStatus,
-          historyRevision: receipt.historyRevision,
-        },
+    const path = `/executions/${encodeURIComponent(id)}:acknowledge`;
+    const body = {
+      receipt: {
+        executionCallId: receipt.executionCallId,
+        manifest: receipt.manifest,
+        deliveryStatus: receipt.deliveryStatus,
+        historyRevision: receipt.historyRevision,
       },
-    );
+    };
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request(path, body);
+    } catch (cause) {
+      // The acknowledgement runs after every durable record is committed, so
+      // a lost reply is replayed the way prepare() replays its reservation:
+      // the runtime deduplicates an identical receipt.
+      if (
+        !(cause instanceof TypeError) &&
+        !(cause instanceof DOMException && cause.name === 'TimeoutError')
+      )
+        throw cause;
+      response = await this.request(path, body);
+    }
     if (
       response['executionCallId'] !== id ||
       response['acknowledged'] !== true

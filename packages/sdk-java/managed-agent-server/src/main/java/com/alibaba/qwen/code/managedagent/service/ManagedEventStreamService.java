@@ -31,6 +31,7 @@ public class ManagedEventStreamService {
     private final Duration reconciliationInterval;
     private final Duration heartbeatInterval;
     private final Duration streamTimeout;
+    private final Duration readGrantRecheckInterval;
 
     public ManagedEventStreamService(ManagedAgentService agentService,
             SessionEventHub eventHub, ExecutorService executor,
@@ -43,6 +44,8 @@ public class ManagedEventStreamService {
         this.heartbeatInterval = properties.getEvents()
                 .getHeartbeatInterval();
         this.streamTimeout = properties.getEvents().getStreamTimeout();
+        this.readGrantRecheckInterval = properties.getEvents()
+                .getReadGrantRecheckInterval();
     }
 
     public SseEmitter publicStream(String tenantId, String actorId,
@@ -74,6 +77,7 @@ public class ManagedEventStreamService {
         String tenantId = session.tenantId();
         String sessionId = session.sessionId();
         AtomicBoolean closed = callbacks(emitter);
+        ReadGrant grant = new ReadGrant(emitter, closed, actorId, session);
         long sequence = initialSequence;
         long heartbeatAt = System.nanoTime()
                 + heartbeatInterval.toNanos();
@@ -81,7 +85,7 @@ public class ManagedEventStreamService {
                 sessionId)) {
             boolean reconcile = true;
             while (!closed.get()) {
-                if (!stillReadable(emitter, closed, actorId, session)) {
+                if (!grant.stillReadable()) {
                     break;
                 }
                 if (reconcile) {
@@ -98,7 +102,7 @@ public class ManagedEventStreamService {
                     }
                     for (EventRecord record : events) {
                         PublicEvent event = agentService.publicEvent(record);
-                        if (!stillReadable(emitter, closed, actorId, session)) {
+                        if (!grant.stillReadable()) {
                             break;
                         }
                         emitter.send(SseEmitter.event()
@@ -125,7 +129,7 @@ public class ManagedEventStreamService {
                     continue;
                 }
                 for (EventRecord event : delivery.events()) {
-                    if (!stillReadable(emitter, closed, actorId, session)) {
+                    if (!grant.stillReadable()) {
                         break;
                     }
                     PublicEvent publicEvent = agentService.publicEvent(event);
@@ -158,6 +162,7 @@ public class ManagedEventStreamService {
         String tenantId = session.tenantId();
         String sessionId = session.sessionId();
         AtomicBoolean closed = callbacks(emitter);
+        ReadGrant grant = new ReadGrant(emitter, closed, actorId, session);
         long sequence = initialSequence;
         long heartbeatAt = System.nanoTime()
                 + heartbeatInterval.toNanos();
@@ -165,7 +170,7 @@ public class ManagedEventStreamService {
                 sessionId)) {
             boolean reconcile = true;
             while (!closed.get()) {
-                if (!stillReadable(emitter, closed, actorId, session)) {
+                if (!grant.stillReadable()) {
                     break;
                 }
                 if (reconcile) {
@@ -182,7 +187,7 @@ public class ManagedEventStreamService {
                     }
                     for (EventRecord record : events) {
                         WebShellEvent event = agentService.webShellEvent(record);
-                        if (!stillReadable(emitter, closed, actorId, session)) {
+                        if (!grant.stillReadable()) {
                             break;
                         }
                         emitter.send(SseEmitter.event()
@@ -209,7 +214,7 @@ public class ManagedEventStreamService {
                     continue;
                 }
                 for (EventRecord event : delivery.events()) {
-                    if (!stillReadable(emitter, closed, actorId, session)) {
+                    if (!grant.stillReadable()) {
                         break;
                     }
                     WebShellEvent webEvent = agentService.webShellEvent(event);
@@ -268,6 +273,46 @@ public class ManagedEventStreamService {
         emitter.onTimeout(() -> closed.set(true));
         emitter.onError(error -> closed.set(true));
         return closed;
+    }
+
+    /**
+     * A stream's read grant, re-verified against the database at most once
+     * per recheck interval instead of before every delivered event; a
+     * revocation stops event delivery within the interval, and a
+     * session.deleted event still ends the stream immediately. The recheck
+     * runs when the stream loop iterates, so an idle stream closes at its
+     * next wake: closure takes at most the interval plus
+     * events.poll-interval.
+     */
+    private final class ReadGrant {
+        private final SseEmitter emitter;
+        private final AtomicBoolean closed;
+        private final String actorId;
+        private final SessionRecord session;
+        // MIN_VALUE, not 0: nanoTime may be negative, and a first check must
+        // always run.
+        private long recheckAt = Long.MIN_VALUE;
+
+        private ReadGrant(SseEmitter emitter, AtomicBoolean closed,
+                String actorId, SessionRecord session) {
+            this.emitter = emitter;
+            this.closed = closed;
+            this.actorId = actorId;
+            this.session = session;
+        }
+
+        private boolean stillReadable() {
+            long now = System.nanoTime();
+            if (now < recheckAt) {
+                return true;
+            }
+            if (ManagedEventStreamService.this.stillReadable(emitter, closed,
+                    actorId, session)) {
+                recheckAt = now + readGrantRecheckInterval.toNanos();
+                return true;
+            }
+            return false;
+        }
     }
 
     private boolean stillReadable(SseEmitter emitter, AtomicBoolean closed,

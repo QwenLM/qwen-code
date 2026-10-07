@@ -2,15 +2,20 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.AccessMode;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
@@ -69,6 +74,7 @@ public class WorkspaceStorageGuard {
         if (!enabled) {
             return "disabled";
         }
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
         Path root = roots.get(new Storage(tenantId, storageId));
         if (root == null) {
             return "unconfigured";
@@ -107,7 +113,36 @@ public class WorkspaceStorageGuard {
                 + " registration=" + (valid ? "valid" : "invalid");
     }
 
+    public record RecoveryRegistration(String tenantId, String storageId, String registrationId,
+            long mountRevision, String fenceOperationId, String root, String hostId,
+            String device, String inode, String birthTime) {
+    }
+
+    public RecoveryRegistration recoveryRegistration(String tenantId, String storageId,
+            long revision, String operationId) {
+        if (!enabled || !validId(operationId)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Registration saved = row(key(tenantId, storageId), false);
+        if (saved == null || !"FENCED".equals(saved.state()) || saved.revision() != revision
+                || !operationId.equals(saved.operationId()) || !tenantId.equals(saved.tenantId())
+                || !storageId.equals(saved.storageId()) || saved.holderKey() != null
+                || saved.bindingId() != null || saved.runtimeGeneration() != null
+                || saved.runtimeSessionId() != null || !validId(saved.registrationId())
+                || saved.completedOperationId() != null) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Path original = root(tenantId, storageId);
+        requireMatching(saved, identity(original), tenantId, storageId);
+        if (!marker(saved).equals(readMarker(original))) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        return new RecoveryRegistration(tenantId, storageId, saved.registrationId(), revision,
+                operationId, saved.root(), saved.hostId(), saved.device(), saved.inode(), saved.birthTime());
+    }
+
     public void verify(ContextBinding binding) {
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         if (!enabled) {
             return;
         }
@@ -115,6 +150,7 @@ public class WorkspaceStorageGuard {
     }
 
     void verifyLocked(ContextBinding binding) {
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         if (enabled) {
             verify(binding.getTenantId(), binding.getStorageId(), binding.getCwdRelative(), true);
         }
@@ -124,10 +160,13 @@ public class WorkspaceStorageGuard {
         if (!enabled || !validId(operationId)) {
             throw WorkspaceExecutionStore.unavailable();
         }
+        WorkspaceStorageKindGuard.requireFreshTransaction();
         Path root = root(tenantId, storageId);
         Identity identity = identity(root);
         String key = key(tenantId, storageId);
         Registration prepared = transaction.execute(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             jdbc.update("INSERT INTO managed_workspace_execution_lease"
                     + " (storage_key, tenant_id, storage_id) VALUES (?, ?, ?)"
                     + " ON DUPLICATE KEY UPDATE storage_key = storage_key",
@@ -154,7 +193,7 @@ public class WorkspaceStorageGuard {
                 jdbc.update("UPDATE managed_workspace_execution_lease SET tenant_id = ?, storage_id = ?,"
                         + " mount_operation_id = ?, mount_root = ?, mount_host_id = ?,"
                         + " mount_device = ?, mount_inode = ?, mount_birth_time = ?, mount_registration_id = ?"
-                        + " WHERE storage_key = ? AND mount_state = 'UNVERIFIED'",
+                        + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND mount_state = 'UNVERIFIED'",
                         tenantId, storageId, operationId, identity.root(), identity.hostId(),
                         identity.device(), identity.inode(), identity.birthTime(), registrationId, key);
                 return row(key, true);
@@ -178,6 +217,8 @@ public class WorkspaceStorageGuard {
         }
         publishMarker(root, marker);
         transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             Registration row = row(key, true);
             if (row == null || row.holderKey() != null || row.bindingId() != null
                     || row.runtimeGeneration() != null || row.runtimeSessionId() != null) {
@@ -196,7 +237,7 @@ public class WorkspaceStorageGuard {
             }
             int changed = jdbc.update("UPDATE managed_workspace_execution_lease"
                     + " SET mount_state = 'READY', mount_revision = mount_revision + 1,"
-                    + " mount_operation_id = NULL, mount_completed_operation_id = ? WHERE storage_key = ?"
+                    + " mount_operation_id = NULL, mount_completed_operation_id = ? WHERE storage_key = ? AND storage_kind = 'LOCAL' "
                     + " AND mount_state = 'UNVERIFIED' AND mount_operation_id = ?"
                     + " AND mount_revision = 0", operationId, key, operationId);
             if (changed != 1) {
@@ -210,6 +251,8 @@ public class WorkspaceStorageGuard {
             throw WorkspaceExecutionStore.unavailable();
         }
         transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             Registration current = row(key(tenantId, storageId), true);
             if (current != null && "FENCED".equals(current.state())
                     && tenantId.equals(current.tenantId()) && storageId.equals(current.storageId())
@@ -220,7 +263,7 @@ public class WorkspaceStorageGuard {
             int changed = jdbc.update("UPDATE managed_workspace_execution_lease"
                     + " SET mount_state = 'FENCED', mount_operation_id = ?,"
                     + " mount_completed_operation_id = NULL"
-                    + " WHERE storage_key = ? AND tenant_id = ? AND storage_id = ?"
+                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND tenant_id = ? AND storage_id = ?"
                     + " AND mount_state = 'READY' AND mount_revision = ?"
                     + " AND holder_key IS NULL AND binding_id IS NULL"
                     + " AND runtime_generation IS NULL AND runtime_session_id IS NULL",
@@ -238,6 +281,8 @@ public class WorkspaceStorageGuard {
         }
         Path root = root(tenantId, storageId);
         transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             Registration row = row(key(tenantId, storageId), true);
             if (row != null && "READY".equals(row.state())
                     && row.revision() == revision + 1 && row.operationId() == null
@@ -261,7 +306,7 @@ public class WorkspaceStorageGuard {
             int changed = jdbc.update("UPDATE managed_workspace_execution_lease"
                     + " SET mount_state = 'READY', mount_revision = mount_revision + 1,"
                     + " mount_operation_id = NULL, mount_completed_operation_id = ?"
-                    + " WHERE storage_key = ? AND mount_state = 'FENCED'"
+                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND mount_state = 'FENCED'"
                     + " AND mount_revision = ? AND mount_operation_id = ?",
                     operationId, key(tenantId, storageId), revision, operationId);
             if (changed != 1) {
@@ -294,13 +339,91 @@ public class WorkspaceStorageGuard {
         }
     }
 
+    // Probe-only verification: identical structural checks to verify(), but
+    // the cwd settlement probe classifies by the verdict — a momentary I/O
+    // failure on an identity or marker read, or on the directory liveness
+    // calls, is retryable-with-cause so the delivery machine re-arms the
+    // operation and the refusal log keeps the cause. Everything structural
+    // keeps the terminal unavailable(), and the shared acquire path above
+    // is deliberately untouched: re-classifying inside verify() would flip
+    // tool-turn verdicts.
+    public void verifyProbe(ContextBinding binding) {
+        if (!enabled) {
+            return;
+        }
+        verifyProbe(binding.getTenantId(), binding.getStorageId(),
+                binding.getCwdRelative());
+    }
+
+    private void verifyProbe(String tenantId, String storageId, String cwd) {
+        Path root = root(tenantId, storageId);
+        Identity actual;
+        try {
+            actual = identities.read(root);
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailableTransient(error);
+        } catch (RuntimeException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Registration row = row(key(tenantId, storageId), false);
+        if (row == null || !"READY".equals(row.state()) || row.operationId() != null
+                || row.revision() <= 0) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        requireMatching(row, actual, tenantId, storageId);
+        if (!marker(row).equals(readMarkerProbe(root))) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Path directory = root.resolve(cwd).normalize();
+        try {
+            if (!directory.startsWith(root)
+                    || !Files.readAttributes(directory,
+                            BasicFileAttributes.class,
+                            LinkOption.NOFOLLOW_LINKS).isDirectory()
+                    || !directory.toRealPath().equals(directory)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            directory.getFileSystem().provider().checkAccess(directory,
+                    AccessMode.READ, AccessMode.EXECUTE);
+        } catch (NoSuchFileException | AccessDeniedException
+                | SecurityException | IllegalArgumentException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailableTransient(error);
+        }
+    }
+
+    private Marker readMarkerProbe(Path root) {
+        Path file = root.resolve(MARKER);
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        try (FileChannel channel = FileChannel.open(file,
+                StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            if (channel.size() > 4096) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            ByteBuffer bytes = ByteBuffer.allocate((int) channel.size());
+            while (bytes.hasRemaining()) {
+                if (channel.read(bytes) <= 0) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+            }
+            return json.readValue(bytes.array(), Marker.class);
+        } catch (JsonProcessingException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailableTransient(error);
+        }
+    }
+
     private Registration row(String key, boolean lock) {
         List<Registration> rows = jdbc.query("SELECT tenant_id, storage_id, holder_key,"
                 + " binding_id, runtime_generation, runtime_session_id,"
                 + " mount_revision, mount_state, mount_operation_id, mount_root,"
                 + " mount_host_id, mount_device, mount_inode, mount_birth_time, mount_registration_id,"
                 + " mount_completed_operation_id"
-                + " FROM managed_workspace_execution_lease WHERE storage_key = ?"
+                + " FROM managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL'"
                 + (lock ? " FOR UPDATE" : ""), (result, index) -> new Registration(
                         result.getString("tenant_id"), result.getString("storage_id"),
                         result.getString("holder_key"), result.getString("binding_id"),

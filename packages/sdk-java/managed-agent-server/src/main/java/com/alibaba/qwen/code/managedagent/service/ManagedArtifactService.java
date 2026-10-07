@@ -128,12 +128,19 @@ public class ManagedArtifactService {
                 && policy.readOriginal(tenant.tenantId(), tenant.actorId(),
                         session.workspace().getWorkspaceId(), session.sessionId());
         var availability = reader.availability(page.artifacts());
+        if (availability.containsValue(false)) {
+            session(tenant, sessionId);
+        }
         return new WebShellPage<>(page.artifacts().stream().map(a -> view(a,
                 availability.get(a.descriptor().path("id").asText()), sessionRead)).toList(), next, page.hasMore());
     }
 
     private ArtifactResponse view(TenantContext tenant, SessionRecord session, Artifact artifact) {
-        return view(artifact, reader.available(artifact), policy.readOriginal(tenant.tenantId(), tenant.actorId(),
+        boolean available = reader.available(artifact);
+        if (!available) {
+            session(tenant, artifact.source().sessionId());
+        }
+        return view(artifact, available, policy.readOriginal(tenant.tenantId(), tenant.actorId(),
                 session.workspace().getWorkspaceId(), session.sessionId()));
     }
 
@@ -161,6 +168,7 @@ public class ManagedArtifactService {
     private void requireContent(TenantContext tenant, Artifact artifact) {
         requireContentAccess(tenant, artifact);
         if (!reader.available(artifact)) {
+            session(tenant, artifact.source().sessionId());
             throw unavailable();
         }
     }
@@ -222,27 +230,41 @@ public class ManagedArtifactService {
             outcome = "interrupted";
             long started = System.nanoTime();
             long timeout = settings.getReadTimeout().toNanos();
-            Runnable guard = () -> {
-                if (System.nanoTime() - started > timeout) {
-                    throw unavailable();
-                }
-                requireContentAccess(tenant, artifact);
-            };
-            try {
+            long revalidation = settings.getReadRevalidationInterval()
+                    .toNanos();
+            try (var lease = reader.lease(artifact)) {
+                // Access was verified before streaming; re-verify at most once
+                // per revalidation window instead of on every chunk. MIN_VALUE,
+                // not 0: nanoTime may be negative, and the first guard call must
+                // always re-verify.
+                long[] nextAccessCheck = {Long.MIN_VALUE};
+                Runnable guard = () -> {
+                    long now = System.nanoTime();
+                    if (now - started > timeout) {
+                        throw unavailable();
+                    }
+                    if (now >= nextAccessCheck[0]) {
+                        requireContentAccess(tenant, artifact);
+                        nextAccessCheck[0] = now + revalidation;
+                    }
+                };
                 if (selection.partial()) {
-                    byte[] bytes = reader.readRange(artifact, selection.offset(), (int) selection.length(), guard);
+                    byte[] bytes = reader.readRange(artifact, selection.offset(), (int) selection.length(), lease, guard);
+                    lease.check();
                     guard.run();
                     headers(response, artifact, etag, selection, size);
                     response.getOutputStream().write(bytes);
                     sent = bytes.length;
                 } else {
-                    try (var input = reader.open(artifact, guard)) {
+                    try (var input = reader.open(artifact, lease, guard)) {
                         byte[] buffer = new byte[64 * 1024];
                         int count = input.read(buffer);
+                        lease.check();
                         guard.run();
                         headers(response, artifact, etag, selection, size);
                         response.flushBuffer();
                         while (count != -1) {
+                            lease.check();
                             guard.run();
                             response.getOutputStream().write(buffer, 0, count);
                             sent += count;
@@ -255,6 +277,11 @@ public class ManagedArtifactService {
                     throw new IOException("Artifact stream interrupted", error);
                 }
                 if (error instanceof ApiException api) {
+                    if ("tool_output_session_retired".equals(api.getCode())
+                            || "tool_output_read_expired".equals(api.getCode())) {
+                        session(tenant, sessionId);
+                        throw unavailable();
+                    }
                     throw api;
                 }
                 throw unavailable();
