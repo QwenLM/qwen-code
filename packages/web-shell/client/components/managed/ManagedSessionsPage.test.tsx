@@ -1790,6 +1790,68 @@ describe('ManagedSessionsPage', () => {
     expect(alerts).toEqual(['Not found', 'Turn already active']);
   });
 
+  it('shows a failed older-page fetch alongside a sticky terminal stop', async () => {
+    vi.useFakeTimers();
+    mocks.client.getSession
+      .mockResolvedValueOnce(summary('s1'))
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      )
+      .mockResolvedValue(summary('s1'));
+    mocks.client.getTranscript
+      .mockResolvedValueOnce({
+        events: [event(1, 'Persisted answer')],
+        olderCursor: '1',
+        lastEventId: 1,
+      })
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(500, 'internal', 'History unavailable'),
+      );
+    await render('s1');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Not found',
+    );
+    await click('Older history');
+    const alerts = [...container.querySelectorAll('[role="alert"]')].map(
+      (el) => el.textContent,
+    );
+    expect(alerts).toContain('Not found');
+    expect(alerts).toContain('History unavailable');
+  });
+
+  it('renders one alert when the action error repeats the standing verdict', async () => {
+    vi.useFakeTimers();
+    mocks.client.getSession
+      .mockResolvedValueOnce(summary('s1'))
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      )
+      .mockResolvedValue(summary('s1'));
+    await render('s1');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Not found',
+    );
+    // The same server condition fails the page action: the message must
+    // not be announced twice.
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+    );
+    await input('Is anything there?');
+    await click('Send');
+    const alerts = [...container.querySelectorAll('[role="alert"]')].map(
+      (el) => el.textContent,
+    );
+    expect(alerts).toEqual(['Not found']);
+  });
+
   it('merges a gapped stream with a durable snapshot and keeps paged history', async () => {
     vi.useFakeTimers();
     let deliverGap!: () => void;

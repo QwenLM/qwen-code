@@ -462,7 +462,24 @@ describe('useManagedSession', () => {
           yield event(1);
           throw Object.assign(new Error('session gone'), { status: 404 });
         }
-        yield event(2);
+        if (subscribeCalls === 2) {
+          // The new frame lands past the attempt's +3s proof-of-life
+          // point, so the armed verdict capture is what the frame must
+          // disarm…
+          await new Promise((resolve) => setTimeout(resolve, 3_500));
+          yield event(2);
+          // …and the same attempt then fails: the live frame already
+          // refuted the verdict, so the failure must not resurrect it.
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          throw new TypeError('connection reset by peer');
+        }
+        if (subscribeCalls === 3) {
+          // The retired verdict's mirror is cleared: a later attempt that
+          // parks past its own proof-of-life point and then fails must not
+          // resurrect it either.
+          await new Promise((resolve) => setTimeout(resolve, 4_000));
+          throw new TypeError('second failure');
+        }
         await new Promise((resolve) =>
           request.signal?.addEventListener('abort', resolve),
         );
@@ -482,13 +499,27 @@ describe('useManagedSession', () => {
       // The reconnect delivers a genuinely new frame: the stream retires
       // its own verdict — no other leg's success was involved.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(3_100);
+        await vi.advanceTimersByTimeAsync(6_600);
       });
       expect(subscribeCalls).toBe(2);
       expect(latest?.events.map((item) => item.id)).toEqual([1, 2]);
       expect(latest?.stoppedReason).toBeUndefined();
       expect(latest?.stoppedLeg).toBeUndefined();
       expect(latest?.error).toBeUndefined();
+      // The delivering attempt then fails: the verdict stays retired.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.error).toBe('connection reset by peer');
+      // A later attempt parks past its proof-of-life point and fails: the
+      // retired verdict stays gone.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(7_100);
+      });
+      expect(subscribeCalls).toBe(3);
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.error).toBe('second failure');
     } finally {
       restoreBackoff();
       vi.useRealTimers();
@@ -939,6 +970,236 @@ describe('useManagedSession', () => {
       });
       expect(latest?.error).toBeUndefined();
       expect(latest?.stoppedReason).toBeUndefined();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not restore a keep-alive-expired verdict when the certified connection later drops', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal; onAlive?: () => void },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          yield event(1);
+          throw Object.assign(new Error('session gone'), { status: 404 });
+        }
+        if (subscribeCalls === 2) {
+          // A live but idle Session: no frame ever arrives, only heartbeat
+          // comments. The keep-alive lands past the +3s proof-of-life
+          // point…
+          await new Promise((resolve) => setTimeout(resolve, 4_000));
+          request.onAlive?.();
+          // …and the connection it certified then drops with a network
+          // error (a server deploy, a load-balancer drain).
+          await new Promise((resolve) => setTimeout(resolve, 61_000));
+          throw new TypeError('network error');
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // Attempt 2 opens at t=3000; the keep-alive lands at t=7000 and
+      // expires the verdict it refutes.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(7_100);
+      });
+      expect(latest?.stoppedReason).toBeUndefined();
+      // The certified connection drops at t=68000: the failure is the
+      // transient network error, never the verdict the keep-alive already
+      // refuted.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(61_000);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.stoppedLeg).toBeUndefined();
+      expect(latest?.error).toBe('network error');
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('restores a terminal stream verdict when a replay-only reconnect fails past the proof-of-life point', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          yield event(1);
+          throw Object.assign(new Error('session gone'), { status: 404 });
+        }
+        if (subscribeCalls === 2) {
+          // A replay is old data, not proof of life: it arms the expiry
+          // the proof-of-life point lands, and the slow failure that
+          // follows restores the verdict that expiry removed.
+          yield event(1);
+          await new Promise((resolve) => setTimeout(resolve, 4_000));
+          throw new TypeError('connection reset by peer');
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // Attempt 2 opens at t=3000 and replays history; at its t=6000
+      // proof-of-life point the verdict expires on that answer.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_100);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.stoppedReason).toBeUndefined();
+      // The attempt then fails at t=7000: the expiry it landed was not
+      // the error-free success it credited, so the verdict is restored
+      // and the weaker transient cannot take its place.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('expires a terminal stream verdict at the proof-of-life point when a keep-alive lands before it', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal; onAlive?: () => void },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          yield event(1);
+          throw Object.assign(new Error('session gone'), { status: 404 });
+        }
+        if (subscribeCalls === 2) {
+          // A low-latency server's first keep-alive can land before the
+          // +3s proof-of-life point: it arms the timer's expiry rather
+          // than expiring early itself…
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+          request.onAlive?.();
+          // …and the connection it certified later drops.
+          await new Promise((resolve) => setTimeout(resolve, 6_000));
+          throw new TypeError('network error');
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // Attempt 2 opens at t=3000; the keep-alive lands at t=4000, before
+      // the proof-of-life point, so the verdict still stands…
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_500);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // …and the timer lands the expiry at t=6000 on the heartbeat's
+      // answer.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.stoppedLeg).toBeUndefined();
+      expect(latest?.error).toBeUndefined();
+      // The certified connection drops at t=10000: the failure is the
+      // transient network error, never the expired verdict.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_000);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.error).toBe('network error');
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps climbing the reconnect ladder when heartbeat-only attempts keep failing fast', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      const opens: number[] = [];
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal; onAlive?: () => void },
+      ) {
+        opens.push(Date.now());
+        // A gateway that accepts the connection, forwards one heartbeat,
+        // then resets inside the proof-of-life window.
+        yield* [];
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        request.onAlive?.();
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        throw new TypeError('connection reset by peer');
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      // Every attempt heartbeats but none delivers a frame: the ladder
+      // must keep climbing — the floor is for attempts that delivered.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(12_000);
+      });
+      const first = opens[0] ?? 0;
+      expect(opens.map((opened) => opened - first)).toEqual([0, 4_000, 10_999]);
     } finally {
       restoreBackoff();
       vi.useRealTimers();

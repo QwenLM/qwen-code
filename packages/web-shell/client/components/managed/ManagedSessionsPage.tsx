@@ -428,12 +428,19 @@ function ManagedSessionsContent({
           {t('managed.refresh')}
         </Button>
       </div>
-      {(detail.stoppedReason || detail.error) && (
+      {detail.stoppedReason && (
         <p role="alert" className="text-sm text-destructive">
-          {detail.stoppedReason || detail.error}
+          {detail.stoppedReason}
         </p>
       )}
-      {error && (
+      {detail.error && detail.error !== detail.stoppedReason && (
+        <p role="alert" className="text-sm text-destructive">
+          {detail.error}
+        </p>
+      )}
+      {/* One server condition can surface through both channels; announce
+          each distinct message once. */}
+      {error && error !== detail.stoppedReason && error !== detail.error && (
         <p role="alert" className="text-sm text-destructive">
           {error}
         </p>

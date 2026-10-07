@@ -349,6 +349,7 @@ export function useManagedSession(
         let gap = false;
         let delayMs = 0;
         let delivered = false;
+        let alive = false;
         let proofOfLifePassed = false;
         // Captured when the proof-of-life timer below fires: the expiry it
         // accompanies stands only if the attempt goes on to answer
@@ -362,14 +363,17 @@ export function useManagedSession(
         // expiry is gated on a delivered frame (a replay counts: delivered
         // is set before the replay guard) or a heartbeat (onAlive below).
         // A failed attempt is no answer either: the catch below restores a
-        // verdict this removed.
+        // verdict this removed — unless a heartbeat landed, which certified
+        // the connection no matter how it later ends.
         const proofOfLife = setTimeout(() => {
           proofOfLifePassed = true;
           // Capture from the mirror synchronously: the state update runs
           // at React's flush, which an attempt failing right after the
-          // expiry would beat to the catch.
-          expiredVerdictMessage = streamVerdictMessageRef.current;
-          if (delivered) expireAnswered('stream');
+          // expiry would beat to the catch. A heartbeat-certified attempt
+          // keeps nothing armed: what it expires must never come back from
+          // that connection's later failure.
+          if (!alive) expiredVerdictMessage = streamVerdictMessageRef.current;
+          if (delivered || alive) expireAnswered('stream');
         }, BASE_RETRY_DELAY_MS);
         try {
           for await (const event of provider.subscribeEvents(sessionId, {
@@ -379,7 +383,11 @@ export function useManagedSession(
             // delivers no frame: it certifies the stream the same way, so
             // it lands the expiry the proof-of-life point was holding.
             onAlive: () => {
-              delivered = true;
+              // A heartbeat certifies the connection, not the data path:
+              // it must not reset the reconnect ladder, and an expiry it
+              // lands is never restored by this connection's later drop.
+              alive = true;
+              expiredVerdictMessage = undefined;
               if (proofOfLifePassed) expireAnswered('stream');
             },
           })) {
