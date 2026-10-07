@@ -102,6 +102,13 @@ describe('parseGoalCommand', () => {
     ['/goal resume', { kind: 'resume' }],
     ['/goal clear', { kind: 'clear' }],
     ['/goal stop', { kind: 'clear' }],
+    ['/目标', { kind: 'status' }],
+    ['/目标 ship it', { kind: 'set', objective: 'ship it' }],
+    ['/目标 set ship it', { kind: 'set', objective: 'ship it' }],
+    ['/目标 pause', { kind: 'pause' }],
+    ['/目标 resume', { kind: 'resume' }],
+    ['/目标 clear', { kind: 'clear' }],
+    ['/目标 stop', { kind: 'clear' }],
   ] as const)('parses %j', (args, expected) => {
     expect(parseGoalCommand(args)).toEqual(expected);
   });
@@ -126,6 +133,10 @@ describe('parseGoalCommand', () => {
 });
 
 describe('goalCommand', () => {
+  it('registers the Chinese alias', () => {
+    expect(goalCommand.altNames).toEqual(['目标']);
+  });
+
   it('is available in interactive, non-interactive, and ACP modes', () => {
     expect(goalCommand.supportedModes).toEqual([
       'interactive',

@@ -367,4 +367,8 @@ describe('OPEN_TUI_COMMAND_ROUTES (built-in registry parity)', () => {
       expect([...(route?.results ?? [])].sort()).toEqual([...results].sort());
     }
   });
+
+  it('registers the Chinese alias on the goal route', () => {
+    expect(commandRouteFor('goal')?.altNames).toEqual(['目标']);
+  });
 });

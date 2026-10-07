@@ -20,15 +20,17 @@ export const GOAL_CLEAR_KEYWORDS: ReadonlySet<string> = new Set([
   'cancel',
 ]);
 
+export const GOAL_COMMAND_PATTERN = /^\/(?:goal|目标)(?=\s|$)/i;
+
 export type ParsedWebShellGoalCommand =
   | { kind: 'status' }
   | { kind: 'set' | 'edit'; objective: string }
   | { kind: 'pause' | 'resume' | 'clear' }
   | { kind: 'error'; keyword: 'set' | 'edit' };
 
-/** The argument of a `/goal …` command; `''` for a bare `/goal`. */
+/** The argument of a `/goal …` (or `/目标 …`) command; `''` for a bare name. */
 export function goalArgOf(text: string): string {
-  return text.replace(/^\/goal\b/i, '').trim();
+  return text.replace(GOAL_COMMAND_PATTERN, '').trim();
 }
 
 /** Browser-side mirror of the CLI's Goal v3 command grammar. */
@@ -65,7 +67,7 @@ export function parseWebShellGoalCommand(
  * box — would answer true to "is this a goal-clear command?".
  */
 export function isGoalClearCommand(text: string): boolean {
-  if (!/^\/goal\b/i.test(text.trim())) return false;
+  if (!GOAL_COMMAND_PATTERN.test(text.trim())) return false;
   return isGoalClearKeyword(goalArgOf(text.trim()));
 }
 

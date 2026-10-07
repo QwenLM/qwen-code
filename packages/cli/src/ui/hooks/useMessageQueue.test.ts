@@ -8,7 +8,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { GoalTurnHost, GoalTurnPermit } from '@qwen-code/qwen-code-core';
-import { useMessageQueue } from './useMessageQueue.js';
+import { useMessageQueue, GOAL_COMMAND_RE } from './useMessageQueue.js';
+
+describe('GOAL_COMMAND_RE', () => {
+  it('matches both the English and the Chinese goal command prefix', () => {
+    expect(GOAL_COMMAND_RE.test('/goal pause')).toBe(true);
+    expect(GOAL_COMMAND_RE.test('/目标 pause')).toBe(true);
+    expect(GOAL_COMMAND_RE.test('/目标')).toBe(true);
+    expect(GOAL_COMMAND_RE.test('/目标x pause')).toBe(false);
+    expect(GOAL_COMMAND_RE.test('/goalkeeper pause')).toBe(false);
+  });
+});
 
 describe('useMessageQueue', () => {
   beforeEach(() => {

@@ -26,6 +26,13 @@ describe('parseWebShellGoalCommand', () => {
     ['/goal resume', { kind: 'resume' }],
     ['/goal clear', { kind: 'clear' }],
     ['/goal stop', { kind: 'clear' }],
+    ['/目标', { kind: 'status' }],
+    ['/目标 ship it', { kind: 'set', objective: 'ship it' }],
+    ['/目标 set ship it', { kind: 'set', objective: 'ship it' }],
+    ['/目标 pause', { kind: 'pause' }],
+    ['/目标 resume', { kind: 'resume' }],
+    ['/目标 clear', { kind: 'clear' }],
+    ['/目标 stop', { kind: 'clear' }],
   ])('parses %s', (input, expected) => {
     expect(parseWebShellGoalCommand(input)).toEqual(expected);
   });
@@ -57,6 +64,12 @@ describe('goalArgOf', () => {
   it('does not strip a command that merely starts with goal', () => {
     expect(goalArgOf('/goalkeeper x')).toBe('/goalkeeper x');
   });
+
+  it('strips the Chinese alias the same way', () => {
+    expect(goalArgOf('/目标')).toBe('');
+    expect(goalArgOf('/目标  pause ')).toBe('pause');
+    expect(goalArgOf('/目标x pause')).toBe('/目标x pause');
+  });
 });
 
 describe('isGoalClearKeyword', () => {
@@ -85,8 +98,18 @@ describe('isGoalClearCommand', () => {
     expect(isGoalClearCommand('/goal  STOP ')).toBe(true);
   });
 
-  it('does not match a bare /goal', () => {
+  it('matches the Chinese alias spelling', () => {
+    expect(isGoalClearCommand('/目标 clear')).toBe(true);
+    expect(isGoalClearCommand('/目标  stop ')).toBe(true);
+  });
+
+  it('does not match a bare /goal or /目标', () => {
     expect(isGoalClearCommand('/goal')).toBe(false);
+    expect(isGoalClearCommand('/目标')).toBe(false);
+  });
+
+  it('does not match a longer command that merely starts with the alias', () => {
+    expect(isGoalClearCommand('/目标x clear')).toBe(false);
   });
 
   it('does not match /goal <condition>', () => {

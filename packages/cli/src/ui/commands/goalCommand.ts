@@ -43,10 +43,10 @@ export type ParsedGoalCommand =
   | { kind: 'error'; message: string };
 
 export function parseGoalCommand(args: string): ParsedGoalCommand {
-  let input = args.trim();
-  if (/^\/goal(?:\s|$)/i.test(input)) {
-    input = input.slice('/goal'.length).trim();
-  }
+  const input = args
+    .trim()
+    .replace(/^\/(?:goal|目标)(?=\s|$)/i, '')
+    .trim();
   if (!input) return { kind: 'status' };
 
   const [head = '', ...tail] = input.split(/\s+/);
@@ -90,6 +90,7 @@ function goalControl(
 
 export const goalCommand: SlashCommand = {
   name: 'goal',
+  altNames: ['目标'],
   get description() {
     return t('Set or control a session goal');
   },
