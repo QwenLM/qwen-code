@@ -364,16 +364,23 @@ describe('AppContainer State Management', () => {
   // timeout without any real hang.
   vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 
-  // That same initialize() creates a real ExtensionStore under ~/.qwen; some
-  // runners — including the review-address verification gate's clean child —
-  // inherit a HOME the test process cannot write to. Ordinary CI already
-  // overrides HOME, so point it at a scratch directory for this suite, and
-  // leave that directory alone: the mount effect's initialize() is un-awaited,
-  // so store work can still be in flight at afterAll, and deleting the tree
+  // That same initialize() creates a real ExtensionStore under the resolved
+  // QWEN_HOME (~/.qwen when unset); some runners — including the
+  // review-address verification gate's clean child — inherit a HOME the test
+  // process cannot write to. Ordinary CI already overrides HOME, so point
+  // both HOME and QWEN_HOME at a scratch directory for this suite, and leave
+  // that directory alone: the mount effect's initialize() is un-awaited, so
+  // store work can still be in flight at afterAll, and deleting the tree
   // there fails it with ENOENT — an unhandled rejection that fails the run.
+  // QWEN_HOME must be pinned here explicitly: test-setup.ts otherwise pins it
+  // to a per-file directory that it deletes at afterAll, and QWEN_HOME
+  // outranks HOME for the store root, so the in-flight chain would target
+  // exactly the tree the suite pin deletes.
   const savedHome = process.env['HOME'];
+  const savedQwenHome = process.env['QWEN_HOME'];
   const suiteHome = mkdtempSync(join(tmpdir(), 'qwen-appcontainer-home-'));
   process.env['HOME'] = suiteHome;
+  process.env['QWEN_HOME'] = suiteHome;
 
   afterAll(() => {
     if (savedHome === undefined) {
@@ -381,6 +388,20 @@ describe('AppContainer State Management', () => {
     } else {
       process.env['HOME'] = savedHome;
     }
+    if (savedQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = savedQwenHome;
+    }
+  });
+
+  it('keeps the extension store root on the never-deleted suite scratch home', () => {
+    // The mount effect's initialize() runs real store work against the
+    // resolved QWEN_HOME that can still be in flight at afterAll;
+    // test-setup.ts deletes its per-file pin there. If this redirect is
+    // lost, that work fails ENOENT as an unhandled rejection and fails the
+    // whole run — so pin the redirect itself down deterministically.
+    expect(process.env['QWEN_HOME']).toBe(suiteHome);
   });
 
   let mockConfig: Config;
