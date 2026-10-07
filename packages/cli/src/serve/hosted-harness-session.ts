@@ -825,6 +825,7 @@ async function settleProjectablePromptId(
     return null;
   if (
     fileHistory &&
+    (fileHistory.pendingTurn || fileHistory.pendingUndo) &&
     !(await canSettleHostedFileHistory(managed, {
       ...fileHistory,
       pendingTurn: promptId,
@@ -1773,6 +1774,50 @@ export function registerHostedHarnessSessionRoutes(
     });
   };
 
+  const answerResidentInapplicable = async (
+    res: Response,
+    sessionId: string,
+    resident: HostedSession,
+    promptId: string,
+  ): Promise<void> => {
+    const authorization =
+      await resident.managed.authority.harnessRunAuthorization();
+    const approvalPending =
+      authorization.status === 'runnable' &&
+      authorization.checkpoint.approval?.state === 'requested';
+    const settle = approvalPending
+      ? null
+      : await settleProjectablePromptId(
+          resident.managed,
+          resident,
+          await readHostedFileHistory(resident.managed),
+          promptId,
+        );
+    if (!approvalPending && settle === null) {
+      noteOwedAdoption(resident, sessionId);
+      writeStderrLineSafe(
+        `qwen serve: Hosted Session ${sessionId} redrive refused (takeover_inapplicable_unpayable): prompt=${promptId}`,
+      );
+      error(res, 409, 'hosted_turn_recovery_required');
+      return;
+    }
+    if (sessions.get(sessionId) !== resident) {
+      noteOwedAdoption(resident, sessionId);
+      error(res, 404, 'hosted_session_not_found');
+      return;
+    }
+    if (resident.mcpClosing) {
+      noteOwedAdoption(resident, sessionId);
+      error(res, 409, 'hosted_session_closing');
+      return;
+    }
+    refusedAdoptions.delete(sessionId);
+    resident.blocked = false;
+    sendAttachment(res, sessionId, resident);
+    if (settle !== null)
+      runSettleProjection(resident, sessionId, settle, brokerOptions);
+  };
+
   const open = async (
     req: Request,
     res: Response,
@@ -1920,6 +1965,14 @@ export function registerHostedHarnessSessionRoutes(
               sessionId,
               parkedForCancellation,
             );
+            if (sessions.get(sessionId) !== resident) {
+              error(res, 404, 'hosted_session_not_found');
+              return;
+            }
+            if (resident.mcpClosing) {
+              error(res, 409, 'hosted_session_closing');
+              return;
+            }
             writeStderrLineSafe(
               `qwen serve: Hosted Session ${sessionId} settles the cancelled park on the redriven load: prompt=${parkedForCancellation}`,
             );
@@ -1988,18 +2041,11 @@ export function registerHostedHarnessSessionRoutes(
           leaseAlreadyHeld: resident.runtimeLeaseHeld !== undefined,
         });
         if (outcome.kind === 'declined') {
-          error(res, 409, 'hosted_session_already_attached');
+          recoveryDeclined(res, outcome.reason);
           return;
         }
         if (outcome.kind === 'inapplicable') {
-          // An inapplicable drive redrive owes this Session nothing: the
-          // kernel released whatever it took, so the refusal carries no
-          // owed lease — it is named instead of released, because a release
-          // would persist RELEASED and wedge every retried acquire.
-          writeStderrLineSafe(
-            `qwen serve: Hosted Session ${sessionId} redrive refused (takeover_inapplicable_unpayable): prompt=${parked}`,
-          );
-          error(res, 409, 'hosted_turn_recovery_required');
+          await answerResidentInapplicable(res, sessionId, resident, parked);
           return;
         }
         recovery = outcome.turn.report;
@@ -2084,51 +2130,51 @@ export function registerHostedHarnessSessionRoutes(
           // concurrent teardown would otherwise release a lease that is still
           // mid-adoption and persist the record RELEASED.
           resident.mcpRecovering += 1;
-          const outcome = await recoverHostedRuntimeTurn({
-            session: resident.managed,
-            sessionId,
-            cwd: resident.cwd,
-            promptId: parked,
-            brokerOptions,
-            passive: true,
-            onPassiveRuntimeAcquired: (runtimeSessionId) => {
-              resident.runtimeLeaseHeld = runtimeSessionId;
-            },
-          }).finally(() => {
+          try {
+            const outcome = await recoverHostedRuntimeTurn({
+              session: resident.managed,
+              sessionId,
+              cwd: resident.cwd,
+              promptId: parked,
+              brokerOptions,
+              passive: true,
+              onPassiveRuntimeAcquired: (runtimeSessionId) => {
+                resident.runtimeLeaseHeld = runtimeSessionId;
+              },
+            });
+            if (outcome.kind === 'recovered') {
+              recovery = outcome.turn.report;
+            } else if (outcome.kind === 'inapplicable') {
+              await answerResidentInapplicable(
+                res,
+                sessionId,
+                resident,
+                parked,
+              );
+              return;
+            } else {
+              // A declined passive load was refused before any adoption, so
+              // nothing is owed; the typed code tells the coordinator the
+              // refusal is terminal.
+              recoveryDeclined(res, outcome.reason);
+              return;
+            }
+            if (
+              !resident.active &&
+              unsettledPromptId(resident) &&
+              (!recovery ||
+                parked !== unsettledPromptId(resident) ||
+                recovery.checkpointId !==
+                  resident.managed.authority.latestCheckpoint?.checkpointId ||
+                recovery.activationId !==
+                  resident.managed.activation.activationId)
+            ) {
+              noteOwedAdoption(resident, sessionId);
+              error(res, 409, 'hosted_turn_recovery_required');
+              return;
+            }
+          } finally {
             resident.mcpRecovering -= 1;
-          });
-          if (outcome.kind === 'recovered') {
-            recovery = outcome.turn.report;
-          } else if (outcome.kind === 'inapplicable') {
-            // An inapplicable passive recovery took the adoption but cannot
-            // settle it here, so the lease stays owed for the teardown's
-            // release while the coordinator retries the refusal.
-            noteOwedAdoption(resident, sessionId);
-            writeStderrLineSafe(
-              `qwen serve: Hosted Session ${sessionId} redrive refused (takeover_inapplicable_unpayable): prompt=${parked}`,
-            );
-            error(res, 409, 'hosted_turn_recovery_required');
-            return;
-          } else {
-            // A declined passive load was refused before any adoption, so
-            // nothing is owed; the typed code tells the coordinator the
-            // refusal is terminal.
-            recoveryDeclined(res, outcome.reason);
-            return;
-          }
-          if (
-            !resident.active &&
-            unsettledPromptId(resident) &&
-            (!recovery ||
-              parked !== unsettledPromptId(resident) ||
-              recovery.checkpointId !==
-                resident.managed.authority.latestCheckpoint?.checkpointId ||
-              recovery.activationId !==
-                resident.managed.activation.activationId)
-          ) {
-            noteOwedAdoption(resident, sessionId);
-            error(res, 409, 'hosted_turn_recovery_required');
-            return;
           }
         }
         // The fence above covers the whole adoption, so these exits answer

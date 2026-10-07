@@ -8987,7 +8987,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
       expect(refused.status).toBe(409);
       expect(refused.body.code).toBe('hosted_turn_recovery_required');
       expect(acquireSpy).toHaveBeenCalledOnce();
-      expect(authorization).toHaveBeenCalledTimes(2);
+      expect(authorization).toHaveBeenCalledTimes(
+        failure === 'blocked' ? 4 : 2,
+      );
+      if (failure === 'blocked')
+        expect(await authorization.mock.results[1].value).toMatchObject({
+          status: 'blocked',
+          reason: 'missing_state',
+        });
       expect(release).not.toHaveBeenCalled();
       const firstRefusalDiagnostics = owedLines().length;
       let repeatedRefusalDiagnostics: number | undefined;
@@ -9614,6 +9621,175 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(loaded.status).toBe(409);
     expect(loaded.body.code).toBe('hosted_turn_recovery_declined');
     expect(loaded.body.reason).toBe('model_start');
+  });
+
+  it('carries a resident kernel decline reason onto the wire', async () => {
+    const { server } = await parkToolTurn(true);
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({ status: 'blocked', reason: 'identity_mismatch' });
+    const declined = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store(), driveRuntimeRecovery: true });
+    expect(declined.status).toBe(409);
+    expect(declined.body.code).toBe('hosted_turn_recovery_declined');
+    expect(declined.body.reason).toBe('checkpoint_blocked');
+  });
+
+  it.each([false, true])(
+    'reattaches a resident requested approval (passive=%s)',
+    async (passive) => {
+      const { server, clientId } = await parkToolTurn(true);
+      mockAuthorizationWithPhase('await_approval', { state: 'requested' });
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: store(),
+        toolProfile: FILE_PROFILE,
+        [passive ? 'passiveManagedRuntimeRecovery' : 'driveRuntimeRecovery']:
+          true,
+      });
+      expect(loaded.status).toBe(200);
+      expect(loaded.body.clientId).toBe(clientId);
+      expect(loaded.body.recoveryRequired).toBeUndefined();
+      expect(acquireSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'settles a payable resident projection after a lost terminal write (passive=%s)',
+    async (passive) => {
+      await parkToolTurn();
+      vi.mocked(HostedWorkspaceBroker.prototype.execute).mockResolvedValue({
+        executionStatus: 'success',
+        responseParts: [{ text: 'written' }],
+      } as never);
+      const { server, loaded } = await loadReplacement();
+      expect(loaded.status).toBe(200);
+      const recovery = loaded.body._meta['qwen.daemon.managedRuntimeRecovery'];
+      const originalWrite = ManagedSessionRecordSink.prototype.write;
+      const write = vi
+        .spyOn(ManagedSessionRecordSink.prototype, 'write')
+        .mockImplementation(function (this: ManagedSessionRecordSink, item) {
+          if (item.subtype === 'turn_result')
+            return Promise.reject(new Error('terminal write unavailable'));
+          return originalWrite.call(this, item);
+        });
+      await replacementHeaders(
+        supertest(server).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', loaded.body.clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        })
+        .expect(200);
+      await vi.waitFor(async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      });
+      write.mockRestore();
+      const history = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/files/history`),
+      ).set('X-Qwen-Client-Id', loaded.body.clientId);
+      expect(history.body.history.pendingTurn).toBeNull();
+      expect(history.body.history.pendingUndo).toBeNull();
+      mockAuthorizationWithPhase('turn_settled', null);
+      const redriven = await replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: storeFor(BOOT_ID_2),
+        toolProfile: FILE_PROFILE,
+        [passive ? 'passiveManagedRuntimeRecovery' : 'driveRuntimeRecovery']:
+          true,
+      });
+      expect(redriven.status).toBe(200);
+      expect(redriven.body.clientId).toBe(loaded.body.clientId);
+      await vi.waitFor(async () => {
+        const transcript = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId);
+        expect(transcript.body.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'turn_complete',
+              promptId: PROMPT_ID,
+            }),
+          ]),
+        );
+      });
+    },
+  );
+
+  it('refuses a cancellation takeover attachment deleted during settlement', async () => {
+    const { server } = await parkToolTurn(true);
+    const authorize =
+      LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
+      const result = await authorize.call(this);
+      if (result.status !== 'runnable') return result;
+      return {
+        ...result,
+        checkpoint: {
+          ...result.checkpoint,
+          approval: null,
+          tools: {
+            ...result.checkpoint.tools,
+            items: result.checkpoint.tools!.items.map((item) => ({
+              ...item,
+              state: 'settled',
+              consumed: true,
+            })),
+          },
+        },
+      } as never;
+    });
+    let started!: () => void;
+    const settling = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let resume!: () => void;
+    const held = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const originalWrite = ManagedSessionRecordSink.prototype.write;
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+      async function (this: ManagedSessionRecordSink, item) {
+        await originalWrite.call(this, item);
+        if (item.subtype === 'turn_result') {
+          started();
+          await held;
+        }
+      },
+    );
+    const load = headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+      .send({
+        managedSessionStore: store(),
+        passiveManagedRuntimeRecovery: true,
+        cancellationTakeover: true,
+      })
+      .then((response) => response);
+    await settling;
+    try {
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+        204,
+      );
+    } finally {
+      resume();
+    }
+    const refused = await load;
+    expect(refused.status).toBe(404);
+    expect(refused.body.code).toBe('hosted_session_not_found');
   });
 
   it('re-answers the unchanged recovery after a lost cancellation report', async () => {
