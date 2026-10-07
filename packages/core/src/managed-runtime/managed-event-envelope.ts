@@ -18,13 +18,14 @@ import {
 } from './managed-session-records.js';
 
 // The managed-event-envelope/1 contract: the distribution notice an
-// EventTransport publishes after a Session Authority commit, for
-// materialization and cross-node wake. The design invariants pin it: only
-// committed facts fly, the transport is never Session truth and an offset is
-// never a recovery credential. So the envelope identifies the committed
-// event row by its tenant-scoped ordering key (tenantId + sessionId +
-// sequence), carries the event's own recorder-side timestamp and kind, and
-// binds the body by digest only — the payload body stays in the SQL record.
+// EventTransport publishes after a Session Authority commit, for cross-node
+// wake on journal facts; the public-event/materialization lane is a later
+// stream. The design invariants pin it: only committed facts fly, the
+// transport is never Session truth and an offset is never a recovery
+// credential. So the envelope identifies the committed event row by its
+// tenant-scoped ordering key (tenantId + sessionId + stream + sequence),
+// carries the event's own recorder-side timestamp and kind, and binds the
+// body by digest only — the payload body stays in the SQL record.
 // Declared, not enabled: a derivation from the committed row proves the
 // commit path can supply every field, but no runtime path consumes the
 // envelope yet and the gate test proves that.
@@ -68,12 +69,14 @@ export const MANAGED_EVENT_ENVELOPE_FORBIDDEN_FIELDS = Object.freeze([
 
 /**
  * The body this envelope binds, never a lookup handle: the receiver
- * locates the row by the envelope key `(tenantId, sessionId, sequence)`
- * and recomputes this value over the single event to confirm it has not
- * been altered. It is the digest of the full committed event in the same
- * canonical form the commit marker's `eventsDigest` uses — over the
- * one-event range this envelope announces, so a multi-event transaction
- * stores no column equal to it. The body itself never travels.
+ * locates the row by the envelope key `(tenantId, sessionId, stream,
+ * sequence)` and recomputes this value over the single event to confirm
+ * it has not been altered. It is the digest of the full committed event
+ * in the same canonical form the commit marker's transaction-wide
+ * `eventsDigest` uses — over the one-event range this envelope announces,
+ * so the two are equal only for a single-event transaction and a
+ * multi-event transaction stores no column equal to it. The body itself
+ * never travels.
  */
 export interface ManagedEventEnvelopePayloadRef {
   readonly digest: string;
@@ -86,8 +89,8 @@ export interface ManagedEventEnvelopePayloadRef {
  * `occurredAt` is the UTC Unix millisecond at which the event's own writer
  * recorded it — the recorder-side timestamp committed with the event, so
  * it precedes commit by however long the call took in flight. It is not a
- * commit order; ordering per Session rides `(tenantId, sessionId,
- * sequence)`.
+ * commit order; ordering per Session rides `(tenantId, sessionId, stream,
+ * sequence)` — within one stream, by `sequence`.
  */
 export interface ManagedEventEnvelope {
   readonly v: 1;
@@ -222,9 +225,12 @@ export function parseManagedEventEnvelope(
 
 /**
  * The envelope of one committed event, derived from the row the journal
- * commits plus the digest the commit marker already computes. It exists to
- * prove the commit path can supply every field today without new record
- * state; it is not wired into that path.
+ * commits plus a per-event digest recomputed in the same canonical form
+ * the commit marker's transaction-wide `eventsDigest` uses. It is not the
+ * marker's value: the marker digests the whole transaction, so the two are
+ * equal only for a single-event transaction. It exists to prove the commit
+ * path can supply every field today without new record state; it is not
+ * wired into that path.
  */
 export function managedEventEnvelopeFrom(
   event: ManagedSessionEvent,
