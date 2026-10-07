@@ -1,6 +1,9 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
+import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.BlockRecoveryRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
@@ -187,6 +190,10 @@ public class ManagedSessionStore {
                 writerToken);
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
+        var csiOriginal = lockCsiOriginal(tenantId, sessionId);
+        if (csiOriginal != null) {
+            csiOriginal.requireAdmission();
+        }
         ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         List<String> closed = jdbc.query("SELECT status FROM managed_agent_session"
@@ -226,6 +233,7 @@ public class ManagedSessionStore {
         }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        requireCsiWriter(csiOriginal, head);
         if ("DELETING".equals(head.state())
                 || "DELETED".equals(head.state())) {
             throw conflict("managed_session_not_writable",
@@ -257,6 +265,9 @@ public class ManagedSessionStore {
         }
         long generation = increment(head.writerGeneration(),
                 "writer generation");
+        if (csiOriginal != null) {
+            throw conflict("csi_original_writer_unavailable", "The original CSI writer cannot be replaced.");
+        }
         Timestamp leaseUntil = plusMillis(now, request.leaseMillis());
         jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                         + " state = 'ACTIVE', writer_generation = ?,"
@@ -282,8 +293,13 @@ public class ManagedSessionStore {
         validateStableId(request.writerId(), "writerId");
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
         validateLeaseMillis(request.leaseMillis());
+        var csiOriginal = lockCsiOriginal(tenantId, sessionId);
+        if (csiOriginal != null) {
+            csiOriginal.requireContinuation();
+        }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        requireCsiWriter(csiOriginal, head);
         Timestamp now = databaseNow();
         requireWriter(head, request.writerId(), request.writerGeneration(),
                 writerToken, now, true);
@@ -307,6 +323,9 @@ public class ManagedSessionStore {
                 writerToken);
         validateStableId(request.writerId(), "writerId");
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
+        if (lockCsiOriginal(tenantId, sessionId) != null) {
+            throw conflict("csi_finalize_required", "The original CSI writer requires retirement finalization.");
+        }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         if ("SEALED".equals(head.state())
@@ -341,8 +360,13 @@ public class ManagedSessionStore {
         }
         validateText(request.recoveryDetailCode(), "recoveryDetailCode",
                 MAX_TEXT_BYTES);
+        var csiOriginal = lockCsiOriginal(tenantId, sessionId);
+        if (csiOriginal != null) {
+            csiOriginal.requireContinuation();
+        }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        requireCsiWriter(csiOriginal, head);
         Timestamp now = databaseNow();
         requireWriter(head, request.writerId(), request.writerGeneration(),
                 writerToken, now, true);
@@ -377,8 +401,13 @@ public class ManagedSessionStore {
                 writerToken);
         validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
+        var csiOriginal = lockCsiOriginal(tenantId, sessionId);
+        if (csiOriginal != null) {
+            csiOriginal.requireContinuation();
+        }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        requireCsiWriter(csiOriginal, head);
         TransactionRow existing = findTransactionByCommand(tenantId,
                 sessionId, commandKeyHash(request.operation(),
                         request.commandId()));
@@ -653,8 +682,13 @@ public class ManagedSessionStore {
         if (bytes.length != request.byteLength() || !sha256(bytes).equals(request.digest())) {
             throw invalid("Tool result bytes do not match their length or digest.");
         }
+        var csiOriginal = lockCsiOriginal(tenantId, sessionId);
+        if (csiOriginal != null) {
+            csiOriginal.requireContinuation();
+        }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        requireCsiWriter(csiOriginal, head);
         Timestamp now = databaseNow();
         requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, now, true);
         String scopeKey = sessionScopeKey(tenantId, sessionId);
@@ -1019,6 +1053,30 @@ public class ManagedSessionStore {
                         + " FOR UPDATE",
                 headMapper, tenantId, sessionId);
         return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    JdbcCsiFilesRetirementGuard.Original lockCsiOriginal(String tenantId, String sessionId) {
+        return jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<JdbcCsiFilesRetirementGuard.Original>) connection -> {
+            var target = org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection);
+            if (!org.springframework.jdbc.datasource.DataSourceUtils.isConnectionTransactional(target, jdbc.getDataSource())) {
+                var profiles = jdbc.query("SELECT tool_profile FROM managed_agent_session"
+                                + " WHERE tenant_id = ? AND session_id = ?",
+                        (row, index) -> row.getString("tool_profile"), tenantId, sessionId);
+                if (profiles.contains(CsiFilesRetirementProfile.PROFILE)) {
+                    throw new IllegalStateException("CSI mutation requires its original transaction connection");
+                }
+                return null;
+            }
+            JdbcRuntimeBindingRepository.lockPlacementDomain(target, tenantId, 10);
+            ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+            return JdbcCsiFilesRetirementGuard.lockManagedSession(target, tenantId, sessionId);
+        });
+    }
+
+    private static void requireCsiWriter(JdbcCsiFilesRetirementGuard.Original original, HeadRow head) {
+        if (original != null && head.writerGeneration() != 1) {
+            throw conflict("csi_original_writer_unavailable", "The original CSI writer cannot be replaced.");
+        }
     }
 
     private HeadRow requireHeadForUpdate(String tenantId, String sessionId) {

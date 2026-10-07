@@ -368,7 +368,7 @@ public final class WorkspaceCsiReservationStore {
                 && binding.getProvisionSeed().getProvisionRequestId().equals(holder.provisionRequestId());
     }
 
-    private void verifyRegistration(WorkspaceCsiRegistration expected) {
+    void verifyRegistration(WorkspaceCsiRegistration expected) {
         if (!expected.equals(readRegistration(expected.aliasKey()))) {
             throw unavailable();
         }

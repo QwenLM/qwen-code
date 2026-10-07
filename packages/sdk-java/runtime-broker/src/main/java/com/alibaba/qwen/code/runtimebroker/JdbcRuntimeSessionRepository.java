@@ -100,6 +100,20 @@ public final class JdbcRuntimeSessionRepository
             RuntimeSessionRecord candidate) {
         requireCandidate(candidate);
         RuntimeScope scope = candidate.getSession().getScope();
+        if (JdbcCsiFilesRetirementGuard.isProfile(scope)) {
+            return JdbcRepositorySupport.transaction(dataSource, connection -> {
+                var original = JdbcCsiFilesRetirementGuard.lockRuntimeSession(connection, candidate);
+                original.requireAdmission();
+                JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
+                RuntimeSessionRecord existing = selectSession(connection, scope,
+                        candidate.getRuntimeSessionId(), true);
+                if (existing != null) {
+                    return requireSameIdentity(existing, candidate);
+                }
+                insertSession(connection, candidate);
+                return candidate;
+            });
+        }
         RuntimeSessionRecord existing = findById(scope,
                 candidate.getRuntimeSessionId());
         if (existing != null) {
@@ -148,8 +162,23 @@ public final class JdbcRuntimeSessionRepository
     @Override
     public RuntimeSessionRecord compareAndSet(RuntimeSessionRecord expected,
             RuntimeSessionRecord replacement) {
-        return JdbcRepositorySupport.transaction(dataSource,
-                connection -> compareAndSet(connection, expected, replacement));
+        requireReplacement(expected, replacement);
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            JdbcCsiFilesRetirementGuard.Original original =
+                    JdbcCsiFilesRetirementGuard.lockRuntimeSession(connection, expected);
+            if (original != null) {
+                JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
+                if (replacement.getState() == RuntimeSessionRecord.State.RELEASING
+                        || replacement.getState() == RuntimeSessionRecord.State.RELEASED) {
+                    throw JdbcCsiFilesRetirementGuard.releaseUnavailable();
+                }
+                if (expected.getState() == RuntimeSessionRecord.State.ACQUIRING
+                        && replacement.getState() == RuntimeSessionRecord.State.READY) {
+                    original.requireAdmission();
+                }
+            }
+            return compareAndSet(connection, expected, replacement);
+        });
     }
 
     static RuntimeSessionRecord compareAndSet(Connection connection, RuntimeSessionRecord expected,

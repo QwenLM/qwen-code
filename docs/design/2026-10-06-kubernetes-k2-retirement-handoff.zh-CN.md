@@ -2,8 +2,11 @@
 
 [English](2026-10-06-kubernetes-k2-retirement-handoff.md) | [简体中文](2026-10-06-kubernetes-k2-retirement-handoff.zh-CN.md)
 
-状态：补全设计与本地 K2-A1 原型，更新于 2026-10-07。K2-A2 到 K2-D 仍为提案；
-本文不声明完整 K2 或新增云上验收完成。实现基线为 main
+状态：补全设计、本地 K2-A1 原型与进行中的 K2-A2 实现，更新于 2026-10-07。
+原生边界观测器已实现；私有 CREATE/request 固定点已在本地实现并验证。
+原 binding/Session/writer guard 正在本地实现。
+完整 A2 准入关闭与 K2-B 到 K2-D 仍待完成；本文不声明完整 K2 或新增云上验收完成。
+实现基线为 main
 `4bffa678bced8b14c25c85e3ba4226b7b752414d`，已包含以
 `69d5db2ff2424da01ac6f14e4c484773aae7204c` 合入的
 [PR #13289](https://github.com/QwenLM/qwen-code/pull/13289)。剩余工作由
@@ -95,6 +98,71 @@ Finalization 引用 cut digest；`DRAINED` 引用两者。物理证据引用相�
 
 ## 4. 封住准入并建立完整成员清单
 
+### 4.1 私有 CREATE 与原 request 固定点
+
+私有操作入口为 `WorkspaceCsiSessionMain create <reviewed-csi-session-json>`，
+使用 `K2_JDBC_URL`、`K2_JDBC_USER`、`K2_JDBC_PASSWORD` 和 `K2_AGENT_REVISION`。
+它不启动 worker，也不经过公开 Session CREATE。封闭且有界的输入包含已审查的
+`registration`、可信 `actorId`、`idempotencyKey`、可选 `requestedRevision` 和
+`title`，以及显式 `workspace` 选择。重复键、额外字段、尾随 token 和超过 32 KiB
+的输入均拒绝。
+
+一个全新、十秒有界、使用原 connection 的事务先锁住租户 placement domain，验证
+持久化的不可变 CSI registration，串行化已有 creation scope，再使用现有 Workspace
+访问与创建权威。新建要求 storage 与 registration 一致、Workspace 为 ACTIVE、具有
+读取与创建权限，并使用固定 `csi-files-retirement-tools/1` 与
+`csi-files-retirement-policy/1` 引用。先分配 Session UUID，再导出以 Session 隔离的
+`kubernetes-workspace` request。远端 mount root 来自 registration，不在宿主机解析
+文件系统。V48 增加可空 `runtime_request_key`，不为旧数据回填成功证据；CREATE 将它与
+`tool_profile=csi-files-retirement/1` 同时插入。
+
+Capability digest 是精确 `CsiFilesRetirementProfile.CAPABILITY_MANIFEST` UTF-8
+字节的 SHA-256：profile 为 `csi-files-retirement/1`，工具按 `read_file`、
+`write_file`、`edit` 排列，包含经过认证的 file history、invocation protocol 2，以及
+保留结果至 finalize。Request 身份复用已有长度前缀 managed-context 编码器，不使用
+规范化 JSON；规范化 JSON 仅用于私有 CREATE 命令独立的幂等 digest。
+
+精确重放复用原 Session，验证持久化 request 固定点，不因 agent revision 或
+Workspace registry 变化重写身份。冲突、registration/pin 损坏、权限缺失或插入失败会
+回滚整个命令。旧的绑定及非绑定 CREATE 保持原 profile 和空 request pin。该入口当前
+只持久化未启动 Session；打开执行前仍须完成下文的原 binding 准入检查和 worker/Harness
+组合接线。CREATE 固定点本身不是准入关闭、application cut、DRAINED 或挂载授权。
+首个 profile 只接受 Workspace 根目录选择（`cwdRelative="."`）。子目录执行留待
+后续支持，不会静默映射到已注册的 mount root。
+
+### 4.2 协同准入与成员清单
+
+当前本地 guard 批次使用调用方原事务与 current locking read，顺序为 placement
+domain、排序的 slot、binding history、持久 Session pin。从 Session 冻结 context
+重建原 request，要求精确一个原 slot 与 generation-1 binding；缺失、冲突、孤立或
+replacement 权威都拒绝。Legacy profile 判别扫描完整匹配的上游 history，检查是否
+存在冲突的新 capability；保留两个 binding 候选即可检测歧义，但不能以最初两行
+抽样证明 CSI 权威不存在。保留全部已锁 slot，完成上游引用枚举。
+Binding history 还按每个 slot 的 request key 和 active-binding 引用枚举，
+不依赖其 isolation key。相同 request key 的第二代记录即使携带冲突的 isolation key，
+仍须阻塞原 writer；只按 Session isolation key 筛选会遗漏该历史。
+最初两个之后的普通 slot 也可能指向 foreign CSI binding；即使该 binding 的
+isolation key 不同，这种冲突引用仍须阻塞 legacy fallback。不存在冲突 CSI 权威的
+多个普通 slot 保持原 legacy 行为。
+
+原生 Session mutation 组合共享 fence 的顺序为 placement domain → 既有 retention
+tenant → 完整 slot/binding history 与 Session pin → journal head。外层 publication
+receipt 事务在原结算、tenant 和 head 锁之前先取同一个 fence，覆盖首次提交与
+REFERENCED 重放。这避免嵌套原生 commit 引入的旧 LOCAL tenant/domain 逆序，并保持
+删除和结果投影既有的 tenant-before-Session 顺序。不能用普通 profile 快照跳过完整的
+current CSI 判别。既有 retention 等待与整体事务 deadline 仍需资格验证。
+
+首批生产消费者为 binding provision、Runtime Session admission 与直接 CAS、原生
+writer acquire/renew/recovery/commit/resource publication，以及普通 release。
+此 profile 只允许原 UUID Runtime Session，released 历史仍参加成员检查。Worker RPC
+后的 acquire completion 必须再次检查准入。缓存 acquire 与最终 acquire 返回在父锁下
+以 current read 检查已有 READY Session；该检查不会插入或更新缺失、已改变的 Session。
+结果读取和结算 continuation 保留单独的 DRAINING 语义。原生 writer generation 固定为 1：精确
+live reacquire 合法，过期接管与通用 seal 拒绝。普通 Runtime Session release 在 worker
+RPC 前拒绝，包含已保存的 RELEASING 重试。该本地批次仍需完成下述 execution、
+activation、Managed Agent、retention 及完整异步协调；它不是完整
+准入闭包，也不授权挂载或执行 worker。
+
 将既有 binding fence 扩展到新 Runtime Session、execution、publication、activation、
 turn 和生命周期配置的生产准入路径。退役可完成原 continuation，但不能在它们结算期间
 接受新 turn。Worker 也必须在最终异步变更/启动边界执行相同区分。
@@ -120,6 +188,9 @@ warm-up 则发生在持久 Session 打开之后。初始 provision request 不�
 binding 缺失，也须读取持久 Session profile。MySQL read-committed 和 repeatable-read
 下，准入敏感成员检查均使用 current locking read；先前的 consistent read 或
 isolation-key 索引不提供父级 fence。旧 profile 保持现有契约。
+[MySQL locking-read 契约](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html)
+要求活跃事务；普通读取不足以保护后续相关变更。因此资格验证须建立真实锁等待，
+并在等待后检查已提交的退役状态，包括已预热 RR snapshot 的情况。
 
 为新身份显式扩展当前仅支持 workspace 的私有 CSI adapter 及其 ACK transport 检查；
 保持原 `workspace`/null 契约。后续公开 resolver 消费同一身份，不转换本地路径，

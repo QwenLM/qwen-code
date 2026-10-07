@@ -10,6 +10,13 @@ public interface RuntimeBindingRepository {
     RuntimeSessionRecord admitSession(RuntimeSessionRepository sessions,
             RuntimeSessionRecord candidate);
 
+    /** Rechecks admission for an existing READY Session without inserting or updating it. */
+    default RuntimeSessionRecord requireSessionAdmission(RuntimeSessionRepository sessions,
+            RuntimeSessionRecord expected) {
+        throw new RuntimeBrokerException(501, "runtime_session_admission_unavailable",
+                "Runtime repository does not support atomic Session admission checks", false);
+    }
+
     /** Existing idempotency receipts remain readable after admission closes. */
     ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, ToolExecutionRecord candidate);

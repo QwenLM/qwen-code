@@ -63,6 +63,9 @@ public final class JdbcRuntimeBindingRepository
             throw new IllegalArgumentException("Release requires the same DataSource");
         }
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            if (JdbcCsiFilesRetirementGuard.lockRuntimeSession(connection, expected) != null) {
+                throw JdbcCsiFilesRetirementGuard.releaseUnavailable();
+            }
             RuntimeBindingRecord binding = selectById(connection, expected.getBindingId(), true);
             RuntimeAdmission.requireRelease(binding, expected);
             return JdbcRuntimeSessionRepository.compareAndSet(connection, expected,
@@ -81,6 +84,9 @@ public final class JdbcRuntimeBindingRepository
             throw new IllegalArgumentException("Release requires the same DataSource");
         }
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            if (JdbcCsiFilesRetirementGuard.lockRuntimeSession(connection, expected) != null) {
+                throw JdbcCsiFilesRetirementGuard.releaseUnavailable();
+            }
             // Statement order is load-bearing under InnoDB REPEATABLE READ:
             // this locking read must stay first, and the plain execution read
             // below must stay the transaction's first consistent read, so its
@@ -196,12 +202,32 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public RuntimeSessionRecord admitSession(RuntimeSessionRepository sessions,
             RuntimeSessionRecord candidate) {
+        JdbcRuntimeSessionRepository.requireCandidate(candidate);
+        return admitSession(sessions, candidate, false);
+    }
+
+    @Override
+    public RuntimeSessionRecord requireSessionAdmission(RuntimeSessionRepository sessions,
+            RuntimeSessionRecord expected) {
+        if (expected == null || expected.getState() != RuntimeSessionRecord.State.READY) {
+            throw new IllegalArgumentException("Admission check requires a READY Session");
+        }
+        return admitSession(sessions, expected, true);
+    }
+
+    private RuntimeSessionRecord admitSession(RuntimeSessionRepository sessions,
+            RuntimeSessionRecord candidate, boolean existingOnly) {
         if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
                 || !jdbcSessions.usesDataSource(dataSource)) {
             throw new IllegalArgumentException("Admission requires the same DataSource");
         }
-        JdbcRuntimeSessionRepository.requireCandidate(candidate);
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            JdbcCsiFilesRetirementGuard.Original original =
+                    JdbcCsiFilesRetirementGuard.lockRuntimeSession(connection, candidate);
+            if (original != null) {
+                original.requireAdmission();
+                JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
+            }
             lockPlacementDomain(connection, candidate.getSession().getScope().getTenantId());
             RuntimeBindingRecord binding = selectById(connection,
                     candidate.getBindingId(), true);
@@ -219,7 +245,15 @@ public final class JdbcRuntimeBindingRepository
                 if (!existing.sameIdentity(candidate)) {
                     throw new IllegalArgumentException("Session identity differs");
                 }
+                if (existingOnly && existing.getState() != RuntimeSessionRecord.State.READY) {
+                    throw new RuntimeBrokerException(409, "runtime_session_not_ready",
+                            "Runtime Session is not ready", false);
+                }
                 return existing;
+            }
+            if (existingOnly) {
+                throw new RuntimeBrokerException(409, "runtime_session_not_ready",
+                        "Runtime Session is not ready", false);
             }
             JdbcRuntimeSessionRepository.insertSession(connection, candidate);
             return candidate;
@@ -387,6 +421,7 @@ public final class JdbcRuntimeBindingRepository
         requireRequest(request);
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, request.getScope().getTenantId());
+            boolean csiFiles = JdbcCsiFilesRetirementGuard.requireProvisionPin(connection, request);
             requireHarnessAdmission(connection, request);
             String key = JdbcRepositorySupport.requestKey(request);
             ensureSlot(connection, key, request);
@@ -400,7 +435,15 @@ public final class JdbcRuntimeBindingRepository
                     throw new IllegalStateException(
                             "Runtime binding slot is inconsistent");
                 }
+                if (csiFiles) {
+                    JdbcCsiFilesRetirementGuard.lockBinding(connection, active);
+                }
                 return active;
+            }
+
+            if (csiFiles && slot.lastGeneration != 0) {
+                throw new RuntimeBrokerException(409, "csi_original_binding_unavailable",
+                        "The original CSI request cannot create a replacement generation.", false);
             }
 
             requireRecoverablePlacement(connection, request);
@@ -823,7 +866,7 @@ public final class JdbcRuntimeBindingRepository
         lockPlacementDomain(connection, tenantId, 0);
     }
 
-    private static void lockPlacementDomain(Connection connection, String tenantId, int timeoutSeconds)
+    public static void lockPlacementDomain(Connection connection, String tenantId, int timeoutSeconds)
             throws SQLException {
         String key = JdbcRepositorySupport.valueKey(tenantId);
         try (PreparedStatement insert = connection.prepareStatement(

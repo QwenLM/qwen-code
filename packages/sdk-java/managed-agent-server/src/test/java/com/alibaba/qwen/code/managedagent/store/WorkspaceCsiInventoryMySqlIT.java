@@ -14,6 +14,7 @@ import java.sql.SQLException;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -23,16 +24,28 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.AbstractDataSource;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 /** Real InnoDB snapshot qualification; the fixture journal is SQL mapping data only. */
 @Timeout(60)
 class WorkspaceCsiInventoryMySqlIT {
     @Test
     void holdsOneConsistentCutAcrossPagesAndSessionHeadsWhileAnotherCoordinatorCommits() throws Exception {
-        try (var database = new O4MySqlDatabase()) {
+        String url = System.getProperty("mysql.url");
+        if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
+            throw new IllegalArgumentException("A MySQL test database URL is required");
+        }
+        String user = System.getProperty("mysql.user");
+        String password = System.getProperty("mysql.password", "");
+        var admin = new JdbcTemplate(new DriverManagerDataSource(url, user, password));
+        String database = "csi_inventory_" + UUID.randomUUID().toString().replace("-", "");
+        admin.execute("CREATE DATABASE " + database);
+        try {
+            DataSource source = new DriverManagerDataSource(
+                    url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + database), user, password);
             var fixture = new WorkspaceCsiCheckpointSnapshotStoreTest();
-            fixture.initialize(database.source());
-            var jdbc = new JdbcTemplate(database.source());
+            fixture.initialize(source);
+            var jdbc = new JdbcTemplate(source);
             var original = jdbc.queryForMap("SELECT * FROM qwen_tool_execution");
             for (int index = 0; index < 101; index++) {
                 insert(jdbc, original, "before-" + index);
@@ -40,7 +53,7 @@ class WorkspaceCsiInventoryMySqlIT {
             String retirementId = jdbc.queryForObject("SELECT retirement_id FROM managed_workspace_csi_retirement", String.class);
             var pageRead = new CountDownLatch(1);
             var committed = new CountDownLatch(1);
-            DataSource observing = pauseAfterExecutionPage(database.source(), pageRead, committed);
+            DataSource observing = pauseAfterExecutionPage(source, pageRead, committed);
             var bindings = new JdbcRuntimeBindingRepository(observing, new AesGcmSecretProtector("test-key", new byte[32]));
             var store = new WorkspaceCsiCheckpointSnapshotStore(observing, bindings, new ObjectMapper());
             try (var threads = Executors.newFixedThreadPool(2)) {
@@ -49,7 +62,7 @@ class WorkspaceCsiInventoryMySqlIT {
                     try {
                         assertThat(pageRead.await(10, TimeUnit.SECONDS)).isTrue();
                         var tx = new org.springframework.transaction.support.TransactionTemplate(
-                                new org.springframework.jdbc.datasource.DataSourceTransactionManager(database.source()));
+                                new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
                         tx.executeWithoutResult(status -> {
                             insert(jdbc, original, "after-snapshot");
                             jdbc.update("UPDATE qwen_managed_session_journal_head SET state = 'ACTIVE'");
@@ -75,6 +88,8 @@ class WorkspaceCsiInventoryMySqlIT {
             } finally {
                 committed.countDown();
             }
+        } finally {
+            admin.execute("DROP DATABASE IF EXISTS " + database);
         }
     }
 

@@ -2,8 +2,12 @@
 
 [English](2026-10-06-kubernetes-k2-retirement-handoff.md) | [简体中文](2026-10-06-kubernetes-k2-retirement-handoff.zh-CN.md)
 
-Status: completion design with a local K2-A1 prototype, updated 2026-10-07. K2-A2 through
-K2-D remain proposed; no complete K2 or new cluster acceptance is claimed.
+Status: completion design with a local K2-A1 prototype and K2-A2 implementation
+in progress, updated 2026-10-07. The native boundary observer is implemented;
+private CREATE/request pinning is locally implemented and verified. The original
+binding/Session/writer guard is being implemented locally. Complete A2 admission
+closure and K2-B through K2-D remain pending; no complete K2 or new cluster
+acceptance is claimed.
 Implementation baseline: main `4bffa678bced8b14c25c85e3ba4226b7b752414d`, after
 [PR #13289](https://github.com/QwenLM/qwen-code/pull/13289) merged as
 `69d5db2ff2424da01ac6f14e4c484773aae7204c`. Track remaining work in
@@ -114,6 +118,91 @@ committed evidence for that identity or fails on conflict.
 
 ## 4. Seal admission and establish complete membership
 
+### 4.1 Private CREATE and original request pin
+
+The private operator entry is `WorkspaceCsiSessionMain create
+<reviewed-csi-session-json>`. It uses `K2_JDBC_URL`, `K2_JDBC_USER`,
+`K2_JDBC_PASSWORD` and `K2_AGENT_REVISION`; it neither starts a worker nor routes
+through public Session CREATE. The closed, bounded input contains the reviewed
+`registration`, trusted `actorId`, `idempotencyKey`, optional `requestedRevision`
+and `title`, and explicit `workspace` selection. Duplicate keys, extra fields,
+trailing tokens and inputs larger than 32 KiB are refused.
+
+One fresh, ten-second original-connection transaction takes the tenant placement
+domain, verifies the persisted immutable CSI registration, serializes the existing
+creation scope, and uses the existing Workspace access/creation authority. New
+creation requires matching registered storage, ACTIVE Workspace, read/create
+permission, and fixed `csi-files-retirement-tools/1` and
+`csi-files-retirement-policy/1` references. The Session UUID is allocated before
+deriving its Session-isolated `kubernetes-workspace` request. Its remote mount
+root comes from the registration, without host filesystem resolution. V48 adds
+nullable `runtime_request_key` with no legacy evidence backfill; the CREATE
+inserts it alongside `tool_profile=csi-files-retirement/1`.
+The first profile only accepts Workspace root selection (`cwdRelative="."`).
+Subdirectory execution is deferred rather than silently mapping it to the
+registered mount root.
+
+The capability digest is SHA-256 over the exact UTF-8
+`CsiFilesRetirementProfile.CAPABILITY_MANIFEST` bytes: profile
+`csi-files-retirement/1`, the ordered `read_file`, `write_file`, `edit` tools,
+authenticated file history, invocation protocol 2, and result retention until
+finalize. Request identity uses the existing length-prefixed managed-context
+encoder, not canonical JSON. Canonical JSON is used only for the private CREATE
+command's distinct idempotency digest.
+
+Exact replay reuses the original Session, validates its persisted request pin,
+and does not rewrite it on agent revision or Workspace registry changes. Conflicts,
+registration/pin corruption, missing permission or insert failure roll back the
+entire command. Legacy bound and unbound CREATE retain their profiles and null
+request pins. This entry currently only persists an unstarted Session; the
+coordinated original-binding guard and worker/Harness composition below remain
+required before opening execution. CREATE pinning alone is not admission closure,
+an application cut, DRAINED or a mount authorization.
+
+### 4.2 Coordinated admission and membership
+
+The current local guard batch uses the caller's original transaction and current
+locking reads in placement-domain, sorted slot, binding-history, then persisted
+Session-pin order. It reconstructs the original request from the frozen Session
+context and requires exactly one original slot and generation-1 binding. It
+rejects missing, conflicting, orphan or replacement authority. The legacy
+profile discriminator scans the entire matching upstream history for a conflicting
+new capability; two retained binding candidates suffice to detect ambiguity,
+but an initial two-row sample must never certify that CSI authority is absent.
+All locked slots are retained for the complete upstream reference enumeration.
+Binding history includes each slot's request key and active-binding
+reference, independently of its isolation key. A second generation with the
+same request key but a conflicting isolation key must still block the original
+writer; filtering only by the Session isolation key would omit that history.
+An ordinary slot beyond the first two can also point to a foreign CSI binding;
+such a conflicting reference must block legacy fallback, even when that binding
+has a different isolation key. Multiple ordinary slots without conflicting CSI
+authority retain their legacy behavior.
+
+Native Session mutations compose the shared fence in placement-domain →
+existing retention tenant → complete slot/binding history and Session pin →
+journal-head order. The outer publication receipt transaction takes the same
+fence before its original-settlement, tenant and head locks, for both first
+commit and REFERENCED replay. This avoids the legacy LOCAL tenant/domain
+inversion introduced by a nested native commit, and retains the existing
+tenant-before-Session order of deletion and result projection. No ordinary
+profile snapshot bypasses the complete current CSI discriminator. Existing
+retention waits and the overall transaction deadline still need qualification.
+
+Its initial production consumers are binding provision, Runtime Session admission
+and direct CAS, native writer acquire/renew/recovery/commit/resource publication,
+and ordinary release. Only the original UUID Runtime Session joins this profile;
+released history remains in the membership check. An acquire completion must
+recheck admission after the worker RPC. Cached acquires and the final acquire
+return use a current parent-locked check of the existing READY Session; this
+check never inserts or updates a missing or changed Session. Result/settlement
+continuations retain their separate DRAINING semantics. Native writer generation stays 1: exact
+live reacquire is legal, expired takeover and generic seal are refused. Ordinary
+Runtime Session release is refused before its worker RPC, including a saved
+RELEASING retry. This local batch still needs the complete execution, activation,
+Managed Agent, retention and full asynchronous composition below. It is
+not complete admission closure or authorization to mount or execute a worker.
+
 Extend the existing binding fence to the production admission paths for new
 Runtime Sessions, executions, publications, activations, turns and lifecycle
 configuration. A retirement can finish original continuations, but cannot admit
@@ -148,6 +237,11 @@ Use current locking reads for admission-sensitive membership under both MySQL
 read-committed and repeatable-read; a prior consistent read or an isolation-key
 index does not supply the parent fence. Legacy profiles keep their existing
 contract.
+The [MySQL locking-read contract](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html)
+requires an active transaction; a normal read does not protect a subsequent
+related mutation. Qualification must therefore establish a real lock wait and
+check the committed retirement state after it, including a pre-existing RR
+snapshot.
 
 Extend the currently workspace-only private CSI adapter and its ACK transport
 checks explicitly for the new identity; retain the old `workspace`/null contract.

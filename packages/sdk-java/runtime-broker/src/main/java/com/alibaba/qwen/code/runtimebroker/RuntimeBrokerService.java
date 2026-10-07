@@ -393,7 +393,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 try {
                     requireSameSession(context.session(), new RuntimeSession(harnessId,
                             runtimeId, turnKind, context.session().getScope()));
-                    return requireReadySessionRecord(context);
+                    return requireAcquireSessionRecord(context);
                 } finally {
                     context.unlock();
                 }
@@ -1985,7 +1985,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             context.lock();
             try {
                 requireSameSession(context.session(), session);
-                return requireReadySessionRecord(context);
+                return requireAcquireSessionRecord(context);
             } finally {
                 context.unlock();
             }
@@ -3255,6 +3255,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
         });
     }
 
+    private RuntimeSessionRecord requireAcquireSessionRecord(SessionContext context) {
+        RuntimeSessionRecord record = requireReadySessionRecord(context);
+        return JdbcCsiFilesRetirementGuard.isProfile(record.getSession().getScope())
+                ? bindingRepository.requireSessionAdmission(sessionRepository, record) : record;
+    }
+
     private RuntimeSessionRecord requireReadySessionRecord(
             SessionContext context) {
         RuntimeSessionRecord record = sessionRepository.findById(
@@ -3920,6 +3926,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         if (current == null) {
             throw notFound("runtime_session_not_found",
                     "Runtime Session was not found");
+        }
+        if (JdbcCsiFilesRetirementGuard.isProfile(current.getSession().getScope())) {
+            throw JdbcCsiFilesRetirementGuard.releaseUnavailable();
         }
         for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
             if (current.getState()

@@ -79,6 +79,48 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void cachedPrivateCsiAcquireRechecksAdmissionWithoutAnotherWorkerCall() {
+        var scope = new RuntimeScope("tenant", "workspace", "3", "/workspace",
+                CsiFilesRetirementProfile.CAPABILITY_DIGEST, "session");
+        for (RuntimeBindingRecord.State state : List.of(RuntimeBindingRecord.State.READY,
+                RuntimeBindingRecord.State.DRAINING)) {
+            try (Fixture fixture = new Fixture(scope)) {
+                String id = java.util.UUID.randomUUID().toString();
+                RuntimeSessionRecord ready = join(fixture.service.acquire(id, id, "bootstrap"));
+                assertSame(ready, join(fixture.service.acquire(id, id, "bootstrap")));
+                RuntimeBindingRecord claimed = fixture.bindingRepository.claimOperation(
+                        ready.getBindingId(), "broker", Duration.ofMinutes(1));
+                assertEquals(state, fixture.bindingRepository.compareAndSet(claimed,
+                        claimed.withDrainRequested(true, START).withState(state, claimed.getLease(), START)).getState());
+
+                assertEquals("runtime_admission_closed", failure(fixture.service.acquire(id, id, "bootstrap")).getCode());
+                assertSame(ready, fixture.sessionRepository.findById(scope, id));
+                assertEquals(1, fixture.transport.acquireCalls.get());
+                assertEquals(1, fixture.provisioner.calls.get());
+            }
+        }
+    }
+
+    @Test
+    void privateCsiAcquireCannotReturnReadyAfterDrainStartsDuringWorkerCall() {
+        var scope = new RuntimeScope("tenant", "workspace", "3", "/workspace",
+                CsiFilesRetirementProfile.CAPABILITY_DIGEST, "session");
+        try (Fixture fixture = new Fixture(scope)) {
+            String id = java.util.UUID.randomUUID().toString();
+            var worker = new CompletableFuture<Void>();
+            fixture.transport.acquireResult = worker;
+            var acquire = fixture.service.acquire(id, id, "bootstrap");
+            RuntimeBindingRecord claimed = fixture.bindingRepository.claimOperation(
+                    "binding-1", "broker", Duration.ofMinutes(1));
+            fixture.bindingRepository.compareAndSet(claimed, claimed.withDrainRequested(true, START));
+            worker.complete(null);
+
+            assertEquals("runtime_admission_closed", failure(acquire).getCode());
+            assertEquals(1, fixture.transport.acquireCalls.get());
+        }
+    }
+
+    @Test
     void concurrentAcquireOfOneSessionCallsRuntimeOnce() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             CompletableFuture<Void> acquire = new CompletableFuture<>();

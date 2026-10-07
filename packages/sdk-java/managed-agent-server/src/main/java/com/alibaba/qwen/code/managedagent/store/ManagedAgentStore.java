@@ -32,6 +32,8 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -290,6 +292,51 @@ public class ManagedAgentStore implements AgentStateStore {
                 existing.getFirst());
     }
 
+    Admission insertCsiSessionCommand(WorkspaceCsiRegistration registration,
+            String actorId, String idempotencyKey, String requestDigest,
+            String requestedRevision, String title, WorkspaceSelection selection) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("Private CSI CREATE requires a transaction");
+        }
+        String tenantId = registration.tenantId();
+        requireCreationScope(tenantId, idempotencyKey, true);
+        List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId, actorId, idempotencyKey);
+        if (!existing.isEmpty()) {
+            Admission replay = replayWorkspaceCommand(tenantId, actorId, requestDigest, existing.getFirst());
+            requireCsiRequest(registration, replay.sessionId());
+            return replay;
+        }
+        requireAgentRevision(requestedRevision);
+        ResolvedBinding workspace = workspaces.resolveForCreation(tenantId, actorId, selection);
+        if (!registration.storageId().equals(workspace.binding().getStorageId())
+                || !CsiFilesRetirementProfile.CONFIG_REF.equals(workspace.configRef())
+                || !CsiFilesRetirementProfile.POLICY_REF.equals(workspace.policyRef())) {
+            throw workspaceExecutionUnavailable();
+        }
+        return insertSession(tenantId, "CREATE_SESSION", idempotencyKey, requestDigest,
+                "qwen-code", title, List.of(), null, workspace, actorId, registration);
+    }
+
+    RuntimeProvisionRequest requireCsiRequest(WorkspaceCsiRegistration registration, String sessionId) {
+        SessionRecord session = requireSessionForUpdate(registration.tenantId(), sessionId);
+        if (!CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())
+                || session.workspace() == null
+                || !"qwen-code".equals(session.agentId())
+                || !CsiFilesRetirementProfile.CONTEXT_CONFIG_REF.equals(session.workspace().getContextConfigRef())
+                || !registration.storageId().equals(session.workspace().getStorageId())) {
+            throw workspaceExecutionUnavailable();
+        }
+        RuntimeProvisionRequest request = CsiFilesRetirementProfile.request(session.workspace(),
+                registration.mountRoot(), session.sessionId());
+        String saved = jdbc.queryForObject("SELECT runtime_request_key FROM managed_agent_session"
+                + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
+                session.tenantId(), session.sessionId());
+        if (!request.requestKey().equals(saved)) {
+            throw workspaceExecutionUnavailable();
+        }
+        return request;
+    }
+
     private Admission replayWorkspaceCommand(String tenantId, String actorId,
             String requestDigest, WorkspaceCommand command) {
         if (!command.requestDigest().equals(requestDigest)) {
@@ -380,10 +427,21 @@ public class ManagedAgentStore implements AgentStateStore {
             String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved,
             String actorId) {
+        return insertSession(tenantId, operation, idempotencyKey, requestDigest, agentId,
+                title, input, payloadDigest, resolved, actorId, null);
+    }
+
+    private Admission insertSession(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String title, List<Map<String, Object>> input,
+            String payloadDigest, ResolvedBinding resolved,
+            String actorId, WorkspaceCsiRegistration registration) {
         ContextBinding workspace = resolved == null ? null
                 : resolved.binding();
         long now = clock.millis();
         String sessionId = UUID.randomUUID().toString();
+        String runtimeRequestKey = registration == null ? null
+                : CsiFilesRetirementProfile.request(workspace, registration.mountRoot(), sessionId).requestKey();
         String turnId = input.isEmpty() ? null : publicId("turn");
         String promptId = input.isEmpty() ? null
                 : UUID.randomUUID().toString();
@@ -394,9 +452,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
-                        + " creator_actor_key) VALUES"
+                        + " creator_actor_key, runtime_request_key) VALUES"
                         + " (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,"
-                        + " ?, ?, ?, ?, ?)",
+                        + " ?, ?, ?, ?, ?, ?)",
                 tenantId, sessionId, agentId, agentRevision, title, now, now,
                 workspace == null ? null : workspace.getWorkspaceId(),
                 workspace == null ? null : workspace.getWorkspaceGeneration(),
@@ -406,10 +464,11 @@ public class ManagedAgentStore implements AgentStateStore {
                 workspace == null ? null : workspace.getContextRevision(),
                 resolved == null ? null : resolved.configRef(),
                 resolved == null ? null : resolved.policyRef(),
-                workspace == null ? null : "hosted-workspace-files/1",
+                registration != null ? CsiFilesRetirementProfile.PROFILE
+                        : workspace == null ? null : "hosted-workspace-files/1",
                 actorId == null ? null
                         : ManagedWorkspaceRegistry.actorKey(tenantId,
-                                actorId));
+                                actorId), runtimeRequestKey);
         jdbc.update("INSERT INTO managed_agent_consumer_progress"
                         + " (tenant_id, session_id, consumer_name,"
                         + " covered_sequence, updated_at) VALUES"
