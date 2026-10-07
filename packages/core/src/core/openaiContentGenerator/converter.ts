@@ -1240,6 +1240,8 @@ function convertOpenAITextToParts(
   final = true,
   completed = true,
 ): Part[] {
+  // Tagged-thinking streams are out of scope for the trailing-tag filter: once
+  // a stream opens a literal thinking block, the parser below owns its tags.
   if (
     !requestContext.responseParsingOptions?.taggedThinkingTags &&
     !requestContext.taggedThinkingParser
