@@ -5109,6 +5109,94 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         await agentPromise;
       }
     });
+
+    it('keeps the named entries when one ledger in the aggregate is unreadable', async () => {
+      await setupSessionMocks('managed-host-quarantine-summary-mixed');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        // A transient-unreadable ledger throws with an empty remaining; the
+        // names and counts of every OTHER ledger the same sweep identified
+        // must survive beside the unreadable clause.
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          new AggregateError(
+            [
+              Object.assign(new Error('cannot be read'), {
+                workFile: '/tmp/x/managed-runtime/a.json',
+                remaining: [],
+              }),
+              Object.assign(new Error('unproven b'), {
+                workFile: '/tmp/x/managed-runtime/b.json',
+                remaining: [4124],
+              }),
+            ],
+            'The Managed Runtime ledgers could not be fully swept',
+          ),
+        );
+        const refused = await agent
+          .newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          })
+          .catch((error: unknown) => error);
+        expect((refused as Error).message).toContain(
+          'b.json: 1 process group(s)',
+        );
+        expect((refused as Error).message).toContain(
+          'a ledger it could not read',
+        );
+        expect((refused as Error).message).not.toContain('/tmp/x');
+        expect((refused as Error).message).not.toContain('4124');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it('names an unreadable ledger by what the client may inspect', async () => {
+      await setupSessionMocks('managed-host-quarantine-summary-unreadable');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        // Both unreadable shapes — a transient read failure and bytes that
+        // are not a ledger — arrive with an empty remaining list: the
+        // refusal must say the ledger could not be read, never report
+        // 'ghost.json: 0 process group(s)' as if nothing were owed.
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          Object.assign(new Error('cannot be read'), {
+            workFile: '/tmp/x/managed-runtime/ghost.json',
+            remaining: [],
+          }),
+        );
+        const refused = await agent
+          .newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          })
+          .catch((error: unknown) => error);
+        expect((refused as Error).message).toContain(
+          'a ledger it could not read held the unproven stop',
+        );
+        expect((refused as Error).message).not.toContain('/tmp/x');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
   });
 
   it.each([false, true])(

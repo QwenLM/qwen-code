@@ -180,6 +180,29 @@ describe('paired Bridge rejections', () => {
       },
     });
   });
+
+  it('answers the service-level quarantine code with httpStatus 503', () => {
+    // After the bindAndRelease translation a liftable refusal arrives as a
+    // StandaloneSessionServiceError; the ladder must keep 503=retry-later
+    // instead of falling to the default 409 the ACP surface already avoids.
+    expect(
+      toRpcError(
+        new StandaloneSessionServiceError(
+          'managed_engine_quarantined',
+          'session-1',
+          'The Managed engine is quarantined while a Runtime worker stop stays unproven; retry once it proves.',
+          true,
+        ),
+      ),
+    ).toMatchObject({
+      data: {
+        code: 'managed_engine_quarantined',
+        errorKind: 'managed_engine_quarantined',
+        httpStatus: 503,
+        retryable: true,
+      },
+    });
+  });
 });
 
 describe('transcript snapshot rejections', () => {

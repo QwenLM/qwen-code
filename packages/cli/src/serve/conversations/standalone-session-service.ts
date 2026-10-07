@@ -3010,6 +3010,15 @@ export class StandaloneSessionService {
       attempt.diagnostic.cleanupOutcome = 'unknown';
       await this.closeOwnedSessionOrQuarantine(runtime, sessionId);
       attempt.diagnostic.cleanupOutcome = 'closed';
+      // bindAndRelease already translates its quarantine refusals at the
+      // throw site: let the classification through rather than rewrapping
+      // it as a creation-outcome failure.
+      if (
+        error instanceof StandaloneSessionServiceError &&
+        error.code === 'managed_engine_quarantined'
+      ) {
+        throw error;
+      }
       if (isManagedEngineQuarantineRefusal(error)) {
         throw serviceError(
           'managed_engine_quarantined',
@@ -3083,8 +3092,16 @@ export class StandaloneSessionService {
         }
         // A quarantined-engine refusal lifts once its stop proves: keeping
         // the activation retryable, not freezing the runtime that might
-        // lift seconds later.
-        if (isManagedEngineQuarantineRefusal(retryError)) throw retryError;
+        // lift seconds later. Translate at the throw site, once, so every
+        // caller — create and restore alike — sees one classification.
+        if (isManagedEngineQuarantineRefusal(retryError)) {
+          throw serviceError(
+            'managed_engine_quarantined',
+            sessionId,
+            true,
+            retryError,
+          );
+        }
         this.beginTerminalQuarantine(runtime, error);
       }
     }
@@ -3120,7 +3137,16 @@ export class StandaloneSessionService {
         if (retryError instanceof TerminalQuarantineSignal) {
           throw new TerminalQuarantineSignal(retryError.completion, error);
         }
-        if (isManagedEngineQuarantineRefusal(retryError)) throw retryError;
+        // Same one-shot translation as the commit arm above: the release
+        // path's callers classify a liftable quarantine once.
+        if (isManagedEngineQuarantineRefusal(retryError)) {
+          throw serviceError(
+            'managed_engine_quarantined',
+            sessionId,
+            true,
+            retryError,
+          );
+        }
         this.directoryStates.set(sessionId, { pinned });
         this.beginTerminalQuarantine(runtime, error);
       }

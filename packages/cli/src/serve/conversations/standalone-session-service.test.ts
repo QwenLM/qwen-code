@@ -4274,6 +4274,33 @@ describe('StandaloneSessionService', () => {
     expect(harness.reservation.release).toHaveBeenCalled();
   });
 
+  it('reports a liftable quarantine on the restore path as retryable, never directory-compromised', async () => {
+    // The commit-arm refusal arrives inside a session load/resume: the
+    // translation happens once at bindAndRelease, so restore's own catch
+    // must see the StandaloneSessionServiceError shape — classifiable as
+    // retryable, not the compromised-directory fallback.
+    mockActiveStandalone();
+    const harness = createHarness();
+    const refusal = Object.assign(
+      new Error(
+        "The Managed engine is quarantined: a Runtime worker's stop could not be proven (3 groups remain).",
+      ),
+      { code: -32024, data: { errorKind: 'managed_engine_quarantined' } },
+    );
+    harness.bridge.commitManagedConversationBinding.mockRejectedValue(refusal);
+
+    await expect(harness.service.load(sessionId)).rejects.toMatchObject({
+      code: 'managed_engine_quarantined',
+      retryable: true,
+      cause: refusal,
+    });
+
+    expect(
+      harness.bridge.commitManagedConversationBinding,
+    ).toHaveBeenCalledTimes(2);
+    expect(harness.quarantineRuntime).not.toHaveBeenCalled();
+  });
+
   it('closes only a wrong fresh returned session before quarantining', async () => {
     vi.spyOn(
       SessionService.prototype,

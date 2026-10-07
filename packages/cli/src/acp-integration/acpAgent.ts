@@ -869,15 +869,18 @@ function managedQuarantineSummary(reason: Error): string {
     // could look at.
     return 'a sweep of its Runtime ledgers did not prove the stop';
   }
-  if (named.some((failure) => failure.remaining.length === 0)) {
-    return 'a ledger it could not read held the unproven stop';
-  }
-  return named
+  const entries = named
+    .filter((failure) => failure.remaining.length > 0)
     .map(
       (failure) =>
         `${path.basename(failure.workFile)}: ${failure.remaining.length} process group(s) not proven stopped`,
-    )
-    .join('; ');
+    );
+  if (named.some((failure) => failure.remaining.length === 0)) {
+    // An unreadable ledger in the same batch erases nothing: the entries
+    // the sweep did name still carry their basename and count.
+    entries.push('a ledger it could not read held the unproven stop');
+  }
+  return entries.join('; ');
 }
 
 /**

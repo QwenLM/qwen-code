@@ -648,6 +648,32 @@ describe('sendBridgeError session writer errors', () => {
     });
   });
 
+  it('answers the service-level quarantine code 503, not the conflict ladder', () => {
+    // StandaloneSessionServiceError('managed_engine_quarantined') is how a
+    // liftable refusal reaches a daemon route after the bindAndRelease
+    // translation; it must satisfy 503=retry-later the same way the raw
+    // child refusal does, never fall to the default 409.
+    const { response, status, json } = responseMock();
+    const error = new StandaloneSessionServiceError(
+      'managed_engine_quarantined',
+      'session-1',
+      'The Managed engine is quarantined while a Runtime worker stop stays unproven; retry once it proves.',
+      true,
+    );
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        'The Managed engine is quarantined while a Runtime worker stop stays unproven; retry once it proves.',
+      code: 'managed_engine_quarantined',
+      errorKind: 'managed_engine_quarantined',
+      retryable: true,
+      sessionId: 'session-1',
+    });
+  });
+
   it('logs why an execution engine rejection happened', () => {
     const daemonLog = { warn: vi.fn() } as unknown as DaemonLogger;
     const ctx = { route: 'POST /session/:id/load', sessionId: 'session-1' };

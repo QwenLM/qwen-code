@@ -1079,6 +1079,51 @@ describe.skipIf(process.platform === 'win32')(
         }
       });
 
+      it('sweeps the ledger of a worker that never finished launching', async () => {
+        // A launch that fails attestation leaves no live session to own the
+        // file: the inline sweep at the launch failure is what both stops
+        // the half-launched worker's groups and unlinks its ledger, so this
+        // child never reads the file as a sibling's live work later.
+        const ledgerDir = path.join(root, 'ledgers');
+        const quarantine = { report: vi.fn(), lift: vi.fn() };
+        const created = ledgerWorker('impostor', { ledgerDir, quarantine });
+        const attempt = created
+          .execute('read_file', { file_path: 'a.txt' }, signal)
+          .catch((error: unknown) => error);
+        let inc = '';
+        await vi.waitFor(
+          async () => {
+            const entries = await logged();
+            expect(entries.some((entry) => entry.boot !== undefined)).toBe(
+              true,
+            );
+            inc = entries.find((entry) => entry.boot !== undefined)!.boot!;
+          },
+          { timeout: 10_000 },
+        );
+        const workFile = path.join(ledgerDir, `${inc}.json`);
+        const sleeperPid = spawnSleeper();
+        testInternals.writeLedgerDocument(
+          workFile,
+          {
+            pid: 42424245,
+            pgid: 42424245,
+            incarnation: 'incarnation-1',
+            startedAt: Date.now(),
+          },
+          [{ pgid: sleeperPid, callId: 'call-launch', startedAt: Date.now() }],
+        );
+        const outcome = await attempt;
+        expect(outcome).toBeInstanceOf(Error);
+        await vi.waitFor(
+          () => {
+            expect(processGroupLiveness(sleeperPid)).toBe('gone');
+            expect(existsSync(workFile)).toBe(false);
+          },
+          { timeout: 10_000 },
+        );
+      });
+
       it(
         'a reaper keeps the groups an earlier failure named across a later nameless one',
         // Reaper ticks are seconds apart; the choreography observes each
@@ -2213,6 +2258,111 @@ describe.skipIf(process.platform === 'win32')(
           ).toHaveLength(1);
         } finally {
           await second.dispose();
+        }
+      },
+    );
+
+    it(
+      'a second environment creation never sweeps the first live worker',
+      { timeout: 30_000 },
+      async () => {
+        // Two Managed sessions in one child share the ledger dir, and the
+        // second one's startup sweep must not prove anything about the
+        // first session's live worker. The ONLY thing holding that line is
+        // the skip-set wiring: launchedLedgerPaths.add before every spawn
+        // keeps the first worker's ledger invisible to the sibling pass,
+        // because holdsForLiveHost explicitly refuses to hold what this
+        // process itself parented. Dropping the wire SIGKILLs the first
+        // worker mid-Shell.
+        const sweeperConfig = (sessionId: string) =>
+          new Config({
+            sessionId,
+            targetDir: root,
+            cwd: root,
+            debugMode: false,
+            model: 'test-model',
+            usageStatisticsEnabled: false,
+            telemetry: { enabled: false },
+            deferTelemetryInitialization: true,
+          });
+        const firstConfig = sweeperConfig(
+          '44444444-2222-3333-4444-555555555555',
+        );
+        const ledgerDir = path.join(
+          firstConfig.storage.getProjectTempDir(),
+          'managed-runtime',
+        );
+        const launch = () => ({
+          command: process.execPath,
+          args: [script],
+          env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
+        });
+        // The first session's worker, launched through the same production
+        // constructor the environment wraps: its launch has already
+        // enrolled its ledger path in the process-wide skip set by the time
+        // the environment creation below runs the startup sweep.
+        const firstWorker = new ManagedSessionRuntimeWorker(
+          SESSION_ID,
+          root,
+          launch,
+          undefined,
+          { ledgerDir },
+        );
+        await firstWorker.execute('read_file', { file_path: 'a.txt' }, signal);
+        let inc = '';
+        await vi.waitFor(
+          async () => {
+            const entries = (await readFile(logFile, 'utf8'))
+              .split('\n')
+              .filter(Boolean)
+              .map((line) => JSON.parse(line) as { boot?: string });
+            expect(entries.some((entry) => entry.boot !== undefined)).toBe(
+              true,
+            );
+            inc = entries.find((entry) => entry.boot !== undefined)!.boot!;
+          },
+          { timeout: 10_000 },
+        );
+        const liveWorkerLedger = path.join(ledgerDir, `${inc}.json`);
+        // A live, marker-bearing process recorded as that ledger's worker:
+        // exactly the shape the sibling sweep would sign and unlink without
+        // the skip.
+        const fixture = spawn(
+          process.execPath,
+          ['-e', 'setInterval(() => {}, 1_000_000)', 'managed-runtime-worker'],
+          { detached: true, stdio: 'ignore' },
+        );
+        fixture.unref();
+        fixture.on('exit', () => undefined);
+        const fixturePid = fixture.pid!;
+        testInternals.writeLedgerDocument(
+          liveWorkerLedger,
+          {
+            pid: fixturePid,
+            pgid: fixturePid,
+            incarnation: inc,
+            startedAt: Date.now(),
+          },
+          [],
+        );
+        const second = createManagedRuntimeEnvironment(
+          sweeperConfig('55555555-2222-3333-4444-555555555555'),
+          launch,
+        );
+        try {
+          // The sibling pass settles quickly over one file; give it its
+          // window, then the live worker still runs and its file stands.
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          expect(processGroupLiveness(fixturePid)).toBe('alive');
+          expect(existsSync(liveWorkerLedger)).toBe(true);
+        } finally {
+          await second.dispose();
+          await firstWorker.close().catch(() => undefined);
+          try {
+            process.kill(-fixturePid, 'SIGKILL');
+          } catch {
+            // Already gone.
+          }
         }
       },
     );

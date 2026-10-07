@@ -884,14 +884,16 @@ export function toRpcError(err: unknown): {
   if (err instanceof StandaloneSessionServiceError) {
     const httpStatus = err.capacity
       ? 503
-      : err.code === 'invalid_request'
-        ? 400
-        : err.code === 'standalone_session_not_found'
-          ? 404
-          : err.code === 'standalone_creation_outcome_unknown' ||
-              err.code === 'standalone_creation_rolled_back'
-            ? 500
-            : 409;
+      : err.code === 'managed_engine_quarantined'
+        ? 503
+        : err.code === 'invalid_request'
+          ? 400
+          : err.code === 'standalone_session_not_found'
+            ? 404
+            : err.code === 'standalone_creation_outcome_unknown' ||
+                err.code === 'standalone_creation_rolled_back'
+              ? 500
+              : 409;
     return {
       code:
         httpStatus >= 500 || err.retryable
