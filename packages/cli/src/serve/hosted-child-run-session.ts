@@ -10,7 +10,7 @@ import type {
   ChildRun,
   ChildRunStopReason,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
-import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import { parseChildShellRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import type {
   ManagedSessionActor,
   ManagedSessionCommand,
@@ -76,7 +76,7 @@ export class HostedChildRunSession {
   /** The last committed body of one Shell, parsed. */
   record(shellId: string): ChildRun | undefined {
     const existing = this.store.authority.extensionRecord('child_run', shellId);
-    return existing ? parseChildRun(existing.record) : undefined;
+    return existing ? parseChildShellRun(existing.record) : undefined;
   }
 
   /** Revision 1: the start call's intent, before any physical side effect. */
@@ -274,7 +274,9 @@ export class HostedChildRunSession {
         'child_run',
         shellId,
       );
-      const previous = existing ? parseChildRun(existing.record) : undefined;
+      const previous = existing
+        ? parseChildShellRun(existing.record)
+        : undefined;
       const next =
         typeof record === 'function' ? await record(previous) : record;
       if (previous && isDeepStrictEqual(previous, next)) return;

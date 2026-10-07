@@ -116,7 +116,7 @@ Finalization 引用 cut digest；`DRAINED` 引用两者。物理证据引用相�
 读取与创建权限，并使用固定 `csi-files-retirement-tools/1` 与
 `csi-files-retirement-policy/1` 引用。先分配 Session UUID，再导出以 Session 隔离的
 `kubernetes-workspace` request。远端 mount root 来自 registration，不在宿主机解析
-文件系统。V48 增加可空 `runtime_request_key`，不为旧数据回填成功证据；CREATE 将它与
+文件系统。V51 增加可空 `runtime_request_key`，不为旧数据回填成功证据；CREATE 将它与
 `tool_profile=csi-files-retirement/1` 同时插入。
 
 Capability digest 是精确 `CsiFilesRetirementProfile.CAPABILITY_MANIFEST` UTF-8
@@ -213,7 +213,14 @@ replacement 修复。Renewal 保持原 activation、install reference 与 worker
 原生 renewal sequence。Terminal release 需要后续窄 retirement-close 操作；本批
 不授权通用 release、seal 或 finalization。
 
-在 V49 及独立 JDBC 的 fresh/upgrade schema 中增加可空
+迁移与 journal transaction 都先取得 placement domain，再取得 retention tenant。
+离线 LOCAL 迁移即使与 journal 使用不同 storage，仍共享这两个锁；反序获取会死锁。
+Workspace 生命周期入口在锁定 Session 和检查迁移封锁前取得 domain。未绑定 workspace
+的旧生命周期保留仅锁 Session 的 admission：另一连接阻塞 extension UPDATE 时，DELETE
+必须能够先提交，让 journal 后续的删除检查抑制 task projection。Session 的 workspace
+身份不可变。
+
+在 V52 及独立 JDBC 的 fresh/upgrade schema 中增加可空
 `first_activation_journal_revision`，不回填 legacy，也不增加调用方可设置的 binding
 字段。在原 SQL 连接上，首个接受在既有 binding/version 条件下将 NULL 固定为精确
 SQL journal revision，并将 `record_version` 增加一次。Resources、journal、head 与
@@ -494,6 +501,12 @@ ACK 或 release receipt。跨 tenant alias 仍在同一 physical key 上串行�
 丢失 release 响应时，即使卷已归他人，重试也只返回已提交的原 release receipt。历史
 查询不应要求当前仍为 `DRAINING` holder，但也不能变更新 holder，或为已释放 retirement
 提交新 ACK。缺少原 handle、CREATE 不确定仍阻塞；“没有 handle”不证明从未挂载。
+
+本次同步 main 保留已发布的 Workspace migration V48–V50，将本 Draft 尚未发布的
+Session request 与首次 activation migration 重编号为 V51、V52，SQL 字节与顺序
+不变。升级检查分别从 main V50 和仅 request 的 V51 开始，保留 legacy 行及版本，
+要求 first-activation pin 保持 NULL，不能回填权威。此前本地资格验证数据库均自有
+且已清理；本变更不改写任何已应用的共享 migration history。
 
 实现时使用下一个可用 migration 版本。保留旧 LOCAL 行、现有 CSI identity 字节和 ACK
 digest。不回填 `DRAINED`、`RELEASED` 或正向证据。在所有 coordinator writer/reader

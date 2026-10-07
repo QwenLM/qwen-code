@@ -23,7 +23,7 @@ import org.springframework.web.bind.annotation.RestController;
 class ApiExceptionHandlerTest {
     @Test
     void preservesBrokerRefusalStatusCodeAndRetryabilityThroughAdvice() throws Exception {
-        for (int statusCode : List.of(409, 503)) {
+        for (int statusCode : List.of(409, 499, 503)) {
             boolean retryable = statusCode == 503;
             var mvc = MockMvcBuilders.standaloneSetup(new RefusalController(
                     new RuntimeBrokerException(statusCode, "csi_original_activation_unavailable", "unavailable", retryable)))
@@ -77,6 +77,9 @@ class ApiExceptionHandlerTest {
 
         assertThat(new ApiExceptionHandler().api(new ApiException(
                 HttpStatus.NOT_FOUND, "session_not_found", "gone"),
+                new MockHttpServletRequest(), response)).isNull();
+        assertThat(new ApiExceptionHandler().broker(new RuntimeBrokerException(
+                409, "workspace_unavailable", "Maintenance", false),
                 new MockHttpServletRequest(), response)).isNull();
         assertThat(response.getContentAsByteArray()).isEmpty();
     }

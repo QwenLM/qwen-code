@@ -243,6 +243,25 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 : drainBindings(tenantId, harnessSessionId, batch.getLast().getBindingId()));
     }
 
+    public CompletionStage<Void> retireStorageBinding(String tenantId, String storageId,
+            String operationId, String bindingId, long generation) {
+        requireOpen();
+        var saved = bindingRepository.findById(bindingId);
+        if (!bindingRepository.isStorageFenced(tenantId, storageId, operationId) || saved == null
+                || saved.getGeneration() != generation
+                || !tenantId.equals(saved.getRequest().getScope().getTenantId())
+                || !storageId.equals(saved.getRequest().getStorageId())) {
+            return failed(conflict("migration_conflict", "Original storage retirement identity differs"));
+        }
+        if (saved.getState() == RuntimeBindingRecord.State.RELEASED) {
+            if (saved.getDrainReceipt() == null && !saved.hasStoppedWriters()) {
+                return failed(conflict("workspace_migration_stop_unverified", "Original worker stop is unproven"));
+            }
+            return CompletableFuture.completedFuture(null);
+        }
+        return drainBinding(saved);
+    }
+
     private CompletionStage<Void> drainBinding(RuntimeBindingRecord saved) {
         if (saved.getState() == RuntimeBindingRecord.State.RELEASED) {
             return CompletableFuture.completedFuture(null);
@@ -1481,20 +1500,33 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<RuntimeSessionRecord> persistedSession(
             String harnessSessionId, String runtimeSessionId) {
-        return resolveScope(harnessSessionId).thenApply(scope -> {
-            RuntimeSessionRecord record = sessionRepository.findById(scope,
-                    runtimeSessionId);
-            if (record == null) {
-                throw notFound("runtime_session_not_found",
-                        "Runtime Session was not found");
-            }
-            if (!record.getSession().getHarnessSessionId().equals(
-                    harnessSessionId)) {
-                throw conflict("runtime_session_conflict",
-                        "Runtime Session belongs to another Harness Session");
-            }
-            return record;
-        });
+        return mapFailure(safeStage(() -> sessionResolver.resolveTenant(harnessSessionId)),
+                "runtime_scope_resolution_failed", "Runtime scope resolution failed").thenCompose(tenant -> {
+                    RuntimeSessionRecord record = sessionRepository.findHistorical(tenant, harnessSessionId, runtimeSessionId);
+                    if (record == null) {
+                        throw notFound("runtime_session_not_found",
+                                "Runtime Session was not found");
+                    }
+                    if (!record.getSession().getHarnessSessionId().equals(
+                            harnessSessionId)) {
+                        throw conflict("runtime_session_conflict",
+                                "Runtime Session belongs to another Harness Session");
+                    }
+                    var parent = bindingRepository.findById(record.getBindingId());
+                    if (parent == null || parent.getGeneration() != record.getRuntimeGeneration()
+                            || !parent.getRequest().getScope().equals(record.getSession().getScope())) {
+                        throw conflict("runtime_session_conflict", "Historical Runtime parent differs");
+                    }
+                    if (!parent.getRequest().isManagedContext()) {
+                        return resolveScope(harnessSessionId).thenApply(scope -> {
+                            if (!scope.equals(record.getSession().getScope())) {
+                                throw notFound("runtime_session_not_found", "Runtime Session was not found");
+                            }
+                            return record;
+                        });
+                    }
+                    return CompletableFuture.completedFuture(record);
+                });
     }
 
     private ToolExecutionRecord createExecution(SessionContext context,
@@ -3027,8 +3059,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
         // registration as journal loss would erase the clean-stop boundary.
         if (record.getState() != RuntimeBindingRecord.State.LOST
                 && "session".equals(record.getRequest().getScope().getIsolationClass())
-                && bindingRepository.isHarnessDraining(record.getRequest().getScope().getTenantId(),
-                        record.getRequest().getIsolationKey())) {
+                && (bindingRepository.isHarnessDraining(record.getRequest().getScope().getTenantId(),
+                        record.getRequest().getIsolationKey()) || record.getRequest().getStorageId() != null
+                        && bindingRepository.isStorageFenced(record.getRequest().getScope().getTenantId(),
+                                record.getRequest().getStorageId(), null))) {
             return CompletableFuture.completedFuture(record);
         }
         if (!provisioner.supportsStartupRecovery(record.getResourceHandle())) {
@@ -3056,8 +3090,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             if (claimed.getState() != RuntimeBindingRecord.State.LOST
                     && "session".equals(claimed.getRequest().getScope().getIsolationClass())
-                    && bindingRepository.isHarnessDraining(claimed.getRequest().getScope().getTenantId(),
-                            claimed.getRequest().getIsolationKey())) {
+                    && (bindingRepository.isHarnessDraining(claimed.getRequest().getScope().getTenantId(),
+                            claimed.getRequest().getIsolationKey()) || claimed.getRequest().getStorageId() != null
+                            && bindingRepository.isStorageFenced(claimed.getRequest().getScope().getTenantId(),
+                                    claimed.getRequest().getStorageId(), null))) {
                 return CompletableFuture.completedFuture(claimed);
             }
             if (claimed.getState() == RuntimeBindingRecord.State.LOST) {

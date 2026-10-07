@@ -67,6 +67,12 @@ public interface RuntimeBindingRepository {
     List<RuntimeBindingRecord> findByHarnessSession(String tenantId, String harnessSessionId,
             String afterBindingId, int limit);
 
+    void requestStorageFence(String tenantId, String storageId, String operationId);
+
+    boolean isStorageFenced(String tenantId, String storageId, String operationId);
+
+    List<RuntimeBindingRecord> findByStorage(String tenantId, String storageId, String afterBindingId, int limit);
+
     RuntimeBindingRecord findOrCreate(RuntimeProvisionRequest request);
 
     RuntimeBindingRecord findActive(RuntimeProvisionRequest request);

@@ -140,7 +140,7 @@ creation requires matching registered storage, ACTIVE Workspace, read/create
 permission, and fixed `csi-files-retirement-tools/1` and
 `csi-files-retirement-policy/1` references. The Session UUID is allocated before
 deriving its Session-isolated `kubernetes-workspace` request. Its remote mount
-root comes from the registration, without host filesystem resolution. V48 adds
+root comes from the registration, without host filesystem resolution. V51 adds
 nullable `runtime_request_key` with no legacy evidence backfill; the CREATE
 inserts it alongside `tool_profile=csi-files-retirement/1`.
 The first profile only accepts Workspace root selection (`cwdRelative="."`).
@@ -269,7 +269,16 @@ activation, install reference and worker, and advances the native renewal
 sequence. Terminal release needs the later narrow retirement-close operation;
 this slice does not grant generic release, seal or finalization.
 
-Install V49 and the standalone JDBC fresh/upgrade schema with a nullable
+Migration and journal transactions acquire the placement domain before the
+retention tenant. Offline LOCAL migration shares these guards even when its
+storage differs from the journal's storage; taking them in reverse order
+deadlocks. Workspace lifecycle entry points take the domain before locking
+their Session and checking the migration fence. The unbound legacy lifecycle
+keeps its Session-only admission: its DELETE must commit while an extension
+UPDATE waits on another connection, so the journal's later deletion guard
+suppresses the task projection. Session workspace identity is immutable.
+
+Install V52 and the standalone JDBC fresh/upgrade schema with a nullable
 `first_activation_journal_revision`, without legacy backfill or a caller-settable
 binding field. On the same original SQL connection, first acceptance changes
 NULL to the exact SQL journal revision and increments `record_version` once,
@@ -655,6 +664,14 @@ volume now belongs to someone else. Historical lookup must not require current
 `DRAINING` ownership, but it also cannot mutate a new holder or submit new ACKs
 for a released retirement. Missing original handles and ambiguous CREATE remain
 blocked; “no handle” is not proof that no mount existed.
+
+The main synchronization keeps the published Workspace migration versions
+V48–V50 unchanged and renumbers this Draft's unpublished Session request and
+first activation migrations to V51 and V52. Their SQL bytes and ordering do not
+change. Upgrade checks start from main V50 and request-only V51, retain legacy
+rows and versions, and require a NULL first-activation pin rather than
+backfilling authority. Earlier local qualification databases were owned and
+cleaned; this change does not rewrite any applied shared migration history.
 
 Add migrations using the next free version at implementation time. Preserve
 legacy LOCAL rows, existing CSI identity bytes and ACK digests. Never backfill

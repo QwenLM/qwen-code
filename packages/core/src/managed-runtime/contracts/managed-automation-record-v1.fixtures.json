@@ -1,0 +1,1277 @@
+{
+  "contract": "managed-automation-record/1",
+  "domains": {
+    "schedule": {
+      "taskKind": null
+    },
+    "automation_run": {
+      "taskKind": "automation_run"
+    }
+  },
+  "validatedTimezones": [
+    "Asia/Shanghai",
+    "America/New_York",
+    "Europe/Paris",
+    "Australia/Lord_Howe",
+    "Pacific/Apia",
+    "Asia/Urumqi",
+    "America/Santiago"
+  ],
+  "overlapPolicies": ["skip", "queue_one", "allow"],
+  "catchUpPolicies": ["none", "latest", "bounded"],
+  "sessionModes": ["persistent", "per_run"],
+  "keys": {
+    "schedule": [
+      "catchUp",
+      "catchUpLimit",
+      "cron",
+      "definitionDigest",
+      "definitionRevision",
+      "enabled",
+      "goal",
+      "kind",
+      "overlap",
+      "ownerScopeId",
+      "promptRef",
+      "run",
+      "scheduleId",
+      "sessionMode",
+      "targetSessionId",
+      "timezone"
+    ],
+    "automation_run": [
+      "automationRunId",
+      "definitionRevision",
+      "kind",
+      "occurrenceKey",
+      "run",
+      "scheduleId",
+      "sessionMode",
+      "targetSessionId"
+    ]
+  },
+  "fixedKeys": {
+    "schedule": ["kind", "ownerScopeId", "scheduleId"],
+    "automation_run": [
+      "automationRunId",
+      "definitionRevision",
+      "kind",
+      "occurrenceKey",
+      "scheduleId",
+      "sessionMode",
+      "targetSessionId"
+    ]
+  },
+  "templates": {
+    "schedule": {
+      "kind": "schedule",
+      "scheduleId": "schedule-1",
+      "ownerScopeId": "scope-1",
+      "goal": "nightly build verification",
+      "cron": "0 9 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "definitionRevision": 1,
+      "definitionDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "promptRef": {
+        "resourceId": "prompt-1",
+        "kind": "managed-publication",
+        "schemaVersion": 1,
+        "byteLength": 2,
+        "digest": "6666666666666666666666666666666666666666666666666666666666666666"
+      },
+      "sessionMode": "persistent",
+      "targetSessionId": "session-1",
+      "overlap": "skip",
+      "catchUp": "none",
+      "catchUpLimit": null,
+      "enabled": true,
+      "run": {
+        "state": "admitted",
+        "reason": null,
+        "definition": null,
+        "executionCallId": null,
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": null
+      }
+    },
+    "automation_run": {
+      "kind": "automation_run",
+      "automationRunId": "run-1",
+      "scheduleId": "schedule-1",
+      "definitionRevision": 3,
+      "occurrenceKey": "schedule:2026-10-06T01:00:00Z",
+      "sessionMode": "persistent",
+      "targetSessionId": "session-1",
+      "run": {
+        "state": "admitted",
+        "reason": null,
+        "definition": null,
+        "executionCallId": null,
+        "effectId": null,
+        "dispatchId": "claim-1",
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": null
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "schedule-start",
+      "domain": "schedule",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "schedule-reserved-start",
+      "domain": "schedule",
+      "patch": {
+        "run": {
+          "state": "reserved"
+        }
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "schedule-running",
+      "domain": "schedule",
+      "patch": {
+        "run": {
+          "state": "running"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "schedule-kind-unknown",
+      "domain": "schedule",
+      "patch": {
+        "kind": "automation_run"
+      },
+      "valid": false,
+      "error": "must be 'schedule' in schema version 1",
+      "start": false
+    },
+    {
+      "id": "schedule-extra-key",
+      "domain": "schedule",
+      "patch": {
+        "extra": true
+      },
+      "valid": false,
+      "error": "exactly",
+      "start": false
+    },
+    {
+      "id": "cron-four-fields",
+      "domain": "schedule",
+      "patch": {
+        "cron": "0 9 * *"
+      },
+      "valid": false,
+      "error": "exactly five fields",
+      "start": false
+    },
+    {
+      "id": "cron-six-fields",
+      "domain": "schedule",
+      "patch": {
+        "cron": "0 0 9 * * 1-5"
+      },
+      "valid": false,
+      "error": "exactly five fields",
+      "start": false
+    },
+    {
+      "id": "cron-named-month",
+      "domain": "schedule",
+      "patch": {
+        "cron": "0 9 * JAN 1-5"
+      },
+      "valid": false,
+      "error": "must use digit, range, list or step atoms",
+      "start": false
+    },
+    {
+      "id": "cron-atom-control",
+      "domain": "schedule",
+      "patch": {
+        "cron": "0 9 ? * 1-5"
+      },
+      "valid": false,
+      "error": "must use digit, range, list or step atoms",
+      "start": false
+    },
+    {
+      "id": "cron-step-zero",
+      "domain": "schedule",
+      "patch": {
+        "cron": "*/0 * * * *"
+      },
+      "valid": false,
+      "start": false,
+      "error": "steps must stay within"
+    },
+    {
+      "id": "cron-step-over-max",
+      "domain": "schedule",
+      "patch": {
+        "cron": "*/60 * * * *"
+      },
+      "valid": false,
+      "start": false,
+      "error": "steps must stay within"
+    },
+    {
+      "id": "cron-dash-empty",
+      "domain": "schedule",
+      "patch": {
+        "cron": "- - - - -"
+      },
+      "valid": false,
+      "start": false,
+      "error": "must use digit, range, list or step atoms"
+    },
+    {
+      "id": "cron-out-of-range",
+      "domain": "schedule",
+      "patch": {
+        "cron": "99 99 99 99 99"
+      },
+      "valid": false,
+      "start": false,
+      "error": "must stay within"
+    },
+    {
+      "id": "cron-hour-out-of-range",
+      "domain": "schedule",
+      "patch": {
+        "cron": "0 24 * * *"
+      },
+      "valid": false,
+      "start": false,
+      "error": "must stay within"
+    },
+    {
+      "id": "cron-wrap",
+      "domain": "schedule",
+      "patch": {
+        "cron": "0 17-9 * * *"
+      },
+      "valid": false,
+      "start": false,
+      "error": "must not wrap"
+    },
+    {
+      "id": "cron-steps-and-ranges",
+      "domain": "schedule",
+      "patch": {
+        "cron": "*/15 9-17 1,15 * 1-5"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "timezone-utc",
+      "domain": "schedule",
+      "patch": {
+        "timezone": "UTC"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "timezone-zoo-a",
+      "domain": "schedule",
+      "patch": {
+        "timezone": "Australia/Lord_Howe"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "timezone-zoo-b",
+      "domain": "schedule",
+      "patch": {
+        "timezone": "Etc/GMT+8"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "timezone-anchor-Asia-Shanghai",
+      "domain": "schedule",
+      "patch": {
+        "timezone": "Asia/Shanghai"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "timezone-anchor-America-New_York",
+      "domain": "schedule",
+      "patch": {
+        "timezone": "America/New_York"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "timezone-anchor-Europe-Paris",
+      "domain": "schedule",
+      "patch": {
+        "timezone": "Europe/Paris"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "timezone-anchor-Australia-Lord_Howe",
+      "domain": "schedule",
+      "patch": {
+        "timezone": "Australia/Lord_Howe"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "timezone-anchor-Pacific-Apia",
+      "domain": "schedule",
+      "patch": {
+        "timezone": "Pacific/Apia"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "timezone-anchor-Asia-Urumqi",
+      "domain": "schedule",
+      "patch": {
+        "timezone": "Asia/Urumqi"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "timezone-anchor-America-Santiago",
+      "domain": "schedule",
+      "patch": {
+        "timezone": "America/Santiago"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "timezone-space",
+      "domain": "schedule",
+      "patch": {
+        "timezone": "Mars/Olympus Mons"
+      },
+      "valid": false,
+      "error": "IANA timezone name form",
+      "start": false
+    },
+    {
+      "id": "timezone-empty",
+      "domain": "schedule",
+      "patch": {
+        "timezone": ""
+      },
+      "valid": false,
+      "error": "must be a non-empty string",
+      "start": false
+    },
+    {
+      "id": "mode-unknown",
+      "domain": "schedule",
+      "patch": {
+        "sessionMode": "detached"
+      },
+      "valid": false,
+      "error": "sessionMode must be one of",
+      "start": false
+    },
+    {
+      "id": "persistent-without-target",
+      "domain": "schedule",
+      "patch": {
+        "targetSessionId": null
+      },
+      "valid": false,
+      "error": "frozen exactly for the persistent target mode",
+      "start": false
+    },
+    {
+      "id": "per-run-with-target",
+      "domain": "schedule",
+      "patch": {
+        "sessionMode": "per_run"
+      },
+      "valid": false,
+      "error": "frozen exactly for the persistent target mode",
+      "start": false
+    },
+    {
+      "id": "per-run",
+      "domain": "schedule",
+      "patch": {
+        "sessionMode": "per_run",
+        "targetSessionId": null
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "overlap-unknown",
+      "domain": "schedule",
+      "patch": {
+        "overlap": "queue_all"
+      },
+      "valid": false,
+      "error": "overlap must be one of",
+      "start": false
+    },
+    {
+      "id": "overlap-queue-one",
+      "domain": "schedule",
+      "patch": {
+        "overlap": "queue_one"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "catch-up-unknown",
+      "domain": "schedule",
+      "patch": {
+        "catchUp": "all"
+      },
+      "valid": false,
+      "error": "catchUp must be one of",
+      "start": false
+    },
+    {
+      "id": "catch-up-bounded",
+      "domain": "schedule",
+      "patch": {
+        "catchUp": "bounded",
+        "catchUpLimit": 3
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "catch-up-bounded-no-limit",
+      "domain": "schedule",
+      "patch": {
+        "catchUp": "bounded"
+      },
+      "valid": false,
+      "error": "catchUpLimit is set exactly for bounded catch-up",
+      "start": false
+    },
+    {
+      "id": "catch-up-none-with-limit",
+      "domain": "schedule",
+      "patch": {
+        "catchUpLimit": 3
+      },
+      "valid": false,
+      "error": "catchUpLimit is set exactly for bounded catch-up",
+      "start": false
+    },
+    {
+      "id": "catch-up-limit-zero",
+      "domain": "schedule",
+      "patch": {
+        "catchUp": "bounded",
+        "catchUpLimit": 0
+      },
+      "valid": false,
+      "error": "must be an integer from 1 to 9007199254740990",
+      "start": false
+    },
+    {
+      "id": "revision-zero",
+      "domain": "schedule",
+      "patch": {
+        "definitionRevision": 0
+      },
+      "valid": false,
+      "error": "must be an integer from 1 to 9007199254740990",
+      "start": false
+    },
+    {
+      "id": "digest-not-hex",
+      "domain": "schedule",
+      "patch": {
+        "definitionDigest": "zzz"
+      },
+      "valid": false,
+      "error": "must be a lowercase SHA-256 hex digest",
+      "start": false
+    },
+    {
+      "id": "enabled-text",
+      "domain": "schedule",
+      "patch": {
+        "enabled": "yes"
+      },
+      "valid": false,
+      "error": "enabled must be boolean",
+      "start": false
+    },
+    {
+      "id": "goal-empty",
+      "domain": "schedule",
+      "patch": {
+        "goal": ""
+      },
+      "valid": false,
+      "error": "goal must be a non-empty string",
+      "start": false
+    },
+    {
+      "id": "goal-surrogates-1365",
+      "domain": "schedule",
+      "patch": {
+        "goal": "\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "goal-high-surrogates-1366",
+      "domain": "schedule",
+      "patch": {
+        "goal": "\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d\ud83d"
+      },
+      "valid": false,
+      "start": false,
+      "error": "exceeds 4096 UTF-8 bytes"
+    },
+    {
+      "id": "goal-low-surrogates-1366",
+      "domain": "schedule",
+      "patch": {
+        "goal": "\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00\udc00"
+      },
+      "valid": false,
+      "start": false,
+      "error": "exceeds 4096 UTF-8 bytes"
+    },
+    {
+      "id": "prompt-ref-required",
+      "domain": "schedule",
+      "patch": {
+        "promptRef": "prompt-1"
+      },
+      "valid": false,
+      "error": "promptRef",
+      "start": false
+    },
+    {
+      "id": "run-with-execution",
+      "domain": "schedule",
+      "patch": {
+        "run": {
+          "execution": "intent",
+          "executionCallId": "call-1"
+        }
+      },
+      "valid": false,
+      "error": "must stay a purely logical lifecycle",
+      "start": false
+    },
+    {
+      "id": "run-with-definition",
+      "domain": "schedule",
+      "patch": {
+        "run": {
+          "definition": {
+            "definitionId": "schedule-1",
+            "definitionRevision": 1,
+            "definitionDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        }
+      },
+      "valid": false,
+      "error": "must stay a purely logical lifecycle",
+      "start": false
+    },
+    {
+      "id": "run-start",
+      "domain": "automation_run",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "run-reserved-start",
+      "domain": "automation_run",
+      "patch": {
+        "run": {
+          "state": "reserved",
+          "dispatchId": null
+        }
+      },
+      "valid": false,
+      "error": "name its dispatch",
+      "start": false
+    },
+    {
+      "id": "manual-occurrence",
+      "domain": "automation_run",
+      "patch": {
+        "occurrenceKey": "manual:command-1"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "webhook-reserved",
+      "domain": "automation_run",
+      "patch": {
+        "occurrenceKey": "webhook:event-1"
+      },
+      "valid": false,
+      "error": "webhook occurrences are reserved until their slice lands",
+      "start": false
+    },
+    {
+      "id": "occurrence-unknown-kind",
+      "domain": "automation_run",
+      "patch": {
+        "occurrenceKey": "timer:2026-10-06T01:00:00Z"
+      },
+      "valid": false,
+      "error": "occurrenceKey must be schedule:<slot> or manual:<commandId>",
+      "start": false
+    },
+    {
+      "id": "occurrence-empty",
+      "domain": "automation_run",
+      "patch": {
+        "occurrenceKey": ""
+      },
+      "valid": false,
+      "error": "must be a non-empty string",
+      "start": false
+    },
+    {
+      "id": "occurrence-no-separator",
+      "domain": "automation_run",
+      "patch": {
+        "occurrenceKey": "schedule"
+      },
+      "valid": false,
+      "error": "occurrenceKey must be schedule:<slot> or manual:<commandId>",
+      "start": false
+    },
+    {
+      "id": "slot-millis",
+      "domain": "automation_run",
+      "patch": {
+        "occurrenceKey": "schedule:2026-10-06T01:00:00.000Z"
+      },
+      "valid": false,
+      "error": "slot must be a canonical UTC instant",
+      "start": false
+    },
+    {
+      "id": "slot-offset",
+      "domain": "automation_run",
+      "patch": {
+        "occurrenceKey": "schedule:2026-10-06T09:00:00+08:00"
+      },
+      "valid": false,
+      "error": "slot must be a canonical UTC instant",
+      "start": false
+    },
+    {
+      "id": "slot-invalid-date",
+      "domain": "automation_run",
+      "patch": {
+        "occurrenceKey": "schedule:2026-02-30T01:00:00Z"
+      },
+      "valid": false,
+      "error": "slot must be a canonical UTC instant",
+      "start": false
+    },
+    {
+      "id": "slot-leap",
+      "domain": "automation_run",
+      "patch": {
+        "occurrenceKey": "schedule:2028-02-29T01:00:00Z"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "no-dispatch",
+      "domain": "automation_run",
+      "patch": {
+        "run": {
+          "dispatchId": null
+        }
+      },
+      "valid": false,
+      "error": "name its dispatch",
+      "start": false
+    },
+    {
+      "id": "with-call",
+      "domain": "automation_run",
+      "patch": {
+        "run": {
+          "executionCallId": "call-1"
+        }
+      },
+      "valid": false,
+      "error": "name its dispatch, no call and no definition",
+      "start": false
+    },
+    {
+      "id": "with-definition",
+      "domain": "automation_run",
+      "patch": {
+        "run": {
+          "definition": {
+            "definitionId": "schedule-1",
+            "definitionRevision": 3,
+            "definitionDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        }
+      },
+      "valid": false,
+      "error": "name its dispatch, no call and no definition",
+      "start": false
+    },
+    {
+      "id": "run-kind-unknown",
+      "domain": "automation_run",
+      "patch": {
+        "kind": "schedule"
+      },
+      "valid": false,
+      "error": "must be 'automation_run' in schema version 1",
+      "start": false
+    },
+    {
+      "id": "run-extra-key",
+      "domain": "automation_run",
+      "patch": {
+        "extra": true
+      },
+      "valid": false,
+      "error": "exactly",
+      "start": false
+    },
+    {
+      "id": "run-revision-zero",
+      "domain": "automation_run",
+      "patch": {
+        "definitionRevision": 0
+      },
+      "valid": false,
+      "error": "must be an integer from 1 to 9007199254740990",
+      "start": false
+    },
+    {
+      "id": "run-persistent-without-target",
+      "domain": "automation_run",
+      "patch": {
+        "targetSessionId": null
+      },
+      "valid": false,
+      "error": "frozen exactly for the persistent target mode",
+      "start": false
+    },
+    {
+      "id": "run-per-run",
+      "domain": "automation_run",
+      "patch": {
+        "sessionMode": "per_run",
+        "targetSessionId": null
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "delivery-planned",
+      "domain": "automation_run",
+      "patch": {
+        "run": {
+          "deliveryId": "delivery-1",
+          "delivery": {
+            "target": "channel",
+            "state": "planned"
+          }
+        }
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "delivery-sending-while-running",
+      "domain": "automation_run",
+      "patch": {
+        "run": {
+          "state": "running",
+          "execution": "intent",
+          "effectId": "effect-1",
+          "deliveryId": "delivery-1",
+          "delivery": {
+            "target": "channel",
+            "state": "sending"
+          }
+        }
+      },
+      "valid": false,
+      "error": "delivery moves past its plan only once the run ended",
+      "start": false
+    },
+    {
+      "id": "delivery-settled-sending",
+      "domain": "automation_run",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "deliveryId": "delivery-1",
+          "delivery": {
+            "target": "channel",
+            "state": "sending"
+          }
+        }
+      },
+      "valid": false,
+      "error": "needs an executionCallId or an effectId",
+      "start": false
+    },
+    {
+      "id": "delivery-settled-unknown",
+      "domain": "automation_run",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "effectId": "effect-1",
+          "deliveryId": "delivery-1",
+          "delivery": {
+            "target": "channel",
+            "state": "unknown"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    }
+  ],
+  "successors": [
+    {
+      "id": "schedule-admit-to-running",
+      "domain": "schedule",
+      "before": {},
+      "after": {
+        "run": {
+          "state": "running"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "schedule-revise-cron",
+      "domain": "schedule",
+      "before": {},
+      "after": {
+        "definitionRevision": 2,
+        "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999",
+        "cron": "30 8 * * 1-5"
+      },
+      "valid": true
+    },
+    {
+      "id": "schedule-revise-same-revision",
+      "domain": "schedule",
+      "before": {},
+      "after": {
+        "cron": "30 8 * * 1-5"
+      },
+      "valid": false
+    },
+    {
+      "id": "schedule-revise-skips-revision",
+      "domain": "schedule",
+      "before": {},
+      "after": {
+        "definitionRevision": 3,
+        "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "valid": false
+    },
+    {
+      "id": "schedule-disable",
+      "domain": "schedule",
+      "before": {
+        "run": {
+          "state": "running"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "waiting"
+        },
+        "definitionRevision": 2,
+        "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999",
+        "enabled": false
+      },
+      "valid": true
+    },
+    {
+      "id": "schedule-toggle-mode",
+      "domain": "schedule",
+      "before": {},
+      "after": {
+        "definitionRevision": 2,
+        "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999",
+        "sessionMode": "per_run",
+        "targetSessionId": null
+      },
+      "valid": true
+    },
+    {
+      "id": "schedule-fixed-id",
+      "domain": "schedule",
+      "before": {},
+      "after": {
+        "scheduleId": "schedule-2",
+        "definitionRevision": 2,
+        "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "valid": false
+    },
+    {
+      "id": "schedule-fixed-owner",
+      "domain": "schedule",
+      "before": {},
+      "after": {
+        "ownerScopeId": "scope-2",
+        "definitionRevision": 2,
+        "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "valid": false
+    },
+    {
+      "id": "schedule-cancel",
+      "domain": "schedule",
+      "before": {
+        "run": {
+          "state": "running"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "cancelled"
+        },
+        "definitionRevision": 2,
+        "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "valid": true
+    },
+    {
+      "id": "schedule-frozen-when-terminal",
+      "domain": "schedule",
+      "before": {
+        "run": {
+          "state": "cancelled"
+        },
+        "definitionRevision": 2,
+        "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "after": {
+        "run": {
+          "state": "cancelled"
+        },
+        "definitionRevision": 3,
+        "definitionDigest": "8888888888888888888888888888888888888888888888888888888888888888"
+      },
+      "valid": false
+    },
+    {
+      "id": "run-admit-to-intent",
+      "domain": "automation_run",
+      "before": {},
+      "after": {
+        "run": {
+          "state": "running",
+          "execution": "intent",
+          "effectId": "effect-1"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "run-intent-to-dispatch",
+      "domain": "automation_run",
+      "before": {
+        "run": {
+          "state": "running",
+          "execution": "intent",
+          "effectId": "effect-1"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "effectId": "effect-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "run-settle-creates-delivery",
+      "domain": "automation_run",
+      "before": {
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "effectId": "effect-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "after": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "effectId": "effect-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "deliveryId": "delivery-1",
+          "delivery": {
+            "target": "channel",
+            "state": "planned"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "run-delivery-progress",
+      "domain": "automation_run",
+      "before": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "effectId": "effect-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "deliveryId": "delivery-1",
+          "delivery": {
+            "target": "channel",
+            "state": "planned"
+          }
+        }
+      },
+      "after": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "effectId": "effect-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "deliveryId": "delivery-1",
+          "delivery": {
+            "target": "channel",
+            "state": "sending"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "run-delivery-unknown-reconciles",
+      "domain": "automation_run",
+      "before": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "effectId": "effect-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "deliveryId": "delivery-1",
+          "delivery": {
+            "target": "channel",
+            "state": "sending"
+          }
+        }
+      },
+      "after": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "effectId": "effect-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "deliveryId": "delivery-1",
+          "delivery": {
+            "target": "channel",
+            "state": "partial"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "run-delivery-failure-never-reopens",
+      "domain": "automation_run",
+      "before": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "effectId": "effect-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "deliveryId": "delivery-1",
+          "delivery": {
+            "target": "channel",
+            "state": "sending"
+          }
+        }
+      },
+      "after": {
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "effectId": "effect-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "deliveryId": "delivery-1",
+          "delivery": {
+            "target": "channel",
+            "state": "sending"
+          }
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "run-delivery-before-end",
+      "domain": "automation_run",
+      "before": {
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "effectId": "effect-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          }
+        }
+      },
+      "after": {
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "effectId": "effect-1",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "deliveryId": "delivery-1",
+          "delivery": {
+            "target": "channel",
+            "state": "sending"
+          }
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "run-fixed-occurrence",
+      "domain": "automation_run",
+      "before": {},
+      "after": {
+        "occurrenceKey": "schedule:2026-10-07T01:00:00Z"
+      },
+      "valid": false
+    },
+    {
+      "id": "run-fixed-revision",
+      "domain": "automation_run",
+      "before": {},
+      "after": {
+        "definitionRevision": 4
+      },
+      "valid": false
+    },
+    {
+      "id": "run-fixed-mode",
+      "domain": "automation_run",
+      "before": {},
+      "after": {
+        "sessionMode": "per_run",
+        "targetSessionId": null
+      },
+      "valid": false
+    },
+    {
+      "id": "run-fixed-target",
+      "domain": "automation_run",
+      "before": {},
+      "after": {
+        "targetSessionId": "session-2"
+      },
+      "valid": false
+    },
+    {
+      "id": "run-effect-fixed",
+      "domain": "automation_run",
+      "before": {
+        "run": {
+          "state": "running",
+          "execution": "intent",
+          "effectId": "effect-1"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "running",
+          "execution": "intent",
+          "effectId": "effect-2"
+        }
+      },
+      "valid": false
+    }
+  ]
+}

@@ -12,6 +12,9 @@ import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskRow;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -73,6 +76,42 @@ class ManagedSessionStoreIntegrationTest {
 
     @Autowired
     private ManagedExtensionRecordStore records;
+
+    @Test
+    void reportsAMigrationFenceAsADefiniteConflictWithoutChangingTheWriter() throws Exception {
+        String session = "migration-" + UUID.randomUUID();
+        String storage = "storage-" + UUID.randomUUID();
+        String base = "/internal/managed-session-store/v1/sessions/" + session;
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status,"
+                + " created_at, updated_at, workspace_storage_id, workspace_id, workspace_generation, cwd_relative,"
+                + " context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref)"
+                + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1, ?, 'workspace', 1, '.', ?, 1, ?, ?)",
+                TENANT, session, storage, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        mvc.perform(post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(writerRequest(WRITER_A).toString()))
+                .andExpect(status().isOk());
+        var original = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", session);
+        new JdbcRuntimeBindingRepository(jdbc.getDataSource(), new AesGcmSecretProtector("test", new byte[32]))
+                .requestStorageFence(TENANT, storage, UUID.randomUUID().toString());
+        mvc.perform(post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .header(HttpHeaders.ACCEPT, MediaType.TEXT_EVENT_STREAM_VALUE)
+                .contentType(MediaType.APPLICATION_JSON).content(writerRequest(WRITER_A).toString()))
+                .andExpect(status().isConflict())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.error.code").value("workspace_unavailable"))
+                .andExpect(jsonPath("$.error.retryable").value(false));
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", session))
+                .isEqualTo(original);
+        jdbc.update("DELETE FROM qwen_runtime_storage_fence WHERE tenant_id = ? AND storage_id = ?", TENANT, storage);
+        mvc.perform(post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(writerRequest(WRITER_A).toString()))
+                .andExpect(status().isOk());
+    }
 
     @Test
     void acceptsTheStageHTransactionsTheAuthorityWrote() throws Exception {
