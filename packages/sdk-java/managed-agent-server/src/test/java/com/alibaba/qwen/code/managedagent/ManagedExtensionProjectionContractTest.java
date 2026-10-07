@@ -61,8 +61,13 @@ class ManagedExtensionProjectionContractTest {
                                 .valueOf(kind));
             }
         });
-        assertEquals(JSON.convertValue(fixtures.required("recordBodies"),
-                TreeMap.class), JSON.convertValue(bodies, TreeMap.class));
+        Map<String, Object> expected = new TreeMap<>(JSON.convertValue(
+                fixtures.required("recordBodies"), TreeMap.class));
+        // The bodies H6 added to the projection contract after H4.
+        expected.putAll(JSON.convertValue(
+                fixtures.required("additionalRecordBodies"), TreeMap.class));
+        assertEquals(JSON.convertValue(expected, TreeMap.class),
+                JSON.convertValue(bodies, TreeMap.class));
         assertEquals(JSON.convertValue(fixtures.required("taskStates"),
                 List.class), ManagedExtensionProjection.TASK_STATES);
         List<String> runtimeStates = new ArrayList<>(

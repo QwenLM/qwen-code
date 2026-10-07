@@ -663,6 +663,27 @@ it('preserves a worker history refusal reason', async () => {
   });
 });
 
+it('reads Workspace context on its own tool-session route, through the result parser', async () => {
+  // The parser is the only gate between the Broker's reply and the system
+  // instruction: a name outside the closed list must not get through.
+  const paths: string[] = [];
+  let files: unknown = [{ name: 'QWEN.md', text: 'project rules' }];
+  const broker = await fixture((path) => {
+    paths.push(path);
+    return { body: { ...identity, result: { files } } };
+  });
+  await expect(broker.workspaceContext()).resolves.toEqual([
+    { name: 'QWEN.md', text: 'project rules' },
+  ]);
+  expect(paths[0]).toBe(
+    '/internal/runtime-broker/v1/tool-sessions/turn/control',
+  );
+  files = [{ name: '../etc/passwd', text: 'host' }];
+  await expect(broker.workspaceContext()).rejects.toThrow(
+    'Invalid Workspace context result.',
+  );
+});
+
 it('resolves a durable execution status for recovery reports', async () => {
   const broker = await fixture(() => ({
     body: {

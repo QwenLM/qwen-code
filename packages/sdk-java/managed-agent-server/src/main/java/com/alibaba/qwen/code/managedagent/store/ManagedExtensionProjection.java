@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import static java.util.Map.entry;
+
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.nio.charset.StandardCharsets;
@@ -21,43 +23,63 @@ import java.util.function.Predicate;
  * module managed-extension-projection.ts there replays the same cases.
  */
 public final class ManagedExtensionProjection {
-    /** The record bodies defined so far; a slice adds its body here. */
-    public static final Map<String, Body> RECORD_BODIES = Map.of(
-            "monitor_run", new Body(record -> "monitor",
+    /** The record bodies defined so far; a slice adds its body here. ofEntries, since Map.of caps ten pairs. */
+    public static final Map<String, Body> RECORD_BODIES = Map.ofEntries(
+            entry("monitor_run", new Body(record -> "monitor",
                     ManagedExtensionRecords::requireMonitorRun,
                     body -> body.get("monitorId").textValue(),
                     ManagedExtensionRecords::isMonitorRunStart,
-                    ManagedExtensionRecords::isMonitorRunSuccessor),
-            "mcp_configuration", new Body(record -> null,
+                    ManagedExtensionRecords::isMonitorRunSuccessor)),
+            entry("mcp_configuration", new Body(record -> null,
                     ManagedMcpRecords::requireConfiguration,
                     body -> body.get("configurationId").textValue(),
                     ManagedMcpRecords::isConfigurationStart,
-                    ManagedMcpRecords::isConfigurationSuccessor),
-            "mcp_operation", new Body(record -> null,
+                    ManagedMcpRecords::isConfigurationSuccessor)),
+            entry("mcp_operation", new Body(record -> null,
                     ManagedMcpRecords::requireOperation,
                     body -> body.get("operationId").textValue(),
                     ManagedMcpRecords::isOperationStart,
-                    ManagedMcpRecords::isOperationSuccessor),
-            "hook_registration", new Body(record -> null,
+                    ManagedMcpRecords::isOperationSuccessor)),
+            entry("hook_registration", new Body(record -> null,
                     ManagedHookRecords::requireRegistration,
                     body -> body.get("registrationId").textValue(),
                     ManagedHookRecords::isRegistrationStart,
-                    ManagedHookRecords::isRegistrationSuccessor),
-            "hook_execution", new Body(record -> null,
+                    ManagedHookRecords::isRegistrationSuccessor)),
+            entry("hook_execution", new Body(record -> null,
                     ManagedHookRecords::requireExecution,
                     body -> body.get("hookExecutionId").textValue(),
                     ManagedHookRecords::isExecutionStart,
-                    ManagedHookRecords::isExecutionSuccessor),
-            "child_run", new Body(ManagedExtensionRecords::childRunTaskKind,
+                    ManagedHookRecords::isExecutionSuccessor)),
+            entry("child_run", new Body(ManagedExtensionRecords::childRunTaskKind,
                     ManagedExtensionRecords::requireChildRun,
                     ManagedExtensionRecords::childRunRecordId,
                     ManagedExtensionRecords::isChildRunStart,
-                    ManagedExtensionRecords::isChildRunSuccessor),
-            "child_acceptance", new Body(record -> null,
+                    ManagedExtensionRecords::isChildRunSuccessor)),
+            entry("channel_route", new Body(record -> null,
+                    ManagedChannelRecords::requireRoute,
+                    body -> body.get("routeId").textValue(),
+                    ManagedChannelRecords::isRouteStart,
+                    ManagedChannelRecords::isRouteSuccessor)),
+            entry("channel_delivery", new Body(record -> null,
+                    ManagedChannelRecords::requireDelivery,
+                    body -> body.get("deliveryId").textValue(),
+                    ManagedChannelRecords::isDeliveryStart,
+                    ManagedChannelRecords::isDeliverySuccessor)),
+            entry("child_acceptance", new Body(record -> null,
                     ManagedExtensionRecords::requireChildAcceptance,
                     body -> body.get("childRunId").textValue(),
                     ManagedExtensionRecords::isChildAcceptanceStart,
-                    ManagedExtensionRecords::isChildAcceptanceSuccessor));
+                    ManagedExtensionRecords::isChildAcceptanceSuccessor)),
+            entry("schedule", new Body(record -> null,
+                    ManagedExtensionRecords::requireScheduleRecord,
+                    body -> body.get("scheduleId").textValue(),
+                    ManagedExtensionRecords::isScheduleStart,
+                    ManagedExtensionRecords::isScheduleSuccessor)),
+            entry("automation_run", new Body(record -> "automation_run",
+                    ManagedExtensionRecords::requireAutomationRunRecord,
+                    body -> body.get("automationRunId").textValue(),
+                    ManagedExtensionRecords::isAutomationRunStart,
+                    ManagedExtensionRecords::isAutomationRunSuccessor)));
     public static final List<String> TASK_STATES = List.of("pending",
             "running", "waiting", "completed", "failed", "cancelled",
             "degraded", "recovery_blocked");
