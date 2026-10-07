@@ -5,7 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, utimesSync } from 'node:fs';
+import { chmodSync, existsSync, utimesSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os, { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -204,6 +204,54 @@ describe('Managed Runtime ledger', () => {
       ]);
       expect(ledger.outstandingGroups()).toHaveLength(1);
     });
+
+    it.skipIf(!POSIX)(
+      'addGroup records durably first, so a write failure leaves both views holding nothing',
+      async () => {
+        const directory = path.join(root, 'readonly-dir');
+        await mkdir(directory, { recursive: true });
+        const workFile = path.join(directory, 'ledger.json');
+        testInternals.writeLedgerDocument(
+          workFile,
+          {
+            pid: process.pid,
+            pgid: process.pid,
+            incarnation: 'inc',
+            startedAt: Date.now(),
+          },
+          [],
+        );
+        const ledger = ManagedRuntimeLedger.create({
+          workFile,
+          worker: {
+            pid: process.pid,
+            pgid: process.pid,
+            incarnation: 'inc',
+            startedAt: Date.now(),
+          },
+        });
+        // Every write from here fails: the tmp staging cannot be created.
+        chmodSync(directory, 0o555);
+        const proc = spawnGroupLeader();
+        strays.add(proc);
+        try {
+          expect(() =>
+            ledger.addGroup({
+              pgid: proc.pid!,
+              callId: 'c1',
+              startedAt: Date.now(),
+            }),
+          ).toThrow();
+          expect(ledger.outstandingGroups()).toHaveLength(0);
+          const onDisk = testInternals.readLedgerDocument(workFile);
+          expect(onDisk?.groups).toEqual([]);
+        } finally {
+          chmodSync(directory, 0o755);
+          killGroup(proc.pid!);
+          strays.delete(proc);
+        }
+      },
+    );
 
     it.skipIf(!POSIX)(
       'prunes only groups that are gone and rewrites on change',
@@ -490,6 +538,14 @@ describe('Managed Runtime ledger', () => {
       );
       expect(parsePsElapsed('nonsense')).toBeUndefined();
       expect(parsePsElapsed('1:2:3:4')).toBeUndefined();
+      // procps's negative-elapsed wraparound: astronomically large days —
+      // rejected outright, so its row can never flip a one-sided age test.
+      expect(parsePsElapsed('441077234-00:18:40')).toBeUndefined();
+      expect(parsePsElapsed('99999-23:59:59')).toBeUndefined();
+      // Four day digits is the accepted ceiling.
+      expect(parsePsElapsed('9999-23:59:59')).toBe(
+        (9999 * 24 * 3600 + 23 * 3600 + 59 * 60 + 59) * 1000,
+      );
     });
 
     it('parses table rows and skips malformed ones', () => {
